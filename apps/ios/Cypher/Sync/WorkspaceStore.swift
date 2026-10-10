@@ -16,7 +16,7 @@ import Observation
 
 @MainActor
 @Observable
-final class WorkspaceStore {
+final class WorkspaceStore: WorkspaceData {
     private(set) var devices: [DeviceRow] = []
     private(set) var spaces: [Space] = []
     private(set) var chats: [Chat] = []
@@ -253,59 +253,6 @@ final class WorkspaceStore {
         sessions = rows
     }
 
-    // MARK: Derived views
-
-    /// state.rs `overview_chats`: every non-archived chat of a live space,
-    /// attention-sorted.
-    var overviewChats: [Chat] {
-        let liveSpaceIds = Set(spaces.map(\.id))
-        let live = chats.filter { !$0.isChild && !$0.archived && $0.spaceId.map(liveSpaceIds.contains) == true }
-        return sortActive(live)
-    }
-
-    /// A space's sessions, in the sidebar's Sessions order (recency).
-    ///
-    /// NOT desktop's `chats_in_space`, which is creation order because there
-    /// the rows are TABS and activity must never reorder tabs. The phone has
-    /// no tabs — a space opens into the same list, with the same rows, as the
-    /// Sessions section — so it follows that list's ordering instead.
-    func chats(in spaceId: String) -> [Chat] {
-        sortActive(chats.filter { !$0.isChild && !$0.archived && $0.spaceId == spaceId })
-    }
-
-    /// Active sessions outside any live project (desktop "No project"
-    /// groups: project-less chats, or ones whose project was removed).
-    /// Quick chats are listed on their own.
-    var projectlessChats: [Chat] {
-        let liveSpaceIds = Set(spaces.map(\.id))
-        return sortActive(chats.filter {
-            !$0.isChild && !$0.archived && !$0.isScratch
-                && !($0.spaceId.map(liveSpaceIds.contains) ?? false)
-        })
-    }
-
-    /// Active quick chats, every device merged (state.rs merge_scratch_groups).
-    var quickChats: [Chat] {
-        sortActive(chats.filter { !$0.isChild && !$0.archived && $0.isScratch })
-    }
-
-    /// Archived chats under an optional space scope, recency order — feeds the
-    /// Archived shelf (shell/spaces.rs `render_archived_section`). Unlike
-    /// `overviewChats`, a live space is not required: an archived session of a
-    /// deleted space should still be reachable for unarchive.
-    func archivedChats(in spaceId: String? = nil) -> [Chat] {
-        sortActive(chats.filter { !$0.isChild && $0.archived && (spaceId == nil || $0.spaceId == spaceId) })
-    }
-
-    func indicator(for chat: Chat) -> ChatIndicator {
-        chatIndicator(chat: chat, live: effectiveStatus(sessions[chat.id], now: nowMs()))
-    }
-
-    /// Aggregate active sessions for the project's trailing status indicator.
-    func spaceIndicator(_ spaceId: String) -> ChatIndicator? {
-        ChatIndicator.projectSummary(chats(in: spaceId).map { indicator(for: $0) })
-    }
-
     // MARK: Device relay (folder browsing / direct host RPCs; the calls are in
     // WorkspaceStore+DeviceRelay.swift)
 
@@ -451,9 +398,18 @@ final class WorkspaceStore {
         }
     }
 
-    /// Quick chat step 1 (composer.rs first send): the host makes this
-    /// chat's `…/cypher-scratch/<chatId>` folder and returns its path.
-    func createScratchDir(deviceId: String, chatId: String) async throws -> String {
+    /// Quick chat (composer.rs first send): the host makes the chat's
+    /// scratch folder, then the row is minted there without a project.
+    func createQuickChat(deviceId: String, config chatConfig: ChatConfig) async throws -> String {
+        let chatId = UUID().uuidString.lowercased()
+        let cwd = try await createScratchDir(deviceId: deviceId, chatId: chatId)
+        createQuickChat(chatId: chatId, deviceId: deviceId, cwd: cwd, config: chatConfig)
+        return chatId
+    }
+
+    /// Quick chat step 1: the host makes this chat's
+    /// `…/cypher-scratch/<chatId>` folder and returns its path.
+    private func createScratchDir(deviceId: String, chatId: String) async throws -> String {
         struct Reply: Decodable { var path: String }
         let reply: Reply = try await relayClient(for: deviceId)
             .call(method: "CreateScratchDir", params: ["chatId": chatId], timeoutSeconds: 20)
@@ -462,7 +418,7 @@ final class WorkspaceStore {
 
     /// Quick chat step 2: `createChat`'s full-row upsert without a project,
     /// under the id the scratch folder was made for.
-    func createQuickChat(chatId: String, deviceId: String, cwd: String, config chatConfig: ChatConfig) {
+    private func createQuickChat(chatId: String, deviceId: String, cwd: String, config chatConfig: ChatConfig) {
         var set: [String: JSONValue] = [
             "id": .string(chatId),
             "deviceId": .string(deviceId),

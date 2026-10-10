@@ -203,7 +203,7 @@ final class DemoDataset {
     ].map { FileSearchMatch(path: $0, isDir: false) }
         + ["apps/ios", "crates/ui", "docs"].map { FileSearchMatch(path: $0, isDir: true) }
 
-    func searchFiles(_ query: String) -> [FileSearchMatch] {
+    func fileMatches(_ query: String) -> [FileSearchMatch] {
         let needle = query.lowercased()
         guard !needle.isEmpty else { return Array(Self.checkoutFiles.prefix(6)) }
         return Self.checkoutFiles.filter { $0.path.lowercased().contains(needle) }
@@ -225,7 +225,7 @@ final class DemoDataset {
 
     private static let repoNames: Set<String> = ["cypher", "dotfiles", "blog", "playground", "edge", "landing"]
 
-    func listFolders(deviceId: String, path: String) -> FolderListing {
+    func folderListing(at path: String) -> FolderListing {
         let entries = (Self.fileTree[path] ?? []).map { name in
             FolderEntry(name: name, isDir: true, isRepo: Self.repoNames.contains(name))
         }
@@ -234,7 +234,7 @@ final class DemoDataset {
 
     private var refsByPath: [String: [RepoRef]] = [:]
 
-    func listRefs(spacePath: String) -> [RepoRef] {
+    func refs(spacePath: String) -> [RepoRef] {
         if let cached = refsByPath[spacePath] { return cached }
         let seeded: [RepoRef]
         if spacePath.contains("cypher") {
@@ -256,18 +256,18 @@ final class DemoDataset {
     }
 
     /// git checkout simulation: move the `current` marker in the repo at path.
-    func switchRef(path: String, refName: String) {
-        var refs = listRefs(spacePath: path)
+    func checkOut(_ refName: String, in path: String) {
+        var refs = self.refs(spacePath: path)
         for ix in refs.indices {
             refs[ix].current = refs[ix].name == refName
         }
         refsByPath[path] = refs
     }
 
-    func createWorktree(spacePath: String, base: String) -> String {
+    func addWorktree(spacePath: String, base: String) -> String {
         let slug = base.replacingOccurrences(of: "/", with: "-")
         let path = "/Users/dev/.cypher/worktrees/\((spacePath as NSString).lastPathComponent)-\(slug)"
-        var refs = listRefs(spacePath: spacePath)
+        var refs = self.refs(spacePath: spacePath)
         if let ix = refs.firstIndex(where: { $0.name == base }), refs[ix].worktreePath == nil {
             refs[ix].worktreePath = path
         }
