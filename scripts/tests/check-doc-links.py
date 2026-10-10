@@ -106,6 +106,8 @@ def check_links(path, text, errors):
 
 def check_citations(path, text, errors):
     rel = path.relative_to(ROOT).as_posix()
+    if path == Path(__file__).resolve():
+        return
     for number, line in enumerate(text.splitlines(), 1):
         for cited in CITATION.findall(line):
             if (rel, cited) in FOREIGN_CITATIONS:
