@@ -335,18 +335,10 @@ final class WorkspaceStore {
         return client
     }
 
-    /// The last relay failure, for surfacing in UI/diagnostics.
-    private(set) var lastRelayError: String?
-
     /// ListFolders on the target device (engine caps at 500 entries, hides
     /// dotfiles, stamps isRepo). nil path = the device's home directory.
     func listFolders(deviceId: String, path: String?) async -> FolderListing? {
-        do {
-            return try await listFoldersDetailed(deviceId: deviceId, path: path)
-        } catch {
-            lastRelayError = error.localizedDescription
-            return nil
-        }
+        try? await listFoldersDetailed(deviceId: deviceId, path: path)
     }
 
     func listFoldersDetailed(deviceId: String, path: String?) async throws -> FolderListing {
