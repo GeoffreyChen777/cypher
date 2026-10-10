@@ -6,8 +6,8 @@ import { decodeFrame, encodeFrame, type FrameType } from "../../src/chat/chat-fr
 
 const binary = (bytes: Uint8Array) => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 
-/** ephemeral-stream-v1 `start` (0x24) — a frame type the production decoder
- * does not register; see docs/design/ephemeral-stream-v1.md. */
+/** The dormant stream-preview protocol's `start` frame (0x24), a type the
+ * production decoder does not register. */
 const PREVIEW_START = 0x24 as FrameType;
 
 describe("stream preview frames through real ChatRoom/workerd", () => {

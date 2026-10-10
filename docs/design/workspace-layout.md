@@ -1,7 +1,6 @@
 # Workspace layout
 
-Status: done (phases 1–5). Replaces the three-column shell (sidebar · chat card ·
-right surface pane) with two columns: the sidebar and a freely tiled
+The desktop shell has two columns: the sidebar and a freely tiled
 **workspace** of sessions.
 
 ## Model
@@ -64,19 +63,6 @@ The main `AppState` runs in lists-only mode (`set_transcript_watches(false)`):
 it owns the list watches and the sidebar; its `selected_chat` follows the
 focused tile. Contexts mirror its lists on every notify and share its
 send-in-flight map, so sidebar dots and chimes see sends from any tile.
-
-Phases (each ends in a build and a Dev App restart):
-
-1. Done — pure workspace model (`crates/ui/src/workspace.rs`).
-2. Done — `AppState::new_session_context`, shared pending sends, lists-only
-   main state, seen/config forwarding to the parent.
-3. Done — session slots (`shell/session.rs`, `shell/dock.rs`) and the tiled
-   workspace (`shell/workspace_view.rs`): tab bars, split handles, presets,
-   split/focus/zoom actions, sidebar routing, focus-routed actions.
-4. Done — drag a session tab between tiles / onto an edge to split;
-   short-tile sizing, background-tab pruning, customizable shortcuts.
-5. Done — persistence, project windows, per-session dock fractions,
-   composer-defaults merging, `ARCHITECTURE.md`.
 
 ## Persistence
 

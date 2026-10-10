@@ -99,7 +99,8 @@ An object with one array per function. Rows and ops are in their wire shape
 Arrays. Stream preview cases are `{name, kind, header, text}` to encode or
 `{name, hex}` to decode, with `valid`; reducer cases are frames
 `{kind, header, text}` applied in order with the expected `display`,
-`interrupted` and `replies`. See [the ephemeral stream design](../docs/design/ephemeral-stream-v1.md).
+`interrupted` and `replies`. The preview protocol is dormant: the Rust and Swift clients
+carry it, but no Edge relays it (the production `ChatRoom` rejects its frames).
 
 ## Where the loaders run
 

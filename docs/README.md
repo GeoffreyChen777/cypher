@@ -19,8 +19,8 @@ explains how it works. Everything else is grouped here by who reads it.
 - [Unix IPC](design/unix-ipc.md) — the private local engine transport, sockets and data directories.
 - [Workspace layout](design/workspace-layout.md) — the desktop's sidebar plus tiled session workspace.
 - [Syntax highlighting](design/syntax-highlighting.md) — the tree-sitter highlighter in `cypher-syntax`.
-- [Notifications](design/notifications.md) — session-targeted mobile notifications and their rollout.
-- [Ephemeral stream v1](design/ephemeral-stream-v1.md) — the streaming preview protocol slice, off by default (Chinese).
+- [Notifications](design/notifications.md) — session-targeted mobile notifications.
+- [Pi RPC harness](design/pi-rpc.md) — how the engine drives Pi over its native RPC protocol.
 
 ## Development — working on the code
 
@@ -35,12 +35,6 @@ explains how it works. Everything else is grouped here by who reads it.
 - [CI/CD operations](operations/ci-cd.md) — workflows, independent platform releases, credentials and recovery.
 - [iOS release](operations/ios-release.md) — TestFlight preparation and the publication boundary.
 - [Cloudflare billing and measurement](operations/cloudflare-billing.md) — measuring Edge cost, watching the bill, release retention.
-
-## Research and plans
-
-- [Pi RPC harness](research/pi-rpc.md) — the record behind driving Pi over its native RPC (historical).
-- [Durable Objects language](research/durable-objects-language.md) — why the Durable Objects stay in TypeScript.
-- [Migration plan](plans/MIGRATION.md) — a future plan to move the sync backend off Cloudflare (Chinese; not started).
 
 ## Releases
 

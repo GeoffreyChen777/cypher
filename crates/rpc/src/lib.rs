@@ -232,7 +232,7 @@ pub mod methods {
     /// Cypher child-subagent bridge (IPC-only, unary): idempotently create the
     /// same-device child Chat for `(parentChatId, runId)` and queue its initial
     /// durable Pi run; replies `{childChatId}`. See `StartSubagent` in the
-    /// engine RPC + docs/research/pi-rpc.md.
+    /// engine RPC + docs/design/pi-rpc.md.
     pub const START_SUBAGENT: &str = "StartSubagent";
     /// Cypher child-subagent bridge (IPC-only, stream): replayable agent events
     /// for a chat (journal replay after `afterSeq`, then live) — the parent

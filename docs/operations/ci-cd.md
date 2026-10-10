@@ -109,7 +109,7 @@ wrapper exempts only that unknown-key diagnostic, and `workflow_policy.py`
 strictly verifies the permitted queue/group/cancellation fields. Other syntax
 and expression diagnostics remain fatal.
 
-## Required credentials and honest deployment status
+## Required credentials and deployment status
 
 Configure **`CLOUDFLARE_API_TOKEN`** through repository **Settings → Secrets and
 variables → Actions**. Restrict it to the configured account and
@@ -170,33 +170,17 @@ review submission remain separate, explicit actions. Export compliance is
 declared in `Info.plist` (`ITSAppUsesNonExemptEncryption = NO`), so App Store
 Connect no longer asks per build.
 
-## First deployment after the checksum migration
+## Deployment gate
 
-The current embedded installer requires standalone `.sha256` files. Do **not**
-deploy it against an older channel that lacks those files.
-
-1. Prepare a new application version; do not reuse the already released `0.2.2`.
-2. Configure the deployment credential in GitHub Settings.
-3. Publish a matching `cypher-linux-v<version>-b<build>` tag and wait for it to
-   succeed. The installer resolves the Linux channel, so that is the one the
-   deployment gate requires.
-4. Run `deploy` on `main` again.
-
-The deployment gate resolves the channel exactly as `install.sh` does: it reads
-`linux/manifest.json`, `linux/latest.txt` and `linux/stem.txt` when the Linux
-channel exists, and falls back to the shared `manifest.json`/`latest.txt` before
-the first per-platform release. It requires them to agree and verifies that both
-Linux archives for the published build and their matching checksum sidecars
-exist. Deployment is therefore not blocked by a per-platform channel that has
-not been published yet. Until ready, deployment fails and the existing workers
-remain in place. This is intentional: the installer and release workflows are
-not made into a new download protocol or migrated to a different storage model.
-
-The guided Linux installer additionally declares `MINIMUM_SETUP_VERSION=0.3.3`.
-Publish a client with the `setup` command before deploying this installer. The
-deployment gate reads that floor from the installer source; the installer also
-checks the channel version and probes `cypher setup --help` before activation.
-Do not weaken the gate to deploy it against the existing 0.3.2 channel.
+`deploy.yml` runs `release.py check-deploy` before deploying the Edge, because the Worker
+embeds the Linux installer, which must find a release it can install. The gate resolves the
+channel exactly as `install.sh` does: it reads `linux/manifest.json`, `linux/latest.txt`
+and `linux/stem.txt`, falling back to the shared `manifest.json`/`latest.txt` when there is
+no Linux channel. It requires them to agree, and verifies that both Linux archives of the
+published build and their matching `.sha256` files exist. It also requires the channel
+version to be at least the installer's `MINIMUM_SETUP_VERSION` (the first client with
+`cypher setup`). A failed gate leaves the existing workers in place; publish a matching
+Linux release instead of weakening the gate.
 
 ## Publication transaction and retries
 

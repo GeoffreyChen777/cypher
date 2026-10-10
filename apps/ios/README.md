@@ -204,9 +204,9 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   A tap opens its session from any screen: the request is consumed the
   moment it resolves (never replayed later), and it waits out a push/pop
   that is still animating, including an interactive back swipe, before the
-  navigation path changes. Real-device APNs delivery is a separate
-  rollout/acceptance step. See
-  [`docs/design/notifications.md`](../../docs/design/notifications.md) for rollout boundaries.
+  navigation path changes. See
+  [`docs/design/notifications.md`](../../docs/design/notifications.md) for delivery and
+  account boundaries.
 
 ### Validation boundary
 

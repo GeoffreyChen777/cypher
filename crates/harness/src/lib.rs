@@ -1,6 +1,6 @@
 //! cypher-harness — one interface over coding agents: the native Pi harness
 //! (`pi --mode rpc`, the [`pi`] module) and a mock for tests and dev rigs.
-//! Decision record: docs/research/pi-rpc.md.
+//! Protocol notes: docs/design/pi-rpc.md.
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;

@@ -1,34 +1,18 @@
-# Native pi RPC harness (2026-08)
+# Pi RPC harness
 
-Status: Pi is now the only agent harness. The ACP harness this record compares
-against was retired with the Claude Code, Codex, Cursor, Grok and Hermes
-agents; ACP references below are historical.
+Pi is Cypher's only agent harness. `crates/harness/src/pi/` drives it over pi's own RPC
+protocol (`pi --mode rpc`, strict JSONL over stdio), which carries everything the
+product needs: extension UI dialogs (`extension_ui_request`/`extension_ui_response`),
+extension, prompt and skill commands (`get_commands`), native mid-run steering, and the
+configured model directory with reasoning and context-window metadata
+(`get_available_models`).
 
-## Decision
-- Replace the community **pi-acp** adapter path with a **native pi harness**
-  (`crates/harness/src/pi/`) that speaks pi's OWN RPC protocol
-  (`pi --mode rpc`, strict JSONL over stdio) directly. The pi-acp spec,
-  managed-install arm, and `AcpHarness::pi()` are deleted; the registry's Pi
-  slot resolves `cypher_harness::pi::PiHarness` instead.
-- **Motivation — the ACP adapter's expression ceiling**: pi's RPC mode carries
-  capabilities the ACP surface (via pi-acp 0.0.33) could not reach:
-  - **extension UI dialogs** — `select`/`confirm`/`input`/`editor` arrive as
-    first-class `extension_ui_request`/`extension_ui_response` pairs (the
-    adapter flattened them into permission requests or dropped them);
-  - **extension commands** — `get_commands` enumerates extension / prompt /
-    skill commands directly;
-  - **native mid-run steering** — pi `steer` queues into the live turn after
-    the current assistant message's tool calls (ACP got turn boundaries only);
-  - **real model directory** — `get_available_models` returns pi's configured
-    providers/models with reasoning + context-window metadata (the adapter
-    advertised a single pass-through `default`).
-- Wire is hand-rolled tolerant serde against raw `Value`s (house style, like
-  ACP) — NOT the official SDK — so cypher keeps its child-lifecycle hardening
-  (StderrTail, SIGTERM→SIGKILL, PATH composition) and shell-script test
-  fixtures. **Not JSON-RPC 2.0**: a small line transport
-  (`pi/client.rs`) frames on `\n` only (strip trailing `\r`), never on
-  Unicode separators — Node `readline` splits on U+2028/U+2029, which are
-  valid inside JSON strings.
+The wire is hand-rolled tolerant serde over raw `Value`s, not the official SDK, so the
+harness keeps its child-lifecycle hardening (StderrTail, SIGTERM→SIGKILL, PATH
+composition) and shell-script test fixtures. It is **not JSON-RPC 2.0**: a small line
+transport (`pi/client.rs`) frames on `\n` only (stripping a trailing `\r`), never on
+Unicode separators — Node `readline` splits on U+2028/U+2029, which are valid inside JSON
+strings.
 
 ## Session truth division
 - **cypher doc = display/sync truth** — the harness never touches it.
@@ -55,7 +39,7 @@ agents; ACP references below are historical.
   is true; `commands()` = `get_commands` (extension / prompt / skill).
 - Run (one child per run, cwd = `RunRequest.cwd`): `switch_session` (resume)
   → `set_model` / `set_thinking_level` (best-effort — a rejected set is
-  logged, never fatal, like ACP's `set_config_option`) → `get_state` →
+  logged, never fatal) → `get_state` →
   `prompt` (message + inlined `image/*` attachments; the response only means
   acceptance) → the event stream.
 - Steering: a mailbox message while the turn is ACTIVE sends `{"type":
@@ -66,8 +50,7 @@ agents; ACP references below are historical.
   order with the events** (`PiClient::send_ordered` → `Incoming::Response`),
   never ahead of a settle written before it:
   - `queued` — the NEXT assistant `message_start` emits `Steered { prev,
-    next }` before the steered content streams (the same boundary point as
-    the ACP harness);
+    next }` before the steered content streams;
   - `handled` — an extension command or input handler consumed it (a
     mid-turn `/command` runs at once). Nothing streams for it, but it still
     owes one `Steered` — the engine's at-least-once ledger retires one routed
@@ -198,7 +181,7 @@ TUI-furniture rule above:
   background child finishes), and subagent-to-subagent message activity
   (`mode: "message"`, no `toolCallId`).
 
-## Cypher-hosted child chats (`StartSubagent` bridge, 2026-08)
+## Cypher-hosted child chats (`StartSubagent` bridge)
 
 In Cypher RPC mode the ENGINE can host a subagent's child chat as a **first-class
 navigable session**, instead of the extension owning an ephemeral child pi
@@ -341,31 +324,30 @@ handler already showed a blocking dialog or notified before the ACK (the
 close-picker spin). Transient furniture (`setStatus`/`setWidget`/`setTitle`/
 `set_editor_text`) never counts as UI, and a plain prompt always keeps the
 full grace: the goal, MCP and subagents extensions push `setStatus` at startup
-and mid-turn, and the translation extension delays the ACK by seconds, so the
-old "any UI request" rule Done'd ordinary turns before their first agent
-event (2026-09-20; fixture `scenario:status-before-ack`).
+and mid-turn, and the translation extension delays the ACK by seconds, so treating any UI
+request as a reply would end ordinary turns before their first agent event
+(fixture `scenario:status-before-ack`).
 
-- **Segment semantics** (engine consumption is the source of truth; ACP is the
-  reference): the doc fold splits entries only on `Steered` (and clears on
-  `SessionStarted`) — `AssistantMessageCompleted` is journal-only, matching
-  the ACP turn-boundary markers. A pi turn has multiple assistant messages
-  (LLM→tool→LLM); each `message_end` emits its `AssistantMessageCompleted`,
-  and the whole turn folds into one doc entry until a steer boundary or the
-  terminal `Done` — identical to an ACP turn.
+- **Segment semantics** (engine consumption is the source of truth): the doc
+  fold splits entries only on `Steered` (and clears on `SessionStarted`) —
+  `AssistantMessageCompleted` is journal-only. A pi turn has multiple
+  assistant messages (LLM→tool→LLM); each `message_end` emits its
+  `AssistantMessageCompleted`, and the whole turn folds into one doc entry
+  until a steer boundary or the terminal `Done`.
 - **Tool-name mapping** (`pi_typed_call`): pi's built-in set is
   `bash`/`read`/`write`/`edit`/`grep`/`find`/`ls` → `Exec`/`ReadFile`/
-  `WriteFile`/`EditFile`/`Search`/`Glob`/`Search`, sharing the ACP normalizer's
-  `cap_text` and 16KB cap; anything else (extension/MCP tools) falls through
+  `WriteFile`/`EditFile`/`Search`/`Glob`/`Search`, capped by the harness's
+  `cap_text` (16KB); anything else (extension/MCP tools) falls through
   to `ToolCall::Unknown` with the raw args.
 
 ## Executable resolution
 `PI_EXECUTABLE` override → PATH → login-shell PATH (`shell_env.rs`) → npm
 global bins + node-version-manager bins (`find_on_paths` + `npm_global_bins`
-in `crates/harness/src/lib.rs`). `installed()` = a resolution hit. Discovery and run spawn
+in `crates/harness/src/process.rs`). `installed()` = a resolution hit. Discovery and run spawn
 the resolved `pi` with `--mode rpc --session-dir`.
 
-## Citations
-pi RPC protocol doc (`docs/rpc.md` in the pi package), pi 0.84.1 source (historical; the
-runtime now pins a newer Pi, see `pi-runtime/package.json`)
-(`rpc-mode.js` command/response/extension-UI handling, `agent-session.js`
-event emission order, `pi-agent-core` agent-loop tool/message ordering).
+## Sources
+pi's RPC protocol doc (`docs/rpc.md` in the pi package) and the pi source for the
+version pinned in `pi-runtime/package.json` (`rpc-mode.js` command/response/extension-UI
+handling, `agent-session.js` event emission order, `pi-agent-core` agent-loop
+tool/message ordering).

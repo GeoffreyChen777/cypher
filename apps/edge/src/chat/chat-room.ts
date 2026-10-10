@@ -1,6 +1,6 @@
 /**
  * ChatRoom — one Durable Object per chat session (`chat2/{chatId}`), the
- * dumb authenticated log relay (docs/design/chat2-sync.md workstream B). Modeled
+ * dumb authenticated log relay (docs/design/chat2-sync.md B). Modeled
  * line-for-line on RegistryRoom: no loro-wasm import anywhere in this class.
  *
  * The DO's entire job: append opaque update blobs to a seq-ordered log,

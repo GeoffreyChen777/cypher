@@ -1,31 +1,25 @@
 # Registry sync — the workspace index without a CRDT
 
-**Status: shipped behind the `reg1/` room namespace; replaces the `ws4/` Loro workspace doc.**
+The registry is the workspace index behind the sidebar: devices, spaces, chats and session
+status. It syncs as a table of rows with per-field last-writer-wins clocks through the
+RegistryRoom Durable Object (`reg1/{org}/{user}`), not as a CRDT document.
 
 ## Why
 
-The workspace doc (sidebar index: devices, spaces, chats, session status) was a Loro CRDT
-synced through a Durable Object. Three incidents in one week (2026-07-30, 2026-08-04,
-2026-08-05) traced to the same root: the CRDT keeps *history*, and the DO must replay or
-re-export that history in wasm under a CPU limit. Loro's full-snapshot export deterministically
-RangeErrors on workerd for this doc (works locally), so the room could not self-compact — the
-log only grew, cold replays crept toward the CPU limit, and the room wedged. All of that
-machinery bought convergence-without-a-server that the topology never uses: every write
-already flows through one DO, which can simply *be* the authority.
-
-The sidebar's data is a keyed set of rows with independently-updatable scalar fields —
-a replicated table, not a document. The registry stores **current state only**:
+The sidebar's data is a keyed set of rows with independently updatable scalar fields — a
+replicated table, not a document. Every write already flows through one Durable Object, so
+that object can be the authority and keep **current state only**:
 
 - 10,000 sessions ≈ a few MB of rows, bounded forever; history is discarded the moment it
   stops being true.
-- The DO cold-starts by reading a SQLite table. No replay, no wasm, no compaction, no
-  fold budgets, no wedge class.
-- Conflict semantics are unchanged in practice: the Loro schema resolved same-field
-  conflicts by last-write-wins map sets; the registry runs the same rule as ~40 lines of
-  auditable code (per-field hybrid logical clocks) instead of a black-box wasm library.
+- The Durable Object cold-starts by reading a SQLite table: no history replay, no wasm, no
+  compaction. A CRDT doc here kept growing history that the Durable Object had to replay or
+  re-export in wasm under a CPU limit, and that is how such a room wedges.
+- Same-field conflicts resolve by last-writer-wins, as a Loro map would, in a few dozen
+  lines of auditable code (per-field hybrid logical clocks).
 
-Session docs (transcripts) stay on Loro — concurrent text has no "newest wins" answer,
-and that side is measured and healthy.
+Session docs (transcripts) stay on Loro, because concurrent text has no "newest wins"
+answer ([chat2 sync](chat2-sync.md)).
 
 ## Topology
 
@@ -45,9 +39,8 @@ engine B ── RegistryDoc ── RegistryClient ──────────
   Serialized whole into `DocsStore` (`registry1` snapshot row) — offline restarts keep
   full state, cursor, and queue.
 - **RegistryClient** (`crates/sync/src/registry.rs`): WS transport — hello/cursor handshake,
-  push/ack, rows broadcasts, presence, probe/redial liveness (same deaf-socket discipline
-  as `RoomClient`), reconnect with backoff. Fills the same `RoomStatsSnapshot` the
-  SyncStatus RPC and `cypher sync` already render.
+  push/ack, rows broadcasts, presence, probe/redial liveness, reconnect with backoff. Fills
+  the `RoomStatsSnapshot` that the SyncStatus RPC and `cypher sync` render.
 
 ## Wire protocol (JSON text frames)
 
@@ -82,10 +75,9 @@ The vectors are in `protocol/vectors/registry-core-v1.json`; see
   device id breaks ties totally.
 - A field set applies iff its clock > the stored clock for that field. `null` deletes the
   field (still a clocked write).
-- `update` ops never create or revive rows (the old "never invent rows" discipline);
-  `upsert` creates, and revives a tombstone iff newer than `delHlc`.
-- `delete` tombstones iff newer than every… no: iff newer than `delHlc`; fields/clocks are
-  cleared. Tombstones GC after 30 days (daily alarm); `gcFloor` forces a full resync for
+- `update` ops never create or revive rows; `upsert` creates, and revives a tombstone iff
+  newer than `delHlc`.
+- `delete` tombstones iff newer than `delHlc`; fields and clocks are cleared. Tombstones GC after 30 days (daily alarm); `gcFloor` forces a full resync for
   cursors older than the horizon.
 - Re-applying any op is a no-op (`>` compare) — reconnect re-pushes are idempotent by
   construction.
@@ -96,22 +88,17 @@ The vectors are in `protocol/vectors/registry-core-v1.json`; see
   `SELECT * WHERE seq > cursor`.
 - Server behind the client (`state.seq < cursor`, e.g. wiped DO storage): the client keeps
   its rows and re-seeds the server from them with **original per-field clocks** (`clocks`
-  on the op) — the ws4 manual repair recipe, automated and lossless.
+  on the op), so nothing is lost.
 - Local-only rows on a full resync re-seed the same way; unpushed writes always live in
   the pending queue and replay over whatever the server returns.
 
-## Migration
+## Presence and operations
 
-The first-boot seed from the legacy `workspace2` Loro snapshot was removed after 0.3.41.
-An install older than the registry cutover must first update through a 0.3.x release up
-to 0.3.41, which converts its workspace into the `registry1` snapshot; newer releases
-start from `registry1` only. The old `ws4` rooms are no longer routed by the edge.
-
-## Parity notes
-
-- Presence stays ephemeral: in-memory map in the DO, 15s beats, 45s freshness window,
-  same relay-probe fallback and deaf-socket tripwire in the host.
-- Per-device push attribution (`pushOutcomes`) is on `/registry/:orgId/stats` from day one —
-  the only per-device surface that made the 2026-08-05 incident debuggable.
-- Nightly R2 backup of the row table (seq-monotonic guard), `/registry/:orgId/rows` repair
-  read, `POST /registry/:orgId/reset` operator wipe (fleet re-seeds automatically).
+- Presence is ephemeral: an in-memory map in the Durable Object, 15 s client beats and a
+  45 s freshness window in the host, which falls back to probing a peer over the device
+  relay.
+- `/registry/:orgId/stats` carries per-device push attribution (`pushOutcomes`), the
+  surface for debugging a device whose writes are not landing.
+- The daily alarm takes a nightly R2 backup of the row table (seq-monotonic guard) and GCs
+  tombstones. `/registry/:orgId/rows` is a repair read, and `POST /registry/:orgId/reset`
+  is an operator wipe; the devices re-seed it automatically.

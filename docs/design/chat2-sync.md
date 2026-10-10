@@ -1,160 +1,117 @@
-# chat2: dumb-relay session sync + thin docs
+# chat2: session sync over a log relay
 
-Status: CURRENT — in production since cypher 0.1.4 (ChatRoom DO, `apps/edge/src/chat/chat-room.ts`). Origin: 2026-08-09 investigation (whale-doc dissection + t3code comparison).
-Prior art: `docs/design/registry-sync.md` (the same argument, applied to the workspace index).
+Each chat's Loro doc syncs through a ChatRoom Durable Object (`chat2/{chatId}`,
+`apps/edge/src/chat/chat-room.ts`) that stores and relays opaque Loro updates as
+append-only rows and never parses a doc. The synced transcript stays thin: tool output is
+kept as a summary, not in full. Code cites the section labels below (A1, C3, M2, …).
 
 ## Why
 
-Two compounding problems, one measured root cause:
+- **Thin docs.** Tool outputs and diffs dominate a transcript's size, so the doc keeps
+  summaries and per-file diff stats; the full text stays in the host's local run journal.
+  Small docs keep sync fast on slow links.
+- **A relay that cannot wedge.** A Durable Object that materializes docs through loro-wasm
+  fails at around 1 MB (CPU limits, wasm heap faults, rejoins that never backfill). The
+  ChatRoom only stores rows and checkpoints, so its serving cost does not depend on what
+  the doc contains.
 
-1. **Session docs got fat.** The tool-output/diff caps (c951c3e, 2026-08-07) bound each
-   *part*, not the *session*. Dissection of chat `1b65e93d` ("ACP Model Traits
-   Integration Polish"): 1,079,986-byte snapshot, 10 messages, 426 tool parts —
-   **917 KB (85%) is capped tool output**, history overhead 1.00× (pure payload, not
-   oplog bloat). Every agentic session now reaches the ~1 MB wasm-wedge zone in a day.
-2. **The SessionRoom DO wedges at that size.** Every incident class of Aug 4–5 (wasm
-   heap poison, use-after-free doc wrappers, replay CPU-limit death, silent shallow
-   exports, import penalty box) exists because the DO materializes the doc through
-   loro-wasm. At 1 MB docs these fire routinely: the fresh-device symptom is
-   join-OK → 3 silent rejoins → `REJECTED 3` (penalty box) → no backfill, forever.
+Clients keep real Loro docs: offline commit-then-converge and the command ledger as the
+outbox work as on any Loro doc. Partial or windowed doc loads are out of scope.
 
-Priority (product decision): **flawless sync on ~1.2 Mbps links beats tool-output
-transparency.** Small docs first, unwedgeable serving second; neither substitutes for
-the other (stripping shrinks bytes, the relay makes serving them instant and reliable).
+## A. Thin docs
 
-## Non-goals
+**A1. The fold keeps summaries.** In `crates/doc/src/parts.rs`:
+- `output`: code fences stripped, then at most `TOOL_OUTPUT_SUMMARY_MAX_LINES` (5)
+  complete lines; a long single line is kept whole.
+- `diff`: per-file stats `{path, additions, deletions}` (`diffStats`) instead of inline
+  diff text.
+- `outputRef`, `outputBytes`, `diffRef` and `diffStats` are serde-additive; older apps
+  render the summary as if it were the output.
 
-- Replacing Loro. Clients keep real Loro docs: same schema, same offline
-  commit-then-converge, same command-ledger-as-outbox. Only the DO stops parsing bytes.
-- Windowed/partial doc loads. Out of scope; the host-published tail sidecar covers
-  first-paint latency.
-- Preserving full tool outputs inside the synced doc. They move to a lazy sidecar.
+**A2. Output sidecar (read-only).** Hosts do not upload full outputs. Older chats whose
+parts carry an `outputRef` still resolve it: the Worker answers
+`GET /blob/{chatId}/{partId}[.diff]` from the `BLOBS` bucket (owner auth through the
+Worker's JWT check), and the UI fetches it on expand (`FetchToolBlob`); offline shows the
+summary.
 
----
+**A3. UI.** A tool part renders its summary inline and fetches an existing `outputRef`
+when expanded.
 
-## Workstream A — thin docs (ship first, independently)
+## B. The ChatRoom relay
 
-Keeps session docs small: the doc carries summaries, full payloads live elsewhere.
+**Storage** (Durable Object SQLite):
+- `rows(seq INTEGER PRIMARY KEY, device TEXT, batch_id TEXT UNIQUE, bytes BLOB)` — opaque
+  Loro update blobs, at most 1 MB per row (`MAX_ROW_BYTES`); oversized rows are rejected
+  at the header.
+- The checkpoint and its opaque, client-written frontier as blobs (chunked by `blobs.ts`),
+  and `meta` keys `seqFloor`, `checkpointSeq`, `checkpointSize` and `checkpointAt`.
+- `tail` and `diff` sidecar routes serve whatever a host published, verbatim; current
+  hosts publish neither (C3).
 
-**A1. Fold strips outputs/diffs to summaries.** In `crates/doc/src/parts.rs`:
-- `output`: keep first non-empty line, ≤160 chars (t3code ships 84 and users cope).
-  Add additive fields `outputRef: Option<String>` (sidecar key) and
-  `outputBytes: Option<u64>` so the UI can render "Show full output (12 KB)".
-- `diff`: replace inline `ToolDiff` text with per-file stats `{path, additions,
-  deletions}` (t3's shape) + `diffRef`. Kill `TOOL_DIFF_DOC_CAP` usage — the 32 KB/edit
-  inline diff is a bigger bomb than outputs, currently unexercised only because the
-  claude harness emits none.
-- Old readers: both fields are already serde-additive; old app versions render the
-  summary as if it were the output. Acceptable.
+**Protocol** (binary WebSocket frames: 1-byte type + JSON header + raw payload, with no
+base64 so payloads cost their own size on slow links):
+- `hello{cursor, device}` → `state{seqFloor, headSeq, checkpointSeq, checkpointSize,
+  rowCount, rowBytes}` with the checkpoint frontier as its payload, metadata only. The
+  client compares that frontier with its local doc: if the doc already includes it, it requests `rows{after: max(cursor,
+  checkpointSeq)}`; otherwise it fetches `GET /checkpoint` (HTTP, Range-resumable) and
+  then the rows after `checkpointSeq`.
+- `rows{after, excludeDevice}` streams rows with `seq > after` from other devices, so a
+  device never re-downloads its own writes.
+- `push{batchId, bytes}` appends, relays and answers `ack{batchId, seq}`. `batch_id
+  UNIQUE` deduplicates reconnect re-pushes; re-importing a Loro update is a no-op, so
+  duplicates are safe end to end. Reconnect replay sends one pending batch at a time,
+  armed by the previous ACK, and a duplicate `batchId` is acknowledged before quota
+  accounting so lost ACKs do not spend the write budget.
+- `POST /checkpoint {seqCovered, frontier}` + chunked blob: owner-only and refused below
+  `seqFloor` (the floor never moves backwards). Rows with `seq <= seqCovered` are deleted
+  once the checkpoint commits.
+- Presence: opaque ephemeral frames relayed to live sockets with a 30 s TTL sweep; the
+  server keeps no presence state beyond that.
+- Validation needs no wasm: auth and ownership, frame shape, the row size cap and
+  per-device rate and byte quotas. Malformed content stays inside its owner's room, is
+  skipped by client imports and disappears with the next checkpoint.
+- Operations: `GET /stats` (headSeq, seqFloor, row bytes and count, checkpoint age) and a
+  nightly R2 backup from the daily alarm.
 
-**A2. Output sidecar (read-only).** Hosts never upload full outputs: the fold keeps
-small outputs inline (≤160 chars, fence-stripped) and summarizes big ones, and the full
-text survives only in the host's run journal. The upload path, parked by a product call
-in August 2026, was removed after 0.3.45. What remains serves older chats whose parts
-carry an `outputRef`: the Worker answers `GET /blob/{chatId}/{partId}[.diff]` from the
-`BLOBS` bucket (owner auth via the Worker JWT check), and the UI fetches on expand
-(`FetchToolBlob`); offline shows the summary.
+## C. Clients and host duties
 
-**A3. UI.** Tool-part expansion fetches an existing `outputRef` lazily; render summary inline.
+**C1. Rust client** (`crates/sync/src/chat_client.rs`): cursor tracking, a pending-push
+queue keyed by batch id, the hello → backfill → live loop, the frontier comparison that
+skips a checkpoint, and reconnect with backoff and wake-ups. Liveness is layered: a ping
+lease, a join deadline and a probe clock.
 
----
+**C2. Store** (`crates/sync/src/store.rs`): each snapshot row carries its room `cursor`
+and doc `epoch`, written in the same transaction as the snapshot bytes so content and
+cursor cannot diverge; unacknowledged batches live in the durable `chat_outbox` until
+their ACK. iOS writes the cursor and snapshot into one `c2_<id>.loro` file for the same
+reason (`DocDisk.swift`).
 
-## Workstream B — chat2 edge room (dumb authenticated log relay)
+**C3. Host duties** (`crates/engine/src/host/doc_host/chat2_sync.rs`). Only the chat's
+host device posts checkpoints:
+- a threshold checkpoint when the room's rows pass 512 KB or 200 rows (`rowBytes` and
+  `rowCount` in `state`);
+- a bootstrap checkpoint when a room has rows but no checkpoint;
+- a seed checkpoint after a server reset, and a compensating one after a rejected push.
 
-New DO class `ChatRoom`, room name `chat2/{chatId}`, modeled line-for-line on
-`RegistryRoom` (registry-room.ts, 425 LOC), not on SessionRoom. **No loro-wasm import
-anywhere in the class.**
+Hosts publish no tail or diff sidecar: nothing reads the tail, and remote clients read
+working-tree diffs through the device relay. Measuring the Edge's cost:
+[Cloudflare billing](../operations/cloudflare-billing.md).
 
-**Storage** (DO SQLite):
-- `rows(seq INTEGER PRIMARY KEY, device TEXT, batch_id TEXT UNIQUE, bytes BLOB)` —
-  opaque Loro update blobs. Per-row cap 1 MB (post-strip updates are KB-scale;
-  oversized rows are rejected at the header, matching today's discipline).
-- checkpoint blob via `blobs.ts` chunking + `meta`: `owner`, `seqFloor`,
-  `checkpointFrontier BLOB` (opaque, client-written), `checkpointSize`,
-  `checkpointSeq`, `tailDirty`.
-- Sidecars: `tail` and `diff` blobs become **host-published** (`PUT /tail`,
-  `PUT /diff`), served verbatim. The DO never materializes anything.
-
-**Protocol** (binary WS frames: 1-byte type + JSON header + raw payload; no
-loro-protocol, no base64 — 33% base64 overhead matters at 1.2 Mbps):
-- `hello{cursor, device}` → `state{seqFloor, headSeq, checkpointSeq,
-  checkpointFrontier, checkpointSize}` — metadata only, then:
-- **Client-side precision** (replaces the server VV diff): client compares
-  `checkpointFrontier` against its local doc frontiers.
-  Included → skip the checkpoint, request `rows{after: max(cursor, checkpointSeq)}`.
-  Not included → `GET /checkpoint` (HTTP, **Range-resumable** — a stored blob can
-  resume at byte N; today's export-per-join cannot), then rows after `checkpointSeq`.
-- `rows{after, excludeDevice}` → server streams rows `seq > after AND device !=
-  excludeDevice` — you never re-download your own writes (matters exactly on the
-  reconnect-after-offline-work path).
-- `push{batchId, bytes}` → append + relay + `ack{batchId, seq}`. `batch_id UNIQUE`
-  dedupes reconnect re-pushes server-side (client keeps a pending-unacked queue,
-  registry-style; Loro re-import is a no-op so duplicates are safe end-to-end).
-- `POST /checkpoint {seqCovered, frontier}` + chunked blob: owner-only, guarded by
-  `seqCovered >= seqFloor` (floor-monotonic — the dumb replacement for the VV-monotonic
-  R2 guard). Rows `seq <= seqCovered` deleted after commit.
-- Presence: relay opaque ephemeral frames to live sockets with a 30 s TTL sweep —
-  broadcast only, no EphemeralStore on the server.
-- Validation kept (all wasm-free): auth/owner, frame shape, row size cap, per-device
-  rate/byte quotas. Semantic garbage is contained per-user (owner-only rooms), skipped
-  by client imports (malformed-entry philosophy), and erased by the next checkpoint.
-- Reconnect replay is head-serialized: one pending batch is sent at a time and the
-  next is armed by its ACK. A duplicate `batchId` is acknowledged before quota
-  accounting, so lost ACKs do not consume the write budget.
-- Ops: `GET /stats` (headSeq, seqFloor, rowBytes, checkpoint age), nightly
-  seq-monotonic R2 backup (registry pattern), tombstone-free — rows are the log.
-
----
-
-## Workstream C — Rust client + host duties
-
-**C1. `crates/sync/src/chat_client.rs`** modeled on `registry.rs` (764 LOC): cursor
-tracking, pending-push queue with batch ids, hello/backfill/live loop, frontier
-comparison for checkpoint skip, reconnect/backoff/wake plumbing reused from the
-existing supervisor machinery. The layered liveness model (ping lease, join deadline,
-probe clock) carries over — those lessons are transport-level, not CRDT-level.
-
-**C2. Store migration** (`crates/sync/src/store.rs` MIGRATIONS — append entry #N):
-`ALTER TABLE snapshots ADD COLUMN cursor INTEGER; ADD COLUMN epoch INTEGER` — cursor
-persisted **in the same transaction** as the snapshot bytes, so content and cursor
-cannot diverge (this kills the restored-backup/copied-device redownload cases at the
-root).
-
-**C3. Host duties** (`doc_host.rs`):
-- Checkpoint policy: post a full checkpoint when server `rowBytes > 512 KB` or
-  `rows > 200` (from `/stats` piggybacked on hello) — thresholds cheap to tune later.
-  History trim: shallow checkpoint only at a frontier older than RETAIN_DAYS, same
-  aged-frontier discipline as today (the ws4 live-frontier lesson: an offline device's
-  concurrent ops must never land behind a shallow root).
-- Sidecars: hosts publish neither a tail nor a diff sidecar. Nothing read the tail once
-  iOS spoke chat2 natively, and it had grown to 18% of the Durable Object bill; the
-  route remains for a future instant-open reader (`docs/operations/cloudflare-billing.md`). Remote
-  clients read working-tree diffs through the device relay.
-- Non-host owner devices may checkpoint as fallback if floor lag exceeds a high-water
-  mark (any device holds the full doc; ~20 lines, ships later if ever needed — hosts
-  must be online to execute commands anyway, so lag is bounded in practice).
-
-**C4. iOS** (`apps/ios/Cypher/Sync/`): `ChatRoomClient.swift`, modeled on
-`RegistryClient.swift`. Framing test vectors are shared across Rust/TS/Swift
+**C4. iOS** (`apps/ios/Cypher/Sync/ChatRoomClient.swift`): the same protocol, with the
+framing vectors shared across Rust, TypeScript and Swift
 ([`protocol/vectors/chat-frames-v1.json`](../../protocol/README.md)).
 
----
+## M. Doc lineage
 
-## Doc lineage
-
-**M1. Lineage epoch.** Every chat2 doc carries `meta.epoch = 2` (thin docs: summaries
-in the doc, full payloads in the A2 sidecar or the host's run journal). The one-time
-epoch rebuild that converted fat s2 docs during the cutover was removed after 0.3.41,
-together with the s2 rooms themselves.
+**M1. Lineage epoch.** Every chat2 doc carries `meta.epoch = 2`.
 
 **M2. Room generation.** Registry chat rows carry a `roomGen` field (per-field HLC LWW
-like everything else). Desktop hosts and current iOS builds open every chat as chat2,
-whatever the row says. Every chat is still created with `roomGen: 2` because iOS builds
-through 0.2.0 (24) dial a chat's room only when the row says 2; the field can stop being
-written once those builds are gone (TestFlight builds expire 90 days after upload).
+like every row). Desktop hosts and current iOS builds open every chat as chat2, whatever
+the row says. Chats are still created with `roomGen: 2` because iOS builds up to 0.2.0
+(24) dial a chat's room only when the row says 2; the field can stop being written once
+those builds are gone (TestFlight builds expire 90 days after upload).
 
-**M3. Rebuild-vs-lineage on other devices.** A device opening a chat whose local doc
-has `epoch < 2` discards that doc **after** re-queueing any of its own unresolved
-commands as fresh entries, then adopts the chat2 checkpoint. The old snapshot row is
-kept under a suffixed doc id. Importing it instead would duplicate every message,
-because the two Loro histories are unrelated.
+**M3. Older local docs.** A device opening a chat whose local doc has `epoch < 2` discards
+that doc **after** re-queueing its own unresolved commands as fresh entries, then adopts
+the chat2 checkpoint. The old snapshot row is kept under a suffixed doc id; importing it
+instead would duplicate every message, because the two Loro histories are unrelated.

@@ -1,6 +1,6 @@
 # Session-targeted mobile notifications
 
-## Implementation and status
+## Implementation
 
 The implementation lives in the existing Cloudflare Worker, desktop app and iOS
 client. There is **no separate APNs sender service**. Native Workers `fetch()`
@@ -155,8 +155,7 @@ engines and ordinary registry presence are not routing signals.
   old account's bearer/refresh token.
 - `/notifications/revoke` is an unauthenticated **revocation-only capability**
   endpoint: exact opaque binding ID, scope, lease and newer epoch are required.
-  It cannot register, read or send. Apply normal public-endpoint abuse/rate
-  controls during rollout.
+  It cannot register, read or send.
 - Account/config generations guard in-flight HTTP work, registration responses
   and notification navigation. Invalidated auth configurations cannot persist a
   late refresh over a newly signed-in account.
@@ -169,37 +168,19 @@ in-flight system alerts cannot be recalled reliably; their text stays generic,
 and cross-account taps are rejected. APNs acceptance also does not prove device
 receipt or presentation.
 
-## Enabling delivery — separate approval required
+## APNs credentials
 
-1. Enable Push Notifications for the existing App ID
-   `ai.mvp-lab.cypher.ios`, team `999875MHT4`. Do not create a replacement bundle.
-2. Create/use an **APNs token-auth key**, authorized for this topic and the desired
-   APNs environment. This is not an App Store Connect API key.
-3. Store the following as Cloudflare secrets using a private interactive/file
-   workflow, never chat, shell command arguments, git or logs:
-   `APNS_PRIVATE_KEY` (PKCS#8 `.p8` contents), `APNS_KEY_ID`, `APNS_TEAM_ID`.
-   The current sender uses one configured provider key; ensure it is authorized
-   for every environment you intend to use.
-4. Review the `PushDevice` SQLite migration/binding (`v4`) and deployment plan.
-   Keep the production Worker name and existing Durable Object identities.
-   Do not enable outgoing request tracing: the APNs URL contains the device
-   token. Update App Store privacy disclosures for identifiers and coarse
-   activity used for notification functionality; the required-reason API
-   manifest alone is not an App Privacy declaration.
-5. Produce a newly authorized iOS build. Debug uses `development` (sandbox);
-   Release/TestFlight uses `production`. **Verify the exported IPA's actual
-   signed `aps-environment=production` entitlement**, not just its Info.plist.
-   Revalidate distribution export after the portal capability change.
-   A cloud Mac does not need a registered physical development device for
-   App Store/TestFlight distribution.
-6. Deploy/enable only with approval and complete real-device acceptance below.
-   Code commit, push, deployment, setting the flag and TestFlight upload remain
-   separate operations. Pushes to main can trigger the production deploy workflow.
+The provider key is an **APNs token-auth key** (not an App Store Connect API key) for the
+App ID `ai.mvp-lab.cypher.ios`, team `999875MHT4`, authorized for every APNs environment in
+use. Its PKCS#8 `.p8` contents live only in the `APNS_PRIVATE_KEY` Worker secret, set
+through a private interactive or file workflow — never chat, command arguments, git or
+logs. Keep outgoing request tracing off: the APNs URL contains the device token.
 
-No phone Runtime, provider credential or MCP installation is required.
-Transport uses TLS; this is not a claim of end-to-end encryption.
+Debug builds use the `development` (sandbox) environment; Release and TestFlight builds use
+`production`. What counts is the exported IPA's signed `aps-environment` entitlement, not
+its Info.plist. Transport uses TLS; this is not end-to-end encryption.
 
-## Tests and acceptance
+## Tests
 
 Local suites cover policy/validation, authenticated routing, APNs payload/retry
 classification, real workerd SQLite outbox persistence, token ownership,
@@ -227,18 +208,3 @@ xcodebuild -project apps/ios/Cypher.xcodeproj -scheme Cypher \
 `CODE_SIGNING_ALLOWED=NO` produces an unsigned test host whose real Keychain
 writes fail with `errSecMissingEntitlement (-34018)`. Do not skip the Keychain
 tests or mistake that environment failure for an auth race.
-
-Real-device rollout must separately verify:
-
-- permission refusal/grant and token registration;
-- production APNs HTTP 200 **and actual phone receipt/tap**;
-- desktop active versus away, and resuming interaction before the delay expires;
-- same-chat silence, other-page in-app banner and background/system presentation;
-- resolved input cancellation and one deferred unresolved-input reminder;
-- subagent defaults, project muting and all modes;
-- offline logout, account/organization switch, token rotation and cold start;
-- reconnect/restart without a flood of old completion notifications;
-- iOS Focus behavior and exported distribution entitlements.
-
-Mock/SQLite tests and a successful cloud transport probe do not replace this
-acceptance.

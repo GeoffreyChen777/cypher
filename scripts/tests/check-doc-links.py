@@ -30,7 +30,7 @@ FENCE = re.compile(r"^\s*(```|~~~)")
 # content rather than a file in this repository.
 FOREIGN_CITATIONS = {
     ("crates/harness/src/pi/fork.rs", "docs/rpc.md"),  # pi's own repository
-    ("docs/research/pi-rpc.md", "docs/rpc.md"),  # pi's own repository
+    ("docs/design/pi-rpc.md", "docs/rpc.md"),  # pi's own repository
     ("apps/ios/CypherTests/Composer/MentionsTests.swift", "docs/中文.md"),  # test fixture
     ("apps/ios/Cypher/Development/DemoDataset.swift", "docs/chat2-sync.md"),  # demo content
 }

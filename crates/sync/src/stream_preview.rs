@@ -1,6 +1,7 @@
 //! Ephemeral stream-preview frame codec (`ephemeral-stream-v1`), driven by
-//! [`crate::preview_link`]. Parsing is NOT authorization; see
-//! docs/design/ephemeral-stream-v1.md. Mirrored by the Swift client; both run
+//! [`crate::preview_link`]. Parsing is NOT authorization. The protocol is dormant:
+//! no Edge relays these frames (the production ChatRoom rejects them). Mirrored by
+//! the Swift client; both run
 //! `protocol/vectors/stream-preview-v1.json` (`protocol/README.md`).
 
 use crate::chat_frames::{self, WireFrame};

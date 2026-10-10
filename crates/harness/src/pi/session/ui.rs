@@ -192,7 +192,7 @@ impl PiRun {
             // Deliberate: setWidget/setTitle/set_editor_text (and
             // any non-cypher setStatus) are transient TUI furniture
             // — cypher has its own state surface (see the
-            // classification table in docs/research/pi-rpc.md).
+            // classification table in docs/design/pi-rpc.md).
             _ => {}
         }
         Flow::Continue

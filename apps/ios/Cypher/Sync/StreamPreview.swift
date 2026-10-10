@@ -1,4 +1,4 @@
-// Inactive P1 codec, not authorization. See docs/design/ephemeral-stream-v1.md.
+// Stream-preview frame codec, dormant (no Edge relays these frames); parsing is not authorization.
 // Mirrors crates/sync/src/stream_preview.rs; both run
 // protocol/vectors/stream-preview-v1.json (protocol/README.md).
 // Deliberately not registered in ChatRoomClient.

@@ -10,7 +10,7 @@
 //! is a LOUD error (Done Errored naming the path — never a silent fresh
 //! session); an absent value means a fresh session pi creates itself.
 //!
-//! Event mapping (see the table in `docs/research/pi-rpc.md`): text/thinking
+//! Event mapping (see the table in `docs/design/pi-rpc.md`): text/thinking
 //! deltas, tool calls + capped results, extension errors, and the steer /
 //! abort commands. Segment semantics:
 //! - each assistant `message_end` emits `AssistantMessageCompleted` (a

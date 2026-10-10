@@ -126,6 +126,3 @@ already promoted, and housekeeping must not fail it.
 
 - `apps/edge/test/workerd/rows-optimization.workerd.test.ts` — the deferred-write
   optimizations pinned against real workerd + real Durable Object SQLite.
-- [`docs/plans/MIGRATION.md`](../plans/MIGRATION.md) §12.3 / §12.3b — the behaviours and the
-  in-memory rebuild rule that **no** optimization may break, whichever backend
-  it targets.
