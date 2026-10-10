@@ -174,7 +174,7 @@ def main():
             os.chmod(path, 0o600)
             proc = subprocess.Popen(
                 ["npx", "wrangler", "tail", args.worker, "--format", "json"],
-                cwd="edge", stdout=sink, stderr=subprocess.DEVNULL)
+                cwd="apps/edge", stdout=sink, stderr=subprocess.DEVNULL)
             started = time.time()
             try:
                 time.sleep(args.seconds)

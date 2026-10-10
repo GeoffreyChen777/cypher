@@ -1,5 +1,5 @@
 // Edge auth client — /auth/exchange, /auth/refresh, /auth/orgs
-// (edge/src/auth-routes.ts). Two modes, mirroring the engine:
+// (apps/edge/src/auth-routes.ts). Two modes, mirroring the engine:
 // - WorkOS: paste-code exchange → access/refresh tokens; refresh scoped to an
 //   org adds the org_id claim the workspace room requires.
 // - Dev (AUTH_MODE=dev edge): the bearer string IS the user id; "user@org"

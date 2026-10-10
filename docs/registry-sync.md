@@ -35,7 +35,7 @@ engine A ── RegistryDoc (rows + pending ops, SQLite-persisted) ── Regist
 engine B ── RegistryDoc ── RegistryClient ────────────────────────────────────────┘   rows table + seq counter
 ```
 
-- **RegistryRoom DO** (`edge/src/registry-room.ts`): authoritative row table in DO SQLite.
+- **RegistryRoom DO** (`apps/edge/src/registry-room.ts`): authoritative row table in DO SQLite.
   Applies pushed ops with per-field LWW (HLC compare), bumps a monotonic `seq` per batch,
   broadcasts merged rows to every socket. Cursor sync: a client joining with `cursor=N`
   gets only rows with `seq > N`. Pure merge logic lives in `registry-core.ts` (unit-tested;

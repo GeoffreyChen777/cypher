@@ -14,7 +14,7 @@ use anyhow::{Context, bail};
 
 #[cfg(test)]
 const LAUNCHD_LABEL: &str = "ai.mvp-lab.cypher";
-/// Same unit name the curl|sh installer (`edge/src/install.sh`) writes, so
+/// Same unit name the curl|sh installer (`apps/edge/src/install.sh`) writes, so
 /// `cypher daemon …` manages that installation rather than a competing copy.
 #[cfg(test)]
 const SYSTEMD_UNIT: &str = "cypher.service";
@@ -771,7 +771,7 @@ mod tests {
 
     #[test]
     fn curl_installer_delegates_setup_instead_of_starting_before_login() {
-        let installer = include_str!("../../../edge/src/install.sh");
+        let installer = include_str!("../../edge/src/install.sh");
         assert!(!installer.contains("session.json"));
         assert!(installer.contains("exec \"$app_root/current/cypher\" setup </dev/tty"));
         assert!(!installer.contains("\"$app_root/current/cypher\" daemon install"));

@@ -5,7 +5,7 @@
 //!
 //! The client owns no row semantics: everything applies through the shared
 //! [`cypher_doc::RegistryDoc`] under a lock. Wire frames are JSON text —
-//! byte-compatible with `edge/src/registry-room.ts`.
+//! byte-compatible with `apps/edge/src/registry-room.ts`.
 //!
 //! Liveness discipline: the transport-level text ping elicits a runtime
 //! auto-pong that proves NOTHING about the DO, so room-level health is judged
@@ -92,7 +92,7 @@ pub trait RegistryTransport: Send + Sync + 'static {
     fn push(&self, body: String) -> BoxFuture<'static, Result<String, SyncError>>;
 }
 
-// ── wire frames (JSON text; mirror edge/src/registry-room.ts) ───────────────
+// ── wire frames (JSON text; mirror apps/edge/src/registry-room.ts) ───────────────
 
 #[derive(Serialize)]
 #[serde(tag = "t", rename_all = "lowercase")]

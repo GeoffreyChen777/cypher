@@ -10,7 +10,7 @@ import { dirname, resolve } from "node:path";
 
 const base = process.argv[2];
 if (!base) throw new Error("usage: node crosscheck.mjs <baseUrl>");
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const wsBase = base.replace(/^http/, "ws");
 const user = "e2e-cross-user";
 const chat = `cross-${randomUUID().slice(0, 12)}`;

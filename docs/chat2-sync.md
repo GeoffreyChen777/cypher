@@ -1,6 +1,6 @@
 # chat2: dumb-relay session sync + thin docs
 
-Status: CURRENT — in production since cypher 0.1.4 (ChatRoom DO, `edge/src/chat-room.ts`). Origin: 2026-08-09 investigation (whale-doc dissection + t3code comparison).
+Status: CURRENT — in production since cypher 0.1.4 (ChatRoom DO, `apps/edge/src/chat-room.ts`). Origin: 2026-08-09 investigation (whale-doc dissection + t3code comparison).
 Prior art: `docs/registry-sync.md` (the same argument, applied to the workspace index).
 
 ## Why

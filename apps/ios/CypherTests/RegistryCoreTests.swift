@@ -1,5 +1,5 @@
 // Registry merge conformance vectors — a 1:1 port of
-// edge/src/registry-core.test.ts (same inputs, same expected rows). These are
+// apps/edge/src/registry-core.test.ts (same inputs, same expected rows). These are
 // the cross-language vectors shared with registry-core.ts (vitest) and
 // crates/doc/src/registry.rs (cargo test); change all three together.
 

@@ -1,5 +1,5 @@
 // Registry merge core + client-side doc — the Swift mirror of
-// edge/src/registry-core.ts (pure op/row semantics) and
+// apps/edge/src/registry-core.ts (pure op/row semantics) and
 // crates/doc/src/registry.rs (RegistryDoc: authoritative rows + pending
 // overlay). See docs/registry-sync.md.
 //
@@ -137,7 +137,7 @@ struct HlcClock: Codable, Hashable, Sendable {
     }
 }
 
-// MARK: - Rows and ops (wire-compatible with edge/src/registry-core.ts)
+// MARK: - Rows and ops (wire-compatible with apps/edge/src/registry-core.ts)
 
 struct RegistryRow: Hashable, Codable, Sendable {
     var kind: String

@@ -88,7 +88,7 @@ version so it can be compared numerically, and the artifact stem is published
 separately rather than parsed out of JSON in POSIX `sh`.
 
 The Rust toolchain is pinned in `rust-toolchain.toml`. Node is pinned to 24.19.0.
-Worker deployments use Wrangler from `edge/package-lock.json`, not a floating
+Worker deployments use Wrangler from `apps/edge/package-lock.json`, not a floating
 `npx wrangler@4`. Actions are pinned by commit.
 
 `deploy`, `release.publish` and `pi-runtime.publish` share the

@@ -167,8 +167,8 @@ cypher/
     ios/                          # SwiftUI iPhone client (apps/ios/README.md)
     landing/                      # letscypher.app landing page (static Worker assets)
     www-redirect/                 # www → apex redirect Worker
-  edge/                          # TypeScript Worker + DOs (ported from cypher/apps/edge,
-                                 # + auth-exchange routes absorbed from apps/server)
+    edge/                         # TypeScript Worker + DOs (ported from cypher/apps/edge,
+                                  # + auth-exchange routes absorbed from apps/server)
   docs/                          # reference docs, research decisions, release notes
 ```
 
@@ -253,7 +253,7 @@ Direct ports of zeron behaviors:
 - **Auth**: WorkOS through edge routes (`/auth/exchange`, `/auth/refresh`, orgs); loopback
   callback server headed, paste-code headless; dev mode (no key ⇒ bearer = configured user id).
 
-## 6. Edge plan (TypeScript, `edge/`)
+## 6. Edge plan (TypeScript, `apps/edge/`)
 
 Ported from `cypher/apps/edge` (device room byte relay + nudges + sidecar slots, R2
 attachments, JWKS auth). Its Loro-aware session room was later replaced by the chat2 ChatRoom

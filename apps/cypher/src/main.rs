@@ -119,7 +119,7 @@ fn workos_client_id_from_env(edge_url: &str, edge_token: &Option<String>) -> Opt
 }
 
 /// The development Edge this build defaults to: a local `wrangler dev`, on the
-/// port `edge/package.json`'s `dev` script binds (there is no hosted
+/// port `apps/edge/package.json`'s `dev` script binds (there is no hosted
 /// development Worker).
 ///
 /// `CYPHER_DEV_EDGE_URL` overrides this, so a development engine can still be

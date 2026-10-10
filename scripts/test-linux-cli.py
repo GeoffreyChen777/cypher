@@ -164,7 +164,7 @@ esac
         return data
 
     def install(self, success=True):
-        result = self.run_command(["sh", str(ROOT / "edge/src/install.sh"), "--no-setup"])
+        result = self.run_command(["sh", str(ROOT / "apps/edge/src/install.sh"), "--no-setup"])
         if success:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         else:
@@ -221,7 +221,7 @@ esac
         reaped = False
         try:
             with os.fdopen(write_fd,"wb") as script:
-                script.write((ROOT/"edge/src/install.sh").read_bytes())
+                script.write((ROOT/"apps/edge/src/install.sh").read_bytes())
             deadline = time.monotonic()+15
             while time.monotonic()<deadline:
                 if select.select([master],[],[],0.1)[0]:

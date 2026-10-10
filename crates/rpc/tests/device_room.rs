@@ -1,6 +1,6 @@
 //! HostRelay + ClientLink end-to-end over an in-memory fake device room.
 //!
-//! The fake implements the `DeviceRoom` DO's relay semantics (edge/src/device-room.ts):
+//! The fake implements the `DeviceRoom` DO's relay semantics (apps/edge/src/device-room.ts):
 //! route client frames to the single host socket with `from` stamped; route host frames
 //! by `to` (bounce `client_gone` when the target left); host supersede (a new host join
 //! closes the predecessor); `client_closed` on client disconnect; `host_closed` broadcast

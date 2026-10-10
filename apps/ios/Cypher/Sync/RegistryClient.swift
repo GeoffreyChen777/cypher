@@ -442,7 +442,7 @@ actor RegistryClient {
     }
 }
 
-// MARK: - Wire frames (JSON text; mirror edge/src/registry-room.ts)
+// MARK: - Wire frames (JSON text; mirror apps/edge/src/registry-room.ts)
 
 private struct HelloFrame: Encodable {
     var t = "hello"

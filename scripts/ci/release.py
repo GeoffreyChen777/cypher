@@ -313,7 +313,7 @@ def check_deploy(base):
         stem = get(channel + "stem.txt").decode().strip()
         require(stem == version_stem(v, build),
                 "Deployment blocked: release stem disagrees with the manifest")
-    installer = (ROOT / "edge/src/install.sh").read_text()
+    installer = (ROOT / "apps/edge/src/install.sh").read_text()
     floor = re.search(r"^MINIMUM_SETUP_VERSION=([0-9.]+)$", installer, re.M)
     if floor:
         require(version(v) >= version(floor.group(1)),

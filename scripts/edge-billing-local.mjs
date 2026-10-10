@@ -11,7 +11,7 @@
  *
  * Why this and not the development Worker: the deployed dev Worker wraps every
  * operation in `DevelopmentGuard`, which spends its own requests and rows
- * (`edge/src/development-budget.ts` — `budget.events++; budget.rows++`), and
+ * (`apps/edge/src/development-budget.ts` — `budget.events++; budget.rows++`), and
  * its room allowlist is capped at 16 for the lifetime of the guard data. It is
  * an integration target, not a measurement target. This is guard-free, exact,
  * unmetered and offline.
@@ -21,7 +21,7 @@
  *   node scripts/edge-billing-local.mjs [--since MS] [--port N] [--json]
  *
  * Start the server first:
- *   cd edge && npx wrangler dev --port 27655 --var AUTH_MODE:dev --local
+ *   cd apps/edge && npx wrangler dev --port 27655 --var AUTH_MODE:dev --local
  */
 const args = process.argv.slice(2);
 const flag = (name, fallback) => {

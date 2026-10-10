@@ -14,7 +14,7 @@ xcodebuild -project apps/ios/Cypher.xcodeproj -scheme CypherDev -configuration D
   -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
   CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- build
 xcrun simctl install "$sim" "$out/Build/Products/Development-iphonesimulator/Cypher.app"
-# The app defaults to a local `wrangler dev` (cd edge && npm run dev), which
+# The app defaults to a local `wrangler dev` (cd apps/edge && npm run dev), which
 # needs no secret. CYPHER_DEV_EDGE_URL names a staging Edge instead; a value
 # from the caller wins over the private file, as in dev-engine.sh.
 dev_edge_override="${CYPHER_DEV_EDGE_URL:-}"

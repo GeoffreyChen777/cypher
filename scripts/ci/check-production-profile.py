@@ -12,7 +12,7 @@ assert 'Development' not in scheme
 for script in ['scripts/package-linux.sh', 'scripts/package-macos.sh']:
     text = (root / script).read_text()
     assert '--features development' not in text
-assert 'cypher-edge-development' not in (root / 'edge/wrangler.jsonc').read_text()
+assert 'cypher-edge-development' not in (root / 'apps/edge/wrangler.jsonc').read_text()
 if len(sys.argv) > 1:
     artifact = pathlib.Path(sys.argv[1])
     if artifact.is_dir():

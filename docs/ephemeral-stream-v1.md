@@ -3,7 +3,7 @@
 状态：**Rust/iOS codec、Engine 发送和 Desktop/iOS 展示已实现，默认关闭；服务端 relay 已移除**。
 Edge 的开发 relay 及其 `dev-locked` 鉴权已随托管开发 Worker 一并删除，Edge 的 TS codec
 （`stream-preview.ts`）随后也已删除（可从 git 历史取回）；生产 `ChatRoom` 对 `0x20–0x26`
-帧回 `bad_frame`（`edge/test/workerd/preview.workerd.test.ts`）。启用本功能需在新服务端
+帧回 `bad_frame`（`apps/edge/test/workerd/preview.workerd.test.ts`）。启用本功能需在新服务端
 （`docs/plans/MIGRATION.md` §13 UX-2）上按下文契约重建 relay。正式设备身份、全故障矩阵
 与云端性能仍待验收。现有 HELLO、STATE、PUSH、ACK 和 durable 提交频率完全不变。
 

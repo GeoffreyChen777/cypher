@@ -12,7 +12,7 @@ __pycache__/
 node_modules
 .wrangler
 build/
-edge/dist/
+apps/edge/dist/
 
 # Xcode per-user workspace state and local distribution products.
 **/xcuserdata/

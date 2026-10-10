@@ -11,7 +11,7 @@ authentication errors such as `MissingProviderToken` / `InvalidProviderToken`),
 and Web Crypto produces valid ES256 signatures.
 
 Production sends are enabled by `NOTIFICATIONS_ENABLED = "true"` in
-`edge/wrangler.jsonc`, which also carries `APNS_KEY_ID` and `APNS_TEAM_ID`; the
+`apps/edge/wrangler.jsonc`, which also carries `APNS_KEY_ID` and `APNS_TEAM_ID`; the
 APNs provider key is the `APNS_PRIVATE_KEY` Worker secret. Release iOS builds
 carry the production push entitlement (checked by `scripts/ci/ios-verify.py`).
 Source entitlements are not Apple Developer portal configuration.

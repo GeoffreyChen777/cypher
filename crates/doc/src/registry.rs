@@ -9,7 +9,7 @@
 //!   reconnect (idempotent by strict-`>` clock compare);
 //! - an HLC clock stamping every local write.
 //!
-//! The merge function [`apply_op`] mirrors `edge/src/registry-core.ts` 1:1 —
+//! The merge function [`apply_op`] mirrors `apps/edge/src/registry-core.ts` 1:1 —
 //! the shared test vectors live in both files; change them together.
 
 use std::collections::{BTreeMap, HashMap};
@@ -75,7 +75,7 @@ impl HlcClock {
     }
 }
 
-// ── rows and ops (wire-compatible with edge/src/registry-core.ts) ───────────
+// ── rows and ops (wire-compatible with apps/edge/src/registry-core.ts) ───────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,7 +161,7 @@ impl RowOp {
 }
 
 /// Apply one op to a row — the 1:1 mirror of `applyOp` in
-/// `edge/src/registry-core.ts`. Returns the new row (`None` only for an
+/// `apps/edge/src/registry-core.ts`. Returns the new row (`None` only for an
 /// `update` on a missing row) and whether anything changed.
 pub fn apply_op(row: Option<&RegistryRow>, op: &RowOp) -> (Option<RegistryRow>, bool) {
     if op.op == OpKind::Delete {

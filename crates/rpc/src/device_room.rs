@@ -3,7 +3,7 @@
 //! full RPC surface through the relay), and the **client link** (dialing another device's
 //! relay and speaking ordinary [`RpcClient`] RPC over it).
 //!
-//! Frame encoding (must stay byte-identical to `edge/src/device-room.ts`):
+//! Frame encoding (must stay byte-identical to `apps/edge/src/device-room.ts`):
 //! `uleb128(header_len) ‖ UTF-8 JSON header ‖ payload`, header `{s, k, to?, from?}`.
 //! - client → DO: the DO stamps `from = connId` and forwards to the host socket;
 //! - host → DO: must carry `to = connId`; the DO strips routing keys and delivers;
@@ -47,7 +47,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Text `"ping"` keepalive — answered by the DO's hibernation-safe auto-response
-/// pair (`edge/src/device-room.ts`) without waking it.
+/// pair (`apps/edge/src/device-room.ts`) without waking it.
 ///
 /// 15s, not 30: a laptop's uplink (corporate proxy, VPN split-tunnel extension,
 /// consumer NAT) can reap an idle flow well inside a minute, and a keepalive
@@ -59,7 +59,7 @@ const PING_INTERVAL: Duration = Duration::from_secs(15);
 /// couple of intervals plus grace = dead socket (half-open TCP after NAT
 /// timeout or sleep/wake) — drop it and reconnect instead of waiting on a TCP
 /// write error. Must stay well under the relay's own host-liveness window
-/// (`HOST_LIVENESS_MS`, edge/src/device-room.ts) so a host replaces its dead
+/// (`HOST_LIVENESS_MS`, apps/edge/src/device-room.ts) so a host replaces its dead
 /// socket before the relay gives up on the device.
 const SILENCE_LEASE: Duration = Duration::from_secs(40);
 
@@ -966,7 +966,7 @@ fn credential_transport_allowed(base: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Codec tests — vectors ported from edge/src/device-frame.test.ts
+// Codec tests — vectors ported from apps/edge/src/device-frame.test.ts
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

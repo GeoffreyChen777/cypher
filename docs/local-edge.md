@@ -200,7 +200,7 @@ already promoted, and housekeeping must not fail it.
 
 ## Related
 
-- `edge/test/workerd/rows-optimization.workerd.test.ts` — the deferred-write
+- `apps/edge/test/workerd/rows-optimization.workerd.test.ts` — the deferred-write
   optimizations pinned against real workerd + real Durable Object SQLite.
 - `scripts/e2e-smoke.sh` — two headless engines and a local Edge, proving the
   cross-device command path end to end with the mock harness.

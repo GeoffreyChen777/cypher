@@ -16,7 +16,7 @@ export CYPHER_DATA_DIR="$HOME/.cypher-development/$mode-engine${instance:+-$inst
 umask 077
 mkdir -p "$CYPHER_DATA_DIR"
 if [[ "$mode" == dev ]]; then
-  # The development Edge is a local `wrangler dev` (cd edge && npm run dev)
+  # The development Edge is a local `wrangler dev` (cd apps/edge && npm run dev)
   # unless an endpoint is named explicitly:
   #   CYPHER_DEV_EDGE_URL=https://edge-dev.example.com scripts/dev-engine.sh dev
   # A caller-supplied value wins over the private file.

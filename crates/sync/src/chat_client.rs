@@ -7,7 +7,7 @@
 //! [`ChatDocSink`] the engine implements over its `ChatDocHandle` (import +
 //! persist doc AND cursor in one transaction — the C2 rule). Wire frames are
 //! the binary chat2 codec ([`crate::chat_frames`]), byte-compatible with
-//! `edge/src/chat-frames.ts`.
+//! `apps/edge/src/chat-frames.ts`.
 //!
 //! Liveness discipline matches `registry.rs`: transport pings prove nothing
 //! about the DO; room health is judged only by protocol frames with probe

@@ -49,7 +49,7 @@ until CYPHER_DATA_DIR=~/.cypher-development/local-engine target/debug/cypher sta
 nohup scripts/dev-app.sh local > ~/.cypher-development/local-ui.log 2>&1 &
 ```
 
-`dev` mode syncs through a development Edge: run `cd edge && npm run dev`
+`dev` mode syncs through a development Edge: run `cd apps/edge && npm run dev`
 (a local `wrangler dev` on port 27640, bearer `dev-user@dev-org`), then
 `scripts/dev-engine.sh dev` and `scripts/dev-app.sh dev`. The engine sources
 the private env file at `CYPHER_DEV_ENV_FILE` (default

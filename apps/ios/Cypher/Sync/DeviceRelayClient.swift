@@ -1,6 +1,6 @@
 // Device-room relay RPC client — dials a device's room on the edge as a
 // `client` peer and speaks ControlRpc to the HOST engine over a virtual
-// socket (crates/rpc/src/device_room.rs + edge/src/device-room.ts).
+// socket (crates/rpc/src/device_room.rs + apps/edge/src/device-room.ts).
 //
 // Streaming calls (`subscribe`) get `{id, item}` frames until `{id, done}`
 // or `{id, err}`; dropping the stream sends `{id, cancel: true}`.

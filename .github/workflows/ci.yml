@@ -44,7 +44,7 @@ jobs:
       - run: node --test pi-runtime/extensions/cypher-translation.test.mjs pi-runtime/extensions/cypher-fast-mode.test.mjs pi-runtime/extensions/cypher-codemode.test.mjs
       - run: bash scripts/test-check-linux-abi.sh
       - run: bash -n scripts/*.sh
-      - run: sh -n edge/src/install.sh
+      - run: sh -n apps/edge/src/install.sh
 
   edge:
     runs-on: ubuntu-24.04
@@ -57,7 +57,7 @@ jobs:
         with:
           node-version: 24.19.0
           cache: npm
-          cache-dependency-path: edge/package-lock.json
+          cache-dependency-path: apps/edge/package-lock.json
       - run: npm ci --prefix edge
       - run: npm --prefix edge run typecheck
       - run: npm --prefix edge test
