@@ -451,8 +451,50 @@ impl Transcript {
             return;
         }
 
+        let frame = OwnTurnFrame {
+            anchor_ix,
+            last_ix,
+            viewport,
+            viewport_height,
+            inset,
+            base_pad,
+            usable,
+            current,
+        };
         // ---- reservation sizing (skipped while unmeasured: the provisional
         // pad stands; the render gate re-runs this every live frame) --------
+        if self.size_own_turn_reservation(&frame, cx) {
+            return;
+        }
+
+        // ---- entry glide, then absolute hold -------------------------------
+        let (held, positioned) = self
+            .own_turn
+            .as_ref()
+            .map_or((false, false), |a| (a.held, a.positioned));
+        if !held {
+            return;
+        }
+        if positioned {
+            self.hold_own_turn(&frame, cx);
+            return;
+        }
+        self.glide_own_turn(&frame, cx);
+    }
+
+    /// Size the reservation from the measured turn (skipped while
+    /// unmeasured: the provisional pad stands; the render gate re-runs this
+    /// every live frame). Returns true when the step is over: the reply
+    /// outgrew the reservation and the anchor was dropped.
+    fn size_own_turn_reservation(&mut self, frame: &OwnTurnFrame, cx: &mut Context<Self>) -> bool {
+        let OwnTurnFrame {
+            anchor_ix,
+            last_ix,
+            usable,
+            current,
+            base_pad,
+            ..
+        } = *frame;
         if let (Some(anchor_bounds), Some(last_bounds)) = (
             self.list.bounds_for_item(anchor_ix),
             self.list.bounds_for_item(last_ix),
@@ -486,7 +528,7 @@ impl Transcript {
                 } else {
                     cx.notify();
                 }
-                return;
+                return true;
             }
             if (target - current).abs() > 0.5 {
                 if let Some(anchor) = self.own_turn.as_mut() {
@@ -498,84 +540,94 @@ impl Transcript {
                 cx.notify();
             }
         }
+        false
+    }
 
-        // ---- entry glide, then absolute hold -------------------------------
-        let (held, positioned) = self
-            .own_turn
-            .as_ref()
-            .map_or((false, false), |a| (a.held, a.positioned));
-        if !held {
-            return;
-        }
-        if positioned {
-            // Landed: re-assert the prompt's position after every layout.
-            // scroll_to is absolute and bounds-independent, so neither glue
-            // re-snaps, pad-sizing lag, nor a splice's unmeasured flicker can
-            // carry the view off the prompt (each broke the spring-held
-            // variants of this — rig-traced). ONE-SIDED: only upward drift
-            // (view above the hold) is corrected. The scroll slack under the
-            // reservation is legal resting space — wheel-down sinks into it
-            // and stops hard at the list's own clamp; snapping back up from
-            // there made the bottom bounce/stutter on every scroll event
-            // (user report). Way-below-slack (impossible short of a bug)
-            // still re-asserts.
-            let moved = match self.list.bounds_for_item(anchor_ix) {
+    /// The absolute hold after landing (see the comment inside).
+    fn hold_own_turn(&mut self, frame: &OwnTurnFrame, cx: &mut Context<Self>) {
+        let OwnTurnFrame {
+            anchor_ix,
+            viewport,
+            inset,
+            ..
+        } = *frame;
+        // Landed: re-assert the prompt's position after every layout.
+        // scroll_to is absolute and bounds-independent, so neither glue
+        // re-snaps, pad-sizing lag, nor a splice's unmeasured flicker can
+        // carry the view off the prompt (each broke the spring-held
+        // variants of this — rig-traced). ONE-SIDED: only upward drift
+        // (view above the hold) is corrected. The scroll slack under the
+        // reservation is legal resting space — wheel-down sinks into it
+        // and stops hard at the list's own clamp; snapping back up from
+        // there made the bottom bounce/stutter on every scroll event
+        // (user report). Way-below-slack (impossible short of a bug)
+        // still re-asserts.
+        let moved = match self.list.bounds_for_item(anchor_ix) {
+            Some(b) => {
+                let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
+                // The legal rest zone below the hold is the epsilon plus
+                // rounding; anything deeper is a transient-collision sink
+                // and rubber-bands back.
+                err > 0.5 || err < -(OWN_SEND_SCROLL_SLACK_PX + 2.0)
+            }
+            // Bounds vanish in the glued representation (dissolved
+            // above, so at most for this one frame) and through splice
+            // flicker. Near the stop that is dead-band space — no
+            // assert (asserting on None here was the bottom bounce);
+            // far from it the position is unknowable flicker: re-assert.
+            None => self.distance_from_bottom() > OWN_SEND_SCROLL_SLACK_PX + 8.0,
+        };
+        if moved {
+            // Correct with the entry glide's ease, not a snap: the only
+            // in-band escapes are one-frame commit transients and splice
+            // flicker, and an eased ~200ms return reads as native
+            // rubber-banding where an instant re-assert read as stutter
+            // (user report). Bounds-less flicker still snaps — there is
+            // nothing to ease against.
+            match self.list.bounds_for_item(anchor_ix) {
                 Some(b) => {
                     let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
-                    // The legal rest zone below the hold is the epsilon plus
-                    // rounding; anything deeper is a transient-collision sink
-                    // and rubber-bands back.
-                    err > 0.5 || err < -(OWN_SEND_SCROLL_SLACK_PX + 2.0)
-                }
-                // Bounds vanish in the glued representation (dissolved
-                // above, so at most for this one frame) and through splice
-                // flicker. Near the stop that is dead-band space — no
-                // assert (asserting on None here was the bottom bounce);
-                // far from it the position is unknowable flicker: re-assert.
-                None => self.distance_from_bottom() > OWN_SEND_SCROLL_SLACK_PX + 8.0,
-            };
-            if moved {
-                // Correct with the entry glide's ease, not a snap: the only
-                // in-band escapes are one-frame commit transients and splice
-                // flicker, and an eased ~200ms return reads as native
-                // rubber-banding where an instant re-assert read as stutter
-                // (user report). Bounds-less flicker still snaps — there is
-                // nothing to ease against.
-                match self.list.bounds_for_item(anchor_ix) {
-                    Some(b) => {
-                        let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
-                        let now = Instant::now();
-                        let frames = match self.own_turn_last_tick {
-                            Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0
-                                / SPRING_FRAME_MS)
-                                .min(SPRING_MAX_CATCHUP_FRAMES),
-                            None => 1.0,
-                        };
-                        self.own_turn_last_tick = Some(now);
-                        let ease = 1.0 - OWN_SEND_GLIDE_RETAIN.powf(frames);
-                        if err.abs() <= OWN_SEND_GLIDE_SNAP_PX {
-                            self.list.scroll_by(px(err));
-                            self.own_turn_last_tick = None;
-                        } else {
-                            self.list.scroll_by(px(err * ease));
-                        }
-                        self.own_turn_kick = true;
-                    }
-                    None => {
-                        self.list.scroll_to(ListOffset {
-                            item_ix: anchor_ix,
-                            offset_in_item: px(0.0),
-                        });
-                        self.list.scroll_by(px(-inset));
+                    let now = Instant::now();
+                    let frames = match self.own_turn_last_tick {
+                        Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0
+                            / SPRING_FRAME_MS)
+                            .min(SPRING_MAX_CATCHUP_FRAMES),
+                        None => 1.0,
+                    };
+                    self.own_turn_last_tick = Some(now);
+                    let ease = 1.0 - OWN_SEND_GLIDE_RETAIN.powf(frames);
+                    if err.abs() <= OWN_SEND_GLIDE_SNAP_PX {
+                        self.list.scroll_by(px(err));
                         self.own_turn_last_tick = None;
+                    } else {
+                        self.list.scroll_by(px(err * ease));
                     }
+                    self.own_turn_kick = true;
                 }
-                cx.notify();
-            } else {
-                self.own_turn_last_tick = None;
+                None => {
+                    self.list.scroll_to(ListOffset {
+                        item_ix: anchor_ix,
+                        offset_in_item: px(0.0),
+                    });
+                    self.list.scroll_by(px(-inset));
+                    self.own_turn_last_tick = None;
+                }
             }
-            return;
+            cx.notify();
+        } else {
+            self.own_turn_last_tick = None;
         }
+    }
+
+    /// The entry glide toward the hold, landing with an absolute snap.
+    fn glide_own_turn(&mut self, frame: &OwnTurnFrame, cx: &mut Context<Self>) {
+        let OwnTurnFrame {
+            anchor_ix,
+            viewport,
+            viewport_height,
+            inset,
+            ..
+        } = *frame;
         let now = Instant::now();
         let frames = match self.own_turn_last_tick {
             Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0 / SPRING_FRAME_MS)
@@ -1094,6 +1146,23 @@ impl Transcript {
         entry.epoch += 1;
         entry.toggled_at = Some(Instant::now());
     }
+}
+
+/// One own-turn step's measurements, shared by its phases.
+#[derive(Clone, Copy)]
+struct OwnTurnFrame {
+    anchor_ix: usize,
+    last_ix: usize,
+    viewport: gpui::Bounds<gpui::Pixels>,
+    viewport_height: f32,
+    /// Where the prompt rests below the viewport top.
+    inset: f32,
+    /// The last row's pad without any reservation.
+    base_pad: f32,
+    /// Room the reservation may fill.
+    usable: f32,
+    /// The reservation already installed.
+    current: f32,
 }
 
 #[cfg(test)]
