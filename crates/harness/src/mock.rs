@@ -4,9 +4,41 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use cypher_proto::{AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode};
+use cypher_proto::{
+    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
+    UserInputQuestion,
+};
 
 use crate::{Harness, HarnessError, RunControls};
+
+/// Prompt marker: the run asks one question through the engine's input bridge
+/// (the session sits in awaiting-input) and replays its script once answered.
+pub const ASK_MARKER: &str = "[mock:ask]";
+/// Prompt marker: the run streams its opening, starts a command that never
+/// finishes and keeps working until interrupted (Stop), ending
+/// `Done { status: Interrupted }`. The open command is what keeps it live:
+/// the engine parks a turn that goes silent after finished output, but
+/// never one with a tool still running.
+pub const HOLD_MARKER: &str = "[mock:hold]";
+
+/// The id of the command a `[mock:hold]` run leaves running.
+pub const HOLD_TOOL_ID: &str = "mock-hold-tool";
+
+/// One step of a marked run: a scripted event, or a pause on the controls.
+enum Step {
+    Event(AgentEvent),
+    Ask,
+    Hold,
+}
+
+fn interrupted() -> AgentEvent {
+    AgentEvent::Done {
+        status: DoneStatus::Interrupted,
+        result: None,
+        error: None,
+        session_id: None,
+    }
+}
 
 pub struct MockHarness {
     pub script: Vec<AgentEvent>,
@@ -156,8 +188,8 @@ impl Harness for MockHarness {
     }
     async fn run(
         &self,
-        _request: RunRequest,
-        _controls: RunControls,
+        request: RunRequest,
+        controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         // Optional pacing knob for demos/manual testing: `CYPHER_MOCK_DELAY_MS`
         // spaces the scripted events out so live-run UI states (working
@@ -202,6 +234,33 @@ impl Harness for MockHarness {
             .iter()
             .take_while(|e| matches!(e, AgentEvent::SessionStarted { .. }))
             .count();
+        // Dev/demo prompt markers ([`ASK_MARKER`], [`HOLD_MARKER`]): the
+        // data-side way to put live awaiting-input and working sessions on
+        // screen, e.g. when seeding a demo sidebar.
+        let ask = request.prompt.contains(ASK_MARKER);
+        let hold = request.prompt.contains(HOLD_MARKER);
+        if ask || hold {
+            let rest = think_events
+                .chain(work_events)
+                .chain(body[lead..].iter().cloned());
+            let mut steps: Vec<Step> = body[..lead].iter().cloned().map(Step::Event).collect();
+            if ask {
+                steps.push(Step::Ask);
+            }
+            if hold {
+                steps.extend(rest.take(1).map(Step::Event));
+                steps.push(Step::Event(AgentEvent::ToolCall {
+                    id: HOLD_TOOL_ID.into(),
+                    call: cypher_proto::ToolCall::Exec {
+                        command: "cargo test --workspace -- --include-ignored".into(),
+                    },
+                }));
+                steps.push(Step::Hold);
+            } else {
+                steps.extend(rest.chain(tail.iter().cloned()).map(Step::Event));
+            }
+            return Ok(marked_run(steps, controls, delay));
+        }
         let events: Vec<Result<AgentEvent, HarnessError>> = body[..lead]
             .iter()
             .cloned()
@@ -221,4 +280,55 @@ impl Harness for MockHarness {
             })
             .boxed())
     }
+}
+
+/// Replay a marked run's steps: scripted events (paced by `delay`), the
+/// question an `Ask` step waits on, and the interrupt a `Hold` step waits
+/// for. An interrupt during either pause ends the run `Interrupted`.
+fn marked_run(
+    steps: Vec<Step>,
+    controls: RunControls,
+    delay: std::time::Duration,
+) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    let RunControls {
+        request_input,
+        interrupt,
+        ..
+    } = controls;
+    futures::stream::unfold(
+        (steps.into_iter(), Some((request_input, interrupt))),
+        move |(mut steps, controls)| async move {
+            let (request_input, interrupt) = controls?;
+            loop {
+                match steps.next()? {
+                    Step::Event(event) => {
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
+                        return Some((Ok(event), (steps, Some((request_input, interrupt)))));
+                    }
+                    Step::Ask => {
+                        let answer = (request_input)(vec![UserInputQuestion {
+                            id: "mock-question".into(),
+                            header: "Approach".into(),
+                            question: "Which approach should I take?".into(),
+                            options: vec!["Patch it in place".into(), "Rewrite the module".into()],
+                            multi_select: false,
+                        }]);
+                        tokio::select! {
+                            _ = answer => {}
+                            _ = interrupt.cancelled() => {
+                                return Some((Ok(interrupted()), (steps, None)));
+                            }
+                        }
+                    }
+                    Step::Hold => {
+                        interrupt.cancelled().await;
+                        return Some((Ok(interrupted()), (steps, None)));
+                    }
+                }
+            }
+        },
+    )
+    .boxed()
 }
