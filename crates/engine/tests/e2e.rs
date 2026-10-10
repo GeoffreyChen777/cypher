@@ -1,4 +1,4 @@
-//! M2 end-to-end tests: doc-queued commands → host executor → harness stream →
+//! End-to-end tests: doc-queued commands → host executor → harness stream →
 //! journal + broadcast + folded doc entries, plus interrupt/recovery/idempotence
 //! and the RPC surface over the in-memory transport.
 

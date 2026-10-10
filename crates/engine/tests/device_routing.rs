@@ -325,7 +325,7 @@ async fn target_device_id_routes_over_the_relay() {
     core_b.shutdown().await;
 }
 
-/// M5: terminals are device-addressable — OpenTerminal/WriteTerminal forward as
+/// Terminals are device-addressable — OpenTerminal/WriteTerminal forward as
 /// unary calls and SubscribeTerminal proxies its stream through the relay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_stream_proxies_over_the_relay() {
