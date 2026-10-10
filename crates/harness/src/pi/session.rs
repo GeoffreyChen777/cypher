@@ -28,6 +28,7 @@ pub(super) struct Session {
     pub(super) kill_grace: Duration,
     pub(super) handshake_timeout: Duration,
     pub(super) no_activity_grace: Duration,
+    pub(super) liveness_probe_interval: Duration,
     pub(super) model_catalog_wait: Duration,
     pub(super) stderr_tail: crate::process::StderrTail,
     /// Which synthesized built-in commands this run intercepts (computed from
@@ -68,6 +69,24 @@ struct PiRun {
     no_activity_grace: Duration,
     interrupt_grace: Duration,
     kill_grace: Duration,
+    /// LIVENESS PROBE: after this long without a pi event mid-turn, ask pi
+    /// whether it is still working ([`Self::liveness_watched`]). The engine's
+    /// turn-quiesce watchdog only sees stream silence, and a silent pi is
+    /// the normal shape of a long reasoning step, a cold prefill or a retry
+    /// backoff — its heartbeat must keep arriving well inside the engine's
+    /// shortest window, or a live turn is parked as if its Done were lost.
+    liveness_interval: Duration,
+    /// Fires [`Self::liveness_interval`] after the last pi event.
+    liveness_at: std::pin::Pin<Box<tokio::time::Sleep>>,
+    /// The in-flight `get_state` probe's id. Sent ordered, so its answer is
+    /// read only after every event pi wrote ahead of it — an "idle" answer
+    /// can never overtake the `agent_settled` it would contradict.
+    liveness_probe: Option<String>,
+    /// A run pi started on its own — a background task's wake, with no
+    /// prompt outstanding (`in_turn` false). Its `agent_settled` closes it
+    /// with a Done of its own instead of leaving the engine to guess from
+    /// silence; a prompt dispatched meanwhile takes the run over.
+    self_run: bool,
     assistant_message_id: String,
     /// The current assistant message's streamed text (Done's `result` and
     /// the error text for an `error` stopReason).

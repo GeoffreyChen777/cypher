@@ -148,6 +148,9 @@ impl PiRun {
             self.agent_started = false;
             self.done_sent = false;
             self.in_turn = true;
+            // A prompt dispatched into a self-started run takes it over: its
+            // settle is this turn's Done now.
+            self.self_run = false;
             self.progress_last.clear();
             self.progress_ended.clear();
             self.throughput.start_turn();
@@ -292,6 +295,11 @@ impl PiRun {
         ) {
             self.agent_started = true;
         }
+        // A run starting with no prompt outstanding is pi's own (a
+        // background task's wake): track it so its settle gets a Done.
+        if kind == "agent_start" && !self.in_turn && !self.self_run {
+            self.start_self_run();
+        }
         match kind {
             "message_update" => self.on_message_update(&ev).await,
             "message_start" => self.on_message_start(&ev).await,
@@ -300,6 +308,7 @@ impl PiRun {
             "tool_execution_update" => self.on_tool_update(&ev).await,
             "tool_execution_end" => self.on_tool_end(&ev).await,
             "extension_error" => self.on_extension_error(&ev).await,
+            "agent_settled" if !self.in_turn && self.self_run => self.on_self_run_settled().await,
             "agent_settled" => self.on_agent_settled().await,
             // Manual (parked `/compact`) and automatic compactions
             // both end here: re-read the gauge, falling back to the
@@ -562,6 +571,152 @@ impl PiRun {
         Flow::Continue
     }
 
+    /// The settled turn's Done status and error, from how its last assistant
+    /// message stopped.
+    fn settled_outcome(&self) -> (DoneStatus, Option<String>) {
+        if self.interrupted {
+            return (DoneStatus::Interrupted, None);
+        }
+        match self.last_stop_reason.as_str() {
+            "error" => (
+                DoneStatus::Errored,
+                Some(
+                    self.last_error_message
+                        .clone()
+                        .filter(|m| !m.trim().is_empty())
+                        .or_else(|| {
+                            (!self.last_assistant_text.is_empty())
+                                .then(|| self.last_assistant_text.clone())
+                        })
+                        .unwrap_or_else(|| "The agent reported an error.".into()),
+                ),
+            ),
+            "aborted" => (DoneStatus::Interrupted, None),
+            _ => (DoneStatus::Completed, None),
+        }
+    }
+
+    /// pi started a run on its own: reset the per-turn state its Done and
+    /// progress read, as a dispatched turn does.
+    fn start_self_run(&mut self) {
+        self.self_run = true;
+        self.last_assistant_text.clear();
+        self.last_stop_reason = "stop".to_owned();
+        self.last_error_message = None;
+        self.progress_last.clear();
+        self.progress_ended.clear();
+        self.throughput.start_turn();
+    }
+
+    /// A self-started run settled. `agent_settled`'s normal path ignores it
+    /// (no prompt was outstanding), which left the engine to settle the turn
+    /// from silence alone — and a silent high-reasoning step looks exactly
+    /// like that. Close it with a real Done; the child stays parked.
+    async fn on_self_run_settled(&mut self) -> Flow {
+        if !self.self_run {
+            return Flow::Continue;
+        }
+        self.self_run = false;
+        refresh_context_usage(&self.client, &self.event_tx, None);
+        let (status, error) = self.settled_outcome();
+        let result =
+            (!self.last_assistant_text.is_empty()).then(|| self.last_assistant_text.clone());
+        let done = AgentEvent::Done {
+            status,
+            result,
+            error,
+            session_id: Some(self.session_file.clone()),
+        };
+        if send(&self.event_tx, done).await {
+            Flow::Continue
+        } else {
+            Flow::Break
+        }
+    }
+
+    /// Whether pi owes this run a settle: a dispatched turn whose agent run
+    /// started, or a self-started run. Only then is silence worth probing.
+    fn liveness_watched(&self) -> bool {
+        !self.interrupted
+            && (self.self_run
+                || (self.in_turn
+                    && self.agent_started
+                    && !self.done_sent
+                    && self.idle_prompt.is_none()))
+    }
+
+    /// pi spoke: push the next probe a full interval out.
+    fn rearm_liveness(&mut self) {
+        let at = tokio::time::Instant::now() + self.liveness_interval;
+        self.liveness_at.as_mut().reset(at);
+    }
+
+    /// A watched turn went a full interval without a pi event: ask pi
+    /// whether it is still working. A probe that never answered by the next
+    /// tick means pi itself is wedged — no heartbeat for it, so the engine's
+    /// watchdog stays the backstop for exactly that case.
+    fn on_liveness_tick(&mut self) -> Flow {
+        match self.liveness_probe.take() {
+            Some(id) => tracing::warn!(probe = %id, "pi did not answer the liveness probe"),
+            None => match self.client.send_ordered("get_state", Map::new()) {
+                Ok(id) => self.liveness_probe = Some(id),
+                Err(err) => tracing::debug!(error = %err, "liveness probe not sent"),
+            },
+        }
+        self.rearm_liveness();
+        Flow::Continue
+    }
+
+    /// pi answered the liveness probe. Ordered, so every event it wrote
+    /// first — a settle included — is already handled.
+    async fn on_liveness_state(&mut self, result: Result<Value, String>) -> Flow {
+        self.liveness_probe = None;
+        if !self.liveness_watched() {
+            // The turn settled while the probe was in flight.
+            return Flow::Continue;
+        }
+        let state = match result {
+            Ok(state) => state,
+            Err(err) => {
+                tracing::debug!(error = %err, "liveness probe failed");
+                return Flow::Continue;
+            }
+        };
+        let flag = |key: &str| state.get(key).and_then(Value::as_bool);
+        match (flag("isStreaming"), flag("isCompacting")) {
+            // Silent but working (a long reasoning step, a cold prefill, a
+            // retry backoff, a compaction): an empty reasoning delta is the
+            // engine's pure heartbeat — it holds the turn-quiesce watchdog
+            // off and is never journaled.
+            (Some(true), _) | (_, Some(true)) => {
+                let heartbeat = AgentEvent::ReasoningDelta {
+                    text: String::new(),
+                };
+                if send(&self.event_tx, heartbeat).await {
+                    Flow::Continue
+                } else {
+                    Flow::Break
+                }
+            }
+            // Idle, yet the run never settled: its `agent_settled` was lost
+            // (pi marks the run inactive before its extensions' settle
+            // handlers run, and one that throws or hangs keeps the event
+            // from ever being written). Settle it now rather than leave the
+            // turn to the engine's silence heuristic; a late duplicate is
+            // ignored like any stale settle.
+            (Some(false), _) => {
+                tracing::warn!("pi went idle without agent_settled; settling the turn");
+                if self.in_turn {
+                    self.on_agent_settled().await
+                } else {
+                    self.on_self_run_settled().await
+                }
+            }
+            // A runtime that does not report it: no verdict.
+            (None, _) => Flow::Continue,
+        }
+    }
+
     /// The turn settled: send its Done, then park or end the run.
     async fn on_agent_settled(&mut self) -> Flow {
         // A stale duplicate (or an abort racing a settled
@@ -575,27 +730,7 @@ impl PiRun {
         // session write.
         refresh_context_usage(&self.client, &self.event_tx, None);
         self.done_sent = true;
-        let (status, error) = if self.interrupted {
-            (DoneStatus::Interrupted, None)
-        } else {
-            match self.last_stop_reason.as_str() {
-                "error" => (
-                    DoneStatus::Errored,
-                    Some(
-                        self.last_error_message
-                            .clone()
-                            .filter(|m| !m.trim().is_empty())
-                            .or_else(|| {
-                                (!self.last_assistant_text.is_empty())
-                                    .then(|| self.last_assistant_text.clone())
-                            })
-                            .unwrap_or_else(|| "The agent reported an error.".into()),
-                    ),
-                ),
-                "aborted" => (DoneStatus::Interrupted, None),
-                _ => (DoneStatus::Completed, None),
-            }
-        };
+        let (status, error) = self.settled_outcome();
         // Messages an extension consumed confirm before
         // the Done (the last segment then ends empty).
         // Steers pi queued but never delivered (the turn
@@ -759,6 +894,7 @@ pub async fn run_session(session: Session) {
         kill_grace,
         handshake_timeout,
         no_activity_grace,
+        liveness_probe_interval,
         model_catalog_wait,
         stderr_tail,
         intercept,
@@ -873,6 +1009,10 @@ pub async fn run_session(session: Session) {
         no_activity_grace,
         interrupt_grace,
         kill_grace,
+        liveness_interval: liveness_probe_interval,
+        liveness_at: Box::pin(tokio::time::sleep(liveness_probe_interval)),
+        liveness_probe: None,
+        self_run: false,
         assistant_message_id,
         last_assistant_text,
         last_stop_reason: "stop".to_owned(),
@@ -915,11 +1055,20 @@ pub async fn run_session(session: Session) {
                 run.on_prompt_response(res).await
             }
             inc = incoming.recv() => match inc {
-                Some(Incoming::Event(ev)) => run.on_event(ev).await,
+                Some(Incoming::Event(ev)) => {
+                    run.rearm_liveness();
+                    run.on_event(ev).await
+                }
+                Some(Incoming::Response { id, result })
+                    if run.liveness_probe.as_deref() == Some(id.as_str()) =>
+                {
+                    run.on_liveness_state(result).await
+                }
                 Some(Incoming::Response { id, result }) => {
                     run.on_steer_response(id, result).await
                 }
                 Some(Incoming::UiRequest { id, method, payload }) => {
+                    run.rearm_liveness();
                     run.on_ui_request(id, method, payload).await
                 }
                 Some(Incoming::Eof) | None => {
@@ -935,6 +1084,7 @@ pub async fn run_session(session: Session) {
             {
                 run.on_no_activity().await
             }
+            _ = &mut run.liveness_at, if run.liveness_watched() => run.on_liveness_tick(),
             _ = run.event_tx.closed() => Flow::Break,
         };
         if let Flow::Break = flow {

@@ -200,6 +200,13 @@ pub struct PiHarness {
     /// child remains parked afterward so process-local extension state (such
     /// as `/fast`) survives into the next turn.
     no_activity_grace: Duration,
+    /// How long a turn may go without a pi event before the harness asks pi
+    /// whether it is still working (`get_state`). A silent pi mid-request is
+    /// the normal shape of a long reasoning step; the probe's heartbeat keeps
+    /// the engine's turn-quiesce watchdog from mistaking it for a lost Done,
+    /// and an idle answer settles a turn whose `agent_settled` really was
+    /// lost. Kept under the engine's shortest watchdog window (20s).
+    liveness_probe_interval: Duration,
     /// How long model discovery waits for `get_available_models` to become
     /// non-empty. pi's RPC snapshot is empty until the catalog refresh
     /// finishes (`--list-models` awaits that refresh; RPC does not).
@@ -232,6 +239,7 @@ impl PiHarness {
             kill_grace: Duration::from_secs(3),
             handshake_timeout: Duration::from_secs(120),
             no_activity_grace: Duration::from_secs(2),
+            liveness_probe_interval: Duration::from_secs(10),
             model_catalog_wait: Duration::from_secs(8),
             engine_socket: None,
             commands: Mutex::new(None),
@@ -282,6 +290,13 @@ impl PiHarness {
     /// 2s). Tests shrink it so no-activity settlement is fast.
     pub fn with_no_activity_grace(mut self, grace: Duration) -> Self {
         self.no_activity_grace = grace;
+        self
+    }
+
+    /// Test seam: how long a turn stays silent before the liveness probe
+    /// (default 10s).
+    pub fn with_liveness_probe_interval(mut self, interval: Duration) -> Self {
+        self.liveness_probe_interval = interval;
         self
     }
 
@@ -454,6 +469,7 @@ impl Harness for PiHarness {
             kill_grace: self.kill_grace,
             handshake_timeout: self.handshake_timeout,
             no_activity_grace: self.no_activity_grace,
+            liveness_probe_interval: self.liveness_probe_interval,
             model_catalog_wait: self.model_catalog_wait,
             stderr_tail,
             intercept,

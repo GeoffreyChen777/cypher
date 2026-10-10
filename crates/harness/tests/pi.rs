@@ -1957,3 +1957,69 @@ async fn clone_leaf_requires_a_materialized_session() {
     assert!(err.to_string().contains("not materialized"), "{err}");
     assert!(scratch_leftovers(&root).is_empty());
 }
+
+/// The liveness probe's heartbeats: empty reasoning deltas.
+fn heartbeats(events: &[AgentEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::ReasoningDelta { text } if text.is_empty()))
+        .count()
+}
+
+/// The Done results, in order.
+fn done_results(events: &[AgentEvent]) -> Vec<Option<String>> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Done { result, .. } => Some(result.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A long silent reasoning step (the 511s xhigh step of the quiesce report):
+/// every probe that finds pi still streaming heartbeats the engine, so its
+/// turn-quiesce watchdog never mistakes the wait for a lost Done.
+#[tokio::test]
+async fn liveness_probe_heartbeats_a_silent_turn() {
+    let harness = harness().with_liveness_probe_interval(Duration::from_millis(150));
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&harness, request("scenario:silent-thinking"), controls).await;
+    assert_eq!(heartbeats(&events), 2, "one heartbeat per streaming probe");
+    assert_eq!(dones(&events), [(DoneStatus::Completed, None)]);
+    assert_eq!(done_results(&events), [Some("thought it through".into())]);
+}
+
+/// A lost `agent_settled`: pi is idle but never said so. The probe finds it
+/// idle and the harness settles the turn with its real outcome — no waiting
+/// on the engine's silence heuristic.
+#[tokio::test]
+async fn liveness_probe_settles_a_lost_agent_settled() {
+    let harness = harness().with_liveness_probe_interval(Duration::from_millis(150));
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&harness, request("scenario:lost-settle"), controls).await;
+    assert_eq!(heartbeats(&events), 0);
+    assert_eq!(dones(&events), [(DoneStatus::Completed, None)]);
+    assert_eq!(done_results(&events), [Some("all done".into())]);
+}
+
+/// A run pi starts on its own (a background task's wake) gets probed like a
+/// prompt turn and closes with a Done of its own when it settles.
+#[tokio::test]
+async fn self_started_run_is_probed_and_settles_with_a_done() {
+    let harness = harness().with_liveness_probe_interval(Duration::from_millis(150));
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&harness, request("scenario:self-run"), controls).await;
+    assert_eq!(heartbeats(&events), 1, "the self-run's silence is probed");
+    assert_eq!(
+        dones(&events),
+        [(DoneStatus::Completed, None), (DoneStatus::Completed, None)]
+    );
+    assert_eq!(
+        done_results(&events),
+        [
+            Some("started the build".into()),
+            Some("build is green".into())
+        ]
+    );
+}

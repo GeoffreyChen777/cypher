@@ -744,6 +744,68 @@ while read -r line; do
       exit 1
       ;;
 
+    *scenario:silent-thinking*)
+      # A long reasoning step: pi streams nothing while the provider thinks.
+      # The harness's liveness probe (get_state) finds pi still streaming and
+      # must heartbeat each time; the answer lands after the second probe.
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+      emit '{"type":"agent_start"}'
+      emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+      probes=0
+      while [ "$probes" -lt 2 ]; do
+        next_cmd probe || exit 1
+        if has "$probe" '"type":"get_state"'; then
+          emit "{\"id\":$(rid "$probe"),\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"isStreaming\":true,\"isCompacting\":false}}"
+          probes=$((probes + 1))
+        fi
+      done
+      emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"thought it through"}}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"thought it through"}],"stopReason":"stop"}}'
+      emit '{"type":"agent_settled"}'
+      exit 0
+      ;;
+
+    *scenario:lost-settle*)
+      # The run finishes but its agent_settled is never written (pi marks the
+      # run inactive before an extension's settle handler throws). The probe
+      # finds pi idle: the harness must settle the turn itself.
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+      emit '{"type":"agent_start"}'
+      emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+      emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"all done"}}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"all done"}],"stopReason":"stop"}}'
+      next_cmd probe || exit 1
+      if has "$probe" '"type":"get_state"'; then
+        emit "{\"id\":$(rid "$probe"),\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"isStreaming\":false,\"isCompacting\":false}}"
+        exit 0
+      fi
+      exit 1
+      ;;
+
+    *scenario:self-run*)
+      # The prompt turn settles; then pi wakes on its own (a background task
+      # finished) and runs with no prompt outstanding. That run thinks
+      # silently (one probe: still streaming), then settles: the harness
+      # must close it with a Done of its own.
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+      emit '{"type":"agent_start"}'
+      emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+      emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"started the build"}}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"started the build"}],"stopReason":"stop"}}'
+      emit '{"type":"agent_settled"}'
+      emit '{"type":"agent_start"}'
+      emit '{"type":"message_start","message":{"role":"assistant","id":"m2","content":[]}}'
+      emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"build is green"}}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"build is green"}],"stopReason":"stop"}}'
+      next_cmd probe || exit 1
+      if has "$probe" '"type":"get_state"'; then
+        emit "{\"id\":$(rid "$probe"),\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"isStreaming\":true,\"isCompacting\":false}}"
+        emit '{"type":"agent_settled"}'
+        exit 0
+      fi
+      exit 1
+      ;;
+
     *scenario:resumed*)
       emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
       emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
