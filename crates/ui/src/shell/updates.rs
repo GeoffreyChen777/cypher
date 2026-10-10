@@ -13,13 +13,16 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let mac_app = matches!(self.install, cypher_update::InstallKind::MacApp { .. });
+        let mac_app = matches!(
+            self.updates.install,
+            cypher_update::InstallKind::MacApp { .. }
+        );
         let view = update_strip_view(
             self.state.read(cx).update.as_ref(),
             cypher_update::current_version(),
-            self.update_dismissed.as_deref(),
+            self.updates.dismissed.as_deref(),
             mac_app,
-            &self.update_flow,
+            &self.updates.flow,
         )?;
         let UpdateStripView {
             label,
@@ -80,7 +83,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let view =
-            pi_update_strip_view(self.state.read(cx).pi_update.as_ref(), self.pi_update_busy)?;
+            pi_update_strip_view(self.state.read(cx).pi_update.as_ref(), self.updates.pi_busy)?;
         let PiUpdateStripView {
             label,
             clickable,
@@ -125,15 +128,15 @@ impl Shell {
     }
 
     fn begin_pi_update(&mut self, cx: &mut Context<Self>) {
-        if self.pi_update_busy {
+        if self.updates.pi_busy {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        self.pi_update_busy = true;
+        self.updates.pi_busy = true;
         let state = self.state.clone();
-        self.pi_update_task = Some(cx.spawn(async move |this, cx| {
+        self.updates.pi_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call(methods::APPLY_PI_UPDATES, serde_json::json!({}))
@@ -154,7 +157,7 @@ impl Shell {
                 }
             }
             this.update(cx, |shell, cx| {
-                shell.pi_update_busy = false;
+                shell.updates.pi_busy = false;
                 if let Err(err) = result {
                     shell.sidebar_notice = Some(format!("Pi update failed: {err}").into());
                 }
@@ -168,8 +171,11 @@ impl Shell {
     /// Idle → download; Ready → swap + relaunch; Failed → retry; advisory
     /// installs → dismiss for this version.
     fn on_update_strip_click(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.install, cypher_update::InstallKind::MacApp { .. }) {
-            self.update_dismissed = self
+        if !matches!(
+            self.updates.install,
+            cypher_update::InstallKind::MacApp { .. }
+        ) {
+            self.updates.dismissed = self
                 .state
                 .read(cx)
                 .update
@@ -178,9 +184,9 @@ impl Shell {
             cx.notify();
             return;
         }
-        match std::mem::replace(&mut self.update_flow, UpdateFlow::Idle) {
+        match std::mem::replace(&mut self.updates.flow, UpdateFlow::Idle) {
             UpdateFlow::Idle | UpdateFlow::Failed(_) => self.begin_update_download(cx),
-            UpdateFlow::Downloading => self.update_flow = UpdateFlow::Downloading,
+            UpdateFlow::Downloading => self.updates.flow = UpdateFlow::Downloading,
             UpdateFlow::Ready(staged) => self.apply_staged_update(staged, cx),
         }
     }
@@ -190,19 +196,19 @@ impl Shell {
     fn begin_update_download(&mut self, cx: &mut Context<Self>) {
         let edge_url = self.boot.edge_url.clone();
         let data_dir = self.data_dir.clone();
-        self.update_flow = UpdateFlow::Downloading;
+        self.updates.flow = UpdateFlow::Downloading;
         let download = Tokio::spawn(cx, async move {
             let manifest = cypher_update::fetch_latest(&edge_url).await?;
             cypher_update::stage_mac_app(&edge_url, &manifest, &data_dir).await
         });
-        self.update_task = Some(cx.spawn(async move |this, cx| {
+        self.updates.task = Some(cx.spawn(async move |this, cx| {
             let outcome = match download.await {
                 Ok(Ok(staged)) => Ok(staged),
                 Ok(Err(err)) => Err(format!("{err:#}")),
                 Err(join_err) => Err(join_err.to_string()),
             };
             this.update(cx, |shell, cx| {
-                shell.update_flow = match outcome {
+                shell.updates.flow = match outcome {
                     Ok(staged) => UpdateFlow::Ready(staged),
                     Err(message) => {
                         tracing::warn!(%message, "update download failed");
@@ -220,7 +226,7 @@ impl Shell {
     /// relauncher, and quit — the relauncher `open`s the new bundle once this
     /// process (and its engine lock / IPC socket) is gone.
     fn apply_staged_update(&mut self, staged: PathBuf, cx: &mut Context<Self>) {
-        let cypher_update::InstallKind::MacApp { bundle } = self.install.clone() else {
+        let cypher_update::InstallKind::MacApp { bundle } = self.updates.install.clone() else {
             return;
         };
         match cypher_update::apply_mac_app(&staged, &bundle) {
@@ -230,7 +236,7 @@ impl Shell {
             }
             Err(err) => {
                 tracing::error!(error = %err, "update apply failed");
-                self.update_flow = UpdateFlow::Failed(format!("{err:#}").into());
+                self.updates.flow = UpdateFlow::Failed(format!("{err:#}").into());
                 cx.notify();
             }
         }
@@ -241,7 +247,7 @@ impl Shell {
             self.state.read(cx).update.as_ref(),
             cypher_update::current_version(),
         );
-        self.about = Some(AboutDialog {
+        self.updates.about = Some(AboutDialog {
             check,
             runtime_checking: false,
         });
@@ -250,17 +256,17 @@ impl Shell {
 
     pub(super) fn begin_update_check(&mut self, cx: &mut Context<Self>) {
         if matches!(
-            self.about.as_ref().map(|about| &about.check),
+            self.updates.about.as_ref().map(|about| &about.check),
             Some(AboutCheck::Checking)
         ) {
             return;
         }
         let check = AboutCheck::Checking;
-        if let Some(about) = &mut self.about {
+        if let Some(about) = &mut self.updates.about {
             about.check = check;
             about.runtime_checking = true;
         } else {
-            self.about = Some(AboutDialog {
+            self.updates.about = Some(AboutDialog {
                 check,
                 runtime_checking: true,
             });
@@ -269,7 +275,7 @@ impl Shell {
         let engine = self.state.read(cx).engine().cloned();
         let edge_url = self.boot.edge_url.clone();
         let state = self.state.clone();
-        self.about_task = Some(cx.spawn(async move |this, cx| {
+        self.updates.about_task = Some(cx.spawn(async move |this, cx| {
             let status = if let Some(engine) = engine {
                 match engine
                     .client()
@@ -329,7 +335,7 @@ impl Shell {
                 cx.notify();
             });
             this.update(cx, |shell, cx| {
-                if let Some(about) = &mut shell.about {
+                if let Some(about) = &mut shell.updates.about {
                     about.check =
                         about_check_from_status(Some(&status), cypher_update::current_version());
                     if matches!(about.check, AboutCheck::Idle) {
@@ -348,13 +354,13 @@ impl Shell {
     /// download never holds up the application check's answer.
     fn begin_runtime_update_check(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            if let Some(about) = &mut self.about {
+            if let Some(about) = &mut self.updates.about {
                 about.runtime_checking = false;
             }
             return;
         };
         let state = self.state.clone();
-        self.about_runtime_task = Some(cx.spawn(async move |this, cx| {
+        self.updates.about_runtime_task = Some(cx.spawn(async move |this, cx| {
             let reply = engine
                 .client()
                 .call(methods::CHECK_PI_UPDATE, serde_json::json!({}))
@@ -378,7 +384,7 @@ impl Shell {
                 Err(err) => tracing::warn!(error = %err, "Pi Runtime update check failed"),
             }
             this.update(cx, |shell, cx| {
-                if let Some(about) = &mut shell.about {
+                if let Some(about) = &mut shell.updates.about {
                     about.runtime_checking = false;
                 }
                 cx.notify();

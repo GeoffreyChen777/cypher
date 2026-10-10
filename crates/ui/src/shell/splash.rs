@@ -53,14 +53,14 @@ impl Shell {
     /// the embedded engine flushes before the new bundle opens.
     /// Returns whether it quit.
     fn quit_for_relaunch(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) -> bool {
-        if !self.relaunch_quit_sent
+        if !self.updates.relaunch_quit_sent
             && state
                 .read(cx)
                 .update
                 .as_ref()
                 .is_some_and(|update| update.relaunch_pending)
         {
-            self.relaunch_quit_sent = true;
+            self.updates.relaunch_quit_sent = true;
             tracing::info!(
                 "update applied by the engine; quitting so the relauncher can open the new bundle"
             );

@@ -1080,6 +1080,33 @@ struct ShellDialogs {
     add_space: Option<AddSpaceFlow>,
 }
 
+/// In-app update state: the bundle update's progress, the About dialog,
+/// the one-click Pi update, and the relaunch after a remote update.
+struct UpdateUi {
+    /// The engine replaced this app's bundle (a Devices → Update, possibly
+    /// from another machine) and armed the relauncher: quit exactly once.
+    relaunch_quit_sent: bool,
+    /// Local lifecycle of an in-app update (macOS bundle swap) — the engine's
+    /// UpdateStatus stream says WHETHER one exists; this says how far the
+    /// download/stage of it has come in this process.
+    flow: UpdateFlow,
+    task: Option<Task<()>>,
+    about: Option<AboutDialog>,
+    about_task: Option<Task<()>>,
+    about_runtime_task: Option<Task<()>>,
+    /// Version whose update strip the user dismissed (advisory installs only —
+    /// a newer release shows the strip again).
+    dismissed: Option<String>,
+    /// One-click Pi CLI + extension update request. The engine publishes the
+    /// checker-side applying/error state; this local bit closes the
+    /// click-to-first-watch-frame double-click window.
+    pi_busy: bool,
+    pi_task: Option<Task<()>>,
+    /// How this binary was installed — decides the strip's click behavior.
+    /// Cached: `detect_install` stats `current_exe` and this renders per frame.
+    install: cypher_update::InstallKind,
+}
+
 pub struct Shell {
     /// The window's main state: lists (sidebar, spaces, sessions) in
     /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
@@ -1115,9 +1142,8 @@ pub struct Shell {
     debug_setup: bool,
     /// The window's modal dialogs and palettes (`None` while closed).
     dialogs: ShellDialogs,
-    /// The engine replaced this app's bundle (a Devices → Update, possibly
-    /// from another machine) and armed the relauncher: quit exactly once.
-    relaunch_quit_sent: bool,
+    /// In-app updates, the About dialog and the Pi runtime update.
+    updates: UpdateUi,
     /// Scratch-folder removal after a quick chat was deleted (host RPC).
     scratch_cleanup_task: Option<Task<()>>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
@@ -1138,25 +1164,6 @@ pub struct Shell {
     /// the mapping is dropped on a definitive reply (Created or typed
     /// Unavailable).
     fork_request_ids: std::collections::HashMap<(String, String), String>,
-    /// Local lifecycle of an in-app update (macOS bundle swap) — the engine's
-    /// UpdateStatus stream says WHETHER one exists; this says how far the
-    /// download/stage of it has come in this process.
-    update_flow: UpdateFlow,
-    update_task: Option<Task<()>>,
-    about: Option<AboutDialog>,
-    about_task: Option<Task<()>>,
-    about_runtime_task: Option<Task<()>>,
-    /// Version whose update strip the user dismissed (advisory installs only —
-    /// a newer release shows the strip again).
-    update_dismissed: Option<String>,
-    /// One-click Pi CLI + extension update request. The engine publishes the
-    /// checker-side applying/error state; this local bit closes the
-    /// click-to-first-watch-frame double-click window.
-    pi_update_busy: bool,
-    pi_update_task: Option<Task<()>>,
-    /// How this binary was installed — decides the strip's click behavior.
-    /// Cached: `detect_install` stats `current_exe` and this renders per frame.
-    install: cypher_update::InstallKind,
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
     mutate_task: Option<Task<()>>,
@@ -1454,7 +1461,18 @@ impl Shell {
                 delete_space: None,
                 add_space: None,
             },
-            relaunch_quit_sent: false,
+            updates: UpdateUi {
+                relaunch_quit_sent: false,
+                flow: UpdateFlow::Idle,
+                task: None,
+                about: None,
+                about_task: None,
+                about_runtime_task: None,
+                dismissed: None,
+                pi_busy: false,
+                pi_task: None,
+                install: cypher_update::detect_install(),
+            },
             scratch_cleanup_task: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
             space_boot_applied: false,
@@ -1462,15 +1480,6 @@ impl Shell {
             dock_badge: None,
             sidebar_notice: None,
             fork_request_ids: std::collections::HashMap::new(),
-            update_flow: UpdateFlow::Idle,
-            update_task: None,
-            about: None,
-            about_task: None,
-            about_runtime_task: None,
-            update_dismissed: None,
-            pi_update_busy: false,
-            pi_update_task: None,
-            install: cypher_update::detect_install(),
             org: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,

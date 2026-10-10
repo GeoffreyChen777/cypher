@@ -864,10 +864,10 @@ impl Shell {
         viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let about = self.about.as_ref()?;
+        let about = self.updates.about.as_ref()?;
         let theme = Theme::of(cx).clone();
         let version = cypher_update::current_version();
-        let install = install_kind_label(&self.install);
+        let install = install_kind_label(&self.updates.install);
         let checking = matches!(about.check, AboutCheck::Checking);
         let runtime_line = about_runtime_line(
             self.state.read(cx).pi_update.as_ref(),
@@ -885,7 +885,7 @@ impl Shell {
             .id("about-cypher-dialog")
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" {
-                    this.about = None;
+                    this.updates.about = None;
                     cx.notify();
                 }
             }))
@@ -925,7 +925,7 @@ impl Shell {
                     popover::btn_ghost(&theme, "OK", "about-cypher-ok")
                         .id("about-cypher-ok")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.about = None;
+                            this.updates.about = None;
                             cx.notify();
                         })),
                 )
