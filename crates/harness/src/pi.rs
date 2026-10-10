@@ -275,7 +275,7 @@ fn private_support_dir() -> std::io::Result<&'static std::path::Path> {
             .mode(0o600)
             .open(dir.path().join("engine-client.mjs"))
             .map_err(|e| e.to_string())?;
-        file.write_all(include_str!("engine-client.mjs").as_bytes())
+        file.write_all(include_str!("pi/engine-client.mjs").as_bytes())
             .map_err(|e| e.to_string())?;
         Ok(dir)
     });
