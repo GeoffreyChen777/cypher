@@ -399,7 +399,7 @@ export class RegistryRoom implements DurableObject {
     const originals = new Map<string, Row | undefined>();
     let applied = 0;
     for (const op of ops) {
-      const key = `${op.kind} ${op.id}`;
+      const key = `${op.kind}\u0000${op.id}`;
       const before = touched.get(key) ?? this.loadRow(op.kind, op.id);
       if (!originals.has(key)) originals.set(key, before);
       const { row, changed } = applyOp(before, op);
