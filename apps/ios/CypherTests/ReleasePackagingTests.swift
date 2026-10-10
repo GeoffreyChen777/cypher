@@ -17,7 +17,7 @@ final class ReleasePackagingTests: XCTestCase {
     }
 
     func testDistributionOptionsNeverUploadOrRewriteVersionImplicitly() throws {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let root = try TestSupport.iosRoot()
         let plist = try XCTUnwrap(PropertyListSerialization.propertyList(
             from: Data(contentsOf: root.appendingPathComponent("ExportOptions-TestFlight.plist")),
             format: nil) as? [String: Any])

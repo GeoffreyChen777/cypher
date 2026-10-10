@@ -2,6 +2,25 @@ import SwiftUI
 import XCTest
 @testable import Cypher
 
+enum TestSupport {
+    /// The repository checkout: the nearest ancestor of this file holding
+    /// Cargo.toml. Simulator tests read repo fixtures straight from the host,
+    /// so no test depends on its own folder depth.
+    static func repoRoot(file: String = #filePath) throws -> URL {
+        var dir = URL(fileURLWithPath: file).deletingLastPathComponent()
+        while dir.path != "/" {
+            if FileManager.default.fileExists(atPath: dir.appendingPathComponent("Cargo.toml").path) { return dir }
+            dir = dir.deletingLastPathComponent()
+        }
+        throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: file])
+    }
+
+    /// apps/ios, for project-level files such as export options.
+    static func iosRoot() throws -> URL {
+        try repoRoot().appendingPathComponent("apps/ios")
+    }
+}
+
 /// `TranscriptRowBuilder.rows` with fresh parse caches, as a first render
 /// builds them.
 func buildRows(_ entries: [MessageEntry], pending: [PendingSend] = []) -> [TranscriptRow] {
