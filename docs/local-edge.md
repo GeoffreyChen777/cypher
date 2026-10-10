@@ -85,13 +85,13 @@ the retired Worker. Debug builds can still point at any loopback Edge with
 
 `wrangler dev` records every invocation as a queryable span, including the ones
 that decide the Durable Object bill and are invisible to a SQL-level probe.
-`scripts/edge-billing-local.mjs` turns those spans into a billing summary:
+`scripts/ops/edge-billing-local.mjs` turns those spans into a billing summary:
 
 ```sh
 cd edge && npm run dev &                                   # leave running
-MARK=$(node scripts/edge-billing-local.mjs --mark)         # scope the run
+MARK=$(node scripts/ops/edge-billing-local.mjs --mark)         # scope the run
 # ...drive traffic: scripts/e2e-smoke.sh, a dev engine, curl, anything...
-node scripts/edge-billing-local.mjs --since "$MARK"
+node scripts/ops/edge-billing-local.mjs --since "$MARK"
 ```
 
 It reports billable Durable Object requests split into HTTP (1:1), WebSocket
@@ -105,13 +105,13 @@ keepalive from waking the room.
 
 ## Watching the bill
 
-`scripts/cf-usage.py` reports every metered dimension against its Workers Paid
+`scripts/ops/cf-usage.py` reports every metered dimension against its Workers Paid
 inclusion for the **current billing cycle**, read from the subscription rather
 than assumed to be a calendar month:
 
 ```sh
-CLOUDFLARE_API_TOKEN=... python3 scripts/cf-usage.py            # table
-CLOUDFLARE_API_TOKEN=... python3 scripts/cf-usage.py --json     # for a cron job
+CLOUDFLARE_API_TOKEN=... python3 scripts/ops/cf-usage.py            # table
+CLOUDFLARE_API_TOKEN=... python3 scripts/ops/cf-usage.py --json     # for a cron job
 ```
 
 It exits non-zero when any meter is projected at or above `--fail-at` (default
@@ -173,7 +173,7 @@ beat halves the cost and doubles worst-case offline detection from 45s to 90s),
 so that is a product decision, not a fix. Signed-in development engines beat
 into the same room as the real client, so count them before paying that price.
 
-To attribute production traffic, `scripts/edge-billing-prod.py` samples
+To attribute production traffic, `scripts/ops/edge-billing-prod.py` samples
 `wrangler tail` and classifies each event by its `entrypoint` (the Durable
 Object class — the `durableObjectId` alone tells you nothing). It counts only
 the Durable Object event of each call, not the Worker-level one, and cannot tell

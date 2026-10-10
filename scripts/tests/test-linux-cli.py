@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Isolated installer/CLI regressions. No production downloads or real services.
 
-python3 scripts/test-linux-cli.py [--binary /path/to/headless/cypher]
+python3 scripts/tests/test-linux-cli.py [--binary /path/to/headless/cypher]
 On macOS only uname, GNU mv -T, sha256sum and service commands are simulated.
 On Linux GNU file tools are real; systemctl/loginctl are always test doubles.
 """
@@ -26,7 +26,7 @@ import select
 import time
 import unittest
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 PARSER = argparse.ArgumentParser()
 PARSER.add_argument("--binary", type=lambda p: str(Path(p).resolve()))
 ARGS, TEST_ARGS = PARSER.parse_known_args()

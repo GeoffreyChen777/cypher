@@ -67,5 +67,5 @@ just the icon, without rebuilding Rust, touching an existing app, or signing:
 
 ```sh
 bash scripts/package-macos.sh --icon-only /tmp/cypher.icns
-bash scripts/test-macos-icon.sh
+bash scripts/tests/test-macos-icon.sh
 ```

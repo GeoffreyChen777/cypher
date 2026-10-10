@@ -27,23 +27,23 @@ jobs:
       - run: bash scripts/ci/actionlint.sh
       - run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
       - run: python3 scripts/ci/check-production-profile.py
-      - run: python3 scripts/test-linux-cli.py
+      - run: python3 scripts/tests/test-linux-cli.py
       - name: installer regressions on release container Python 3.8
         run: |
           docker run --rm -v "$PWD:/repo:ro" -w /repo public.ecr.aws/docker/library/ubuntu:20.04 bash -ec '
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
             apt-get install -y -qq python3 curl ca-certificates
-            python3 scripts/test-linux-cli.py
+            python3 scripts/tests/test-linux-cli.py
           '
-      - run: node --test scripts/test-landing.mjs
+      - run: node --test scripts/tests/test-landing.mjs
       - run: node --test pi-runtime/provider-service.test.mjs
       - run: node --test pi-runtime/patches/pi-agent-squad-cypher-host/cypher-host.test.mjs
       # The extension suites import their .ts sources directly (Node type
       # stripping) and need no staged runtime.
       - run: node --test pi-runtime/extensions/cypher-translation.test.mjs pi-runtime/extensions/cypher-fast-mode.test.mjs pi-runtime/extensions/cypher-codemode.test.mjs
-      - run: bash scripts/test-check-linux-abi.sh
-      - run: bash -n scripts/*.sh
+      - run: bash scripts/tests/test-check-linux-abi.sh
+      - run: bash -n scripts/*.sh scripts/*/*.sh
       - run: sh -n apps/edge/src/install.sh
 
   edge:
@@ -83,7 +83,7 @@ jobs:
       - run: cargo test --locked -p cypher-engine --features development --lib development_auth_tests
       - run: cargo build --locked --no-default-features -p cypher
       - run: python3 scripts/ci/check-production-profile.py "$PWD/target/debug/cypher"
-      - run: python3 scripts/test-linux-cli.py --binary target/debug/cypher
+      - run: python3 scripts/tests/test-linux-cli.py --binary target/debug/cypher
 
   macos-workspace:
     runs-on: macos-15
@@ -93,7 +93,7 @@ jobs:
         with:
           persist-credentials: false
       - name: validate macOS icon alpha and artwork
-        run: bash scripts/test-macos-icon.sh
+        run: bash scripts/tests/test-macos-icon.sh
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo check --workspace --locked

@@ -5,7 +5,7 @@ Answers one question: is any meter heading for an overage before the cycle
 closes? Every figure is read from the account, not estimated, and the billing
 cycle is read from the subscription rather than assumed to be a calendar month.
 
-    CLOUDFLARE_API_TOKEN=... python3 scripts/cf-usage.py [--json] [--fail-at 80]
+    CLOUDFLARE_API_TOKEN=... python3 scripts/ops/cf-usage.py [--json] [--fail-at 80]
 
 The token needs Account Analytics Read; reading the cycle boundaries also needs
 Billing Read, and without it the script falls back to a calendar month and says

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Local/CI regression coverage; does not build Rust, sign, launch, or publish.
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/cypher-icon-test.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT

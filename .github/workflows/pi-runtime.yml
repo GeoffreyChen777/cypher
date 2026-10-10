@@ -52,7 +52,7 @@ jobs:
           cache-dependency-path: pi-runtime/package-lock.json
       - name: package Runtime with real RPC and negative extension tests
         run: scripts/package-pi-runtime.sh
-      - run: python3 scripts/test-linux-cli.py Installer.test_runtime_metadata_size_is_portable_and_validated
+      - run: python3 scripts/tests/test-linux-cli.py Installer.test_runtime_metadata_size_is_portable_and_validated
       - name: full Runtime smoke on minimum Linux glibc
         if: runner.os == 'Linux'
         run: |

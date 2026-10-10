@@ -4,12 +4,12 @@
 # fake readelf feeding canned --version-info output, so the parser and the
 # version comparison (sort -V) are exercised in isolation.
 #
-# Usage: scripts/test-check-linux-abi.sh
+# Usage: scripts/tests/test-check-linux-abi.sh
 # Exits non-zero if any check fails.
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$ROOT/scripts/check-linux-abi.sh"
 
 pass=0

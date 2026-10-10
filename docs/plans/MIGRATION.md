@@ -4,7 +4,7 @@
 >
 > **本文是下一阶段的计划，不是当前正在做的事。** 当前进行中的是 Cloudflare 上的
 > 持续测量—优化循环（`docs/local-edge.md`：本地 `wrangler dev` +
-> `scripts/edge-billing-local.mjs`，按实测排优先级）。本文描述的 Rust + Postgres
+> `scripts/ops/edge-billing-local.mjs`，按实测排优先级）。本文描述的 Rust + Postgres
 > 自建服务端**尚未开工**，§11 的 WP0 前置问题也还没回答；在那之前不要按本文的
 > 工作包表安排实施。
 >
@@ -68,7 +68,7 @@
 | 发布产物 + 安装脚本 | `index.ts:130-165`、`install.sh` | R2 bucket `cypher-releases`；`scripts/ci/release.py:385-398` 通过 Cloudflare R2 REST API 写入 |
 | 部署 | `.github/workflows/deploy.yml:83` | `wrangler deploy` 三个 Worker（edge、landing、www-redirect） |
 | 域名与证书 | `apps/edge/wrangler.jsonc:24` | Worker custom domain 自动签发 DNS + TLS；`letscypher.app` zone 托管在 Cloudflare |
-| 开发环境 | `docs/local-edge.md`、`scripts/edge-billing-local.mjs` | **无云端依赖**。托管开发 Worker `cypher-edge-development` 及其 6 个 DO namespace、2 个 R2 bucket 已于 2026-09-22 删除；开发环境改为本地 `wrangler dev`。预览 relay 的实现（`development-preview.ts`）及 `dev-locked` 鉴权已删除，生产化时需在新服务端重建（§13 UX-2） |
+| 开发环境 | `docs/local-edge.md`、`scripts/ops/edge-billing-local.mjs` | **无云端依赖**。托管开发 Worker `cypher-edge-development` 及其 6 个 DO namespace、2 个 R2 bucket 已于 2026-09-22 删除；开发环境改为本地 `wrangler dev`。预览 relay 的实现（`development-preview.ts`）及 `dev-locked` 鉴权已删除，生产化时需在新服务端重建（§13 UX-2） |
 
 ### 1.2 客户端对服务端的硬耦合【现状】
 

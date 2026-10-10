@@ -9,16 +9,12 @@
  * `durable_object_storage_setAlarm` (one request AND one row written), and
  * every `durable_object_storage_exec` with its exact rows_written/rows_read.
  *
- * Why this and not the development Worker: the deployed dev Worker wraps every
- * operation in `DevelopmentGuard`, which spends its own requests and rows
- * (`apps/edge/src/development-budget.ts` — `budget.events++; budget.rows++`), and
- * its room allowlist is capped at 16 for the lifetime of the guard data. It is
- * an integration target, not a measurement target. This is guard-free, exact,
- * unmetered and offline.
+ * There is no hosted development Worker; a local `wrangler dev` is the
+ * measurement target. It is exact, unmetered and offline.
  *
  * Usage:
- *   node scripts/edge-billing-local.mjs --mark            # epoch ms to scope a run
- *   node scripts/edge-billing-local.mjs [--since MS] [--port N] [--json]
+ *   node scripts/ops/edge-billing-local.mjs --mark            # epoch ms to scope a run
+ *   node scripts/ops/edge-billing-local.mjs [--since MS] [--port N] [--json]
  *
  * Start the server first:
  *   cd apps/edge && npx wrangler dev --port 27655 --var AUTH_MODE:dev --local

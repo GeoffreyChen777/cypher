@@ -3,7 +3,7 @@ import { readFileSync, existsSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-const root = new URL("../", import.meta.url);
+const root = new URL("../../", import.meta.url);
 const publicDir = new URL("apps/landing/public/", root);
 const html = readFileSync(new URL("index.html", publicDir), "utf8");
 const source = readFileSync(new URL("site.js", publicDir), "utf8");

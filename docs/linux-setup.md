@@ -166,7 +166,7 @@ The tarball's own `install.sh` is a manual, unmanaged installation to
 
 ## Validation
 
-`scripts/test-linux-cli.py` covers archive integrity, compatibility gating,
+`scripts/tests/test-linux-cli.py` covers archive integrity, compatibility gating,
 PATH idempotence and a real PTY/pipe handoff to setup. With a Linux binary,
 additional tests use an isolated HOME, a loopback Runtime fixture, and test
 service managers to cover local setup, idempotence, download failure, service

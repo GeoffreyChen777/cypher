@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Classify a production `wrangler tail` sample into billable Durable Object requests.
 
-The production counterpart to `scripts/edge-billing-local.mjs`. Local wrangler
+The production counterpart to `scripts/ops/edge-billing-local.mjs`. Local wrangler
 exposes spans and can be driven deterministically; production cannot, so the
 only attribution available is the tail event's `entrypoint` field, which names
 the Durable Object class. The `durableObjectId` alone tells you nothing.
 
-    python3 scripts/edge-billing-prod.py --seconds 305        # sample and report
-    python3 scripts/edge-billing-prod.py --from FILE          # re-read a capture
-    python3 scripts/edge-billing-prod.py --seconds 305 --json
+    python3 scripts/ops/edge-billing-prod.py --seconds 305        # sample and report
+    python3 scripts/ops/edge-billing-prod.py --from FILE          # re-read a capture
+    python3 scripts/ops/edge-billing-prod.py --seconds 305 --json
 
 Billing model, from Cloudflare's published conversion:
 
@@ -39,6 +39,8 @@ import tempfile
 import time
 from collections import Counter
 from urllib.parse import urlparse
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 WS_MESSAGES_PER_REQUEST = 20
 # Room ids, chat ids and device ids are unbounded cardinality and identify a
@@ -174,7 +176,7 @@ def main():
             os.chmod(path, 0o600)
             proc = subprocess.Popen(
                 ["npx", "wrangler", "tail", args.worker, "--format", "json"],
-                cwd="apps/edge", stdout=sink, stderr=subprocess.DEVNULL)
+                cwd=os.path.join(ROOT, "apps/edge"), stdout=sink, stderr=subprocess.DEVNULL)
             started = time.time()
             try:
                 time.sleep(args.seconds)

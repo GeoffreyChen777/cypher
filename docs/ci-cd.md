@@ -284,7 +284,7 @@ Ubuntu 20.04 / glibc 2.31.
 ```sh
 bash scripts/ci/actionlint.sh
 python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
-python3 scripts/test-linux-cli.py
+python3 scripts/tests/test-linux-cli.py
 node scripts/ci/pi-runtime-smoke.mjs /path/to/extracted/runtime
 python3 scripts/ci/release.py validate-platform --platform linux \
   --dist /path/to/artifacts --version 0.3.41 --build 1 --out /tmp/release-plan
