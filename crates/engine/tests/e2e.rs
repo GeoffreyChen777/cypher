@@ -1,4 +1,4 @@
-//! M2 end-to-end tests: doc-queued commands → host executor → harness stream →
+//! End-to-end tests: doc-queued commands → host executor → harness stream →
 //! journal + broadcast + folded doc entries, plus interrupt/recovery/idempotence
 //! and the RPC surface over the in-memory transport.
 
@@ -501,7 +501,7 @@ async fn steer_with_no_live_run_falls_back_to_new_turn() {
     .await;
 
     // No live run anymore (mock finishes instantly): a steer command must fall back to
-    // dispatch-as-next-turn, per zeron's executor.
+    // dispatch-as-next-turn.
     queue_as_viewer(
         handle.doc(),
         "cmd-steer-1",
@@ -576,9 +576,16 @@ async fn dead_processed_commands_are_terminalized_on_redelivery() {
         },
     );
 
-    // Give the drain a moment: the dead command must be terminalized — no
-    // user entry or run can be recovered from the original consumed attempt.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The dead command must be terminalized — no user entry or run can be
+    // recovered from the original consumed attempt.
+    wait_for(
+        || {
+            command_status(&core, "cmd-crashed")
+                .is_some_and(|(status, _)| status != SessionCommandStatus::Pending)
+        },
+        "the dead command to resolve",
+    )
+    .await;
     assert!(entries(&core).is_empty(), "dead command must not execute");
     assert_eq!(
         command_status(&core, "cmd-crashed"),
@@ -1471,7 +1478,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
 }
 
 // ---------------------------------------------------------------------------
-// Attachments (round 17): chunked upload → durable path → Run carrying both
+// Attachments: chunked upload → durable path → Run carrying both
 // the prompt-embedded refs (the persisted transport) and the staged paths.
 // ---------------------------------------------------------------------------
 
@@ -1528,7 +1535,7 @@ async fn attachment_upload_then_run_threads_refs_and_paths() {
         "committed file holds the exact reassembled bytes"
     );
 
-    // Run with the zeron `withAttachments` transport: refs embedded in the
+    // Run with the `withAttachments` transport: refs embedded in the
     // prompt text (this is what persists), paths on the additive field.
     let prompt = format!(
         "what color is this?\n\nAttached images (local files — open them to view):\n- {path}"
@@ -1670,8 +1677,8 @@ async fn empty_reasoning_deltas_are_heartbeats_not_journal_noise() {
 
 #[tokio::test]
 async fn parked_session_ignores_trailing_frames_and_stays_idle() {
-    // ACP children keep forwarding session/update frames after a turn's Done
-    // (late tool_call_updates, flushed text). A parked session must treat
+    // A harness child can keep streaming frames after a turn's Done (late
+    // tool updates, flushed text). A parked session must treat
     // them as inert: no Working re-arm (the eternally-running-session bug),
     // no phantom assistant entry.
     let mut script = mock_script();

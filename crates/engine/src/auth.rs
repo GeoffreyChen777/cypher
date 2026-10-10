@@ -1,4 +1,4 @@
-//! Auth — the engine owns the WorkOS session for its device (ARCHITECTURE §5). Port of zeron's `apps/backend/src/auth.ts`.
+//! Auth — the engine owns the WorkOS session for its device (ARCHITECTURE §5).
 //!
 //! The engine is a public client: it builds the AuthKit authorize URL itself but
 //! delegates the secret-bearing **code exchange** and **refresh** to the edge Worker
@@ -1400,10 +1400,43 @@ async fn loopback_loop(listener: tokio::net::TcpListener, inner: Weak<AuthInner>
     }
 }
 
+/// One loopback request: its method and path, and the query and URL-encoded
+/// form parameters.
+struct LoopbackRequest {
+    method: String,
+    path: String,
+    query: HashMap<String, String>,
+    form: HashMap<String, String>,
+}
+
 async fn handle_loopback_conn(
     mut stream: tokio::net::TcpStream,
     auth: Auth,
 ) -> Result<(), std::io::Error> {
+    let request = read_loopback_request(&mut stream).await?;
+    let (status, body) = match request.path.as_str() {
+        "/callback" => callback_response(&auth, &request.query).await,
+        "/verify" => {
+            let params = if request.method == "POST" {
+                &request.form
+            } else {
+                &request.query
+            };
+            verify_response(&auth, params).await
+        }
+        _ => ("404 Not Found", page("Not found.")),
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.shutdown().await
+}
+
+async fn read_loopback_request(
+    stream: &mut tokio::net::TcpStream,
+) -> Result<LoopbackRequest, std::io::Error> {
     // Read the request head (bounded; verification submissions also carry a
     // small URL-encoded body).
     let mut buf = Vec::with_capacity(2048);
@@ -1474,167 +1507,158 @@ async fn handle_loopback_conn(
         .split_once('?')
         .unwrap_or((target.as_str(), ""));
 
-    let query_params: HashMap<String, String> = query
+    let query: HashMap<String, String> = query
         .split('&')
         .filter_map(|kv| kv.split_once('='))
         .map(|(k, v)| (k.to_string(), url_decode(v)))
         .collect();
-    let form_params: HashMap<String, String> = form_body
+    let form: HashMap<String, String> = form_body
         .split('&')
         .filter_map(|kv| kv.split_once('='))
         .map(|(k, v)| (k.to_string(), url_decode(v)))
         .collect();
-    let invalid_callback = || {
-        (
-            "400 Bad Request",
-            page("Invalid or expired sign-in link. Start again from Cypher."),
-        )
-    };
-    let (status, body) = match path {
-        "/callback" => {
-            let code = query_params.get("code");
-            let state = query_params.get("state");
-            match (code, state) {
-                (Some(code), Some(state)) => match auth.take_pending(state) {
-                    Some((generation, verifier)) => {
-                        match auth.exchange_code(code, &verifier).await {
-                            Ok(ExchangeOutcome::Complete(result)) => {
-                                match auth.finish_sign_in(result, generation) {
-                                    Ok(()) => (
-                                        "200 OK",
-                                        page(
-                                            "Signed in. You can close this tab and return to Cypher.",
-                                        ),
-                                    ),
-                                    Err(err) => {
-                                        tracing::info!(
-                                            error = %err,
-                                            "auth: discarded canceled callback exchange"
-                                        );
-                                        (
-                                            "409 Conflict",
-                                            page(
-                                                "This sign-in was canceled. Start again from Cypher if you still want to enable sync.",
-                                            ),
-                                        )
-                                    }
-                                }
-                            }
-                            Ok(ExchangeOutcome::EmailVerificationRequired {
-                                pending_authentication_token,
-                                email,
-                            }) => {
-                                auth.store_email_verification(
-                                    state,
-                                    generation,
-                                    pending_authentication_token,
-                                    email.clone(),
-                                );
-                                ("200 OK", verification_page(state, email.as_deref(), None))
-                            }
-                            Err(err) => {
-                                tracing::warn!(
-                                    error = %err,
-                                    "auth: loopback code exchange failed"
-                                );
+    Ok(LoopbackRequest {
+        method,
+        path: path.to_string(),
+        query,
+        form,
+    })
+}
+
+fn invalid_callback() -> (&'static str, String) {
+    (
+        "400 Bad Request",
+        page("Invalid or expired sign-in link. Start again from Cypher."),
+    )
+}
+
+/// `/callback`: the OAuth redirect — exchange the code for the pending sign-in.
+async fn callback_response(auth: &Auth, query: &HashMap<String, String>) -> (&'static str, String) {
+    let code = query.get("code");
+    let state = query.get("state");
+    match (code, state) {
+        (Some(code), Some(state)) => match auth.take_pending(state) {
+            Some((generation, verifier)) => match auth.exchange_code(code, &verifier).await {
+                Ok(ExchangeOutcome::Complete(result)) => {
+                    match auth.finish_sign_in(result, generation) {
+                        Ok(()) => (
+                            "200 OK",
+                            page("Signed in. You can close this tab and return to Cypher."),
+                        ),
+                        Err(err) => {
+                            tracing::info!(
+                                error = %err,
+                                "auth: discarded canceled callback exchange"
+                            );
+                            (
+                                "409 Conflict",
+                                page(
+                                    "This sign-in was canceled. Start again from Cypher if you still want to enable sync.",
+                                ),
+                            )
+                        }
+                    }
+                }
+                Ok(ExchangeOutcome::EmailVerificationRequired {
+                    pending_authentication_token,
+                    email,
+                }) => {
+                    auth.store_email_verification(
+                        state,
+                        generation,
+                        pending_authentication_token,
+                        email.clone(),
+                    );
+                    ("200 OK", verification_page(state, email.as_deref(), None))
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "auth: loopback code exchange failed"
+                    );
+                    (
+                        "502 Bad Gateway",
+                        page("Sign-in failed during token exchange — check the Cypher logs."),
+                    )
+                }
+            },
+            None => invalid_callback(),
+        },
+        _ => invalid_callback(),
+    }
+}
+
+/// `/verify`: the emailed code for a sign-in WorkOS challenged.
+async fn verify_response(auth: &Auth, params: &HashMap<String, String>) -> (&'static str, String) {
+    let state = params.get("state");
+    let code = params.get("code");
+    match (state, code) {
+        (Some(state), Some(code))
+            if code.len() == 6 && code.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            match auth.pending_email_verification(state) {
+                Some((generation, token, email)) => {
+                    match auth.exchange_email_verification(&token, code).await {
+                        Ok(result) => match auth.finish_sign_in(result, generation) {
+                            Ok(()) => {
+                                auth.clear_email_verification(state);
                                 (
-                                    "502 Bad Gateway",
+                                    "200 OK",
                                     page(
-                                        "Sign-in failed during token exchange — check the Cypher logs.",
+                                        "Email verified and signed in. You can close this tab and return to Cypher.",
                                     ),
                                 )
                             }
-                        }
-                    }
-                    None => invalid_callback(),
-                },
-                _ => invalid_callback(),
-            }
-        }
-        "/verify" => {
-            let params = if method == "POST" {
-                &form_params
-            } else {
-                &query_params
-            };
-            let state = params.get("state");
-            let code = params.get("code");
-            match (state, code) {
-                (Some(state), Some(code))
-                    if code.len() == 6 && code.chars().all(|c| c.is_ascii_digit()) =>
-                {
-                    match auth.pending_email_verification(state) {
-                        Some((generation, token, email)) => {
-                            match auth.exchange_email_verification(&token, code).await {
-                                Ok(result) => match auth.finish_sign_in(result, generation) {
-                                    Ok(()) => {
-                                        auth.clear_email_verification(state);
-                                        (
-                                            "200 OK",
-                                            page(
-                                                "Email verified and signed in. You can close this tab and return to Cypher.",
-                                            ),
-                                        )
-                                    }
-                                    Err(err) => {
-                                        auth.clear_email_verification(state);
-                                        tracing::info!(
-                                            error = %err,
-                                            "auth: discarded canceled email verification"
-                                        );
-                                        (
-                                            "409 Conflict",
-                                            page(
-                                                "This sign-in was canceled. Start again from Cypher if you still want to enable sync.",
-                                            ),
-                                        )
-                                    }
-                                },
-                                Err(err) => {
-                                    tracing::warn!(
-                                        error = %err,
-                                        "auth: email verification failed"
-                                    );
-                                    (
-                                        "400 Bad Request",
-                                        verification_page(
-                                            state,
-                                            email.as_deref(),
-                                            Some(
-                                                "That code was not accepted. Check the email and try again.",
-                                            ),
-                                        ),
-                                    )
-                                }
+                            Err(err) => {
+                                auth.clear_email_verification(state);
+                                tracing::info!(
+                                    error = %err,
+                                    "auth: discarded canceled email verification"
+                                );
+                                (
+                                    "409 Conflict",
+                                    page(
+                                        "This sign-in was canceled. Start again from Cypher if you still want to enable sync.",
+                                    ),
+                                )
                             }
+                        },
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "auth: email verification failed"
+                            );
+                            (
+                                "400 Bad Request",
+                                verification_page(
+                                    state,
+                                    email.as_deref(),
+                                    Some(
+                                        "That code was not accepted. Check the email and try again.",
+                                    ),
+                                ),
+                            )
                         }
-                        None => invalid_callback(),
                     }
                 }
-                (Some(state), _) if auth.pending_email_verification(state).is_some() => {
-                    let email = auth
-                        .pending_email_verification(state)
-                        .and_then(|(_, _, email)| email);
-                    (
-                        "400 Bad Request",
-                        verification_page(
-                            state,
-                            email.as_deref(),
-                            Some("Enter the six-digit code from your email."),
-                        ),
-                    )
-                }
-                _ => invalid_callback(),
+                None => invalid_callback(),
             }
         }
-        _ => ("404 Not Found", page("Not found.")),
-    };
-    let response = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream.write_all(response.as_bytes()).await?;
-    stream.shutdown().await
+        (Some(state), _) if auth.pending_email_verification(state).is_some() => {
+            let email = auth
+                .pending_email_verification(state)
+                .and_then(|(_, _, email)| email);
+            (
+                "400 Bad Request",
+                verification_page(
+                    state,
+                    email.as_deref(),
+                    Some("Enter the six-digit code from your email."),
+                ),
+            )
+        }
+        _ => invalid_callback(),
+    }
 }
 
 /// Shared shell for every loopback page — mirrors the edge's hosted

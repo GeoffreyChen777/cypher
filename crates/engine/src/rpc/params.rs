@@ -3,7 +3,10 @@
 use serde::Deserialize;
 
 use cypher_doc::SessionCommandPayload;
-use cypher_proto::{ChatConfig, HarnessId, SubagentRunMode};
+use cypher_proto::agent_prompt::AgentQuote;
+use cypher_proto::{
+    ChatConfig, HarnessId, RunRequest, SideChatSource, SubagentRunMode, UserInputAnswer,
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -393,4 +396,104 @@ pub(super) enum MutateParams {
 #[cfg(feature = "development")]
 fn seed_device_platform() -> String {
     "linux".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct PathParams {
+    pub(super) path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct UrlParams {
+    pub(super) url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct NameParams {
+    pub(super) name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CheckoutDiffParams {
+    pub(super) cwd: String,
+    #[serde(default)]
+    pub(super) mode: String,
+    pub(super) base_ref: Option<String>,
+    pub(super) chat_id: Option<String>,
+    pub(super) commit_sha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct GitHistoryParams {
+    pub(super) cwd: String,
+    #[serde(default)]
+    pub(super) cursor: usize,
+    #[serde(default = "default_git_history_limit")]
+    pub(super) limit: usize,
+}
+
+fn default_git_history_limit() -> usize {
+    crate::repos::GIT_HISTORY_DEFAULT_LIMIT
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct GithubIssueParams {
+    pub(super) repo: String,
+    pub(super) number: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct GithubLoginParams {
+    pub(super) login_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DeleteScratchDirParams {
+    pub(super) chat_id: String,
+    pub(super) path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct StartSideChatParams {
+    pub(super) parent_chat_id: String,
+    pub(super) source: SideChatSource,
+    pub(super) selected_text: String,
+    #[serde(default)]
+    pub(super) origin: Option<AgentQuote>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SendSideChatParams {
+    pub(super) side_chat_id: String,
+    pub(super) request: RunRequest,
+    #[serde(default)]
+    pub(super) message_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SideChatIdParams {
+    pub(super) side_chat_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RespondSideChatInputParams {
+    pub(super) side_chat_id: String,
+    pub(super) request_id: String,
+    pub(super) answers: Vec<UserInputAnswer>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WatchAgentEventsParams {
+    pub(super) chat_id: String,
+    #[serde(default)]
+    pub(super) after_seq: Option<u64>,
 }

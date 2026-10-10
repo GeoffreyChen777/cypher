@@ -4,8 +4,8 @@
 //! may not have saved.
 use cypher_doc::{MessagePart, MessageRole, MessageStatus, SessionDoc, SessionMessageEntry};
 use cypher_engine::chat2_host::EngineChatSink;
-use cypher_engine::profile::EngineProfile;
-use cypher_engine::{EngineCore, HarnessRegistry, RunJournal};
+
+use cypher_engine::{EngineCore, EngineProfile, HarnessRegistry, RunJournal};
 use cypher_proto::{AgentEvent, HarnessId};
 use cypher_sync::chat_client::{ChatDocSink, CheckpointFetcher};
 use cypher_sync::chat_frames::{self as wire, frame_type};

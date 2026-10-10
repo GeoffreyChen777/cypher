@@ -1,5 +1,7 @@
 //! Local-first startup boundaries and captured synced-session behavior.
 
+mod common;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -252,16 +254,6 @@ async fn serve_daemon_edge(
             }
         }
     }
-}
-
-async fn wait_until(mut check: impl FnMut() -> bool, message: &str) {
-    for _ in 0..500 {
-        if check() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("{message}");
 }
 
 #[tokio::test]
@@ -589,14 +581,14 @@ async fn headless_sign_out_closes_joined_edge_rooms_and_stops_daemon() {
     })
     .await
     .expect("headless IPC did not start");
-    wait_until(
+    common::wait_for(
         || edge.active_matching("/registry/") > 0,
-        "registry room did not connect",
+        "the registry room to connect",
     )
     .await;
-    wait_until(
+    common::wait_for(
         || edge.active_matching("/device/") > 0,
-        "device relay did not connect",
+        "the device relay to connect",
     )
     .await;
 
@@ -612,9 +604,9 @@ async fn headless_sign_out_closes_joined_edge_rooms_and_stops_daemon() {
         .expect("headless engine did not stop after sign-out")
         .expect("headless task panicked")
         .expect("headless shutdown failed");
-    wait_until(
+    common::wait_for(
         || edge.active_total() == 0,
-        "authenticated Edge sockets survived daemon sign-out",
+        "authenticated Edge sockets to close at daemon sign-out",
     )
     .await;
 
@@ -649,9 +641,9 @@ async fn online_runtime_shutdown_stops_edge_workers_and_retires_the_graph() {
     if let Some(updater) = runtime.core().updater() {
         updater.check_now();
     }
-    wait_until(
+    common::wait_for(
         || requests.load(Ordering::SeqCst) >= 2,
-        "edge workers never produced traffic before shutdown",
+        "edge worker traffic before shutdown",
     )
     .await;
 
@@ -661,9 +653,9 @@ async fn online_runtime_shutdown_stops_edge_workers_and_retires_the_graph() {
     let after = requests.load(Ordering::SeqCst);
     drop(runtime);
 
-    wait_until(
+    common::wait_for(
         &*retired,
-        "engine graph still reachable after shutdown + drop",
+        "the engine graph to be freed after shutdown + drop",
     )
     .await;
     // Long enough to cover a couple of worker retry periods: a surviving

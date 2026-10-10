@@ -1,5 +1,5 @@
-//! M5a integration: repos/worktrees, folder listing, checkout-diff capture + sync,
-//! terminals, and the RPC dispatch for each new method over the memory transport.
+//! Repos/worktrees, folder listing, checkout-diff capture + sync,
+//! terminals, and their RPC dispatch over the memory transport.
 
 mod common;
 
@@ -1088,12 +1088,31 @@ async fn open_terminal_expands_a_project_less_chats_tilde_cwd() {
 // RPC dispatch over the in-memory transport
 // ---------------------------------------------------------------------------
 
+/// An engine over the memory transport with one created repo (`demo`, one
+/// seed commit on `main`); returns the repo path.
+async fn rpc_with_repo(tmp: &Path) -> (EngineCore, cypher_rpc::RpcClient, String) {
+    let core = assemble(&tmp.join("data"));
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    let created = client
+        .call(methods::CREATE_REPO, serde_json::json!({ "name": "demo" }))
+        .await
+        .expect("CreateRepo");
+    let repo_path = created["path"].as_str().expect("repo path").to_string();
+    seed_commit(&repo_path).await;
+    (core, client, repo_path)
+}
+
+/// Seed a commit so branches/worktrees exist.
+async fn seed_commit(repo_path: &str) {
+    let repo_dir = PathBuf::from(repo_path);
+    std::fs::write(repo_dir.join("file.txt"), "hello\n").expect("seed file");
+    git(&repo_dir, &["add", "."]).await;
+    git(&repo_dir, &["commit", "-m", "seed"]).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rpc_dispatch_for_m5_methods() {
+async fn rpc_repos_search_and_workspace_files() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    // EngineCore's Repos resolves the worktree root from the env; keep test
-    // worktrees out of $HOME. (Process-global — this is the only test that sets it.)
-    unsafe { std::env::set_var("CYPHER_WORKTREES_DIR", tmp.path().join("worktrees")) };
     let core = assemble(&tmp.path().join("data"));
     let client = cypher_rpc::memory_client(core.rpc_service());
 
@@ -1117,11 +1136,7 @@ async fn rpc_dispatch_for_m5_methods() {
         .expect("AddRepo");
     assert_eq!(added["name"], "demo");
 
-    // Seed a commit so branches/worktrees exist.
-    let repo_dir = PathBuf::from(&repo_path);
-    std::fs::write(repo_dir.join("file.txt"), "hello\n").expect("seed file");
-    git(&repo_dir, &["add", "."]).await;
-    git(&repo_dir, &["commit", "-m", "seed"]).await;
+    seed_commit(&repo_path).await;
 
     // SearchFiles resolves both space and chat roots, while rejecting a chat
     // whose cwd was retargeted outside the owning repository.
@@ -1263,6 +1278,23 @@ async fn rpc_dispatch_for_m5_methods() {
         "chat cwd must stay inside its workspace checkout"
     );
 
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rpc_branches_folders_and_worktrees() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // EngineCore's Repos resolves the worktree root from the env; keep test
+    // worktrees out of $HOME. (Process-global — this is the only test that sets it.)
+    unsafe { std::env::set_var("CYPHER_WORKTREES_DIR", tmp.path().join("worktrees")) };
+    let (core, client, repo_path) = rpc_with_repo(tmp.path()).await;
+    core.workspace
+        .create_space("space-term", &core.device_id, &repo_path, None, true)
+        .expect("search space");
+    core.workspace
+        .create_chat("search-chat", Some("space-term"), None, None, None)
+        .expect("search chat");
+
     // ListBranches: default (checked-out) branch first.
     let branches = client
         .call(
@@ -1350,6 +1382,15 @@ async fn rpc_dispatch_for_m5_methods() {
     assert_eq!(deleted["ok"], true);
     assert!(!PathBuf::from(&worktree_path).exists());
 
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rpc_watch_checkout_diffs_streams_the_current_set() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let core = assemble(&tmp.path().join("data"));
+    let client = cypher_rpc::memory_client(core.rpc_service());
+
     // WatchCheckoutDiffs: streams the current (empty) diff set immediately.
     let mut diffs_stream = client
         .subscribe(methods::WATCH_CHECKOUT_DIFFS, serde_json::Value::Null)
@@ -1360,6 +1401,14 @@ async fn rpc_dispatch_for_m5_methods() {
         .expect("first diffs item")
         .expect("stream alive");
     assert!(first.is_array());
+
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rpc_terminals_open_in_the_chat_checkout() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (core, client, repo_path) = rpc_with_repo(tmp.path()).await;
 
     // Terminals: the chat's cwd (via its space) becomes the PTY cwd.
     client

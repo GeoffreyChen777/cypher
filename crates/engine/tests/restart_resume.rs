@@ -3,10 +3,9 @@
 //! is run twice over one data dir, asserting
 //! - chats + transcripts survive a graceful shutdown → relaunch;
 //! - the next run in an existing chat carries the chat's stored harness-native
-//!   session id as `RunRequest.resume` (engine-owned, zeron sessions.ts:736);
+//!   session id as `RunRequest.resume` (engine-owned);
 //! - a kill -9 style crash recovers the session id from the run journal
-//!   (zeron recoverDraft, sessions.ts:538-552) and stamps streaming entries
-//!   `aborted`;
+//!   and stamps streaming entries `aborted`;
 //! - resume is cwd-scoped (harness session stores are keyed by cwd);
 //! - a startup crash retries once with the resume kept, and a helper that is
 //!   down hard never tombstones the stored session id;
@@ -418,7 +417,7 @@ async fn persistent_session_serves_multiple_turns_on_one_child() {
     )
     .await;
 
-    // The session PARKS (zeron runsBySession): the second message routes into
+    // The session PARKS: the second message routes into
     // the live child instead of spawning a new one.
     queue_run(&core, "second", "/tmp", "msg-user-2");
     wait_for(
@@ -468,8 +467,8 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
         },
     );
 
-    // The run is PICKED BACK UP without any user action (zeron: "not just
-    // eulogized"): recovery re-dispatches the crashed prompt itself.
+    // The run is PICKED BACK UP without any user action: recovery
+    // re-dispatches the crashed prompt itself.
     wait_for(
         || complete_assistant_count(&core, CHAT) == 1,
         "auto-resumed turn to complete",
@@ -559,9 +558,8 @@ async fn startup_crash_retries_once_with_resume_kept() {
     run_one_turn_and_shutdown(&dir, &requests, "hs-live").await;
 
     // Relaunch with a harness whose child dies at startup ONCE (a transient
-    // spawn blip). Since the ACP conversion a stale id falls back inside the
-    // harness (`session/load` → `session/new`), so a startup death never
-    // indicts the stored id: the retry must carry the SAME session id, not
+    // spawn blip). A stale id falls back to a fresh session inside the
+    // harness, so a startup death never indicts the stored id: the retry must carry the SAME session id, not
     // start fresh — and never tombstone it.
     let core = assemble(
         &dir,

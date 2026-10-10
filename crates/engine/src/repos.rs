@@ -1,5 +1,5 @@
 //! Repos — this device's git repositories, branches, worktrees, and the folder
-//! browser (port of zeron's `repos.ts` + `folder-lister.ts`).
+//! browser.
 //!
 //! Repos are device-local (paths differ per machine), so the known set is a plain
 //! JSON list (`{data_dir}/repos.json`) — no sync. Existing repos can live anywhere

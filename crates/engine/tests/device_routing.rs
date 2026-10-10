@@ -1,4 +1,4 @@
-//! M4b integration: `targetDeviceId` routing — engine A forwards device-addressed RPCs
+//! `targetDeviceId` routing — engine A forwards device-addressed RPCs
 //! to engine B through B's device-room relay (host relay on B, link cache on A), with a
 //! minimal in-memory device-room standing in for the edge DO (route client→host with
 //! `from` stamped, host→client by `to`).
@@ -325,7 +325,7 @@ async fn target_device_id_routes_over_the_relay() {
     core_b.shutdown().await;
 }
 
-/// M5: terminals are device-addressable — OpenTerminal/WriteTerminal forward as
+/// Terminals are device-addressable — OpenTerminal/WriteTerminal forward as
 /// unary calls and SubscribeTerminal proxies its stream through the relay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_stream_proxies_over_the_relay() {
@@ -705,9 +705,22 @@ async fn mcp_login_is_shared_across_services_and_expires_without_a_viewer() {
     core.shutdown().await;
 }
 
+/// Two settings engines, device-b hosting its relay and device-a linked to
+/// it; the client talks to device-a.
 #[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target() {
+struct SettingsPair {
+    a: EngineCore,
+    b: EngineCore,
+    a_dir: std::path::PathBuf,
+    b_dir: std::path::PathBuf,
+    client: cypher_rpc::RpcClient,
+    relay: tokio::task::JoinHandle<()>,
+    _host: cypher_rpc::HostRelay,
+    _dirs: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+async fn settings_pair() -> SettingsPair {
     let (url, relay) = fake_device_room().await;
     let dirs = tempfile::tempdir().unwrap();
     let a_dir = dirs.path().join("a");
@@ -736,6 +749,30 @@ async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    SettingsPair {
+        a,
+        b,
+        a_dir,
+        b_dir,
+        client,
+        relay,
+        _host,
+        _dirs: dirs,
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_settings_route_catalogs_titles_and_web_search_to_the_target() {
+    let SettingsPair {
+        a,
+        b,
+        client,
+        relay,
+        _host,
+        _dirs,
+        ..
+    } = settings_pair().await;
     for device in ["device-a", "device-b"] {
         let commands = client
             .call(
@@ -865,6 +902,22 @@ async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target
         "the other device keeps its pin"
     );
 
+    relay.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target() {
+    let SettingsPair {
+        a: _a,
+        b: _b,
+        a_dir,
+        b_dir,
+        client,
+        relay,
+        _host,
+        _dirs,
+    } = settings_pair().await;
     for (method, action) in [
         (methods::LIST_PI_PROVIDERS, "list"),
         (methods::SAVE_PI_PROVIDER, "save"),

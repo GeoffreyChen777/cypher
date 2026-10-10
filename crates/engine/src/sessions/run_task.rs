@@ -69,54 +69,95 @@ pub(super) fn folded_text(parts: &[MessagePart]) -> String {
         .join("\n")
 }
 
-/// The segment being written: the parts folded so far and the models that
-/// answered them (one per completed assistant message).
-struct Segment<'s> {
-    folded: &'s [MessagePart],
-    models: &'s [AnsweredModel],
-}
-
-fn sync_segment<'a>(
+/// The assistant entry being written: the parts folded so far, the models
+/// that answered them (one per completed assistant message), and the doc
+/// writer once the entry exists. Reset at every steer/park boundary.
+struct Segment<'a> {
     doc: &'a SessionDoc,
-    writer: &mut Option<SegmentWriter<'a>>,
-    entry_id: &str,
-    device_id: &str,
-    started_at: i64,
-    segment: Segment<'_>,
-) -> Result<(), DocError> {
-    if segment.folded.is_empty() {
-        return Ok(());
-    }
-    let rendered = render_parts(segment.folded);
-    if writer.is_none() {
-        *writer = Some(SegmentWriter::begin(doc, entry_id, device_id, started_at)?);
-    }
-    if let Some(w) = writer.as_mut() {
-        w.set_models(segment.models)?;
-        w.sync(&rendered)?;
-    }
-    Ok(())
-}
-
-fn finish_segment<'a>(
-    doc: &'a SessionDoc,
+    device_id: &'a str,
+    folded: Vec<MessagePart>,
+    models: Vec<AnsweredModel>,
+    entry_id: String,
+    started: i64,
     writer: Option<SegmentWriter<'a>>,
-    entry_id: &str,
-    device_id: &str,
-    started_at: i64,
-    segment: Segment<'_>,
-    status: MessageStatus,
-) -> Result<(), DocError> {
-    let rendered = render_parts(segment.folded);
-    let mut writer = match writer {
-        Some(w) => w,
-        None if !segment.folded.is_empty() => {
-            SegmentWriter::begin(doc, entry_id, device_id, started_at)?
+    /// Folded parts not yet committed; `flush_at` is their coalesced commit.
+    dirty: bool,
+    flush_at: tokio::time::Instant,
+}
+
+impl<'a> Segment<'a> {
+    fn new(doc: &'a SessionDoc, device_id: &'a str) -> Self {
+        Self {
+            doc,
+            device_id,
+            folded: Vec::new(),
+            models: Vec::new(),
+            entry_id: new_id(),
+            started: now_ms(),
+            writer: None,
+            dirty: false,
+            flush_at: tokio::time::Instant::now(),
         }
-        None => return Ok(()),
-    };
-    writer.set_models(segment.models)?;
-    writer.finish(&rendered, status)
+    }
+
+    /// Start the next entry with an empty fold.
+    fn reset(&mut self, entry_id: String) {
+        self.folded.clear();
+        self.models.clear();
+        self.dirty = false;
+        self.entry_id = entry_id;
+        self.started = now_ms();
+    }
+
+    /// Whether anything of this entry reached the fold or the doc.
+    fn streamed(&self) -> bool {
+        !self.folded.is_empty() || self.writer.is_some()
+    }
+
+    /// Commit the fold so far, opening the entry on first content.
+    fn sync(&mut self) -> Result<(), DocError> {
+        if self.folded.is_empty() {
+            return Ok(());
+        }
+        let rendered = render_parts(&self.folded);
+        if self.writer.is_none() {
+            self.writer = Some(SegmentWriter::begin(
+                self.doc,
+                &self.entry_id,
+                self.device_id,
+                self.started,
+            )?);
+        }
+        if let Some(w) = self.writer.as_mut() {
+            w.set_models(&self.models)?;
+            w.sync(&rendered)?;
+        }
+        Ok(())
+    }
+
+    /// Finalize the entry with `status`; an entry that never streamed is not written.
+    fn finish(&mut self, status: MessageStatus) -> Result<(), DocError> {
+        let writer = self.writer.take();
+        let rendered = render_parts(&self.folded);
+        let mut writer = match writer {
+            Some(w) => w,
+            None if !self.folded.is_empty() => {
+                SegmentWriter::begin(self.doc, &self.entry_id, self.device_id, self.started)?
+            }
+            None => return Ok(()),
+        };
+        writer.set_models(&self.models)?;
+        writer.finish(&rendered, status)
+    }
+
+    /// Arm the coalesced STREAM_COMMIT_MS commit for newly folded parts.
+    fn schedule_flush(&mut self) {
+        if !self.folded.is_empty() && !self.dirty {
+            self.dirty = true;
+            self.flush_at =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+        }
+    }
 }
 
 /// Resume bookkeeping for one run task: which user entry the run answers (so
@@ -130,6 +171,26 @@ pub(super) struct RunResumeState {
     pub(super) resume_injected: bool,
     pub(super) startup_retry: bool,
     pub(super) agent_prompt: Option<String>,
+}
+
+/// What one run task knows about itself for the length of the run.
+struct RunScope<'r> {
+    inner: &'r Arc<Inner>,
+    chat_id: &'r str,
+    run_id: &'r str,
+    harness_id: HarnessId,
+    plugin_epoch: u64,
+    steerable: bool,
+    user_prompt: &'r str,
+    run_cwd: &'r str,
+}
+
+/// How the loop continues after a terminal Done.
+enum DoneFlow {
+    /// The turn parked; the persistent session waits for the next one.
+    Park,
+    /// The run ends with this status.
+    End(SessionStatus),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -199,22 +260,14 @@ pub(super) async fn drive_run(
     if let Some(host) = inner.doc_host() {
         host.preview_run(&chat_id, &run_id);
     }
-    let mut folded: Vec<MessagePart> = Vec::new();
-    // The models that answered the current segment, beside `folded` and
-    // cleared with it at every segment boundary.
-    let mut segment_models: Vec<AnsweredModel> = Vec::new();
+    let mut seg = Segment::new(doc_ref, &device_id);
     // Every tool id this run has folded, across segment resets. Adapters
-    // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,
-    // long-running completions) as full ToolCall events; once the fold has
-    // reset at a steer/park boundary those ids are gone from `folded`, and
-    // folding the echo would mint an orphan chip mid-text in the NEXT
-    // segment — the mid-word transcript splits.
+    // re-emit shape-bearing tool updates (title/input refreshes, long-running
+    // completions) as full ToolCall events; once the fold has reset at a
+    // steer/park boundary those ids are gone from the fold, and folding the
+    // echo would mint an orphan chip mid-text in the NEXT segment — the
+    // mid-word transcript splits.
     let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut entry_id = new_id();
-    let mut segment_started = now_ms();
-    let mut writer: Option<SegmentWriter<'_>> = None;
-    let mut dirty = false;
-    let mut flush_at = tokio::time::Instant::now();
     // Set when the engine interrupts the run: the harness gets this long to end its own
     // stream (its token was cancelled); past it, a terminal Done is synthesized.
     let mut interrupt_deadline: Option<tokio::time::Instant> = None;
@@ -232,18 +285,28 @@ pub(super) async fn drive_run(
     // so the gate still catches real crashes. touch_session throttles at 10s.
     let mut live_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
     live_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // PERSISTENT SESSION (zeron runsBySession): a completed turn on a
-    // steerable harness parks here instead of ending the run — the child and
-    // its steering mailbox stay warm, and the next user message (dispatch
-    // routes into a live run) starts the next turn with zero respawn/resume
-    // latency. `Some(when)` = idle since then; the 30-min reaper below ends
-    // a session nobody comes back to (zeron SESSION_IDLE_MS).
+    // PERSISTENT SESSION: a completed turn on a steerable harness parks here
+    // instead of ending the run — the child and its steering mailbox stay
+    // warm, and the next user message (dispatch routes into a live run)
+    // starts the next turn with zero respawn/resume latency. `Some(when)` =
+    // idle since then; the 30-min reaper below ends a session nobody comes
+    // back to.
     const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
     let mut idle_since: Option<tokio::time::Instant> = None;
     let steerable = harness.supports_steering();
+    let scope = RunScope {
+        inner: &inner,
+        chat_id: &chat_id,
+        run_id: &run_id,
+        harness_id,
+        plugin_epoch,
+        steerable,
+        user_prompt: &user_prompt,
+        run_cwd: &run_cwd,
+    };
     // TURN-QUIESCE WATCHDOG: a harness
-    // that loses a turn's Done — the adapter never settles `session/prompt`
-    // even though the agent finished — strands Working forever: the live
+    // that loses a turn's Done — the agent finished but its turn-end never
+    // arrives — strands Working forever: the live
     // heartbeat above keeps the row fresh, and there is no per-turn timeout
     // by design. This is NOT that stall timeout: it never ends the run or
     // errors anything. When the stream has been silent past the window AND
@@ -252,34 +315,13 @@ pub(super) async fn drive_run(
     // segment finalized Complete, status Idle, child and mailbox warm. A
     // false trip (the agent was quietly waiting on something invisible)
     // costs a status dip: the parked-resume path below re-arms Working the
-    // moment output flows again, and nothing is lost. Default 5min: long
-    // silent thinking with no reasoning events must not drop the spinner.
-    // `CYPHER_TURN_QUIESCE_MS` overrides the window; 0 disables.
-    let quiesce_after: Option<std::time::Duration> =
-        match cypher_env::var("TURN_QUIESCE_MS").and_then(|v| v.parse::<u64>().ok()) {
-            Some(0) => None,
-            Some(ms) => Some(std::time::Duration::from_millis(ms)),
-            None => Some(std::time::Duration::from_secs(300)),
-        };
+    // moment output flows again, and nothing is lost. SELF-CONTINUED turns
+    // (see [`QuiesceWindows::self_turn`]) use a much shorter window.
+    let QuiesceWindows {
+        turn: quiesce_after,
+        self_turn: self_quiesce_after,
+    } = inner.quiesce_windows();
     let mut last_stream_activity = tokio::time::Instant::now();
-    // SELF-CONTINUED turns get a much SHORTER quiesce window. A turn the
-    // agent starts on its own (background-task wake) can never receive a
-    // harness Done: the adapter has no `session/prompt` outstanding to
-    // settle — verified in claude-agent-acp's autonomous-result lane, which
-    // consumes the SDK's turn-end without emitting anything; codex shows
-    // the same shape. The watchdog is that turn shape's ONLY settle path,
-    // so the normal window (then 120s) read as 2min of stuck-Working after every
-    // background notification. The in-flight
-    // fold gate below still protects running tools; reasoning heartbeats
-    // push the window during real thinking. `CYPHER_SELF_TURN_QUIESCE_MS`
-    // overrides; 0 falls back to the normal window. An explicit
-    // `CYPHER_TURN_QUIESCE_MS=0` still disables the watchdog entirely.
-    let self_quiesce_after: Option<std::time::Duration> =
-        match cypher_env::var("SELF_TURN_QUIESCE_MS").and_then(|v| v.parse::<u64>().ok()) {
-            Some(0) => None,
-            Some(ms) => Some(std::time::Duration::from_millis(ms)),
-            None => Some(std::time::Duration::from_secs(20)),
-        };
     let mut self_continued_turn = false;
     // The last translation frame folded, so the keepalive repeats that keep a
     // slow translation's stream alive are not each journaled in full.
@@ -308,9 +350,9 @@ pub(super) async fn drive_run(
                 inner.touch_session(&chat_id);
                 continue;
             }
-            // Idle reaper (zeron SESSION_IDLE_MS): a parked persistent session
-            // nobody returned to in 30 minutes releases its child. The turn
-            // was finalized at Done, so this end is clean — no aborted stamp.
+            // Idle reaper: a parked persistent session nobody returned to in
+            // 30 minutes releases its child. The turn was finalized at Done,
+            // so this end is clean — no aborted stamp.
             _ = tokio::time::sleep_until(
                 idle_since.map(|at| at + SESSION_IDLE).unwrap_or_else(tokio::time::Instant::now)
             ), if idle_since.is_some() => {
@@ -358,15 +400,12 @@ pub(super) async fn drive_run(
                     session_id: None,
                 },
             },
-            _ = tokio::time::sleep_until(flush_at), if dirty => {
+            _ = tokio::time::sleep_until(seg.flush_at), if seg.dirty => {
                 // Coalesced STREAM_COMMIT_MS tick: one doc commit per window.
-                let segment = Segment { folded: &folded, models: &segment_models };
-                if let Err(err) = sync_segment(
-                    doc_ref, &mut writer, &entry_id, &device_id, segment_started, segment,
-                ) {
+                if let Err(err) = seg.sync() {
                     tracing::warn!(chat = %chat_id, error = %err, "segment sync failed");
                 }
-                dirty = false;
+                seg.dirty = false;
                 continue;
             }
             // Turn-quiesce watchdog (see the knob above). Armed only when the
@@ -388,7 +427,7 @@ pub(super) async fn drive_run(
                 && idle_since.is_none()
                 && !interrupted
                 && steerable
-                && !folded.iter().any(|p| match p {
+                && !seg.folded.iter().any(|p| match p {
                     MessagePart::Tool { id, resolved: false, .. } => {
                         id != cypher_proto::LIVE_PLAN_TOOL_ID
                     }
@@ -402,75 +441,19 @@ pub(super) async fn drive_run(
                     "turn quiesced: stream silent after completed output with no \
                      turn-end; parking (suspected missing harness Done)"
                 );
-                if !folded.is_empty() || writer.is_some() {
-                    if let Err(err) = finish_segment(
-                        doc_ref,
-                        writer.take(),
-                        &entry_id,
-                        &device_id,
-                        segment_started,
-                        Segment { folded: &folded, models: &segment_models },
-                        MessageStatus::Complete,
-                    ) {
+                if seg.streamed() {
+                    if let Err(err) = seg.finish(MessageStatus::Complete) {
                         tracing::warn!(chat = %chat_id, error = %err, "quiesce segment finish failed");
                     }
-                    inner.note_message(&chat_id, &folded_text(&folded));
+                    inner.note_message(&chat_id, &folded_text(&seg.folded));
                     if let Some(host) = inner.doc_host() { host.flush_chat_sync(&chat_id); }
                 }
-                folded.clear();
-                segment_models.clear();
-                dirty = false;
-                entry_id = new_id();
-                segment_started = now_ms();
-                idle_since = Some(tokio::time::Instant::now());
-                self_continued_turn = false;
-                inner.set_status(&chat_id, SessionStatus::Idle, false);
+                park(&scope, &mut seg, &mut idle_since, &mut self_continued_turn);
                 continue;
             }
         };
 
-        // SubagentStatus is a LIVE PROJECTION, not run activity: mirror it
-        // onto the chat's session row and stop — no journal append, no doc
-        // fold, no status transition, no session freshness touch, and no
-        // parked-session resume or quiesce-watchdog push (a background
-        // subagent finishing must never re-arm a parked session as Working;
-        // `set_subagents`' own updated_at bump keeps the row fresh instead).
-        if let AgentEvent::SubagentStatus { runs } = &event {
-            inner.set_subagents(&chat_id, runs.clone());
-            continue;
-        }
-        // The context gauge is the same kind of projection: mirrored onto
-        // the local session row, never journaled, folded, or allowed to
-        // resume a parked session (Claude re-reports it after compaction).
-        if let AgentEvent::ContextUsage { used, size } = event {
-            inner.set_context_usage(&chat_id, ContextUsage { used, size });
-            continue;
-        }
-        // Throughput too: a live reading for the working trailer, never
-        // run activity (the extension's final clear lands after agent_end).
-        if let AgentEvent::Throughput { throughput } = event {
-            inner.set_throughput(&chat_id, throughput);
-            continue;
-        }
-        // A prompt's translation belongs to the USER entry it replaced, which
-        // was written before the run saw it — stamped there directly, never
-        // folded into the assistant segment. Handled ahead of the parked gate
-        // because the extension translates a prompt BEFORE the turn it opens
-        // starts, while the session may still be parked from the last one.
-        if let AgentEvent::InputTranslation { source, text } = &event {
-            match doc_ref.stamp_user_agent_text(source, text) {
-                Ok(true) => {
-                    if let Some(host) = inner.doc_host() {
-                        host.flush_chat_sync(&chat_id);
-                    }
-                }
-                Ok(false) => {
-                    tracing::debug!(chat = %chat_id, "prompt translation matched no recent user entry");
-                }
-                Err(err) => {
-                    tracing::warn!(chat = %chat_id, error = %err, "prompt translation stamp failed");
-                }
-            }
+        if apply_projection(&scope, doc_ref, &event) {
             continue;
         }
 
@@ -502,92 +485,15 @@ pub(super) async fn drive_run(
                 continue;
             }
         }
-        // PARKED: a steer boundary, a terminal Done, or SELF-CONTINUED OUTPUT
-        // re-opens the session; everything else stays gated. The ACP child
-        // keeps forwarding `session/update` frames after a turn completes,
-        // and they split two ways:
-        //
-        // - Post-turn NOISE — late tool_call_updates for commands folded in a
-        //   prior segment, command refreshes, reasoning heartbeats. Treating
-        //   those as "the next turn" re-armed Working with no Done ever
-        //   coming (the eternally-running session bug) and folded orphan
-        //   parts into a phantom segment. Still dropped.
-        // - SELF-CONTINUED WORK — Claude Code re-invokes itself when a
-        //   background task finishes (turns no prompt started) and streams
-        //   real output for them. Dropping those LOST transcript content
-        //   (agent output that never reached the doc). Fresh text or a genuinely new tool
-        //   call resumes the session: new segment, Working, and the turn
-        //   settles again via Done — or via the quiesce watchdog, which is
-        //   what makes this resume safe where the naive version was not.
-        //
-        // The RESUME_GATE separates the two by arrival time: a finished
-        // turn's tail flush lands within milliseconds of its Done, while a
-        // self-continued turn starts a whole new agent round trip (seconds
-        // at minimum, minutes in the incident). Inside the gate everything
-        // non-boundary stays inert, exactly as before.
-        const RESUME_GATE: std::time::Duration = std::time::Duration::from_secs(1);
-        if idle_since.is_some() {
-            let self_continued = idle_since
-                .is_some_and(|parked_at| parked_at.elapsed() >= RESUME_GATE)
-                && (matches!(
-                    &event,
-                    AgentEvent::TextDelta { text } if !text.is_empty()
-                ) || matches!(
-                    &event,
-                    AgentEvent::ToolCall { id, .. }
-                        if id == cypher_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
-                ));
-            if self_continued {
-                tracing::info!(
-                    chat = %chat_id,
-                    "parked session resumed by self-continued agent output"
-                );
-                idle_since = None;
-                self_continued_turn = true;
-                // The park cleared the fold; rotate to a fresh entry and
-                // fall through — this event is the new segment's first part.
-                entry_id = new_id();
-                segment_started = now_ms();
-                inner.set_status(&chat_id, SessionStatus::Working, true);
-            } else {
-                match &event {
-                    AgentEvent::Steered { .. } => {
-                        idle_since = None;
-                        inner.set_status(&chat_id, SessionStatus::Working, true);
-                    }
-                    AgentEvent::Done { .. } => {
-                        idle_since = None;
-                    }
-                    // A question with NO turn behind it (post-turn permission
-                    // noise): answer it empty. But a routed send already flipped
-                    // Working — `/subagent-config` and friends ARE the turn,
-                    // and auto-declining them hangs the extension handler.
-                    AgentEvent::InputRequested { request_id, .. } => {
-                        let live = lock(&inner.statuses).get(&chat_id).is_some_and(|s| {
-                            matches!(
-                                s.status,
-                                SessionStatus::Working | SessionStatus::AwaitingInput
-                            )
-                        });
-                        if live {
-                            idle_since = None;
-                        } else {
-                            let resolver = lock(&inner.runs)
-                                .get(&chat_id)
-                                .and_then(|h| lock(&h.pending_inputs).remove(request_id));
-                            if let Some(tx) = resolver {
-                                let _ = tx.send(Vec::new());
-                            }
-                            tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
-                            continue;
-                        }
-                    }
-                    // A stale answer settling after its turn already closed:
-                    // nothing is running — stay parked.
-                    AgentEvent::InputResolved { .. } => continue,
-                    _ => continue,
-                }
-            }
+        if let Gate::Drop = parked_gate(
+            &scope,
+            &event,
+            &mut seg,
+            &mut idle_since,
+            &mut self_continued_turn,
+            &seen_tools,
+        ) {
+            continue;
         }
         // Empty reasoning deltas are PURE heartbeats: redacted thinking and
         // tool-input-generation windows stream them with no text. They fold
@@ -615,59 +521,22 @@ pub(super) async fn drive_run(
             _ => last_translation = None,
         }
 
-        // Stale tool echoes: a ToolCall/ToolResult naming an id folded in a
-        // PRIOR segment (the fold reset at a steer or park since) belongs to
-        // a chip that already rendered in its own entry. Folding the echo
-        // would splice a phantom chip into the middle of the current
-        // segment's streaming text (the mid-word transcript splits). Dropped;
-        // same-segment refreshes still land in place.
-        let in_segment = |folded: &[MessagePart], id: &str| {
-            folded
-                .iter()
-                .any(|p| matches!(p, MessagePart::Tool { id: pid, .. } if pid == id))
-        };
-        match &event {
-            // The live plan chip is a deliberate singleton (every update
-            // reuses `LIVE_PLAN_TOOL_ID` so the fold refreshes in place):
-            // treating its reappearance after a park/steer reset as a stale
-            // echo dropped the todo list for the rest of the run — from the
-            // first boundary on, plans never rendered again.
-            AgentEvent::ToolCall { id, .. } if id == cypher_proto::LIVE_PLAN_TOOL_ID => {}
-            AgentEvent::ToolResult { id, .. } if id == cypher_proto::LIVE_PLAN_TOOL_ID => {}
-            AgentEvent::ToolCall { id, .. } => {
-                if !in_segment(&folded, id) && seen_tools.contains(id) {
-                    continue;
-                }
-                seen_tools.insert(id.clone());
-            }
-            AgentEvent::ToolResult { id, .. }
-                if !in_segment(&folded, id) && seen_tools.contains(id) =>
-            {
-                continue;
-            }
-            // `ToolProgress` deliberately falls through: it arrives with its
-            // ToolCall in the SAME segment, so it is never a stale echo here
-            // — and the doc fold is the single authority on whether to apply
-            // it (id known + !resolved). A cross-segment tick reaches the
-            // fold with no matching part and is a no-op there; a post-resolve
-            // tick is ignored the same way. No exemption arm needed.
-            _ => {}
+        if stale_tool_echo(&event, &seg.folded, &mut seen_tools) {
+            continue;
         }
 
         // Startup-crash retry: a run that dies before ever starting (errored
         // Done, no SessionStarted, nothing streamed) means the AGENT CHILD
-        // failed to come up — not that the injected resume id was bad. Since
-        // the ACP conversion a stale id is handled inside the
-        // harness (`session/load` falls back to `session/new`), so the old
-        // guess here — tombstone the id, retry fresh — fired only on child
-        // startup failures and permanently severed GOOD conversations. The id stays; retry ONCE against the same
-        // user entry, resume and all, in case the crash was transient. A
-        // helper that is down hard fails the retry too and surfaces its
-        // crash text (the harness now appends exit status + stderr).
+        // failed to come up — not that the injected resume id was bad (the
+        // harness falls back to a fresh session on a stale id itself). The id
+        // stays; retry ONCE against the same user entry, resume and all, in
+        // case the crash was transient. A helper that is down hard fails the
+        // retry too and surfaces its crash text (the harness appends exit
+        // status + stderr).
         if resume_state.resume_injected
             && !resume_state.startup_retry
             && !saw_session_started
-            && folded.is_empty()
+            && seg.folded.is_empty()
             && !interrupted
             && matches!(
                 &event,
@@ -678,40 +547,7 @@ pub(super) async fn drive_run(
             )
             && let Some(retry) = retry_request.take()
         {
-            tracing::warn!(
-                chat = %chat_id,
-                "run died before session start; retrying once (resume kept)"
-            );
-            // This harness owner is gone (nothing ever started under it).
-            inner.fail_orphaned_subagents(&chat_id, "Subagent owner failed to start");
-            inner.remove_run(&chat_id, &run_id);
-            let engine = SessionsEngine {
-                inner: inner.clone(),
-            };
-            let chat = chat_id.clone();
-            let message_id = resume_state.user_message_id.clone();
-            tokio::spawn(async move {
-                // The user entry write inside dispatch is idempotent by
-                // message id; `startup_retry` makes this attempt final.
-                if let Err(err) = engine
-                    .dispatch_with(
-                        &chat,
-                        harness_id,
-                        retry,
-                        resume_state.agent_prompt.clone(),
-                        Some(message_id),
-                        true,
-                    )
-                    .await
-                {
-                    tracing::error!(chat = %chat, error = %err, "startup-crash retry dispatch failed");
-                    // No run is coming: leaving the row Working would spin
-                    // the session forever with nothing behind it.
-                    engine
-                        .inner
-                        .set_status(&chat, SessionStatus::Errored, false);
-                }
-            });
+            spawn_startup_retry(&scope, retry, resume_state);
             return;
         }
 
@@ -725,29 +561,14 @@ pub(super) async fn drive_run(
             // A steer boundary means a real prompt owns the turn again — its
             // Done will come; the short self-continued window stands down.
             self_continued_turn = false;
-            if let Err(err) = finish_segment(
-                doc_ref,
-                writer.take(),
-                &entry_id,
-                &device_id,
-                segment_started,
-                Segment {
-                    folded: &folded,
-                    models: &segment_models,
-                },
-                MessageStatus::Complete,
-            ) {
+            if let Err(err) = seg.finish(MessageStatus::Complete) {
                 tracing::warn!(chat = %chat_id, error = %err, "segment finish failed");
             }
             if let Some(host) = inner.doc_host() {
                 host.flush_chat_sync(&chat_id);
             }
-            inner.note_message(&chat_id, &folded_text(&folded));
-            folded.clear();
-            segment_models.clear();
-            dirty = false;
-            entry_id = next_assistant_message_id.clone().unwrap_or_else(new_id);
-            segment_started = now_ms();
+            inner.note_message(&chat_id, &folded_text(&seg.folded));
+            seg.reset(next_assistant_message_id.clone().unwrap_or_else(new_id));
             // The elapsed timer is per user message, not per child process: a
             // steer boundary restarts it (matches the parked-resume path and
             // the composer's optimistic overlay, which already reads 0:00).
@@ -791,125 +612,40 @@ pub(super) async fn drive_run(
             // model labels the segment it wrote).
             AgentEvent::AssistantMessageCompleted {
                 model: Some(model), ..
-            } if !segment_models.contains(model) => {
-                segment_models.push(model.clone());
+            } if !seg.models.contains(model) => {
+                seg.models.push(model.clone());
             }
             _ => {}
         }
 
         inner.publish(&chat_id, &event);
 
-        // Defensive rule from zeron: a mid-run SessionStarted re-emission (Claude SDK
-        // background re-invocations) must not wipe the segment being written.
-        let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
+        // A mid-run SessionStarted re-emission (background re-invocations)
+        // must not wipe the segment being written.
+        let skip_fold =
+            matches!(&event, AgentEvent::SessionStarted { .. }) && !seg.folded.is_empty();
         if !skip_fold {
             // Full tool output stays in the host's local run journal; the doc
             // keeps the fold's bounded summary and diff stats.
-            fold_event_into_parts(&mut folded, &event);
+            fold_event_into_parts(&mut seg.folded, &event);
         }
 
         if let AgentEvent::Done { status, .. } = &event {
-            // A question still pending at turn end can never be legitimately
-            // answered (its turn is over): drain the resolvers NOW, or a late
-            // `respond_input` finds one, emits InputResolved, and un-parks
-            // the session into Working with no turn behind it — stranded
-            // Working, timer forever, reaper disarmed. Empty answers unblock
-            // the harness-side bridge like an interrupt does.
-            let pending = lock(&inner.runs)
-                .get(&chat_id)
-                .filter(|h| h.run_id == run_id)
-                .map(|h| h.pending_inputs.clone());
-            if let Some(pending) = pending {
-                for (_, tx) in lock(&pending).drain() {
-                    let _ = tx.send(Vec::new());
-                }
+            match on_done(
+                &scope,
+                *status,
+                &mut seg,
+                interrupted,
+                &mut saw_session_started,
+                &mut idle_since,
+                &mut self_continued_turn,
+            ) {
+                DoneFlow::Park => continue,
+                DoneFlow::End(status) => break status,
             }
-            let message_status = match status {
-                DoneStatus::Interrupted => MessageStatus::Aborted,
-                DoneStatus::Completed | DoneStatus::Errored => MessageStatus::Complete,
-            };
-            // No dangling chips: a run that ends for ANY reason (completed,
-            // errored, interrupted) terminally resolves its input parts — an
-            // unresolved question must not outlive the run that asked it
-            // (its resolver died with the run; an answer could never land).
-            for part in folded.iter_mut() {
-                if let MessagePart::Input { resolved, .. } = part {
-                    *resolved = true;
-                }
-            }
-            // A Done landing on a PARKED session with nothing streamed (the
-            // idle reaper's or an interrupt's own teardown) has no entry to
-            // finalize — writing one would leave an empty aborted stub.
-            let nothing_streamed = writer.is_none() && folded.is_empty();
-            if !nothing_streamed {
-                if let Err(err) = finish_segment(
-                    doc_ref,
-                    writer.take(),
-                    &entry_id,
-                    &device_id,
-                    segment_started,
-                    Segment {
-                        folded: &folded,
-                        models: &segment_models,
-                    },
-                    message_status,
-                ) {
-                    tracing::warn!(chat = %chat_id, error = %err, "final segment finish failed");
-                }
-                inner.note_message(&chat_id, &folded_text(&folded));
-                if let Some(host) = inner.doc_host() {
-                    host.flush_chat_sync(&chat_id);
-                }
-            }
-            if *status == DoneStatus::Completed {
-                // A cleanly completed turn resets the auto-resume revival
-                // budget: only consecutive crash-revive-crash cycles spend it.
-                inner.journal.clear_resume_attempts(&chat_id);
-            }
-            // Exchange completed on an untitled chat → name it (fire-and-forget;
-            // interrupted/errored turns never trigger naming).
-            if *status == DoneStatus::Completed
-                && !inner.is_ephemeral(&chat_id)
-                && let Some(titles) = inner.titles.get()
-            {
-                titles.maybe_generate(&chat_id, harness_id, &user_prompt, &run_cwd);
-            }
-            // PERSISTENT SESSION: a cleanly completed turn on a steerable
-            // harness PARKS instead of ending — child + mailbox stay warm for
-            // the next routed dispatch; per-turn state resets for it.
-            // A Pi-package change mid-turn bumps `plugin_epoch`: skip the park
-            // so the next send respawns against the new settings.json.
-            if *status == DoneStatus::Completed && steerable && !interrupted {
-                if inner.plugin_epoch.load(Ordering::SeqCst) != plugin_epoch {
-                    tracing::info!(
-                        chat = %chat_id,
-                        "ending session so the next turn loads updated Pi packages"
-                    );
-                    break SessionStatus::Idle;
-                }
-                folded.clear();
-                segment_models.clear();
-                dirty = false;
-                entry_id = new_id();
-                segment_started = now_ms();
-                // Resume-retry is strictly a first-turn concern.
-                saw_session_started = true;
-                idle_since = Some(tokio::time::Instant::now());
-                self_continued_turn = false;
-                inner.set_status(&chat_id, SessionStatus::Idle, false);
-                continue;
-            }
-            break match status {
-                DoneStatus::Errored => SessionStatus::Errored,
-                _ => SessionStatus::Idle,
-            };
         }
 
-        if !folded.is_empty() && !dirty {
-            dirty = true;
-            flush_at =
-                tokio::time::Instant::now() + std::time::Duration::from_millis(STREAM_COMMIT_MS);
-        }
+        seg.schedule_flush();
     };
 
     // Claim any accepted-but-unconfirmed steers BEFORE the handle goes away:
@@ -936,45 +672,402 @@ pub(super) async fn drive_run(
     inner.remove_run(&chat_id, &run_id);
     inner.set_status(&chat_id, final_status, false);
     if !interrupted && !orphans.is_empty() {
-        // The dying run accepted these into its mailbox but never confirmed a
-        // Steered boundary (idle-reaper race, a mid-turn error discarding
-        // queued boundary steers, a parked child death). Their user entries
-        // are already in the transcript — a message that shows as sent must
-        // never silently not run. Re-dispatch each as a fresh turn
-        // (write_user_message dedupes by id; resume is engine-injected).
-        let engine = SessionsEngine {
-            inner: inner.clone(),
-        };
-        let chat = chat_id.clone();
-        tokio::spawn(async move {
-            for steer in orphans {
-                let Some(mut request) = engine.last_request(&chat) else {
-                    tracing::warn!(chat = %chat, "orphaned steer lost: no run config to re-dispatch");
-                    break;
-                };
-                request.prompt = steer.prompt.clone();
-                request.resume = None;
-                request.attachments = Vec::new();
-                tracing::info!(chat = %chat, "re-dispatching steer orphaned by a dying run");
-                if let Err(err) = engine
-                    .dispatch_augmented(
-                        &chat,
-                        harness_id,
-                        request,
-                        steer.agent_prompt.clone(),
-                        Some(steer.message_id.clone()),
-                    )
-                    .await
-                {
-                    tracing::warn!(chat = %chat, error = %err, "orphaned steer re-dispatch failed");
-                    engine
-                        .inner
-                        .set_status(&chat, SessionStatus::Errored, false);
-                    break;
+        redispatch_orphans(&scope, orphans);
+    }
+}
+
+/// Park the turn: the persistent session idles with child and mailbox warm,
+/// and the next entry starts empty.
+fn park(
+    scope: &RunScope<'_>,
+    seg: &mut Segment<'_>,
+    idle_since: &mut Option<tokio::time::Instant>,
+    self_continued_turn: &mut bool,
+) {
+    seg.reset(new_id());
+    *idle_since = Some(tokio::time::Instant::now());
+    *self_continued_turn = false;
+    scope
+        .inner
+        .set_status(scope.chat_id, SessionStatus::Idle, false);
+}
+
+/// Live projections mirrored onto the chat's session row instead of being
+/// treated as run activity. Returns true when `event` was consumed.
+fn apply_projection(scope: &RunScope<'_>, doc: &SessionDoc, event: &AgentEvent) -> bool {
+    let (inner, chat_id) = (scope.inner, scope.chat_id);
+    match event {
+        // SubagentStatus is a LIVE PROJECTION, not run activity: mirror it
+        // onto the chat's session row and stop — no journal append, no doc
+        // fold, no status transition, no session freshness touch, and no
+        // parked-session resume or quiesce-watchdog push (a background
+        // subagent finishing must never re-arm a parked session as Working;
+        // `set_subagents`' own updated_at bump keeps the row fresh instead).
+        AgentEvent::SubagentStatus { runs } => {
+            inner.set_subagents(chat_id, runs.clone());
+        }
+        // The context gauge is the same kind of projection: mirrored onto
+        // the local session row, never journaled, folded, or allowed to
+        // resume a parked session (re-reported after compaction).
+        AgentEvent::ContextUsage { used, size } => {
+            inner.set_context_usage(
+                chat_id,
+                ContextUsage {
+                    used: *used,
+                    size: *size,
+                },
+            );
+        }
+        // Throughput too: a live reading for the working trailer, never
+        // run activity (the extension's final clear lands after agent_end).
+        AgentEvent::Throughput { throughput } => {
+            inner.set_throughput(chat_id, *throughput);
+        }
+        // A prompt's translation belongs to the USER entry it replaced, which
+        // was written before the run saw it — stamped there directly, never
+        // folded into the assistant segment. Handled ahead of the parked gate
+        // because the extension translates a prompt BEFORE the turn it opens
+        // starts, while the session may still be parked from the last one.
+        AgentEvent::InputTranslation { source, text } => {
+            match doc.stamp_user_agent_text(source, text) {
+                Ok(true) => {
+                    if let Some(host) = inner.doc_host() {
+                        host.flush_chat_sync(chat_id);
+                    }
+                }
+                Ok(false) => {
+                    tracing::debug!(chat = %chat_id, "prompt translation matched no recent user entry");
+                }
+                Err(err) => {
+                    tracing::warn!(chat = %chat_id, error = %err, "prompt translation stamp failed");
                 }
             }
-        });
+        }
+        _ => return false,
     }
+    true
+}
+
+/// What the parked gate decided for one event.
+enum Gate {
+    /// Not parked, or the event re-opened the session: process it.
+    Pass,
+    /// Post-turn noise on a parked session: drop it.
+    Drop,
+}
+
+/// PARKED: a steer boundary, a terminal Done, or SELF-CONTINUED OUTPUT
+/// re-opens the session; everything else stays gated. A parked child can
+/// keep streaming after its turn completed, and those frames split two ways:
+///
+/// - Post-turn NOISE — late tool updates for commands folded in a prior
+///   segment, command refreshes, reasoning heartbeats. Treating those as
+///   "the next turn" re-armed Working with no Done ever coming (the
+///   eternally-running session bug) and folded orphan parts into a phantom
+///   segment. Still dropped.
+/// - SELF-CONTINUED WORK — an agent re-invoking itself when a background
+///   task finishes (turns no prompt started) streams real output for them.
+///   Dropping those LOST transcript content. Fresh text or a genuinely new
+///   tool call resumes the session: new segment, Working, and the turn
+///   settles again via Done — or via the quiesce watchdog, which is what
+///   makes this resume safe where the naive version was not.
+///
+/// The RESUME_GATE separates the two by arrival time: a finished turn's tail
+/// flush lands within milliseconds of its Done, while a self-continued turn
+/// starts a whole new agent round trip (seconds at minimum). Inside the gate
+/// everything non-boundary stays inert.
+fn parked_gate(
+    scope: &RunScope<'_>,
+    event: &AgentEvent,
+    seg: &mut Segment<'_>,
+    idle_since: &mut Option<tokio::time::Instant>,
+    self_continued_turn: &mut bool,
+    seen_tools: &std::collections::HashSet<String>,
+) -> Gate {
+    const RESUME_GATE: std::time::Duration = std::time::Duration::from_secs(1);
+    let (inner, chat_id) = (scope.inner, scope.chat_id);
+    if idle_since.is_none() {
+        return Gate::Pass;
+    }
+    let self_continued = idle_since.is_some_and(|parked_at| parked_at.elapsed() >= RESUME_GATE)
+        && (matches!(
+            event,
+            AgentEvent::TextDelta { text } if !text.is_empty()
+        ) || matches!(
+            event,
+            AgentEvent::ToolCall { id, .. }
+                if id == cypher_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
+        ));
+    if self_continued {
+        tracing::info!(
+            chat = %chat_id,
+            "parked session resumed by self-continued agent output"
+        );
+        *idle_since = None;
+        *self_continued_turn = true;
+        // The park cleared the fold; rotate to a fresh entry and
+        // fall through — this event is the new segment's first part.
+        seg.entry_id = new_id();
+        seg.started = now_ms();
+        inner.set_status(chat_id, SessionStatus::Working, true);
+        return Gate::Pass;
+    }
+    match event {
+        AgentEvent::Steered { .. } => {
+            *idle_since = None;
+            inner.set_status(chat_id, SessionStatus::Working, true);
+            Gate::Pass
+        }
+        AgentEvent::Done { .. } => {
+            *idle_since = None;
+            Gate::Pass
+        }
+        // A question with NO turn behind it (post-turn permission
+        // noise): answer it empty. But a routed send already flipped
+        // Working — `/subagent-config` and friends ARE the turn,
+        // and auto-declining them hangs the extension handler.
+        AgentEvent::InputRequested { request_id, .. } => {
+            let live = lock(&inner.statuses).get(chat_id).is_some_and(|s| {
+                matches!(
+                    s.status,
+                    SessionStatus::Working | SessionStatus::AwaitingInput
+                )
+            });
+            if live {
+                *idle_since = None;
+                Gate::Pass
+            } else {
+                let resolver = lock(&inner.runs)
+                    .get(chat_id)
+                    .and_then(|h| lock(&h.pending_inputs).remove(request_id));
+                if let Some(tx) = resolver {
+                    let _ = tx.send(Vec::new());
+                }
+                tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
+                Gate::Drop
+            }
+        }
+        // A stale answer settling after its turn already closed:
+        // nothing is running — stay parked.
+        AgentEvent::InputResolved { .. } => Gate::Drop,
+        _ => Gate::Drop,
+    }
+}
+
+/// Stale tool echoes: a ToolCall/ToolResult naming an id folded in a PRIOR
+/// segment (the fold reset at a steer or park since) belongs to a chip that
+/// already rendered in its own entry. Folding the echo would splice a phantom
+/// chip into the middle of the current segment's streaming text (the mid-word
+/// transcript splits). Returns true to drop it; same-segment refreshes still
+/// land in place. Records each tool id the run folds.
+fn stale_tool_echo(
+    event: &AgentEvent,
+    folded: &[MessagePart],
+    seen_tools: &mut std::collections::HashSet<String>,
+) -> bool {
+    let in_segment = |folded: &[MessagePart], id: &str| {
+        folded
+            .iter()
+            .any(|p| matches!(p, MessagePart::Tool { id: pid, .. } if pid == id))
+    };
+    match event {
+        // The live plan chip is a deliberate singleton (every update
+        // reuses `LIVE_PLAN_TOOL_ID` so the fold refreshes in place):
+        // treating its reappearance after a park/steer reset as a stale
+        // echo dropped the todo list for the rest of the run — from the
+        // first boundary on, plans never rendered again.
+        AgentEvent::ToolCall { id, .. } if id == cypher_proto::LIVE_PLAN_TOOL_ID => {}
+        AgentEvent::ToolResult { id, .. } if id == cypher_proto::LIVE_PLAN_TOOL_ID => {}
+        AgentEvent::ToolCall { id, .. } => {
+            if !in_segment(folded, id) && seen_tools.contains(id) {
+                return true;
+            }
+            seen_tools.insert(id.clone());
+        }
+        AgentEvent::ToolResult { id, .. } if !in_segment(folded, id) && seen_tools.contains(id) => {
+            return true;
+        }
+        // `ToolProgress` deliberately falls through: it arrives with its
+        // ToolCall in the SAME segment, so it is never a stale echo here
+        // — and the doc fold is the single authority on whether to apply
+        // it (id known + !resolved). A cross-segment tick reaches the
+        // fold with no matching part and is a no-op there; a post-resolve
+        // tick is ignored the same way. No exemption arm needed.
+        _ => {}
+    }
+    false
+}
+
+/// Retire this run (nothing ever started under it) and dispatch the startup
+/// retry against the same user entry.
+fn spawn_startup_retry(scope: &RunScope<'_>, retry: RunRequest, resume_state: RunResumeState) {
+    let (inner, chat_id) = (scope.inner, scope.chat_id);
+    tracing::warn!(
+        chat = %chat_id,
+        "run died before session start; retrying once (resume kept)"
+    );
+    // This harness owner is gone (nothing ever started under it).
+    inner.fail_orphaned_subagents(chat_id, "Subagent owner failed to start");
+    inner.remove_run(chat_id, scope.run_id);
+    let engine = SessionsEngine {
+        inner: inner.clone(),
+    };
+    let chat = chat_id.to_string();
+    let harness_id = scope.harness_id;
+    let message_id = resume_state.user_message_id.clone();
+    tokio::spawn(async move {
+        // The user entry write inside dispatch is idempotent by
+        // message id; `startup_retry` makes this attempt final.
+        if let Err(err) = engine
+            .dispatch_with(
+                &chat,
+                harness_id,
+                retry,
+                resume_state.agent_prompt.clone(),
+                Some(message_id),
+                true,
+            )
+            .await
+        {
+            tracing::error!(chat = %chat, error = %err, "startup-crash retry dispatch failed");
+            // No run is coming: leaving the row Working would spin
+            // the session forever with nothing behind it.
+            engine
+                .inner
+                .set_status(&chat, SessionStatus::Errored, false);
+        }
+    });
+}
+
+/// Settle a terminal Done: drain pending inputs, finalize the segment, title
+/// the chat, then park the persistent session or end the run.
+fn on_done(
+    scope: &RunScope<'_>,
+    status: DoneStatus,
+    seg: &mut Segment<'_>,
+    interrupted: bool,
+    saw_session_started: &mut bool,
+    idle_since: &mut Option<tokio::time::Instant>,
+    self_continued_turn: &mut bool,
+) -> DoneFlow {
+    let (inner, chat_id) = (scope.inner, scope.chat_id);
+    // A question still pending at turn end can never be legitimately
+    // answered (its turn is over): drain the resolvers NOW, or a late
+    // `respond_input` finds one, emits InputResolved, and un-parks
+    // the session into Working with no turn behind it — stranded
+    // Working, timer forever, reaper disarmed. Empty answers unblock
+    // the harness-side bridge like an interrupt does.
+    let pending = lock(&inner.runs)
+        .get(chat_id)
+        .filter(|h| h.run_id == scope.run_id)
+        .map(|h| h.pending_inputs.clone());
+    if let Some(pending) = pending {
+        for (_, tx) in lock(&pending).drain() {
+            let _ = tx.send(Vec::new());
+        }
+    }
+    let message_status = match status {
+        DoneStatus::Interrupted => MessageStatus::Aborted,
+        DoneStatus::Completed | DoneStatus::Errored => MessageStatus::Complete,
+    };
+    // No dangling chips: a run that ends for ANY reason (completed,
+    // errored, interrupted) terminally resolves its input parts — an
+    // unresolved question must not outlive the run that asked it
+    // (its resolver died with the run; an answer could never land).
+    for part in seg.folded.iter_mut() {
+        if let MessagePart::Input { resolved, .. } = part {
+            *resolved = true;
+        }
+    }
+    // A Done landing on a PARKED session with nothing streamed (the
+    // idle reaper's or an interrupt's own teardown) has no entry to
+    // finalize — writing one would leave an empty aborted stub.
+    if seg.streamed() {
+        if let Err(err) = seg.finish(message_status) {
+            tracing::warn!(chat = %chat_id, error = %err, "final segment finish failed");
+        }
+        inner.note_message(chat_id, &folded_text(&seg.folded));
+        if let Some(host) = inner.doc_host() {
+            host.flush_chat_sync(chat_id);
+        }
+    }
+    if status == DoneStatus::Completed {
+        // A cleanly completed turn resets the auto-resume revival
+        // budget: only consecutive crash-revive-crash cycles spend it.
+        inner.journal.clear_resume_attempts(chat_id);
+    }
+    // Exchange completed on an untitled chat → name it (fire-and-forget;
+    // interrupted/errored turns never trigger naming).
+    if status == DoneStatus::Completed
+        && !inner.is_ephemeral(chat_id)
+        && let Some(titles) = inner.titles.get()
+    {
+        titles.maybe_generate(chat_id, scope.harness_id, scope.user_prompt, scope.run_cwd);
+    }
+    // PERSISTENT SESSION: a cleanly completed turn on a steerable
+    // harness PARKS instead of ending — child + mailbox stay warm for
+    // the next routed dispatch; per-turn state resets for it.
+    // A Pi-package change mid-turn bumps `plugin_epoch`: skip the park
+    // so the next send respawns against the new settings.json.
+    if status == DoneStatus::Completed && scope.steerable && !interrupted {
+        if inner.plugin_epoch.load(Ordering::SeqCst) != scope.plugin_epoch {
+            tracing::info!(
+                chat = %chat_id,
+                "ending session so the next turn loads updated Pi packages"
+            );
+            return DoneFlow::End(SessionStatus::Idle);
+        }
+        // Resume-retry is strictly a first-turn concern.
+        *saw_session_started = true;
+        park(scope, seg, idle_since, self_continued_turn);
+        return DoneFlow::Park;
+    }
+    DoneFlow::End(match status {
+        DoneStatus::Errored => SessionStatus::Errored,
+        _ => SessionStatus::Idle,
+    })
+}
+
+/// Re-dispatch steers a dying run accepted into its mailbox but never
+/// confirmed with a Steered boundary (idle-reaper race, a mid-turn error
+/// discarding queued boundary steers, a parked child death). Their user
+/// entries are already in the transcript — a message that shows as sent must
+/// never silently not run. Each becomes a fresh turn (write_user_message
+/// dedupes by id; resume is engine-injected).
+fn redispatch_orphans(scope: &RunScope<'_>, orphans: Vec<RoutedSteer>) {
+    let engine = SessionsEngine {
+        inner: scope.inner.clone(),
+    };
+    let chat = scope.chat_id.to_string();
+    let harness_id = scope.harness_id;
+    tokio::spawn(async move {
+        for steer in orphans {
+            let Some(mut request) = engine.last_request(&chat) else {
+                tracing::warn!(chat = %chat, "orphaned steer lost: no run config to re-dispatch");
+                break;
+            };
+            request.prompt = steer.prompt.clone();
+            request.resume = None;
+            request.attachments = Vec::new();
+            tracing::info!(chat = %chat, "re-dispatching steer orphaned by a dying run");
+            if let Err(err) = engine
+                .dispatch_augmented(
+                    &chat,
+                    harness_id,
+                    request,
+                    steer.agent_prompt.clone(),
+                    Some(steer.message_id.clone()),
+                )
+                .await
+            {
+                tracing::warn!(chat = %chat, error = %err, "orphaned steer re-dispatch failed");
+                engine
+                    .inner
+                    .set_status(&chat, SessionStatus::Errored, false);
+                break;
+            }
+        }
+    });
 }
 
 #[cfg(test)]

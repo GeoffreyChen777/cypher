@@ -46,6 +46,9 @@ struct StubState {
     token_ttl: AtomicUsize,
     /// org_id claim for exchange-minted tokens ("" = none).
     exchange_org: Mutex<String>,
+    /// Answer /auth/exchange with WorkOS's email-verification challenge.
+    require_email_verification: AtomicBool,
+    verifications: AtomicUsize,
 }
 
 struct StubEdge {
@@ -105,6 +108,15 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
                 return;
             }
             let n = state.exchanges.fetch_add(1, Ordering::SeqCst) + 1;
+            if state.require_email_verification.load(Ordering::SeqCst) {
+                respond(
+                    &mut stream,
+                    "409 Conflict",
+                    r#"{"code":"email_verification_required","pendingAuthenticationToken":"pending-1","email":"w@example.com"}"#,
+                )
+                .await;
+                return;
+            }
             if state.block_exchange.load(Ordering::SeqCst) {
                 state.exchange_started.notify_one();
                 state.release_exchange.notified().await;
@@ -116,6 +128,26 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
                           "firstName": "Wing", "lastName": "Test" },
                 "accessToken": token,
                 "refreshToken": format!("refresh-{n}"),
+            });
+            respond(&mut stream, "200 OK", &response.to_string()).await;
+        }
+        ("POST", "/auth/verify-email") => {
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            state.verifications.fetch_add(1, Ordering::SeqCst);
+            let accepted = parsed
+                .get("pendingAuthenticationToken")
+                .and_then(|v| v.as_str())
+                == Some("pending-1")
+                && parsed.get("code").and_then(|v| v.as_str()) == Some("123456");
+            if !accepted {
+                respond(&mut stream, "400 Bad Request", r#"{"error":"bad code"}"#).await;
+                return;
+            }
+            let org = state.exchange_org.lock().expect("lock").clone();
+            let response = serde_json::json!({
+                "user": { "id": "user_1", "email": "w@example.com" },
+                "accessToken": fake_jwt(ttl, (!org.is_empty()).then_some(org.as_str())),
+                "refreshToken": "verified-1",
             });
             respond(&mut stream, "200 OK", &response.to_string()).await;
         }
@@ -468,6 +500,107 @@ async fn loopback_callback_completes_headed_sign_in() {
     assert!(
         matches!(auth.state(), AuthState::SignedIn { org_id: Some(org), user } if org == "org_1" && user.name.as_deref() == Some("Wing Test"))
     );
+}
+
+#[tokio::test]
+async fn loopback_verify_completes_email_verification() {
+    let edge = StubEdge::start().await;
+    edge.state
+        .require_email_verification
+        .store(true, Ordering::SeqCst);
+    *edge.state.exchange_org.lock().expect("lock") = "org_1".into();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+
+    let url = auth.start_sign_in().await.expect("authorize url");
+    let state = query_param(&url, "state").expect("state");
+    let callback = query_param(&url, "redirect_uri")
+        .expect("redirect")
+        .replace("%3A", ":")
+        .replace("%2F", "/");
+    let verify = callback.replace("/callback", "/verify");
+    let http = reqwest::Client::new();
+    let post = |body: String| {
+        http.post(&verify)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(body)
+            .send()
+    };
+
+    // The callback's exchange is challenged: the browser gets the code form.
+    let challenged = reqwest::get(format!("{callback}?code=abc&state={state}"))
+        .await
+        .expect("cb");
+    assert_eq!(challenged.status().as_u16(), 200);
+    let form = challenged.text().await.expect("form page");
+    assert!(form.contains("action='/verify'"), "{form}");
+    assert!(auth.email_verification_pending());
+    assert!(!auth.state().is_signed_in());
+
+    // A malformed code re-renders the form without reaching the edge.
+    let malformed = post(format!("state={state}&code=12")).await.expect("post");
+    assert_eq!(malformed.status().as_u16(), 400);
+    assert!(
+        malformed
+            .text()
+            .await
+            .expect("page")
+            .contains("Enter the six-digit code")
+    );
+    assert_eq!(edge.state.verifications.load(Ordering::SeqCst), 0);
+
+    // A code the edge rejects keeps the verification pending.
+    let rejected = post(format!("state={state}&code=000000"))
+        .await
+        .expect("post");
+    assert_eq!(rejected.status().as_u16(), 400);
+    assert!(
+        rejected
+            .text()
+            .await
+            .expect("page")
+            .contains("That code was not accepted")
+    );
+    assert!(auth.email_verification_pending());
+
+    // An unknown state is an invalid link, by GET as well as POST.
+    let unknown = reqwest::get(format!("{verify}?state=wrong&code=123456"))
+        .await
+        .expect("get");
+    assert_eq!(unknown.status().as_u16(), 400);
+    assert!(
+        unknown
+            .text()
+            .await
+            .expect("page")
+            .contains("Invalid or expired sign-in link")
+    );
+
+    // The right code signs in and retires the pending verification.
+    let accepted = post(format!("state={state}&code=123456"))
+        .await
+        .expect("post");
+    assert_eq!(accepted.status().as_u16(), 200);
+    assert!(
+        accepted
+            .text()
+            .await
+            .expect("page")
+            .contains("Email verified and signed in")
+    );
+    let mut state_rx = auth.watch_state();
+    wait_for(&mut state_rx, |s| s.is_signed_in()).await;
+    assert!(!auth.email_verification_pending());
+    assert_eq!(edge.state.verifications.load(Ordering::SeqCst), 2);
+    let replay = post(format!("state={state}&code=123456"))
+        .await
+        .expect("post");
+    assert_eq!(replay.status().as_u16(), 400);
+
+    let missing = reqwest::get(callback.replace("/callback", "/nope"))
+        .await
+        .expect("get");
+    assert_eq!(missing.status().as_u16(), 404);
 }
 
 #[tokio::test]

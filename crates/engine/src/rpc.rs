@@ -25,8 +25,8 @@ use tokio::sync::watch;
 
 use cypher_doc::{MessagePart, SessionCommandPayload, SessionCommandStatus};
 use cypher_proto::{
-    ChildAgentProfile, EngineInfo, HarnessId, RunRequest, SessionForkRequest, SideChatSource,
-    ToolCall, WorkspaceScope,
+    ChildAgentProfile, EngineInfo, HarnessId, RunRequest, SessionForkRequest, ToolCall,
+    WorkspaceScope,
 };
 use cypher_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
@@ -42,26 +42,35 @@ use crate::terminals::Terminals;
 use crate::uploads::Uploads;
 use crate::workspace_host::WorkspaceHost;
 
+mod chats;
+mod diffs;
+mod docs;
+mod files;
+mod github;
+mod harnesses;
+mod mcp;
+mod mutate;
 mod params;
+mod pi;
+mod repos;
+mod settings;
+mod terminals;
+mod updates;
+mod uploads;
+
 use params::*;
 
-const FILE_SEARCH_RPC_TIMEOUT: Duration = Duration::from_secs(6);
-const FILE_SEARCH_FEATURED_PATHS: usize = 32;
+fn failed(e: impl std::fmt::Display) -> RpcError {
+    RpcError::Failed(e.to_string())
+}
 
-fn tool_file_path(call: &ToolCall) -> Option<&str> {
-    match call {
-        ToolCall::ReadFile { path }
-        | ToolCall::WriteFile { path, .. }
-        | ToolCall::EditFile { path, .. } => Some(path),
-        ToolCall::ApplyPatch { path } | ToolCall::Search { path, .. } => path.as_deref(),
-        ToolCall::Exec { .. }
-        | ToolCall::Glob { .. }
-        | ToolCall::WebFetch { .. }
-        | ToolCall::WebSearch { .. }
-        | ToolCall::Todo { .. }
-        | ToolCall::Mcp { .. }
-        | ToolCall::Unknown { .. } => None,
+/// Drop the routing field before a strict parse: the forwarder has consumed it,
+/// and an explicit local target still carries it.
+fn strip_target(mut params: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = params.as_object_mut() {
+        object.remove("targetDeviceId");
     }
+    params
 }
 
 pub struct EngineRpc {
@@ -221,445 +230,66 @@ impl EngineRpc {
         self.sessions.recycle_idle_sessions().await;
     }
 
+    /// Reject a selection naming a model outside THIS device's Pi catalog.
+    async fn require_pi_catalog_models(
+        &self,
+        models: &[impl AsRef<str>],
+        timeout: Duration,
+        missing: &'static str,
+    ) -> Result<(), RpcError> {
+        let harness = self.registry.resolve(HarnessId::Pi).map_err(failed)?;
+        let available = tokio::time::timeout(timeout, harness.models())
+            .await
+            .map_err(|_| RpcError::Failed("Model catalog timed out".into()))?
+            .map_err(failed)?
+            .into_iter()
+            .map(|model| model.id)
+            .collect::<HashSet<_>>();
+        if models
+            .iter()
+            .any(|model| !available.contains(model.as_ref()))
+        {
+            return Err(RpcError::BadParams(missing.into()));
+        }
+        Ok(())
+    }
+
     fn local_importer(&self) -> Result<&crate::local_import::LocalImporter, RpcError> {
         self.local_import
             .as_ref()
             .ok_or_else(|| RpcError::Failed("local import requires a synced workspace".into()))
     }
 
-    /// Resolve a mention-search root from synced workspace rows. A client may
-    /// name an existing linked worktree for a new chat, but it is verified
-    /// against the space repository before any filesystem walk begins.
-    async fn file_search_root(&self, p: &FileSearchParams) -> Result<std::path::PathBuf, RpcError> {
-        let local_device = self.doc_host.device_id();
-        match (&p.chat_id, &p.space_id) {
-            (Some(_), Some(_)) | (None, None) => Err(RpcError::BadParams(
-                "SearchFiles needs exactly one of chatId or spaceId".into(),
-            )),
-            (Some(chat_id), None) => {
-                if p.path.is_some() {
-                    return Err(RpcError::BadParams(
-                        "SearchFiles path applies only to a space".into(),
-                    ));
-                }
-                let chat = self
-                    .workspace
-                    .chat(chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?
-                    .ok_or_else(|| RpcError::Failed("chat not found".into()))?;
-                if chat.device_id != local_device {
-                    return Err(RpcError::Failed("chat belongs to another device".into()));
-                }
-                let cwd = chat
-                    .cwd
-                    .map(|cwd| std::path::PathBuf::from(expand_home(&cwd)))
-                    .ok_or_else(|| RpcError::Failed("chat has no workspace folder".into()))?;
-                let space_id = chat
-                    .space_id
-                    .ok_or_else(|| RpcError::Failed("chat has no workspace space".into()))?;
-                let space = self
-                    .workspace
-                    .space(&space_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?
-                    .ok_or_else(|| RpcError::Failed("chat workspace space not found".into()))?;
-                if space.device_id != local_device {
-                    return Err(RpcError::Failed(
-                        "chat space belongs to another device".into(),
-                    ));
-                }
-                if let Some(cwd) = self
-                    .repos
-                    .workspace_checkout(std::path::Path::new(&space.path), &cwd)
-                    .await
-                {
-                    Ok(cwd)
-                } else {
-                    Err(RpcError::Failed(
-                        "chat folder is not a workspace checkout".into(),
-                    ))
-                }
-            }
-            (None, Some(space_id)) => {
-                let space = self
-                    .workspace
-                    .space(space_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?
-                    .ok_or_else(|| RpcError::Failed("space not found".into()))?;
-                if space.device_id != local_device {
-                    return Err(RpcError::Failed("space belongs to another device".into()));
-                }
-                let space_path = std::path::PathBuf::from(&space.path);
-                let requested = p
-                    .path
-                    .as_deref()
-                    .map_or_else(|| space_path.clone(), std::path::PathBuf::from);
-                if let Some(requested) =
-                    self.repos.workspace_checkout(&space_path, &requested).await
-                {
-                    Ok(requested)
-                } else {
-                    Err(RpcError::BadParams(
-                        "SearchFiles path is not a workspace checkout".into(),
-                    ))
-                }
-            }
-        }
-    }
-
-    /// Most-recent-first paths the current chat actually touched, followed by
-    /// files still changed in its checkout. The search worker validates and
-    /// normalizes them against the resolved root before using them as ranking
-    /// hints, so stale or out-of-workspace tool paths simply disappear.
-    fn featured_file_paths(&self, chat_id: &str) -> Vec<String> {
-        let mut paths = Vec::new();
-        let mut seen = HashSet::new();
-        if let Ok(handle) = self.doc_host.open(chat_id)
-            && let Ok(entries) = handle.doc().read_entries()
+    /// Config changes the active MCP / provider sign-in would race.
+    fn refuse_during_login(&self, method: &str) -> Result<(), RpcError> {
+        if self.mcp_logins.active()
+            && matches!(
+                method,
+                methods::ADD_MCP_SERVERS
+                    | methods::REMOVE_MCP_SERVER
+                    | methods::SET_MCP_SERVER_ENABLED
+                    | methods::START_MCP_AUTH
+                    | methods::LOGOUT_MCP_SERVER
+            )
         {
-            for entry in entries.into_iter().rev() {
-                for part in entry.parts.into_iter().rev() {
-                    if let MessagePart::Tool { call, .. } = part
-                        && let Some(path) = tool_file_path(&call)
-                        && !path.trim().is_empty()
-                        && seen.insert(path.to_string())
-                    {
-                        paths.push(path.to_string());
-                        if paths.len() == FILE_SEARCH_FEATURED_PATHS {
-                            break;
-                        }
-                    }
-                }
-                if paths.len() == FILE_SEARCH_FEATURED_PATHS {
-                    break;
-                }
-            }
-        }
-
-        if let Ok(Some(chat)) = self.workspace.chat(chat_id) {
-            let diffs = self.diff_sync.watch_diffs().borrow().clone();
-            let diff = chat
-                .checkout_id
-                .as_deref()
-                .and_then(|id| diffs.iter().find(|diff| diff.checkout_id == id))
-                .or_else(|| {
-                    // `diff.cwd` is a real canonical checkout root, so the row's
-                    // `~` has to be expanded before it can ever match.
-                    chat.cwd
-                        .as_deref()
-                        .map(expand_home)
-                        .and_then(|cwd| diffs.iter().find(|diff| diff.cwd == cwd))
-                });
-            if let Some(diff) = diff {
-                for file in &diff.files {
-                    if paths.len() == FILE_SEARCH_FEATURED_PATHS {
-                        break;
-                    }
-                    if seen.insert(file.path.clone()) {
-                        paths.push(file.path.clone());
-                    }
-                }
-            }
-        }
-        paths
-    }
-
-    /// `StartSubagent` handler: validate the parent (exists + hosted locally),
-    /// idempotently create the same-device child Chat with additive Cypher-owned
-    /// metadata, and queue its initial durable Pi run. Strict bounded params — a
-    /// bad frame is rejected before any row is written. On queue failure the
-    /// child row is removed so no bogus navigable row survives. Serialized by
-    /// `start_subagent_lock` so concurrent starts of the same (parent, run)
-    /// cannot race the read-then-create scan.
-    async fn start_subagent(&self, params: StartSubagentParams) -> Result<RpcReply, RpcError> {
-        // One `StartSubagent` at a time: the idempotence scan, the row create,
-        // and the initial-run queue must be atomic relative to each other (a
-        // concurrent duplicate must see the row we just created and never
-        // double-queue). Everything below is synchronous, but the guard is held
-        // across the whole operation for the same reason.
-        let _guard = self.start_subagent_lock.lock().await;
-
-        // Strict bounds (mirror the extension's own publisher caps + headroom).
-        let bad = |msg: &str| RpcError::BadParams(msg.into());
-        if params.parent_chat_id.chars().count() > 256 {
-            return Err(bad("parentChatId too long"));
-        }
-        if params.run_id.chars().count() > 200 {
-            return Err(bad("runId too long"));
-        }
-        if params.agent.chars().count() > 100 || params.agent.trim().is_empty() {
-            return Err(bad("agent invalid"));
-        }
-        if params.task.chars().count() > 500 {
-            return Err(bad("task too long"));
-        }
-        if params
-            .prompt
-            .as_deref()
-            .is_some_and(|p| p.len() > 64 * 1024)
-        {
-            return Err(bad("prompt too large"));
-        }
-        if params.system_prompt.len() > 64 * 1024 {
-            return Err(bad("systemPrompt too large"));
-        }
-        if params.message_root.chars().count() > 512 {
-            return Err(bad("messageRoot too long"));
-        }
-        if params.tools.len() > 32
-            || params
-                .tools
-                .iter()
-                .any(|t| t.chars().count() > 128 || t.trim().is_empty())
-        {
-            return Err(bad("tools invalid"));
-        }
-        if params
-            .cwd
-            .as_deref()
-            .is_some_and(|c| c.chars().count() > 1024)
-        {
-            return Err(bad("cwd too long"));
-        }
-        if params
-            .address
-            .as_deref()
-            .is_some_and(|a| a.chars().count() > 256 || a.trim().is_empty())
-        {
-            return Err(bad("address invalid"));
-        }
-        if params.child_index > 32 {
-            return Err(bad("childIndex too large"));
-        }
-        if params
-            .model
-            .as_deref()
-            .is_some_and(|m| m.chars().count() > 200 || m.trim().is_empty())
-        {
-            return Err(bad("model invalid"));
-        }
-        if params
-            .thinking
-            .as_deref()
-            .is_some_and(|t| t.chars().count() > 32 || t.trim().is_empty())
-        {
-            return Err(bad("thinking invalid"));
-        }
-
-        let parent = self
-            .workspace
-            .chat(&params.parent_chat_id)
-            .map_err(|e| RpcError::Failed(e.to_string()))?
-            .ok_or_else(|| RpcError::Failed("parent chat not found".into()))?;
-        if parent.device_id != self.doc_host.device_id() {
             return Err(RpcError::Failed(
-                "parent chat is not hosted on this device".into(),
+                "Finish or cancel the active MCP sign-in before changing MCP configuration.".into(),
             ));
         }
-
-        let title = if params.task.trim().is_empty() {
-            format!("{} subagent", params.agent)
-        } else {
-            let head: String = params.task.trim().chars().take(60).collect();
-            format!("{} · {}", params.agent, head)
-        };
-        let profile = ChildAgentProfile {
-            system_prompt: params.system_prompt.clone(),
-            tools: params.tools.clone(),
-            model: params.model.clone(),
-            thinking: params.thinking.clone(),
-        };
-        // One resolved cwd for BOTH the persisted row and the initial run, so a
-        // child's second turn never silently drifts back to the parent's folder.
-        let child_cwd = params
-            .cwd
-            .clone()
-            .filter(|c| !c.trim().is_empty())
-            .or_else(|| parent.cwd.clone());
-        let child_chat_id = self
-            .workspace
-            .create_child_chat(
-                &parent,
-                &params.run_id,
-                &params.agent,
-                &params.task,
-                params.mode,
-                params.tool_call_id.clone(),
-                profile,
-                &title,
-                child_cwd.clone(),
+        if self.provider_logins.active()
+            && matches!(
+                method,
+                methods::SAVE_PI_PROVIDER
+                    | methods::LOGOUT_PI_PROVIDER
+                    | methods::REMOVE_PI_PROVIDER
+                    | methods::BEGIN_PI_PROVIDER_LOGIN
             )
-            .map_err(|e| RpcError::Failed(e.to_string()))?;
-        let child_id = child_chat_id.id().to_string();
-
-        // Does the initial Run still need to be queued? A FRESH child always
-        // does. An EXISTING child does only when its row is an orphan — no
-        // Pending/Applied Run in the durable ledger AND no dispatch evidence
-        // (a message or harness session on the row). That is exactly the
-        // crash-gap state (row created, process died before queueing) or a
-        // child whose only run command was rejected/expired/cancelled.
-        // Ordinary retries — the initial run already queued or already
-        // dispatched — return the id WITHOUT queueing a second Run.
-        let needs_initial_run = if child_chat_id.created() {
-            true
-        } else {
-            !self.child_initial_run_evident(&child_id)?
-        };
-
-        if needs_initial_run {
-            // Remember the messaging channel LOCALLY (never synced — the
-            // channel root is an absolute host-local path) so the initial
-            // queued run below can reach the parent's message root. Consumed at
-            // first dispatch; later child turns have no channel.
-            self.sessions.register_child_channel(
-                &child_id,
-                &params.message_root,
-                params.child_index,
-                params.address.as_deref().filter(|a| *a != params.agent),
-            );
-
-            // The normal durable Run command (idempotent by child chat + message id;
-            // the engine's own executor picks it up and dispatches through the pi
-            // harness with the child's persisted profile + local messaging channel).
-            let task = params
-                .prompt
-                .as_deref()
-                .filter(|p| !p.trim().is_empty())
-                .unwrap_or(&params.task);
-            let request = RunRequest {
-                prompt: if task.trim().is_empty() {
-                    "Task: (no description provided)".to_string()
-                } else {
-                    format!("Task: {task}")
-                },
-                harness: Some(HarnessId::Pi),
-                model: params.model.clone(),
-                reasoning: None,
-                model_options: Default::default(),
-                cwd: child_cwd.unwrap_or_else(|| "~".into()),
-                sandbox: parent
-                    .config
-                    .as_ref()
-                    .map(|c| c.sandbox)
-                    .unwrap_or(cypher_proto::SandboxLevel::WorkspaceWrite),
-                auto_approve: false,
-                resume: None,
-                worktree: None,
-                attachments: Vec::new(),
-                pending_attachments: Vec::new(),
-            };
-            if let Err(err) = self.doc_host.queue_command(
-                &child_id,
-                SessionCommandPayload::Run {
-                    request,
-                    message_id: crate::new_id(),
-                    agent_prompt: None,
-                },
-            ) {
-                // Rollback: no bogus navigable row — the queue is what makes the
-                // child real. The local channel entry goes with it.
-                let _ = self.workspace.delete_chat(&child_id);
-                self.sessions.remove_child_channel(&child_id);
-                return Err(RpcError::Failed(format!("child start queue failed: {err}")));
-            }
-        }
-        RpcReply::value(&serde_json::json!({
-            "childChatId": child_id
-        }))
-    }
-
-    /// Does an EXISTING child already show its initial run was queued or
-    /// dispatched? True when the durable command ledger holds a Pending or
-    /// Applied Run command, or the chat row carries dispatch evidence
-    /// (`last_message_at` set, or a harness session id recorded). False for an
-    /// orphan row — the crash gap between row creation and queueing, or a child
-    /// whose only run command was rejected/expired/cancelled — which the caller
-    /// then recovers by registering the fresh channel and queueing exactly one
-    /// initial Run.
-    fn child_initial_run_evident(&self, child_id: &str) -> Result<bool, RpcError> {
-        if let Some(chat) = self
-            .workspace
-            .chat(child_id)
-            .map_err(|e| RpcError::Failed(e.to_string()))?
-            && (chat.last_message_at.is_some() || chat.harness_session_id.is_some())
         {
-            // A message or a harness session means the initial run dispatched —
-            // it must have been queued to dispatch.
-            return Ok(true);
+            return Err(RpcError::Failed(
+                "Finish or cancel the active provider sign-in before changing providers.".into(),
+            ));
         }
-        match self.doc_host.open(child_id) {
-            Ok(handle) => {
-                let commands = handle
-                    .doc()
-                    .read_commands()
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                Ok(commands.iter().any(|c| {
-                    matches!(c.payload, SessionCommandPayload::Run { .. })
-                        && matches!(
-                            c.status,
-                            SessionCommandStatus::Pending | SessionCommandStatus::Applied
-                        )
-                }))
-            }
-            // No (readable) ledger — treat as an orphan: the caller recovers by
-            // queueing the initial Run rather than leaving the row stuck.
-            Err(_) => Ok(false),
-        }
-    }
-
-    /// `WatchAgentEvents` handler: replayable per-chat agent events from the
-    /// sessions journal/hub (journal replay after `afterSeq`, then live). The
-    /// parent extension subscribes to the child chat and maps terminal
-    /// `Done.result` back into its own result semantics.
-    fn watch_agent_events(&self, chat_id: String, after_seq: u64) -> Result<RpcReply, RpcError> {
-        let (replay, rx) = self
-            .sessions
-            .subscribe(&chat_id, after_seq)
-            .map_err(|e| RpcError::Failed(e.to_string()))?;
-        // The hub subscription opens before the journal is read, so an event
-        // published in between is in both; the live leg starts after the
-        // newest replayed seq (a doubled text delta would double the text).
-        let replayed_through = replay.last().map(|entry| entry.seq).unwrap_or(0);
-        let replay = futures::stream::iter(replay.into_iter().map(|entry| {
-            serde_json::to_value(&entry.event).map_err(|e| RpcError::Failed(e.to_string()))
-        }));
-        // Journaled events are tagged JSON (`AgentEvent`'s own serde); the
-        // live hub carries the same shape. A lagging subscriber skips the
-        // deltas it missed rather than ending the stream: the parent extension
-        // treats an ended stream as a lost child, and the terminal `Done` it
-        // waits for is still ahead of it.
-        let live = futures::stream::unfold(rx, move |mut rx| async move {
-            loop {
-                match rx.recv().await {
-                    Ok(entry) if entry.seq != 0 && entry.seq <= replayed_through => continue,
-                    Ok(entry) => {
-                        let value = serde_json::to_value(&entry.event)
-                            .map_err(|e| RpcError::Failed(e.to_string()));
-                        return Some((value, rx));
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-                }
-            }
-        });
-        let stream = replay
-            .chain(live)
-            .filter_map({
-                let chat_id = chat_id.clone();
-                move |item: Result<serde_json::Value, RpcError>| {
-                    let chat = chat_id.clone();
-                    async move {
-                        match item {
-                            Ok(value) => Some(value),
-                            Err(err) => {
-                                tracing::warn!(chat = %chat, error = %err, "watch agent events serialization failed");
-                                None
-                            }
-                        }
-                    }
-                }
-            })
-            .boxed();
-        Ok(RpcReply::Stream(stream))
+        Ok(())
     }
 
     /// Forward a device-addressed call over the target device's relay. On transport
@@ -723,192 +353,54 @@ impl EngineRpc {
             }
         }
     }
+}
 
-    fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
-        let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
-        match params {
-            MutateParams::CreateChat {
-                chat_id,
-                space_id,
-                device_id,
-                config,
-                branch,
-                cwd,
-            } => {
-                self.workspace
-                    .create_chat(
-                        &chat_id,
-                        space_id.as_deref(),
-                        device_id.as_deref(),
-                        config,
-                        cwd,
-                    )
-                    .map_err(failed)?;
-                if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
-                    self.workspace
-                        .set_chat_branch(&chat_id, branch)
-                        .map_err(failed)?;
-                }
-                Ok(())
-            }
-            MutateParams::CreateSpace {
-                space_id,
-                device_id,
-                path,
-                name,
-                git_detected,
-            } => self
-                .workspace
-                .create_space(&space_id, &device_id, &path, name, git_detected)
-                .map_err(failed),
-            MutateParams::RenameSpace { space_id, name } => self
-                .workspace
-                .rename_space(&space_id, name.as_deref())
-                .map_err(failed)
-                .map(drop),
-            MutateParams::DeleteSpace { space_id } => {
-                let deleted = self.workspace.delete_space(&space_id).map_err(failed)?;
-                // Best-effort teardown of live runs we host for the deleted chats
-                // (the doc rows are already tombstoned; a straggler run would only
-                // write into an orphaned session doc).
-                let sessions = self.sessions.clone();
-                let doc_host = self.doc_host.clone();
-                let chat_ids = deleted.chat_ids;
-                tokio::spawn(async move {
-                    for chat_id in chat_ids {
-                        if let Err(err) = sessions.interrupt(&chat_id).await {
-                            tracing::debug!(chat = %chat_id, error = %err, "deleteSpace interrupt skipped");
-                        }
-                        doc_host.purge_chat(&chat_id);
-                    }
-                });
-                Ok(())
-            }
-            MutateParams::RenameChat { chat_id, title } => self
-                .workspace
-                .rename_chat(&chat_id, &title)
-                .map_err(failed)
-                .map(drop),
-            MutateParams::SetChatBranch { chat_id, branch } => self
-                .workspace
-                .set_chat_branch(&chat_id, &branch)
-                .map_err(failed)
-                .map(drop),
-            MutateParams::SetChatCwd { chat_id, cwd } => self
-                .workspace
-                .set_chat_cwd(&chat_id, &cwd)
-                .map_err(failed)
-                .map(drop),
-            MutateParams::SetChatActivity {
-                chat_id,
-                last_message_at,
-                created_at,
-            } => self
-                .workspace
-                .set_chat_activity(&chat_id, last_message_at, created_at)
-                .map_err(failed)
-                .map(drop),
-            MutateParams::SetChatHost { chat_id, device_id } => self
-                .workspace
-                .set_chat_host(&chat_id, &device_id)
-                .map_err(failed)
-                .map(drop),
-            MutateParams::SetChatArchived { chat_id, archived } => self
-                .workspace
-                .set_chat_archived(&chat_id, archived)
-                .map_err(failed)
-                .map(drop),
-            MutateParams::SetChatPinned { chat_id, pinned } => self
-                .workspace
-                .set_chat_pinned(&chat_id, pinned)
-                .map_err(failed)
-                .map(drop),
-            MutateParams::SetSpacePinned { space_id, pinned } => self
-                .workspace
-                .set_space_pinned(&space_id, pinned)
-                .map_err(failed)
-                .map(drop),
-            MutateParams::SetSpaceAppearance {
-                space_id,
-                icon,
-                color,
-            } => self
-                .workspace
-                .set_space_appearance(&space_id, icon.as_deref(), color.as_deref())
-                .map_err(failed)
-                .map(drop),
-            MutateParams::SetChatConfig { chat_id, config } => self
-                .workspace
-                .set_chat_config(&chat_id, &config)
-                .map_err(failed)
-                .map(drop),
-            MutateParams::DeleteChat { chat_id } => {
-                // Parent delete CASCADES to its Cypher child chats (rows + docs +
-                // session interruption): a deleted parent must not leave orphaned
-                // navigable child rows behind (no dangling navigation). Child rows
-                // are tombstoned in the same mutation, then torn down async.
-                let children = self.workspace.child_chats(&chat_id).map_err(failed)?;
-                self.workspace.delete_chat(&chat_id).map_err(failed)?;
-                self.doc_host.purge_chat(&chat_id);
-                if !children.is_empty() {
-                    let sessions = self.sessions.clone();
-                    let doc_host = self.doc_host.clone();
-                    let workspace = self.workspace.clone();
-                    tokio::spawn(async move {
-                        for child in children {
-                            // Interrupt first so the run settles and its
-                            // terminal bookkeeping lands BEFORE the row goes
-                            // (a live run's late claim could otherwise
-                            // resurrect the tombstoned row).
-                            if let Err(err) = sessions.interrupt(&child.id).await {
-                                tracing::debug!(chat = %child.id, error = %err, "child interrupt skipped");
-                            }
-                            // The host-local channel entry (initial-run only)
-                            // dies with the row.
-                            sessions.remove_child_channel(&child.id);
-                            let _ = workspace.delete_chat(&child.id);
-                            doc_host.purge_chat(&child.id);
-                        }
-                    });
-                }
-                Ok(())
-            }
-            MutateParams::RenameDevice { device_id, name } => self
-                .workspace
-                .rename_device(&device_id, &name)
-                .map_err(failed)
-                .map(drop),
-            MutateParams::DeleteDevice { device_id } => self
-                .workspace
-                .delete_device(&device_id)
-                .map_err(failed)
-                .map(drop),
-            #[cfg(feature = "development")]
-            MutateParams::SeedDevice {
-                device_id,
-                name,
-                platform,
-                last_seen_at,
-            } => self
-                .workspace
-                .seed_device(
-                    &device_id,
-                    &name,
-                    &platform,
-                    last_seen_at.and_then(chrono::DateTime::from_timestamp_millis),
-                )
-                .map_err(failed),
-            MutateParams::MarkChatSeen { chat_id, at } => {
-                let at = at
-                    .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
-                    .unwrap_or_else(chrono::Utc::now);
-                self.workspace
-                    .mark_chat_seen(&chat_id, at)
-                    .map_err(failed)
-                    .map(drop)
-            }
-        }
+/// Checks that run before a call can be forwarded: a blank `targetDeviceId`, and
+/// bodies that must never reach another device unvalidated.
+fn preflight(method: &str, params: &serde_json::Value) -> Result<(), RpcError> {
+    if forwardable(method)
+        && let Some(target) = params.get("targetDeviceId")
+        && !target.as_str().is_some_and(|id| !id.trim().is_empty())
+    {
+        return Err(RpcError::BadParams("Invalid target device.".into()));
     }
+    if method == methods::SAVE_PI_PROVIDER {
+        // Validate before forwarding, without echoing malformed credentials.
+        let body = strip_target(params.clone());
+        serde_json::from_value::<crate::pi_providers::SaveProvider>(body)
+            .map_err(|_| RpcError::BadParams("Invalid provider settings.".into()))?;
+    }
+    if method == methods::ADD_MCP_SERVERS {
+        if !params
+            .get("targetDeviceId")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            return Err(RpcError::BadParams(
+                "Select a target device before adding MCP servers.".into(),
+            ));
+        }
+        let body = strip_target(params.clone());
+        let request = serde_json::from_value::<crate::mcp::AddMcpServers>(body)
+            .map_err(|_| RpcError::BadParams("Invalid MCP configuration.".into()))?;
+        request.validate().map_err(RpcError::BadParams)?;
+    }
+    if method == methods::REMOVE_MCP_SERVER {
+        if !params
+            .get("targetDeviceId")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            return Err(RpcError::BadParams(
+                "Select a target device before deleting an MCP server.".into(),
+            ));
+        }
+        let body = strip_target(params.clone());
+        let request = serde_json::from_value::<crate::mcp::RemoveMcpServer>(body)
+            .map_err(|_| RpcError::BadParams("Invalid MCP deletion request.".into()))?;
+        request.validate().map_err(RpcError::BadParams)?;
+    }
+    Ok(())
 }
 
 /// ControlRpc methods that honor `targetDeviceId`. Extend this
@@ -1039,37 +531,6 @@ fn is_stream_method(method: &str) -> bool {
             | methods::PI_UPDATE_STATUS
             | methods::WATCH_SIDE_CHAT_STATUS
     )
-}
-
-/// The Side Chat status watch as a stream: current value first (`null` until
-/// the first transition), then every change. Ends when the private channel
-/// closes — after dispose, or at promotion when the panel switches to the
-/// normal chat surface.
-fn side_chat_status_stream(
-    side_chat_id: String,
-    rx: watch::Receiver<Option<cypher_proto::Session>>,
-) -> BoxStream<'static, serde_json::Value> {
-    use cypher_proto::SideChatStatus;
-    futures::stream::unfold(
-        (side_chat_id, rx, false),
-        |(side_chat_id, mut rx, emitted)| async move {
-            if emitted {
-                rx.changed().await.ok()?;
-            }
-            let frame = {
-                let session = rx.borrow_and_update().clone();
-                session.map(|s| SideChatStatus {
-                    side_chat_id: side_chat_id.clone(),
-                    status: s.status,
-                    started_at: s.started_at,
-                    updated_at: s.updated_at,
-                })
-            };
-            let value = serde_json::to_value(&frame).ok()?;
-            Some((value, (side_chat_id, rx, true)))
-        },
-    )
-    .boxed()
 }
 
 /// A watch receiver as a stream: current value first, then every change.
@@ -1217,16 +678,12 @@ impl RpcService for AuthRpc {
                     .auth
                     .report_notification_activity(&p.expected_user_id, &p.expected_org_id, activity)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&response)
             }
             methods::AUTH_STATUS => Ok(RpcReply::Stream(watch_stream(self.auth.watch_state()))),
             methods::SIGN_IN => {
-                let url = self
-                    .auth
-                    .start_sign_in()
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let url = self.auth.start_sign_in().await.map_err(failed)?;
                 RpcReply::value(&serde_json::json!({ "url": url }))
             }
             methods::SIGN_IN_HEADLESS => {
@@ -1239,22 +696,15 @@ impl RpcService for AuthRpc {
                     code: String,
                 }
                 let p: P = parse_params(params)?;
-                self.auth
-                    .complete_sign_in(&p.code)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                self.auth.complete_sign_in(&p.code).await.map_err(failed)?;
+                RpcReply::ok()
             }
             methods::SIGN_OUT => {
                 self.auth.sign_out();
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                RpcReply::ok()
             }
             methods::LIST_ORGS => {
-                let orgs = self
-                    .auth
-                    .list_orgs()
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let orgs = self.auth.list_orgs().await.map_err(failed)?;
                 RpcReply::value(&serde_json::json!({ "orgs": orgs }))
             }
             methods::CREATE_ORG => {
@@ -1263,11 +713,8 @@ impl RpcService for AuthRpc {
                     name: String,
                 }
                 let p: P = parse_params(params)?;
-                self.auth
-                    .create_org(&p.name)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                self.auth.create_org(&p.name).await.map_err(failed)?;
+                RpcReply::ok()
             }
             methods::SELECT_ORG => {
                 #[derive(Deserialize)]
@@ -1279,8 +726,8 @@ impl RpcService for AuthRpc {
                 self.auth
                     .select_org(&p.organization_id)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                    .map_err(failed)?;
+                RpcReply::ok()
             }
             _ => Err(RpcError::UnknownMethod(method.to_string())),
         }
@@ -1290,67 +737,7 @@ impl RpcService for AuthRpc {
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        let provider_method = matches!(
-            method,
-            methods::LIST_PI_PROVIDERS
-                | methods::SAVE_PI_PROVIDER
-                | methods::REFRESH_PI_PROVIDER
-                | methods::LOGOUT_PI_PROVIDER
-                | methods::REMOVE_PI_PROVIDER
-        );
-        if forwardable(method)
-            && let Some(target) = params.get("targetDeviceId")
-            && !target.as_str().is_some_and(|id| !id.trim().is_empty())
-        {
-            return Err(RpcError::BadParams("Invalid target device.".into()));
-        }
-        if provider_method {
-            // Validate before forwarding, without echoing malformed credentials.
-            if method == methods::SAVE_PI_PROVIDER {
-                let mut body = params.clone();
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
-                serde_json::from_value::<crate::pi_providers::SaveProvider>(body)
-                    .map_err(|_| RpcError::BadParams("Invalid provider settings.".into()))?;
-            }
-        }
-        if method == methods::ADD_MCP_SERVERS {
-            if !params
-                .get("targetDeviceId")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| !id.trim().is_empty())
-            {
-                return Err(RpcError::BadParams(
-                    "Select a target device before adding MCP servers.".into(),
-                ));
-            }
-            let mut body = params.clone();
-            if let Some(object) = body.as_object_mut() {
-                object.remove("targetDeviceId");
-            }
-            let request = serde_json::from_value::<crate::mcp::AddMcpServers>(body)
-                .map_err(|_| RpcError::BadParams("Invalid MCP configuration.".into()))?;
-            request.validate().map_err(RpcError::BadParams)?;
-        }
-        if method == methods::REMOVE_MCP_SERVER {
-            if !params
-                .get("targetDeviceId")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| !id.trim().is_empty())
-            {
-                return Err(RpcError::BadParams(
-                    "Select a target device before deleting an MCP server.".into(),
-                ));
-            }
-            let mut body = params.clone();
-            if let Some(object) = body.as_object_mut() {
-                object.remove("targetDeviceId");
-            }
-            let request = serde_json::from_value::<crate::mcp::RemoveMcpServer>(body)
-                .map_err(|_| RpcError::BadParams("Invalid MCP deletion request.".into()))?;
-            request.validate().map_err(RpcError::BadParams)?;
-        }
+        preflight(method, &params)?;
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
@@ -1365,604 +752,76 @@ impl RpcService for EngineRpc {
                 .handle(method, params)
                 .await;
         }
-        if self.mcp_logins.active()
-            && matches!(
-                method,
-                methods::ADD_MCP_SERVERS
-                    | methods::REMOVE_MCP_SERVER
-                    | methods::SET_MCP_SERVER_ENABLED
-                    | methods::START_MCP_AUTH
-                    | methods::LOGOUT_MCP_SERVER
-            )
-        {
-            return Err(RpcError::Failed(
-                "Finish or cancel the active MCP sign-in before changing MCP configuration.".into(),
-            ));
-        }
-        if self.provider_logins.active()
-            && matches!(
-                method,
-                methods::SAVE_PI_PROVIDER
-                    | methods::LOGOUT_PI_PROVIDER
-                    | methods::REMOVE_PI_PROVIDER
-                    | methods::BEGIN_PI_PROVIDER_LOGIN
-            )
-        {
-            return Err(RpcError::Failed(
-                "Finish or cancel the active provider sign-in before changing providers.".into(),
-            ));
-        }
+        self.refuse_during_login(method)?;
         match method {
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
             methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
-            methods::SET_HARNESS_ENABLED => {
-                let p: SetHarnessEnabledParams = parse_params(params)?;
-                self.registry
-                    .set_enabled(p.harness, p.enabled)
-                    .map_err(RpcError::Failed)?;
-                // Fresh catalog in the reply: the page repaints from it in one
-                // round trip, and a refused/raced toggle self-corrects.
-                RpcReply::value(&self.registry.descriptors())
-            }
+            methods::SET_HARNESS_ENABLED => harnesses::set_harness_enabled(self, params),
             methods::LIST_PI_PACKAGES => {
                 RpcReply::value(&crate::pi_packages::list(self.pi_runtime()?.paths()))
             }
-            methods::INSTALL_PI => {
-                self.pi_runtime()?
-                    .install_latest()
-                    .await
-                    .map_err(RpcError::Failed)?;
-                self.registry.invalidate_discovery(HarnessId::Pi);
-                RpcReply::value(&crate::pi_packages::list(self.pi_runtime()?.paths()))
-            }
-            methods::INSTALL_PI_PACKAGE => {
-                let p: PiPackageParams = parse_params(params)?;
-                crate::pi_packages::install_package(self.pi_runtime()?.paths(), &p.source)
-                    .await
-                    .map_err(RpcError::Failed)?;
-                self.reload_pi_runtime().await;
-                RpcReply::value(&crate::pi_packages::list(self.pi_runtime()?.paths()))
-            }
-            methods::SET_PI_PACKAGE_ENABLED => {
-                let p: crate::pi_packages::SetPackageEnabled = parse_params(params)?;
-                crate::pi_packages::set_package_enabled(self.pi_runtime()?.paths(), p)
-                    .map_err(RpcError::Failed)?;
-                self.reload_pi_runtime().await;
-                RpcReply::value(&crate::pi_packages::list(self.pi_runtime()?.paths()))
-            }
+            methods::INSTALL_PI => pi::install_pi(self).await,
+            methods::INSTALL_PI_PACKAGE => pi::install_pi_package(self, params).await,
+            methods::SET_PI_PACKAGE_ENABLED => pi::set_pi_package_enabled(self, params).await,
             methods::PI_RUNTIME_STATUS => RpcReply::value(&self.pi_runtime()?.status()),
-            methods::LIST_PI_SUBAGENTS => {
-                let paths = self.pi_runtime()?.paths().clone();
-                let agents = crate::off_runtime(move || crate::pi_subagents::list(&paths))
-                    .await
-                    .map_err(RpcError::Failed)?;
-                RpcReply::value(&agents)
-            }
-            methods::SAVE_PI_SUBAGENT => {
-                let mut body = params;
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
-                let request: SavePiSubagentParams = parse_params(body)?;
-                request.agent.validate().map_err(RpcError::BadParams)?;
-                let paths = self.pi_runtime()?.paths().clone();
-                let list_paths = paths.clone();
-                crate::off_runtime(move || {
-                    crate::pi_subagents::save(
-                        &paths,
-                        &request.agent,
-                        request.original_name.as_deref(),
-                    )
-                })
-                .await
-                .map_err(RpcError::Failed)?
-                .map_err(RpcError::BadParams)?;
-                // The next child spawn has to read the new profile, and the
-                // extension loads `agents/` once per process.
-                self.reload_pi_runtime().await;
-                let agents = crate::off_runtime(move || crate::pi_subagents::list(&list_paths))
-                    .await
-                    .map_err(RpcError::Failed)?;
-                RpcReply::value(&agents)
-            }
-            methods::DELETE_PI_SUBAGENT => {
-                let mut body = params;
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
-                let request: DeletePiSubagentParams = parse_params(body)?;
-                let paths = self.pi_runtime()?.paths().clone();
-                let list_paths = paths.clone();
-                crate::off_runtime(move || crate::pi_subagents::delete(&paths, &request.name))
-                    .await
-                    .map_err(RpcError::Failed)?
-                    .map_err(RpcError::BadParams)?;
-                self.reload_pi_runtime().await;
-                let agents = crate::off_runtime(move || crate::pi_subagents::list(&list_paths))
-                    .await
-                    .map_err(RpcError::Failed)?;
-                RpcReply::value(&agents)
-            }
-            methods::GET_PI_TRANSLATION_SETTINGS => {
-                let paths = self.pi_runtime()?.paths().clone();
-                let settings = crate::off_runtime(move || crate::pi_translation::load(&paths))
-                    .await
-                    .map_err(RpcError::Failed)?;
-                RpcReply::value(&settings)
-            }
+            methods::LIST_PI_SUBAGENTS => pi::list_pi_subagents(self).await,
+            methods::SAVE_PI_SUBAGENT => pi::save_pi_subagent(self, params).await,
+            methods::DELETE_PI_SUBAGENT => pi::delete_pi_subagent(self, params).await,
+            methods::GET_PI_TRANSLATION_SETTINGS => pi::get_pi_translation_settings(self).await,
             methods::SET_PI_TRANSLATION_SETTINGS => {
-                let mut body = params;
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
-                let settings: crate::pi_translation::PiTranslationSettings = parse_params(body)?;
-                settings.validate().map_err(RpcError::BadParams)?;
-                let paths = self.pi_runtime()?.paths().clone();
-                let previous_paths = paths.clone();
-                let previous =
-                    crate::off_runtime(move || crate::pi_translation::load(&previous_paths))
-                        .await
-                        .map_err(RpcError::Failed)?;
-                // Language/display changes and deselection need no model
-                // discovery. Only newly selected ids require catalog validation.
-                let added = settings.new_model_selections(&previous);
-                if !added.is_empty() {
-                    let harness = self
-                        .registry
-                        .resolve(HarnessId::Pi)
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    let available = tokio::time::timeout(Duration::from_secs(10), harness.models())
-                        .await
-                        .map_err(|_| RpcError::Failed("Model catalog timed out".into()))?
-                        .map_err(|e| RpcError::Failed(e.to_string()))?
-                        .into_iter()
-                        .map(|model| model.id)
-                        .collect::<HashSet<_>>();
-                    if added.iter().any(|model| !available.contains(*model)) {
-                        return Err(RpcError::BadParams(
-                            "Selected model is not in this device's Pi catalog; refresh and choose again"
-                                .into(),
-                        ));
-                    }
-                }
-                let saved =
-                    crate::off_runtime(move || crate::pi_translation::save(&paths, settings))
-                        .await
-                        .and_then(|result| result)
-                        .map_err(RpcError::Failed)?;
-                // The extension reads translation.json on every input/message
-                // hook. Do not invalidate model discovery or recycle sessions.
-                RpcReply::value(&saved)
+                pi::set_pi_translation_settings(self, params).await
             }
-            methods::DETECT_PI_LANGUAGE => {
-                let p: DetectPiLanguageParams = parse_params(params)?;
-                if p.text.chars().count() > 24_000 {
-                    return Err(RpcError::BadParams(
-                        "Text is too long for offline language detection".into(),
-                    ));
-                }
-                RpcReply::value(&crate::pi_translation::detect_language(&p.text))
-            }
+            methods::DETECT_PI_LANGUAGE => pi::detect_pi_language(params),
             methods::LIST_PI_PROVIDERS
             | methods::SAVE_PI_PROVIDER
             | methods::REFRESH_PI_PROVIDER
             | methods::LOGOUT_PI_PROVIDER
-            | methods::REMOVE_PI_PROVIDER => {
-                // Routing is consumed here, never passed to the Runtime helper.
-                // Non-local requests have already been forwarded above.
-                let mut params = params;
-                if let Some(object) = params.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
-                let (action, args) = match method {
-                    methods::LIST_PI_PROVIDERS => ("list", serde_json::json!({})),
-                    methods::SAVE_PI_PROVIDER => {
-                        let p = serde_json::from_value::<crate::pi_providers::SaveProvider>(params)
-                            .map_err(|_| {
-                                RpcError::BadParams("Invalid provider settings.".into())
-                            })?;
-                        (
-                            "save",
-                            serde_json::to_value(p)
-                                .map_err(|_| RpcError::BadParams("Invalid provider.".into()))?,
-                        )
-                    }
-                    _ => {
-                        let id = params
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| RpcError::BadParams("Missing provider id.".into()))?;
-                        let action = match method {
-                            methods::REFRESH_PI_PROVIDER => "refresh",
-                            methods::LOGOUT_PI_PROVIDER => "logout",
-                            _ => "remove",
-                        };
-                        (action, serde_json::json!({ "id": id }))
-                    }
-                };
-                let result =
-                    crate::pi_providers::request(self.pi_runtime()?.paths(), action, args).await;
-                // Even a partially completed disk operation needs cache invalidation.
-                if action != "list" {
-                    self.reload_pi_runtime().await;
-                }
-                RpcReply::value(&result.map_err(RpcError::Failed)?)
-            }
-            methods::BEGIN_PI_PROVIDER_LOGIN => {
-                let id = params
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| RpcError::BadParams("Missing provider id.".into()))?;
-                let status = self
-                    .provider_logins
-                    .begin(self.pi_runtime()?.paths(), id)
-                    .map_err(RpcError::Failed)?;
-                RpcReply::value(&status)
-            }
+            | methods::REMOVE_PI_PROVIDER => pi::pi_provider(self, method, params).await,
+            methods::BEGIN_PI_PROVIDER_LOGIN => pi::begin_pi_provider_login(self, params),
             methods::PI_PROVIDER_LOGIN_STATUS
             | methods::COMPLETE_PI_PROVIDER_LOGIN
             | methods::CANCEL_PI_PROVIDER_LOGIN => {
-                let id = params
-                    .get("attemptId")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|id| id.len() <= 64)
-                    .ok_or_else(|| {
-                        RpcError::BadParams("Provider sign-in attempt ID required.".into())
-                    })?;
-                let status = match method {
-                    methods::COMPLETE_PI_PROVIDER_LOGIN => {
-                        let callback = params
-                            .get("callbackUrl")
-                            .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| RpcError::BadParams("Callback URL required.".into()))?;
-                        self.provider_logins.respond(id, callback)
-                    }
-                    methods::CANCEL_PI_PROVIDER_LOGIN => self.provider_logins.cancel(id),
-                    _ => self.provider_logins.status(id),
-                }
-                .map_err(RpcError::Failed)?;
-                if status.phase == "succeeded" {
-                    self.reload_pi_runtime().await;
-                }
-                RpcReply::value(&status)
+                pi::pi_provider_login(self, method, params).await
             }
-            // MCP helpers read and rewrite config files: blocking work, so
-            // each runs on the blocking pool.
-            methods::LIST_MCP_SERVERS => {
-                let paths = self.pi_runtime()?.paths().clone();
-                let snapshot = crate::off_runtime(move || crate::mcp::list(&paths))
-                    .await
-                    .map_err(RpcError::Failed)?;
-                RpcReply::value(&snapshot)
-            }
-            methods::ADD_MCP_SERVERS => {
-                let mut body = params;
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
-                let request = serde_json::from_value::<crate::mcp::AddMcpServers>(body)
-                    .map_err(|_| RpcError::BadParams("Invalid MCP configuration.".into()))?;
-                let paths = self.pi_runtime()?.paths().clone();
-                let snapshot = crate::off_runtime(move || crate::mcp::add_servers(&paths, request))
-                    .await
-                    .and_then(|result| result)
-                    .map_err(RpcError::Failed)?;
-                self.reload_pi_runtime().await;
-                RpcReply::value(&snapshot)
-            }
-            methods::SET_MCP_SERVER_ENABLED => {
-                let p: crate::mcp::SetMcpServerEnabled = parse_params(params)?;
-                let paths = self.pi_runtime()?.paths().clone();
-                let snapshot = crate::off_runtime(move || crate::mcp::set_enabled(&paths, p))
-                    .await
-                    .and_then(|result| result)
-                    .map_err(RpcError::Failed)?;
-                self.reload_pi_runtime().await;
-                RpcReply::value(&snapshot)
-            }
-            methods::REMOVE_MCP_SERVER => {
-                let mut body = params;
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
-                let request = serde_json::from_value::<crate::mcp::RemoveMcpServer>(body)
-                    .map_err(|_| RpcError::BadParams("Invalid MCP deletion request.".into()))?;
-                if self.sessions.any_active() {
-                    return Err(RpcError::Failed(
-                        "Finish or stop active runs on this device before deleting an MCP server."
-                            .into(),
-                    ));
-                }
-                self.sessions.recycle_idle_sessions().await;
-                let paths = self.pi_runtime()?.paths().clone();
-                let result = crate::off_runtime(move || crate::mcp::remove_server(&paths, request))
-                    .await
-                    .and_then(|result| result);
-                self.registry.invalidate_discovery(HarnessId::Pi);
-                RpcReply::value(&result.map_err(RpcError::Failed)?)
-            }
-            methods::BEGIN_MCP_LOGIN => {
-                let p: crate::mcp::McpServerName = parse_params(params)?;
-                let harness = self
-                    .registry
-                    .resolve(HarnessId::Pi)
-                    .map_err(|_| RpcError::Failed("Pi runtime unavailable.".into()))?;
-                let status = self
-                    .mcp_logins
-                    .begin(self.pi_runtime()?.paths(), p.name, harness)
-                    .map_err(RpcError::Failed)?;
-                RpcReply::value(&status)
-            }
+            methods::LIST_MCP_SERVERS => mcp::list_mcp_servers(self).await,
+            methods::ADD_MCP_SERVERS => mcp::add_mcp_servers(self, params).await,
+            methods::SET_MCP_SERVER_ENABLED => mcp::set_mcp_server_enabled(self, params).await,
+            methods::REMOVE_MCP_SERVER => mcp::remove_mcp_server(self, params).await,
+            methods::BEGIN_MCP_LOGIN => mcp::begin_mcp_login(self, params),
             methods::MCP_LOGIN_STATUS | methods::COMPLETE_MCP_LOGIN | methods::CANCEL_MCP_LOGIN => {
-                let id = params
-                    .get("attemptId")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|id| id.len() <= 64)
-                    .ok_or_else(|| {
-                        RpcError::BadParams("MCP sign-in attempt ID required.".into())
-                    })?;
-                let status = match method {
-                    methods::COMPLETE_MCP_LOGIN => {
-                        let callback = params
-                            .get("callbackUrl")
-                            .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| RpcError::BadParams("Callback URL required.".into()))?;
-                        self.mcp_logins.respond(id, callback)
-                    }
-                    methods::CANCEL_MCP_LOGIN => self.mcp_logins.cancel(id),
-                    _ => self.mcp_logins.status(id),
-                }
-                .map_err(RpcError::Failed)?;
-                if status.phase == "succeeded" {
-                    self.reload_pi_runtime().await;
-                }
-                RpcReply::value(&status)
+                mcp::mcp_login(self, method, params).await
             }
-            methods::START_MCP_AUTH => {
-                let p: crate::mcp::McpServerName = parse_params(params)?;
-                let harness = self
-                    .registry
-                    .resolve(cypher_proto::HarnessId::Pi)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let snapshot =
-                    crate::mcp::authenticate(self.pi_runtime()?.paths(), &p.name, harness.as_ref())
-                        .await
-                        .map_err(RpcError::Failed)?;
-                self.reload_pi_runtime().await;
-                RpcReply::value(&snapshot)
-            }
-            methods::LOGOUT_MCP_SERVER => {
-                let p: crate::mcp::McpServerName = parse_params(params)?;
-                let paths = self.pi_runtime()?.paths().clone();
-                let snapshot = crate::off_runtime(move || crate::mcp::logout(&paths, &p.name))
-                    .await
-                    .and_then(|result| result)
-                    .map_err(RpcError::Failed)?;
-                self.reload_pi_runtime().await;
-                RpcReply::value(&snapshot)
-            }
+            methods::START_MCP_AUTH => mcp::start_mcp_auth(self, params).await,
+            methods::LOGOUT_MCP_SERVER => mcp::logout_mcp_server(self, params).await,
             methods::GET_WEB_SEARCH_FALLBACK => RpcReply::value(&crate::web_search_fallback::load(
                 self.pi_runtime()?.paths(),
             )),
             methods::SET_WEB_SEARCH_FALLBACK => {
-                // Routing is consumed by the forwarder; strip it before the
-                // strict parse (an explicit local target also carries it).
-                let mut body = params;
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
-                let request: crate::web_search_fallback::SetWebSearchFallback = parse_params(body)?;
-                // Pinning points a real tool at one model: it must exist in
-                // THIS device's catalog (the same rule as the title model).
-                // Automatic ranks the catalog itself, and a disabled save only
-                // remembers the preference.
-                if let (true, Some(pinned)) = (request.enabled, request.model.as_deref()) {
-                    crate::web_search_fallback::validate_model(pinned)
-                        .map_err(RpcError::BadParams)?;
-                    let harness = self
-                        .registry
-                        .resolve(HarnessId::Pi)
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    let models =
-                        tokio::time::timeout(std::time::Duration::from_secs(20), harness.models())
-                            .await
-                            .map_err(|_| RpcError::Failed("Model catalog timed out".into()))?
-                            .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    if !models.iter().any(|model| model.id == pinned) {
-                        return Err(RpcError::BadParams(
-                            "Model is not in this device's Pi catalog; refresh and choose again"
-                                .into(),
-                        ));
-                    }
-                }
-                let paths = self.pi_runtime()?.paths();
-                let settings =
-                    crate::web_search_fallback::save(paths, request).map_err(RpcError::Failed)?;
-                // Enabling/disabling edits settings.json: parked Pi children
-                // and cached discovery must pick the change up.
-                self.reload_pi_runtime().await;
-                RpcReply::value(&settings)
+                settings::set_web_search_fallback(self, params).await
             }
-            methods::GET_TITLE_MODEL_SETTINGS => {
-                let store = self.title_settings.as_ref().ok_or_else(|| {
-                    RpcError::Failed(
-                        "Title settings unavailable; update this device's engine".into(),
-                    )
-                })?;
-                let settings = store.load().map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&settings)
-            }
+            methods::GET_TITLE_MODEL_SETTINGS => settings::get_title_model_settings(self),
             methods::SET_TITLE_MODEL_SETTINGS => {
-                // Require an explicit model field, including null for Auto.
-                // An accidental {} must not clear the user's chosen model.
-                if params.get("model").is_none() {
-                    return Err(RpcError::BadParams(
-                        "model is required (null selects Automatic)".into(),
-                    ));
-                }
-                let settings: cypher_proto::TitleModelSettings = parse_params(params)?;
-                crate::title_settings::validate(&settings)
-                    .map_err(|e| RpcError::BadParams(e.to_string()))?;
-                let store = self.title_settings.as_ref().ok_or_else(|| {
-                    RpcError::Failed(
-                        "Title settings unavailable; update this device's engine".into(),
-                    )
-                })?;
-                if let Some(model) = &settings.model {
-                    let harness = self
-                        .registry
-                        .resolve(HarnessId::Pi)
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    let models =
-                        tokio::time::timeout(std::time::Duration::from_secs(20), harness.models())
-                            .await
-                            .map_err(|_| RpcError::Failed("Model catalog timed out".into()))?
-                            .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    if !models.iter().any(|candidate| candidate.id == *model) {
-                        return Err(RpcError::BadParams(
-                            "Model is not in this device's Pi catalog; refresh and choose again"
-                                .into(),
-                        ));
-                    }
-                }
-                store
-                    .save(&settings)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&settings)
+                settings::set_title_model_settings(self, params).await
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;
-                let harness = self
-                    .registry
-                    .resolve(p.harness)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let models = harness
-                    .models()
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let harness = self.registry.resolve(p.harness).map_err(failed)?;
+                let models = harness.models().await.map_err(failed)?;
                 RpcReply::value(&models)
             }
-            methods::LIST_COMMANDS => {
-                // Same shape as ListModels: forces a lazy resolve, then the
-                // harness's own (cached) discovery. Non-ACP harnesses return
-                // an empty list from the trait default.
-                let p: ListModelsParams = parse_params(params)?;
-                let harness = self
-                    .registry
-                    .resolve(p.harness)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let commands = harness
-                    .commands()
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&commands)
-            }
-            methods::PI_SESSION_MODES => {
-                let p: PiSessionModesParams = parse_params(params)?;
-                let agent_dir = self.pi_runtime()?.paths().agent_dir.clone();
-                let sessions = self.sessions.clone();
-                let modes = crate::off_runtime(move || {
-                    let session = p
-                        .chat_id
-                        .as_deref()
-                        .and_then(|chat_id| sessions.pi_session_file(chat_id));
-                    crate::pi_session_modes::read(session.as_deref(), &agent_dir)
-                })
-                .await
-                .map_err(RpcError::Failed)?;
-                RpcReply::value(&modes)
-            }
-            methods::QUEUE_COMMAND => {
-                let p: QueueCommandParams = parse_params(params)?;
-                let command_id = self
-                    .doc_host
-                    .queue_command(&p.chat_id, p.command)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "commandId": command_id }))
-            }
-            methods::RETRY_COMMAND => {
-                let p: RetryCommandParams = parse_params(params)?;
-                let command_id = self
-                    .doc_host
-                    .retry_command(&p.chat_id, &p.command_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "commandId": command_id }))
-            }
-            methods::WATCH_DOC_MESSAGES => {
-                let p: ChatParams = parse_params(params)?;
-                let handle = self
-                    .doc_host
-                    .open(&p.chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                Ok(RpcReply::Stream(doc_messages_stream(
-                    handle.watch_messages(),
-                )))
-            }
-            methods::WATCH_DOC_COMMANDS => {
-                let p: ChatParams = parse_params(params)?;
-                let handle = self
-                    .doc_host
-                    .open(&p.chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                // Same watch_stream shape as the other standing watches: the
-                // current command ledger first, then every doc change.
-                Ok(RpcReply::Stream(watch_stream(handle.watch_commands())))
-            }
+            methods::LIST_COMMANDS => harnesses::list_commands(self, params).await,
+            methods::PI_SESSION_MODES => pi::pi_session_modes(self, params).await,
+            methods::QUEUE_COMMAND => docs::queue_command(self, params),
+            methods::RETRY_COMMAND => docs::retry_command(self, params),
+            methods::WATCH_DOC_MESSAGES => docs::watch_doc_messages(self, params),
+            methods::WATCH_DOC_COMMANDS => docs::watch_doc_commands(self, params),
             methods::PROBE_SYNC => {
                 self.workspace.probe();
                 self.doc_host.probe_open_chats();
                 RpcReply::value(&serde_json::json!({}))
             }
-            methods::SYNC_STATUS => {
-                fn room_json(s: &cypher_sync::RoomStatsSnapshot) -> serde_json::Value {
-                    serde_json::json!({
-                        "connected": s.connected,
-                        "lastPushedMs": s.last_pushed_ms,
-                        "lastAckMs": s.last_ack_ms,
-                        "rejoins": s.rejoins,
-                        "probes": s.probes,
-                        "fullResyncs": s.full_resyncs,
-                        "disconnects": s.disconnects,
-                        "rejected": s.rejected,
-                    })
-                }
-                fn chat2_json(s: &cypher_sync::ChatStatsSnapshot) -> serde_json::Value {
-                    serde_json::json!({
-                        "connected": s.connected,
-                        "cursor": s.cursor,
-                        "headSeq": s.head_seq,
-                        "seqFloor": s.seq_floor,
-                        "checkpointSeq": s.checkpoint_seq,
-                        "checkpointSize": s.checkpoint_size,
-                        "rowCount": s.row_count,
-                        "rowBytes": s.row_bytes,
-                        "pendingPushes": s.pending_pushes,
-                        "rejoins": s.rejoins,
-                        "disconnects": s.disconnects,
-                        "rejected": s.rejected,
-                        "serverResets": s.server_resets,
-                    })
-                }
-                let workspace = self.workspace.sync_status();
-                let chats: Vec<serde_json::Value> = self
-                    .doc_host
-                    .sync_statuses()
-                    .iter()
-                    .map(|(chat_id, room)| {
-                        serde_json::json!({
-                            "chatId": chat_id,
-                            "room": room.as_ref().map(chat2_json),
-                        })
-                    })
-                    .collect();
-                RpcReply::value(&serde_json::json!({
-                    "deviceId": self.doc_host.device_id(),
-                    "nowMs": crate::now_ms(),
-                    "workspace": workspace.as_ref().map(room_json),
-                    "chats": chats,
-                }))
-            }
+            methods::SYNC_STATUS => docs::sync_status(self),
             methods::WATCH_CHATS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_chats())))
             }
@@ -1972,852 +831,131 @@ impl RpcService for EngineRpc {
             methods::WATCH_SPACES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_spaces(),
             ))),
-            methods::WATCH_SESSIONS => {
-                // Local live statuses merged with remote devices' workspace rows.
-                let merged = self
-                    .workspace
-                    .merged_sessions_watch(self.sessions.watch_sessions());
-                Ok(RpcReply::Stream(watch_stream(merged)))
-            }
-            methods::LOCAL_IMPORT_STATUS => {
-                let importer = self.local_importer()?.clone();
-                let status = tokio::task::spawn_blocking(move || importer.status())
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&status)
-            }
-            methods::IMPORT_LOCAL_WORKSPACE => {
-                let importer = self.local_importer()?.clone();
-                // Progress rides an unbounded channel: the importer is
-                // blocking (sqlite + fs) and must never wedge on a slow
-                // viewer; items are tiny and bounded by the chat count.
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
-                tokio::task::spawn_blocking(move || {
-                    let emit = |event: crate::local_import::ImportEvent| {
-                        if let Ok(item) = serde_json::to_value(&event) {
-                            let _ = tx.send(item);
-                        }
-                    };
-                    if let Err(err) = importer.run(emit) {
-                        tracing::error!(error = %err, "local import failed");
-                        let _ = tx.send(serde_json::json!({
-                            "kind": "summary",
-                            "importedChats": 0, "importedSpaces": 0,
-                            "skippedChats": 0, "skippedSpaces": 0,
-                            "journalsCopied": 0, "ledgerRowsMerged": 0,
-                            "errors": [format!("{err}")],
-                        }));
-                    }
-                    // tx drops here — the stream ends after the summary item.
-                });
-                Ok(RpcReply::Stream(Box::pin(futures::stream::poll_fn(
-                    move |cx| rx.poll_recv(cx),
-                ))))
-            }
+            methods::WATCH_SESSIONS => docs::watch_sessions(self),
+            methods::LOCAL_IMPORT_STATUS => docs::local_import_status(self).await,
+            methods::IMPORT_LOCAL_WORKSPACE => docs::import_local_workspace(self),
             methods::UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(self.updater()?.watch()))),
             methods::CHECK_UPDATE => RpcReply::value(&self.updater()?.check().await),
             methods::UPDATE_ON_ACTIVATION => RpcReply::value(&serde_json::json!({
                 "woke": self.updater()?.check_on_activation(),
             })),
-            methods::APPLY_UPDATE => {
-                // `force` skips the idle guard (active runs / open terminals).
-                let force = params
-                    .get("force")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false);
-                let version = self
-                    .updater()?
-                    .apply(force)
-                    .await
-                    .map_err(|e| RpcError::Failed(format!("{e:#}")))?;
-                RpcReply::value(&serde_json::json!({ "ok": true, "version": version }))
-            }
+            methods::APPLY_UPDATE => updates::apply_update(self, params).await,
             methods::PI_UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(
                 self.pi_runtime()?.watch_updates(),
             ))),
-            // One manual sweep: the scheduled six-hour check on demand, with
-            // its auto-apply intact. `spawn_reload_on_install` reloads Pi for
-            // an install started here exactly as it does for the timer.
-            methods::CHECK_PI_UPDATE => {
-                self.pi_runtime()?.check_updates().await;
-                RpcReply::value(&self.pi_runtime()?.update_status())
-            }
-            methods::APPLY_PI_UPDATES => {
-                self.pi_runtime()?
-                    .install_latest()
-                    .await
-                    .map_err(RpcError::Failed)?;
-                self.reload_pi_runtime().await;
-                RpcReply::value(&self.pi_runtime()?.update_status())
-            }
+            methods::CHECK_PI_UPDATE => updates::check_pi_update(self).await,
+            methods::APPLY_PI_UPDATES => updates::apply_pi_updates(self).await,
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
                 self.mutate(p)?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                RpcReply::ok()
             }
             methods::WATCH_CHECKOUT_DIFFS => {
                 Ok(RpcReply::Stream(watch_stream(self.diff_sync.watch_diffs())))
             }
-            // One-shot scoped capture for the Changes pane: `branch` diffs the
-            // working tree against merge-base(baseRef, HEAD); `turn` diffs the
-            // turn-start tree snapshot against the current tree; anything else
-            // is the plain working-tree capture.
-            methods::GET_CHECKOUT_DIFF => {
-                // Keep the scoped-diff future off the dispatcher's stack. The
-                // per-commit path adds another nested git-capture future.
-                Box::pin(async move {
-                    #[derive(Deserialize)]
-                    #[serde(rename_all = "camelCase")]
-                    struct P {
-                        cwd: String,
-                        #[serde(default)]
-                        mode: String,
-                        base_ref: Option<String>,
-                        chat_id: Option<String>,
-                        commit_sha: Option<String>,
-                    }
-                    let p: P = parse_params(params)?;
-                    let identity = self
-                        .repos
-                        .checkout_identity(std::path::Path::new(&p.cwd))
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    let root = identity.root.as_path();
-                    let snapshot = match p.mode.as_str() {
-                        "branch" => {
-                            let base_ref = p
-                                .base_ref
-                                .as_deref()
-                                .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
-                            let base = crate::diff_sync::merge_base(root, base_ref)
-                                .await
-                                .map_err(|e| RpcError::Failed(e.to_string()))?;
-                            crate::diff_sync::capture_diff_against(&self.repos, root, Some(&base))
-                                .await
-                        }
-                        // One commit's own changes (History → per-commit tab):
-                        // parent (or the empty tree) vs the commit itself.
-                        "commit" => {
-                            let sha = p
-                                .commit_sha
-                                .as_deref()
-                                .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
-                            crate::diff_sync::capture_commit_diff(&self.repos, root, sha).await
-                        }
-                        "turn" => {
-                            let chat_id = p
-                                .chat_id
-                                .as_deref()
-                                .ok_or_else(|| RpcError::Failed("chatId required".into()))?;
-                            let snapshot = self
-                                .diff_sync
-                                .turn_snapshot(chat_id)
-                                .filter(|s| s.root == identity.root)
-                                .ok_or_else(|| RpcError::Failed("no turn recorded".into()))?;
-                            crate::diff_sync::capture_turn_diff(&self.repos, root, &snapshot.tree)
-                                .await
-                        }
-                        _ => crate::diff_sync::capture_diff(&self.repos, root).await,
-                    }
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    RpcReply::value(&cypher_proto::CheckoutDiff {
-                        checkout_id: identity.id,
-                        device_id: self.doc_host.device_id().to_string(),
-                        cwd: identity.root.to_string_lossy().to_string(),
-                        patch: snapshot.patch,
-                        files: snapshot.files,
-                        additions: snapshot.additions,
-                        deletions: snapshot.deletions,
-                        truncated: snapshot.truncated,
-                        checksum: snapshot.checksum,
-                        updated_at: chrono::Utc::now(),
-                    })
-                })
-                .await
-            }
+            // Keep the scoped-diff futures off the dispatcher's stack: the
+            // per-commit path adds another nested git-capture future, and every
+            // unrelated RPC would otherwise carry their state in `handle`'s frame.
+            methods::GET_CHECKOUT_DIFF => Box::pin(diffs::get_checkout_diff(self, params)).await,
             methods::GET_CHECKOUT_FILE_DIFF_TEXT => {
-                // This branch contains several large nested async futures. Keep it
-                // behind an allocation so every unrelated RPC does not carry that
-                // state in `EngineRpc::handle`'s stack frame.
-                Box::pin(async move {
-                    let p: cypher_proto::GetCheckoutFileDiffTextRequest = parse_params(params)?;
-                    let identity =
-                        Box::pin(self.repos.checkout_identity(std::path::Path::new(&p.cwd)))
-                            .await
-                            .map_err(|error| RpcError::Failed(error.to_string()))?;
-                    if identity.id != p.checkout_id {
-                        return Err(RpcError::Failed("checkoutId does not match cwd".into()));
-                    }
-                    let root = identity.root.as_path();
-                    let (snapshot, base, target) = match p.mode.as_str() {
-                        "branch" => {
-                            let base_ref = p
-                                .base_ref
-                                .as_deref()
-                                .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
-                            let base = Box::pin(crate::diff_sync::merge_base(root, base_ref))
-                                .await
-                                .map_err(|error| RpcError::Failed(error.to_string()))?;
-                            let snapshot = Box::pin(crate::diff_sync::capture_diff_against(
-                                &self.repos,
-                                root,
-                                Some(&base),
-                            ))
-                            .await
-                            .map_err(|error| RpcError::Failed(error.to_string()))?;
-                            (snapshot, base, None)
-                        }
-                        "commit" => {
-                            let sha = p
-                                .commit_sha
-                                .as_deref()
-                                .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
-                            let base =
-                                Box::pin(crate::diff_sync::commit_diff_base(root, sha)).await;
-                            let snapshot = Box::pin(crate::diff_sync::capture_commit_diff(
-                                &self.repos,
-                                root,
-                                sha,
-                            ))
-                            .await
-                            .map_err(|error| RpcError::Failed(error.to_string()))?;
-                            (snapshot, base, Some(sha.to_string()))
-                        }
-                        "turn" => {
-                            let chat_id = p
-                                .chat_id
-                                .as_deref()
-                                .ok_or_else(|| RpcError::Failed("chatId required".into()))?;
-                            let turn = self
-                                .diff_sync
-                                .turn_snapshot(chat_id)
-                                .filter(|snapshot| snapshot.root == identity.root)
-                                .ok_or_else(|| RpcError::Failed("no turn recorded".into()))?;
-                            let snapshot = Box::pin(crate::diff_sync::capture_turn_diff(
-                                &self.repos,
-                                root,
-                                &turn.tree,
-                            ))
-                            .await
-                            .map_err(|error| RpcError::Failed(error.to_string()))?;
-                            (snapshot, turn.tree, None)
-                        }
-                        _ => {
-                            let base = Box::pin(crate::diff_sync::working_diff_base(root))
-                                .await
-                                .map_err(|error| RpcError::Failed(error.to_string()))?;
-                            let snapshot =
-                                Box::pin(crate::diff_sync::capture_diff(&self.repos, root))
-                                    .await
-                                    .map_err(|error| RpcError::Failed(error.to_string()))?;
-                            (snapshot, base, None)
-                        }
-                    };
-                    let stale = || cypher_proto::CheckoutFileDiffText {
-                        diff_checksum: p.diff_checksum.clone(),
-                        old_text: None,
-                        new_text: None,
-                        old_content_hash: None,
-                        new_content_hash: None,
-                        binary: false,
-                        truncated: false,
-                        stale: true,
-                    };
-                    if snapshot.checksum != p.diff_checksum {
-                        return RpcReply::value(&stale());
-                    }
-                    let file = snapshot
-                        .files
-                        .iter()
-                        .find(|file| file.path == p.path)
-                        .ok_or_else(|| {
-                            RpcError::Failed("path is not part of diff snapshot".into())
-                        })?;
-                    let pair = Box::pin(crate::diff_sync::read_diff_file_text_at(
-                        root,
-                        &base,
-                        target.as_deref(),
-                        file,
-                    ))
-                    .await
-                    .map_err(|error| RpcError::Failed(error.to_string()))?;
-                    let current = match p.mode.as_str() {
-                        "branch" => {
-                            Box::pin(crate::diff_sync::capture_diff_against(
-                                &self.repos,
-                                root,
-                                Some(&base),
-                            ))
-                            .await
-                        }
-                        "turn" => {
-                            Box::pin(crate::diff_sync::capture_turn_diff(
-                                &self.repos,
-                                root,
-                                &base,
-                            ))
-                            .await
-                        }
-                        "commit" => {
-                            let sha = p
-                                .commit_sha
-                                .as_deref()
-                                .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
-                            Box::pin(crate::diff_sync::capture_commit_diff(
-                                &self.repos,
-                                root,
-                                sha,
-                            ))
-                            .await
-                        }
-                        _ => Box::pin(crate::diff_sync::capture_diff(&self.repos, root)).await,
-                    }
-                    .map_err(|error| RpcError::Failed(error.to_string()))?;
-                    if current.checksum != p.diff_checksum {
-                        return RpcReply::value(&stale());
-                    }
-                    RpcReply::value(&cypher_proto::CheckoutFileDiffText {
-                        diff_checksum: p.diff_checksum,
-                        old_text: pair.old_text,
-                        new_text: pair.new_text,
-                        old_content_hash: pair.old_content_hash,
-                        new_content_hash: pair.new_content_hash,
-                        binary: pair.binary,
-                        truncated: pair.truncated,
-                        stale: false,
-                    })
-                })
-                .await
+                Box::pin(diffs::get_checkout_file_diff_text(self, params)).await
             }
             methods::LIST_REPOS => RpcReply::value(&self.repos.list().await),
             methods::ADD_REPO => {
-                #[derive(Deserialize)]
-                struct P {
-                    path: String,
-                }
-                let p: P = parse_params(params)?;
-                let repo = self
-                    .repos
-                    .add(&p.path)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let p: PathParams = parse_params(params)?;
+                let repo = self.repos.add(&p.path).await.map_err(failed)?;
                 RpcReply::value(&repo)
             }
             methods::CLONE_REPO => {
-                #[derive(Deserialize)]
-                struct P {
-                    url: String,
-                }
-                let p: P = parse_params(params)?;
-                let repo = self
-                    .repos
-                    .clone_repo(&p.url)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let p: UrlParams = parse_params(params)?;
+                let repo = self.repos.clone_repo(&p.url).await.map_err(failed)?;
                 RpcReply::value(&repo)
             }
             methods::CREATE_REPO => {
-                #[derive(Deserialize)]
-                struct P {
-                    name: String,
-                }
-                let p: P = parse_params(params)?;
-                let repo = self
-                    .repos
-                    .create(&p.name)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let p: NameParams = parse_params(params)?;
+                let repo = self.repos.create(&p.name).await.map_err(failed)?;
                 RpcReply::value(&repo)
             }
-            methods::LIST_BRANCHES => {
-                let p: RepoPathParams = parse_params(params)?;
-                let branches = self
-                    .repos
-                    .branches(std::path::Path::new(&p.repo_path))
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&branches)
-            }
-            methods::LIST_REFS => {
-                let p: RepoPathParams = parse_params(params)?;
-                let refs = self
-                    .repos
-                    .refs(std::path::Path::new(&p.repo_path))
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&refs)
-            }
-            methods::LIST_GIT_HISTORY => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    cwd: String,
-                    #[serde(default)]
-                    cursor: usize,
-                    #[serde(default = "default_git_history_limit")]
-                    limit: usize,
-                }
-                fn default_git_history_limit() -> usize {
-                    crate::repos::GIT_HISTORY_DEFAULT_LIMIT
-                }
-                let p: P = parse_params(params)?;
-                let history = self
-                    .repos
-                    .history(std::path::Path::new(&p.cwd), p.cursor, p.limit)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&history)
-            }
-            methods::FETCH_ALL => {
-                let p: RepoPathParams = parse_params(params)?;
-                self.repos
-                    .fetch_all(std::path::Path::new(&p.repo_path))
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                // Remote refs are repository state too. Force the checkout
-                // watchers to publish a fresh snapshot instead of waiting for
-                // the repair tick (some platforms do not report packed-refs).
-                self.diff_sync.sync_all();
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
-            methods::SWITCH_REF => {
-                let p: SwitchRefParams = parse_params(params)?;
-                let branch = self
-                    .repos
-                    .switch_ref(std::path::Path::new(&p.repo_path), &p.ref_name)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "branch": branch }))
-            }
+            methods::LIST_BRANCHES => repos::list_branches(self, params).await,
+            methods::LIST_REFS => repos::list_refs(self, params).await,
+            methods::LIST_GIT_HISTORY => repos::list_git_history(self, params).await,
+            methods::FETCH_ALL => repos::fetch_all(self, params).await,
+            methods::SWITCH_REF => repos::switch_ref(self, params).await,
             methods::LIST_FOLDERS => {
                 let p: ListFoldersParams = parse_params(params)?;
-                let listing = self
-                    .repos
-                    .list_folders(p.path)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let listing = self.repos.list_folders(p.path).await.map_err(failed)?;
                 RpcReply::value(&listing)
             }
             methods::LIST_WORKSPACE_FILES
             | methods::READ_WORKSPACE_FILE
-            | methods::WRITE_WORKSPACE_FILE => {
-                let p: WorkspaceFileParams = parse_params(params)?;
-                let directory = method == methods::LIST_WORKSPACE_FILES;
-                let write = (method == methods::WRITE_WORKSPACE_FILE)
-                    .then(|| {
-                        p.text.clone().ok_or_else(|| {
-                            RpcError::BadParams("WriteWorkspaceFile needs text".into())
-                        })
-                    })
-                    .transpose()?;
-                tokio::time::timeout(std::time::Duration::from_secs(8), async {
-                    let same_checkout = || -> Result<(), RpcError> {
-                        let chat = self
-                            .workspace
-                            .chat(&p.chat_id)
-                            .map_err(|e| RpcError::Failed(e.to_string()))?
-                            .ok_or_else(|| RpcError::Failed("chat not found".into()))?;
-                        if chat.device_id != self.doc_host.device_id()
-                            || chat.cwd.as_deref() != Some(p.cwd.as_str())
-                        {
-                            return Err(RpcError::Failed(
-                                "chat device or checkout changed; reopen Files".into(),
-                            ));
-                        }
-                        Ok(())
-                    };
-                    same_checkout()?;
-                    let root = self
-                        .file_search_root(&FileSearchParams {
-                            query: String::new(),
-                            chat_id: Some(p.chat_id.clone()),
-                            space_id: None,
-                            path: None,
-                        })
-                        .await?;
-                    same_checkout()?;
-                    let value = match write {
-                        Some(text) => {
-                            crate::workspace_files::write(root, p.path.clone(), text).await
-                        }
-                        None => crate::workspace_files::read(root, p.path.clone(), directory).await,
-                    }
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    same_checkout()?;
-                    RpcReply::value(&value)
-                })
-                .await
-                .map_err(|_| RpcError::Failed("workspace file access timed out".into()))?
-            }
-            methods::SEARCH_FILES => {
-                let p: FileSearchParams = parse_params(params)?;
-                if p.query.chars().count() > 256 {
-                    return Err(RpcError::BadParams(
-                        "SearchFiles query must not exceed 256 characters".into(),
-                    ));
-                }
-                let matches = tokio::time::timeout(FILE_SEARCH_RPC_TIMEOUT, async {
-                    let root = self.file_search_root(&p).await?;
-                    let featured_paths = p
-                        .chat_id
-                        .as_deref()
-                        .filter(|_| p.query.is_empty())
-                        .map(|chat_id| self.featured_file_paths(chat_id))
-                        .unwrap_or_default();
-                    self.repos
-                        .search_files(root, p.query, featured_paths)
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))
-                })
-                .await
-                .map_err(|_| RpcError::Failed("file search timed out".into()))??;
-                RpcReply::value(&matches)
-            }
-            methods::SEARCH_GITHUB_ISSUES => {
-                let p: FileSearchParams = parse_params(params)?;
-                if p.query.chars().count() > crate::github::MAX_QUERY_CHARS {
-                    return Err(RpcError::BadParams(
-                        "SearchGithubIssues query must not exceed 256 characters".into(),
-                    ));
-                }
-                let github = self.github()?;
-                let root = self.file_search_root(&p).await?;
-                let search = github
-                    .search_issues(&root, &p.query)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&search)
-            }
-            methods::GET_GITHUB_ISSUE => {
-                #[derive(Deserialize)]
-                struct P {
-                    repo: String,
-                    number: u64,
-                }
-                let p: P = parse_params(params)?;
-                if !crate::github::valid_repo(&p.repo) || p.number == 0 {
-                    return Err(RpcError::BadParams("invalid GitHub issue reference".into()));
-                }
-                let snapshot = self
-                    .github()?
-                    .issue_snapshot(&p.repo, p.number)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&snapshot)
-            }
+            | methods::WRITE_WORKSPACE_FILE => files::workspace_file(self, method, params).await,
+            methods::SEARCH_FILES => files::search_files(self, params).await,
+            methods::SEARCH_GITHUB_ISSUES => github::search_github_issues(self, params).await,
+            methods::GET_GITHUB_ISSUE => github::get_github_issue(self, params).await,
             methods::GITHUB_ACCOUNT_STATUS => RpcReply::value(&self.github()?.status().await),
             methods::START_GITHUB_LOGIN => {
-                let start = self
-                    .github()?
-                    .start_login()
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let start = self.github()?.start_login().await.map_err(failed)?;
                 RpcReply::value(&start)
             }
             methods::POLL_GITHUB_LOGIN | methods::CANCEL_GITHUB_LOGIN => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    login_id: String,
-                }
-                let p: P = parse_params(params)?;
-                let github = self.github()?;
-                if method == methods::CANCEL_GITHUB_LOGIN {
-                    github.cancel_login(&p.login_id);
-                    RpcReply::value(&serde_json::json!({ "ok": true }))
-                } else {
-                    RpcReply::value(&github.poll_login(&p.login_id))
-                }
+                github::github_login(self, method, params)
             }
             methods::SIGN_OUT_GITHUB => {
                 self.github()?.sign_out().await;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                RpcReply::ok()
             }
-            methods::CREATE_WORKTREE => {
-                let p: CreateWorktreeParams = parse_params(params)?;
-                let worktree = self
-                    .repos
-                    .create_worktree(std::path::Path::new(&p.repo_path), &p.branch)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&worktree)
-            }
-            methods::DELETE_WORKTREE => {
-                let p: DeleteWorktreeParams = parse_params(params)?;
-                self.repos
-                    .delete_worktree(
-                        std::path::Path::new(&p.repo_path),
-                        std::path::Path::new(&p.worktree_path),
-                    )
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
+            methods::CREATE_WORKTREE => repos::create_worktree(self, params).await,
+            methods::DELETE_WORKTREE => repos::delete_worktree(self, params).await,
             methods::CREATE_SCRATCH_DIR => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    chat_id: String,
-                }
-                let p: P = parse_params(params)?;
+                let p: ChatParams = parse_params(params)?;
                 let path = crate::scratch::create(&p.chat_id).map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "path": path }))
             }
             methods::DELETE_SCRATCH_DIR => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    chat_id: String,
-                    path: String,
-                }
-                let p: P = parse_params(params)?;
+                let p: DeleteScratchDirParams = parse_params(params)?;
                 let removed =
                     crate::scratch::delete(&p.chat_id, &p.path).map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "ok": true, "removed": removed }))
             }
-            methods::OPEN_TERMINAL => {
-                let p: OpenTerminalParams = parse_params(params)?;
-                // The terminal runs in the chat's checkout; a chat with no cwd (or
-                // no row yet) gets the home directory. A project-less chat stores
-                // the literal `~` — expand it here or the shell never spawns.
-                let cwd = self
-                    .workspace
-                    .chat(&p.chat_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|chat| chat.cwd)
-                    .map(|cwd| expand_home(&cwd))
-                    .unwrap_or_else(|| home_dir().to_string_lossy().to_string());
-                let session = self
-                    .terminals
-                    .open(&cwd, p.cols, p.rows)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&session)
-            }
-            methods::SUBSCRIBE_TERMINAL => {
-                let p: SubscribeTerminalParams = parse_params(params)?;
-                let rx = self
-                    .terminals
-                    .subscribe(&p.terminal_id, p.after_seq)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let stream = futures::stream::unfold(rx, |mut rx| async move {
-                    let event = rx.recv().await?;
-                    let value = serde_json::to_value(&event).ok()?;
-                    Some((value, rx))
-                });
-                Ok(RpcReply::Stream(stream.boxed()))
-            }
-            methods::WRITE_TERMINAL => {
-                let p: WriteTerminalParams = parse_params(params)?;
-                self.terminals
-                    .write(&p.terminal_id, &p.data)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
-            methods::RESIZE_TERMINAL => {
-                let p: ResizeTerminalParams = parse_params(params)?;
-                self.terminals
-                    .resize(&p.terminal_id, p.cols, p.rows)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
+            methods::OPEN_TERMINAL => terminals::open_terminal(self, params),
+            methods::SUBSCRIBE_TERMINAL => terminals::subscribe_terminal(self, params),
+            methods::WRITE_TERMINAL => terminals::write_terminal(self, params),
+            methods::RESIZE_TERMINAL => terminals::resize_terminal(self, params),
             methods::CLOSE_TERMINAL => {
                 let p: TerminalIdParams = parse_params(params)?;
-                self.terminals
-                    .close(&p.terminal_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                self.terminals.close(&p.terminal_id).map_err(failed)?;
+                RpcReply::ok()
             }
-            methods::UPLOAD_CHUNK => {
-                let p: UploadChunkParams = parse_params(params)?;
-                self.uploads
-                    .append(&p.upload_id, &p.data, p.seq)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
-            methods::UPLOAD_COMMIT => {
-                let p: UploadCommitParams = parse_params(params)?;
-                let path = self
-                    .uploads
-                    .commit(&p.upload_id, &p.file_name)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                if let Some(chat_id) = &p.chat_id {
-                    // Queue-first send: seal against the chat so its host's
-                    // drain releases the waiting Run. Best-effort — the
-                    // durable path is already committed; an unsealable chat
-                    // just leaves the Run's grace window to expire it.
-                    self.doc_host
-                        .seal_attachment(chat_id, &p.upload_id, &path, &p.file_name);
-                }
-                RpcReply::value(&serde_json::json!({ "path": path }))
-            }
-            methods::READ_ATTACHMENT_CHUNK => {
-                let p: ReadAttachmentChunkParams = parse_params(params)?;
-                // Path jail: the uploads dir plus every workspace-known chat cwd.
-                let roots: Vec<std::path::PathBuf> = self
-                    .workspace
-                    .read_chats()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|chat| chat.cwd)
-                    .map(|cwd| std::path::PathBuf::from(expand_home(&cwd)))
-                    .collect();
-                let chunk = self
-                    .uploads
-                    .read_chunk(&p.path, p.offset, &roots)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&chunk)
-            }
-            methods::FETCH_TOOL_BLOB => {
-                let p: FetchToolBlobParams = parse_params(params)?;
-                let text = self
-                    .doc_host
-                    .fetch_tool_blob(&p.blob_ref)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "text": text }))
-            }
+            methods::UPLOAD_CHUNK => uploads::upload_chunk(self, params),
+            methods::UPLOAD_COMMIT => uploads::upload_commit(self, params),
+            methods::READ_ATTACHMENT_CHUNK => uploads::read_attachment_chunk(self, params),
+            methods::FETCH_TOOL_BLOB => uploads::fetch_tool_blob(self, params).await,
             methods::START_SUBAGENT => {
                 let p: StartSubagentParams = parse_params(params)?;
                 self.start_subagent(p).await
             }
-            methods::START_SIDE_CHAT => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    parent_chat_id: String,
-                    source: SideChatSource,
-                    selected_text: String,
-                    #[serde(default)]
-                    origin: Option<cypher_proto::agent_prompt::AgentQuote>,
-                }
-                let p: P = parse_params(params)?;
-                let created = self
-                    .side_chats
-                    .start(&p.parent_chat_id, p.source, p.selected_text, p.origin)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&created)
-            }
-            methods::SEND_SIDE_CHAT => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    side_chat_id: String,
-                    request: RunRequest,
-                    #[serde(default)]
-                    message_id: Option<String>,
-                }
-                let p: P = parse_params(params)?;
-                self.side_chats
-                    .send(&p.side_chat_id, p.request, p.message_id)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
-            methods::INTERRUPT_SIDE_CHAT => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    side_chat_id: String,
-                }
-                let p: P = parse_params(params)?;
-                let interrupted = self
-                    .side_chats
-                    .interrupt(&p.side_chat_id)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "interrupted": interrupted }))
-            }
-            methods::RESPOND_SIDE_CHAT_INPUT => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    side_chat_id: String,
-                    request_id: String,
-                    answers: Vec<cypher_proto::UserInputAnswer>,
-                }
-                let p: P = parse_params(params)?;
-                let resolved = self
-                    .side_chats
-                    .respond_input(&p.side_chat_id, &p.request_id, p.answers)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "resolved": resolved }))
-            }
-            methods::WATCH_SIDE_CHAT_STATUS => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    side_chat_id: String,
-                }
-                let p: P = parse_params(params)?;
-                let rx = self
-                    .side_chats
-                    .watch_status(&p.side_chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                Ok(RpcReply::Stream(side_chat_status_stream(
-                    p.side_chat_id,
-                    rx,
-                )))
-            }
+            methods::START_SIDE_CHAT => chats::start_side_chat(self, params),
+            methods::SEND_SIDE_CHAT => chats::send_side_chat(self, params).await,
+            methods::INTERRUPT_SIDE_CHAT => chats::interrupt_side_chat(self, params).await,
+            methods::RESPOND_SIDE_CHAT_INPUT => chats::respond_side_chat_input(self, params),
+            methods::WATCH_SIDE_CHAT_STATUS => chats::watch_side_chat_status(self, params),
             methods::PROMOTE_SIDE_CHAT => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    side_chat_id: String,
-                }
-                let p: P = parse_params(params)?;
-                let promoted = self
-                    .side_chats
-                    .promote(&p.side_chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let p: SideChatIdParams = parse_params(params)?;
+                let promoted = self.side_chats.promote(&p.side_chat_id).map_err(failed)?;
                 RpcReply::value(&promoted)
             }
-            methods::DISPOSE_SIDE_CHAT => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    side_chat_id: String,
-                }
-                let p: P = parse_params(params)?;
-                self.side_chats
-                    .dispose(&p.side_chat_id)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
+            methods::DISPOSE_SIDE_CHAT => chats::dispose_side_chat(self, params).await,
             methods::FORK_SESSION => {
                 let p: SessionForkRequest = parse_params(params)?;
-                let reply = self
-                    .session_forks
-                    .fork(p)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let reply = self.session_forks.fork(p).await.map_err(failed)?;
                 RpcReply::value(&reply)
             }
             methods::REWIND_SESSION => {
                 let p: cypher_proto::SessionRewindRequest = parse_params(params)?;
-                let reply = self
-                    .session_forks
-                    .rewind(p)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let reply = self.session_forks.rewind(p).await.map_err(failed)?;
                 RpcReply::value(&reply)
             }
-            methods::WATCH_AGENT_EVENTS => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    chat_id: String,
-                    #[serde(default)]
-                    after_seq: Option<u64>,
-                }
-                let p: P = parse_params(params)?;
-                if p.chat_id.chars().count() > 256 {
-                    return Err(RpcError::BadParams("chatId too long".into()));
-                }
-                self.watch_agent_events(p.chat_id, p.after_seq.unwrap_or(0))
-            }
+            methods::WATCH_AGENT_EVENTS => chats::watch_agent_events(self, params),
             other => Err(RpcError::UnknownMethod(other.to_string())),
         }
     }

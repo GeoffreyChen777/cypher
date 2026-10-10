@@ -13,13 +13,13 @@ use cypher_rpc::{RpcError, RpcReply, RpcService, methods};
 
 use cypher_sync::DocsStore;
 
-pub mod auth;
+mod auth;
 pub mod chat2_host;
 mod device_identity;
-pub mod diff_sync;
-pub mod doc_host;
+mod diff_sync;
+mod doc_host;
 pub mod github;
-pub mod instance_lock;
+mod instance_lock;
 pub mod local_import;
 pub mod mcp;
 mod notification_events;
@@ -29,22 +29,24 @@ pub mod pi_runtime;
 pub mod pi_session_modes;
 pub mod pi_subagents;
 pub mod pi_translation;
-pub mod profile;
+mod profile;
 pub mod registry;
 pub mod repos;
 pub mod rpc;
 pub mod run_journal;
 mod scratch;
 pub mod session_forks;
-pub mod sessions;
-pub mod side_chats;
-pub mod spaces;
-pub mod terminals;
-pub mod titles;
-pub mod uploads;
-pub mod viewport_activity;
+mod sessions;
+mod side_chats;
+mod spaces;
+mod terminals;
+mod title_settings;
+mod titles;
+mod uploads;
+mod viewport_activity;
+mod web_search_fallback;
 mod workspace_files;
-pub mod workspace_host;
+mod workspace_host;
 
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
 pub use diff_sync::{
@@ -60,12 +62,10 @@ pub use registry::{
 pub use repos::{Repos, worktree_branch_from_title};
 pub use run_journal::RunJournal;
 pub use session_forks::SessionForks;
-pub use sessions::{SessionsEngine, SteerOutcome};
+pub use sessions::{QuiesceWindows, SessionsEngine, SteerOutcome};
 pub use side_chats::bounded_transcript_context;
 pub use spaces::SpacesSync;
 pub use terminals::Terminals;
-pub mod title_settings;
-pub mod web_search_fallback;
 pub use uploads::Uploads;
 pub use workspace_host::{DEFAULT_ORG_ID, DEFAULT_USER_ID, WorkspaceHost};
 
@@ -85,12 +85,21 @@ pub enum EngineError {
     Journal(#[from] run_journal::JournalError),
     #[error("store: {0}")]
     Store(#[from] cypher_sync::StoreError),
-    #[error("harness: {0}")]
+    #[error("{}", harness_message(.0))]
     Harness(#[from] cypher_harness::HarnessError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Other(String),
+}
+
+/// Harness errors read "harness: …", except a retired harness's message,
+/// which is user-facing as-is.
+fn harness_message(err: &cypher_harness::HarnessError) -> String {
+    match err {
+        cypher_harness::HarnessError::Unsupported(message) => message.clone(),
+        other => format!("harness: {other}"),
+    }
 }
 
 /// Epoch millis now — the doc/journal timestamp base.
@@ -227,6 +236,7 @@ impl EngineCore {
         Self::assemble_with_profile(profile, registry, default_harness, edge)
     }
 
+    /// Test seam: assemble a synced profile for an explicit org/user identity.
     pub fn assemble_with_identity(
         data_dir: &Path,
         registry: Arc<HarnessRegistry>,

@@ -110,8 +110,8 @@ impl Harness for TestHarness {
 /// (matched by `main_prompt`) streams whatever the test pushes through the
 /// returned sender; any other run — the engine's auto-titler — completes
 /// immediately with nothing. With `confirm_steers`, each accepted steer is
-/// confirmed with a `Steered` boundary ahead of later feed events, like the
-/// ACP adapters do.
+/// confirmed with a `Steered` boundary ahead of later feed events, like a
+/// steerable harness does.
 pub fn feed_harness(
     main_prompt: &str,
     confirm_steers: bool,
@@ -307,6 +307,21 @@ pub async fn wait_for_within(mut predicate: impl FnMut() -> bool, what: &str, bu
             "timed out waiting for {what}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Poll `probe` until it yields a value (15s budget).
+pub async fn wait_for_some<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(value) = probe() {
+            return value;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 

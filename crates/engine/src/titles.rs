@@ -1,6 +1,5 @@
 //! Chat auto-titling — after the first user+assistant exchange completes on an
-//! untitled chat, name it with the harness's cheapest model (port of zeron's
-//! `generateTitle` in `sessions.ts`).
+//! untitled chat, name it with the harness's cheapest model (ported from zeron).
 //!
 //! Flow (fire-and-forget from the run task; every failure is a silent skip with
 //! tracing — a title must never fail or delay a run):
