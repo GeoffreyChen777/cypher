@@ -23,6 +23,40 @@ before any model exists. At runtime:
 - Pi subprocesses receive `PI_CODING_AGENT_DIR` and `PI_PACKAGE_DIR`, so
   `~/.pi` and a system `pi` executable are never consulted.
 
+## Layout
+
+This directory is the source of the bundle; `scripts/package-pi-runtime.sh`
+builds the archive from it.
+
+| Entry | Consumer |
+| --- | --- |
+| `package.json`, `package-lock.json`, `.npmrc` | `npm ci` into the stage's `npm/` by the package script; `scripts/ci/release.py` checks the published plugin set against `dependencies` |
+| `release.json` | Runtime version, minimum Cypher and Node versions: the package script and `scripts/ci/release.py` |
+| `provider-service.mjs` | Copied to the stage root; embedded in the engine by `include_str!` in `crates/engine/src/pi_providers.rs` |
+| `extensions/cypher-*.ts` | Copied to the stage's `extensions/`; the engine enables them in the agent settings (`crates/engine/src/pi_runtime.rs`) |
+| `patches/*.mjs` | Run by the package script against the staged `node_modules`; a missing anchor fails the build |
+| `patches/lib/apply-anchors.mjs` | Shared anchor-patch mechanics for the patch scripts |
+| `patches/pi-agent-squad-cypher-host/` | `cypher-host.ts` and its manifest, installed into pi-agent-squad by `patches/pi-agent-squad-cypher-host.mjs` |
+
+## Tests
+
+Tests sit beside the file they cover and come in two tiers:
+
+- `*.test.mjs` need no install and no staged Runtime (the extension suites
+  import their `.ts` sources through Node type stripping). `npm --prefix
+  pi-runtime test` runs them; it is the `runtime` stage of `scripts/check.sh`.
+- `*.staged.test.mjs` load the patched packages of a staged Runtime named by
+  `CYPHER_PI_RUNTIME_STAGE`. The package script runs them against every build;
+  to run them against an installed Runtime:
+
+  ```bash
+  S=~/.cypher/pi-runtime/current
+  PATH="$S/bin:$PATH" CYPHER_PI_RUNTIME_STAGE="$S" npm --prefix pi-runtime run test:staged
+  ```
+
+  An installed Runtime only passes the staged suites whose patches it was
+  built with.
+
 ## Provider management
 
 The first version supports NewAPI / OpenAI-compatible gateways using API keys.
