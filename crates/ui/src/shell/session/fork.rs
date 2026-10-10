@@ -283,7 +283,8 @@ impl Shell {
                 // first shown; the prefill waits with
                 // the closed-tab drafts.
                 None => {
-                    self.closed_drafts
+                    self.closed_tabs
+                        .drafts
                         .insert(fork_id.clone(), (text, Vec::new()));
                 }
             }

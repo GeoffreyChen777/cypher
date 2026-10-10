@@ -289,7 +289,7 @@ impl Shell {
                 .update(cx, |composer, _| composer.purge_chat(&chat_id));
         }
         self.close_tab(&crate::workspace::TabKey::session(chat_id.clone()), cx);
-        self.closed_drafts.remove(&chat_id);
+        self.closed_tabs.drafts.remove(&chat_id);
         self.mutate(
             serde_json::json!({ "op": "deleteChat", "chatId": chat_id.clone() }),
             cx,

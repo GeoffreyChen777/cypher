@@ -972,6 +972,20 @@ struct SlotTable {
     saved_workspace: Option<crate::workspace::Workspace>,
 }
 
+/// What closed session tabs leave behind, restored when the session's slot
+/// is created again.
+struct ClosedTabStash {
+    /// Unsent drafts + staged attachments of closed session tabs, restored
+    /// when the session's slot is created again (drafts used to survive chat
+    /// switches). In memory only. Also holds a background fork's prefill
+    /// until its tab is first shown.
+    drafts: std::collections::HashMap<String, (String, Vec<crate::attachments::StagedAttachment>)>,
+    /// Terminal panels of closed session tabs, by chat id: their PTYs keep
+    /// running (a long job stays reachable) and the panel re-binds to the
+    /// session's next slot. Closed for good when the chat is deleted.
+    terminals: std::collections::HashMap<String, Entity<TerminalPanel>>,
+}
+
 pub struct Shell {
     /// The window's main state: lists (sidebar, spaces, sessions) in
     /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
@@ -983,16 +997,8 @@ pub struct Shell {
     /// The session slots behind the workspace's tabs, and how main follows
     /// the focused one.
     tiles: SlotTable,
-    /// Unsent drafts + staged attachments of closed session tabs, restored
-    /// when the session's slot is created again (drafts used to survive chat
-    /// switches). In memory only. Also holds a background fork's prefill
-    /// until its tab is first shown.
-    closed_drafts:
-        std::collections::HashMap<String, (String, Vec<crate::attachments::StagedAttachment>)>,
-    /// Terminal panels of closed session tabs, by chat id: their PTYs keep
-    /// running (a long job stays reachable) and the panel re-binds to the
-    /// session's next slot. Closed for good when the chat is deleted.
-    parked_terminals: std::collections::HashMap<String, Entity<TerminalPanel>>,
+    /// What closed session tabs leave behind for their next slot.
+    closed_tabs: ClosedTabStash,
     /// The main state's chats generation `prune_tabs` last judged: only a
     /// NEW chats frame may close a tab whose chat is missing from the list.
     seen_chats_generation: u64,
@@ -1366,8 +1372,10 @@ impl Shell {
                 boot_landed: false,
                 saved_workspace,
             },
-            closed_drafts: std::collections::HashMap::new(),
-            parked_terminals: std::collections::HashMap::new(),
+            closed_tabs: ClosedTabStash {
+                drafts: std::collections::HashMap::new(),
+                terminals: std::collections::HashMap::new(),
+            },
             seen_chats_generation: 0,
             expected_chats: std::collections::HashMap::new(),
             tile_tab_scroll: std::collections::HashMap::new(),

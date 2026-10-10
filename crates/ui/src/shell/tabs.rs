@@ -291,8 +291,8 @@ impl Shell {
             .filter_map(|tab| tab.chat_id())
             .map(str::to_string)
             .collect();
-        open.extend(self.parked_terminals.keys().cloned());
-        open.extend(self.closed_drafts.keys().cloned());
+        open.extend(self.closed_tabs.terminals.keys().cloned());
+        open.extend(self.closed_tabs.drafts.keys().cloned());
         let sending: std::collections::HashSet<String> = open
             .iter()
             .filter(|id| self.chat_sending(id, cx))
@@ -334,10 +334,10 @@ impl Shell {
             (closing, deleted)
         };
         for id in &deleted {
-            if let Some(terminal) = self.parked_terminals.remove(id) {
+            if let Some(terminal) = self.closed_tabs.terminals.remove(id) {
                 terminal.update(cx, |terminal, cx| terminal.close_all(cx));
             }
-            self.closed_drafts.remove(id);
+            self.closed_tabs.drafts.remove(id);
         }
         if closing.is_empty() {
             return;

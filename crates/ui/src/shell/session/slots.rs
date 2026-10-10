@@ -148,7 +148,7 @@ impl Shell {
         // fork's prefill landing on a background tab) gets back the one
         // stashed for it.
         if let Some(chat_id) = &chat_id
-            && let Some((draft, staged)) = self.closed_drafts.remove(chat_id)
+            && let Some((draft, staged)) = self.closed_tabs.drafts.remove(chat_id)
         {
             composer.update(cx, |composer, cx| {
                 composer.seed_draft(chat_id, draft, cx);
@@ -158,7 +158,7 @@ impl Shell {
         // The session's terminals outlived its last tab: re-bind them here.
         let terminal = chat_id
             .as_ref()
-            .and_then(|id| self.parked_terminals.remove(id));
+            .and_then(|id| self.closed_tabs.terminals.remove(id));
         if let Some(panel) = &terminal {
             let open = docks.terminal_open;
             panel.update(cx, |panel, cx| {
@@ -223,7 +223,8 @@ impl Shell {
             let draft = composer.current_draft(cx);
             let staged = composer.staged_attachments();
             if !draft.trim().is_empty() || !staged.is_empty() {
-                self.closed_drafts
+                self.closed_tabs
+                    .drafts
                     .insert(chat_id.to_string(), (draft, staged));
             }
         }
@@ -247,7 +248,9 @@ impl Shell {
                     // mirror and transcript watches.
                     slot.state.update(cx, |s, _| s.park_session_context());
                     terminal.update(cx, |terminal, cx| terminal.set_open(false, cx));
-                    self.parked_terminals.insert(chat_id.to_string(), terminal);
+                    self.closed_tabs
+                        .terminals
+                        .insert(chat_id.to_string(), terminal);
                 }
                 None => terminal.update(cx, |terminal, cx| terminal.close_all(cx)),
             }
