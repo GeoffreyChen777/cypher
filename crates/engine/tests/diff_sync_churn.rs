@@ -14,6 +14,11 @@ use std::time::Duration;
 use cypher_engine::{CheckoutDiffSync, EngineCore, HarnessRegistry};
 use cypher_proto::HarnessId;
 
+/// How long a recapture would take to show: twice diff-sync's 500 ms watch
+/// debounce. Nothing positive marks "no recapture happened", so the churn
+/// checks hold this negative window after their writes have landed.
+const NO_RECAPTURE_WINDOW: Duration = Duration::from_secs(1);
+
 async fn init_dirty_repo(dir: &Path) {
     common::init_repo(dir, "one\ntwo\n").await;
     std::fs::write(dir.join("a.txt"), "one\ntwo\nedited\n").expect("dirty tree");
@@ -90,8 +95,19 @@ async fn row_write_reconcile_does_not_recapture_an_idle_checkout() {
     core.workspace
         .set_chat_checkout("chat", &before.checkout_id)
         .expect("checkout write");
+    common::wait_for(
+        || {
+            core.workspace.watch_chats().borrow().iter().any(|chat| {
+                chat.id == "chat"
+                    && chat.branch.as_deref() == Some("main")
+                    && chat.checkout_id.as_deref() == Some(before.checkout_id.as_str())
+            })
+        },
+        "the row writes to reach the chat watch",
+    )
+    .await;
     core.diff_sync.reconcile_now().await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(NO_RECAPTURE_WINDOW).await;
 
     let after = core
         .diff_sync
@@ -152,7 +168,7 @@ async fn chat_flap_keeps_entry_until_absence_is_sustained() {
         .expect("chat restored");
     wait_for_chat(&core, "chat", true).await;
     sync.reconcile_now().await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(NO_RECAPTURE_WINDOW).await;
     let after = sync
         .watch_diffs()
         .borrow()

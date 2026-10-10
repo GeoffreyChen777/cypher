@@ -576,9 +576,16 @@ async fn dead_processed_commands_are_terminalized_on_redelivery() {
         },
     );
 
-    // Give the drain a moment: the dead command must be terminalized — no
-    // user entry or run can be recovered from the original consumed attempt.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The dead command must be terminalized — no user entry or run can be
+    // recovered from the original consumed attempt.
+    wait_for(
+        || {
+            command_status(&core, "cmd-crashed")
+                .is_some_and(|(status, _)| status != SessionCommandStatus::Pending)
+        },
+        "the dead command to resolve",
+    )
+    .await;
     assert!(entries(&core).is_empty(), "dead command must not execute");
     assert_eq!(
         command_status(&core, "cmd-crashed"),
