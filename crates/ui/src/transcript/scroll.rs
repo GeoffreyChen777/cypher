@@ -1,4 +1,4 @@
-//! Rail plumbing (rendering lives in `crate::rail`), scrolling, stick-to-bottom
+//! Rail plumbing (rendering lives in `rail.rs`), scrolling, stick-to-bottom
 //! and the doc → rows sync.
 
 use super::*;

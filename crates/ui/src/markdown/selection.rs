@@ -17,11 +17,12 @@
 //! This module is the pure state half (gpui-free, unit-tested); the
 //! registry, geometry and mouse listeners live in `render.rs`.
 
-use crate::kit::lock;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+use crate::kit::lock;
 
 /// Which surface owns a selection. Every stateful call takes the scope so
 /// independent surfaces (the transcript, each diff pane) never collide in
