@@ -15,3 +15,13 @@ pub mod soft_shadow;
 pub mod sound;
 pub mod syntax_cache;
 pub mod theme;
+
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+/// Lock one of the crate's `std` mutexes, ignoring poisoning. They guard
+/// short critical sections over caches and paint state; a panic that
+/// poisoned one leaves data that is still safe to read, and panicking on
+/// every later frame would only turn one failure into a dead window.
+pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}

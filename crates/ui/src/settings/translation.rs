@@ -265,7 +265,7 @@ impl TranslationControl {
         // One in-flight save and one latest draft: rapid multi-select changes
         // stay interactive without out-of-order writes overwriting newer edits.
         if self.busy {
-            *self.pending_save.lock().unwrap() = Some(settings);
+            *crate::kit::lock(&self.pending_save) = Some(settings);
             cx.notify();
             return;
         }
@@ -290,7 +290,7 @@ impl TranslationControl {
                         ticket.params(serde_json::to_value(&settings).unwrap_or_default()),
                     )
                     .await;
-                let next = pending.lock().unwrap().take();
+                let next = crate::kit::lock(&pending).take();
                 this.update(cx, |page, cx| {
                     if !page.target.read(cx).matches(&ticket) {
                         return;

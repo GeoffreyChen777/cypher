@@ -17,6 +17,7 @@
 //! This module is the pure state half (gpui-free, unit-tested); the
 //! registry, geometry and mouse listeners live in `render.rs`.
 
+use crate::kit::lock;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -224,7 +225,7 @@ fn resolve_spans_inner(
 /// Because copy is single-active, beginning a drag in ANY scope clears every
 /// other scope's selection — only the newest gesture stays selected.
 pub fn begin(scope: SelectionScope, key: &str, ix: usize) {
-    let mut guard = state().lock().unwrap();
+    let mut guard = lock(state());
     guard.retain(|s, _| *s == scope);
     guard.insert(
         scope,
@@ -244,7 +245,7 @@ pub fn begin(scope: SelectionScope, key: &str, ix: usize) {
 /// same single-active semantics as [`begin`].
 pub fn begin_with_span(scope: SelectionScope, key: &str, text: &str, range: Range<usize>) {
     let head_ix = range.end;
-    let mut guard = state().lock().unwrap();
+    let mut guard = lock(state());
     guard.retain(|s, _| *s == scope);
     guard.insert(
         scope,
@@ -268,7 +269,7 @@ pub fn begin_with_span(scope: SelectionScope, key: &str, text: &str, range: Rang
 
 /// The live drag's anchor, if `key` owns it: `(anchor byte offset)`.
 pub fn drag_anchor(scope: SelectionScope, key: &str) -> Option<usize> {
-    let guard = state().lock().unwrap();
+    let guard = lock(state());
     let sel = guard.get(&scope)?.as_ref()?;
     (sel.dragging && sel.anchor_key == key).then_some(sel.anchor_ix)
 }
@@ -276,9 +277,7 @@ pub fn drag_anchor(scope: SelectionScope, key: &str) -> Option<usize> {
 /// Whether `key` owns a fixed double/triple-click span. Fixed spans settle as
 /// selected, without a final character-level drag update.
 pub fn drag_is_fixed(scope: SelectionScope, key: &str) -> bool {
-    state()
-        .lock()
-        .unwrap()
+    lock(state())
         .get(&scope)
         .and_then(|s| s.as_ref())
         .is_some_and(|sel| sel.dragging && sel.anchor_key == key && sel.fixed_span)
@@ -296,7 +295,7 @@ pub fn update_drag(
     head_ix: usize,
     spans: Vec<Span>,
 ) -> bool {
-    let mut guard = state().lock().unwrap();
+    let mut guard = lock(state());
     let Some(sel) = guard.get_mut(&scope).and_then(|s| s.as_mut()) else {
         return false;
     };
@@ -316,7 +315,7 @@ pub fn update_drag(
 /// selection is non-empty. The state stays (settled) so copy + the wash
 /// keep working; [`SelectionSnapshot::text`] is the joined visible quote.
 pub fn end_drag(scope: SelectionScope, key: &str) -> Option<SelectionSnapshot> {
-    let mut guard = state().lock().unwrap();
+    let mut guard = lock(state());
     let sel = guard.get_mut(&scope).and_then(|s| s.as_mut())?;
     if sel.anchor_key != key || !sel.dragging {
         return None;
@@ -336,13 +335,13 @@ pub fn end_drag(scope: SelectionScope, key: &str) -> Option<SelectionSnapshot> {
 
 /// Unconditionally drop `scope`'s selection (chat switch, row replacement).
 pub fn clear(scope: SelectionScope) {
-    state().lock().unwrap().remove(&scope);
+    lock(state()).remove(&scope);
 }
 
 /// Clear if `key` owns a settled selection (a mouse-down landed outside the
 /// owner; the element the down landed IN claims right after). True if cleared.
 pub fn clear_if_owner(scope: SelectionScope, key: &str) -> bool {
-    let mut guard = state().lock().unwrap();
+    let mut guard = lock(state());
     if guard
         .get(&scope)
         .and_then(|s| s.as_ref())
@@ -356,7 +355,7 @@ pub fn clear_if_owner(scope: SelectionScope, key: &str) -> bool {
 
 /// The wash range for `key` this frame (empty ⇒ nothing to paint).
 pub fn wash_range(scope: SelectionScope, key: &str) -> Option<Range<usize>> {
-    let guard = state().lock().unwrap();
+    let guard = lock(state());
     let sel = guard.get(&scope)?.as_ref()?;
     sel.spans
         .iter()
@@ -369,7 +368,7 @@ pub fn wash_range(scope: SelectionScope, key: &str) -> Option<Range<usize>> {
 /// clear every other scope, so this returns the LATEST selection no matter
 /// which surface (transcript, any diff pane) it came from.
 pub fn selected_text() -> Option<String> {
-    let guard = state().lock().unwrap();
+    let guard = lock(state());
     let sel = guard.values().find_map(|s| s.as_ref())?;
     if sel.spans.iter().all(|s| s.range.is_empty()) {
         return None;

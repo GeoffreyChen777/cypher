@@ -104,7 +104,7 @@ pub fn theme_generation() -> u32 {
 #[cfg(test)]
 pub fn lock_appearance() -> std::sync::MutexGuard<'static, ()> {
     static APPEARANCE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    APPEARANCE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    super::lock(&APPEARANCE_LOCK)
 }
 
 /// Point the context-free paint helpers at an appearance. Called by the
