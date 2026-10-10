@@ -32,8 +32,8 @@ builds the archive from it.
 | --- | --- |
 | `package.json`, `package-lock.json`, `.npmrc` | `npm ci` into the stage's `npm/` by the package script; `scripts/ci/release.py` checks the published plugin set against `dependencies` |
 | `release.json` | Runtime version, minimum Cypher and Node versions: the package script and `scripts/ci/release.py` |
-| `provider-service.mjs` | Copied to the stage root; embedded in the engine by `include_str!` in `crates/engine/src/pi_providers.rs` |
-| `extensions/cypher-*.ts` | Copied to the stage's `extensions/`; the engine enables them in the agent settings (`crates/engine/src/pi_runtime.rs`) |
+| `provider-service.mjs` | Copied to the stage root; embedded in the engine by `include_str!` in `crates/engine/src/pi/providers.rs` |
+| `extensions/cypher-*.ts` | Copied to the stage's `extensions/`; the engine enables them in the agent settings (`crates/engine/src/pi/runtime.rs`) |
 | `patches/*.mjs` | Run by the package script against the staged `node_modules`; a missing anchor fails the build |
 | `patches/lib/apply-anchors.mjs` | Shared anchor-patch mechanics for the patch scripts |
 | `patches/pi-agent-squad-cypher-host/` | `cypher-host.ts` and its manifest, installed into pi-agent-squad by `patches/pi-agent-squad-cypher-host.mjs` |

@@ -39,7 +39,7 @@ the tests on every side by hand.
 | Device-room relay kind `" relay"`, relay error codes, host liveness | `crates/rpc/src/device_room.rs` (`RELAY_KIND`, `HOST_OFFLINE`, …) | `apps/edge/src/device/device-room.ts` (`RELAY_KIND`, `HOST_LIVENESS_MS`); `device-room.test.ts` | `Sync/DeviceRelayClient.swift` |
 | Transcript delta frames (`WatchDocMessages`) | `crates/doc/src/transcript_delta.rs` | — | `Sync/TranscriptFeed.swift`; `SideChatTests.swift` |
 | Agent prompt envelope (comments, session references, translation markers) | `crates/proto/src/agent_prompt.rs` | `pi-runtime/extensions/cypher-translation.ts`; `cypher-translation.test.mjs` | `Models/Comments.swift`, `Composer/SessionReferences.swift`; `CommentsTests.swift`, `MentionsTests.swift` |
-| Translation language aliases | `crates/engine/src/pi_translation.rs` | `pi-runtime/extensions/cypher-translation.ts` (`LANGUAGE_ALIASES`) | — |
+| Translation language aliases | `crates/engine/src/pi/translation.rs` | `pi-runtime/extensions/cypher-translation.ts` (`LANGUAGE_ALIASES`) | — |
 | Notifications model (badge payload, preferences) | — | `apps/edge/src/notifications/notifications-model.ts`; `notifications-model.test.ts` | `Notifications/NotificationModels.swift`; `NotificationTests.swift` |
 | Subagent aggregation | `crates/ui/src/subagents.rs` | — | `Models/Subagents.swift`; `SubagentsTests.swift` |
 

@@ -183,7 +183,7 @@ async function detectLanguage(value: string): Promise<LanguageDetection | undefi
  *  the code space the offline detector reports.
  *
  *  These are exactly the languages the detector is built with (`LANGUAGES` in
- *  `cypher_engine::pi_translation`) and exactly the ones the settings card
+ *  `cypher_engine::pi::translation`) and exactly the ones the settings card
  *  offers. A name outside this table is not rejected, it simply carries no
  *  local decision, which keeps its messages going to the translation model. */
 const LANGUAGE_ALIASES: Record<string, string> = {

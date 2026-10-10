@@ -41,7 +41,7 @@ enum SlashCommandGroup: CaseIterable {
     }
 }
 
-/// pi_session_modes.rs `PiSessionModes`: the Pi plugins' per-chat switches,
+/// crates/engine/src/pi/session_modes.rs `PiSessionModes`: the Pi plugins' per-chat switches,
 /// which they keep only in the chat's Pi session file, so the chat's host
 /// reads them there.
 struct PiSessionModes: Decodable, Equatable {

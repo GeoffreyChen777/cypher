@@ -10,7 +10,7 @@
  *
  * Replaces the gpt-fast-pi package and keeps its state formats, so chats
  * toggled under it keep their setting and the engine's `/` menu
- * (crates/engine/src/pi_session_modes.rs) reads both alike:
+ * (crates/engine/src/pi/session_modes.rs) reads both alike:
  * - each toggle appends a `gpt-fast-pi.state` custom entry; the last one on
  *   the session's branch wins;
  * - without one, `"pi-gpt-fast-mode": {"enabled": true}` in the agent's

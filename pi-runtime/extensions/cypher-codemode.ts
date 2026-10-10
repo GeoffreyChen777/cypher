@@ -20,7 +20,7 @@
  *
  * Each toggle appends a `cypher-codemode.state` custom entry; the last one on
  * the session's branch wins, and the engine reads the same entries for the
- * composer's `/` menu (crates/engine/src/pi_session_modes.rs).
+ * composer's `/` menu (crates/engine/src/pi/session_modes.rs).
  */
 
 import { readFileSync } from "node:fs";
