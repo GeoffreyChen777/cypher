@@ -586,125 +586,12 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let mut overlays: Vec<AnyElement> = Vec::new();
 
-        if let Some((chat_id, position)) = self.chat_menu.get().cloned() {
-            let chat_menu_closing = self.chat_menu.closing_since();
-            let rename_id = chat_id.clone();
-            let archive_id = chat_id.clone();
-            let delete_id = chat_id.clone();
-            let pin_id = chat_id.clone();
-            let pinned = self
-                .state
-                .read(cx)
-                .chats
-                .iter()
-                .any(|c| c.id == chat_id && c.pinned);
-            let menu = popover::popover_card(&theme)
-                .w(px(170.0))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.close_chat_menu(cx);
-                }))
-                .flex()
-                .flex_col()
-                .child(
-                    popover::menu_row(&theme, false, format!("chat-menu-pin-{chat_id}"))
-                        .id("chat-menu-pin")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_chat_pinned(pin_id.clone(), !pinned, cx)
-                        }))
-                        .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
-                        .child(SharedString::from(if pinned { "Unpin" } else { "Pin" })),
-                )
-                .child(
-                    popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
-                        .id("chat-menu-rename")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_rename_chat(rename_id.clone(), cx)
-                        }))
-                        .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
-                        .child(SharedString::from("Rename…")),
-                )
-                .child(
-                    popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
-                        .id("chat-menu-archive")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.archive_chat(archive_id.clone(), cx)
-                        }))
-                        .child(
-                            icon(icons::ARCHIVE_MINIMALISTIC)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(SharedString::from("Archive")),
-                )
-                .child(popover::menu_separator())
-                .child(
-                    popover::menu_row(&theme, false, format!("chat-menu-delete-{chat_id}"))
-                        .id("chat-menu-delete")
-                        .text_color(theme.danger)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.close_chat_menu(cx);
-                            this.delete_confirm = Some(delete_id.clone());
-                            cx.notify();
-                        }))
-                        .child(
-                            icon(icons::TRASH_BIN_MINIMALISTIC)
-                                .size(px(16.0))
-                                .text_color(theme.danger),
-                        )
-                        .child(SharedString::from("Delete…")),
-                )
-                .into_any_element();
-            overlays.push(popover::menu_at(
-                "chat-context-menu",
-                position,
-                menu,
-                chat_menu_closing,
-            ));
+        if let Some(overlay) = self.render_chat_menu_overlay(&theme, cx) {
+            overlays.push(overlay);
         }
 
-        if let Some(dialog) = &mut self.rename_dialog {
-            if std::mem::take(&mut dialog.focus_pending) {
-                window.focus(&dialog.input.focus_handle(cx), cx);
-            }
-            let input = dialog.input.clone();
-            let card = popover::dialog_card(&theme)
-                .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
-                    if ev.keystroke.key == "escape" {
-                        this.rename_dialog = None;
-                        cx.notify();
-                    }
-                }))
-                .child(popover::dialog_title(&theme, "Rename session"))
-                .child(
-                    div()
-                        .mt(px(12.0))
-                        .child(popover::dialog_field(input.into_any_element())),
-                )
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Cancel", "rename-chat-cancel")
-                                .id("rename-chat-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.rename_dialog = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, "Rename")
-                                .id("rename-chat-save")
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.submit_rename_chat(cx)),
-                                ),
-                        ),
-                )
-                .into_any_element();
-            overlays.push(popover::modal("rename-chat-dialog", viewport, card));
+        if let Some(overlay) = self.render_rename_chat_dialog(viewport, &theme, window, cx) {
+            overlays.push(overlay);
         }
 
         overlays.extend(self.render_space_overlays(viewport, window, cx));
@@ -712,85 +599,12 @@ impl Shell {
             overlays.push(overlay);
         }
 
-        if let Some(chat_id) = self.delete_confirm.clone() {
-            let title = transcript::single_line(
-                &self
-                    .state
-                    .read(cx)
-                    .chats
-                    .iter()
-                    .find(|c| c.id == chat_id)
-                    .and_then(|c| c.title.clone())
-                    .unwrap_or_else(|| "New session".into()),
-            );
-            let card = popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Delete session?"))
-                .child(div().mt(px(6.0)).child(popover::dialog_body(
-                    &theme,
-                    format!("\u{201C}{title}\u{201D} will be permanently deleted. This can\u{2019}t be undone."),
-                )))
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Cancel", "delete-chat-cancel")
-                                .id("delete-chat-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.delete_confirm = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            popover::btn_danger(&theme, "Delete")
-                                .id("delete-chat-confirm")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.delete_chat(chat_id.clone(), cx)
-                                })),
-                        ),
-                )
-                .into_any_element();
-            overlays.push(popover::modal("delete-chat-dialog", viewport, card));
+        if let Some(overlay) = self.render_delete_chat_dialog(viewport, &theme, cx) {
+            overlays.push(overlay);
         }
 
-        if let Some(orphan) = self.delete_worktree_confirm.clone() {
-            let label = orphan.label.clone();
-            let card = popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Delete worktree too?"))
-                .child(div().mt(px(6.0)).child(popover::dialog_body(
-                    &theme,
-                    format!(
-                        "No other sessions are using the \u{201C}{label}\u{201D} worktree. Delete it as well? This can\u{2019}t be undone."
-                    ),
-                )))
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Keep", "delete-worktree-keep")
-                                .id("delete-worktree-keep")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.delete_worktree_confirm = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            popover::btn_danger(&theme, "Delete")
-                                .id("delete-worktree-confirm")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.delete_worktree(orphan.clone(), cx)
-                                })),
-                        ),
-                )
-                .into_any_element();
-            overlays.push(popover::modal("delete-worktree-dialog", viewport, card));
+        if let Some(overlay) = self.render_delete_worktree_dialog(viewport, &theme, cx) {
+            overlays.push(overlay);
         }
 
         if let Some(sync) = self.render_sync_overlay(viewport, cx) {
@@ -814,6 +628,235 @@ impl Shell {
         }
 
         overlays
+    }
+
+    /// A chat row's context menu: pin, rename, archive, delete.
+    fn render_chat_menu_overlay(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (chat_id, position) = self.chat_menu.get().cloned()?;
+        let chat_menu_closing = self.chat_menu.closing_since();
+        let rename_id = chat_id.clone();
+        let archive_id = chat_id.clone();
+        let delete_id = chat_id.clone();
+        let pin_id = chat_id.clone();
+        let pinned = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .any(|c| c.id == chat_id && c.pinned);
+        let menu =
+            popover::popover_card(theme)
+                .w(px(170.0))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.close_chat_menu(cx);
+                }))
+                .flex()
+                .flex_col()
+                .child(
+                    popover::menu_row(theme, false, format!("chat-menu-pin-{chat_id}"))
+                        .id("chat-menu-pin")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_chat_pinned(pin_id.clone(), !pinned, cx)
+                        }))
+                        .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
+                        .child(SharedString::from(if pinned { "Unpin" } else { "Pin" })),
+                )
+                .child(
+                    popover::menu_row(theme, false, format!("chat-menu-rename-{chat_id}"))
+                        .id("chat-menu-rename")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_rename_chat(rename_id.clone(), cx)
+                        }))
+                        .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
+                        .child(SharedString::from("Rename…")),
+                )
+                .child(
+                    popover::menu_row(theme, false, format!("chat-menu-archive-{chat_id}"))
+                        .id("chat-menu-archive")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.archive_chat(archive_id.clone(), cx)
+                        }))
+                        .child(
+                            icon(icons::ARCHIVE_MINIMALISTIC)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from("Archive")),
+                )
+                .child(popover::menu_separator())
+                .child(
+                    popover::menu_row(theme, false, format!("chat-menu-delete-{chat_id}"))
+                        .id("chat-menu-delete")
+                        .text_color(theme.danger)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.close_chat_menu(cx);
+                            this.delete_confirm = Some(delete_id.clone());
+                            cx.notify();
+                        }))
+                        .child(
+                            icon(icons::TRASH_BIN_MINIMALISTIC)
+                                .size(px(16.0))
+                                .text_color(theme.danger),
+                        )
+                        .child(SharedString::from("Delete…")),
+                )
+                .into_any_element();
+        Some(popover::menu_at(
+            "chat-context-menu",
+            position,
+            menu,
+            chat_menu_closing,
+        ))
+    }
+
+    /// The rename-session dialog.
+    fn render_rename_chat_dialog(
+        &mut self,
+        viewport: gpui::Size<Pixels>,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let dialog = self.rename_dialog.as_mut()?;
+        if std::mem::take(&mut dialog.focus_pending) {
+            window.focus(&dialog.input.focus_handle(cx), cx);
+        }
+        let input = dialog.input.clone();
+        let card = popover::dialog_card(theme)
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" {
+                    this.rename_dialog = None;
+                    cx.notify();
+                }
+            }))
+            .child(popover::dialog_title(theme, "Rename session"))
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .child(popover::dialog_field(input.into_any_element())),
+            )
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(theme, "Cancel", "rename-chat-cancel")
+                            .id("rename-chat-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.rename_dialog = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_primary(theme, "Rename")
+                            .id("rename-chat-save")
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_rename_chat(cx))),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("rename-chat-dialog", viewport, card))
+    }
+
+    /// Confirming a session delete.
+    fn render_delete_chat_dialog(
+        &self,
+        viewport: gpui::Size<Pixels>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let chat_id = self.delete_confirm.clone()?;
+        let title = transcript::single_line(
+            &self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .find(|c| c.id == chat_id)
+                .and_then(|c| c.title.clone())
+                .unwrap_or_else(|| "New session".into()),
+        );
+        let card = popover::dialog_card(theme)
+            .child(popover::dialog_title(theme, "Delete session?"))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(
+                theme,
+                format!("\u{201C}{title}\u{201D} will be permanently deleted. This can\u{2019}t be undone."),
+            )))
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(theme, "Cancel", "delete-chat-cancel")
+                            .id("delete-chat-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.delete_confirm = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_danger(theme, "Delete")
+                            .id("delete-chat-confirm")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.delete_chat(chat_id.clone(), cx)
+                            })),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("delete-chat-dialog", viewport, card))
+    }
+
+    /// Offering to delete a worktree no other session uses.
+    fn render_delete_worktree_dialog(
+        &self,
+        viewport: gpui::Size<Pixels>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let orphan = self.delete_worktree_confirm.clone()?;
+        let label = orphan.label.clone();
+        let card = popover::dialog_card(theme)
+            .child(popover::dialog_title(theme, "Delete worktree too?"))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(
+                theme,
+                format!(
+                    "No other sessions are using the \u{201C}{label}\u{201D} worktree. Delete it as well? This can\u{2019}t be undone."
+                ),
+            )))
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(theme, "Keep", "delete-worktree-keep")
+                            .id("delete-worktree-keep")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.delete_worktree_confirm = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_danger(theme, "Delete")
+                            .id("delete-worktree-confirm")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.delete_worktree(orphan.clone(), cx)
+                            })),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("delete-worktree-dialog", viewport, card))
     }
 
     fn render_about_overlay(
