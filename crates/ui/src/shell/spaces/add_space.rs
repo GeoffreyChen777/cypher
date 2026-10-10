@@ -28,14 +28,14 @@ impl Shell {
                 if this.add_space_slash_descend(cx) {
                     return;
                 }
-                if let Some(flow) = this.add_space.as_mut() {
+                if let Some(flow) = this.dialogs.add_space.as_mut() {
                     flow.active = 0;
                 }
                 cx.notify();
             }
         });
         let has_device = device.is_some();
-        self.add_space = Some(AddSpaceFlow {
+        self.dialogs.add_space = Some(AddSpaceFlow {
             device,
             search,
             browser: Loadable::Idle,
@@ -60,7 +60,7 @@ impl Shell {
 
     /// Devices-rail click: rebrowse the same palette on another device.
     fn add_space_pick_device(&mut self, device: Device, cx: &mut Context<Self>) {
-        let Some(flow) = self.add_space.as_mut() else {
+        let Some(flow) = self.dialogs.add_space.as_mut() else {
             return;
         };
         if flow.device.as_ref().is_some_and(|d| d.id == device.id) {
@@ -82,7 +82,7 @@ impl Shell {
     /// The current listing's folder rows filtered by the search query
     /// (prefix matches first — `popover::filter_indices`).
     fn add_space_filtered(&self, cx: &App) -> Vec<cypher_proto::FolderEntry> {
-        let Some(flow) = self.add_space.as_ref() else {
+        let Some(flow) = self.dialogs.add_space.as_ref() else {
             return Vec::new();
         };
         let Some(listing) = flow.browser.ready() else {
@@ -100,7 +100,7 @@ impl Shell {
     /// Descend into the highlighted (filtered) folder; clears the query.
     fn add_space_open_active(&mut self, cx: &mut Context<Self>) {
         let rows = self.add_space_filtered(cx);
-        let Some(flow) = self.add_space.as_ref() else {
+        let Some(flow) = self.dialogs.add_space.as_ref() else {
             return;
         };
         let Some(listing) = flow.browser.ready() else {
@@ -112,7 +112,7 @@ impl Shell {
         let full = crate::pickers::child_path(&listing.path, &entry.name);
         let is_repo = entry.is_repo;
         let search = flow.search.clone();
-        if let Some(flow) = self.add_space.as_mut() {
+        if let Some(flow) = self.dialogs.add_space.as_mut() {
             flow.browser_repo = is_repo;
         }
         search.update(cx, |input, cx| input.set_text("", cx));
@@ -127,7 +127,7 @@ impl Shell {
     /// old text.
     fn add_space_slash_descend(&mut self, cx: &mut Context<Self>) -> bool {
         let target = {
-            let Some(flow) = self.add_space.as_ref() else {
+            let Some(flow) = self.dialogs.add_space.as_ref() else {
                 return false;
             };
             let text = flow.search.read(cx).text().to_string();
@@ -161,7 +161,7 @@ impl Shell {
     /// `(full name, remaining suffix)`; `None` on an empty query or when the
     /// match is already complete.
     fn add_space_completion(&self, cx: &App) -> Option<(String, String)> {
-        let flow = self.add_space.as_ref()?;
+        let flow = self.dialogs.add_space.as_ref()?;
         let query = flow.search.read(cx).text().to_string();
         if query.is_empty() {
             return None;
@@ -187,7 +187,7 @@ impl Shell {
         let Some((name, _)) = self.add_space_completion(cx) else {
             return;
         };
-        if let Some(flow) = self.add_space.as_ref() {
+        if let Some(flow) = self.dialogs.add_space.as_ref() {
             let search = flow.search.clone();
             search.update(cx, |input, cx| input.set_text(name, cx));
         }
@@ -195,7 +195,7 @@ impl Shell {
 
     /// Descend into a specific folder row (mouse path); clears the query.
     fn add_space_descend(&mut self, full: String, is_repo: bool, cx: &mut Context<Self>) {
-        let Some(flow) = self.add_space.as_mut() else {
+        let Some(flow) = self.dialogs.add_space.as_mut() else {
             return;
         };
         flow.browser_repo = is_repo;
@@ -214,7 +214,7 @@ impl Shell {
             return;
         };
         let local = self.state.read(cx).local_device_id.clone();
-        let Some(flow) = self.add_space.as_mut() else {
+        let Some(flow) = self.dialogs.add_space.as_mut() else {
             return;
         };
         let device_id = flow.device.as_ref().map(|d| d.id.clone());
@@ -242,7 +242,7 @@ impl Shell {
                 .call(methods::LIST_FOLDERS, serde_json::Value::Object(params))
                 .await;
             this.update(cx, |shell, cx| {
-                if let Some(flow) = shell.add_space.as_mut() {
+                if let Some(flow) = shell.dialogs.add_space.as_mut() {
                     flow.browser = match result {
                         Ok(value) => match serde_json::from_value::<FolderListing>(value) {
                             Ok(listing) => {
@@ -270,7 +270,7 @@ impl Shell {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let Some(flow) = self.add_space.as_ref() else {
+        let Some(flow) = self.dialogs.add_space.as_ref() else {
             return;
         };
         if flow.submit_busy {
@@ -295,11 +295,11 @@ impl Shell {
             .find(|s| s.device_id == device.id && s.path == path)
             .map(|s| s.id.clone())
         {
-            self.add_space = None;
+            self.dialogs.add_space = None;
             self.land_in_space(existing, cx);
             return;
         }
-        let Some(flow) = self.add_space.as_mut() else {
+        let Some(flow) = self.dialogs.add_space.as_mut() else {
             return;
         };
         flow.submit_busy = true;
@@ -339,7 +339,7 @@ impl Shell {
             this.update(cx, |shell, cx| {
                 match result {
                     Ok(_) => {
-                        shell.add_space = None;
+                        shell.dialogs.add_space = None;
                         shell.land_in_space(submit_id.clone(), cx);
                     }
                     Err(err) => {
@@ -348,7 +348,7 @@ impl Shell {
                             s.spaces.retain(|space| space.id != submit_id);
                             cx.notify();
                         });
-                        if let Some(flow) = shell.add_space.as_mut() {
+                        if let Some(flow) = shell.dialogs.add_space.as_mut() {
                             flow.submit_busy = false;
                             flow.error = Some(format!("{err}").into());
                         }
@@ -358,7 +358,7 @@ impl Shell {
             })
             .ok();
         });
-        if let Some(flow) = self.add_space.as_mut() {
+        if let Some(flow) = self.dialogs.add_space.as_mut() {
             flow.submit_task = Some(task);
         }
         cx.notify();
@@ -367,12 +367,13 @@ impl Shell {
     /// Go up to the parent folder (←, and ⌫ on an empty query).
     fn add_space_go_up(&mut self, cx: &mut Context<Self>) {
         let parent = self
+            .dialogs
             .add_space
             .as_ref()
             .and_then(|f| f.browser.ready())
             .and_then(|l| parent_path(&l.path));
         if let Some(parent) = parent {
-            if let Some(flow) = self.add_space.as_mut() {
+            if let Some(flow) = self.dialogs.add_space.as_mut() {
                 flow.browser_repo = false; // unknown at the parent
             }
             self.load_space_folders(Some(parent), cx);
@@ -412,13 +413,13 @@ impl Shell {
         );
         match key {
             popover::MenuKey::Escape => {
-                self.add_space = None;
+                self.dialogs.add_space = None;
                 cx.notify();
             }
             popover::MenuKey::Up | popover::MenuKey::Down => {
                 let count = self.add_space_filtered(cx).len();
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
-                if let Some(flow) = self.add_space.as_mut() {
+                if let Some(flow) = self.dialogs.add_space.as_mut() {
                     flow.active = popover::menu_step(Some(flow.active), count, delta).unwrap_or(0);
                     // Keep the highlighted row in view as the cursor walks
                     // past the viewport (user-reported: the list didn't
@@ -437,6 +438,7 @@ impl Shell {
             popover::MenuKey::ModEnter => self.submit_add_space(cx),
             popover::MenuKey::Backspace => {
                 let empty = self
+                    .dialogs
                     .add_space
                     .as_ref()
                     .is_some_and(|f| f.search.read(cx).is_empty());
@@ -523,7 +525,7 @@ impl Shell {
                 // Clicking the scrim dismisses (user requirement) — same close
                 // path as Escape.
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.add_space = None;
+                    this.dialogs.add_space = None;
                     cx.notify();
                 }))
                 .child(input_row)
@@ -550,7 +552,7 @@ impl Shell {
     ) -> Option<(AddSpaceView, AddSpaceInputs)> {
         let theme = Theme::of(cx).clone();
         {
-            let flow = self.add_space.as_mut()?;
+            let flow = self.dialogs.add_space.as_mut()?;
             if std::mem::take(&mut flow.focus_pending) {
                 let handle = flow.search.focus_handle(cx);
                 window.focus(&handle, cx);
@@ -569,7 +571,7 @@ impl Shell {
             list_scroll,
             home,
         ) = {
-            let flow = self.add_space.as_ref()?;
+            let flow = self.dialogs.add_space.as_ref()?;
             (
                 flow.device.clone(),
                 flow.search.clone(),
@@ -719,7 +721,7 @@ impl Shell {
                     .cursor_pointer()
                     .hover(|s| s.bg(crate::kit::theme::ink(0.09)))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.add_space = None;
+                        this.dialogs.add_space = None;
                         cx.notify();
                     }))
                     .child(SharedString::from("esc")),
@@ -779,7 +781,7 @@ impl Shell {
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme.text))
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(flow) = this.add_space.as_mut() {
+                                    if let Some(flow) = this.dialogs.add_space.as_mut() {
                                         flow.browser_repo = false;
                                     }
                                     this.load_space_folders(None, cx);
@@ -817,7 +819,8 @@ impl Shell {
                                             .cursor_pointer()
                                             .hover(|s| s.text_color(theme.text))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                if let Some(flow) = this.add_space.as_mut() {
+                                                if let Some(flow) = this.dialogs.add_space.as_mut()
+                                                {
                                                     flow.browser_repo = false;
                                                 }
                                                 this.load_space_folders(Some(full.clone()), cx);
@@ -885,7 +888,11 @@ impl Shell {
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.element_hover))
                         .on_click(cx.listener(|this, _, _, cx| {
-                            let path = this.add_space.as_ref().and_then(|f| f.browser_path.clone());
+                            let path = this
+                                .dialogs
+                                .add_space
+                                .as_ref()
+                                .and_then(|f| f.browser_path.clone());
                             this.load_space_folders(path, cx);
                         }))
                         .child(SharedString::from("Retry")),

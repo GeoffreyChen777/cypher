@@ -124,7 +124,7 @@ impl Shell {
             match which.as_str() {
                 "rename" => self.open_rename_chat(first, cx),
                 "delete" => {
-                    self.delete_confirm = Some(first);
+                    self.dialogs.delete_chat = Some(first);
                 }
                 _ => {}
             }

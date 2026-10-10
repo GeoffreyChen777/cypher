@@ -39,7 +39,7 @@ impl Shell {
                 this.submit_rename_chat(cx);
             }
         });
-        self.rename_dialog = Some(RenameChatDialog {
+        self.dialogs.rename_chat = Some(RenameChatDialog {
             chat_id,
             input,
             focus_pending: true,
@@ -49,7 +49,7 @@ impl Shell {
     }
 
     pub(super) fn submit_rename_chat(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = self.rename_dialog.take() else {
+        let Some(dialog) = self.dialogs.rename_chat.take() else {
             return;
         };
         let title = dialog.input.read(cx).text().trim().to_string();
@@ -266,7 +266,7 @@ impl Shell {
     }
 
     pub(super) fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        self.delete_confirm = None;
+        self.dialogs.delete_chat = None;
         let orphan = {
             let state = self.state.read(cx);
             spaces::orphan_worktree_after_delete(&state.chats, &state.spaces, &chat_id)
@@ -300,7 +300,7 @@ impl Shell {
         // Last session of a linked worktree: ask whether to remove the
         // checkout too. Captured before the mutate so the row is still in
         // the local list; children of this chat cascade and don't count.
-        self.delete_worktree_confirm = orphan;
+        self.dialogs.delete_worktree = orphan;
         cx.notify();
     }
 
@@ -341,7 +341,7 @@ impl Shell {
     }
 
     pub(super) fn delete_worktree(&mut self, orphan: OrphanWorktree, cx: &mut Context<Self>) {
-        self.delete_worktree_confirm = None;
+        self.dialogs.delete_worktree = None;
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.sidebar_notice = Some("Engine not connected".into());
             cx.notify();

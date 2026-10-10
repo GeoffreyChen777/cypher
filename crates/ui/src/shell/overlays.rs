@@ -694,7 +694,7 @@ impl Shell {
                         .text_color(theme.danger)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.close_chat_menu(cx);
-                            this.delete_confirm = Some(delete_id.clone());
+                            this.dialogs.delete_chat = Some(delete_id.clone());
                             cx.notify();
                         }))
                         .child(
@@ -721,7 +721,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let dialog = self.rename_dialog.as_mut()?;
+        let dialog = self.dialogs.rename_chat.as_mut()?;
         if std::mem::take(&mut dialog.focus_pending) {
             window.focus(&dialog.input.focus_handle(cx), cx);
         }
@@ -729,7 +729,7 @@ impl Shell {
         let card = popover::dialog_card(theme)
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" {
-                    this.rename_dialog = None;
+                    this.dialogs.rename_chat = None;
                     cx.notify();
                 }
             }))
@@ -750,7 +750,7 @@ impl Shell {
                         popover::btn_ghost(theme, "Cancel", "rename-chat-cancel")
                             .id("rename-chat-cancel")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.rename_dialog = None;
+                                this.dialogs.rename_chat = None;
                                 cx.notify();
                             })),
                     )
@@ -771,7 +771,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let chat_id = self.delete_confirm.clone()?;
+        let chat_id = self.dialogs.delete_chat.clone()?;
         let title = transcript::single_line(
             &self
                 .state
@@ -799,7 +799,7 @@ impl Shell {
                         popover::btn_ghost(theme, "Cancel", "delete-chat-cancel")
                             .id("delete-chat-cancel")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.delete_confirm = None;
+                                this.dialogs.delete_chat = None;
                                 cx.notify();
                             })),
                     )
@@ -822,7 +822,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let orphan = self.delete_worktree_confirm.clone()?;
+        let orphan = self.dialogs.delete_worktree.clone()?;
         let label = orphan.label.clone();
         let card = popover::dialog_card(theme)
             .child(popover::dialog_title(theme, "Delete worktree too?"))
@@ -843,7 +843,7 @@ impl Shell {
                         popover::btn_ghost(theme, "Keep", "delete-worktree-keep")
                             .id("delete-worktree-keep")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.delete_worktree_confirm = None;
+                                this.dialogs.delete_worktree = None;
                                 cx.notify();
                             })),
                     )

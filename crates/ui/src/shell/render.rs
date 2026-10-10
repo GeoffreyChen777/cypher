@@ -1533,12 +1533,12 @@ impl Shell {
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
                 if this.is_project_window() {
                     this.forward_to_main(cx, |main, cx| {
-                        if main.add_space.is_none() {
+                        if main.dialogs.add_space.is_none() {
                             main.open_add_space(cx);
                         }
                     });
-                } else if this.add_space.is_some() {
-                    this.add_space = None;
+                } else if this.dialogs.add_space.is_some() {
+                    this.dialogs.add_space = None;
                     cx.notify();
                 } else {
                     this.open_add_space(cx);

@@ -42,7 +42,7 @@ impl Shell {
                 this.submit_rename_space(cx);
             }
         });
-        self.rename_space_dialog = Some(RenameSpaceDialog {
+        self.dialogs.rename_space = Some(RenameSpaceDialog {
             space_id,
             input,
             focus_pending: true,
@@ -52,7 +52,7 @@ impl Shell {
     }
 
     pub(in crate::shell) fn submit_rename_space(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = self.rename_space_dialog.take() else {
+        let Some(dialog) = self.dialogs.rename_space.take() else {
             return;
         };
         let name = dialog.input.read(cx).text().trim().to_string();
@@ -66,7 +66,7 @@ impl Shell {
     }
 
     pub(in crate::shell) fn delete_space(&mut self, space_id: String, cx: &mut Context<Self>) {
-        self.delete_space_confirm = None;
+        self.dialogs.delete_space = None;
         self.mutate(
             serde_json::json!({ "op": "deleteSpace", "spaceId": space_id }),
             cx,
@@ -183,7 +183,7 @@ impl Shell {
                     .text_color(theme.danger)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.close_space_menu(cx);
-                        this.delete_space_confirm = Some(delete_id.clone());
+                        this.dialogs.delete_space = Some(delete_id.clone());
                         cx.notify();
                     }))
                     .child(
@@ -210,7 +210,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let dialog = self.rename_space_dialog.as_mut()?;
+        let dialog = self.dialogs.rename_space.as_mut()?;
         if std::mem::take(&mut dialog.focus_pending) {
             window.focus(&dialog.input.focus_handle(cx), cx);
         }
@@ -218,7 +218,7 @@ impl Shell {
         let card = popover::dialog_card(theme)
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" {
-                    this.rename_space_dialog = None;
+                    this.dialogs.rename_space = None;
                     cx.notify();
                 }
             }))
@@ -239,7 +239,7 @@ impl Shell {
                         popover::btn_ghost(theme, "Cancel", "rename-space-cancel")
                             .id("rename-space-cancel")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.rename_space_dialog = None;
+                                this.dialogs.rename_space = None;
                                 cx.notify();
                             })),
                     )
@@ -260,7 +260,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let space_id = self.delete_space_confirm.clone()?;
+        let space_id = self.dialogs.delete_space.clone()?;
         let (name, device, count) = {
             let state = self.state.read(cx);
             let space = state.space_row(&space_id);
@@ -298,7 +298,7 @@ impl Shell {
                         popover::btn_ghost(theme, "Cancel", "delete-space-cancel")
                             .id("delete-space-cancel")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.delete_space_confirm = None;
+                                this.dialogs.delete_space = None;
                                 cx.notify();
                             })),
                     )

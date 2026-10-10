@@ -11,7 +11,7 @@ impl Shell {
             .iter()
             .position(|(_, online, _)| *online)
             .unwrap_or(0);
-        self.quick_chat = Some(QuickChatFlow {
+        self.dialogs.quick_chat = Some(QuickChatFlow {
             active,
             focus: cx.focus_handle(),
             focus_pending: true,
@@ -52,13 +52,13 @@ impl Shell {
         );
         match key {
             popover::MenuKey::Escape => {
-                self.quick_chat = None;
+                self.dialogs.quick_chat = None;
                 cx.notify();
             }
             popover::MenuKey::Up | popover::MenuKey::Down => {
                 let count = self.quick_chat_devices(cx).len();
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
-                if let Some(flow) = self.quick_chat.as_mut() {
+                if let Some(flow) = self.dialogs.quick_chat.as_mut() {
                     flow.active = popover::menu_step(Some(flow.active), count, delta).unwrap_or(0);
                     // Row 0 of the scroll container is the section label.
                     flow.list_scroll.scroll_to_item(flow.active + 1);
@@ -66,7 +66,12 @@ impl Shell {
                 }
             }
             popover::MenuKey::Enter | popover::MenuKey::ModEnter => {
-                let active = self.quick_chat.as_ref().map(|f| f.active).unwrap_or(0);
+                let active = self
+                    .dialogs
+                    .quick_chat
+                    .as_ref()
+                    .map(|f| f.active)
+                    .unwrap_or(0);
                 if let Some((device, true, _)) = self.quick_chat_devices(cx).get(active).cloned() {
                     self.start_quick_chat(device.id, cx);
                 }
@@ -87,7 +92,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let (active, focus, list_scroll) = {
-            let flow = self.quick_chat.as_mut()?;
+            let flow = self.dialogs.quick_chat.as_mut()?;
             if std::mem::take(&mut flow.focus_pending) {
                 window.focus(&flow.focus, cx);
             }
@@ -159,7 +164,7 @@ impl Shell {
                     this.quick_chat_key(event, cx)
                 }))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.quick_chat = None;
+                    this.dialogs.quick_chat = None;
                     cx.notify();
                 }))
                 .child(header)
@@ -215,7 +220,7 @@ fn quick_chat_header(
                 .cursor_pointer()
                 .hover(|s| s.bg(crate::kit::theme::ink(0.09)))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.quick_chat = None;
+                    this.dialogs.quick_chat = None;
                     cx.notify();
                 }))
                 .child(SharedString::from("esc")),
@@ -263,7 +268,7 @@ fn quick_chat_device_row(
                 .hover(|s| s.bg(theme.element_hover))
         })
         .on_mouse_move(cx.listener(move |this, _, _, cx| {
-            if let Some(flow) = this.quick_chat.as_mut()
+            if let Some(flow) = this.dialogs.quick_chat.as_mut()
                 && flow.active != ix
             {
                 flow.active = ix;

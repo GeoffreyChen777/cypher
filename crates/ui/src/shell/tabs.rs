@@ -392,7 +392,7 @@ impl Shell {
     /// underneath the add-space palette, stranding the overlay over a session
     /// they never picked.
     pub(super) fn cycle_session(&mut self, forward: bool, cx: &mut Context<Self>) {
-        if !matches!(self.route, Route::Chat) || self.add_space.is_some() {
+        if !matches!(self.route, Route::Chat) || self.dialogs.add_space.is_some() {
             return;
         }
         let selected = self
@@ -492,7 +492,7 @@ impl Shell {
     /// The first send asks that device for a throwaway scratch folder and
     /// the session runs there; deleting the chat removes it.
     pub(super) fn start_quick_chat(&mut self, device_id: String, cx: &mut Context<Self>) {
-        self.quick_chat = None;
+        self.dialogs.quick_chat = None;
         let Some(sid) = self.open_canvas(cx) else {
             return;
         };

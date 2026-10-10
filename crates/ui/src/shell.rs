@@ -1063,6 +1063,23 @@ struct SettingsPages {
     notifications_sub: Option<Subscription>,
 }
 
+/// The window's modal dialogs and palettes; each is `Some` while open.
+struct ShellDialogs {
+    rename_chat: Option<RenameChatDialog>,
+    /// Chat id awaiting delete confirmation.
+    delete_chat: Option<String>,
+    /// The quick-chat device palette (sidebar header "Quick chat").
+    quick_chat: Option<spaces::QuickChatFlow>,
+    /// Follow-up after the last session of a linked worktree was deleted.
+    delete_worktree: Option<OrphanWorktree>,
+    rename_space: Option<RenameSpaceDialog>,
+    /// Space id awaiting delete confirmation (hard delete + session cascade).
+    delete_space: Option<String>,
+    /// The add-space palette (⌘K-style; device tabs + folder search), `Some`
+    /// while open.
+    add_space: Option<AddSpaceFlow>,
+}
+
 pub struct Shell {
     /// The window's main state: lists (sidebar, spaces, sessions) in
     /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
@@ -1096,24 +1113,13 @@ pub struct Shell {
     pages: SettingsPages,
     /// `CYPHER_FORCE_GATE=setup` keeps the first-run overlay visible.
     debug_setup: bool,
-    rename_dialog: Option<RenameChatDialog>,
-    /// Chat id awaiting delete confirmation.
-    delete_confirm: Option<String>,
+    /// The window's modal dialogs and palettes (`None` while closed).
+    dialogs: ShellDialogs,
     /// The engine replaced this app's bundle (a Devices → Update, possibly
     /// from another machine) and armed the relauncher: quit exactly once.
     relaunch_quit_sent: bool,
-    /// The quick-chat device palette (sidebar header "Quick chat").
-    quick_chat: Option<spaces::QuickChatFlow>,
     /// Scratch-folder removal after a quick chat was deleted (host RPC).
     scratch_cleanup_task: Option<Task<()>>,
-    /// Follow-up after the last session of a linked worktree was deleted.
-    delete_worktree_confirm: Option<OrphanWorktree>,
-    rename_space_dialog: Option<RenameSpaceDialog>,
-    /// Space id awaiting delete confirmation (hard delete + session cascade).
-    delete_space_confirm: Option<String>,
-    /// The add-space palette (⌘K-style; device tabs + folder search), `Some`
-    /// while open.
-    add_space: Option<AddSpaceFlow>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
     /// `settings.last_space_id` applied once after the first spaces frame.
@@ -1439,15 +1445,17 @@ impl Shell {
                 notifications_sub: None,
             },
             debug_setup,
-            rename_dialog: None,
-            delete_confirm: None,
+            dialogs: ShellDialogs {
+                rename_chat: None,
+                delete_chat: None,
+                quick_chat: None,
+                delete_worktree: None,
+                rename_space: None,
+                delete_space: None,
+                add_space: None,
+            },
             relaunch_quit_sent: false,
-            quick_chat: None,
             scratch_cleanup_task: None,
-            delete_worktree_confirm: None,
-            rename_space_dialog: None,
-            delete_space_confirm: None,
-            add_space: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
             space_boot_applied: false,
             sound_prev: std::collections::HashMap::new(),
