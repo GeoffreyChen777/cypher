@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "rootDir": ".", "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers/types"] },
-  "include": ["test/workerd/*.ts"]
+  "include": ["test/workerd/*.ts", "test/support/*.ts"]
 }
