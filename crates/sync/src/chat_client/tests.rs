@@ -1762,11 +1762,13 @@ async fn https_timeout_releases_chat_single_flight_for_retry() {
     let tuning = ChatTuning {
         probe_quiet: Duration::from_secs(60),
         http_timeout: Duration::from_millis(20),
+        ..ChatTuning::default()
     };
     let client = ChatClient::connect_with_transport(
         Arc::new(WsBinConnector {
             preview: None,
             url: Arc::new(StaticUrl("ws://127.0.0.1:9/chat2/test/ws".into())),
+            ping_interval: PING_INTERVAL,
         }),
         sink,
         fetcher,

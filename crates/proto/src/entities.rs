@@ -252,7 +252,7 @@ pub enum ChatIndicator {
 
 /// Derive the display status. `live` must already be staleness-gated by the
 /// caller (the UI's 45s window) — pass `None` for a stale/absent session row.
-pub fn chat_indicator(chat: &Chat, live: Option<&Session>) -> ChatIndicator {
+pub(crate) fn chat_indicator(chat: &Chat, live: Option<&Session>) -> ChatIndicator {
     match live.map(|s| s.status) {
         Some(SessionStatus::Working) => ChatIndicator::Working,
         Some(SessionStatus::AwaitingInput) => ChatIndicator::AwaitingInput,

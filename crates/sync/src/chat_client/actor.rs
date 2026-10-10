@@ -249,9 +249,29 @@ impl Actor {
         mut pipe: BinPipe,
         ready: &mut Option<oneshot::Sender<Result<(), SyncError>>>,
     ) -> SessionEnd {
+        let (state_frame, state, cursor) = match self.handshake(&mut pipe, ready.is_some()).await {
+            Ok(joined) => joined,
+            Err(end) => return end,
+        };
+        if let Err(end) = self
+            .catch_up(&mut pipe, state, &state_frame.payload, cursor, ready)
+            .await
+        {
+            return end;
+        }
+        self.steady_state(&mut pipe).await
+    }
+
+    /// Send HELLO, wait for the room's STATE, and apply the once-per-client
+    /// cursor amnesty. Returns the state frame, its header and the cursor
+    /// catch-up starts from.
+    async fn handshake(
+        &mut self,
+        pipe: &mut BinPipe,
+        first_join: bool,
+    ) -> Result<(wire::WireFrame, wire::StateHeader, u64), SessionEnd> {
         use std::sync::atomic::Ordering::Relaxed;
 
-        // ── hello / state ───────────────────────────────────────────────────
         lock(&self.shared).in_flight = None;
         let hello_cursor = lock(&self.shared).cursor;
         let hello = wire::encode(
@@ -263,7 +283,7 @@ impl Actor {
             &[],
         );
         if pipe.tx.send(hello).await.is_err() {
-            return SessionEnd::Reconnect;
+            return Err(SessionEnd::Reconnect);
         }
         let state = tokio::time::timeout(HELLO_DEADLINE, async {
             loop {
@@ -281,12 +301,12 @@ impl Actor {
         .await;
         let Ok(Some(state_frame)) = state else {
             tracing::warn!("chat2: no state frame within deadline");
-            return SessionEnd::Reconnect;
+            return Err(SessionEnd::Reconnect);
         };
         let Ok(state) = serde_json::from_value::<wire::StateHeader>(state_frame.header.clone())
         else {
             tracing::warn!("chat2: malformed state header");
-            return SessionEnd::Reconnect;
+            return Err(SessionEnd::Reconnect);
         };
         lock(&self.shared).server = Some(state);
 
@@ -314,7 +334,7 @@ impl Actor {
         }
         let cursor = lock(&self.shared).cursor;
         self.flags.connected.store(true, Relaxed);
-        if ready.is_none() {
+        if !first_join {
             self.flags.rejoins.fetch_add(1, Relaxed);
         }
         let _ = self.events.send(ChatEvent::Connected);
@@ -333,12 +353,22 @@ impl Actor {
             );
             let _ = self.events.send(ChatEvent::ServerReset);
         }
+        Ok((state_frame, state, cursor))
+    }
 
-        // ── catch-up: checkpoint precision + row backfill ───────────────────
+    /// Bring the document up to the room's head (checkpoint when needed, then
+    /// row backfill), signal readiness and flush pending pushes.
+    async fn catch_up(
+        &mut self,
+        pipe: &mut BinPipe,
+        state: wire::StateHeader,
+        state_payload: &[u8],
+        cursor: u64,
+        ready: &mut Option<oneshot::Sender<Result<(), SyncError>>>,
+    ) -> Result<(), SessionEnd> {
         // Same presence rule as `plan_catch_up`: SIZE, not seq — a seeded
         // room's checkpoint covers seq 0 (see the decision-table test).
-        let contained =
-            state.checkpoint_size == 0 || self.sink.contains_frontier(&state_frame.payload);
+        let contained = state.checkpoint_size == 0 || self.sink.contains_frontier(state_payload);
         let plan = plan_catch_up(cursor, &state, contained);
         let after = match plan {
             CatchUpPlan::RowsOnly { after } => after,
@@ -355,22 +385,22 @@ impl Actor {
                 let fetch = self.fetcher.fetch();
                 let fetched = tokio::select! {
                     fetched = tokio::time::timeout(CHECKPOINT_FETCH_DEADLINE, fetch) => fetched,
-                    _ = self.shutdown.changed() => return SessionEnd::Stop,
+                    _ = self.shutdown.changed() => return Err(SessionEnd::Stop),
                 };
                 let bytes = match fetched {
                     Ok(Ok(bytes)) => bytes,
                     Ok(Err(err)) => {
                         tracing::warn!(error = %err, "chat2: checkpoint fetch failed");
-                        return SessionEnd::Reconnect;
+                        return Err(SessionEnd::Reconnect);
                     }
                     Err(_) => {
                         tracing::warn!("chat2: checkpoint fetch timed out; redialing");
-                        return SessionEnd::Reconnect;
+                        return Err(SessionEnd::Reconnect);
                     }
                 };
                 if let Err(err) = self.sink.apply_checkpoint(&bytes, state.checkpoint_seq) {
                     tracing::warn!(error = %err, "chat2: checkpoint import failed");
-                    return SessionEnd::Reconnect;
+                    return Err(SessionEnd::Reconnect);
                 }
                 let mut shared = lock(&self.shared);
                 shared.cursor = shared.cursor.max(state.checkpoint_seq);
@@ -395,7 +425,7 @@ impl Actor {
             &[],
         );
         if pipe.tx.send(rows_req).await.is_err() {
-            return SessionEnd::Reconnect;
+            return Err(SessionEnd::Reconnect);
         }
         let backfill = tokio::time::timeout(BACKFILL_DEADLINE, async {
             loop {
@@ -418,7 +448,7 @@ impl Actor {
         .await;
         let Ok(Some(head_seq)) = backfill else {
             tracing::warn!("chat2: backfill did not complete");
-            return SessionEnd::Reconnect;
+            return Err(SessionEnd::Reconnect);
         };
         {
             let mut shared = lock(&self.shared);
@@ -432,11 +462,14 @@ impl Actor {
 
         // Anything pending (offline writes, reconnect re-pushes) goes now —
         // the server's batchId dedupe makes replays exact no-ops.
-        if !self.push_pending(&mut pipe).await {
-            return SessionEnd::Reconnect;
+        if !self.push_pending(pipe).await {
+            return Err(SessionEnd::Reconnect);
         }
+        Ok(())
+    }
 
-        // ── steady state ────────────────────────────────────────────────────
+    /// Live traffic until the link must be redialed or the client stops.
+    async fn steady_state(&mut self, pipe: &mut BinPipe) -> SessionEnd {
         let preview = self.sink.preview();
         let preview_notify = preview
             .as_ref()
@@ -451,7 +484,7 @@ impl Actor {
         // after joining. Repair it before waiting for ordinary traffic.
         let mut gap_repairs = 0u32;
         if !self
-            .maybe_repair_gap(&mut pipe, &mut gap_repairs, &mut repair_deadline)
+            .maybe_repair_gap(pipe, &mut gap_repairs, &mut repair_deadline)
             .await
         {
             return SessionEnd::Reconnect;
@@ -509,7 +542,7 @@ impl Actor {
                         }
                     }
                     if !self
-                        .maybe_repair_gap(&mut pipe, &mut gap_repairs, &mut repair_deadline)
+                        .maybe_repair_gap(pipe, &mut gap_repairs, &mut repair_deadline)
                         .await
                     {
                         return SessionEnd::Reconnect;
@@ -517,19 +550,19 @@ impl Actor {
                 }
                 _ = self.nudge_rx.recv() => {
                     let force_flush = lock(&self.shared).force_flush;
-                    if force_flush && !self.push_head(&mut pipe).await {
+                    if force_flush && !self.push_head(pipe).await {
                         return SessionEnd::Reconnect;
                     }
                 }
                 _ = self.http_sync_rx.recv() => {
                     // An overlapping bootstrap/recovery cycle finished.
                     // Once joined, queued writes belong on WS, not both paths.
-                    if !self.push_pending(&mut pipe).await {
+                    if !self.push_pending(pipe).await {
                         return SessionEnd::Reconnect;
                     }
                 }
                 _ = self.probe_rx.recv() => {
-                    if !self.send_probe(&mut pipe, &mut probe_deadline).await {
+                    if !self.send_probe(pipe, &mut probe_deadline).await {
                         return SessionEnd::Reconnect;
                     }
                 }
@@ -542,7 +575,7 @@ impl Actor {
                 // the clock so the queue drains one-per-grant.
                 _ = tokio::time::sleep_until(retry_at) => {
                     lock(&self.shared).retry_at = None;
-                    if !self.push_head(&mut pipe).await {
+                    if !self.push_head(pipe).await {
                         return SessionEnd::Reconnect;
                     }
                 }
@@ -552,10 +585,10 @@ impl Actor {
                         shared.flush_at = None;
                         shared.force_flush = true;
                     }
-                    if !self.push_head(&mut pipe).await { return SessionEnd::Reconnect; }
+                    if !self.push_head(pipe).await { return SessionEnd::Reconnect; }
                 }
                 _ = tokio::time::sleep_until(quiet_probe_at) => {
-                    if !self.send_probe(&mut pipe, &mut probe_deadline).await {
+                    if !self.send_probe(pipe, &mut probe_deadline).await {
                         return SessionEnd::Reconnect;
                     }
                     last_progress = tokio::time::Instant::now();
@@ -693,8 +726,10 @@ impl Actor {
                 )
             });
             if let Some((id, _)) = &frame {
-                shared.in_flight =
-                    Some((id.clone(), tokio::time::Instant::now() + PUSH_ACK_DEADLINE));
+                shared.in_flight = Some((
+                    id.clone(),
+                    tokio::time::Instant::now() + self.tuning.push_ack_deadline,
+                ));
             }
             frame.map(|(_, frame)| frame)
         };

@@ -279,14 +279,12 @@ impl FlipMorph {
     }
 }
 
-// -- morph anchoring (round-9 follow-up) ------------------------------------
+// -- morph anchoring ---------------------------------------------------------
 // The pill sits at the BOTTOM of the shell column: growing it moves its TOP
-// edge; the bottom edge is stationary on screen. The first morph cut anchored
-// the pill's inner content to the top, so the actions/cluster (laid out at
-// the inner bottom) rode the animating height up and down. The controls are
-// therefore pinned to the stationary bottom edge (absolute bottom row when
-// expanded, a bottom-justified row when compact) and only the TEXT glides
-// with the sweeping top edge. The helpers below are the pure math.
+// edge; the bottom edge is stationary on screen. The controls are pinned to
+// that stationary bottom edge (absolute bottom row when expanded, a
+// bottom-justified row when compact) and only the TEXT glides with the
+// sweeping top edge. The helpers below are the pure math.
 
 /// Send/attach center sits 27px above the pill's outer bottom in expanded
 /// mode (`pb-2.5` 10 + half the 32px content zone + 1px hairline) but 24.5px
@@ -321,8 +319,8 @@ pub fn collapse_text_glide(from: f32, progress: f32) -> f32 {
 
 /// The decaying [`CLUSTER_Y_DELTA`] offset for the in-flight morph.
 /// The whole control cluster — chips AND the send button — rides the stationary
-/// bottom anchor at FULL alpha throughout (round-9 follow-up: any fade on the
-/// picker chips read as flicker; their screen position is near-stationary
+/// bottom anchor at FULL alpha throughout (any fade on the picker chips reads
+/// as flicker; their screen position is near-stationary
 /// across the flip, so nothing needs to be hidden).
 pub fn morph_cluster_dy(progress: f32) -> f32 {
     CLUSTER_Y_DELTA * (1.0 - progress)

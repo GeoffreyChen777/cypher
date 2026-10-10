@@ -53,7 +53,7 @@ fn mcp_tool_label(name: &str) -> Option<String> {
 /// `tools["read"](…)`, an MCP tool by its tool name. Read off the source, so
 /// a call the script only makes on some branch is listed too — this names
 /// what the script is about, the nested chips under it say what actually ran.
-pub fn script_tools(code: &str) -> Vec<String> {
+pub(crate) fn script_tools(code: &str) -> Vec<String> {
     let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
     let bytes = code.as_bytes();
     let mut names: Vec<String> = Vec::new();

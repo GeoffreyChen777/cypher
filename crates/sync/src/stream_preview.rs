@@ -4,16 +4,16 @@
 
 use crate::chat_frames::{self, WireFrame};
 
-pub const CAPABILITY: &str = "ephemeral-stream-v1";
-pub const DELTA: u8 = 0x20;
-pub const SNAPSHOT: u8 = 0x21;
+pub(crate) const CAPABILITY: &str = "ephemeral-stream-v1";
+pub(crate) const DELTA: u8 = 0x20;
+pub(crate) const SNAPSHOT: u8 = 0x21;
 pub const RESUME: u8 = 0x22;
-pub const FINISHED: u8 = 0x23;
+pub(crate) const FINISHED: u8 = 0x23;
 pub const START: u8 = 0x24;
 pub const STATE: u8 = 0x25;
-pub const RECEIPT: u8 = 0x26;
-pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const MAX_TEXT_BYTES: usize = 61_440;
+pub(crate) const RECEIPT: u8 = 0x26;
+pub(crate) const MAX_FRAME_BYTES: usize = 65_536;
+pub(crate) const MAX_TEXT_BYTES: usize = 61_440;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 fn id(value: &serde_json::Value) -> bool {

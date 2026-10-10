@@ -317,7 +317,7 @@ impl RegistryClient {
     /// Resolves once the initial hello/state handshake lands; a first-attempt
     /// failure is returned as `Err` (callers own the initial-join retry, same
     /// contract as `ChatClient`). After that the client reconnects itself.
-    pub async fn connect_via(
+    pub(crate) async fn connect_via(
         provider: Arc<dyn UrlProvider>,
         doc: Arc<Mutex<RegistryDoc>>,
         device_id: &str,

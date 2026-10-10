@@ -305,13 +305,24 @@ async fn real_socket_text_pongs_cannot_hide_a_missing_push_ack() {
     });
     let http = Arc::new(CountingTransport::default());
     let (fetch, _) = fetcher(b"");
-    let client = ChatClient::connect_via_transport(
-        Arc::new(StaticUrl(url)),
+    // Shortened clocks: pings well inside the ACK deadline, so the socket
+    // stays visibly alive while the PUSH goes unanswered.
+    let push_ack_deadline = Duration::from_secs(1);
+    let client = ChatClient::connect_with_transport(
+        Arc::new(WsBinConnector {
+            url: Arc::new(StaticUrl(url)),
+            preview: None,
+            ping_interval: Duration::from_millis(200),
+        }),
         Arc::new(RecordingSink::default()),
         fetch,
         "dev-a",
         0,
-        http.clone(),
+        ChatTuning {
+            push_ack_deadline,
+            ..ChatTuning::default()
+        },
+        Some(http.clone()),
     )
     .await
     .unwrap();
@@ -326,7 +337,7 @@ async fn real_socket_text_pongs_cannot_hide_a_missing_push_ack() {
     // not the deliberately retained bootstrap HTTP path.
     tokio::time::sleep(Duration::from_millis(30)).await;
     client.enqueue_update(vec![1]);
-    tokio::time::timeout(PUSH_ACK_DEADLINE + Duration::from_secs(5), async {
+    tokio::time::timeout(push_ack_deadline + Duration::from_secs(5), async {
         while client.stats().pending_pushes != 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

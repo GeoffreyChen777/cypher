@@ -570,7 +570,7 @@ fn thinking_between_tool_calls_folds_into_one_work_run() {
 
 #[test]
 fn the_mock_work_demo_settles_into_one_row() {
-    // `CYPHER_MOCK_WORK` (scripts/dev-demo-work.sh): sixteen alternating
+    // `CYPHER_MOCK_WORK` (`scripts/dev-demo.sh --work`): sixteen alternating
     // thought and command rows fold into one above the answer.
     let mut parts = Vec::new();
     for event in cypher_harness::mock::work_script() {

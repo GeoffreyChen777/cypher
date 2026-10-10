@@ -26,10 +26,10 @@ mod rows;
 pub use rows::{DeletedDevice, DeletedSpace, WorkspaceState};
 
 /// Row kinds — the four sidebar tables.
-pub const KIND_DEVICES: &str = "devices";
-pub const KIND_SPACES: &str = "spaces";
-pub const KIND_CHATS: &str = "chats";
-pub const KIND_SESSIONS: &str = "sessions";
+pub(crate) const KIND_DEVICES: &str = "devices";
+pub(crate) const KIND_SPACES: &str = "spaces";
+pub(crate) const KIND_CHATS: &str = "chats";
+pub(crate) const KIND_SESSIONS: &str = "sessions";
 
 /// Snapshot row id in the local `DocsStore` for the persisted registry state.
 pub const REGISTRY_DOC_ID: &str = "registry1";
@@ -39,7 +39,7 @@ pub const REGISTRY_DOC_ID: &str = "registry1";
 /// Encode an HLC string: `{ms:013}-{counter:06}-{device}`. Fixed-width zero
 /// padding makes lexicographic order = (ms, counter, device) order, and the
 /// device suffix makes the order total (two writers can never tie).
-pub fn encode_hlc(ms: i64, counter: u32, device: &str) -> String {
+pub(crate) fn encode_hlc(ms: i64, counter: u32, device: &str) -> String {
     format!("{ms:013}-{counter:06}-{device}")
 }
 
@@ -54,7 +54,7 @@ fn hlc_newer(a: &str, b: Option<&str>) -> bool {
 /// Monotonic HLC source: never emits the same or an earlier clock twice, even
 /// across a wall-clock regression or restart (state persists with the doc).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct HlcClock {
+pub(crate) struct HlcClock {
     last_ms: i64,
     counter: u32,
 }
@@ -251,7 +251,7 @@ pub fn apply_op(row: Option<&RegistryRow>, op: &RowOp) -> (Option<RegistryRow>, 
 
 /// A row as a re-seed op (server-behind-client recovery): one upsert carrying
 /// the row's ORIGINAL per-field clocks, or a delete for tombstones.
-pub fn row_to_seed_op(row: &RegistryRow) -> RowOp {
+pub(crate) fn row_to_seed_op(row: &RegistryRow) -> RowOp {
     if row.deleted {
         return RowOp {
             kind: row.kind.clone(),

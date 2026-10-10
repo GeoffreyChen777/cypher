@@ -30,7 +30,7 @@ pub use device_room::{
     encode_device_frame,
 };
 pub use local::{LocalListener, connect_local, probe_local};
-pub use server::serve_connection;
+use server::serve_connection;
 
 /// RPC method names — single source of truth for both ends.
 pub mod methods {

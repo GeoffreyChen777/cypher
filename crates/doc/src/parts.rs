@@ -1,23 +1,18 @@
-//! Message parts: the event fold, the render-only privacy policy, and continuation splitting.
-//!
-//! Ports of `packages/control/src/parts.ts` (fold) and
-//! `packages/session-doc/src/{render-parts,messages}.ts`.
+//! Message parts: the event fold and the render-only privacy policy.
 
 use serde::{Deserialize, Serialize};
 
 use cypher_proto::{AgentEvent, ToolCall, ToolDiff, UserInputQuestion};
 
-use crate::constants::MSG_INLINE_MAX;
-
 /// Line cap for the tool-output SUMMARY persisted into the doc. Keeping a
 /// small number of complete lines makes the expandable detail useful without
 /// imposing an arbitrary character limit on a single long line.
-pub const TOOL_OUTPUT_SUMMARY_MAX_LINES: usize = 5;
+pub(crate) const TOOL_OUTPUT_SUMMARY_MAX_LINES: usize = 5;
 
 /// Char cap for the `subagent` tool's `task` kept in the doc (privacy-safe
 /// persistence, [`sanitize_tool_call`]). Cut on a Unicode-char boundary, so
 /// the stored string is always valid UTF-8.
-pub const SUBAGENT_TASK_MAX_CHARS: usize = 500;
+pub(crate) const SUBAGENT_TASK_MAX_CHARS: usize = 500;
 
 /// Char cap for a Pi `codemode` script kept in the doc. The script is the
 /// call's whole invocation — what a `bash` command is to `Exec`, which the doc
@@ -26,7 +21,7 @@ pub const SUBAGENT_TASK_MAX_CHARS: usize = 500;
 pub const CODEMODE_SCRIPT_MAX_CHARS: usize = 8_000;
 
 /// Char cap for a Pi `tool_search` query kept in the doc.
-pub const TOOL_SEARCH_QUERY_MAX_CHARS: usize = 500;
+pub(crate) const TOOL_SEARCH_QUERY_MAX_CHARS: usize = 500;
 
 /// The doc-resident form of a tool output (docs/chat2-sync.md A1). There is no
 /// sidecar, so this IS the whole record in the doc — the full text survives
@@ -39,7 +34,7 @@ pub const TOOL_SEARCH_QUERY_MAX_CHARS: usize = 500;
 /// - A long single line is kept whole; the limit is by lines, not characters.
 ///
 /// `None` for blank output.
-pub fn summarize_tool_output(text: &str) -> Option<String> {
+pub(crate) fn summarize_tool_output(text: &str) -> Option<String> {
     let kept: Vec<&str> = text
         .lines()
         .filter(|l| !l.trim_start().starts_with("```"))
@@ -65,13 +60,13 @@ pub fn summarize_tool_output(text: &str) -> Option<String> {
 /// streaming full transcripts) can never grow the transient column unbounded.
 /// Cutting the head (not the middle) is deliberate: the live card shows what
 /// is happening RIGHT NOW; the settled output summary owns the beginning.
-pub const TOOL_PROGRESS_MAX_LINES: usize = 8;
-pub const TOOL_PROGRESS_MAX_BYTES: usize = 4096;
+pub(crate) const TOOL_PROGRESS_MAX_LINES: usize = 8;
+pub(crate) const TOOL_PROGRESS_MAX_BYTES: usize = 4096;
 
 /// Keep the tail of a live progress blob: last ≤8 lines, whole lines, within
 /// 4KB (truncating by bytes would split a line mid-character; lines are the
 /// UI's render unit).
-pub fn tail_progress(text: &str) -> String {
+pub(crate) fn tail_progress(text: &str) -> String {
     let mut kept: Vec<&str> = Vec::new();
     let mut bytes = 0usize;
     // Walk from the LAST line backwards, keeping as many of the last 8 as fit
@@ -108,7 +103,7 @@ pub struct ToolDiffStat {
 }
 
 /// Line-level add/delete counts for one file's diff.
-pub fn diff_stat(diff: &ToolDiff) -> ToolDiffStat {
+pub(crate) fn diff_stat(diff: &ToolDiff) -> ToolDiffStat {
     let (additions, deletions) = match &diff.old_text {
         None => (diff.new_text.lines().count() as u64, 0),
         Some(old) => {
@@ -579,108 +574,6 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
         },
         other => other.clone(),
     }
-}
-
-/// Deterministic continuation id: `"{root}#c{n}"`.
-pub fn continuation_id(root: &str, index: usize) -> String {
-    format!("{root}#c{index}")
-}
-
-/// Split an oversized parts list into chunks each under `MSG_INLINE_MAX` bytes.
-///
-/// Splitting happens at part boundaries; an oversized text part is itself chunked at char
-/// boundaries. Returns one Vec per resulting entry — the first keeps the root id, the rest are
-/// continuations (`continuation_id(root, i)`), matching `splitMessageEntry` in zeron.
-pub fn split_parts(parts: &[MessagePart]) -> Vec<Vec<MessagePart>> {
-    let mut chunks: Vec<Vec<MessagePart>> = vec![Vec::new()];
-    let mut current_bytes = 0usize;
-
-    let push_part = |chunks: &mut Vec<Vec<MessagePart>>, current: &mut usize, part: MessagePart| {
-        let len = part.byte_len();
-        if *current > 0 && *current + len > MSG_INLINE_MAX {
-            chunks.push(Vec::new());
-            *current = 0;
-        }
-        *current += len;
-        chunks.last_mut().unwrap().push(part);
-    };
-
-    for part in parts {
-        match part {
-            MessagePart::Text {
-                id,
-                text,
-                agent_text,
-            } if text.len() > MSG_INLINE_MAX => {
-                // Chunk oversized text at char boundaries.
-                let mut start = 0usize;
-                let mut piece = 0usize;
-                while start < text.len() {
-                    let mut end = (start + MSG_INLINE_MAX).min(text.len());
-                    while end < text.len() && !text.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    // Guard: ensure forward progress on pathological boundaries.
-                    if end <= start {
-                        end = text.len();
-                    }
-                    let sub = MessagePart::Text {
-                        id: if piece == 0 {
-                            id.clone()
-                        } else {
-                            format!("{id}~{piece}")
-                        },
-                        text: text[start..end].to_string(),
-                        // The agent's version belongs to the part as a
-                        // whole, so it rides the first piece only.
-                        agent_text: if piece == 0 { agent_text.clone() } else { None },
-                    };
-                    push_part(&mut chunks, &mut current_bytes, sub);
-                    start = end;
-                    piece += 1;
-                }
-            }
-            MessagePart::Reasoning { id, text } if text.len() > MSG_INLINE_MAX => {
-                for (piece, range) in char_chunks(text, MSG_INLINE_MAX).into_iter().enumerate() {
-                    let sub = MessagePart::Reasoning {
-                        id: if piece == 0 {
-                            id.clone()
-                        } else {
-                            format!("{id}~{piece}")
-                        },
-                        text: text[range].to_string(),
-                    };
-                    push_part(&mut chunks, &mut current_bytes, sub);
-                }
-            }
-            other => push_part(&mut chunks, &mut current_bytes, other.clone()),
-        }
-    }
-    chunks
-}
-
-/// Byte ranges of `text` at most `max` long, cut on char boundaries.
-fn char_chunks(text: &str, max: usize) -> Vec<std::ops::Range<usize>> {
-    let mut ranges = Vec::new();
-    let mut start = 0usize;
-    while start < text.len() {
-        let mut end = (start + max).min(text.len());
-        while end < text.len() && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        // Guard: ensure forward progress on pathological boundaries.
-        if end <= start {
-            end = text.len();
-        }
-        ranges.push(start..end);
-        start = end;
-    }
-    ranges
-}
-
-/// Render-time inverse of splitting: concatenate continuation entries' parts in list order.
-pub fn join_continuations(entries: Vec<Vec<MessagePart>>) -> Vec<MessagePart> {
-    entries.into_iter().flatten().collect()
 }
 
 #[cfg(test)]

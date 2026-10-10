@@ -27,11 +27,11 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-getrandom = "0.4"
+getrandom.workspace = true
 chrono.workspace = true
 notify.workspace = true
 portable-pty.workspace = true
-base64 = "0.22"
+base64.workspace = true
 libc.workspace = true
 gethostname.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }

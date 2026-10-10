@@ -119,10 +119,8 @@ fn workos_client_id_from_env(edge_url: &str, edge_token: &Option<String>) -> Opt
 }
 
 /// The development Edge this build defaults to: a local `wrangler dev`, on the
-/// port `edge/package.json`'s `dev` script binds. The hosted development Worker
-/// was retired on 2026-09-22 — it consumed the account's Durable Object
-/// allowance, its `DevelopmentGuard` distorted exactly the billing numbers it
-/// was used to measure, and its room allowlist had filled permanently.
+/// port `edge/package.json`'s `dev` script binds (there is no hosted
+/// development Worker).
 ///
 /// `CYPHER_DEV_EDGE_URL` overrides this, so a development engine can still be
 /// pointed at a self-hosted staging server without a rebuild.

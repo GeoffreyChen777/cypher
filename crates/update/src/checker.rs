@@ -41,7 +41,7 @@ impl UpdateStatus {
 /// **on for Linux** — a headless device has no update strip to click, so the
 /// service applies releases itself in a quiet window and restarts — and off
 /// elsewhere, where the desktop app owns updates.
-pub fn auto_update_enabled() -> bool {
+pub(crate) fn auto_update_enabled() -> bool {
     auto_update_setting(cypher_env::var("AUTO_UPDATE").as_deref())
 }
 

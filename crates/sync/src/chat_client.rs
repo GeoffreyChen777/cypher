@@ -60,7 +60,7 @@ const QUOTA_RETRY: Duration = Duration::from_secs(5);
 /// batchId to retire) — the silent replay-forever wedge, again. Enforced at
 /// enqueue: a batch the server can never accept must not enter the replay
 /// queue.
-pub const MAX_PUSH_BYTES: usize = 1024 * 1024 - 4096;
+pub(crate) const MAX_PUSH_BYTES: usize = 1024 * 1024 - 4096;
 /// Upper bound for a buffered HTTPS pull response. The Edge endpoint itself
 /// truncates at 4 MiB; this larger client guard protects against a buggy or
 /// incompatible server before frame parsing allocates more state.
@@ -74,6 +74,9 @@ pub struct ChatTuning {
     /// Bound one HTTPS sync cycle so a stalled request cannot wedge the
     /// single-flight gate forever.
     pub http_timeout: Duration,
+    /// How long a sent PUSH may wait for its ACK before the link is treated
+    /// as dead (transport pongs do not prove the write reached the room).
+    pub push_ack_deadline: Duration,
 }
 
 impl Default for ChatTuning {
@@ -81,6 +84,7 @@ impl Default for ChatTuning {
         Self {
             probe_quiet: PROBE_QUIET_DEFAULT,
             http_timeout: HTTP_SYNC_TIMEOUT,
+            push_ack_deadline: PUSH_ACK_DEADLINE,
         }
     }
 }
@@ -186,7 +190,7 @@ pub trait ChatTransport: Send + Sync + 'static {
 // ── catch-up planning (pure — the client-side precision rule) ───────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CatchUpPlan {
+pub(crate) enum CatchUpPlan {
     /// Local doc already contains the checkpoint frontier (or there is no
     /// checkpoint): stream rows only.
     RowsOnly { after: u64 },
@@ -196,7 +200,7 @@ pub enum CatchUpPlan {
 
 /// Decide the catch-up path from the hello state. `frontier_contained` is the
 /// sink's verdict on the checkpoint frontier payload.
-pub fn plan_catch_up(
+pub(crate) fn plan_catch_up(
     cursor: u64,
     state: &wire::StateHeader,
     frontier_contained: bool,
@@ -238,12 +242,14 @@ pub(crate) trait BinConnector: Send + Sync + 'static {
 struct WsBinConnector {
     url: Arc<dyn UrlProvider>,
     preview: Option<Arc<crate::preview_link::PreviewLink>>,
+    ping_interval: Duration,
 }
 
 impl BinConnector for WsBinConnector {
     fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
         let provider = self.url.clone();
         let preview = self.preview.clone();
+        let ping_interval = self.ping_interval;
         Box::pin(async move {
             let url = provider.url().await?;
             use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -271,7 +277,7 @@ impl BinConnector for WsBinConnector {
                 .map_err(|e| SyncError::WebSocket(e.to_string()))?;
             let (out_tx, out_rx) = mpsc::channel(64);
             let (in_tx, in_rx) = mpsc::channel(64);
-            tokio::spawn(pump(ws, out_rx, in_tx));
+            tokio::spawn(pump(ws, out_rx, in_tx, ping_interval));
             Ok(BinPipe {
                 tx: out_tx,
                 rx: in_rx,
@@ -286,9 +292,10 @@ async fn pump(
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
     mut out_rx: mpsc::Receiver<Vec<u8>>,
     in_tx: mpsc::Sender<Vec<u8>>,
+    ping_interval: Duration,
 ) {
     let (mut sink, mut stream) = ws.split();
-    let mut ping = tokio::time::interval(PING_INTERVAL);
+    let mut ping = tokio::time::interval(ping_interval);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping.tick().await;
     let mut last_rx = tokio::time::Instant::now();
@@ -595,7 +602,7 @@ impl ChatClient {
     /// Resolves once hello/state lands AND the initial catch-up (checkpoint
     /// if needed + row backfill) completes; first-attempt failures are `Err`
     /// (callers own the initial-join retry). After that it reconnects itself.
-    pub async fn connect_via(
+    pub(crate) async fn connect_via(
         provider: Arc<dyn UrlProvider>,
         sink: Arc<dyn ChatDocSink>,
         fetcher: Arc<dyn CheckpointFetcher>,
@@ -605,6 +612,7 @@ impl ChatClient {
         let connector = Arc::new(WsBinConnector {
             url: provider,
             preview: sink.preview(),
+            ping_interval: PING_INTERVAL,
         });
         Self::connect_with_tuned(
             connector,
@@ -631,6 +639,7 @@ impl ChatClient {
         let connector = Arc::new(WsBinConnector {
             url: provider,
             preview: sink.preview(),
+            ping_interval: PING_INTERVAL,
         });
         Self::connect_with_transport(
             connector,

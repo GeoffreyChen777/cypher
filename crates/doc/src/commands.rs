@@ -1,4 +1,4 @@
-//! Durable command ledger — port of `packages/session-doc/src/commands.ts`.
+//! Durable command ledger.
 //!
 //! Rules (verbatim from zeron's design):
 //! 1. Each device inserts only its own entries; entries are append-only and immutable.
@@ -18,7 +18,7 @@ use crate::constants::COMMAND_DEFAULT_TTL_MS;
 /// sealed before the host expires it (aligned with the engine's staging-dir
 /// TTL, so a wedged upload can't leave the command Pending forever). Bounded
 /// wait is a product requirement: the durable queue must eventually resolve.
-pub const ATTACHMENT_SEAL_GRACE_MS: i64 = 10 * 60 * 1000;
+pub(crate) const ATTACHMENT_SEAL_GRACE_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -123,15 +123,10 @@ impl SessionCommandEntry {
         self.payload.kind()
     }
 
-    pub fn effective_expiry(&self) -> i64 {
+    pub(crate) fn effective_expiry(&self) -> i64 {
         self.expires_at
             .unwrap_or(self.issued_at + COMMAND_DEFAULT_TTL_MS)
     }
-}
-
-/// Rule 2: only the composer that issued a still-pending command may cancel it.
-pub fn can_composer_cancel(entry: &SessionCommandEntry, device_id: &str) -> bool {
-    entry.status == SessionCommandStatus::Pending && entry.issued_by == device_id
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,7 +164,7 @@ pub struct EvaluationContext<'a> {
 }
 
 /// The pending-attachment descriptors of a Run command, if it carries any.
-pub fn run_pending_attachments(entry: &SessionCommandEntry) -> Option<&[PendingAttachment]> {
+pub(crate) fn run_pending_attachments(entry: &SessionCommandEntry) -> Option<&[PendingAttachment]> {
     match &entry.payload {
         SessionCommandPayload::Run { request, .. } => {
             let pending = &request.pending_attachments;
@@ -477,16 +472,6 @@ mod tests {
             None,
         );
         assert_eq!(evaluate_command(&r, &cx), CommandDisposition::Execute);
-    }
-
-    #[test]
-    fn composer_cancel_rules() {
-        let e = steer("c1", 1_000);
-        assert!(can_composer_cancel(&e, "device-a"));
-        assert!(!can_composer_cancel(&e, "device-b"));
-        let mut applied = e.clone();
-        applied.status = SessionCommandStatus::Applied;
-        assert!(!can_composer_cancel(&applied, "device-a"));
     }
 
     #[test]

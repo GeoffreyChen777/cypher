@@ -190,7 +190,7 @@ fn escape_mention_label(label: &str) -> String {
 }
 
 /// Reverse of [`escape_mention_label`]: restores the display label from its
-/// escaped Markdown form (`\[` `\]` `\\` → `[` `]` `\`). Used for session
+/// escaped Markdown form (`\[`, `\]`, `\\` → `[`, `]`, `\`). Used for session
 /// titles, which are not re-validatable against a canonical target.
 fn unescape_mention_label(label: &str) -> String {
     let mut out = String::with_capacity(label.len());

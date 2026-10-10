@@ -17,7 +17,7 @@ pub struct EngineBootConfig {
     pub org_id: Option<String>,
     /// WorkOS client id for production authentication.
     pub workos_client_id: Option<String>,
-    /// Harness for doc-command runs until per-chat config lands (M4).
+    /// Harness for doc-command runs on chats without a per-chat config.
     pub default_harness: HarnessId,
 }
 

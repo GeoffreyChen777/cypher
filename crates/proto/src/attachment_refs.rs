@@ -20,7 +20,7 @@ const FILES_HEADER: &str = "Attached files (local files — open them to view):"
 /// Body placeholder for an image-only send with no typed text.
 pub const IMAGES_ONLY_TEXT: &str = "See the attached image(s).";
 /// Body placeholder for a text-less send carrying any non-image file.
-pub const FILES_ONLY_TEXT: &str = "See the attached file(s).";
+pub(crate) const FILES_ONLY_TEXT: &str = "See the attached file(s).";
 
 /// Header prefixes (lowercase) a parser accepts; the header line must also
 /// end with `):`.

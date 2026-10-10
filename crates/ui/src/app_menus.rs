@@ -42,13 +42,13 @@ pub fn init(cx: &mut App) {
     cx.on_action(quit);
     // Application-menu verbs — gpui wraps NSApp `hide` / `hideOtherApplications`
     // / `unhideAllApplications` (zed registers the same trio in
-    // crates/zed/src/zed.rs `init`).
+    // zed's crates/zed/src/zed.rs `init`).
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     // Window verbs route to the active window. cypher is single-window, so a
     // global handler suffices where zed registers these per-workspace
-    // (crates/zed/src/zed.rs `register_action(Minimize/Zoom)`).
+    // (zed's crates/zed/src/zed.rs `register_action(Minimize/Zoom)`).
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window| window.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |window| window.zoom_window()));
     cx.on_action(|_: &CloseWindow, cx| with_active_window(cx, |window| window.remove_window()));
@@ -130,7 +130,7 @@ pub fn app_menus() -> Vec<Menu> {
         // their native selectors (`OsAction` → cut:/copy:/paste:/selectAll:),
         // so the OS Edit menu routes through the responder chain to the focused
         // input — zed wires its editor actions identically
-        // (crates/zed/src/zed/app_menus.rs, Edit/Selection menus).
+        // (zed's crates/zed/src/zed/app_menus.rs, Edit/Selection menus).
         Menu::new("Edit").items([
             // Undo/Redo have no `OsAction` counterpart — they dispatch as plain
             // actions to the focused input, same as the composer keymap.

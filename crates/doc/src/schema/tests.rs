@@ -809,7 +809,6 @@ fn sealed_attachments_round_trip_and_survive_snapshot() {
     // A fresh doc (no container) reads empty — the container is additive.
     let doc = SessionDoc::init("chat-1").unwrap();
     assert!(doc.sealed_attachment("up-1").unwrap().is_none());
-    assert!(doc.sealed_attachments().unwrap().is_empty());
 
     doc.seal_attachment("up-1", "/up/1-a.png", "a.png").unwrap();
     doc.seal_attachment("up-2", "/up/2-b.png", "b.png").unwrap();
@@ -817,14 +816,9 @@ fn sealed_attachments_round_trip_and_survive_snapshot() {
         doc.sealed_attachment("up-1").unwrap(),
         Some(("/up/1-a.png".into(), "a.png".into()))
     );
-    let mut sealed = doc.sealed_attachments().unwrap();
-    sealed.sort();
     assert_eq!(
-        sealed,
-        vec![
-            ("up-1".into(), "/up/1-a.png".into(), "a.png".into()),
-            ("up-2".into(), "/up/2-b.png".into(), "b.png".into()),
-        ]
+        doc.sealed_attachment("up-2").unwrap(),
+        Some(("/up/2-b.png".into(), "b.png".into()))
     );
     // Re-sealing the same id is idempotent (overwrites in place).
     doc.seal_attachment("up-1", "/up/1-c.png", "c.png").unwrap();
@@ -832,7 +826,6 @@ fn sealed_attachments_round_trip_and_survive_snapshot() {
         doc.sealed_attachment("up-1").unwrap(),
         Some(("/up/1-c.png".into(), "c.png".into()))
     );
-    assert_eq!(doc.sealed_attachments().unwrap().len(), 2);
 
     // The container crosses an export/import snapshot intact.
     let bytes = doc.export_snapshot().unwrap();
@@ -845,7 +838,10 @@ fn sealed_attachments_round_trip_and_survive_snapshot() {
         restored.sealed_attachment("up-1").unwrap(),
         Some(("/up/1-c.png".into(), "c.png".into()))
     );
-    assert_eq!(restored.sealed_attachments().unwrap().len(), 2);
+    assert_eq!(
+        restored.sealed_attachment("up-2").unwrap(),
+        Some(("/up/2-b.png".into(), "b.png".into()))
+    );
 }
 
 /// Regression guard: entries/parts missing strict fields must salvage

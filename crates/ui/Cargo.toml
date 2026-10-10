@@ -24,7 +24,7 @@ gpui_platform.workspace = true
 gpui_tokio.workspace = true
 reqwest_client.workspace = true
 rustls.workspace = true
-url = "2"
+url.workspace = true
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true
@@ -32,10 +32,8 @@ serde.workspace = true
 serde_json.workspace = true
 pulldown-cmark.workspace = true
 alacritty_terminal.workspace = true
-base64 = "0.22"
-# Already in the graph via gpui (same version/features): re-encodes pasted
-# TIFF/BMP images as PNG before upload.
-image = { version = "0.25", default-features = false, features = ["png", "tiff", "bmp"] }
+base64.workspace = true
+image.workspace = true
 unicode-segmentation.workspace = true
 uuid.workspace = true
 chrono.workspace = true
@@ -44,7 +42,7 @@ tracing.workspace = true
 sha2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc = "0.2"
+objc.workspace = true
 
 [dev-dependencies]
 cypher-harness.workspace = true

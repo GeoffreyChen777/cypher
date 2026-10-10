@@ -41,7 +41,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 /// (RFC 8305 §5's "Connection Attempt Delay"; 250ms is its recommended value).
 const STAGGER: Duration = Duration::from_millis(250);
 
-pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub(crate) type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// Dial `url` (ws/wss) with happy-eyeballs TCP racing, then run TLS + the
 /// WebSocket handshake on the winning stream. A success also broadcasts
@@ -57,7 +57,7 @@ pub async fn connect_ws(url: &str) -> Result<WsStream, WsError> {
 }
 
 #[allow(clippy::result_large_err)] // tungstenite's error type — see above.
-pub async fn connect_request(
+pub(crate) async fn connect_request(
     request: tokio_tungstenite::tungstenite::http::Request<()>,
 ) -> Result<WsStream, WsError> {
     let uri = request.uri();

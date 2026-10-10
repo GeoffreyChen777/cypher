@@ -81,6 +81,6 @@ pub fn subscribe_online() -> broadcast::Receiver<()> {
 }
 
 /// Broadcast that a dial just succeeded (see [`subscribe_online`]).
-pub fn notify_online() {
+pub(crate) fn notify_online() {
     let _ = online_channel().send(());
 }

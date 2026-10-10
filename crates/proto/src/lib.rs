@@ -1,6 +1,6 @@
 //! cypher-proto — wire types shared by engine, UI, and RPC.
 //!
-//! Ported from zeron's `packages/control/src/wire.ts` + `packages/harness/src/types.ts`.
+//! Ported from zeron's control wire and harness types.
 //! Per-turn token accounting is excluded by design; the `Usage` agent event is kept as a
 //! harness-level passthrough (rate-limit meters), never persisted into docs. The one
 //! usage surface is the live context-window gauge ([`ContextUsage`]), which rides the
@@ -8,17 +8,17 @@
 //! working trailer's tok/s ([`Throughput`]) is an estimate on the same local-only
 //! path, never persisted anywhere.
 
-pub mod agent;
+mod agent;
 pub mod agent_prompt;
 pub mod attachment_refs;
-pub mod entities;
-pub mod github;
+mod entities;
+mod github;
 pub mod motion;
 pub mod scratch;
-pub mod session_fork;
-pub mod side_chat;
+mod session_fork;
+mod side_chat;
 pub mod view;
-pub mod workspace;
+mod workspace;
 
 pub use agent::*;
 pub use entities::*;

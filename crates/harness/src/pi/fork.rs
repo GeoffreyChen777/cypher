@@ -5,7 +5,7 @@
 //! source chat's live client. `--no-extensions` guarantees no
 //! `session_before_fork` extension hook can cancel or mutate the fork.
 //!
-//! Protocol (pi's own RPC, `docs/rpc.md`):
+//! Protocol (pi's own RPC, documented in pi's `docs/rpc.md`):
 //! - `switch_session {sessionPath}` — load the source session;
 //! - `get_entries` → `{entries, leafId}` in APPEND order (abandoned branches
 //!   included) — the ACTIVE branch is rebuilt by walking `leafId -> parentId`;

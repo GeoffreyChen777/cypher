@@ -7,11 +7,11 @@ use std::{collections::BTreeSet, ops::Range, path::Path, sync::atomic::AtomicUsi
 
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
-pub const DEFAULT_MAX_SOURCE_BYTES: usize = 1024 * 1024;
-pub const DEFAULT_MAX_SPANS: usize = 200_000;
+pub(crate) const DEFAULT_MAX_SOURCE_BYTES: usize = 1024 * 1024;
+pub(crate) const DEFAULT_MAX_SPANS: usize = 200_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HighlightLimits {
+pub(crate) struct HighlightLimits {
     pub max_source_bytes: usize,
     pub max_spans: usize,
 }
@@ -88,7 +88,7 @@ pub enum HighlightKind {
 
 impl HighlightKind {
     /// Stable precedence used to resolve overlapping parser captures.
-    pub const fn precedence(self) -> u8 {
+    pub(crate) const fn precedence(self) -> u8 {
         match self {
             Self::Invalid => 100,
             Self::Escape => 95,
@@ -147,7 +147,7 @@ pub enum HighlightError {
 
 impl HighlightedDocument {
     /// Validate, split, and normalize absolute source spans into line-relative spans.
-    pub fn from_absolute_spans(
+    pub(crate) fn from_absolute_spans(
         language: LanguageId,
         source: &str,
         spans: impl IntoIterator<Item = HighlightSpan>,
@@ -292,7 +292,7 @@ pub fn highlight(request: HighlightRequest<'_>) -> Result<HighlightedDocument, H
 }
 
 /// Highlight a complete document with explicit limits and cooperative cancellation.
-pub fn highlight_with_limits(
+pub(crate) fn highlight_with_limits(
     request: HighlightRequest<'_>,
     limits: HighlightLimits,
     cancellation_flag: Option<&AtomicUsize>,

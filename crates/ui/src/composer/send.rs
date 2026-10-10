@@ -274,16 +274,15 @@ impl Composer {
         self.send_with("/compact".into(), false, SendDraft::Keep, cx);
     }
 
-    fn send_with(&mut self, text: String, steer: bool, draft: SendDraft, cx: &mut Context<Self>) {
-        let take_draft = matches!(draft, SendDraft::Take);
+    /// The checks that block a send before anything is staged or cleared:
+    /// on `Err` the draft, comments and attachments all stay put.
+    fn validate_send(&self, text: &str, take_draft: bool, cx: &App) -> Result<(), SharedString> {
         if !text.trim_start().starts_with('/')
             && let Some(id) = self.pickers.read(cx).unavailable_pi_model(cx)
         {
-            self.failure = Some(format!(
+            return Err(format!(
                 "Model \"{id}\" is no longer available. Reconnect its provider in Settings → Providers, or choose another model."
             ).into());
-            cx.notify();
-            return;
         }
         // Annotated slash-command sends are blocked with an inline composer
         // error — comments and session references ride the NEXT NORMAL
@@ -293,48 +292,47 @@ impl Composer {
         // surface) and session references are a main-surface feature, so the
         // block is main-only.
         if matches!(self.transport, ComposerTransport::Main) {
-            if take_draft && block_slash_with_comments(!self.comments.is_empty(), &text) {
-                self.failure = Some(
+            if take_draft && block_slash_with_comments(!self.comments.is_empty(), text) {
+                return Err(
                     "Comments can't be sent with a slash command — remove the /command or the comments first."
                         .into(),
                 );
-                cx.notify();
-                return;
             }
-            if block_slash_with_session_refs(&text) {
-                self.failure = Some(
+            if block_slash_with_session_refs(text) {
+                return Err(
                     "Session references can't be sent with a slash command — remove the /command or the references first."
                         .into(),
                 );
-                cx.notify();
-                return;
             }
             // Send-time cap: pasted/private markup bypasses the picker's
             // insert-time guard, so a raw prompt with more than
             // MAX_SESSION_REFS DISTINCT refs is rejected before anything is
             // cleared (draft/comments/attachments all preserved).
-            if session_send_cap_exceeded(&text) {
-                self.failure =
-                    Some("Up to 3 session references per message — remove one first.".into());
-                cx.notify();
-                return;
+            if session_send_cap_exceeded(text) {
+                return Err("Up to 3 session references per message — remove one first.".into());
             }
-            if block_slash_with_issue_refs(&text) {
-                self.failure = Some(
+            if block_slash_with_issue_refs(text) {
+                return Err(
                     "Issue and pull request references can't be sent with a slash command — remove the /command or the references first."
                         .into(),
                 );
-                cx.notify();
-                return;
             }
-            if issue_refs(&text).len() > MAX_ISSUE_REFS {
-                self.failure = Some(
+            if issue_refs(text).len() > MAX_ISSUE_REFS {
+                return Err(
                     "Up to 3 issue or pull request references per message — remove one first."
                         .into(),
                 );
-                cx.notify();
-                return;
             }
+        }
+        Ok(())
+    }
+
+    fn send_with(&mut self, text: String, steer: bool, draft: SendDraft, cx: &mut Context<Self>) {
+        let take_draft = matches!(draft, SendDraft::Take);
+        if let Err(message) = self.validate_send(&text, take_draft, cx) {
+            self.failure = Some(message);
+            cx.notify();
+            return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.failure = Some("Engine not connected".into());
@@ -493,16 +491,7 @@ impl Composer {
             .map(|att| format!("pending/{}/{}", att.id, att.name))
             .collect();
         let echo_text = attachments::with_attachments(&text, &echo_paths);
-        for (path, att) in echo_paths.iter().zip(&staged) {
-            // Plain files render as tiles from the path alone — nothing to seed.
-            let Some(image) = att.image() else { continue };
-            attachments::seed_attachment(&device_id, path, &att.name, image.clone());
-            if let Some(local) = local_device_id.as_deref()
-                && local != device_id
-            {
-                attachments::seed_attachment(local, path, &att.name, image.clone());
-            }
-        }
+        seed_echo_images(&staged, &echo_paths, &device_id, local_device_id.as_deref());
 
         // Optimistic echo (client-minted id doubles as the persisted message id,
         // so the doc frame dedups it away). It shows the comments this send
@@ -515,22 +504,7 @@ impl Composer {
         } else {
             Vec::new()
         };
-        let echo = SessionMessageEntry {
-            id: message_id.clone(),
-            role: cypher_doc::MessageRole::User,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: echo_text.clone(),
-                agent_text: None,
-            }],
-            created_at,
-            device_id: "local".into(),
-            status: None,
-            continuation_of: None,
-            completed_at: None,
-            comments: echo_comments.clone(),
-            models: Vec::new(),
-        };
+        let echo = echo_entry(&message_id, echo_text, created_at, echo_comments.clone());
         // Label the echo "Steer" now; the ledger's Steer command confirms it
         // once synced (Side Chat has no steer verb).
         let marks_steer = steer && !is_new && matches!(self.transport, ComposerTransport::Main);
@@ -592,50 +566,13 @@ impl Composer {
             .unwrap_or(SandboxLevel::WorkspaceWrite);
         self.send_task = Some(cx.spawn(async move |this, cx| {
             let result: Result<(), String> = async {
-                let mut issue_snapshots: Vec<cypher_proto::GithubIssueSnapshot> =
-                    Vec::with_capacity(issue_ref_list.len());
-                for issue in &issue_ref_list {
-                    let reference = format!(
-                        "{} {}#{}",
-                        github_kind_noun(issue.pull),
-                        issue.repo,
-                        issue.number
-                    );
-                    let mut params = serde_json::json!({
-                        "repo": issue.repo,
-                        "number": issue.number,
-                    });
-                    if let (Some(host), Some(object)) =
-                        (host_device_id.as_deref(), params.as_object_mut())
-                    {
-                        object.insert(
-                            "targetDeviceId".into(),
-                            serde_json::Value::String(host.to_string()),
-                        );
-                    }
-                    let call = engine.client().call(methods::GET_GITHUB_ISSUE, params);
-                    let deadline = cx.background_executor().timer(ISSUE_LOAD_TIMEOUT);
-                    futures::pin_mut!(call);
-                    futures::pin_mut!(deadline);
-                    let value = match futures::future::select(call, deadline).await {
-                        futures::future::Either::Left((Ok(value), _)) => value,
-                        futures::future::Either::Left((Err(err), _)) => {
-                            return Err(format!("Couldn't load GitHub {reference}: {err}"));
-                        }
-                        futures::future::Either::Right(_) => {
-                            return Err(format!("Loading GitHub {reference} timed out."));
-                        }
-                    };
-                    let mut snapshot: cypher_proto::GithubIssueSnapshot =
-                        serde_json::from_value(value).map_err(|_| {
-                            format!("The device returned an unreadable snapshot of {reference}.")
-                        })?;
-                    // Older engines don't say which kind the number is.
-                    if issue.pull {
-                        snapshot.kind = cypher_proto::GithubIssueKind::PullRequest;
-                    }
-                    issue_snapshots.push(snapshot);
-                }
+                let issue_snapshots = fetch_issue_snapshots(
+                    &engine,
+                    cx.background_executor(),
+                    host_device_id.as_deref(),
+                    &issue_ref_list,
+                )
+                .await?;
                 // Resolve the working directory: existing chats keep theirs;
                 // new chats run per the checkout plan (t3code env-mode): the
                 // space's folder as-is, an EXISTING worktree of the picked ref
@@ -656,34 +593,13 @@ impl Composer {
                     // The folder must exist on the HOST before the row names
                     // it as cwd. Bounded: a lost relay frame fails the send
                     // visibly instead of wedging it on "Sending…".
-                    let mut params = serde_json::json!({ "chatId": chat_id });
-                    if let (Some(host), Some(object)) =
-                        (host_device_id.as_deref(), params.as_object_mut())
-                    {
-                        object.insert(
-                            "targetDeviceId".into(),
-                            serde_json::Value::String(host.to_string()),
-                        );
-                    }
-                    let deadline = cx
-                        .background_executor()
-                        .timer(std::time::Duration::from_secs(20));
-                    let call = engine.client().call(methods::CREATE_SCRATCH_DIR, params);
-                    futures::pin_mut!(call);
-                    futures::pin_mut!(deadline);
-                    let path = match futures::future::select(call, deadline).await {
-                        futures::future::Either::Left((Ok(value), _)) => value["path"]
-                            .as_str()
-                            .filter(|path| !path.is_empty())
-                            .map(str::to_string)
-                            .ok_or_else(|| "The device returned no scratch folder.".to_string())?,
-                        futures::future::Either::Left((Err(err), _)) => {
-                            return Err(format!("Could not create the scratch folder: {err}"));
-                        }
-                        futures::future::Either::Right(_) => {
-                            return Err("Creating the scratch folder timed out.".into());
-                        }
-                    };
+                    let path = create_scratch_dir(
+                        &engine,
+                        cx.background_executor(),
+                        host_device_id.as_deref(),
+                        &chat_id,
+                    )
+                    .await?;
                     cwd = path.clone();
                     worktree_cwd = Some(path);
                 }
@@ -692,39 +608,20 @@ impl Composer {
                 // a blocking CreateWorktree relay RPC here: the RPC had no
                 // timeout, so a lost relay frame wedged the send on "Sending…"
                 // forever while the session ran remotely anyway.
-                let mut run_worktree: Option<cypher_proto::WorktreeSpec> = None;
                 // The picked ref rides createChat so the session footer names
                 // it from the first frame (it read "Select ref" until the
                 // host's diff reconciler got around to stamping the branch).
-                let mut chat_branch: Option<String> = None;
-                if is_new {
-                    match &plan {
-                        crate::pickers::CheckoutPlan::CurrentCheckout { branch } => {
-                            chat_branch = branch.clone();
-                        }
-                        crate::pickers::CheckoutPlan::ReuseWorktree { path, branch } => {
-                            cwd = path.clone();
-                            worktree_cwd = Some(path.clone());
-                            chat_branch = branch.clone();
-                        }
-                        crate::pickers::CheckoutPlan::NewWorktree { base } => {
-                            // Footer shows the base until the host stamps the
-                            // actual cypher/<name> branch post-creation. cwd
-                            // stays the repo folder — the compatible initial
-                            // cwd for an old host that doesn't know the spec
-                            // (it degrades to the main checkout instead of
-                            // failing the run).
-                            chat_branch = base.clone();
-                            if let (Some(repo_path), Some(base)) = (&space_path, base) {
-                                run_worktree = Some(cypher_proto::WorktreeSpec {
-                                    repo_path: repo_path.clone(),
-                                    base_ref: base.clone(),
-                                    name_hint: worktree_hint.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
+                let (chat_branch, run_worktree) = if is_new {
+                    plan_checkout(
+                        &plan,
+                        space_path.as_deref(),
+                        worktree_hint.clone(),
+                        &mut cwd,
+                        &mut worktree_cwd,
+                    )
+                } else {
+                    (None, None)
+                };
 
                 // Best-effort Mutate createChat with the picked config: the
                 // engine resolves device + cwd from the PROJECT row when one
@@ -732,45 +629,14 @@ impl Composer {
                 // (idempotent; the doc host would materialize the chat on
                 // first command anyway, so failures are non-fatal).
                 if is_new {
-                    let mut mutate = serde_json::json!({
-                        "op": "createChat",
-                        "chatId": chat_id,
-                    });
-                    if let Some(object) = mutate.as_object_mut() {
-                        match &space_id {
-                            Some(space_id) => {
-                                object.insert(
-                                    "spaceId".into(),
-                                    serde_json::Value::String(space_id.clone()),
-                                );
-                            }
-                            None => {
-                                object.insert(
-                                    "deviceId".into(),
-                                    serde_json::Value::String(device_id.clone()),
-                                );
-                            }
-                        }
-                    }
-                    if let Some(object) = mutate.as_object_mut() {
-                        if let Some(worktree_cwd) = &worktree_cwd {
-                            object.insert(
-                                "cwd".into(),
-                                serde_json::Value::String(worktree_cwd.clone()),
-                            );
-                        }
-                        if let Some(branch) = &chat_branch {
-                            object.insert(
-                                "branch".into(),
-                                serde_json::Value::String(branch.clone()),
-                            );
-                        }
-                        if let Some(config) = resolved.chat_config()
-                            && let Ok(config) = serde_json::to_value(&config)
-                        {
-                            object.insert("config".into(), config);
-                        }
-                    }
+                    let mutate = create_chat_mutation(
+                        &chat_id,
+                        space_id.as_deref(),
+                        &device_id,
+                        worktree_cwd.as_deref(),
+                        chat_branch.as_deref(),
+                        &resolved,
+                    );
                     if let Err(err) = engine.client().call(methods::MUTATE, mutate).await {
                         tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
                     }
@@ -820,33 +686,13 @@ impl Composer {
                     // bubble's thumbnails never round-trip (seedTranscript-
                     // Attachment in the original send path).
                     let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
-                    for (path, att) in attachment_paths.iter().zip(&staged) {
-                        let Some(image) = att.image() else { continue };
-                        attachments::seed_attachment(&seed_device, path, &att.name, image.clone());
-                        if seed_device != device_id {
-                            attachments::seed_attachment(&device_id, path, &att.name, image.clone());
-                        }
-                    }
+                    seed_echo_images(&staged, &attachment_paths, &seed_device, Some(&device_id));
                     content = attachments::with_attachments(&text, &attachment_paths);
                     // Refresh the echo in place with the attachment refs
                     // (same id, same clock — the bubble grows its thumbnails
                     // without flickering).
-                    let refreshed = SessionMessageEntry {
-                        id: message_id.clone(),
-                        role: cypher_doc::MessageRole::User,
-                        parts: vec![MessagePart::Text {
-                            id: "t0".into(),
-                            text: content.clone(),
-                            agent_text: None,
-                        }],
-                        created_at,
-                        device_id: "local".into(),
-                        status: None,
-                        continuation_of: None,
-                        completed_at: None,
-                        comments: echo_comments.clone(),
-                        models: Vec::new(),
-                    };
+                    let refreshed =
+                        echo_entry(&message_id, content.clone(), created_at, echo_comments.clone());
                     let echo_chat_id = chat_id.clone();
                     this.update(cx, |composer, cx| {
                         composer.state.update(cx, |s, cx| {
@@ -871,40 +717,15 @@ impl Composer {
                 // unreachable/malformed/timed-out ref fails the send visibly
                 // (never silently omitted) and the failure path restores the
                 // draft, attachments, and comments.
-                let session_contexts = if session_ref_ids.is_empty() {
-                    Vec::new()
-                } else {
-                    let mut contexts = Vec::with_capacity(session_ref_ids.len());
-                    for chat_id in &session_ref_ids {
-                        let Some(chat) = session_chats.iter().find(|c| &c.id == chat_id) else {
-                            return Err(
-                                "A referenced session no longer exists — remove the @session reference and try again."
-                                    .to_string(),
-                            );
-                        };
-                        let entries = read_session_reset(
-                            &engine,
-                            cx.background_executor(),
-                            local_device_id.as_deref(),
-                            chat_id,
-                            &chat.device_id,
-                            !offline_session_hosts.contains(&chat.device_id),
-                        )
-                        .await?;
-                        // Strip attachment refs BEFORE the safe visible-content
-                        // policy so absolute attachment paths never leak.
-                        let stripped: Vec<SessionMessageEntry> =
-                            entries.iter().map(strip_attachment_trailer).collect();
-                        let context =
-                            cypher_engine::bounded_transcript_context(&stripped, None)
-                                .unwrap_or_default();
-                        contexts.push(SessionReference {
-                            title: session_display_title(chat),
-                            context,
-                        });
-                    }
-                    contexts
-                };
+                let session_contexts = load_session_contexts(
+                    &engine,
+                    cx.background_executor(),
+                    local_device_id.as_deref(),
+                    &session_ref_ids,
+                    &session_chats,
+                    &offline_session_hosts,
+                )
+                .await?;
                 let agent_prompt = if sent_comments.is_empty()
                     && session_contexts.is_empty()
                     && issue_snapshots.is_empty()
@@ -930,17 +751,7 @@ impl Composer {
                                 message_id: Some(message_id.clone()),
                                 agent_prompt: agent_prompt.clone(),
                             };
-                            let command = serde_json::to_value(&command)
-                                .map_err(|e| format!("Send failed: {e}"))?;
-                            let params = serde_json::json!({
-                                "chatId": chat_id,
-                                "command": command
-                            });
-                            engine
-                                .client()
-                                .call(methods::QUEUE_COMMAND, params)
-                                .await
-                                .map_err(|e| format!("Send failed: {e}"))?;
+                            queue_command(&engine, &chat_id, &command).await?;
                         } else if queue_first_upload {
                             // Queue-first Run: the durable command carries the
                             // Run intent + PENDING attachment descriptors
@@ -957,39 +768,21 @@ impl Composer {
                                         file_name: att.name.clone(),
                                     })
                                     .collect();
-                            let command = SessionCommandPayload::Run {
-                                request: RunRequest {
-                                    prompt: content.clone(),
-                                    harness: resolved.harness,
-                                    model: resolved.model.clone(),
-                                    reasoning: resolved.reasoning,
-                                    model_options: resolved.model_options.clone(),
-                                    cwd,
-                                    sandbox: SandboxLevel::WorkspaceWrite,
-                                    auto_approve: false,
-                                    resume: None,
-                                    attachments: Vec::new(),
-                                    pending_attachments: pending_attachments.clone(),
-                                    worktree: run_worktree,
-                                },
-                                message_id: message_id.clone(),
-                                agent_prompt: agent_prompt.clone(),
-                            };
-                            let command = serde_json::to_value(&command)
-                                .map_err(|e| format!("Send failed: {e}"))?;
-                            let params = serde_json::json!({
-                                "chatId": chat_id,
-                                "command": command
-                            });
+                            let command = run_command(
+                                &resolved,
+                                content.clone(),
+                                cwd,
+                                Vec::new(),
+                                pending_attachments.clone(),
+                                run_worktree,
+                                &message_id,
+                                agent_prompt.clone(),
+                            );
                             // Queue FIRST — durable by construction. A queue
                             // failure returns Err and the outer failure path
                             // restores the draft/stash/comments (nothing was
                             // uploaded yet).
-                            engine
-                                .client()
-                                .call(methods::QUEUE_COMMAND, params)
-                                .await
-                                .map_err(|e| format!("Send failed: {e}"))?;
+                            queue_command(&engine, &chat_id, &command).await?;
                             let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
                             let total_bytes = staged
                                 .iter()
@@ -1054,42 +847,18 @@ impl Composer {
                             // the host's entry carrying the trailer).
                             let seed_device =
                                 host_device_id.clone().unwrap_or_else(|| device_id.clone());
-                            for (path, att) in attachment_paths.iter().zip(&staged) {
-                                let Some(image) = att.image() else { continue };
-                                attachments::seed_attachment(
-                                    &seed_device,
-                                    path,
-                                    &att.name,
-                                    image.clone(),
-                                );
-                                if seed_device != device_id {
-                                    attachments::seed_attachment(
-                                        &device_id,
-                                        path,
-                                        &att.name,
-                                        image.clone(),
-                                    );
-                                }
-                            }
-                            let refreshed = SessionMessageEntry {
-                                id: message_id.clone(),
-                                role: cypher_doc::MessageRole::User,
-                                parts: vec![MessagePart::Text {
-                                    id: "t0".into(),
-                                    text: attachments::with_attachments(
-                                        &text,
-                                        &attachment_paths,
-                                    ),
-                                    agent_text: None,
-                                }],
+                            seed_echo_images(
+                                &staged,
+                                &attachment_paths,
+                                &seed_device,
+                                Some(&device_id),
+                            );
+                            let refreshed = echo_entry(
+                                &message_id,
+                                attachments::with_attachments(&text, &attachment_paths),
                                 created_at,
-                                device_id: "local".into(),
-                                status: None,
-                                continuation_of: None,
-                                completed_at: None,
-                                comments: echo_comments.clone(),
-                                models: Vec::new(),
-                            };
+                                echo_comments.clone(),
+                            );
                             let echo_chat_id = chat_id.clone();
                             this.update(cx, |composer, cx| {
                                 composer.state.update(cx, |s, cx| {
@@ -1102,35 +871,17 @@ impl Composer {
                         } else {
                             // Plain Run (no staged attachments): prompt is the
                             // bare text, no pending ids.
-                            let command = SessionCommandPayload::Run {
-                                request: RunRequest {
-                                    prompt: content.clone(),
-                                    harness: resolved.harness,
-                                    model: resolved.model.clone(),
-                                    reasoning: resolved.reasoning,
-                                    model_options: resolved.model_options.clone(),
-                                    cwd,
-                                    sandbox: SandboxLevel::WorkspaceWrite,
-                                    auto_approve: false,
-                                    resume: None,
-                                    attachments: attachment_paths,
-                                    pending_attachments: Vec::new(),
-                                    worktree: run_worktree,
-                                },
-                                message_id: message_id.clone(),
-                                agent_prompt: agent_prompt.clone(),
-                            };
-                            let command = serde_json::to_value(&command)
-                                .map_err(|e| format!("Send failed: {e}"))?;
-                            let params = serde_json::json!({
-                                "chatId": chat_id,
-                                "command": command
-                            });
-                            engine
-                                .client()
-                                .call(methods::QUEUE_COMMAND, params)
-                                .await
-                                .map_err(|e| format!("Send failed: {e}"))?;
+                            let command = run_command(
+                                &resolved,
+                                content.clone(),
+                                cwd,
+                                attachment_paths,
+                                Vec::new(),
+                                run_worktree,
+                                &message_id,
+                                agent_prompt.clone(),
+                            );
+                            queue_command(&engine, &chat_id, &command).await?;
                         }
                     }
                     ComposerTransport::SideChat(side) => {
@@ -1185,47 +936,69 @@ impl Composer {
                     cx.notify();
                 });
                 if let Err(message) = result {
-                    // Failure: red banner, echo removed, prompt back in the
-                    // draft, staged files back in the chat's stash.
-                    composer.failure = Some(message.into());
-                    composer.state.update(cx, |s, cx| {
-                        s.remove_echo(&err_chat_id, &err_message_id);
-                        s.end_pending_send(&err_chat_id, &err_message_id);
-                        cx.notify();
-                    });
-                    // A kept draft never left the input — nothing to restore.
-                    if take_draft {
-                        composer.input.update(cx, |input, cx| input.set_text(restore_text, cx));
-                    }
-                    if !staged.is_empty() {
-                        // Merge by id (stashAttachments): files the user staged
-                        // while the send was in flight survive the hand-back.
-                        let slot = composer.attachments.entry(err_chat_id.clone()).or_default();
-                        let mut merged = staged.clone();
-                        merged.extend(
-                            slot.drain(..)
-                                .filter(|e| !staged.iter().any(|f| f.id == e.id)),
-                        );
-                        *slot = merged;
-                    }
-                    // Restore the comments taken at send: the snapshot first,
-                    // then any added DURING the in-flight send (deduped by id)
-                    // — order is preserved. Only if still in the same chat.
-                    // Side chats never hold comments (defensive guard).
-                    if matches!(composer.transport, ComposerTransport::Main)
-                        && composer.state.read(cx).selected_chat.as_deref()
-                            == Some(err_chat_id.as_str())
-                    {
-                        composer.comments = merge_restored_comments(
-                            sent_comments.clone(),
-                            std::mem::take(&mut composer.comments),
-                        );
-                    }
+                    composer.on_send_failed(
+                        &err_chat_id,
+                        &err_message_id,
+                        message,
+                        take_draft,
+                        restore_text,
+                        &staged,
+                        &sent_comments,
+                        cx,
+                    );
                 }
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// The send failed: red banner, echo removed, prompt back in the draft,
+    /// staged files back in the chat's stash, comments restored.
+    #[allow(clippy::too_many_arguments)]
+    fn on_send_failed(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+        message: String,
+        take_draft: bool,
+        restore_text: String,
+        staged: &[StagedAttachment],
+        sent_comments: &[DraftComment],
+        cx: &mut Context<Self>,
+    ) {
+        self.failure = Some(message.into());
+        self.state.update(cx, |s, cx| {
+            s.remove_echo(chat_id, message_id);
+            s.end_pending_send(chat_id, message_id);
+            cx.notify();
+        });
+        // A kept draft never left the input — nothing to restore.
+        if take_draft {
+            self.input
+                .update(cx, |input, cx| input.set_text(restore_text, cx));
+        }
+        if !staged.is_empty() {
+            // Merge by id (stashAttachments): files the user staged
+            // while the send was in flight survive the hand-back.
+            let slot = self.attachments.entry(chat_id.to_string()).or_default();
+            let mut merged = staged.to_vec();
+            merged.extend(
+                slot.drain(..)
+                    .filter(|e| !staged.iter().any(|f| f.id == e.id)),
+            );
+            *slot = merged;
+        }
+        // Restore the comments taken at send: the snapshot first,
+        // then any added DURING the in-flight send (deduped by id)
+        // — order is preserved. Only if still in the same chat.
+        // Side chats never hold comments (defensive guard).
+        if matches!(self.transport, ComposerTransport::Main)
+            && self.state.read(cx).selected_chat.as_deref() == Some(chat_id)
+        {
+            self.comments =
+                merge_restored_comments(sent_comments.to_vec(), std::mem::take(&mut self.comments));
+        }
     }
 
     pub(super) fn interrupt(&mut self, cx: &mut Context<Self>) {
@@ -1310,4 +1083,312 @@ impl Composer {
             }
         }));
     }
+}
+
+/// The optimistic user entry for a send (the client-minted id doubles as the
+/// persisted message id, so the doc frame dedups it away).
+fn echo_entry(
+    message_id: &str,
+    text: String,
+    created_at: i64,
+    comments: Vec<cypher_doc::MessageComment>,
+) -> SessionMessageEntry {
+    SessionMessageEntry {
+        id: message_id.to_string(),
+        role: cypher_doc::MessageRole::User,
+        parts: vec![MessagePart::Text {
+            id: "t0".into(),
+            text,
+            agent_text: None,
+        }],
+        created_at,
+        device_id: "local".into(),
+        status: None,
+        continuation_of: None,
+        completed_at: None,
+        comments,
+        models: Vec::new(),
+    }
+}
+
+/// Seed the transcript cache with the staged images under `primary`, and
+/// under `secondary` too when it names another device, so the sent bubble's
+/// thumbnails never round-trip. Plain files render as tiles from the path
+/// alone — nothing to seed.
+fn seed_echo_images(
+    staged: &[StagedAttachment],
+    paths: &[String],
+    primary: &str,
+    secondary: Option<&str>,
+) {
+    for (path, att) in paths.iter().zip(staged) {
+        let Some(image) = att.image() else { continue };
+        attachments::seed_attachment(primary, path, &att.name, image.clone());
+        if let Some(secondary) = secondary
+            && secondary != primary
+        {
+            attachments::seed_attachment(secondary, path, &att.name, image.clone());
+        }
+    }
+}
+
+/// Address a forwardable RPC at the chat's host device (`None` = local).
+fn insert_target_device(params: &mut serde_json::Value, host: Option<&str>) {
+    if let (Some(host), Some(object)) = (host, params.as_object_mut()) {
+        object.insert(
+            "targetDeviceId".into(),
+            serde_json::Value::String(host.to_string()),
+        );
+    }
+}
+
+/// Snapshot each referenced issue through the host device's `gh`, bounded per
+/// lookup; any failure fails the send before anything is created or queued.
+async fn fetch_issue_snapshots(
+    engine: &EngineHandle,
+    executor: &BackgroundExecutor,
+    host: Option<&str>,
+    issues: &[IssueRef],
+) -> Result<Vec<cypher_proto::GithubIssueSnapshot>, String> {
+    let mut issue_snapshots: Vec<cypher_proto::GithubIssueSnapshot> =
+        Vec::with_capacity(issues.len());
+    for issue in issues {
+        let reference = format!(
+            "{} {}#{}",
+            github_kind_noun(issue.pull),
+            issue.repo,
+            issue.number
+        );
+        let mut params = serde_json::json!({
+            "repo": issue.repo,
+            "number": issue.number,
+        });
+        insert_target_device(&mut params, host);
+        let call = engine.client().call(methods::GET_GITHUB_ISSUE, params);
+        let deadline = executor.timer(ISSUE_LOAD_TIMEOUT);
+        futures::pin_mut!(call);
+        futures::pin_mut!(deadline);
+        let value = match futures::future::select(call, deadline).await {
+            futures::future::Either::Left((Ok(value), _)) => value,
+            futures::future::Either::Left((Err(err), _)) => {
+                return Err(format!("Couldn't load GitHub {reference}: {err}"));
+            }
+            futures::future::Either::Right(_) => {
+                return Err(format!("Loading GitHub {reference} timed out."));
+            }
+        };
+        let mut snapshot: cypher_proto::GithubIssueSnapshot = serde_json::from_value(value)
+            .map_err(|_| format!("The device returned an unreadable snapshot of {reference}."))?;
+        // Older engines don't say which kind the number is.
+        if issue.pull {
+            snapshot.kind = cypher_proto::GithubIssueKind::PullRequest;
+        }
+        issue_snapshots.push(snapshot);
+    }
+    Ok(issue_snapshots)
+}
+
+/// Have the host mint this chat's scratch folder; returns its path.
+async fn create_scratch_dir(
+    engine: &EngineHandle,
+    executor: &BackgroundExecutor,
+    host: Option<&str>,
+    chat_id: &str,
+) -> Result<String, String> {
+    let mut params = serde_json::json!({ "chatId": chat_id });
+    insert_target_device(&mut params, host);
+    let deadline = executor.timer(std::time::Duration::from_secs(20));
+    let call = engine.client().call(methods::CREATE_SCRATCH_DIR, params);
+    futures::pin_mut!(call);
+    futures::pin_mut!(deadline);
+    match futures::future::select(call, deadline).await {
+        futures::future::Either::Left((Ok(value), _)) => value["path"]
+            .as_str()
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| "The device returned no scratch folder.".to_string()),
+        futures::future::Either::Left((Err(err), _)) => {
+            Err(format!("Could not create the scratch folder: {err}"))
+        }
+        futures::future::Either::Right(_) => Err("Creating the scratch folder timed out.".into()),
+    }
+}
+
+/// Apply a new chat's checkout plan to its working directory; returns the
+/// branch the footer names and the worktree the host should create.
+fn plan_checkout(
+    plan: &crate::pickers::CheckoutPlan,
+    space_path: Option<&str>,
+    worktree_hint: Option<String>,
+    cwd: &mut String,
+    worktree_cwd: &mut Option<String>,
+) -> (Option<String>, Option<cypher_proto::WorktreeSpec>) {
+    match plan {
+        crate::pickers::CheckoutPlan::CurrentCheckout { branch } => (branch.clone(), None),
+        crate::pickers::CheckoutPlan::ReuseWorktree { path, branch } => {
+            *cwd = path.clone();
+            *worktree_cwd = Some(path.clone());
+            (branch.clone(), None)
+        }
+        crate::pickers::CheckoutPlan::NewWorktree { base } => {
+            // Footer shows the base until the host stamps the actual
+            // cypher/<name> branch post-creation. cwd stays the repo folder
+            // — the compatible initial cwd for an old host that doesn't know
+            // the spec (it degrades to the main checkout instead of failing
+            // the run).
+            let worktree = match (space_path, base) {
+                (Some(repo_path), Some(base)) => Some(cypher_proto::WorktreeSpec {
+                    repo_path: repo_path.to_string(),
+                    base_ref: base.clone(),
+                    name_hint: worktree_hint,
+                }),
+                _ => None,
+            };
+            (base.clone(), worktree)
+        }
+    }
+}
+
+/// The `createChat` mutation for a new chat: the engine resolves device + cwd
+/// from the PROJECT row when one is picked; project-less chats name the host
+/// device outright.
+fn create_chat_mutation(
+    chat_id: &str,
+    space_id: Option<&str>,
+    device_id: &str,
+    worktree_cwd: Option<&str>,
+    branch: Option<&str>,
+    resolved: &crate::pickers::ResolvedRunConfig,
+) -> serde_json::Value {
+    let mut mutate = serde_json::json!({
+        "op": "createChat",
+        "chatId": chat_id,
+    });
+    if let Some(object) = mutate.as_object_mut() {
+        match space_id {
+            Some(space_id) => {
+                object.insert(
+                    "spaceId".into(),
+                    serde_json::Value::String(space_id.to_string()),
+                );
+            }
+            None => {
+                object.insert(
+                    "deviceId".into(),
+                    serde_json::Value::String(device_id.to_string()),
+                );
+            }
+        }
+        if let Some(worktree_cwd) = worktree_cwd {
+            object.insert(
+                "cwd".into(),
+                serde_json::Value::String(worktree_cwd.to_string()),
+            );
+        }
+        if let Some(branch) = branch {
+            object.insert(
+                "branch".into(),
+                serde_json::Value::String(branch.to_string()),
+            );
+        }
+        if let Some(config) = resolved.chat_config()
+            && let Ok(config) = serde_json::to_value(&config)
+        {
+            object.insert("config".into(), config);
+        }
+    }
+    mutate
+}
+
+/// Load each referenced session's transcript (bounded) as untrusted
+/// reference context; a missing, unreachable, malformed or timed-out
+/// reference fails the send rather than being silently omitted.
+async fn load_session_contexts(
+    engine: &EngineHandle,
+    executor: &BackgroundExecutor,
+    local_device_id: Option<&str>,
+    chat_ids: &[String],
+    chats: &[Chat],
+    offline_hosts: &HashSet<String>,
+) -> Result<Vec<SessionReference>, String> {
+    let mut contexts = Vec::with_capacity(chat_ids.len());
+    for chat_id in chat_ids {
+        let Some(chat) = chats.iter().find(|c| &c.id == chat_id) else {
+            return Err(
+                "A referenced session no longer exists — remove the @session reference and try again."
+                    .to_string(),
+            );
+        };
+        let entries = read_session_reset(
+            engine,
+            executor,
+            local_device_id,
+            chat_id,
+            &chat.device_id,
+            !offline_hosts.contains(&chat.device_id),
+        )
+        .await?;
+        // Strip attachment refs BEFORE the safe visible-content
+        // policy so absolute attachment paths never leak.
+        let stripped: Vec<SessionMessageEntry> =
+            entries.iter().map(strip_attachment_trailer).collect();
+        let context =
+            cypher_engine::bounded_transcript_context(&stripped, None).unwrap_or_default();
+        contexts.push(SessionReference {
+            title: session_display_title(chat),
+            context,
+        });
+    }
+    Ok(contexts)
+}
+
+/// A main-surface Run with the resolved model config.
+#[allow(clippy::too_many_arguments)]
+fn run_command(
+    resolved: &crate::pickers::ResolvedRunConfig,
+    prompt: String,
+    cwd: String,
+    attachments: Vec<String>,
+    pending_attachments: Vec<cypher_proto::PendingAttachment>,
+    worktree: Option<cypher_proto::WorktreeSpec>,
+    message_id: &str,
+    agent_prompt: Option<String>,
+) -> SessionCommandPayload {
+    SessionCommandPayload::Run {
+        request: RunRequest {
+            prompt,
+            harness: resolved.harness,
+            model: resolved.model.clone(),
+            reasoning: resolved.reasoning,
+            model_options: resolved.model_options.clone(),
+            cwd,
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            resume: None,
+            attachments,
+            pending_attachments,
+            worktree,
+        },
+        message_id: message_id.to_string(),
+        agent_prompt,
+    }
+}
+
+/// Queue a durable command on `chat_id`.
+async fn queue_command(
+    engine: &EngineHandle,
+    chat_id: &str,
+    command: &SessionCommandPayload,
+) -> Result<(), String> {
+    let command = serde_json::to_value(command).map_err(|e| format!("Send failed: {e}"))?;
+    let params = serde_json::json!({
+        "chatId": chat_id,
+        "command": command
+    });
+    engine
+        .client()
+        .call(methods::QUEUE_COMMAND, params)
+        .await
+        .map_err(|e| format!("Send failed: {e}"))?;
+    Ok(())
 }

@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 /// The directory under the host's temp dir that holds every scratch folder.
-pub const SCRATCH_ROOT: &str = "cypher-scratch";
+pub(crate) const SCRATCH_ROOT: &str = "cypher-scratch";
 
 /// Chat ids become directory names: only the characters a client-minted
 /// UUID uses are accepted, so a hostile id cannot escape the scratch root.
@@ -29,7 +29,7 @@ pub fn scratch_dir(temp: &Path, chat_id: &str) -> PathBuf {
 
 /// The chat id a scratch cwd was minted for, when `cwd` has the scratch
 /// shape (`…/cypher-scratch/<chat id>`, any temp root). `None` otherwise.
-pub fn scratch_chat_id(cwd: &str) -> Option<&str> {
+pub(crate) fn scratch_chat_id(cwd: &str) -> Option<&str> {
     let cwd = cwd.trim_end_matches(['/', '\\']);
     let (parent, id) = cwd.rsplit_once('/')?;
     let (_, root) = parent.rsplit_once('/')?;

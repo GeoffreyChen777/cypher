@@ -97,13 +97,13 @@ impl Manifest {
     }
 
     /// The headless/CLI tarball for this machine.
-    pub fn headless_file(&self) -> String {
+    pub(crate) fn headless_file(&self) -> String {
         let (_, arch) = platform_key();
         self.artifact(&format!("headless-{arch}"), headless_artifact)
     }
 
     /// The macOS app update payload.
-    pub fn mac_app_file(&self) -> String {
+    pub(crate) fn mac_app_file(&self) -> String {
         let (_, arch) = platform_key();
         self.artifact(&format!("app-{arch}"), mac_app_artifact)
     }
