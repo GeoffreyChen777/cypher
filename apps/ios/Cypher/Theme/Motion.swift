@@ -1,4 +1,4 @@
-// Animation kit — timings/curves ported from crates/ui/src/motion.rs.
+// Animation kit — timings/curves ported from crates/ui/src/kit/motion.rs.
 // Reduced-motion is honored at call sites via `motionAnimation(_:)`.
 
 import SwiftUI

@@ -1,4 +1,4 @@
-// Adaptive monochrome theme — palette derived from crates/ui/src/theme.rs.
+// Adaptive monochrome theme — palette derived from crates/ui/src/kit/theme.rs.
 //
 // Colors are computed from the same oklch definitions the desktop app uses
 // (Björn Ottosson's OKLab matrices, the ones CSS Color 4 specifies), so every

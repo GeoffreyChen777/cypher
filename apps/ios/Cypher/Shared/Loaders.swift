@@ -1,4 +1,4 @@
-// Loaders + status indicators — ports of crates/ui/src/loaders.rs.
+// Loaders + status indicators — ports of crates/ui/src/kit/loaders.rs.
 //
 // gradient-spin-pulse: a 3×3 cell grid with per-row "sunrise" tints; each cell
 // pulses once per 750ms with phase = distance from bottom-center, so the wave
