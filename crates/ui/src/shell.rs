@@ -1324,93 +1324,8 @@ impl Shell {
         // Lists-only: the session tiles' contexts own the transcripts; this
         // state's selection just follows the focused tile.
         state.update(cx, |s, cx| s.set_transcript_watches(false, cx));
-        // CommentPopup → the owning tile: a comment saved in any surface's
-        // anchored editor lands in the pending list (the status-strip
-        // indicator) of the tile showing that chat. Subscribed ONCE — the
-        // event carries the chat id that was selected when the selection
-        // settled (each surface captured it); the composer's guard still
-        // drops a comment whose chat is no longer selected.
-        let comment_popup_events = cx.subscribe(&comment_popup, {
-            move |this: &mut Shell, _, event: &crate::comment_popup::CommentPopupEvent, cx| {
-                match event {
-                    crate::comment_popup::CommentPopupEvent::CommentSaved {
-                        chat_id,
-                        quote,
-                        origin,
-                        comment,
-                    } => {
-                        let Some(composer) = this
-                            .slot_for_chat(chat_id, cx)
-                            .and_then(|sid| this.slots.get(&sid))
-                            .map(|slot| slot.composer.clone())
-                        else {
-                            return;
-                        };
-                        composer.update(cx, |composer, cx| {
-                            composer.add_comment(
-                                chat_id.clone(),
-                                quote.clone(),
-                                origin.clone(),
-                                comment.clone(),
-                                cx,
-                            )
-                        });
-                    }
-                    crate::comment_popup::CommentPopupEvent::SideChatRequested {
-                        chat_id,
-                        source,
-                        selected_text,
-                        origin,
-                    } => {
-                        // Open a temporary Side Chat from the settled
-                        // selection (the shell owns the StartSideChat call and
-                        // the dock tab). The selected quote rides along so the
-                        // engine validates + injects it on the first send.
-                        let Some(sid) = this.slot_for_chat(chat_id, cx) else {
-                            return;
-                        };
-                        this.open_side_chat(
-                            sid,
-                            chat_id.clone(),
-                            source.clone(),
-                            selected_text.clone(),
-                            origin.clone(),
-                            cx,
-                        );
-                    }
-                }
-            }
-        });
-        // Working-indicator heartbeat: notify once a second while a session is
-        // live so elapsed time and the flavour word stay fresh.
-        let ticker = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let alive = this.update(cx, |shell: &mut Shell, cx| {
-                    // Any visible tile's session counts.
-                    let live = {
-                        let s = shell.state.read(cx);
-                        let now = Utc::now();
-                        shell
-                            .workspace
-                            .visible_tabs()
-                            .into_iter()
-                            .filter_map(|tab| tab.chat_id())
-                            .any(|id| s.indicator_for(id, now) != Indicator::None)
-                    };
-                    if live
-                        || shell
-                            .notification_activity
-                            .heartbeat_due(std::time::Instant::now())
-                    {
-                        cx.notify();
-                    }
-                });
-                if alive.is_err() {
-                    break;
-                }
-            }
-        });
+        let comment_popup_events = Self::subscribe_comment_popup(&comment_popup, cx);
+        let ticker = Self::spawn_heartbeat(cx);
         let settings_target = cx.new(|cx| DeviceTarget::new(state.clone(), cx));
         let settings = UiSettings::load(&data_dir);
         // A project window's entry here is the file's; the main window's
@@ -1425,49 +1340,8 @@ impl Shell {
             // Bind the customizable shortcuts from the persisted keymap.
             apply_keymap(cx, &settings.keymap);
         }
-        // Dev/testing knob: `CYPHER_OPEN_ROUTE=settings[/<section>]` boots
-        // straight into a settings section — these pages have no deep link and
-        // synthetic input can't reach them on headless compositors.
-        let route = match cypher_env::var("OPEN_ROUTE")
-            .filter(|_| main_window)
-            .as_deref()
-        {
-            Some("settings") => Route::Settings(SettingsSection::Harnesses),
-            Some("settings/devices") => Route::Settings(SettingsSection::Devices),
-            Some("settings/providers") => Route::Settings(SettingsSection::Providers),
-            Some("settings/titles") => Route::Settings(SettingsSection::Titles),
-            Some("settings/harnesses") => Route::Settings(SettingsSection::Harnesses),
-            Some("settings/commands") => Route::Settings(SettingsSection::Commands),
-            Some("settings/mcp") => Route::Settings(SettingsSection::Mcp),
-            Some("settings/subagents") => Route::Settings(SettingsSection::Subagents),
-            Some("settings/github") => Route::Settings(SettingsSection::Github),
-            Some("settings/appearance") => Route::Settings(SettingsSection::Appearance),
-            Some("settings/notifications") => Route::Settings(SettingsSection::Notifications),
-            Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
-            Some("settings/archived") => Route::Settings(SettingsSection::Archived),
-            // `new` pins the new-chat canvas (suppresses boot auto-select).
-            Some("new") => {
-                state.update(cx, |s, _| s.auto_selected = true);
-                Route::Chat
-            }
-            _ => Route::Chat,
-        };
-        // More capture knobs of the same kind: `CYPHER_OPEN_DIALOG=rename|delete`
-        // opens that dialog for the first chat once chats land; `=model` pops
-        // the combined harness/model menu once the shell is Ready;
-        // `CYPHER_FORCE_GATE=signin|org|failed|setup` renders that gate
-        // regardless of real auth state (display-only — for styling passes).
-        let debug_dialog = cypher_env::var("OPEN_DIALOG").filter(|_| main_window);
-        let force_gate = cypher_env::var("FORCE_GATE").filter(|_| main_window);
-        let debug_setup = force_gate.as_deref() == Some("setup");
-        let debug_gate = match force_gate.as_deref() {
-            Some("signin") => Some(GatePhase::SignIn),
-            Some("org") => Some(GatePhase::OrgGate),
-            Some("failed") => Some(GatePhase::Failed(
-                "Could not reach the cypher engine on port 27901".into(),
-            )),
-            _ => None,
-        };
+        let route = Self::boot_route(&state, main_window, cx);
+        let (debug_dialog, debug_setup, debug_gate) = debug_knobs(main_window);
         let nav = NavHistory::new(match route {
             Route::Chat => NavEntry::Chat(String::new()),
             Route::Settings(section) => NavEntry::Settings(section),
@@ -1584,6 +1458,132 @@ impl Shell {
         }
     }
 
+    /// CommentPopup → the owning tile: a comment saved in any surface's
+    /// anchored editor lands in the pending list (the status-strip
+    /// indicator) of the tile showing that chat. Subscribed ONCE — the
+    /// event carries the chat id that was selected when the selection
+    /// settled (each surface captured it); the composer's guard still
+    /// drops a comment whose chat is no longer selected.
+    fn subscribe_comment_popup(
+        comment_popup: &Entity<crate::comment_popup::CommentPopup>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe(comment_popup, {
+            move |this: &mut Shell, _, event: &crate::comment_popup::CommentPopupEvent, cx| {
+                match event {
+                    crate::comment_popup::CommentPopupEvent::CommentSaved {
+                        chat_id,
+                        quote,
+                        origin,
+                        comment,
+                    } => {
+                        let Some(composer) = this
+                            .slot_for_chat(chat_id, cx)
+                            .and_then(|sid| this.slots.get(&sid))
+                            .map(|slot| slot.composer.clone())
+                        else {
+                            return;
+                        };
+                        composer.update(cx, |composer, cx| {
+                            composer.add_comment(
+                                chat_id.clone(),
+                                quote.clone(),
+                                origin.clone(),
+                                comment.clone(),
+                                cx,
+                            )
+                        });
+                    }
+                    crate::comment_popup::CommentPopupEvent::SideChatRequested {
+                        chat_id,
+                        source,
+                        selected_text,
+                        origin,
+                    } => {
+                        // Open a temporary Side Chat from the settled
+                        // selection (the shell owns the StartSideChat call and
+                        // the dock tab). The selected quote rides along so the
+                        // engine validates + injects it on the first send.
+                        let Some(sid) = this.slot_for_chat(chat_id, cx) else {
+                            return;
+                        };
+                        this.open_side_chat(
+                            sid,
+                            chat_id.clone(),
+                            source.clone(),
+                            selected_text.clone(),
+                            origin.clone(),
+                            cx,
+                        );
+                    }
+                }
+            }
+        })
+    }
+
+    /// Working-indicator heartbeat: notify once a second while a session is
+    /// live so elapsed time and the flavour word stay fresh.
+    fn spawn_heartbeat(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let alive = this.update(cx, |shell: &mut Shell, cx| {
+                    // Any visible tile's session counts.
+                    let live = {
+                        let s = shell.state.read(cx);
+                        let now = Utc::now();
+                        shell
+                            .workspace
+                            .visible_tabs()
+                            .into_iter()
+                            .filter_map(|tab| tab.chat_id())
+                            .any(|id| s.indicator_for(id, now) != Indicator::None)
+                    };
+                    if live
+                        || shell
+                            .notification_activity
+                            .heartbeat_due(std::time::Instant::now())
+                    {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+    }
+
+    /// Dev/testing knob: `CYPHER_OPEN_ROUTE=settings[/<section>]` boots
+    /// straight into a settings section — these pages have no deep link and
+    /// synthetic input can't reach them on headless compositors.
+    fn boot_route(state: &Entity<AppState>, main_window: bool, cx: &mut Context<Self>) -> Route {
+        match cypher_env::var("OPEN_ROUTE")
+            .filter(|_| main_window)
+            .as_deref()
+        {
+            Some("settings") => Route::Settings(SettingsSection::Harnesses),
+            Some("settings/devices") => Route::Settings(SettingsSection::Devices),
+            Some("settings/providers") => Route::Settings(SettingsSection::Providers),
+            Some("settings/titles") => Route::Settings(SettingsSection::Titles),
+            Some("settings/harnesses") => Route::Settings(SettingsSection::Harnesses),
+            Some("settings/commands") => Route::Settings(SettingsSection::Commands),
+            Some("settings/mcp") => Route::Settings(SettingsSection::Mcp),
+            Some("settings/subagents") => Route::Settings(SettingsSection::Subagents),
+            Some("settings/github") => Route::Settings(SettingsSection::Github),
+            Some("settings/appearance") => Route::Settings(SettingsSection::Appearance),
+            Some("settings/notifications") => Route::Settings(SettingsSection::Notifications),
+            Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
+            Some("settings/archived") => Route::Settings(SettingsSection::Archived),
+            // `new` pins the new-chat canvas (suppresses boot auto-select).
+            Some("new") => {
+                state.update(cx, |s, _| s.auto_selected = true);
+                Route::Chat
+            }
+            _ => Route::Chat,
+        }
+    }
+
     // ---- layout state ----
 
     fn sidebar_target(&self) -> f32 {
@@ -1667,6 +1667,28 @@ impl Shell {
             cx,
         );
     }
+}
+
+/// Capture knobs (like `CYPHER_OPEN_ROUTE`, main window only):
+/// `CYPHER_OPEN_DIALOG=rename|delete` opens that dialog for the first chat
+/// once chats land; `=model` pops the combined harness/model menu once the
+/// shell is Ready; `CYPHER_FORCE_GATE=signin|org|failed|setup` renders that
+/// gate regardless of real auth state (display-only — for styling passes).
+/// Returns the dialog knob, whether to force the setup page, and the forced
+/// gate.
+fn debug_knobs(main_window: bool) -> (Option<String>, bool, Option<GatePhase>) {
+    let debug_dialog = cypher_env::var("OPEN_DIALOG").filter(|_| main_window);
+    let force_gate = cypher_env::var("FORCE_GATE").filter(|_| main_window);
+    let debug_setup = force_gate.as_deref() == Some("setup");
+    let debug_gate = match force_gate.as_deref() {
+        Some("signin") => Some(GatePhase::SignIn),
+        Some("org") => Some(GatePhase::OrgGate),
+        Some("failed") => Some(GatePhase::Failed(
+            "Could not reach the cypher engine on port 27901".into(),
+        )),
+        _ => None,
+    };
+    (debug_dialog, debug_setup, debug_gate)
 }
 
 #[cfg(test)]
