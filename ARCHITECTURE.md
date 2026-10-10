@@ -157,10 +157,15 @@ cypher/
     www-redirect/                 # www → apex redirect Worker
   pi-runtime/                     # curated Pi runtime bundle: extensions, patches, release.json
   packaging/                      # app icon, macOS Info.plist template, dmg art
+  protocol/                       # cross-language mirrors and their shared test vectors
   scripts/                        # dev-*, package-*, check.sh; ci/, tests/, ops/
   docs/                           # design, features, development, operations (docs/README.md)
   .github/workflows/              # CI, deploy and per-platform release workflows
 ```
+
+Wire codecs and merge logic that Rust, the TypeScript Edge and the Swift client each
+implement (chat2 frames, device-room frames, the registry merge core, preview frames) are
+listed in [protocol/README.md](protocol/README.md) with their shared test vectors.
 
 `crates/harness/src/pi/engine-client.mjs` is the one non-Rust source inside a crate: the
 harness embeds it with `include_str!` and hands it to Pi, so it lives beside its user rather

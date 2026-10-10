@@ -1,4 +1,6 @@
 //! Bounded, disposable native preview state. No disk, command, or HTTP access.
+//! Mirrored by the Swift client; both run `protocol/vectors/preview-reducer-v1.json`
+//! (`protocol/README.md`).
 use crate::stream_preview as wire;
 use cypher_doc::{MessagePart, PreviewCoverage};
 use serde_json::json;

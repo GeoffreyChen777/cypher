@@ -335,8 +335,9 @@ Cypher/
 
 `Sync/ChatFrames.swift`, `Sync/StreamPreview.swift` and
 `Sync/PreviewProjection.swift` are also compiled standalone by CI against the
-shared vectors (`scripts/tests/stream-preview-vectors.swift`); keep them free
-of app-only dependencies and at these paths.
+shared vectors in `protocol/vectors` (`scripts/tests/stream-preview-vectors.swift`);
+keep them free of app-only dependencies and at these paths. The cross-language
+mirrors and their vectors are listed in [protocol/README.md](../../protocol/README.md).
 
 ### Parity notes (desktop ⇄ mobile translations)
 

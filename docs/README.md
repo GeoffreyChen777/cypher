@@ -28,6 +28,7 @@ explains how it works. Everything else is grouped here by who reads it.
 - [Local Edge development](development/local-edge.md) — running the Edge locally and pointing engines and iOS at it.
 - [Edge](../apps/edge/README.md) — the Worker's layout, handler chain, conventions and tests.
 - [Pi runtime](../pi-runtime/README.md) — the bundle spec: layout, test tiers and updating it.
+- [Cross-language mirrors](../protocol/README.md) — code mirrored across Rust, TypeScript and Swift, and the shared test vectors.
 
 ## Operations — releasing and running the service
 
