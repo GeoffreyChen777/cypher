@@ -560,6 +560,16 @@ mod tests {
             err.to_string(),
             "Claude Code chats are no longer supported; start a new Pi chat"
         );
+        // A rejected legacy send shows the message without the "harness: "
+        // prefix other harness errors keep.
+        assert_eq!(
+            crate::EngineError::from(err).to_string(),
+            "Claude Code chats are no longer supported; start a new Pi chat"
+        );
+        assert_eq!(
+            crate::EngineError::from(HarnessError::Protocol("x".into())).to_string(),
+            "harness: harness protocol error: x"
+        );
         for id in [
             HarnessId::Codex,
             HarnessId::Cursor,
