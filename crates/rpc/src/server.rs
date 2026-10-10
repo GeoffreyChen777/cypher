@@ -141,10 +141,6 @@ where
 {
     // Native Unix clients negotiate cypher.rpc.v1 and never send Origin.
     // Preserve the Origin rejection as defense against accidental proxies.
-    //
-    // The large `Err` (ErrorResponse) is the shape tungstenite's Callback
-    // trait requires; it can't be boxed away here.
-    #[allow(clippy::result_large_err)]
     let reject_cross_origin = |req: &HandshakeRequest, mut resp: HandshakeResponse| {
         if let Some(origin) = req.headers().get("origin") {
             tracing::warn!(

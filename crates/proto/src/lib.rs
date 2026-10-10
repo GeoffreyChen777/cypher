@@ -8,6 +8,8 @@
 //! working trailer's tok/s ([`Throughput`]) is an estimate on the same local-only
 //! path, never persisted anywhere.
 
+#![forbid(unsafe_code)]
+
 mod agent;
 pub mod agent_prompt;
 pub mod attachment_refs;

@@ -91,11 +91,6 @@ pub struct SessionForkUnavailable {
 }
 
 /// `ForkSession` reply envelope.
-// Boxing `Created` would shrink the enum but is the wrong trade here: this is
-// a serde RPC reply constructed once per fork request, never in a hot path or
-// a large collection, and `Box` would add an indirection every match site has
-// to thread through for no measurable gain.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SessionForkResponse {
@@ -146,7 +141,6 @@ pub struct SessionRewound {
 
 /// `RewindSession` reply envelope. Refusals reuse [`SessionForkUnavailable`]
 /// — the prerequisites are the same set, worded for a rewind by the engine.
-#[allow(clippy::large_enum_variant)] // same rationale as SessionForkResponse
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SessionRewindResponse {

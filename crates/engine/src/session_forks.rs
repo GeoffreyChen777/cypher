@@ -634,10 +634,6 @@ impl SessionForks {
     /// (real pi persists that file only on the target's first send), so a
     /// session-less target is valid there — and an unexpectedly materialized
     /// first-user path is still required to differ from the source.
-    // The `Err` here IS the protocol reply the caller returns verbatim, so its
-    // size is fixed by `SessionForkResponse`; boxing would only move the same
-    // bytes behind a pointer one frame earlier.
-    #[allow(clippy::result_large_err)]
     fn validate_existing_target(
         &self,
         existing: &Chat,

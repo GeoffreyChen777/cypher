@@ -7,10 +7,6 @@
 //! on host disconnect; `host_offline` bounce when a client sends with no host; nudge
 //! frames delivered to the host.
 
-// tungstenite's `accept_hdr_async` callback signature fixes the Err type as a full
-// `Response` — its size is not ours to shrink.
-#![allow(clippy::result_large_err)]
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
