@@ -678,7 +678,7 @@ DO 存储没有官方 dump API。做法：
 | chat2 帧封装 `[type u8][len u32 LE][header][payload]`、拒绝畸形/超长 header | `apps/edge/src/chat/chat-frames.test.ts`（5 例） | `crates/sync/src/chat_frames.rs:151-209`（3 例） | `apps/ios/CypherTests/ChatFramesTests.swift`（4 例，头注释声明三端镜像） | 镜像 |
 | 注册表合并核心（HLC 序、字段 LWW、tombstone/revive、guard tombstone、re-seed 保留时钟、任意到达序收敛、`validateOp`、`maxClock`） | `apps/edge/src/registry/registry-core.test.ts`（13 例） | `crates/doc/src/registry/tests.rs`（31 例，`:1-2` 声明镜像） | `apps/ios/CypherTests/RegistryCoreTests.swift`（16 例，`:1-4` 声明三端向量） | 镜像 |
 | 设备帧 `uleb128(len) ‖ JSON ‖ payload`、relay 错误载荷 | `apps/edge/src/device/device-frame.test.ts`（2 例） | `crates/rpc/src/device_room.rs:973-1088`（7 例，含 `byte_parity_with_ts_encoder`） | **无独立测试文件**（`DeviceRelayClient.swift:5-10` 只有注释） | 镜像（Swift 缺） |
-| 预览帧 wire + 状态机 | `crates/sync/tests/fixtures/stream-preview-v1.json`（48 例；TS codec 已删除） | `crates/sync/src/stream_preview.rs:116-117`（48）、`preview_link.rs:571-573` 读 `preview-reducer-v1.json`（13） | `CypherTests/StreamPreviewTests.swift:9`、`PreviewProjectionTests.swift:8`；CI macOS "Preview protocol" 步骤独立编译 Swift 跑同一 JSON | **共享 JSON** |
+| 预览帧 wire + 状态机 | `protocol/vectors/stream-preview-v1.json`（48 例；TS codec 已删除） | `crates/sync/src/stream_preview.rs:116-117`（48）、`preview_link.rs:571-573` 读 `preview-reducer-v1.json`（13） | `CypherTests/StreamPreviewTests.swift:9`、`PreviewProjectionTests.swift:8`；CI macOS "Preview protocol" 步骤独立编译 Swift 跑同一 JSON | **共享 JSON** |
 
 Rust 服务端复用 `cypher-sync`/`cypher-doc`/`cypher-rpc` 的这些 codec/核心后，上表自动覆盖服务端；需要补的是 Swift 设备帧向量（不阻塞切换，客户端已在线上验证）。
 

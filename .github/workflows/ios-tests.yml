@@ -2,12 +2,12 @@ name: ios-tests
 
 # The iOS unit tests take a macOS runner for several minutes, so they run only
 # when something they build or read changes: the app and its tests, the shared
-# preview vectors under crates/sync/tests/fixtures, and the scripts below.
+# cross-language vectors under protocol/, and the scripts below.
 on:
   pull_request:
     paths:
       - "apps/ios/**"
-      - "crates/sync/tests/fixtures/**"
+      - "protocol/**"
       - "scripts/check.sh"
       - "scripts/ci/ios-unit-tests.sh"
       - "scripts/ci/select-xcode.sh"
@@ -16,7 +16,7 @@ on:
     branches: [main]
     paths:
       - "apps/ios/**"
-      - "crates/sync/tests/fixtures/**"
+      - "protocol/**"
       - "scripts/check.sh"
       - "scripts/ci/ios-unit-tests.sh"
       - "scripts/ci/select-xcode.sh"

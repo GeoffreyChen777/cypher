@@ -95,7 +95,7 @@ Tests per platform:
 - **iOS**: `bash scripts/check.sh ios`, or Xcode; see
   [apps/ios/README.md](../../apps/ios/README.md).
 - **Cross-language vectors**: the registry merge vectors (Rust, TS, Swift) and the
-  preview vectors in `crates/sync/tests/fixtures` (Rust and Swift) must change together.
+  preview vectors in `protocol/vectors` (Rust and Swift) must change together.
 - **Scripts**: `scripts/tests/`; `test-linux-cli.py` also runs under Python 3.8 in
   an Ubuntu 20.04 container, so it and `apps/edge/src/install.sh` stay 3.8- and
   POSIX-sh-compatible.
