@@ -8,9 +8,7 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::settings::{
-    KeymapConfig, ShortcutGroup, ShortcutId, combo_from_keystroke, display_combo,
-};
+use crate::prefs::{KeymapConfig, ShortcutGroup, ShortcutId, combo_from_keystroke, display_combo};
 use crate::state::AppState;
 use crate::theme::{MonoStyled, Theme};
 

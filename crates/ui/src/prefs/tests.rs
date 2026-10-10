@@ -17,11 +17,11 @@ fn round_trip() {
             toggle_sidebar: "mod-shift-s".into(),
             ..KeymapConfig::default()
         },
-        appearance: crate::appearance::AppearanceMode::Light,
+        appearance: AppearanceMode::Light,
         setup_completed: true,
         pi_runtime_setup_version: 1,
         shown_slash_commands: vec!["goal".into(), "skill:x".into()],
-        offered_slash_commands: commands::SHOWN_BY_DEFAULT
+        offered_slash_commands: slash_commands::SHOWN_BY_DEFAULT
             .iter()
             .map(|name| name.to_string())
             .collect(),
@@ -99,7 +99,10 @@ fn legacy_hidden_slash_commands_are_dropped() {
     .unwrap();
     let loaded = UiSettings::load(dir.path());
     assert_eq!(loaded.sidebar_width, 300.0, "the rest of the file loads");
-    assert_eq!(loaded.shown_slash_commands, commands::SHOWN_BY_DEFAULT);
+    assert_eq!(
+        loaded.shown_slash_commands,
+        slash_commands::SHOWN_BY_DEFAULT
+    );
     let json = serde_json::to_string(&loaded).unwrap();
     assert!(!json.contains("hiddenSlashCommands"), "{json}");
 }
@@ -123,7 +126,7 @@ fn a_type_invalid_workspace_drops_only_itself() {
         .unwrap();
     let loaded = UiSettings::load(dir.path());
     assert_eq!(loaded.keymap.toggle_sidebar, "mod-shift-s");
-    assert_eq!(loaded.appearance, crate::appearance::AppearanceMode::Light);
+    assert_eq!(loaded.appearance, AppearanceMode::Light);
     assert_eq!(loaded.workspace, None);
     assert_eq!(
         loaded.project_workspaces.keys().collect::<Vec<_>>(),
@@ -204,7 +207,7 @@ fn settings_without_appearance_default_to_system() {
     )
     .unwrap();
     let loaded = UiSettings::load(dir.path());
-    assert_eq!(loaded.appearance, crate::appearance::AppearanceMode::System);
+    assert_eq!(loaded.appearance, AppearanceMode::System);
     assert_eq!(loaded.sidebar_width, 300.0);
     assert!(!loaded.sound_enabled, "other keys still parse");
     assert!(

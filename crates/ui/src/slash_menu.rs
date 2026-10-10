@@ -16,7 +16,7 @@ use std::ops::Range;
 use cypher_engine::pi_session_modes::PiSessionModes;
 use cypher_proto::{ContextUsage, SlashCommand};
 
-use crate::settings::commands::{CommandGroup, placement};
+use crate::prefs::slash_commands::{CommandGroup, placement};
 
 /// One named choice of a command: what gets typed after the command, and
 /// what it does. `takes_text` choices need more typing after them.

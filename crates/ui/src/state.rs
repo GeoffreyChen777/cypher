@@ -40,7 +40,7 @@ use cypher_proto::{
 };
 use cypher_rpc::{RpcClient, RpcError, RpcReply, RpcService, memory_client, methods};
 
-use crate::settings::SidebarSort;
+use crate::prefs::SidebarSort;
 mod engine;
 pub use engine::*;
 mod glue;
@@ -60,6 +60,16 @@ pub use cypher_proto::view::{
     ConnectionStatus, GatePhase, Indicator, chat_location, display_status, effective_indicator,
     format_time_ago, gate_phase, parse_auth_state, sort_active, sort_chats, sort_spaces, sort_tabs,
 };
+
+/// A device that pinged within this window shows a presence dot (engines
+/// heartbeat every 15s; 70s tolerates a couple of missed beats).
+pub const DEVICE_ONLINE_WINDOW_SECS: i64 = 70;
+
+/// Presence: last-seen within the online window (future timestamps count). Pure.
+pub fn device_online(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    last_seen
+        .is_some_and(|at| now.signed_duration_since(at).num_seconds() <= DEVICE_ONLINE_WINDOW_SECS)
+}
 
 // ---------------------------------------------------------------------------
 // Org gate (pure)

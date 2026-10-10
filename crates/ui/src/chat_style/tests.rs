@@ -94,7 +94,7 @@ fn malformed_values_are_bounded_without_losing_other_preferences() {
 #[test]
 fn local_file_round_trip_does_not_touch_shell_settings() {
     let temp = tempfile::tempdir().unwrap();
-    let ui_path = crate::settings::UiSettings::path(temp.path());
+    let ui_path = crate::prefs::UiSettings::path(temp.path());
     std::fs::write(&ui_path, b"existing pane/tab settings").unwrap();
     let mut settings = ChatAppearance {
         font_size: 20.0,
@@ -110,7 +110,7 @@ fn local_file_round_trip_does_not_touch_shell_settings() {
         b"existing pane/tab settings"
     );
     // A subsequent debounced shell save cannot overwrite this separate file.
-    crate::settings::UiSettings::default()
+    crate::prefs::UiSettings::default()
         .save(temp.path())
         .unwrap();
     assert_eq!(ChatAppearance::load(temp.path()), settings);

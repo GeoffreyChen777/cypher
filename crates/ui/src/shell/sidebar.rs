@@ -105,7 +105,7 @@ impl Shell {
     /// A new sort starts in its natural direction.
     pub(super) fn set_sidebar_sort(
         &mut self,
-        sort: crate::settings::SidebarSort,
+        sort: crate::prefs::SidebarSort,
         cx: &mut Context<Self>,
     ) {
         if self.settings.sidebar_sort != sort {

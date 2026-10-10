@@ -39,7 +39,7 @@ impl Composer {
     /// Warm [`Self::slash_cache`] without opening the popup, so the first `/`
     /// is not a cold `pi --mode rpc` spawn.
     pub(super) fn prefetch_slash_commands(&mut self, cx: &mut Context<Self>) {
-        if !crate::settings::commands::any_shown_in_app(cx) {
+        if !crate::prefs::slash_commands::any_shown_in_app(cx) {
             return;
         }
         self.sync_slash_owner(cx);
@@ -104,7 +104,7 @@ impl Composer {
             .is_some_and(|commands| commands.iter().any(|c| c.name == choice.command));
         if !offered
             || crate::slash_menu::choices(&choice.command).is_empty()
-            || !crate::settings::commands::shows_in_app(cx, &choice.command)
+            || !crate::prefs::slash_commands::shows_in_app(cx, &choice.command)
         {
             return (None, None);
         }
@@ -130,7 +130,7 @@ impl Composer {
             == HarnessId::Pi;
         let relevant = ["fast", "scripts", "orchestrate", "goal"]
             .iter()
-            .any(|name| crate::settings::commands::shows_in_app(cx, name));
+            .any(|name| crate::prefs::slash_commands::shows_in_app(cx, name));
         if !pi || !relevant || !matches!(self.transport, ComposerTransport::Main) {
             return;
         }
@@ -204,7 +204,7 @@ impl Composer {
         // No resolved harness (catalog still loading): the actions only, no
         // fetch. Nor is the agent's list worth a fetch (a cold Pi spawn) when
         // none of its commands is turned on: the menu has only the actions.
-        let Some(harness) = harness.filter(|_| crate::settings::commands::any_shown_in_app(cx))
+        let Some(harness) = harness.filter(|_| crate::prefs::slash_commands::any_shown_in_app(cx))
         else {
             self.slash.loading = false;
             self.refilter_slash(cx);
@@ -281,7 +281,7 @@ impl Composer {
                 crate::slash_menu::command_level(
                     &crate::slash_menu::Action::ALL,
                     commands,
-                    |name| crate::settings::commands::shows_in_app(cx, name),
+                    |name| crate::prefs::slash_commands::shows_in_app(cx, name),
                     &query,
                 )
             }
@@ -582,7 +582,7 @@ impl Composer {
                         let badge = slash_menu::command_badge(&command.name, &facts);
                         let has_choices = !slash_menu::choices(&command.name).is_empty();
                         line.child(
-                            crate::icons::icon(crate::settings::commands::icon(&command.name))
+                            crate::icons::icon(crate::prefs::slash_commands::icon(&command.name))
                                 .size(px(14.0))
                                 .text_color(theme.text_muted),
                         )

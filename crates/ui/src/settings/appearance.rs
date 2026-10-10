@@ -16,7 +16,8 @@ use gpui::{
     AnyElement, Context, Hsla, IntoElement, Render, SharedString, Window, div, prelude::*, px,
 };
 
-use crate::appearance::{self, AppearanceMode};
+use crate::appearance;
+use crate::prefs::AppearanceMode;
 use crate::settings::widgets;
 use crate::theme::Theme;
 

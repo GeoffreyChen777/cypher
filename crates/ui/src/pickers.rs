@@ -33,7 +33,7 @@ const MAX_REF_ROWS: usize = 300;
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion;
 use crate::popover::{self, Loadable, MenuKey};
-use crate::settings::composer::ComposerDefaults;
+use crate::prefs::composer_defaults::ComposerDefaults;
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 mod pure;

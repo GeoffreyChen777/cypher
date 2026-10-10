@@ -28,7 +28,7 @@ use cypher_proto::{TerminalEvent, TerminalSession};
 use cypher_rpc::methods;
 
 use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
-use crate::settings::{TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT};
+use crate::prefs::{TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT};
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 use crate::theme::terminal::terminal_panel_bg;

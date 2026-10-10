@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 use super::dock::{Dock, DockSurface, terminal_dock_height};
 use super::*;
-use crate::settings::SessionDock;
+use crate::prefs::SessionDock;
 use crate::workspace::TabKey;
 
 /// Stable slot identity: survives a canvas tab becoming its session

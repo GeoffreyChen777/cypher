@@ -411,7 +411,7 @@ impl Shell {
         // View menu: filter the cards by device and pick their sort. Tinted
         // while a non-default view is active so the narrowed list is obvious.
         let view_active = self.settings.sidebar_device_filter.is_some()
-            || self.settings.sidebar_sort != crate::settings::SidebarSort::Activity
+            || self.settings.sidebar_sort != crate::prefs::SidebarSort::Activity
             || self.settings.sidebar_sort_reversed;
         let view_tint = if view_active {
             theme.accent
@@ -2747,7 +2747,7 @@ impl Shell {
         menu = menu
             .child(popover::menu_separator())
             .child(popover::menu_heading(theme, "Sort by"));
-        for option in crate::settings::SidebarSort::ALL {
+        for option in crate::prefs::SidebarSort::ALL {
             menu = menu.child(
                 popover::menu_row(
                     theme,

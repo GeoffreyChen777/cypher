@@ -69,7 +69,7 @@ pub enum ComposerEvent {
         target_device: String,
     },
     OpenProviders {
-        intent: crate::settings::providers::ProviderIntent,
+        intent: crate::prefs::slash_commands::ProviderIntent,
         target_device: Option<String>,
     },
     /// A prompt was sent optimistically — give the transcript its exact row
@@ -810,7 +810,7 @@ impl Composer {
             }
         });
         let shown_slash_observe = cx
-            .observe_global::<crate::settings::commands::ShownSlashCommands>(
+            .observe_global::<crate::prefs::slash_commands::ShownSlashCommands>(
                 |this: &mut Self, cx| {
                     // Re-open an open menu from scratch: the first command
                     // turned on needs the agent's list fetched, which a menu

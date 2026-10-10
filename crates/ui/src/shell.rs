@@ -34,6 +34,11 @@ use crate::icons::{self, cypher_app_icon, icon};
 use crate::loaders;
 use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
 use crate::popover::{self, Loadable};
+use crate::prefs::slash_commands::ProviderIntent;
+use crate::prefs::{
+    KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, SAVE_DEBOUNCE_MS, SIDEBAR_DEFAULT,
+    SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
+};
 use crate::rail;
 use crate::settings::appearance::AppearancePage;
 use crate::settings::archived::ArchivedPage;
@@ -43,14 +48,10 @@ use crate::settings::devices::DevicesPage;
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::mcp::McpPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
-use crate::settings::providers::{ProviderIntent, ProvidersPage};
+use crate::settings::providers::ProvidersPage;
 use crate::settings::setup::{SetupEvent, SetupPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::subagents::SubagentsPage;
-use crate::settings::{
-    KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, SAVE_DEBOUNCE_MS, SIDEBAR_DEFAULT,
-    SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
-};
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
     OrgSetup, format_time_ago, org_setup, parse_orgs,
@@ -209,7 +210,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     // these back the native menu key equivalents and must survive keymap
     // re-application.
     crate::app_menus::bind_keys(cx);
-    use crate::settings::ShortcutId;
+    use crate::prefs::ShortcutId;
     let bind = |id: ShortcutId, action: Box<dyn gpui::Action>| {
         let combo = valid_or_default(keymap.get(id), id.default_combo());
         KeyBinding::load(
@@ -1312,7 +1313,7 @@ impl Shell {
         // hold a weak handle to it.
         let comment_popup = cx.new(crate::comments::CommentPopup::new);
         if main_window {
-            crate::settings::commands::publish_shown(Vec::new(), cx);
+            crate::prefs::slash_commands::publish_shown(Vec::new(), cx);
         }
         // Lists-only: the session tiles' contexts own the transcripts; this
         // state's selection just follows the focused tile.
@@ -1412,7 +1413,7 @@ impl Shell {
             Some(project) => settings.project_workspaces.get(project).cloned(),
         };
         if main_window {
-            crate::settings::commands::publish_shown(settings.shown_slash_commands.clone(), cx);
+            crate::prefs::slash_commands::publish_shown(settings.shown_slash_commands.clone(), cx);
             // Bind the customizable shortcuts from the persisted keymap.
             apply_keymap(cx, &settings.keymap);
         }

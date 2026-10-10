@@ -52,7 +52,7 @@ fn unix_engine_directory_does_not_redirect_client_preferences(cx: &mut gpui::Tes
 fn every_default_shortcut_binds_on_this_platform() {
     // `apply_keymap` silently falls back on an unparseable combo, so a
     // default gpui cannot parse would ship as a dead shortcut.
-    for id in crate::settings::ShortcutId::ALL {
+    for id in crate::prefs::ShortcutId::ALL {
         let combo = platform_combo(id.default_combo());
         assert!(
             Keystroke::parse(&combo).is_ok(),
@@ -320,7 +320,7 @@ fn boot_restores_the_saved_layout_and_docks(cx: &mut gpui::TestAppContext) {
         workspace: Some(saved),
         session_docks: std::collections::HashMap::from([(
             "b".to_string(),
-            crate::settings::SessionDock {
+            crate::prefs::SessionDock {
                 right: Some(0.5),
                 right_open: true,
                 used_at: 1,
@@ -610,7 +610,7 @@ fn a_split_workspace_renders(cx: &mut gpui::TestAppContext) {
 
 #[test]
 fn workspace_shortcuts_parse() {
-    let defaults = crate::settings::ShortcutId::ALL
+    let defaults = crate::prefs::ShortcutId::ALL
         .into_iter()
         .map(|id| id.default_combo());
     for combo in defaults.chain(FOCUS_TILE_KEYS) {

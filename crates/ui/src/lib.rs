@@ -26,6 +26,7 @@ mod notification_activity;
 mod notify;
 mod pickers;
 mod popover;
+mod prefs;
 mod quote_origin;
 mod rail;
 mod settings;
@@ -199,7 +200,7 @@ pub fn run_app(config: UiConfig) {
         // palette while settings load.
         let data_dir = config.data_dir.clone();
         appearance::init(
-            settings::UiSettings::load(&data_dir).appearance,
+            prefs::UiSettings::load(&data_dir).appearance,
             data_dir.clone(),
             cx,
         );

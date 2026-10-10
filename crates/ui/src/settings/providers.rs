@@ -12,6 +12,7 @@ use super::device_target::DeviceTarget;
 use super::device_target::DeviceTicket;
 use super::web_search::WebSearchFallbackControl;
 use super::widgets;
+use crate::prefs::slash_commands::ProviderIntent;
 use crate::{
     composer::{ComposerInput, ComposerInputEvent},
     icons,
@@ -19,25 +20,6 @@ use crate::{
     state::AppState,
     theme::Theme,
 };
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProviderIntent {
-    List,
-    Add,
-    Edit(String),
-    Logout(String),
-}
-
-pub fn command_intent(text: &str) -> Option<ProviderIntent> {
-    let parts: Vec<_> = text.split_whitespace().collect();
-    match parts.as_slice() {
-        ["/provider"] | ["/login"] | ["/logout"] => Some(ProviderIntent::List),
-        ["/provider", "add"] => Some(ProviderIntent::Add),
-        ["/login", id, ..] => Some(ProviderIntent::Edit((*id).into())),
-        ["/logout", id] => Some(ProviderIntent::Logout((*id).into())),
-        _ => None,
-    }
-}
 
 /// Kinds the Add-provider dropdown can create. Claude Code and ChatGPT are
 /// listed separately; this catalog is only custom gateways.
@@ -2599,25 +2581,6 @@ mod tests {
         let spec = CustomProviderKind::NewApi.spec();
         assert_eq!(spec.title, "OpenAI-compatible");
         assert!(spec.caption.contains("NewAPI"));
-    }
-
-    #[test]
-    fn only_exact_management_commands_open_settings() {
-        assert_eq!(command_intent("/provider add"), Some(ProviderIntent::Add));
-        assert_eq!(
-            command_intent("/login mvp-lab"),
-            Some(ProviderIntent::Edit("mvp-lab".into()))
-        );
-        assert_eq!(
-            command_intent("/logout mvp-lab"),
-            Some(ProviderIntent::Logout("mvp-lab".into()))
-        );
-        assert_eq!(
-            command_intent("/login x secret"),
-            Some(ProviderIntent::Edit("x".into()))
-        );
-        assert_eq!(command_intent("explain /provider"), None);
-        assert_eq!(command_intent("/newapi-provider-add"), None);
     }
 
     #[test]

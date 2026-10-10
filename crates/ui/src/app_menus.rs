@@ -14,8 +14,9 @@
 
 use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window, actions};
 
-use crate::appearance::{self, AppearanceMode};
+use crate::appearance;
 use crate::composer;
+use crate::prefs::AppearanceMode;
 
 actions!(
     cypher,

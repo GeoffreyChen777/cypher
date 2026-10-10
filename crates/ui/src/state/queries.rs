@@ -123,7 +123,7 @@ impl AppState {
             return true;
         }
         match self.devices.iter().find(|d| d.id == device_id) {
-            Some(d) => crate::settings::devices::device_online(d.last_seen_at, now),
+            Some(d) => device_online(d.last_seen_at, now),
             None => true,
         }
     }

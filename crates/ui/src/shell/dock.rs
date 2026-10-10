@@ -139,7 +139,7 @@ pub fn dock_takes_over(area_width: f32) -> bool {
 pub fn fraction_of(size: f32, extent: f32) -> Option<f32> {
     (extent > 0.0)
         .then(|| size / extent)
-        .and_then(crate::settings::clamp_fraction)
+        .and_then(crate::prefs::clamp_fraction)
 }
 
 /// A remembered fraction back in pixels of `extent`; a dock never dragged
@@ -1451,7 +1451,7 @@ mod tests {
         assert_eq!(fraction_of(500.0, 0.0), None);
         assert_eq!(
             fraction_of(5000.0, 1000.0),
-            Some(crate::settings::DOCK_FRACTION_MAX)
+            Some(crate::prefs::DOCK_FRACTION_MAX)
         );
         // The chat column keeps its minimum; the dock keeps its own.
         let area = 1000.0;
@@ -1471,11 +1471,11 @@ mod tests {
         // Never below the minimum, never above the viewport-relative cap.
         assert_eq!(
             terminal_dock_height(Some(0.05), 280.0, 1000.0),
-            crate::settings::TERMINAL_MIN_HEIGHT
+            crate::prefs::TERMINAL_MIN_HEIGHT
         );
         assert_eq!(
             terminal_dock_height(Some(0.95), 280.0, 1000.0),
-            1000.0 * crate::settings::TERMINAL_MAX_VH
+            1000.0 * crate::prefs::TERMINAL_MAX_VH
         );
     }
 

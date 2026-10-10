@@ -4,7 +4,7 @@
 //! Three pieces, following the pattern zed uses (zed's `crates/theme/src/theme.rs`
 //! `SystemAppearance` + `reload_theme` + `cx.refresh_windows`):
 //!
-//! 1. [`AppearanceMode`] — the persisted user choice: follow the OS, or pin one.
+//! 1. [`AppearanceMode`] (in `prefs`) — the persisted user choice: follow the OS, or pin one.
 //! 2. [`AppearanceState`] — a gpui global holding that choice alongside the last
 //!    appearance the OS reported, so [`resolve`] can combine them.
 //! 3. [`observe_window`] — subscribes to the platform's appearance notification
@@ -21,36 +21,9 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{App, Global, Subscription, Window};
-use serde::{Deserialize, Serialize};
-
-use crate::settings::UiSettings;
+use crate::prefs::{AppearanceMode, UiSettings};
 use crate::theme::{Appearance, Theme};
-
-/// The user's appearance preference. Persisted in `ui-settings.json`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum AppearanceMode {
-    /// Follow the OS. The default — matches every other native app on the
-    /// machine, including when the user has macOS set to switch at sunset.
-    #[default]
-    System,
-    Light,
-    Dark,
-}
-
-impl AppearanceMode {
-    /// Menu/label text.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::System => "System",
-            Self::Light => "Light",
-            Self::Dark => "Dark",
-        }
-    }
-
-    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
-}
+use gpui::{App, Global, Subscription, Window};
 
 /// Global state behind the current theme: what the user chose, and what the OS
 /// last said. Kept separate from [`Theme`] itself so that flipping the OS

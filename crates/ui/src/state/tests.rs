@@ -2249,3 +2249,14 @@ fn steer_ids_join_ledger_steers_and_local_echoes() {
     assert!(ids.contains("m2"), "the ledger's Steer message id");
     assert!(ids.contains("m3"), "this device's unsynced steer echo");
 }
+
+#[test]
+fn presence_window() {
+    let now = Utc::now();
+    assert!(device_online(Some(now - TimeDelta::seconds(10)), now));
+    assert!(device_online(Some(now - TimeDelta::seconds(70)), now));
+    assert!(!device_online(Some(now - TimeDelta::seconds(71)), now));
+    assert!(!device_online(None, now));
+    // Clock skew (future) counts as online.
+    assert!(device_online(Some(now + TimeDelta::seconds(30)), now));
+}

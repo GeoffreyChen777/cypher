@@ -18,18 +18,8 @@ use cypher_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover;
-use crate::state::AppState;
+use crate::state::{AppState, device_online};
 use crate::theme::{MonoStyled, Theme};
-
-/// A device that pinged within this window shows a presence dot (engines
-/// heartbeat every 15s; 70s tolerates a couple of missed beats).
-pub const DEVICE_ONLINE_WINDOW_SECS: i64 = 70;
-
-/// Presence: last-seen within the online window (future timestamps count). Pure.
-pub fn device_online(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
-    last_seen
-        .is_some_and(|at| now.signed_duration_since(at).num_seconds() <= DEVICE_ONLINE_WINDOW_SECS)
-}
 
 /// Compact last-seen line. Pure.
 pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
@@ -921,17 +911,6 @@ impl Render for DevicesPage {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
-
-    #[test]
-    fn presence_window() {
-        let now = Utc::now();
-        assert!(device_online(Some(now - TimeDelta::seconds(10)), now));
-        assert!(device_online(Some(now - TimeDelta::seconds(70)), now));
-        assert!(!device_online(Some(now - TimeDelta::seconds(71)), now));
-        assert!(!device_online(None, now));
-        // Clock skew (future) counts as online.
-        assert!(device_online(Some(now + TimeDelta::seconds(30)), now));
-    }
 
     #[test]
     fn last_seen_formatting() {
