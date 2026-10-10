@@ -9,7 +9,7 @@ impl Shell {
         sid: SlotId,
         cx: &mut Context<Self>,
     ) -> Option<Entity<TerminalPanel>> {
-        let popup = self.comment_popup.clone().downgrade();
+        let popup = self.comments.popup.clone().downgrade();
         let slot = self.tiles.slots.get_mut(&sid)?;
         if let Some(terminal) = &slot.terminal {
             return Some(terminal.clone());

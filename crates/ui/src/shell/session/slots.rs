@@ -60,7 +60,7 @@ impl Shell {
         self.tiles.next_slot_id += 1;
         let chat_id = tab.chat_id().map(str::to_string);
         let state = AppState::new_session_context(&self.state, chat_id.clone(), cx);
-        let popup = self.comment_popup.clone().downgrade();
+        let popup = self.comments.popup.clone().downgrade();
         let transcript = cx.new(|cx| Transcript::new(state.clone(), popup, cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let subagents = cx.new(|cx| SubagentsPanel::new(state.clone(), cx));

@@ -1195,6 +1195,16 @@ struct FocusFallback {
     root: gpui::FocusHandle,
 }
 
+/// The shared floating Comment pill/editor and its event forwarding.
+struct CommentUi {
+    /// Shared floating Comment pill/editor: rendered above every
+    /// clipped surface; surfaces (transcript, diff panes, terminals) drive
+    /// it through the weak handles they hold.
+    popup: Entity<crate::comment_popup::CommentPopup>,
+    /// CommentPopup → composer comment forwarding (subscribed ONCE).
+    _events: Subscription,
+}
+
 pub struct Shell {
     /// The window's main state: lists (sidebar, spaces, sessions) in
     /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
@@ -1275,12 +1285,8 @@ pub struct Shell {
     /// 1s heartbeat re-rendering the working indicator (elapsed + flavour word).
     _ticker: Task<()>,
     _state_observation: Subscription,
-    /// Shared floating Comment pill/editor: rendered above every
-    /// clipped surface; surfaces (transcript, diff panes, terminals) drive
-    /// it through the weak handles they hold.
-    comment_popup: Entity<crate::comment_popup::CommentPopup>,
-    /// CommentPopup → composer comment forwarding (subscribed ONCE).
-    _comment_popup_events: Subscription,
+    /// The shared Comment pill/editor.
+    comments: CommentUi,
     /// The project a project window is dedicated to; `None` in the main
     /// window (see `shell/windows.rs`).
     project_window: Option<String>,
@@ -1569,8 +1575,10 @@ impl Shell {
             },
             _ticker: ticker,
             _state_observation: observation,
-            comment_popup,
-            _comment_popup_events: comment_popup_events,
+            comments: CommentUi {
+                popup: comment_popup,
+                _events: comment_popup_events,
+            },
             project_window,
         }
     }

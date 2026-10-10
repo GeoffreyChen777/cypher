@@ -20,7 +20,8 @@ impl Shell {
     }
 
     pub(super) fn dismiss_comment_popup(&mut self, cx: &mut Context<Self>) {
-        self.comment_popup
+        self.comments
+            .popup
             .update(cx, |popup, cx| popup.dismiss_and_clear(cx));
     }
 

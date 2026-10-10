@@ -613,7 +613,7 @@ impl Shell {
 
         // The shared Comment pill/editor, LAST so it paints above every
         // clipped surface (transcript, diff panes, terminal).
-        self.comment_popup.update(cx, |popup, cx| {
+        self.comments.popup.update(cx, |popup, cx| {
             if let Some(ui) = popup.render(window, cx) {
                 overlays.push(ui);
             }

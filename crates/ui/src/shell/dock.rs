@@ -476,7 +476,7 @@ impl Shell {
         let Some(state) = self.tiles.slots.get(&sid).map(|slot| slot.state.clone()) else {
             return;
         };
-        let popup = self.comment_popup.clone().downgrade();
+        let popup = self.comments.popup.clone().downgrade();
         let changes = cx.new(|cx| Changes::new(state, popup, cx));
         self.register_diff_surface(sid, changes, cx);
     }
@@ -492,7 +492,7 @@ impl Shell {
         let Some(state) = self.tiles.slots.get(&sid).map(|slot| slot.state.clone()) else {
             return;
         };
-        let popup = self.comment_popup.clone().downgrade();
+        let popup = self.comments.popup.clone().downgrade();
         let changes = cx.new(|cx| Changes::for_commit(state, popup, commit, cx));
         self.register_diff_surface(sid, changes, cx);
     }

@@ -477,7 +477,7 @@ fn a_session_leaving_the_screen_drops_the_comment_popup(cx: &mut gpui::TestAppCo
         shell.open_chat("a".into(), cx);
         shell.split_focused(crate::workspace::Edge::Right, cx);
     });
-    let popup = shell.read_with(cx, |shell, _| shell.comment_popup.clone());
+    let popup = shell.read_with(cx, |shell, _| shell.comments.popup.clone());
     let offer = |cx: &mut gpui::TestAppContext| {
         popup.update(cx, |popup, cx| {
             popup.offer(
