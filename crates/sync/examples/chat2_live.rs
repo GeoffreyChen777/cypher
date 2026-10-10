@@ -8,6 +8,9 @@
 //!   cargo run -p cypher-sync --example chat2_live -- <baseUrl> <chatId> <token> <device>
 //!
 //! Prints a single JSON result line prefixed RESULT: for the driver to parse.
+
+#![allow(clippy::print_stdout, clippy::print_stderr)] // a command-line tool
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 

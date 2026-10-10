@@ -2,6 +2,8 @@
 //! local-only without credentials. `cypher login` and `cypher logout` select the
 //! profile used by the next engine start without mutating a live runtime.
 
+#![allow(clippy::print_stdout, clippy::print_stderr)] // the CLI talks to the terminal
+
 mod auth_cli;
 mod daemon;
 mod dev_env;

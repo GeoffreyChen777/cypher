@@ -1,6 +1,9 @@
 //! Recovery tool: inspect and repair chat docs in a docs.sqlite3 store. Modes:
 //!   inspect-chat <data_dir> <chat_id>
 //!   cut-chat     <data_dir> <chat_id> <from_index>
+
+#![allow(clippy::print_stdout, clippy::print_stderr)] // a command-line tool
+
 use cypher_doc::SessionDoc;
 use cypher_sync::DocsStore;
 use loro::{LoroDoc, ToJson};

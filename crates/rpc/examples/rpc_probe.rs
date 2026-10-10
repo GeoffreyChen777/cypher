@@ -4,6 +4,8 @@
 //!   cargo run -p cypher-rpc --example rpc_probe -- /tmp/engine-data EngineInfo '{}'
 //!   cargo run -p cypher-rpc --example rpc_probe -- /tmp/engine-data WatchSessions '{}' --stream 3
 
+#![allow(clippy::print_stdout, clippy::print_stderr)] // a command-line tool
+
 use cypher_rpc::connect_local;
 
 #[tokio::main]

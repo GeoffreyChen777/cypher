@@ -1,0 +1,3 @@
+# Lint configuration shared by every crate; the lint levels live in
+# [workspace.lints] in Cargo.toml.
+allow-print-in-tests = true

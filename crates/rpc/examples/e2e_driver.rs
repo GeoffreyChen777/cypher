@@ -13,6 +13,8 @@
 //!
 //! Prints `PASS`/`FAIL` lines; exits nonzero on failure.
 
+#![allow(clippy::print_stdout, clippy::print_stderr)] // a command-line tool
+
 use std::time::{Duration, Instant};
 
 use cypher_rpc::{RpcClient, connect_local, methods};

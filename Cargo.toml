@@ -30,6 +30,11 @@ unsafe_op_in_unsafe_fn = "warn"
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "warn"
+# Libraries report through `tracing`; only the `cypher` binary and the example
+# tools print, and they opt out at their crate roots (tests are exempt via
+# clippy.toml).
+print_stdout = "warn"
+print_stderr = "warn"
 # Wide enum variants and large `Err` types are deliberate here: the big
 # variants are persisted or wire shapes matched in many places, and the large
 # errors are tungstenite's own types or protocol replies returned verbatim.
