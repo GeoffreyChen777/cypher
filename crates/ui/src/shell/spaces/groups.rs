@@ -3,6 +3,39 @@
 
 use super::*;
 
+/// What a collapsed project or checkout group shows for the sessions it
+/// hides, in the session rows' marks: how many wait on input and how many
+/// finished unseen (the ones worth counting), and whether any is still
+/// working (a spinner, uncounted). Idle and errored rows carry no mark of
+/// their own, so they add nothing; an empty summary shows nothing.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct StatusSummary {
+    pub awaiting: usize,
+    pub working: bool,
+    pub completed: usize,
+}
+
+impl StatusSummary {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+pub(super) fn status_summary<'a>(
+    statuses: impl IntoIterator<Item = &'a ChatIndicator>,
+) -> StatusSummary {
+    let mut summary = StatusSummary::default();
+    for status in statuses {
+        match status {
+            ChatIndicator::AwaitingInput => summary.awaiting += 1,
+            ChatIndicator::Working => summary.working = true,
+            ChatIndicator::Completed => summary.completed += 1,
+            ChatIndicator::Errored | ChatIndicator::Idle => {}
+        }
+    }
+    summary
+}
+
 /// Quick chats have no checkout to name, so a merged card sections its
 /// sessions by host device instead (first appearance orders the sections,
 /// sessions keep their overview order). A single host is one section,

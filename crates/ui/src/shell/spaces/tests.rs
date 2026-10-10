@@ -157,6 +157,51 @@ fn group_chats_by_checkout_identity() {
 }
 
 #[test]
+fn status_summary_counts_input_and_finished_but_not_working() {
+    use ChatIndicator::*;
+    /// (awaiting, working, completed)
+    type Expected = (usize, bool, usize);
+    let cases: &[(&str, &[ChatIndicator], Expected)] = &[
+        ("no sessions show nothing", &[], (0, false, 0)),
+        ("idle sessions show nothing", &[Idle, Idle], (0, false, 0)),
+        (
+            "errored rows carry no mark, so neither does the header",
+            &[Errored, Idle],
+            (0, false, 0),
+        ),
+        (
+            "finished-unseen sessions are counted",
+            &[Completed, Idle, Completed],
+            (0, false, 2),
+        ),
+        (
+            "working is a flag, never a count",
+            &[Working, Working, Idle],
+            (0, true, 0),
+        ),
+        (
+            "every status present is reported together",
+            &[Working, AwaitingInput, Completed, Errored, AwaitingInput],
+            (2, true, 1),
+        ),
+    ];
+    for (name, statuses, (awaiting, working, completed)) in cases {
+        let expected = StatusSummary {
+            awaiting: *awaiting,
+            working: *working,
+            completed: *completed,
+        };
+        let summary = status_summary(statuses.iter());
+        assert_eq!(summary, expected, "{name}");
+        assert_eq!(
+            summary.is_empty(),
+            expected == StatusSummary::default(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn branch_group_key_includes_worktree_path() {
     // The collapse key must distinguish same-label detached worktrees,
     // mirroring the grouping identity.

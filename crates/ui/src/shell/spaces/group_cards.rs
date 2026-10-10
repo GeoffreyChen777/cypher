@@ -350,8 +350,8 @@ impl Shell {
     /// rail of its own — a second guide line beside the project's read as
     /// clutter). The
     /// disclosure chevron only surfaces on hover, except on a collapsed
-    /// group, which keeps the closed chevron and a count of its hidden
-    /// sessions; clicking the row hides/shows the group's sessions.
+    /// group, which keeps the closed chevron and its hidden sessions'
+    /// [`StatusSummary`]; clicking the row hides/shows the group's sessions.
     #[allow(clippy::too_many_arguments)]
     fn render_branch_group_header(
         &self,
@@ -372,6 +372,18 @@ impl Shell {
         let worktree_path = group.worktree_path.clone();
         let branch = group.branch.clone();
         let caption = theme.text_muted.opacity(0.6);
+        // A collapsed group hides its rows' status corners: their summary
+        // rides ahead of the chevron instead.
+        let status = collapsed
+            .then(|| {
+                render_status_summary(
+                    &format!("branch-{key}"),
+                    status_summary(group.chats.iter().map(|(status, _)| status)),
+                    theme,
+                    cx,
+                )
+            })
+            .flatten();
         let chevron = div()
             .flex_none()
             .size(px(10.0))
@@ -427,15 +439,7 @@ impl Shell {
                             .child(SharedString::from(group.label.clone())),
                     ),
             )
-            .when(collapsed, |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(10.0))
-                        .text_color(theme.text_muted.opacity(0.5))
-                        .child(SharedString::from(group.chats.len().to_string())),
-                )
-            })
+            .children(status)
             .child(chevron);
         // Real-space groups get the trailing add plus at the far tail (after
         // the disclosure chevron), opening a canvas targeted at THIS checkout
@@ -473,15 +477,15 @@ impl Shell {
     /// light beside their hairlines while still out-ranking the session
     /// titles; dimming them instead read as disabled and blurred the
     /// no-sessions dim below. The name is followed by the branch when the
-    /// card's lone checkout is inlined, or the hidden session count when the
-    /// card is collapsed — then the target-machine name and, only while the
-    /// host can't be reached, a far-right slashed-cloud glyph. The machine
-    /// name only appears when the sidebar spans several hosts, and then only
-    /// on hover unless the host is offline; a project with no sessions dims
-    /// its title. The header toggles the whole card body (all branch/worktree
-    /// groups + sessions) on left-press; real-space headers open the
-    /// rename/remove context menu on right-click, while synthetic cards
-    /// render no menu.
+    /// card's lone checkout is inlined — then the target-machine name, only
+    /// while the host can't be reached a slashed-cloud glyph, and on a
+    /// collapsed card the hidden sessions' [`StatusSummary`] at the far
+    /// right. The machine name only appears when the sidebar spans several
+    /// hosts, and then only on hover unless the host is offline; a project
+    /// with no sessions dims its title. The header toggles the whole card
+    /// body (all branch/worktree groups + sessions) on left-press;
+    /// real-space headers open the rename/remove context menu on
+    /// right-click, while synthetic cards render no menu.
     fn render_group_header(
         &self,
         group: &GroupCard,
@@ -511,6 +515,25 @@ impl Shell {
         let collapsed = self.sidebar_group_collapsed(&toggle_key);
         let chat_count = group.chat_count();
         let quiet = chat_count == 0;
+        // A collapsed card hides its rows' status corners, so the header
+        // carries their summary, at the far right on the rows' corner column
+        // (header 10px inset + 4 = a row's 6px inset + 8px padding).
+        let status = collapsed
+            .then(|| {
+                render_status_summary(
+                    &format!("space-{}", group.key),
+                    status_summary(
+                        group
+                            .groups
+                            .iter()
+                            .flat_map(|g| g.chats.iter().map(|(status, _)| status)),
+                    ),
+                    theme,
+                    cx,
+                )
+            })
+            .flatten()
+            .map(|summary| div().flex_none().mr(px(4.0)).child(summary));
         let inline_branch: Option<SharedString> = (group.kind != SidebarGroupKind::Scratch
             && group.inline_groups())
         .then(|| group.groups.first().and_then(|g| g.branch.clone()))
@@ -621,19 +644,6 @@ impl Shell {
                                 .flex_none()
                                 .text_color(theme.text_muted.opacity(0.6)),
                         )
-                    })
-                    .when(collapsed && chat_count > 0, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .px(px(5.0))
-                                .rounded_full()
-                                .bg(crate::kit::theme::wash(0.06))
-                                .text_size(px(10.0))
-                                .line_height(px(15.0))
-                                .text_color(theme.text_muted.opacity(0.7))
-                                .child(SharedString::from(chat_count.to_string())),
-                        )
                     }),
             )
             .when(device_t > 0.0, |el| {
@@ -651,7 +661,8 @@ impl Shell {
                         .child(device),
                 )
             })
-            .children(unreachable);
+            .children(unreachable)
+            .children(status);
         if let Some(space_id) = menu_space {
             // Real-space headers also get the trailing add plus (after the
             // offline glyph): a canvas explicitly targeted at the project's
@@ -732,4 +743,62 @@ impl Shell {
             .child(glyph)
             .into_any_element()
     }
+}
+
+/// A collapsed header's [`StatusSummary`], in the session rows' own marks:
+/// awaiting input `? n` (amber), working (the spinner, uncounted), finished
+/// unseen `✓ n` (green) — most urgent first. `None` when nothing shows.
+fn render_status_summary(
+    key: &str,
+    summary: StatusSummary,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Option<AnyElement> {
+    if summary.is_empty() {
+        return None;
+    }
+    let counted = |mark: Option<AnyElement>, count: usize, tint: gpui::Hsla| {
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(3.0))
+            .children(mark)
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .line_height(px(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(tint)
+                    .child(SharedString::from(count.to_string())),
+            )
+    };
+    let awaiting = (summary.awaiting > 0).then(|| {
+        let mark =
+            super::render::status_mark(String::new(), ChatIndicator::AwaitingInput, theme, cx);
+        counted(mark, summary.awaiting, theme.warning)
+    });
+    let working = summary
+        .working
+        .then(|| {
+            super::render::status_mark(format!("{key}-working"), ChatIndicator::Working, theme, cx)
+        })
+        .flatten();
+    let completed = (summary.completed > 0).then(|| {
+        let mark = super::render::status_mark(String::new(), ChatIndicator::Completed, theme, cx);
+        counted(mark, summary.completed, theme.success.opacity(0.9))
+    });
+    Some(
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .children(awaiting)
+            .children(working)
+            .children(completed)
+            .into_any_element(),
+    )
 }

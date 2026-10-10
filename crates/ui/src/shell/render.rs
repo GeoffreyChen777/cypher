@@ -949,37 +949,57 @@ fn chat_row_corner(
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> AnyElement {
-    match status {
-        ChatIndicator::Working => div()
+    status_mark(format!("chat-working-{id}"), status, theme, cx).unwrap_or_else(|| {
+        div()
             .flex_none()
-            .child(loaders::mini_gradient_spinner(
-                format!("chat-working-{id}"),
-                2.0,
-                cx.entity_id(),
-                cx,
-            ))
-            .into_any_element(),
+            .text_size(px(10.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .child(time_ago)
+            .into_any_element()
+    })
+}
+
+/// The sidebar's session status mark — a session row's corner, and the marks
+/// in the status summary a collapsed project or checkout header shows for the
+/// sessions it hides. `None` for statuses without a mark (idle, errored).
+pub(super) fn status_mark(
+    spinner_key: String,
+    status: ChatIndicator,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Option<AnyElement> {
+    match status {
+        ChatIndicator::Working => Some(
+            div()
+                .flex_none()
+                .child(loaders::mini_gradient_spinner(
+                    spinner_key,
+                    2.0,
+                    cx.entity_id(),
+                    cx,
+                ))
+                .into_any_element(),
+        ),
         // The turn is parked on a question, so the spinner has stopped —
         // without a corner of its own the row fell back to the relative
         // time and read exactly like an idle session (user report). Amber
         // is the tone the theme reserves for awaiting-input; the glyph is
         // slightly larger than the check because it carries inner detail.
-        ChatIndicator::AwaitingInput => icon(icons::QUESTION_CIRCLE)
-            .size(px(12.0))
-            .flex_none()
-            .text_color(theme.warning)
-            .into_any_element(),
-        ChatIndicator::Completed => icon(icons::CHECK)
-            .size(px(11.0))
-            .flex_none()
-            .text_color(theme.success.opacity(0.9))
-            .into_any_element(),
-        _ => div()
-            .flex_none()
-            .text_size(px(10.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .child(time_ago)
-            .into_any_element(),
+        ChatIndicator::AwaitingInput => Some(
+            icon(icons::QUESTION_CIRCLE)
+                .size(px(12.0))
+                .flex_none()
+                .text_color(theme.warning)
+                .into_any_element(),
+        ),
+        ChatIndicator::Completed => Some(
+            icon(icons::CHECK)
+                .size(px(11.0))
+                .flex_none()
+                .text_color(theme.success.opacity(0.9))
+                .into_any_element(),
+        ),
+        ChatIndicator::Errored | ChatIndicator::Idle => None,
     }
 }
 
