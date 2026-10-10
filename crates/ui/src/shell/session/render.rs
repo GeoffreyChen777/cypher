@@ -57,53 +57,7 @@ impl Shell {
             // target yet — one clear affordance, regardless of `no_project`
             // (an unselected canvas with zero spaces has nothing to send to).
             let _ = faint;
-            div()
-                .size_full()
-                .pb(px(stack_h))
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .child(motion::fade_in(
-                    "no-spaces-canvas",
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .child(
-                            div()
-                                .font_family(theme.font_sans.clone())
-                                .text_size(px(21.0))
-                                .font_weight(gpui::FontWeight::NORMAL)
-                                .text_color(theme.text.opacity(0.18))
-                                .child(SharedString::from("Let's Cypher")),
-                        )
-                        .child(
-                            div()
-                                .mt(px(24.0))
-                                .text_size(px(16.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(SharedString::from("Add a project to get started")),
-                        )
-                        .child(
-                            div()
-                                .mt(px(6.0))
-                                .text_size(px(13.0))
-                                .text_color(theme.text_muted.opacity(0.7))
-                                .child(SharedString::from(
-                                    "A project is a folder on one of your devices.",
-                                )),
-                        )
-                        .child(
-                            popover::btn_primary(&theme_owned, "Add a project")
-                                .id("onboarding-add-space")
-                                .mt(px(20.0))
-                                .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
-                        ),
-                ))
-                .into_any_element()
+            onboarding_canvas(stack_h, theme, cx)
         } else {
             // New-chat canvas: the Cypher wordmark over the target selectors
             // (device + project — moved up from the composer footer) and the
@@ -115,46 +69,14 @@ impl Shell {
             };
             let pickers = composer.read(cx).pickers().clone();
             let selectors = pickers.update(cx, |p, cx| p.render_target_selectors(cx));
-            div()
-                .size_full()
-                .pb(px(stack_h))
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .child(motion::fade_in(
-                    "new-chat-canvas",
-                    div()
-                        .max_w_full()
-                        .px(px(12.0))
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .when(show_wordmark, |el| {
-                            el.child(
-                                div()
-                                    .mb(px(16.0))
-                                    .font_family(theme.font_sans.clone())
-                                    .text_size(px(21.0))
-                                    .font_weight(gpui::FontWeight::NORMAL)
-                                    .text_color(theme.text.opacity(0.32))
-                                    .child(SharedString::from("Let's Cypher")),
-                            )
-                        })
-                        .child(selectors)
-                        .when(show_helper, |el| {
-                            el.child(
-                                div()
-                                    .mt(px(12.0))
-                                    .text_size(px(14.0))
-                                    .text_center()
-                                    .text_color(theme.text_muted.opacity(0.6))
-                                    .child(helper),
-                            )
-                        }),
-                ))
-                .into_any_element()
+            new_chat_canvas(
+                selectors,
+                helper,
+                stack_h,
+                show_wordmark,
+                show_helper,
+                theme,
+            )
         };
 
         let status = self.render_status_strip(sid, cx);
@@ -206,48 +128,7 @@ impl Shell {
                     cx.notify();
                 }),
             )
-            .child(
-                // Full-height underlay: the transcript viewport spans the
-                // whole column, scrolling under a small top band and the
-                // composer stack below. The per-glyph EdgeFade (glass-safe,
-                // same as the sidebar's) spans the full column with
-                // ASYMMETRIC bands sized to the chrome: content is opaque at
-                // the chrome's inner edge and fades to zero at the window
-                // edge — visible mid-fade through the glass chrome it slides
-                // under. Always on (the resting paddings keep pinned content
-                // out of the bands, and gating on measured scroll state left
-                // the top unfaded for one frame on session switch — user
-                // report). The jump pill floats outside the fade scope,
-                // anchored above the measured stack.
-                {
-                    // The terminal dock lives below the whole chat column
-                    // (see `render_session`), so only the status strip +
-                    // composer overlap the transcript. Opaque from the
-                    // composer PILL's top (the reserved status strip above
-                    // it is empty air), zero at the underlay's bottom edge.
-                    let bottom_band = (stack_h - Theme::STATUS_STRIP_HEIGHT).max(1.0);
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .child(
-                            crate::kit::edge_fade::edge_faded(
-                                Theme::TRANSCRIPT_FADE_BAND,
-                                true,
-                                true,
-                                div().size_full().child(outlet),
-                            )
-                            // The tile header is a normal row above the
-                            // viewport: content is fully faded at its
-                            // bottom edge and opaque one band below.
-                            .band_top(crate::transcript::TOP_CHROME_PX)
-                            .band_bottom(bottom_band),
-                        )
-                        .children(self.render_jump_to_bottom(sid, stack_h, cx))
-                        // The find bar floats in the same layer, at the top
-                        // — outside the fade scope, over the transcript.
-                        .children(self.render_find_bar(sid, window, cx))
-                },
-            )
+            .child(self.render_transcript_underlay(sid, outlet, stack_h, window, cx))
             // The glass chrome stack, floating over the transcript's bottom:
             // reserved status strip (h-6, the WorkingIndicator — the composer
             // below never shifts) and composer. A paint-time
@@ -255,49 +136,61 @@ impl Shell {
             // transcript clearance. The flex_1 spacer has no id/listeners, so
             // pointer + wheel events over it fall through to the list below.
             .child(div().flex_1().min_h_0())
-            .child({
-                div()
-                    .flex_none()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        gpui::canvas(
-                            move |bounds, _, _| measured.set(f32::from(bounds.size.height)),
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .inset_0(),
-                    )
-                    // The session-level subagents trigger lives INSIDE the
-                    // status strip (right edge, next to the composer); the
-                    // inspector it opens is a floating layer and never
-                    // participates in this stack's measurement.
-                    .child(status)
-                    // A SELECTED chat keeps its composer even with zero live
-                    // spaces (a selected project-less / unavailable-project
-                    // chat still needs its input row); an unselected canvas
-                    // with no spaces shows onboarding instead, so the
-                    // composer only mounts where there is something to send
-                    // into.
-                    .when(has_selection || has_spaces, |el| el.child(composer.clone()))
-            })
-            .when(file_drag_active, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(px(12.0))
-                        .bg(theme.scrim().opacity(0.4 / 0.6))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(13.0))
-                        .text_color(theme.text)
-                        .child("Drop images to attach"),
-                )
-            })
+            .child(chrome_stack(
+                measured,
+                status,
+                (has_selection || has_spaces).then(|| composer.clone()),
+            ))
+            .when(file_drag_active, |el| el.child(drop_veil(theme)))
             .into_any_element()
+    }
+
+    /// Full-height underlay: the transcript viewport spans the
+    /// whole column, scrolling under a small top band and the
+    /// composer stack below. The per-glyph EdgeFade (glass-safe,
+    /// same as the sidebar's) spans the full column with
+    /// ASYMMETRIC bands sized to the chrome: content is opaque at
+    /// the chrome's inner edge and fades to zero at the window
+    /// edge — visible mid-fade through the glass chrome it slides
+    /// under. Always on (the resting paddings keep pinned content
+    /// out of the bands, and gating on measured scroll state left
+    /// the top unfaded for one frame on session switch — user
+    /// report). The jump pill floats outside the fade scope,
+    /// anchored above the measured stack.
+    fn render_transcript_underlay(
+        &mut self,
+        sid: SlotId,
+        outlet: AnyElement,
+        stack_h: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        // The terminal dock lives below the whole chat column
+        // (see `render_session`), so only the status strip +
+        // composer overlap the transcript. Opaque from the
+        // composer PILL's top (the reserved status strip above
+        // it is empty air), zero at the underlay's bottom edge.
+        let bottom_band = (stack_h - Theme::STATUS_STRIP_HEIGHT).max(1.0);
+        div()
+            .absolute()
+            .inset_0()
+            .child(
+                crate::kit::edge_fade::edge_faded(
+                    Theme::TRANSCRIPT_FADE_BAND,
+                    true,
+                    true,
+                    div().size_full().child(outlet),
+                )
+                // The tile header is a normal row above the
+                // viewport: content is fully faded at its
+                // bottom edge and opaque one band below.
+                .band_top(crate::transcript::TOP_CHROME_PX)
+                .band_bottom(bottom_band),
+            )
+            .children(self.render_jump_to_bottom(sid, stack_h, cx))
+            // The find bar floats in the same layer, at the top
+            // — outside the fade scope, over the transcript.
+            .children(self.render_find_bar(sid, window, cx))
     }
 
     /// The "↓ Scroll to bottom" pill: a LABELED rounded-full
@@ -488,4 +381,158 @@ impl Shell {
             .child(subagents)
             .into_any_element()
     }
+}
+
+/// The no-projects onboarding canvas: one clear affordance.
+fn onboarding_canvas(stack_h: f32, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
+    div()
+        .size_full()
+        .pb(px(stack_h))
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .child(motion::fade_in(
+            "no-spaces-canvas",
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    div()
+                        .font_family(theme.font_sans.clone())
+                        .text_size(px(21.0))
+                        .font_weight(gpui::FontWeight::NORMAL)
+                        .text_color(theme.text.opacity(0.18))
+                        .child(SharedString::from("Let's Cypher")),
+                )
+                .child(
+                    div()
+                        .mt(px(24.0))
+                        .text_size(px(16.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(SharedString::from("Add a project to get started")),
+                )
+                .child(
+                    div()
+                        .mt(px(6.0))
+                        .text_size(px(13.0))
+                        .text_color(theme.text_muted.opacity(0.7))
+                        .child(SharedString::from(
+                            "A project is a folder on one of your devices.",
+                        )),
+                )
+                .child(
+                    popover::btn_primary(theme, "Add a project")
+                        .id("onboarding-add-space")
+                        .mt(px(20.0))
+                        .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
+                ),
+        ))
+        .into_any_element()
+}
+
+/// New-chat canvas: the Cypher wordmark over the target selectors (device +
+/// project) and the helper line; short tiles shed the helper, then the
+/// wordmark.
+fn new_chat_canvas(
+    selectors: AnyElement,
+    helper: SharedString,
+    stack_h: f32,
+    show_wordmark: bool,
+    show_helper: bool,
+    theme: &Theme,
+) -> AnyElement {
+    div()
+        .size_full()
+        .pb(px(stack_h))
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .child(motion::fade_in(
+            "new-chat-canvas",
+            div()
+                .max_w_full()
+                .px(px(12.0))
+                .flex()
+                .flex_col()
+                .items_center()
+                .when(show_wordmark, |el| {
+                    el.child(
+                        div()
+                            .mb(px(16.0))
+                            .font_family(theme.font_sans.clone())
+                            .text_size(px(21.0))
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .text_color(theme.text.opacity(0.32))
+                            .child(SharedString::from("Let's Cypher")),
+                    )
+                })
+                .child(selectors)
+                .when(show_helper, |el| {
+                    el.child(
+                        div()
+                            .mt(px(12.0))
+                            .text_size(px(14.0))
+                            .text_center()
+                            .text_color(theme.text_muted.opacity(0.6))
+                            .child(helper),
+                    )
+                }),
+        ))
+        .into_any_element()
+}
+
+/// The glass chrome stack floating over the transcript's bottom: the
+/// status strip and (where there is something to send into) the composer,
+/// measured for next frame's fade inset and transcript clearance.
+fn chrome_stack(
+    measured: Rc<Cell<f32>>,
+    status: AnyElement,
+    composer: Option<Entity<Composer>>,
+) -> gpui::Div {
+    div()
+        .flex_none()
+        .relative()
+        .flex()
+        .flex_col()
+        .child(
+            gpui::canvas(
+                move |bounds, _, _| measured.set(f32::from(bounds.size.height)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        // The session-level subagents trigger lives INSIDE the
+        // status strip (right edge, next to the composer); the
+        // inspector it opens is a floating layer and never
+        // participates in this stack's measurement.
+        .child(status)
+        // A SELECTED chat keeps its composer even with zero live
+        // spaces (a selected project-less / unavailable-project
+        // chat still needs its input row); an unselected canvas
+        // with no spaces shows onboarding instead, so the
+        // composer only mounts where there is something to send
+        // into.
+        .children(composer)
+}
+
+/// The "Drop images to attach" veil over the column during an OS file drag.
+fn drop_veil(theme: &Theme) -> gpui::Div {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(px(12.0))
+        .bg(theme.scrim().opacity(0.4 / 0.6))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(13.0))
+        .text_color(theme.text)
+        .child("Drop images to attach")
 }
