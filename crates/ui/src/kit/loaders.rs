@@ -10,13 +10,35 @@
 use gpui::{AnyElement, App, EntityId, IntoElement, ParentElement, SharedString, Styled, div, px};
 
 use crate::kit::motion::{self, GRADIENT_SPIN, SPLASH_OUT};
-use crate::kit::theme::{MonoStyled, Theme};
+use crate::kit::theme::{Appearance, MonoStyled, Theme, oklch};
+use gpui::Hsla;
 
 // Shared with the terminal viewport (`cypher_proto::motion`) so both animate the
 // same loaders from the same numbers.
 pub use cypher_proto::motion::MATRIX_SIDE;
 
 pub use cypher_proto::motion::{GSPIN_DIM, GSPIN_ROW_TINTS};
+
+/// Light-mode resting opacity for [`mini_gradient_spinner`] cells. At
+/// [`GSPIN_DIM`] only the one or two pulsing cells showed on a light
+/// surface, so the grid flickered instead of reading as a spinner; resting
+/// brighter keeps its 2×3 shape between pulses.
+const GSPIN_DIM_LIGHT: f32 = 0.3;
+
+/// [`mini_gradient_spinner`] row tints for `appearance`. Dark keeps the
+/// pastel sunrise ([`GSPIN_ROW_TINTS`]); light deepens the same hues, since
+/// the pastel blue and peach sit at nearly the light frost's lightness and
+/// vanished there (user report).
+fn mini_row_tints(appearance: Appearance) -> [Hsla; 3] {
+    match appearance {
+        Appearance::Dark => GSPIN_ROW_TINTS.map(|tint| gpui::rgb(tint).into()),
+        Appearance::Light => [
+            oklch(0.62, 0.12, 250.0),
+            oklch(0.68, 0.15, 55.0),
+            oklch(0.63, 0.19, 10.0),
+        ],
+    }
+}
 
 /// The gradient matrix spinner (WorkingIndicator), ported from zeron's
 /// gradient-spin.tsx: a 3×3 grid of round cells tinted per row from the
@@ -62,7 +84,8 @@ pub fn gradient_spinner(
 /// (sessions-sidebar working rows): same row tints and pulse timing, but the
 /// brightness SNAKES around the grid's perimeter (every cell of a 2×3 grid is
 /// on the ring) instead of sweeping as a vertical wave — a tiny radial chase.
-/// ~6×10px footprint at the default 2.5px cells.
+/// ~6×10px footprint at the default 2.5px cells. Light mode deepens the tints
+/// and rests the cells brighter ([`mini_row_tints`], [`GSPIN_DIM_LIGHT`]).
 pub fn mini_gradient_spinner(
     key: impl Into<SharedString>,
     cell_px: f32,
@@ -77,12 +100,18 @@ pub fn mini_gradient_spinner(
     const RING_LEN: f32 = (COLS * ROWS) as f32;
     let _key = key.into();
     let delta = motion::pulse_delta(&GRADIENT_SPIN, view, cx);
+    let appearance = crate::kit::theme::current_appearance();
+    let tints = mini_row_tints(appearance);
+    let dim = match appearance {
+        Appearance::Dark => GSPIN_DIM,
+        Appearance::Light => GSPIN_DIM_LIGHT,
+    };
     div()
         .flex()
         .flex_col()
         .gap(px(cell_px / 2.0))
         .children((0..ROWS).map(move |row| {
-            let tint: gpui::Hsla = gpui::rgb(GSPIN_ROW_TINTS[row]).into();
+            let tint = tints[row];
             div()
                 .flex()
                 .flex_row()
@@ -93,7 +122,7 @@ pub fn mini_gradient_spinner(
                         .size(px(cell_px))
                         .rounded(px(cell_px / 2.0))
                         .bg(tint)
-                        .opacity(motion::gspin_opacity(delta + phase, GSPIN_DIM))
+                        .opacity(motion::gspin_opacity(delta + phase, dim))
                 }))
         }))
 }
