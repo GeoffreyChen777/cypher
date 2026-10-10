@@ -9,6 +9,11 @@ use std::{
 };
 use tokio::net::{UnixListener, UnixStream};
 
+fn euid() -> libc::uid_t {
+    // SAFETY: geteuid(2) takes no arguments, touches no memory and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
 fn denied(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
@@ -24,7 +29,7 @@ fn private_directory(path: &Path, create: bool) -> io::Result<()> {
         }
     }
     let meta = std::fs::symlink_metadata(path)?;
-    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+    if !meta.is_dir() || meta.uid() != euid() || meta.mode() & 0o077 != 0 {
         return Err(denied(
             "IPC directory must be owned by this user with mode 0700",
         ));
@@ -47,7 +52,7 @@ fn validate_path(path: &Path, create: bool) -> io::Result<()> {
     let root = instance
         .parent()
         .ok_or_else(|| denied("missing IPC root"))?;
-    let expected = PathBuf::from(format!("/tmp/cypher-ipc-{}", unsafe { libc::geteuid() }));
+    let expected = PathBuf::from(format!("/tmp/cypher-ipc-{}", euid()));
     let key = instance.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if root != expected
         || key.len() != 32
@@ -62,10 +67,7 @@ fn validate_path(path: &Path, create: bool) -> io::Result<()> {
 
 fn socket_metadata(path: &Path) -> io::Result<std::fs::Metadata> {
     let meta = std::fs::symlink_metadata(path)?;
-    if !meta.file_type().is_socket()
-        || meta.uid() != unsafe { libc::geteuid() }
-        || meta.mode() & 0o077 != 0
-    {
+    if !meta.file_type().is_socket() || meta.uid() != euid() || meta.mode() & 0o077 != 0 {
         return Err(denied(
             "IPC path is not a private socket owned by this user",
         ));
@@ -74,7 +76,7 @@ fn socket_metadata(path: &Path) -> io::Result<std::fs::Metadata> {
 }
 
 pub(crate) fn check_peer(stream: &UnixStream) -> io::Result<()> {
-    if stream.peer_cred()?.uid() != unsafe { libc::geteuid() } {
+    if stream.peer_cred()?.uid() != euid() {
         return Err(denied("IPC peer belongs to a different user"));
     }
     Ok(())
