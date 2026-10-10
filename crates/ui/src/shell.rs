@@ -1156,6 +1156,21 @@ struct DevKnobs {
     gate: Option<GatePhase>,
 }
 
+/// The shell's manually driven tweens (sidebar width, titlebar cluster)
+/// and this render pass's motion bookkeeping.
+struct ShellMotion {
+    sidebar_tween: Option<WidthTween>,
+    /// 200ms ease-out tween of the cluster start on fullscreen toggles.
+    titlebar_tween: Option<WidthTween>,
+    /// `motion::reduced_motion` snapshot, refreshed at the top of each render
+    /// pass so [`Shell::eval_tween`] (called from `&self` render helpers) can
+    /// snap without a `cx`.
+    reduced_motion: bool,
+    /// Set by [`Shell::eval_tween`] when any tween is mid-flight this frame;
+    /// render schedules the next animation frame off it.
+    active: std::cell::Cell<bool>,
+}
+
 pub struct Shell {
     /// The window's main state: lists (sidebar, spaces, sessions) in
     /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
@@ -1224,22 +1239,14 @@ pub struct Shell {
     /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
     was_window_active: bool,
     notification_activity: crate::shell::notification_activity::DesktopActivity,
-    sidebar_tween: Option<WidthTween>,
+    /// Manually driven tweens and this frame's motion bookkeeping.
+    motion: ShellMotion,
     /// Last observed `window.is_fullscreen()` (`None` before first paint) —
     /// flips key the traffic-light inset tween.
     fullscreen: Option<bool>,
-    /// 200ms ease-out tween of the cluster start on fullscreen toggles.
-    titlebar_tween: Option<WidthTween>,
     /// Armed by mouse-down on a titlebar strip; the next mouse-move hands the
     /// drag to the compositor (zed's platform-titlebar pattern).
     titlebar_should_move: bool,
-    /// `motion::reduced_motion` snapshot, refreshed at the top of each render
-    /// pass so [`Shell::eval_tween`] (called from `&self` render helpers) can
-    /// snap without a `cx`.
-    reduced_motion: bool,
-    /// Set by [`Shell::eval_tween`] when any tween is mid-flight this frame;
-    /// render schedules the next animation frame off it.
-    motion_active: std::cell::Cell<bool>,
     splash: SplashPhase,
     splash_task: Option<Task<()>>,
     save_task: Option<Task<()>>,
@@ -1529,12 +1536,14 @@ impl Shell {
             settings,
             was_window_active: false,
             notification_activity: Default::default(),
-            sidebar_tween: None,
+            motion: ShellMotion {
+                sidebar_tween: None,
+                titlebar_tween: None,
+                reduced_motion: false,
+                active: std::cell::Cell::new(false),
+            },
             fullscreen: None,
-            titlebar_tween: None,
             titlebar_should_move: false,
-            reduced_motion: false,
-            motion_active: std::cell::Cell::new(false),
             splash: SplashPhase::Visible,
             splash_task: None,
             save_task: None,
@@ -1687,7 +1696,7 @@ impl Shell {
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         let from = self.sidebar_target();
         self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
-        self.sidebar_tween = Some(WidthTween::new(from, self.sidebar_target()));
+        self.motion.sidebar_tween = Some(WidthTween::new(from, self.sidebar_target()));
         self.schedule_save(cx);
         cx.notify();
     }
@@ -1701,7 +1710,7 @@ impl Shell {
         let x = f32::from(event.event.position.x);
         self.settings.sidebar_width = x.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         self.settings.sidebar_collapsed = false;
-        self.sidebar_tween = None; // live drag tracks the pointer directly
+        self.motion.sidebar_tween = None; // live drag tracks the pointer directly
         self.schedule_save(cx);
         cx.notify();
     }

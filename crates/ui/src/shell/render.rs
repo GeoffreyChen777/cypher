@@ -12,7 +12,7 @@ impl Shell {
         let Some(WidthTween { from, to, started }) = tween else {
             return target;
         };
-        if self.reduced_motion {
+        if self.motion.reduced_motion {
             return target;
         }
         let total = RESIZE.total();
@@ -20,7 +20,7 @@ impl Shell {
         if raw >= 1.0 {
             return target;
         }
-        self.motion_active.set(true);
+        self.motion.active.set(true);
         motion::lerp(from, to, RESIZE.progress(raw))
     }
 
@@ -52,7 +52,10 @@ impl Shell {
         let fullscreen = self.fullscreen.unwrap_or(false);
         // The tween runs in cluster-start coordinates; the spacer is that
         // minus the container's own padding.
-        let start = self.eval_tween(self.titlebar_tween, titlebar_cluster_start(fullscreen));
+        let start = self.eval_tween(
+            self.motion.titlebar_tween,
+            titlebar_cluster_start(fullscreen),
+        );
         let width = (start - container_pad).max(0.0);
         Some(div().flex_none().h_full().w(px(width)).into_any_element())
     }
@@ -70,7 +73,7 @@ impl Shell {
         let fullscreen = self.fullscreen.unwrap_or(false);
         let is_macos = cfg!(target_os = "macos");
         let cluster = self.eval_tween(
-            self.titlebar_tween,
+            self.motion.titlebar_tween,
             cluster_buttons_start(is_macos, fullscreen),
         );
         cluster + CLUSTER_BUTTONS_WIDTH + 10.0
@@ -84,7 +87,7 @@ impl Shell {
     fn render_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         match self.route {
             Route::Chat => {
-                let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+                let sidebar_now = self.eval_tween(self.motion.sidebar_tween, self.sidebar_target());
                 let bar = div()
                     .h(px(Theme::TITLEBAR_HEIGHT))
                     .w(px(sidebar_now))
@@ -235,7 +238,7 @@ impl Shell {
     /// (the + lives in the sidebar header), 1 fully collapsed, riding the
     /// sidebar width tween in between.
     pub(super) fn titlebar_plus_alpha(&self) -> f32 {
-        let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+        let sidebar_now = self.eval_tween(self.motion.sidebar_tween, self.sidebar_target());
         let open_width = self.settings.sidebar_width.max(1.0);
         (1.0 - sidebar_now / open_width).clamp(0.0, 1.0)
     }
@@ -305,7 +308,7 @@ impl Shell {
         // vertical divider. The content row spans the full window height (the
         // titlebar overlays it), so the column pads itself below the chrome.
         self.pane_container(
-            self.sidebar_tween,
+            self.motion.sidebar_tween,
             target,
             div()
                 .h_full()
@@ -1265,7 +1268,7 @@ impl Render for Shell {
         // scheduling `with_animation` would have requested). Hover color fades
         // ride the same clock; their once-per-frame tick lives here (this is
         // the window's root render — it runs exactly once per frame).
-        if self.motion_active.get() | motion::hover_fades_active() {
+        if self.motion.active.get() | motion::hover_fades_active() {
             window.request_animation_frame();
         }
 
@@ -1347,7 +1350,7 @@ impl Shell {
         let fullscreen = window.is_fullscreen();
         if self.fullscreen != Some(fullscreen) {
             if self.fullscreen.is_some() && cfg!(target_os = "macos") {
-                self.titlebar_tween = Some(WidthTween::new(
+                self.motion.titlebar_tween = Some(WidthTween::new(
                     titlebar_cluster_start(!fullscreen),
                     titlebar_cluster_start(fullscreen),
                 ));
@@ -1355,8 +1358,8 @@ impl Shell {
             self.fullscreen = Some(fullscreen);
         }
         // Manual tween drive bookkeeping for this pass (see [`WidthTween`]).
-        self.reduced_motion = motion::reduced_motion(cx);
-        self.motion_active.set(false);
+        self.motion.reduced_motion = motion::reduced_motion(cx);
+        self.motion.active.set(false);
     }
 
     /// Keep keyboard focus somewhere that dispatches: the focused tile's

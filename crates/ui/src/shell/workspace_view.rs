@@ -1024,7 +1024,7 @@ impl Shell {
         // Same inset as the terminal tab bar below, so the first tabs line up.
         let mut left = 6.0;
         if touch.top && touch.left {
-            let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+            let sidebar_now = self.eval_tween(self.motion.sidebar_tween, self.sidebar_target());
             let plus_inset = 26.0 * self.titlebar_plus_alpha();
             // + the cluster's Layout button slot.
             let cluster_end = self.title_bar_content_start() + plus_inset + 26.0;
