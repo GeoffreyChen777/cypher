@@ -4,16 +4,14 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
 use cypher_engine::{
-    EngineCore, HarnessRegistry, Repos, Terminals, capture_commit_diff, capture_diff,
-    capture_diff_against, capture_turn_diff, merge_base, read_diff_file_text, snapshot_tree,
-    working_diff_base,
+    EngineCore, Repos, Terminals, capture_commit_diff, capture_diff, capture_diff_against,
+    capture_turn_diff, merge_base, read_diff_file_text, snapshot_tree, working_diff_base,
 };
 use cypher_proto::{GitHistoryRefKind, TerminalEvent};
 use cypher_rpc::methods;
@@ -31,17 +29,6 @@ async fn init_repo(dir: &Path) {
 
 fn test_repos(data_dir: &Path) -> Repos {
     Repos::with_worktrees_root(data_dir, "device-test", data_dir.join("worktrees"))
-}
-
-fn assemble(dir: &Path) -> EngineCore {
-    std::fs::create_dir_all(dir).expect("data dir");
-    EngineCore::assemble(
-        dir,
-        Arc::new(HarnessRegistry::new()),
-        cypher_proto::HarnessId::Mock,
-        None,
-    )
-    .expect("engine assembles")
 }
 
 fn decoded(events: &[TerminalEvent]) -> String {
@@ -656,7 +643,7 @@ async fn spaces_sync_stamps_git_presence_and_reacts_to_git_init() {
     let folder = tmp.path().join("plain-folder");
     std::fs::create_dir_all(&folder).expect("folder");
 
-    let core = assemble(&tmp.path().join("data"));
+    let core = common::assemble_mock(&tmp.path().join("data"));
     // Seeded as git (a lying picker) — the owner's sync must correct it.
     core.workspace
         .create_space(
@@ -715,7 +702,7 @@ async fn delete_space_cascades_chats_and_sessions() {
     let folder = tmp.path().join("folder");
     std::fs::create_dir_all(&folder).expect("folder");
 
-    let core = assemble(&tmp.path().join("data"));
+    let core = common::assemble_mock(&tmp.path().join("data"));
     core.workspace
         .create_space(
             "space-1",
@@ -756,7 +743,7 @@ async fn diff_sync_publishes_and_updates_chat_branch() {
     init_repo(&repo_dir).await;
     std::fs::write(repo_dir.join("a.txt"), "one\ntwo\nedited\n").expect("dirty tree");
 
-    let core = assemble(&tmp.path().join("data"));
+    let core = common::assemble_mock(&tmp.path().join("data"));
     core.workspace
         .create_space(
             "space-diff",
@@ -829,7 +816,7 @@ async fn checkout_file_diff_text_rpc_fits_the_default_worker_stack() {
     init_repo(&repo_dir).await;
     std::fs::write(repo_dir.join("a.txt"), "one\ntwo edited\n").expect("dirty tree");
 
-    let core = assemble(&tmp.path().join("data"));
+    let core = common::assemble_mock(&tmp.path().join("data"));
     let identity = core
         .repos
         .checkout_identity(&repo_dir)
@@ -876,7 +863,7 @@ async fn checkout_file_diff_text_rpc_reads_pinned_commit_sources() {
     std::fs::write(repo_dir.join("a.txt"), "one\ntwo\nworking tree edit\n")
         .expect("working tree content");
 
-    let core = assemble(&tmp.path().join("data"));
+    let core = common::assemble_mock(&tmp.path().join("data"));
     let identity = core
         .repos
         .checkout_identity(&repo_dir)
@@ -1043,7 +1030,7 @@ async fn terminal_guards_input_size_and_cwd() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn open_terminal_expands_a_project_less_chats_tilde_cwd() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let core = assemble(&tmp.path().join("data"));
+    let core = common::assemble_mock(&tmp.path().join("data"));
     let client = cypher_rpc::memory_client(core.rpc_service());
 
     // No spaceId → the row is created with cwd `~`.
@@ -1091,7 +1078,7 @@ async fn open_terminal_expands_a_project_less_chats_tilde_cwd() {
 /// An engine over the memory transport with one created repo (`demo`, one
 /// seed commit on `main`); returns the repo path.
 async fn rpc_with_repo(tmp: &Path) -> (EngineCore, cypher_rpc::RpcClient, String) {
-    let core = assemble(&tmp.join("data"));
+    let core = common::assemble_mock(&tmp.join("data"));
     let client = cypher_rpc::memory_client(core.rpc_service());
     let created = client
         .call(methods::CREATE_REPO, serde_json::json!({ "name": "demo" }))
@@ -1113,7 +1100,7 @@ async fn seed_commit(repo_path: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rpc_repos_search_and_workspace_files() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let core = assemble(&tmp.path().join("data"));
+    let core = common::assemble_mock(&tmp.path().join("data"));
     let client = cypher_rpc::memory_client(core.rpc_service());
 
     // CreateRepo → ListRepos.
@@ -1388,7 +1375,7 @@ async fn rpc_branches_folders_and_worktrees() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rpc_watch_checkout_diffs_streams_the_current_set() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let core = assemble(&tmp.path().join("data"));
+    let core = common::assemble_mock(&tmp.path().join("data"));
     let client = cypher_rpc::memory_client(core.rpc_service());
 
     // WatchCheckoutDiffs: streams the current (empty) diff set immediately.

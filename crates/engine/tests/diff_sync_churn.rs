@@ -8,11 +8,9 @@
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
-use cypher_engine::{CheckoutDiffSync, EngineCore, HarnessRegistry};
-use cypher_proto::HarnessId;
+use cypher_engine::{CheckoutDiffSync, EngineCore};
 
 /// How long a recapture would take to show: diff-sync's 500 ms watch
 /// debounce plus the git capture after it, with margin for a loaded machine.
@@ -23,12 +21,6 @@ const NO_RECAPTURE_WINDOW: Duration = Duration::from_millis(1500);
 async fn init_dirty_repo(dir: &Path) {
     common::init_repo(dir, "one\ntwo\n").await;
     std::fs::write(dir.join("a.txt"), "one\ntwo\nedited\n").expect("dirty tree");
-}
-
-fn assemble(dir: &Path) -> EngineCore {
-    std::fs::create_dir_all(dir).expect("data dir");
-    EngineCore::assemble(dir, Arc::new(HarnessRegistry::new()), HarnessId::Mock, None)
-        .expect("engine assembles")
 }
 
 async fn wait_for_diff(sync: &CheckoutDiffSync) -> cypher_proto::CheckoutDiff {
@@ -70,7 +62,7 @@ async fn row_write_reconcile_does_not_recapture_an_idle_checkout() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path().join("repo");
     init_dirty_repo(&repo).await;
-    let core = assemble(&tmp.path().join("data"));
+    let core = common::assemble_mock(&tmp.path().join("data"));
 
     core.workspace
         .create_space(
@@ -131,7 +123,7 @@ async fn chat_flap_keeps_entry_until_absence_is_sustained() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path().join("repo");
     init_dirty_repo(&repo).await;
-    let core = assemble(&tmp.path().join("data"));
+    let core = common::assemble_mock(&tmp.path().join("data"));
     let sync = CheckoutDiffSync::start_with_orphan_grace(
         core.repos.clone(),
         core.workspace.clone(),

@@ -141,12 +141,6 @@ fn registry() -> Arc<HarnessRegistry> {
     Arc::new(registry)
 }
 
-fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
-    std::fs::create_dir_all(dir).expect("create data dir");
-    std::fs::write(dir.join("device-id"), device_id).expect("write device id");
-    EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine assembles")
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -157,11 +151,11 @@ async fn target_device_id_routes_over_the_relay() {
     let dirs = tempfile::tempdir().expect("tempdir");
 
     // Engine B hosts its device room on the fake relay.
-    let core_b = assemble(&dirs.path().join("b"), "device-b");
+    let core_b = common::assemble_device(&dirs.path().join("b"), "device-b", registry());
     let _host = core_b.start_host_relay(&relay_url);
 
     // Engine A dials peers through the same relay.
-    let core_a = assemble(&dirs.path().join("a"), "device-a");
+    let core_a = common::assemble_device(&dirs.path().join("a"), "device-a", registry());
     let mut link_config =
         LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
     link_config.probe_timeout = Duration::from_secs(5);
@@ -339,7 +333,7 @@ async fn terminal_stream_proxies_over_the_relay() {
 
     // Engine B hosts its device room; its chat row (via its space) pins the
     // terminal cwd.
-    let core_b = assemble(&dirs.path().join("b"), "device-b");
+    let core_b = common::assemble_device(&dirs.path().join("b"), "device-b", registry());
     core_b
         .workspace
         .create_space(
@@ -356,7 +350,7 @@ async fn terminal_stream_proxies_over_the_relay() {
         .expect("chat row on B");
     let _host = core_b.start_host_relay(&relay_url);
 
-    let core_a = assemble(&dirs.path().join("a"), "device-a");
+    let core_a = common::assemble_device(&dirs.path().join("a"), "device-a", registry());
     let mut link_config =
         LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
     link_config.probe_timeout = Duration::from_secs(5);
@@ -447,7 +441,7 @@ async fn terminal_stream_proxies_over_the_relay() {
 #[tokio::test]
 async fn remote_target_without_links_fails_clearly() {
     let dirs = tempfile::tempdir().expect("tempdir");
-    let core = assemble(&dirs.path().join("solo"), "device-solo");
+    let core = common::assemble_device(&dirs.path().join("solo"), "device-solo", registry());
     let client = cypher_rpc::memory_client(core.rpc_service());
     let err = client
         .call(

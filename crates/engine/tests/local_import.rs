@@ -2,29 +2,18 @@
 //! imported docs, journal carry-over, idempotence, and the uploads read-root
 //! marker.
 
-use std::sync::Arc;
+mod common;
 
 use cypher_doc::{MessagePart, MessageRole, SessionDoc, SessionMessageEntry};
 
 use cypher_engine::host::local_import::{ImportEvent, marker_grants_read_root};
 use cypher_engine::session::journal::journal_paths;
-use cypher_engine::{EngineCore, EngineProfile, HarnessId, default_registry};
-
-fn assemble(profile: EngineProfile) -> EngineCore {
-    let pi_sessions = profile.store_root().join("agent-sessions");
-    EngineCore::assemble_with_profile(
-        profile,
-        Arc::new(default_registry(pi_sessions)),
-        HarnessId::Mock,
-        None,
-    )
-    .expect("assemble profile")
-}
+use cypher_engine::{EngineCore, EngineProfile};
 
 /// Seed a local profile with a space, two chats (one with a doc + journal,
 /// one row-only), exactly as a local-first stretch leaves them on disk.
 async fn seed_local(data_dir: &std::path::Path) -> (String, String, String) {
-    let local = assemble(EngineProfile::local(data_dir).expect("local profile"));
+    let local = common::assemble_profile(EngineProfile::local(data_dir).expect("local profile"));
     let device = local.device_id.clone();
 
     local
@@ -127,7 +116,7 @@ async fn local_work_imports_into_synced_profile_once() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (_device, chat_doc, chat_bare) = seed_local(dir.path()).await;
 
-    let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
+    let synced = common::assemble_profile(EngineProfile::synced(dir.path(), "org1", "user1"));
 
     let status = synced
         .local_import
@@ -234,7 +223,7 @@ async fn local_work_imports_into_synced_profile_once() {
 #[tokio::test]
 async fn import_without_local_profile_is_a_clean_no_op() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
+    let synced = common::assemble_profile(EngineProfile::synced(dir.path(), "org1", "user1"));
 
     let status = synced
         .local_import
@@ -270,7 +259,7 @@ async fn per_item_failures_surface_in_the_summary_and_leave_the_row_retryable() 
     let dir = tempfile::tempdir().expect("tempdir");
     let (_device, chat_doc, chat_bare) = seed_local(dir.path()).await;
 
-    let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
+    let synced = common::assemble_profile(EngineProfile::synced(dir.path(), "org1", "user1"));
 
     // Injected failure: the target journals DIRECTORY is replaced by a file,
     // so the journal copy fails for the one chat that has a journal
@@ -329,7 +318,7 @@ async fn corrupt_marker_is_moved_aside_not_clobbered() {
 
     std::fs::write(dir.path().join("local-import.json"), b"{ not json").expect("plant corrupt");
 
-    let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
+    let synced = common::assemble_profile(EngineProfile::synced(dir.path(), "org1", "user1"));
     let events = run_import(&synced);
     let (_, _, errors) = raw_summary(&events);
     assert!(
@@ -359,7 +348,7 @@ async fn marker_persistence_failure_is_an_import_error() {
     // breaks imported attachments on the next restart.
     std::fs::create_dir_all(dir.path().join("local-import.json")).expect("plant marker dir");
 
-    let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
+    let synced = common::assemble_profile(EngineProfile::synced(dir.path(), "org1", "user1"));
     let events = run_import(&synced);
     let (imported, _, errors) = raw_summary(&events);
     assert_eq!(imported, 2, "data still imports");
@@ -373,7 +362,7 @@ async fn marker_persistence_failure_is_an_import_error() {
 #[tokio::test]
 async fn spaces_only_profile_imports_its_spaces() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let local = assemble(EngineProfile::local(dir.path()).expect("local profile"));
+    let local = common::assemble_profile(EngineProfile::local(dir.path()).expect("local profile"));
     let device = local.device_id.clone();
     local
         .workspace
@@ -388,7 +377,7 @@ async fn spaces_only_profile_imports_its_spaces() {
     local.shutdown().await;
     drop(local);
 
-    let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
+    let synced = common::assemble_profile(EngineProfile::synced(dir.path(), "org1", "user1"));
     let status = synced
         .local_import
         .as_ref()
@@ -424,14 +413,14 @@ async fn marker_keeps_one_entry_per_account() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (..) = seed_local(dir.path()).await;
 
-    let first = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
+    let first = common::assemble_profile(EngineProfile::synced(dir.path(), "org1", "user1"));
     run_import(&first);
     first.shutdown().await;
     drop(first);
 
     // A second account on the same device imports too; its marker entry must
     // not erase the first account's grant.
-    let second = assemble(EngineProfile::synced(dir.path(), "org2", "user2"));
+    let second = common::assemble_profile(EngineProfile::synced(dir.path(), "org2", "user2"));
     run_import(&second);
     second.shutdown().await;
 
@@ -444,14 +433,14 @@ async fn later_local_work_imports_as_a_delta() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (device, ..) = seed_local(dir.path()).await;
 
-    let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
+    let synced = common::assemble_profile(EngineProfile::synced(dir.path(), "org1", "user1"));
     let events = run_import(&synced);
     assert_eq!(summary(&events).0, 2);
     synced.shutdown().await;
     drop(synced);
 
     // A later signed-out stretch creates one more local chat…
-    let local = assemble(EngineProfile::local(dir.path()).expect("local profile"));
+    let local = common::assemble_profile(EngineProfile::local(dir.path()).expect("local profile"));
     local
         .workspace
         .create_chat("chat-later", None, Some(&device), None, Some("/tmp".into()))
@@ -460,7 +449,7 @@ async fn later_local_work_imports_as_a_delta() {
     drop(local);
 
     // …and signing back in imports exactly that delta.
-    let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
+    let synced = common::assemble_profile(EngineProfile::synced(dir.path(), "org1", "user1"));
     let status = synced
         .local_import
         .as_ref()
