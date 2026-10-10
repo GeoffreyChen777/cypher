@@ -241,7 +241,7 @@ impl AppState {
         self.update = Some(status);
     }
 
-    pub fn apply_pi_update(&mut self, status: cypher_engine::pi_packages::PiUpdateStatus) {
+    pub fn apply_pi_update(&mut self, status: cypher_engine::pi::packages::PiUpdateStatus) {
         self.pi_update = Some(status);
     }
 

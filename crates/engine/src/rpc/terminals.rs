@@ -16,7 +16,7 @@ pub(super) fn open_terminal(rpc: &EngineRpc, params: Value) -> Result<RpcReply, 
         .flatten()
         .and_then(|chat| chat.cwd)
         .map(|cwd| expand_home(&cwd))
-        .unwrap_or_else(|| home_dir().to_string_lossy().to_string());
+        .unwrap_or_else(|| cypher_env::home_dir().to_string_lossy().to_string());
     let session = rpc.terminals.open(&cwd, p.cols, p.rows).map_err(failed)?;
     RpcReply::value(&session)
 }

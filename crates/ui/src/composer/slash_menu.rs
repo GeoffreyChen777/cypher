@@ -13,7 +13,7 @@
 
 use std::ops::Range;
 
-use cypher_engine::pi_session_modes::PiSessionModes;
+use cypher_engine::pi::session_modes::PiSessionModes;
 use cypher_proto::{ContextUsage, SlashCommand};
 
 use crate::prefs::slash_commands::{CommandGroup, placement};
@@ -377,7 +377,7 @@ fn goal_status(status: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cypher_engine::pi_session_modes::PiGoal;
+    use cypher_engine::pi::session_modes::PiGoal;
 
     fn command(name: &str) -> SlashCommand {
         SlashCommand {

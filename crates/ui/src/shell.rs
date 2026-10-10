@@ -599,7 +599,7 @@ struct AboutDialog {
 /// manual call's reply) is the source, so a bundle installing in the
 /// background reports progress while the dialog is open.
 fn about_runtime_line(
-    status: Option<&cypher_engine::pi_packages::PiUpdateStatus>,
+    status: Option<&cypher_engine::pi::packages::PiUpdateStatus>,
     checking: bool,
 ) -> Option<SharedString> {
     let status = status?;
@@ -1213,7 +1213,7 @@ struct PiUpdateStripView {
 }
 
 fn pi_update_strip_view(
-    status: Option<&cypher_engine::pi_packages::PiUpdateStatus>,
+    status: Option<&cypher_engine::pi::packages::PiUpdateStatus>,
     local_busy: bool,
 ) -> Option<PiUpdateStripView> {
     let status = status?;

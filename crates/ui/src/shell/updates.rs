@@ -139,7 +139,7 @@ impl Shell {
                 .call(methods::APPLY_PI_UPDATES, serde_json::json!({}))
                 .await;
             if let Ok(value) = &result {
-                match serde_json::from_value::<cypher_engine::pi_packages::PiUpdateStatus>(
+                match serde_json::from_value::<cypher_engine::pi::packages::PiUpdateStatus>(
                     value.clone(),
                 ) {
                     Ok(status) => {
@@ -361,7 +361,7 @@ impl Shell {
                 .await;
             match reply {
                 Ok(value) => {
-                    match serde_json::from_value::<cypher_engine::pi_packages::PiUpdateStatus>(
+                    match serde_json::from_value::<cypher_engine::pi::packages::PiUpdateStatus>(
                         value,
                     ) {
                         Ok(status) => {

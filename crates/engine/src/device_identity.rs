@@ -4,7 +4,8 @@
 use std::io::Write;
 use std::path::Path;
 
-use crate::{EngineError, new_id};
+use crate::EngineError;
+use crate::util::new_id;
 
 /// Best-effort human name for this device's registry row.
 pub(crate) fn local_device_name(device_id: &str) -> String {
@@ -166,6 +167,7 @@ impl DeviceIdentityLock {
         {
             use std::os::unix::io::AsRawFd;
             loop {
+                // SAFETY: flock on a descriptor `file` owns for this call.
                 if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
                     break;
                 }

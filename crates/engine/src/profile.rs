@@ -398,8 +398,8 @@ mod tests {
     #[tokio::test]
     async fn development_constructor_uses_account_scoped_uploads() {
         let dir = tempfile::tempdir().unwrap();
-        let org_id = crate::env_or("ORG_ID", crate::DEFAULT_ORG_ID);
-        let user_id = crate::env_or("USER_ID", crate::DEFAULT_USER_ID);
+        let org_id = crate::util::env_or("ORG_ID", crate::DEFAULT_ORG_ID);
+        let user_id = crate::util::env_or("USER_ID", crate::DEFAULT_USER_ID);
         let expected = EngineProfile::development(dir.path(), &org_id, &user_id);
         let core = crate::EngineCore::assemble(
             dir.path(),

@@ -11,8 +11,8 @@
 //! the [`LinkCache`] — the remote engine sees its own id and handles locally, so the
 //! forward can never loop. Streaming methods are proxied by re-subscribing remotely and
 //! piping items. To make another method device-addressable, nothing per-method is needed
-//! beyond listing it in [`forwardable`] (and [`is_stream_method`] if it streams);
-//! handlers stay transport-agnostic.
+//! beyond marking its `cypher_rpc::methods::SPECS` entry forwardable (and stream if it
+//! streams); handlers stay transport-agnostic.
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -31,16 +31,16 @@ use cypher_proto::{
 use cypher_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
 use crate::auth::Auth;
-use crate::diff_sync::CheckoutDiffSync;
-use crate::doc_host::DocHost;
+use crate::git::diff_sync::CheckoutDiffSync;
+use crate::git::repos::{Repos, expand_home};
+use crate::host::doc_host::DocHost;
+use crate::host::workspace_host::WorkspaceHost;
 use crate::registry::HarnessRegistry;
-use crate::repos::{Repos, expand_home, home_dir};
-use crate::session_forks::SessionForks;
-use crate::sessions::SessionsEngine;
-use crate::side_chats::SideChats;
+use crate::session::engine::SessionsEngine;
+use crate::session::forks::SessionForks;
+use crate::session::side_chats::SideChats;
 use crate::terminals::Terminals;
 use crate::uploads::Uploads;
-use crate::workspace_host::WorkspaceHost;
 
 mod chats;
 mod diffs;
@@ -87,12 +87,12 @@ pub struct EngineRpc {
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<cypher_update::Updater>,
-    pi_runtime: Option<crate::pi_runtime::PiRuntimeManager>,
+    pi_runtime: Option<crate::pi::runtime::PiRuntimeManager>,
     mcp_logins: std::sync::Arc<crate::mcp::login::Logins>,
-    provider_logins: std::sync::Arc<crate::pi_providers::Logins>,
-    local_import: Option<crate::local_import::LocalImporter>,
-    title_settings: Option<crate::title_settings::TitleSettingsStore>,
-    github: Option<crate::github::Github>,
+    provider_logins: std::sync::Arc<crate::pi::providers::Logins>,
+    local_import: Option<crate::host::local_import::LocalImporter>,
+    title_settings: Option<crate::session::title_settings::TitleSettingsStore>,
+    github: Option<crate::git::github::Github>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
     /// so concurrent starts of the same `(parentChatId, runId)` cannot race the
@@ -107,7 +107,7 @@ impl EngineRpc {
     }
     pub fn with_provider_logins(
         mut self,
-        logins: std::sync::Arc<crate::pi_providers::Logins>,
+        logins: std::sync::Arc<crate::pi::providers::Logins>,
     ) -> Self {
         self.provider_logins = logins;
         self
@@ -158,19 +158,19 @@ impl EngineRpc {
     /// Share the device's title preferences with the automatic title runner.
     pub fn with_title_settings(
         mut self,
-        settings: crate::title_settings::TitleSettingsStore,
+        settings: crate::session::title_settings::TitleSettingsStore,
     ) -> Self {
         self.title_settings = Some(settings);
         self
     }
 
     /// This device's GitHub sign-in and API access.
-    pub fn with_github(mut self, github: crate::github::Github) -> Self {
+    pub fn with_github(mut self, github: crate::git::github::Github) -> Self {
         self.github = Some(github);
         self
     }
 
-    fn github(&self) -> Result<&crate::github::Github, RpcError> {
+    fn github(&self) -> Result<&crate::git::github::Github, RpcError> {
         self.github
             .as_ref()
             .ok_or_else(|| RpcError::Failed("GitHub isn't available on this engine".into()))
@@ -194,13 +194,13 @@ impl EngineRpc {
         self
     }
 
-    pub fn with_pi_runtime(mut self, runtime: crate::pi_runtime::PiRuntimeManager) -> Self {
+    pub fn with_pi_runtime(mut self, runtime: crate::pi::runtime::PiRuntimeManager) -> Self {
         self.pi_runtime = Some(runtime);
         self
     }
 
     /// Attach the local→synced profile importer (synced runtimes only).
-    pub fn with_local_import(mut self, importer: crate::local_import::LocalImporter) -> Self {
+    pub fn with_local_import(mut self, importer: crate::host::local_import::LocalImporter) -> Self {
         self.local_import = Some(importer);
         self
     }
@@ -217,7 +217,7 @@ impl EngineRpc {
             .ok_or_else(|| RpcError::Failed("updates unavailable".into()))
     }
 
-    fn pi_runtime(&self) -> Result<&crate::pi_runtime::PiRuntimeManager, RpcError> {
+    fn pi_runtime(&self) -> Result<&crate::pi::runtime::PiRuntimeManager, RpcError> {
         self.pi_runtime
             .as_ref()
             .ok_or_else(|| RpcError::Failed("Pi Runtime unavailable".into()))
@@ -254,7 +254,7 @@ impl EngineRpc {
         Ok(())
     }
 
-    fn local_importer(&self) -> Result<&crate::local_import::LocalImporter, RpcError> {
+    fn local_importer(&self) -> Result<&crate::host::local_import::LocalImporter, RpcError> {
         self.local_import
             .as_ref()
             .ok_or_else(|| RpcError::Failed("local import requires a synced workspace".into()))
@@ -305,21 +305,7 @@ impl EngineRpc {
                 "cannot reach device {target}: remote routing unavailable (offline)"
             )));
         };
-        if matches!(
-            method,
-            methods::SAVE_PI_PROVIDER
-                | methods::ADD_MCP_SERVERS
-                | methods::REMOVE_MCP_SERVER
-                | methods::BEGIN_MCP_LOGIN
-                | methods::MCP_LOGIN_STATUS
-                | methods::COMPLETE_MCP_LOGIN
-                | methods::CANCEL_MCP_LOGIN
-                | methods::BEGIN_PI_PROVIDER_LOGIN
-                | methods::PI_PROVIDER_LOGIN_STATUS
-                | methods::COMPLETE_PI_PROVIDER_LOGIN
-                | methods::CANCEL_PI_PROVIDER_LOGIN
-        ) && !links.credential_transport_allowed()
-        {
+        if needs_credential_transport(method) && !links.credential_transport_allowed() {
             return Err(RpcError::Failed(if method != methods::SAVE_PI_PROVIDER {
                 "Remote MCP configuration requires an HTTPS/WSS relay (loopback development is allowed).".into()
             } else {
@@ -367,7 +353,7 @@ fn preflight(method: &str, params: &serde_json::Value) -> Result<(), RpcError> {
     if method == methods::SAVE_PI_PROVIDER {
         // Validate before forwarding, without echoing malformed credentials.
         let body = strip_target(params.clone());
-        serde_json::from_value::<crate::pi_providers::SaveProvider>(body)
+        serde_json::from_value::<crate::pi::providers::SaveProvider>(body)
             .map_err(|_| RpcError::BadParams("Invalid provider settings.".into()))?;
     }
     if method == methods::ADD_MCP_SERVERS {
@@ -403,134 +389,19 @@ fn preflight(method: &str, params: &serde_json::Value) -> Result<(), RpcError> {
     Ok(())
 }
 
-/// ControlRpc methods that honor `targetDeviceId`. Extend this
-/// list (plus [`is_stream_method`] for streams) to make more of the surface
-/// device-addressable — the handlers themselves need no changes.
+/// Methods that honor `targetDeviceId` (see `cypher_rpc::methods::SPECS`).
 fn forwardable(method: &str) -> bool {
-    matches!(
-        method,
-        methods::LIST_HARNESSES
-            | methods::SET_HARNESS_ENABLED
-            | methods::LIST_PI_PACKAGES
-            | methods::INSTALL_PI
-            | methods::INSTALL_PI_PACKAGE
-            | methods::SET_PI_PACKAGE_ENABLED
-            | methods::PI_RUNTIME_STATUS
-            | methods::LIST_PI_SUBAGENTS
-            | methods::SAVE_PI_SUBAGENT
-            | methods::DELETE_PI_SUBAGENT
-            | methods::GET_PI_TRANSLATION_SETTINGS
-            | methods::SET_PI_TRANSLATION_SETTINGS
-            | methods::DETECT_PI_LANGUAGE
-            | methods::LIST_PI_PROVIDERS
-            | methods::SAVE_PI_PROVIDER
-            | methods::REFRESH_PI_PROVIDER
-            | methods::LOGOUT_PI_PROVIDER
-            | methods::REMOVE_PI_PROVIDER
-            | methods::BEGIN_PI_PROVIDER_LOGIN
-            | methods::PI_PROVIDER_LOGIN_STATUS
-            | methods::COMPLETE_PI_PROVIDER_LOGIN
-            | methods::CANCEL_PI_PROVIDER_LOGIN
-            | methods::PI_UPDATE_STATUS
-            | methods::CHECK_PI_UPDATE
-            | methods::APPLY_PI_UPDATES
-            | methods::LIST_MCP_SERVERS
-            | methods::ADD_MCP_SERVERS
-            | methods::REMOVE_MCP_SERVER
-            | methods::SET_MCP_SERVER_ENABLED
-            | methods::START_MCP_AUTH
-            | methods::BEGIN_MCP_LOGIN
-            | methods::MCP_LOGIN_STATUS
-            | methods::COMPLETE_MCP_LOGIN
-            | methods::CANCEL_MCP_LOGIN
-            | methods::LOGOUT_MCP_SERVER
-            | methods::LIST_MODELS
-            | methods::GET_TITLE_MODEL_SETTINGS
-            | methods::SET_TITLE_MODEL_SETTINGS
-            | methods::GET_WEB_SEARCH_FALLBACK
-            | methods::SET_WEB_SEARCH_FALLBACK
-            | methods::LIST_COMMANDS
-            // Read from the chat's Pi session, which lives on its host.
-            | methods::PI_SESSION_MODES
-            | methods::QUEUE_COMMAND
-            | methods::RETRY_COMMAND
-            | methods::WATCH_DOC_MESSAGES
-            | methods::WATCH_DOC_COMMANDS
-            // Repos/worktrees/folders are device-local filesystem state.
-            | methods::LIST_REPOS
-            | methods::ADD_REPO
-            | methods::CLONE_REPO
-            | methods::CREATE_REPO
-            | methods::LIST_BRANCHES
-            | methods::LIST_REFS
-            | methods::LIST_GIT_HISTORY
-            | methods::FETCH_ALL
-            | methods::SWITCH_REF
-            | methods::LIST_FOLDERS
-            | methods::SEARCH_FILES
-            | methods::SEARCH_GITHUB_ISSUES
-            | methods::GET_GITHUB_ISSUE
-            // GitHub logins are per-device, like agent CLI logins.
-            | methods::GITHUB_ACCOUNT_STATUS
-            | methods::START_GITHUB_LOGIN
-            | methods::POLL_GITHUB_LOGIN
-            | methods::CANCEL_GITHUB_LOGIN
-            | methods::SIGN_OUT_GITHUB
-            | methods::LIST_WORKSPACE_FILES
-            | methods::READ_WORKSPACE_FILE
-            | methods::WRITE_WORKSPACE_FILE
-            | methods::CREATE_WORKTREE
-            | methods::DELETE_WORKTREE
-            | methods::CREATE_SCRATCH_DIR
-            | methods::DELETE_SCRATCH_DIR
-            // Checkout diffs are produced on the device holding the checkout.
-            | methods::WATCH_CHECKOUT_DIFFS
-            | methods::GET_CHECKOUT_DIFF
-            | methods::GET_CHECKOUT_FILE_DIFF_TEXT
-            // Terminals live on the chat's host device.
-            | methods::OPEN_TERMINAL
-            | methods::SUBSCRIBE_TERMINAL
-            | methods::WRITE_TERMINAL
-            | methods::RESIZE_TERMINAL
-            | methods::CLOSE_TERMINAL
-            // Uploads/attachments target the chat's host device (the agent reads
-            // the committed file from that device's disk).
-            | methods::UPLOAD_CHUNK
-            | methods::UPLOAD_COMMIT
-            | methods::READ_ATTACHMENT_CHUNK
-            // Updates report/apply on the device whose binary they concern.
-            | methods::UPDATE_STATUS
-            | methods::CHECK_UPDATE
-            | methods::UPDATE_ON_ACTIVATION
-            | methods::APPLY_UPDATE
-            // Side Chats are owned by the parent chat's host device.
-            | methods::START_SIDE_CHAT
-            | methods::SEND_SIDE_CHAT
-            | methods::INTERRUPT_SIDE_CHAT
-            | methods::RESPOND_SIDE_CHAT_INPUT
-            | methods::WATCH_SIDE_CHAT_STATUS
-            | methods::PROMOTE_SIDE_CHAT
-            | methods::DISPOSE_SIDE_CHAT
-            // Session Forks are owned by the source chat's host device (the
-            // Pi session store lives there).
-            | methods::FORK_SESSION
-            // A rewind rewrites the same chat's Pi session: host device too.
-            | methods::REWIND_SESSION
-    )
+    methods::spec(method).is_some_and(|spec| spec.forwardable)
+}
+
+/// Forwarded methods that carry credentials or server configuration.
+fn needs_credential_transport(method: &str) -> bool {
+    methods::spec(method).is_some_and(|spec| spec.credentials)
 }
 
 /// Forwardable methods whose reply is a stream (proxied item-by-item).
 fn is_stream_method(method: &str) -> bool {
-    matches!(
-        method,
-        methods::WATCH_DOC_MESSAGES
-            | methods::WATCH_DOC_COMMANDS
-            | methods::SUBSCRIBE_TERMINAL
-            | methods::WATCH_CHECKOUT_DIFFS
-            | methods::UPDATE_STATUS
-            | methods::PI_UPDATE_STATUS
-            | methods::WATCH_SIDE_CHAT_STATUS
-    )
+    methods::spec(method).is_some_and(|spec| spec.forwardable && spec.stream)
 }
 
 /// A watch receiver as a stream: current value first, then every change.
@@ -598,19 +469,9 @@ impl AuthRpc {
         Self { auth }
     }
 
+    /// Methods this auth-only surface answers.
     pub fn handles(method: &str) -> bool {
-        matches!(
-            method,
-            methods::AUTH_STATUS
-                | methods::SIGN_IN
-                | methods::SIGN_IN_HEADLESS
-                | methods::COMPLETE_SIGN_IN
-                | methods::SIGN_OUT
-                | methods::LIST_ORGS
-                | methods::CREATE_ORG
-                | methods::SELECT_ORG
-                | methods::NOTIFICATION_ACTIVITY
-        )
+        methods::spec(method).is_some_and(|spec| spec.auth)
     }
 }
 
@@ -759,7 +620,7 @@ impl RpcService for EngineRpc {
             methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
             methods::SET_HARNESS_ENABLED => harnesses::set_harness_enabled(self, params),
             methods::LIST_PI_PACKAGES => {
-                RpcReply::value(&crate::pi_packages::list(self.pi_runtime()?.paths()))
+                RpcReply::value(&crate::pi::packages::list(self.pi_runtime()?.paths()))
             }
             methods::INSTALL_PI => pi::install_pi(self).await,
             methods::INSTALL_PI_PACKAGE => pi::install_pi_package(self, params).await,
@@ -794,9 +655,9 @@ impl RpcService for EngineRpc {
             }
             methods::START_MCP_AUTH => mcp::start_mcp_auth(self, params).await,
             methods::LOGOUT_MCP_SERVER => mcp::logout_mcp_server(self, params).await,
-            methods::GET_WEB_SEARCH_FALLBACK => RpcReply::value(&crate::web_search_fallback::load(
-                self.pi_runtime()?.paths(),
-            )),
+            methods::GET_WEB_SEARCH_FALLBACK => {
+                RpcReply::value(&crate::pi::web_search::load(self.pi_runtime()?.paths()))
+            }
             methods::SET_WEB_SEARCH_FALLBACK => {
                 settings::set_web_search_fallback(self, params).await
             }
@@ -908,13 +769,13 @@ impl RpcService for EngineRpc {
             methods::DELETE_WORKTREE => repos::delete_worktree(self, params).await,
             methods::CREATE_SCRATCH_DIR => {
                 let p: ChatParams = parse_params(params)?;
-                let path = crate::scratch::create(&p.chat_id).map_err(RpcError::Failed)?;
+                let path = crate::session::scratch::create(&p.chat_id).map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "path": path }))
             }
             methods::DELETE_SCRATCH_DIR => {
                 let p: DeleteScratchDirParams = parse_params(params)?;
-                let removed =
-                    crate::scratch::delete(&p.chat_id, &p.path).map_err(RpcError::Failed)?;
+                let removed = crate::session::scratch::delete(&p.chat_id, &p.path)
+                    .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "ok": true, "removed": removed }))
             }
             methods::OPEN_TERMINAL => terminals::open_terminal(self, params),

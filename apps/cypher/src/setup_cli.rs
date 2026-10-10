@@ -43,11 +43,11 @@ fn marker(data: &Path) -> PathBuf {
 }
 
 pub(crate) fn runtime_label(data: &Path) -> String {
-    let paths = cypher_engine::pi_runtime::PiRuntimePaths::for_data_dir(data);
+    let paths = cypher_engine::pi::runtime::PiRuntimePaths::for_data_dir(data);
     if !paths.installed() {
         return "not installed".into();
     }
-    cypher_engine::pi_runtime::installed_runtime(data)
+    cypher_engine::pi::runtime::installed_runtime(data)
         .map(|runtime| {
             format!(
                 "Pi {} (bundle {})",
@@ -181,7 +181,7 @@ async fn wait_stopped(config: &EngineConfig) -> anyhow::Result<()> {
 
 async fn install_runtime(config: &EngineConfig, cancel: &Cancel) -> anyhow::Result<()> {
     check_cancel(cancel)?;
-    let manager = cypher_engine::pi_runtime::PiRuntimeManager::spawn(
+    let manager = cypher_engine::pi::runtime::PiRuntimeManager::spawn(
         config.edge_url.clone(),
         &config.data_dir,
     );
@@ -365,6 +365,7 @@ async fn run_foreground(config: &EngineConfig, cancel: &Cancel) -> anyhow::Resul
         _=cancelled(cancel.clone())=>{
             if let Some(pid)=child.id() {
                 #[cfg(unix)]
+                // SAFETY: kill only sends a signal to our own child's pid.
                 unsafe { libc::kill(pid as libc::pid_t,libc::SIGTERM); }
             }
             if tokio::time::timeout(Duration::from_secs(10),child.wait()).await.is_err() {
@@ -432,7 +433,7 @@ async fn run_inner(
         crate::daemon::setup_unit_matches(config)?
     };
     let live = connect(config).await?;
-    let runtime_paths = cypher_engine::pi_runtime::PiRuntimePaths::for_data_dir(&config.data_dir);
+    let runtime_paths = cypher_engine::pi::runtime::PiRuntimePaths::for_data_dir(&config.data_dir);
     let already_ready = live.as_ref().is_some_and(|live| {
         unit_exists
             && runtime_paths.installed()
@@ -487,7 +488,7 @@ async fn run_inner(
                 if !interactive {
                     bail!("Account setup is incomplete. Run `cypher setup` in a terminal.");
                 }
-                cypher_engine::terminal_sign_in_until(&auth, cancelled(cancel.clone())).await?;
+                crate::onboarding::terminal_sign_in_until(&auth, cancelled(cancel.clone())).await?;
             }
             println!("✓ Account connected");
         } else {

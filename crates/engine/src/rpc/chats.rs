@@ -271,7 +271,7 @@ impl EngineRpc {
                 &child_id,
                 SessionCommandPayload::Run {
                     request,
-                    message_id: crate::new_id(),
+                    message_id: crate::util::new_id(),
                     agent_prompt: None,
                 },
             ) {

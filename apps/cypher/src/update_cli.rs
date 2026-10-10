@@ -8,12 +8,13 @@
 //! works after every kind of Linux installation, not only the curl|sh one.
 //! macOS app bundles swap the bundle instead; source builds are report-only.
 
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use cypher_engine::EngineConfig;
 use cypher_rpc::methods;
-use cypher_update::{InstallKind, current_version, version_newer};
+use cypher_update::{InstallKind, Manifest, current_version, version_newer};
 
 pub struct UpdateOptions {
     /// Report only; exit 1 when the binary or the Runtime has a newer release.
@@ -48,9 +49,9 @@ impl RuntimeFacts {
 
 async fn runtime_facts(config: &EngineConfig) -> RuntimeFacts {
     RuntimeFacts {
-        installed: cypher_engine::pi_runtime::installed_runtime(&config.data_dir)
+        installed: cypher_engine::pi::runtime::installed_runtime(&config.data_dir)
             .map(|runtime| runtime.version),
-        latest: cypher_engine::pi_runtime::latest_manifest(&config.edge_url)
+        latest: cypher_engine::pi::runtime::latest_manifest(&config.edge_url)
             .await
             .map(|manifest| manifest.version),
     }
@@ -82,37 +83,13 @@ pub async fn update(config: EngineConfig, options: UpdateOptions) -> anyhow::Res
     let exe = std::env::current_exe().context("resolving the cypher executable path")?;
     match &kind {
         InstallKind::MacApp { bundle } => {
-            if !app_newer {
-                return Ok(());
-            }
-            println!(
-                "downloading {}…",
-                cypher_update::mac_app_artifact(&manifest.version)
-            );
-            let data_dir = super::dirs_data_dir();
-            let staged = cypher_update::stage_mac_app(&edge_url, &manifest, &data_dir).await?;
-            cypher_update::apply_mac_app(&staged, bundle)?;
-            println!("updated {} — relaunch Cypher to finish.", bundle.display());
-            return Ok(());
+            return update_mac_app(&edge_url, &manifest, bundle, app_newer).await;
         }
         InstallKind::Unmanaged if !cfg!(target_os = "linux") => {
-            if !app_newer {
-                return Ok(());
-            }
-            bail!(
-                "this binary is not update-managed (source build or hand-copied).\n\
-                 macOS: download the new Cypher.app dmg, or rebuild from source."
-            )
+            return refuse_unmanaged_mac(app_newer);
         }
         InstallKind::Unmanaged if cypher_update::is_source_build(&exe) => {
-            if !app_newer && !runtime.newer() {
-                return Ok(());
-            }
-            bail!(
-                "{} is a source build; updates are report-only here.\n\
-                 Rebuild from git, or install a release: curl -fsSL {edge_url}/install.sh | sh",
-                exe.display()
-            )
+            return refuse_source_build(&exe, &edge_url, app_newer || runtime.newer());
         }
         InstallKind::Managed { .. } | InstallKind::Unmanaged => {}
     }
@@ -133,48 +110,17 @@ pub async fn update(config: EngineConfig, options: UpdateOptions) -> anyhow::Res
     }
     let service = crate::daemon::service_installed();
 
-    let mut binary_changed = false;
-    match kind {
+    let binary_changed = match kind {
         InstallKind::Managed { app_root } if app_newer => {
-            println!(
-                "Downloading {}…",
-                cypher_update::headless_artifact(&manifest.version)
-            );
-            cypher_update::stage_headless(&edge_url, &manifest, &app_root).await?;
-            cypher_update::apply_headless(&app_root, &manifest.version)?;
-            if cypher_update::migrate_linux_service_to_current(&config.data_dir)? {
-                println!("✓ Service switched to app/current");
-            }
-            println!(
-                "✓ Cypher {} installed (current → {})",
-                manifest.version, manifest.version
-            );
-            binary_changed = true;
+            install_managed(&config, &manifest, &app_root).await?;
+            true
         }
         InstallKind::Unmanaged => {
-            println!(
-                "{} is not in the managed layout; installing Cypher {} under ~/.cypher/app…",
-                exe.display(),
-                manifest.version
-            );
-            let home = cypher_env::home_dir();
-            let app_root = cypher_update::adopt_managed_install(
-                &edge_url,
-                &manifest,
-                &home,
-                &config.data_dir,
-                &exe,
-            )
-            .await?;
-            println!(
-                "✓ Cypher {} installed ({} → current); ~/.local/bin/cypher now links there",
-                manifest.version,
-                app_root.display()
-            );
-            binary_changed = true;
+            adopt_unmanaged(&config, &manifest, &exe).await?;
+            true
         }
-        _ => {}
-    }
+        _ => false,
+    };
 
     let mut restarted = false;
     if binary_changed {
@@ -260,11 +206,105 @@ pub async fn update(config: EngineConfig, options: UpdateOptions) -> anyhow::Res
     Ok(())
 }
 
+/// A macOS app bundle swaps the whole bundle; the user relaunches.
+async fn update_mac_app(
+    edge_url: &str,
+    manifest: &Manifest,
+    bundle: &Path,
+    app_newer: bool,
+) -> anyhow::Result<()> {
+    if !app_newer {
+        return Ok(());
+    }
+    println!(
+        "downloading {}…",
+        cypher_update::mac_app_artifact(&manifest.version)
+    );
+    let data_dir = super::dirs_data_dir();
+    let staged = cypher_update::stage_mac_app(edge_url, manifest, &data_dir).await?;
+    cypher_update::apply_mac_app(&staged, bundle)?;
+    println!("updated {} — relaunch Cypher to finish.", bundle.display());
+    Ok(())
+}
+
+/// A hand-copied binary outside Linux has no managed layout to adopt into.
+fn refuse_unmanaged_mac(app_newer: bool) -> anyhow::Result<()> {
+    if !app_newer {
+        return Ok(());
+    }
+    bail!(
+        "this binary is not update-managed (source build or hand-copied).\n\
+         macOS: download the new Cypher.app dmg, or rebuild from source."
+    )
+}
+
+/// Source builds only report; replacing them would discard the checkout's build.
+fn refuse_source_build(exe: &Path, edge_url: &str, anything_newer: bool) -> anyhow::Result<()> {
+    if !anything_newer {
+        return Ok(());
+    }
+    bail!(
+        "{} is a source build; updates are report-only here.\n\
+         Rebuild from git, or install a release: curl -fsSL {edge_url}/install.sh | sh",
+        exe.display()
+    )
+}
+
+/// Managed layout: stage the release beside `current` and switch to it.
+async fn install_managed(
+    config: &EngineConfig,
+    manifest: &Manifest,
+    app_root: &Path,
+) -> anyhow::Result<()> {
+    println!(
+        "Downloading {}…",
+        cypher_update::headless_artifact(&manifest.version)
+    );
+    cypher_update::stage_headless(&config.edge_url, manifest, app_root).await?;
+    cypher_update::apply_headless(app_root, &manifest.version)?;
+    if cypher_update::migrate_linux_service_to_current(&config.data_dir)? {
+        println!("✓ Service switched to app/current");
+    }
+    println!(
+        "✓ Cypher {} installed (current → {})",
+        manifest.version, manifest.version
+    );
+    Ok(())
+}
+
+/// A Linux binary outside the managed layout is adopted into `~/.cypher/app`.
+async fn adopt_unmanaged(
+    config: &EngineConfig,
+    manifest: &Manifest,
+    exe: &Path,
+) -> anyhow::Result<()> {
+    println!(
+        "{} is not in the managed layout; installing Cypher {} under ~/.cypher/app…",
+        exe.display(),
+        manifest.version
+    );
+    let home = cypher_env::home_dir();
+    let app_root = cypher_update::adopt_managed_install(
+        &config.edge_url,
+        manifest,
+        &home,
+        &config.data_dir,
+        exe,
+    )
+    .await?;
+    println!(
+        "✓ Cypher {} installed ({} → current); ~/.local/bin/cypher now links there",
+        manifest.version,
+        app_root.display()
+    );
+    Ok(())
+}
+
 async fn install_runtime_offline(config: &EngineConfig) -> anyhow::Result<()> {
     let _lock = cypher_engine::InstanceLock::acquire(&config.data_dir).map_err(|_| {
         anyhow::anyhow!("An engine is starting; run `cypher update` again shortly.")
     })?;
-    let manager = cypher_engine::pi_runtime::PiRuntimeManager::spawn(
+    let manager = cypher_engine::pi::runtime::PiRuntimeManager::spawn(
         config.edge_url.clone(),
         &config.data_dir,
     );

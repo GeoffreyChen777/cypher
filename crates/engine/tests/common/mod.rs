@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use cypher_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandStatus, SessionMessageEntry,
 };
-use cypher_engine::{EngineCore, HarnessRegistry};
+use cypher_engine::{EngineCore, EngineProfile, HarnessRegistry, default_registry};
 use cypher_harness::{Harness, HarnessError, RunControls};
 use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
@@ -260,6 +260,35 @@ pub fn assemble_with(
         registry.register(harness);
     }
     EngineCore::assemble(dir, Arc::new(registry), default, None).expect("engine core assembles")
+}
+
+/// An engine at `dir` with no harnesses registered (default `Mock`), for
+/// tests that exercise repos, diffs, terminals or sync rather than runs.
+pub fn assemble_mock(dir: &Path) -> EngineCore {
+    std::fs::create_dir_all(dir).expect("data dir");
+    EngineCore::assemble(dir, Arc::new(HarnessRegistry::new()), HarnessId::Mock, None)
+        .expect("engine core assembles")
+}
+
+/// An engine at `dir` whose device id is pinned to `device_id` — the
+/// two-engine tests tell their devices apart by it.
+pub fn assemble_device(dir: &Path, device_id: &str, registry: Arc<HarnessRegistry>) -> EngineCore {
+    std::fs::create_dir_all(dir).expect("create data dir");
+    std::fs::write(dir.join("device-id"), device_id).expect("write device id");
+    EngineCore::assemble(dir, registry, HarnessId::Mock, None).expect("engine core assembles")
+}
+
+/// Assemble one resolved profile with the production harness registry (Pi
+/// sessions under the profile's store).
+pub fn assemble_profile(profile: EngineProfile) -> EngineCore {
+    let pi_sessions = profile.store_root().join("agent-sessions");
+    EngineCore::assemble_with_profile(
+        profile,
+        Arc::new(default_registry(pi_sessions)),
+        HarnessId::Mock,
+        None,
+    )
+    .expect("assemble profile")
 }
 
 /// An engine at `dir` whose only (and default) harness is `harness`.

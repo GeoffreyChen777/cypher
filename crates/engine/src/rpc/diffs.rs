@@ -25,10 +25,10 @@ pub(super) async fn get_checkout_diff(
                 .base_ref
                 .as_deref()
                 .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
-            let base = crate::diff_sync::merge_base(root, base_ref)
+            let base = crate::git::diff_sync::merge_base(root, base_ref)
                 .await
                 .map_err(failed)?;
-            crate::diff_sync::capture_diff_against(&rpc.repos, root, Some(&base)).await
+            crate::git::diff_sync::capture_diff_against(&rpc.repos, root, Some(&base)).await
         }
         // One commit's own changes (History → per-commit tab):
         // parent (or the empty tree) vs the commit itself.
@@ -37,7 +37,7 @@ pub(super) async fn get_checkout_diff(
                 .commit_sha
                 .as_deref()
                 .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
-            crate::diff_sync::capture_commit_diff(&rpc.repos, root, sha).await
+            crate::git::diff_sync::capture_commit_diff(&rpc.repos, root, sha).await
         }
         "turn" => {
             let chat_id = p
@@ -49,9 +49,9 @@ pub(super) async fn get_checkout_diff(
                 .turn_snapshot(chat_id)
                 .filter(|s| s.root == identity.root)
                 .ok_or_else(|| RpcError::Failed("no turn recorded".into()))?;
-            crate::diff_sync::capture_turn_diff(&rpc.repos, root, &snapshot.tree).await
+            crate::git::diff_sync::capture_turn_diff(&rpc.repos, root, &snapshot.tree).await
         }
-        _ => crate::diff_sync::capture_diff(&rpc.repos, root).await,
+        _ => crate::git::diff_sync::capture_diff(&rpc.repos, root).await,
     }
     .map_err(failed)?;
     RpcReply::value(&cypher_proto::CheckoutDiff {
@@ -86,10 +86,10 @@ pub(super) async fn get_checkout_file_diff_text(
                 .base_ref
                 .as_deref()
                 .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
-            let base = Box::pin(crate::diff_sync::merge_base(root, base_ref))
+            let base = Box::pin(crate::git::diff_sync::merge_base(root, base_ref))
                 .await
                 .map_err(failed)?;
-            let snapshot = Box::pin(crate::diff_sync::capture_diff_against(
+            let snapshot = Box::pin(crate::git::diff_sync::capture_diff_against(
                 &rpc.repos,
                 root,
                 Some(&base),
@@ -103,10 +103,12 @@ pub(super) async fn get_checkout_file_diff_text(
                 .commit_sha
                 .as_deref()
                 .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
-            let base = Box::pin(crate::diff_sync::commit_diff_base(root, sha)).await;
-            let snapshot = Box::pin(crate::diff_sync::capture_commit_diff(&rpc.repos, root, sha))
-                .await
-                .map_err(failed)?;
+            let base = Box::pin(crate::git::diff_sync::commit_diff_base(root, sha)).await;
+            let snapshot = Box::pin(crate::git::diff_sync::capture_commit_diff(
+                &rpc.repos, root, sha,
+            ))
+            .await
+            .map_err(failed)?;
             (snapshot, base, Some(sha.to_string()))
         }
         "turn" => {
@@ -119,7 +121,7 @@ pub(super) async fn get_checkout_file_diff_text(
                 .turn_snapshot(chat_id)
                 .filter(|snapshot| snapshot.root == identity.root)
                 .ok_or_else(|| RpcError::Failed("no turn recorded".into()))?;
-            let snapshot = Box::pin(crate::diff_sync::capture_turn_diff(
+            let snapshot = Box::pin(crate::git::diff_sync::capture_turn_diff(
                 &rpc.repos, root, &turn.tree,
             ))
             .await
@@ -127,10 +129,10 @@ pub(super) async fn get_checkout_file_diff_text(
             (snapshot, turn.tree, None)
         }
         _ => {
-            let base = Box::pin(crate::diff_sync::working_diff_base(root))
+            let base = Box::pin(crate::git::diff_sync::working_diff_base(root))
                 .await
                 .map_err(failed)?;
-            let snapshot = Box::pin(crate::diff_sync::capture_diff(&rpc.repos, root))
+            let snapshot = Box::pin(crate::git::diff_sync::capture_diff(&rpc.repos, root))
                 .await
                 .map_err(failed)?;
             (snapshot, base, None)
@@ -154,7 +156,7 @@ pub(super) async fn get_checkout_file_diff_text(
         .iter()
         .find(|file| file.path == p.path)
         .ok_or_else(|| RpcError::Failed("path is not part of diff snapshot".into()))?;
-    let pair = Box::pin(crate::diff_sync::read_diff_file_text_at(
+    let pair = Box::pin(crate::git::diff_sync::read_diff_file_text_at(
         root,
         &base,
         target.as_deref(),
@@ -164,22 +166,30 @@ pub(super) async fn get_checkout_file_diff_text(
     .map_err(failed)?;
     let current = match p.mode.as_str() {
         "branch" => {
-            Box::pin(crate::diff_sync::capture_diff_against(
+            Box::pin(crate::git::diff_sync::capture_diff_against(
                 &rpc.repos,
                 root,
                 Some(&base),
             ))
             .await
         }
-        "turn" => Box::pin(crate::diff_sync::capture_turn_diff(&rpc.repos, root, &base)).await,
+        "turn" => {
+            Box::pin(crate::git::diff_sync::capture_turn_diff(
+                &rpc.repos, root, &base,
+            ))
+            .await
+        }
         "commit" => {
             let sha = p
                 .commit_sha
                 .as_deref()
                 .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
-            Box::pin(crate::diff_sync::capture_commit_diff(&rpc.repos, root, sha)).await
+            Box::pin(crate::git::diff_sync::capture_commit_diff(
+                &rpc.repos, root, sha,
+            ))
+            .await
         }
-        _ => Box::pin(crate::diff_sync::capture_diff(&rpc.repos, root)).await,
+        _ => Box::pin(crate::git::diff_sync::capture_diff(&rpc.repos, root)).await,
     }
     .map_err(failed)?;
     if current.checksum != p.diff_checksum {

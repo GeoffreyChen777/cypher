@@ -1,7 +1,7 @@
 //! The page's pure model: the custom gateway kinds, form validation and the
 //! status and title labels a provider row shows.
 
-use cypher_engine::pi_providers::PiProviderInfo;
+use cypher_engine::pi::providers::PiProviderInfo;
 
 use crate::kit::icons;
 

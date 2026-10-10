@@ -9,10 +9,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
+use crate::util::lock;
 use cypher_harness::{Harness, HarnessError, mock::MockHarness};
 use cypher_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
 
@@ -127,15 +128,15 @@ impl HarnessRegistry {
     }
 
     fn slots(&self) -> MutexGuard<'_, HashMap<HarnessId, Slot>> {
-        self.slots.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.slots)
     }
 
     fn order(&self) -> MutexGuard<'_, Vec<HarnessId>> {
-        self.order.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.order)
     }
 
     fn prefs(&self) -> MutexGuard<'_, HarnessPrefsFile> {
-        self.prefs.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.prefs)
     }
 
     /// Load `harness-prefs.json` from the engine data dir and remember the
@@ -147,10 +148,7 @@ impl HarnessRegistry {
             .and_then(|text| serde_json::from_str::<HarnessPrefsFile>(&text).ok())
             .unwrap_or_default();
         *self.prefs() = loaded;
-        *self
-            .prefs_path
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(path);
+        *lock(&self.prefs_path) = Some(path);
     }
 
     /// The enabled set in effect (the default set until the user edits it).
@@ -207,12 +205,7 @@ impl HarnessRegistry {
 
     /// Best-effort atomic write (temp + rename, the ui-settings pattern).
     fn persist_prefs(&self) {
-        let Some(path) = self
-            .prefs_path
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-        else {
+        let Some(path) = lock(&self.prefs_path).clone() else {
             return;
         };
         let json = match serde_json::to_string_pretty(&*self.prefs()) {
@@ -351,7 +344,7 @@ pub fn default_registry_with_bridge(
 pub fn default_registry_with_bridge_and_runtime(
     pi_sessions_root: PathBuf,
     engine_socket: Option<String>,
-    runtime: Option<crate::pi_runtime::PiRuntimePaths>,
+    runtime: Option<crate::pi::runtime::PiRuntimePaths>,
 ) -> HarnessRegistry {
     let registry = default_registry_with_runtime(pi_sessions_root.clone(), runtime.clone());
     if let Some(url) = engine_socket {
@@ -387,7 +380,7 @@ pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
 
 fn default_registry_with_runtime(
     pi_sessions_root: PathBuf,
-    runtime: Option<crate::pi_runtime::PiRuntimePaths>,
+    runtime: Option<crate::pi::runtime::PiRuntimePaths>,
 ) -> HarnessRegistry {
     // Warm the login-shell PATH snapshot in the background so the first
     // CLI resolve doesn't pay the shell-startup latency inline.

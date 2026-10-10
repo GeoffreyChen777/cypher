@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use cypher_engine::session_forks::PiForkBackend;
+use cypher_engine::session::forks::PiForkBackend;
 use cypher_engine::{EngineCore, SessionForks};
 use cypher_harness::{Harness, HarnessError, RunControls};
 use cypher_proto::{

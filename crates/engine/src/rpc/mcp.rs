@@ -7,7 +7,7 @@ use super::*;
 
 pub(super) async fn list_mcp_servers(rpc: &EngineRpc) -> Result<RpcReply, RpcError> {
     let paths = rpc.pi_runtime()?.paths().clone();
-    let snapshot = crate::off_runtime(move || crate::mcp::list(&paths))
+    let snapshot = crate::util::off_runtime(move || crate::mcp::list(&paths))
         .await
         .map_err(RpcError::Failed)?;
     RpcReply::value(&snapshot)
@@ -18,7 +18,7 @@ pub(super) async fn add_mcp_servers(rpc: &EngineRpc, params: Value) -> Result<Rp
     let request = serde_json::from_value::<crate::mcp::AddMcpServers>(body)
         .map_err(|_| RpcError::BadParams("Invalid MCP configuration.".into()))?;
     let paths = rpc.pi_runtime()?.paths().clone();
-    let snapshot = crate::off_runtime(move || crate::mcp::add_servers(&paths, request))
+    let snapshot = crate::util::off_runtime(move || crate::mcp::add_servers(&paths, request))
         .await
         .and_then(|result| result)
         .map_err(RpcError::Failed)?;
@@ -32,7 +32,7 @@ pub(super) async fn set_mcp_server_enabled(
 ) -> Result<RpcReply, RpcError> {
     let p: crate::mcp::SetMcpServerEnabled = parse_params(params)?;
     let paths = rpc.pi_runtime()?.paths().clone();
-    let snapshot = crate::off_runtime(move || crate::mcp::set_enabled(&paths, p))
+    let snapshot = crate::util::off_runtime(move || crate::mcp::set_enabled(&paths, p))
         .await
         .and_then(|result| result)
         .map_err(RpcError::Failed)?;
@@ -54,7 +54,7 @@ pub(super) async fn remove_mcp_server(
     }
     rpc.sessions.recycle_idle_sessions().await;
     let paths = rpc.pi_runtime()?.paths().clone();
-    let result = crate::off_runtime(move || crate::mcp::remove_server(&paths, request))
+    let result = crate::util::off_runtime(move || crate::mcp::remove_server(&paths, request))
         .await
         .and_then(|result| result);
     rpc.registry.invalidate_discovery(HarnessId::Pi);
@@ -121,7 +121,7 @@ pub(super) async fn logout_mcp_server(
 ) -> Result<RpcReply, RpcError> {
     let p: crate::mcp::McpServerName = parse_params(params)?;
     let paths = rpc.pi_runtime()?.paths().clone();
-    let snapshot = crate::off_runtime(move || crate::mcp::logout(&paths, &p.name))
+    let snapshot = crate::util::off_runtime(move || crate::mcp::logout(&paths, &p.name))
         .await
         .and_then(|result| result)
         .map_err(RpcError::Failed)?;

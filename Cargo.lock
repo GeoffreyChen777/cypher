@@ -1568,6 +1568,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 
@@ -1589,7 +1590,6 @@ dependencies = [
 name = "cypher-engine"
 version = "0.3.45"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64",
  "chrono",

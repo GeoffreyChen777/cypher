@@ -1,4 +1,4 @@
-//! Mid-session model switch (sessions.rs `retire_stale_run`): a parked,
+//! Mid-session model switch (session/engine.rs `retire_stale_run`): a parked,
 //! steerable run keeps the model its harness process was launched with, so a
 //! turn asking for a different model must end that run and spawn a fresh one
 //! instead of being routed into it. A turn on the SAME settings still routes

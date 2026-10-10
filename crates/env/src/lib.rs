@@ -13,6 +13,7 @@ pub fn ipc_socket(data_dir: &std::path::Path) -> std::io::Result<PathBuf> {
     let canonical = canonical_data_dir(data_dir)?;
     let digest = Sha256::digest(canonical.as_os_str().as_bytes());
     let key: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+    // SAFETY: geteuid takes no arguments and cannot fail.
     let uid = unsafe { libc::geteuid() };
     Ok(PathBuf::from(format!(
         "/tmp/cypher-ipc-{uid}/{key}/engine.sock"
@@ -60,6 +61,18 @@ pub fn var(suffix: &str) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Read `CYPHER_{suffix}` untrimmed, keeping an empty value distinct from an
+/// unset one — for keys where `CYPHER_X=""` deliberately disables a default.
+/// Non-UTF-8 values read as unset.
+pub fn var_raw(suffix: &str) -> Option<String> {
+    std::env::var(format!("CYPHER_{suffix}")).ok()
+}
+
+/// Whether `CYPHER_{suffix}` is present at all, empty values included.
+pub fn is_set(suffix: &str) -> bool {
+    std::env::var_os(format!("CYPHER_{suffix}")).is_some()
 }
 
 /// OsString variant of [`var`] — empty values read as unset.
@@ -127,6 +140,8 @@ mod tests {
     }
 
     fn set(k: &str, v: Option<&str>) {
+        // SAFETY: each key is written by one test only, and nothing in this
+        // crate holds a raw pointer into the environment.
         match v {
             Some(v) => unsafe { std::env::set_var(k, v) },
             None => unsafe { std::env::remove_var(k) },
@@ -146,6 +161,16 @@ mod tests {
         set("CYPHER_TEST_EMPTY_VAR", Some("  "));
         assert_eq!(var("TEST_EMPTY_VAR"), None);
         set("CYPHER_TEST_EMPTY_VAR", None);
+    }
+
+    #[test]
+    fn raw_reads_keep_empty_distinct_from_unset() {
+        set("CYPHER_TEST_RAW_VAR", Some(" "));
+        assert_eq!(var_raw("TEST_RAW_VAR").as_deref(), Some(" "));
+        assert!(is_set("TEST_RAW_VAR"));
+        set("CYPHER_TEST_RAW_VAR", None);
+        assert_eq!(var_raw("TEST_RAW_VAR"), None);
+        assert!(!is_set("TEST_RAW_VAR"));
     }
 
     #[test]

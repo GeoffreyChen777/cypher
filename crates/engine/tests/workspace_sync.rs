@@ -63,13 +63,6 @@ fn registry() -> Arc<HarnessRegistry> {
     Arc::new(registry)
 }
 
-/// Assemble an engine with a fixed device id under its own data dir (offline).
-fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
-    std::fs::create_dir_all(dir).expect("create data dir");
-    std::fs::write(dir.join("device-id"), device_id).expect("write device id");
-    EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine core assembles")
-}
-
 /// The in-process room: an in-memory registry server speaking the DO's JSON
 /// WS protocol (what the RegistryRoom DO does over the wire), with both
 /// engines' hosts wired to it via the test seam.
@@ -128,8 +121,8 @@ fn queue_run_with(
 async fn two_engines_share_a_workspace() {
     let dir_a = tempfile::tempdir().unwrap();
     let dir_b = tempfile::tempdir().unwrap();
-    let a = assemble(dir_a.path(), "dev-a");
-    let b = assemble(dir_b.path(), "dev-b");
+    let a = common::assemble_device(dir_a.path(), "dev-a", registry());
+    let b = common::assemble_device(dir_b.path(), "dev-b", registry());
     let link = bridge(&a, &b).await;
 
     // Device rows from BOTH engines appear on both sides.
@@ -276,8 +269,8 @@ async fn two_engines_share_a_workspace() {
 async fn claim_on_first_command_creates_the_chat_row() {
     let dir_a = tempfile::tempdir().unwrap();
     let dir_b = tempfile::tempdir().unwrap();
-    let a = assemble(dir_a.path(), "dev-a");
-    let b = assemble(dir_b.path(), "dev-b");
+    let a = common::assemble_device(dir_a.path(), "dev-a", registry());
+    let b = common::assemble_device(dir_b.path(), "dev-b", registry());
     let link = bridge(&a, &b).await;
 
     // No CreateChat: the first run command claims the chat under A's device id.
@@ -305,7 +298,7 @@ async fn claim_on_first_command_creates_the_chat_row() {
 #[tokio::test]
 async fn claim_resolves_a_worktree_cwd_to_the_repo_root_space() {
     let dir = tempfile::tempdir().unwrap();
-    let core = assemble(dir.path(), "dev-a");
+    let core = common::assemble_device(dir.path(), "dev-a", registry());
     let client = cypher_rpc::memory_client(core.rpc_service());
 
     // A checkout with a linked worktree — fs layout only; the claim path
@@ -368,7 +361,7 @@ async fn claim_resolves_a_worktree_cwd_to_the_repo_root_space() {
 #[tokio::test]
 async fn claimed_chat_row_records_the_run_harness() {
     let dir = tempfile::tempdir().unwrap();
-    let core = assemble(dir.path(), "dev-a");
+    let core = common::assemble_device(dir.path(), "dev-a", registry());
 
     let request = RunRequest {
         harness: Some(HarnessId::Pi),
@@ -393,7 +386,7 @@ async fn claimed_chat_row_records_the_run_harness() {
 #[tokio::test]
 async fn non_host_engine_leaves_remote_chats_commands_alone() {
     let dir_a = tempfile::tempdir().unwrap();
-    let a = assemble(dir_a.path(), "dev-a");
+    let a = common::assemble_device(dir_a.path(), "dev-a", registry());
 
     // The workspace says dev-b hosts this chat (via its dev-b space); a run
     // command in A's local copy of the session doc must NOT execute on A
@@ -428,7 +421,7 @@ async fn non_host_engine_leaves_remote_chats_commands_alone() {
 #[tokio::test]
 async fn chat_config_selects_the_run_harness() {
     let dir_a = tempfile::tempdir().unwrap();
-    let a = assemble(dir_a.path(), "dev-a"); // default harness = Mock ("Hello")
+    let a = common::assemble_device(dir_a.path(), "dev-a", registry()); // default harness = Mock ("Hello")
 
     a.workspace
         .create_space("space-cfg", "dev-a", "/tmp/cfg", None, false)

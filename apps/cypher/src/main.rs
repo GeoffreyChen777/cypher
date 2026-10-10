@@ -4,7 +4,10 @@
 
 mod auth_cli;
 mod daemon;
+mod dev_env;
+mod onboarding;
 mod setup_cli;
+mod sync_cli;
 mod update_cli;
 
 use clap::{Parser, Subcommand};
@@ -109,166 +112,13 @@ const PRODUCTION_EDGE_URL: &str = "https://edge.letscypher.app";
 ///    edge is exactly [`PRODUCTION_EDGE_URL`]; any custom `CYPHER_EDGE_URL`
 ///    without an explicit client id disables WorkOS.
 fn workos_client_id_from_env(edge_url: &str, edge_token: &Option<String>) -> Option<String> {
-    match std::env::var("CYPHER_WORKOS_CLIENT_ID") {
-        Ok(v) if v.trim().is_empty() => None,
-        Ok(v) => Some(v),
-        Err(_) if edge_token.is_some() => None,
-        Err(_) if edge_url != PRODUCTION_EDGE_URL => None,
-        Err(_) => Some(DEFAULT_WORKOS_CLIENT_ID.into()),
+    match cypher_env::var_raw("WORKOS_CLIENT_ID") {
+        Some(v) if v.trim().is_empty() => None,
+        Some(v) => Some(v),
+        None if edge_token.is_some() => None,
+        None if edge_url != PRODUCTION_EDGE_URL => None,
+        None => Some(DEFAULT_WORKOS_CLIENT_ID.into()),
     }
-}
-
-/// The development Edge this build defaults to: a local `wrangler dev`, on the
-/// port `apps/edge/package.json`'s `dev` script binds (there is no hosted
-/// development Worker).
-///
-/// `CYPHER_DEV_EDGE_URL` overrides this, so a development engine can still be
-/// pointed at a self-hosted staging server without a rebuild.
-const DEFAULT_DEVELOPMENT_EDGE_URL: &str = "http://127.0.0.1:27640";
-
-/// The development Edge this process targets.
-fn development_edge_url() -> String {
-    cypher_env::var("DEV_EDGE_URL").unwrap_or_else(|| DEFAULT_DEVELOPMENT_EDGE_URL.into())
-}
-
-/// The `(plaintext, host)` pair of an Edge URL, or `None` if it is not a
-/// well-formed http(s) URL.
-fn edge_scheme_and_host(url: &str) -> Option<(bool, &str)> {
-    let url = url.trim_end_matches('/');
-    let (plaintext, rest) = match url.split_once("://") {
-        Some(("https", rest)) => (false, rest),
-        Some(("http", rest)) => (true, rest),
-        _ => return None,
-    };
-    let authority = rest.split('/').next().unwrap_or_default();
-    if authority.is_empty() {
-        return None;
-    }
-    let host = match authority.rsplit_once(':') {
-        // Strip a trailing numeric port only. A bracketed IPv6 literal with no
-        // port (`[::1]`) splits into a non-numeric tail and is left intact.
-        Some((head, port))
-            if !head.is_empty() && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) =>
-        {
-            head
-        }
-        _ => authority,
-    };
-    Some((plaintext, host))
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
-}
-
-/// Whether the development Edge is this machine — the one place a development
-/// bearer never leaves the host.
-fn development_edge_is_loopback(url: &str) -> bool {
-    edge_scheme_and_host(url).is_some_and(|(_, host)| is_loopback_host(host))
-}
-
-/// A development bearer is a shared secret for one deployment, so it may only
-/// travel to a development endpoint: never the production Edge, and never over
-/// plaintext to anything but loopback. This is the guard that makes the URL
-/// safe to take from the environment at all.
-fn development_edge_is_safe(url: &str) -> bool {
-    if url
-        .trim_end_matches('/')
-        .eq_ignore_ascii_case(PRODUCTION_EDGE_URL)
-    {
-        return false;
-    }
-    match edge_scheme_and_host(url) {
-        Some((true, host)) => is_loopback_host(host),
-        Some((false, _)) => true,
-        None => false,
-    }
-}
-
-/// A remote development Edge authenticates with that deployment's shared
-/// 64-hex secret, and nothing else is accepted there.
-///
-/// A loopback `wrangler dev` is a different contract: it runs `AUTH_MODE=dev`,
-/// where the bearer *is* the identity and only a `user@org` form carries the
-/// org claim that `/registry/:orgId/*` compares against the URL. A 64-hex
-/// string cannot express one, so the secret alone authenticates as a user with
-/// no org and every registry route answers 403. There is also no shared secret
-/// on loopback to protect. Accept either shape there; the secret only, anywhere
-/// else.
-fn development_credential_is_valid(token: &str, edge: &str) -> bool {
-    if token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return true;
-    }
-    development_edge_is_loopback(edge) && development_identity_is_valid(token)
-}
-
-/// The `user@org` bearer `AUTH_MODE=dev` splits on its first `@`. Exactly one
-/// separator is required so the identity a local Edge derives is unambiguous.
-fn development_identity_is_valid(token: &str) -> bool {
-    let Some((user, org)) = token.split_once('@') else {
-        return false;
-    };
-    !user.is_empty()
-        && !org.is_empty()
-        && !org.contains('@')
-        && token.chars().all(|c| !c.is_whitespace() && !c.is_control())
-}
-
-fn validate_development_environment() -> anyhow::Result<()> {
-    let profile = cypher_env::var("PROFILE").unwrap_or_else(|| "production".into());
-    anyhow::ensure!(
-        matches!(profile.as_str(), "production" | "local" | "development"),
-        "Unknown CYPHER_PROFILE"
-    );
-    if profile == "local" {
-        anyhow::ensure!(
-            !cypher_env::data_dir().join("session.json").exists(),
-            "Local profile cannot load a saved cloud login; choose an isolated local data directory"
-        );
-    }
-    let development_edge = development_edge_url();
-    if profile == "development"
-        || cypher_env::var("EDGE_URL").is_some_and(|url| {
-            let url = url.trim_end_matches('/');
-            url.eq_ignore_ascii_case(development_edge.trim_end_matches('/'))
-                || url.eq_ignore_ascii_case(DEFAULT_DEVELOPMENT_EDGE_URL)
-        })
-    {
-        anyhow::ensure!(
-            cfg!(feature = "development"),
-            "This build does not support development Edge authentication"
-        );
-        anyhow::ensure!(
-            profile == "development",
-            "Development Edge requires CYPHER_PROFILE=development"
-        );
-        anyhow::ensure!(
-            development_edge_is_safe(&development_edge),
-            "CYPHER_DEV_EDGE_URL must be an https development endpoint (http only on loopback), never the production Edge"
-        );
-        let token = cypher_env::var("DEV_ACCESS_TOKEN").unwrap_or_default();
-        anyhow::ensure!(
-            development_credential_is_valid(&token, &development_edge),
-            "Missing or invalid development credential"
-        );
-        let data = cypher_env::canonical_data_dir(&cypher_env::data_dir())?;
-        let root =
-            cypher_env::canonical_data_dir(&cypher_env::home_dir().join(".cypher-development"))?;
-        anyhow::ensure!(
-            data.starts_with(&root) && data != root,
-            "Development profiles require a private instance under ~/.cypher-development/"
-        );
-        anyhow::ensure!(
-            cypher_env::var("EDGE_TOKEN").is_none(),
-            "Do not use the legacy EDGE_TOKEN with locked development auth"
-        );
-    } else {
-        anyhow::ensure!(
-            cypher_env::var("DEV_ACCESS_TOKEN").is_none(),
-            "Development credentials require the development profile"
-        );
-    }
-    Ok(())
 }
 
 /// mimalloc: system malloc (macOS libmalloc especially) never returns the
@@ -282,9 +132,9 @@ fn main() -> anyhow::Result<()> {
     // alone is too late for headless engines linked with both TLS providers.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
-    validate_development_environment()?;
+    dev_env::validate_development_environment()?;
     anyhow::ensure!(
-        std::env::var_os("CYPHER_IPC_PORT").is_none(),
+        !cypher_env::is_set("IPC_PORT"),
         "CYPHER_IPC_PORT has been removed. Unset it; local IPC uses a private Unix socket selected by CYPHER_DATA_DIR."
     );
     // Long-running modes log at info, one-shot CLI commands at warn (RUST_LOG
@@ -349,8 +199,13 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Headless) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
-                let engine = cypher_engine::Engine::new(engine_config_from_env()?);
-                engine.run().await
+                cypher_engine::Engine::run_headless(engine_config_from_env()?, |auth| async move {
+                    onboarding::terminal_sign_in(&auth)
+                        .await
+                        .map_err(|err| cypher_engine::EngineError::Other(err.to_string()))
+                })
+                .await?;
+                Ok(())
             })
         }
         Some(Command::Login) => {
@@ -374,7 +229,7 @@ fn main() -> anyhow::Result<()> {
             runtime.block_on(async {
                 tokio::time::timeout(
                     std::time::Duration::from_secs(5),
-                    sync_cli(engine_config_from_env()?),
+                    sync_cli::run(engine_config_from_env()?),
                 )
                 .await
                 .map_err(|_| anyhow::anyhow!("engine sync diagnostics timed out"))?
@@ -450,7 +305,7 @@ fn engine_config_from_env() -> anyhow::Result<cypher_engine::EngineConfig> {
     Ok(cypher_engine::EngineConfig {
         data_dir: std::path::absolute(cypher_env::data_dir())?,
         edge_url: if development {
-            development_edge_url()
+            dev_env::development_edge_url()
         } else {
             edge_url_from_env()
         },
@@ -497,150 +352,17 @@ fn dirs_data_dir() -> std::path::PathBuf {
     cypher_env::data_dir()
 }
 
-/// `cypher sync`: dial the running engine's IPC and print per-room sync state.
-/// Answers "is this device's workspace room actually receiving?" as a
-/// one-liner.
-async fn sync_cli(config: cypher_engine::EngineConfig) -> anyhow::Result<()> {
-    let ipc_socket = config.ipc_socket;
-    let client = cypher_rpc::connect_local(&ipc_socket).await.map_err(|e| {
-        anyhow::anyhow!(
-            "no engine listening on {} ({e}) — is cypher running?",
-            ipc_socket.display()
-        )
-    })?;
-    let status = client
-        .call(cypher_rpc::methods::SYNC_STATUS, serde_json::json!({}))
-        .await
-        .map_err(|e| anyhow::anyhow!("SyncStatus failed: {e}"))?;
-    let expected = std::fs::read_to_string(config.data_dir.join("device-id")).unwrap_or_default();
-    if expected.trim().is_empty()
-        || status.get("deviceId").and_then(|v| v.as_str()) != Some(expected.trim())
-    {
-        anyhow::bail!("the engine does not match this data directory; check CYPHER_DATA_DIR");
-    }
-    let now = status.get("nowMs").and_then(|v| v.as_i64()).unwrap_or(0);
-    let age = |ms: i64| -> String {
-        if ms <= 0 {
-            return "never".into();
-        }
-        let s = (now - ms).max(0) / 1000;
-        if s >= 3600 {
-            format!("{}h{}m ago", s / 3600, (s % 3600) / 60)
-        } else if s >= 60 {
-            format!("{}m{}s ago", s / 60, s % 60)
-        } else {
-            format!("{s}s ago")
-        }
-    };
-    let room_line = |room: Option<&serde_json::Value>| -> String {
-        let Some(room) = room else {
-            return "no room (dialing or edge-less)".into();
-        };
-        let get = |k: &str| room.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
-        // REJECTED is loud and only shown when nonzero: rejected writes with
-        // a fresh-looking room is exactly the latched-session wedge this
-        // readout previously masked.
-        let rejected = get("rejected");
-        format!(
-            "{} pushed {} · acked {} · rejoins {} probes {} resyncs {} drops {}{}",
-            if room.get("connected").and_then(|v| v.as_bool()) == Some(true) {
-                "connected ·"
-            } else {
-                "DISCONNECTED ·"
-            },
-            age(get("lastPushedMs")),
-            age(get("lastAckMs")),
-            get("rejoins"),
-            get("probes"),
-            get("fullResyncs"),
-            get("disconnects"),
-            if rejected > 0 {
-                format!(" REJECTED {rejected}")
-            } else {
-                String::new()
-            },
-        )
-    };
-    println!(
-        "Device:    {}",
-        status
-            .get("deviceId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?")
-    );
-    println!(
-        "Workspace: {}",
-        room_line(status.get("workspace").filter(|v| !v.is_null()))
-    );
-    let chats = status
-        .get("chats")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if chats.is_empty() {
-        println!("Chats:     none open");
-    }
-    // Chat rooms speak chat2: cursor/head tell "am I caught up?", pending
-    // tells "did my writes leave?", resets/rejected are the loud tells.
-    let chat_line = |room: Option<&serde_json::Value>| -> String {
-        let Some(room) = room else {
-            return "no room (dialing or edge-less)".into();
-        };
-        let get = |k: &str| room.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-        let resets = get("serverResets");
-        let rejected = get("rejected");
-        format!(
-            "{} cursor {}/{} · pending {} · rows {} ({}KB) · rejoins {} drops {}{}{}",
-            if room.get("connected").and_then(|v| v.as_bool()) == Some(true) {
-                "connected ·"
-            } else {
-                "DISCONNECTED ·"
-            },
-            get("cursor"),
-            get("headSeq"),
-            get("pendingPushes"),
-            get("rowCount"),
-            get("rowBytes") / 1024,
-            get("rejoins"),
-            get("disconnects"),
-            if resets > 0 {
-                format!(" RESETS {resets}")
-            } else {
-                String::new()
-            },
-            if rejected > 0 {
-                format!(" REJECTED {rejected}")
-            } else {
-                String::new()
-            },
-        )
-    };
-    for chat in &chats {
-        println!(
-            "Chat {}: {}",
-            chat.get("chatId")
-                .and_then(|v| v.as_str())
-                .map(|s| s.chars().take(8).collect::<String>())
-                .unwrap_or_else(|| "?".into()),
-            chat_line(chat.get("room").filter(|v| !v.is_null()))
-        );
-    }
-    Ok(())
-}
-
 /// `{data_dir}/logs/cypher-{mode}.log`, previous launch preserved as `.old`.
 /// Headed and headless are separate files so an embedded-engine app and a
 /// daemon on the same machine never interleave writes.
 ///
 /// The returned file holds an exclusive `flock` for the process lifetime:
 /// rotate-on-launch is only safe when nothing is still WRITING the current
-/// file. Once, a dev build launched twice next to the running
-/// installed app — the first rename put the daemon's live log at `.old`, the
-/// second unlinked it entirely, and the daemon spent the rest of the incident
-/// logging to an orphaned inode (an entire day of sync diagnostics gone at
-/// the exact moment they were needed). A launch that finds the canonical file
-/// locked logs to `cypher-{mode}.{pid}.log` instead; the next lock-holding
-/// launch sweeps pid-suffixed files older than a week.
+/// file. Two launches next to a running daemon would otherwise rename its
+/// live log to `.old` and then unlink it, leaving the daemon logging to an
+/// orphaned inode. A launch that finds the canonical file locked logs to
+/// `cypher-{mode}.{pid}.log` instead; the next lock-holding launch sweeps
+/// pid-suffixed files older than a week.
 fn open_log_file(mode: &str) -> Option<std::fs::File> {
     let dir = cypher_env::data_dir().join("logs");
     open_log_file_in(&dir, mode)
@@ -662,6 +384,7 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<std::fs::File> 
             .truncate(false)
             .open(&path)
             .ok()?;
+        // SAFETY: flock on a descriptor `existing` owns for this call.
         let rc = unsafe { libc::flock(existing.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc != 0 {
             // A live process owns the canonical log — leave it alone.
@@ -678,6 +401,7 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<std::fs::File> 
             let _ = std::fs::rename(&path, dir.join(format!("cypher-{mode}.log.old")));
         }
         let file = std::fs::File::create(&path).ok()?;
+        // SAFETY: flock on a descriptor `file` owns for this call.
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         sweep_stale_pid_logs(dir, mode);
         Some(file)
@@ -764,6 +488,8 @@ mod workos_resolver_tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn set(key: &str, value: Option<&str>) {
+        // SAFETY: callers hold ENV_LOCK, serializing these writes; nothing in
+        // this binary holds a raw pointer into the environment.
         match value {
             Some(v) => unsafe { std::env::set_var(key, v) },
             None => unsafe { std::env::remove_var(key) },
@@ -846,69 +572,6 @@ mod workos_resolver_tests {
         ] {
             assert_eq!(resolve(edge, None), None, "custom edge {edge}");
             assert_eq!(resolve(edge, Some("dev-token")), None, "custom edge {edge}");
-        }
-    }
-}
-
-#[cfg(test)]
-mod development_edge_tests {
-    use super::{DEFAULT_DEVELOPMENT_EDGE_URL, PRODUCTION_EDGE_URL, development_edge_is_safe};
-
-    #[test]
-    fn accepts_https_development_endpoints() {
-        for url in [
-            DEFAULT_DEVELOPMENT_EDGE_URL,
-            "https://edge-dev.letscypher.app/",
-            "https://edge-dev.letscypher.app",
-            "https://edge-staging.example.com:8443",
-            "https://192.0.2.10",
-        ] {
-            assert!(development_edge_is_safe(url), "should accept {url}");
-        }
-    }
-
-    #[test]
-    fn rejects_production_even_with_a_trailing_slash_or_odd_case() {
-        for url in [
-            PRODUCTION_EDGE_URL,
-            "https://edge.letscypher.app/",
-            "HTTPS://EDGE.LETSCYPHER.APP",
-        ] {
-            assert!(!development_edge_is_safe(url), "should reject {url}");
-        }
-    }
-
-    #[test]
-    fn plaintext_is_loopback_only() {
-        for url in [
-            "http://localhost:27640",
-            "http://127.0.0.1:8787",
-            "http://[::1]:27640",
-        ] {
-            assert!(development_edge_is_safe(url), "should accept {url}");
-        }
-        for url in [
-            "http://edge-dev.letscypher.app",
-            "http://192.0.2.10",
-            "http://evil.example.com",
-        ] {
-            assert!(
-                !development_edge_is_safe(url),
-                "should reject plaintext {url}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_malformed_or_schemeless_values() {
-        for url in [
-            "",
-            "edge-dev.letscypher.app",
-            "ftp://edge-dev.letscypher.app",
-            "https://",
-            "https:///path",
-        ] {
-            assert!(!development_edge_is_safe(url), "should reject {url}");
         }
     }
 }

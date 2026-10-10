@@ -11,13 +11,13 @@ pub(super) async fn set_web_search_fallback(
     // Routing is consumed by the forwarder; strip it before the
     // strict parse (an explicit local target also carries it).
     let body = strip_target(params);
-    let request: crate::web_search_fallback::SetWebSearchFallback = parse_params(body)?;
+    let request: crate::pi::web_search::SetWebSearchFallback = parse_params(body)?;
     // Pinning points a real tool at one model: it must exist in
     // THIS device's catalog (the same rule as the title model).
     // Automatic ranks the catalog itself, and a disabled save only
     // remembers the preference.
     if let (true, Some(pinned)) = (request.enabled, request.model.as_deref()) {
-        crate::web_search_fallback::validate_model(pinned).map_err(RpcError::BadParams)?;
+        crate::pi::web_search::validate_model(pinned).map_err(RpcError::BadParams)?;
         rpc.require_pi_catalog_models(
             &[pinned],
             Duration::from_secs(20),
@@ -26,7 +26,7 @@ pub(super) async fn set_web_search_fallback(
         .await?;
     }
     let paths = rpc.pi_runtime()?.paths();
-    let settings = crate::web_search_fallback::save(paths, request).map_err(RpcError::Failed)?;
+    let settings = crate::pi::web_search::save(paths, request).map_err(RpcError::Failed)?;
     // Enabling/disabling edits settings.json: parked Pi children
     // and cached discovery must pick the change up.
     rpc.reload_pi_runtime().await;
@@ -53,7 +53,8 @@ pub(super) async fn set_title_model_settings(
         ));
     }
     let settings: cypher_proto::TitleModelSettings = parse_params(params)?;
-    crate::title_settings::validate(&settings).map_err(|e| RpcError::BadParams(e.to_string()))?;
+    crate::session::title_settings::validate(&settings)
+        .map_err(|e| RpcError::BadParams(e.to_string()))?;
     let store = rpc.title_settings.as_ref().ok_or_else(|| {
         RpcError::Failed("Title settings unavailable; update this device's engine".into())
     })?;

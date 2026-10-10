@@ -435,7 +435,7 @@ mod tests {
     }
 
     struct McpFixture {
-        paths: cypher_engine::pi_runtime::PiRuntimePaths,
+        paths: cypher_engine::pi::runtime::PiRuntimePaths,
         additions: AtomicUsize,
         removals: AtomicUsize,
         release: tokio::sync::Notify,
@@ -496,7 +496,7 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let fixture = Arc::new(McpFixture {
-            paths: cypher_engine::pi_runtime::PiRuntimePaths::for_data_dir(
+            paths: cypher_engine::pi::runtime::PiRuntimePaths::for_data_dir(
                 &data.path().join("host"),
             ),
             additions: AtomicUsize::new(0),

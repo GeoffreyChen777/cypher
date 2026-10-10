@@ -23,7 +23,7 @@ use gpui::{
 use cypher_doc::{
     MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry, TranscriptFrame,
 };
-use cypher_engine::pi_session_modes::PiSessionModes;
+use cypher_engine::pi::session_modes::PiSessionModes;
 use cypher_proto::{
     Chat, FileSearchMatch, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SlashCommand,
     UserInputAnswer, UserInputQuestion,

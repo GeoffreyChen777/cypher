@@ -1,4 +1,4 @@
-//! Steered-ledger at-least-once contract (sessions.rs): the ledger entry and
+//! Steered-ledger at-least-once contract (session/engine.rs): the ledger entry and
 //! the mailbox send are atomic — the entry goes in BEFORE `try_send` — so a
 //! steer the mailbox accepted is always retired by the `Steered` confirmation
 //! (pi's parked path emits `Steered` immediately on mailbox receive), and the

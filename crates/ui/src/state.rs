@@ -325,7 +325,7 @@ pub struct AppState {
     pub update: Option<cypher_update::UpdateStatus>,
     /// Latest Pi CLI + extension update facts — drives the one-click package
     /// update notification beside the Cypher release strip.
-    pub pi_update: Option<cypher_engine::pi_packages::PiUpdateStatus>,
+    pub pi_update: Option<cypher_engine::pi::packages::PiUpdateStatus>,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,

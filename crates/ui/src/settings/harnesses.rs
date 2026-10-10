@@ -5,8 +5,8 @@ use gpui::{
     div, prelude::*, px,
 };
 
-use cypher_engine::pi_packages::PiPackagesSnapshot;
-use cypher_engine::pi_runtime::PiRuntimeStatus;
+use cypher_engine::pi::packages::PiPackagesSnapshot;
+use cypher_engine::pi::runtime::PiRuntimeStatus;
 use cypher_rpc::methods;
 
 use super::device_target::DeviceTarget;

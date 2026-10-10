@@ -7,7 +7,6 @@ use std::sync::{Arc, Barrier, Mutex};
 
 use cypher_engine::{
     AuthState, Engine, EngineConfig, EngineCore, EngineProfile, HarnessId, WorkspaceScope,
-    default_registry,
 };
 use tokio::net::TcpListener;
 
@@ -28,17 +27,6 @@ fn config(
         org_id: None,
         workos_client_id: workos_client_id.map(str::to_string),
     }
-}
-
-fn assemble(profile: EngineProfile) -> EngineCore {
-    let pi_sessions = profile.store_root().join("agent-sessions");
-    EngineCore::assemble_with_profile(
-        profile,
-        Arc::new(default_registry(pi_sessions)),
-        HarnessId::Mock,
-        None,
-    )
-    .expect("assemble profile")
 }
 
 async fn shutdown(core: EngineCore) {
@@ -88,7 +76,7 @@ async fn concurrent_engine_info_and_runtime_share_one_device_identity() {
         announced
     );
 
-    let core = assemble(EngineProfile::local(dir.path()).expect("local profile"));
+    let core = common::assemble_profile(EngineProfile::local(dir.path()).expect("local profile"));
     assert_eq!(
         core.device_id, announced,
         "the assembled runtime must use the identity already announced"
@@ -122,7 +110,7 @@ async fn empty_legacy_device_identity_is_repaired_once_for_all_boots() {
         announced
     );
 
-    let core = assemble(EngineProfile::local(dir.path()).expect("local profile"));
+    let core = common::assemble_profile(EngineProfile::local(dir.path()).expect("local profile"));
     assert_eq!(core.device_id, announced);
     shutdown(core).await;
 }
@@ -136,7 +124,7 @@ async fn local_and_synced_profiles_remain_isolated_across_restarts() {
     let local_profile_bytes = std::fs::read(&local_profile_file).expect("local profile file");
 
     let local_upload = {
-        let core = assemble(local_profile.clone());
+        let core = common::assemble_profile(local_profile.clone());
         let device_id = core.device_id.clone();
         core.workspace
             .create_space(
@@ -172,7 +160,7 @@ async fn local_and_synced_profiles_remain_isolated_across_restarts() {
 
     let synced_profile = EngineProfile::synced(dir.path(), "cloud-org", "cloud-user");
     {
-        let core = assemble(synced_profile.clone());
+        let core = common::assemble_profile(synced_profile.clone());
         assert_eq!(core.device_id, local_upload.0, "device identity is global");
         assert!(
             core.workspace
@@ -214,7 +202,7 @@ async fn local_and_synced_profiles_remain_isolated_across_restarts() {
         "reopening local must not rotate or rewrite its identity"
     );
     {
-        let core = assemble(reopened_profile);
+        let core = common::assemble_profile(reopened_profile);
         assert_eq!(core.device_id, local_upload.0);
         let chat = core
             .workspace
@@ -260,7 +248,7 @@ async fn synced_accounts_isolate_uploads_and_assign_the_legacy_cache_once() {
 
     let first_profile = EngineProfile::synced(dir.path(), "org-a", "user-a");
     let first_upload = {
-        let core = assemble(first_profile.clone());
+        let core = common::assemble_profile(first_profile.clone());
         assert_eq!(core.uploads.dir(), first_profile.uploads_root());
         assert_eq!(
             core.uploads
@@ -283,7 +271,7 @@ async fn synced_accounts_isolate_uploads_and_assign_the_legacy_cache_once() {
 
     let second_profile = EngineProfile::synced(dir.path(), "org-b", "user-b");
     let second_upload = {
-        let core = assemble(second_profile.clone());
+        let core = common::assemble_profile(second_profile.clone());
         assert_eq!(core.uploads.dir(), second_profile.uploads_root());
         assert_ne!(core.uploads.dir(), first_profile.uploads_root());
         for path in [legacy_upload.to_str().unwrap(), &first_upload] {
@@ -306,7 +294,7 @@ async fn synced_accounts_isolate_uploads_and_assign_the_legacy_cache_once() {
         upload
     };
 
-    let core = assemble(first_profile);
+    let core = common::assemble_profile(first_profile);
     assert_eq!(
         core.uploads
             .read_chunk(&first_upload, 0, &[])
@@ -334,7 +322,7 @@ async fn existing_session_opens_the_historical_cloud_layout_in_place() {
     let dir = tempfile::tempdir().expect("tempdir");
     let historical = EngineProfile::synced(dir.path(), "legacy-org", "legacy-user");
     {
-        let core = assemble(historical.clone());
+        let core = common::assemble_profile(historical.clone());
         core.workspace
             .create_space(
                 "legacy-space",
@@ -375,7 +363,7 @@ async fn existing_session_opens_the_historical_cloud_layout_in_place() {
     );
     assert!(!dir.path().join("profiles/synced").exists());
     {
-        let core = assemble(resolved);
+        let core = common::assemble_profile(resolved);
         assert!(
             core.workspace
                 .chat("legacy-chat")

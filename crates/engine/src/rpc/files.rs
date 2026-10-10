@@ -205,8 +205,8 @@ pub(super) async fn workspace_file(
             .await?;
         same_checkout()?;
         let value = match write {
-            Some(text) => crate::workspace_files::write(root, p.path.clone(), text).await,
-            None => crate::workspace_files::read(root, p.path.clone(), directory).await,
+            Some(text) => crate::git::workspace_files::write(root, p.path.clone(), text).await,
+            None => crate::git::workspace_files::read(root, p.path.clone(), directory).await,
         }
         .map_err(failed)?;
         same_checkout()?;

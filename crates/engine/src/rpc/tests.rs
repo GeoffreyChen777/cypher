@@ -1,6 +1,25 @@
 use super::files::tool_file_path;
 use super::*;
 
+/// Spot checks that the predicates derived from `cypher_rpc::methods::SPECS`
+/// keep their routing meaning.
+#[test]
+fn routing_predicates_follow_the_method_specs() {
+    assert!(!forwardable("NoSuchMethod"));
+    assert!(!AuthRpc::handles("NoSuchMethod"));
+    assert!(is_stream_method(methods::SUBSCRIBE_TERMINAL));
+    assert!(is_stream_method(methods::PI_UPDATE_STATUS));
+    // Streams answered only by the local engine are never proxied.
+    assert!(!is_stream_method(methods::WATCH_CHATS));
+    assert!(!is_stream_method(methods::AUTH_STATUS));
+    assert!(!is_stream_method(methods::QUEUE_COMMAND));
+    assert!(needs_credential_transport(methods::SAVE_PI_PROVIDER));
+    assert!(needs_credential_transport(methods::COMPLETE_MCP_LOGIN));
+    assert!(!needs_credential_transport(methods::LIST_MCP_SERVERS));
+    assert!(AuthRpc::handles(methods::NOTIFICATION_ACTIVITY));
+    assert!(!AuthRpc::handles(methods::ENGINE_INFO));
+}
+
 #[test]
 fn engine_identity_is_not_forwardable() {
     assert!(!forwardable(methods::ENGINE_INFO));
