@@ -171,6 +171,37 @@ listed in [protocol/README.md](protocol/README.md) with their shared test vector
 harness embeds it with `include_str!` and hands it to Pi, so it lives beside its user rather
 than in `pi-runtime/`.
 
+### Inside the larger crates
+
+Modules follow the `foo.rs` + `foo/` layout; a folder groups one feature.
+
+- **`cypher-engine`**: `pi/` (Pi runtime install and updates, packages, providers,
+  session modes, subagents, translation, web-search fallback), `session/` (the sessions
+  engine and its run loop, forks, side chats, run journal, titles, scratch chats), `host/`
+  (doc host and its chat2 sync, workspace registry host, local import, spaces, viewport
+  activity, notification events), `git/` (repos and worktrees, checkout diffs, GitHub,
+  workspace files), `rpc/` (the dispatcher plus one module per method group), `mcp/`,
+  `auth/`; at the root `core.rs` (assembly), `runtime.rs` (process lifecycle, IPC serving),
+  `headless.rs` (the `cypher headless` loop), `error.rs`, `util.rs` (`lock`, `now_ms`,
+  `off_runtime`), plus registry, terminals, uploads, profile and device identity.
+- **`cypher-ui`**: `kit/` (theme, motion, icons, popovers, loaders and other primitives;
+  depends on nothing else in the crate), `appearance/` (persisted style globals: chat,
+  surface and space styles), `prefs.rs` (persisted UI settings, keymap, composer defaults),
+  `widgets/` (the shared `TextInput`), `markdown/`, then the surfaces — `composer/`,
+  `transcript/`, `pickers/`, `changes/`, `history.rs`, `files/`, `terminal/`, `settings/`
+  (pages only) — and `shell/` (window, sidebar, sessions, overlays, menus) over `state/`.
+- **`cypher-harness`**: `lib.rs` (the `Harness` trait), `process.rs` (CLI resolution, child
+  processes), `shell_env.rs`, `mock.rs`, and `pi/` (spawn, discovery, slash commands,
+  `session/` run loop, forks, wire parsers, throughput).
+- **`cypher-sync`**: `chat_client/` and `registry/` (each an actor plus its wire frames),
+  `store.rs` (SQLite `DocsStore`), and the stream-preview link.
+- **`apps/cypher`**: `main.rs` (argument parsing), one `*_cli.rs` per subcommand group,
+  `daemon.rs` (systemd/launchd service), `onboarding.rs` (terminal sign-in and organization
+  choice), `dev_env.rs` (the development-Edge guard).
+
+The iOS app groups Swift by feature and layer ([apps/ios/README.md](apps/ios/README.md));
+the Edge by feature behind one route chain ([apps/edge/README.md](apps/edge/README.md)).
+
 ### Crates and layering
 
 Each crate depends only on crates in lower layers, dev-dependencies included;
@@ -195,7 +226,7 @@ futures surfaced as gpui `Task`s). In-process mode runs the engine on an app-own
 multi-thread runtime (4 workers named `cypher-engine`, handed to gpui via
 `gpui_tokio::init_from_handle`); the UI never blocks on it. Blocking work — subprocesses,
 archive extraction, large directory removals, SQLite — goes through `spawn_blocking`
-(`cypher_engine::off_runtime`), never a runtime worker: a blocked worker on a small
+(`util::off_runtime` in the engine), never a runtime worker: a blocked worker on a small
 runtime stalls IPC, presence and sync together with no panic and no log line.
 
 Loro hook rule: a Loro subscription (`subscribe_local_update`, `subscribe_root`) only
@@ -222,7 +253,7 @@ sink method that touches the document.
   - row height memoization keyed by (row id, content length, width) so a streamed token
     re-measures one row;
   - scroll-anchor absorption for above-viewport height changes.
-- **Markdown** (`cypher-ui::markdown`): `pulldown-cmark` parsing on `background_spawn` with
+- **Markdown** (`cypher-ui` `markdown/`): `pulldown-cmark` parsing on `background_spawn` with
   coalescing (Zed's proven pattern), block-level incremental re-parse of the streaming tail
   (incremark's O(delta) idea: only re-parse from the last stable block boundary), monochrome
   theme where **numbers drive layout, colors are paint**. Code blocks: monospace, no wrap ⇒
@@ -230,8 +261,9 @@ sink method that touches the document.
   from tree-sitter grammars in `cypher-syntax` ([Syntax highlighting](docs/design/syntax-highlighting.md)),
   colors applied as text runs (paint-only). Streaming **fade-in veil** on newly appended text via `with_animation`
   opacity (paint-layer, never affects layout). `prefers-reduced-motion` honored.
-- **Composer**: hand-rolled gpui text input (derived from Zed's `examples/input.rs`: IME,
-  selection, clipboard, key actions), compact↔expanded auto-flip by measured text width, auto-grow 76–260px,
+- **Composer**: built on the crate's one text widget, `widgets::TextInput` (derived from Zed's
+  `examples/input.rs`: IME, selection, clipboard, key actions; also used by settings fields and
+  search boxes), compact↔expanded auto-flip by measured text width, auto-grow 76–260px,
   Enter/Shift+Enter, Send→Steer→Stop morph, drafts + attachments per chat, drag-drop/paste
   images, QuestionPanel (paged, 1-9 keys, 220ms auto-advance) replacing the composer while input
   is requested. Pickers (harness/model, traits, repo w/ folder browser, branch w/ worktree
@@ -241,7 +273,7 @@ sink method that touches the document.
   drag 160px–55vh, 12ms input coalescing / 80ms resize debounce, 1MB replay, detach ≠ close.
 - **Diff pane**: unified-patch parser → virtualized file/hunk/line rows, per-file collapse
   (180ms height tween), time-sliced highlight, 200ms width transition on the pane itself.
-- **Animation kit** (`cypher-ui::motion`): small helpers over gpui `Animation` reproducing the
+- **Animation kit** (`kit/motion.rs`): small helpers over gpui `Animation` reproducing the
   zeron catalog — `fade-in` (0.5s, cubic-bezier(0.16,1,0.3,1), translateY 4→0), `splash-out`,
   `cypher-pulse` staggered cell wave (boot splash + loaders), `gradient-spin-pulse` matrix
   spinner (WorkingIndicator + rotating flavour word), `menu-in`/`dialog-in` scale-fades, 200ms
@@ -254,7 +286,8 @@ sink method that touches the document.
 ## 5. Engine
 
 Ports of zeron behaviors:
-- **Sessions engine**: per-session broadcast hub; on-disk run journal (resumable `seq` replay,
+- **Sessions engine** (`session/`): per-session broadcast hub; each run is driven by a
+  `RunLoop` state machine over the harness stream; on-disk run journal (resumable `seq` replay,
   crash auto-resume); persistent steerable sessions (steering mailbox at step/turn boundary;
   30-minute idle reaper). There is deliberately no stall timeout: a live harness keeps the
   session fresh with a heartbeat, and a turn-quiesce watchdog parks a turn whose end never
@@ -269,6 +302,10 @@ Ports of zeron behaviors:
 - **Repos/diffs**: the `git` subprocess (matches zeron, avoids libgit2 edge cases); worktrees
   under `~/.cypher/worktrees`; fs watchers (`notify`) + 2min repair; diff capture (patch +
   numstat + untracked, 3MiB cap, sha256) → workspace registry summary.
+- **RPC service** (`rpc/`): one dispatcher whose arms call per-domain handlers. Every method
+  has one entry in `cypher_rpc::methods::SPECS` (forwardable, streaming, auth-handled, …); the
+  engine derives its routing predicates from that table, so a new method needs exactly one
+  constant and one spec.
 - **Auth**: WorkOS through edge routes (`/auth/exchange`, `/auth/refresh`, orgs); loopback
   callback server headed, paste-code headless; dev mode (no key ⇒ bearer = configured user id).
 

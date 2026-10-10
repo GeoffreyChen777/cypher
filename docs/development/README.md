@@ -68,8 +68,8 @@ bash scripts/check.sh edge       # apps/edge typecheck, unit and workerd tests
 bash scripts/check.sh scripts    # script/release/installer tests, doc links
 bash scripts/check.sh runtime    # Pi runtime suites that need no staged runtime
 bash scripts/check.sh workflows  # actionlint + workflow policy (downloads actionlint)
-bash scripts/check.sh macos      # macOS: icon, workspace clippy, cypher-ui tests,
-                                 # Rust/Swift preview vectors
+bash scripts/check.sh macos      # macOS: icon, swift-format lint, workspace clippy,
+                                 # cypher-ui tests, Rust/Swift preview vectors
 bash scripts/check.sh ios        # iOS unit tests on a simulator (Xcode 27)
 bash scripts/check.sh all        # everything except ios; macos only on a Mac
 ```
@@ -139,16 +139,22 @@ to verify them) is in
    the engine.
 7. Logging: `tracing` with structured fields (`error = %err`); no print macros in
    library crates; no explicit `target:`.
-8. Env: every `CYPHER_*` read goes through `cypher_env`.
+8. Env: every `CYPHER_*` read goes through `cypher_env` (`var` for a value, `var_raw`/`is_set`
+   where an empty value must stay distinct from an unset one).
 9. Locks: `std::sync::Mutex` for short critical sections, never held across
    `.await`; poisoning ignored through one `lock()` helper per crate.
 10. Comments explain current behaviour and why; no dates, incident stories,
     review-round labels, or citations of files that don't exist.
+11. RPC methods: a new method is one constant in `cypher_rpc::methods` plus one entry in
+    `methods::SPECS` (forwardable, streaming, auth-handled, …); the engine derives its routing
+    from that table and a test fails if a constant has no spec.
 
-Lints live in `[workspace.lints]` in the root `Cargo.toml`; every package opts in
-with `[lints] workspace = true`, and CI runs clippy with `-D warnings`. Crates
-without unsafe code (`proto`, `doc`, `sync`, `update`, `syntax`) declare
-`#![forbid(unsafe_code)]`. Prefer `#[expect(lint, reason = "…")]` for a new
+Lints live in `[workspace.lints]` in the root `Cargo.toml` (clippy settings in `clippy.toml`);
+every package opts in with `[lints] workspace = true`, and CI runs clippy with `-D warnings`.
+Library crates may not print (`print_stdout`/`print_stderr`); the `cypher` binary and the
+example tools opt out at their crate roots, and tests are exempt. Crates without unsafe code
+(`proto`, `doc`, `net`, `sync`, `update`, `syntax`) declare `#![forbid(unsafe_code)]`; every
+remaining `unsafe` block carries a `// SAFETY:` comment. Prefer `#[expect(lint, reason = "…")]` for a new
 local suppression.
 
 ### Swift (`apps/ios`)
@@ -160,7 +166,10 @@ local suppression.
   `Development/`.
 - Stores are `@MainActor @Observable final class`, transports are `actor`, members
   are `private` by default.
-- Tests are named for behaviour; helpers live only in `TestSupport`.
+- Tests are named for behaviour, in folders mirroring the app's; helpers live only in
+  `TestSupport` (repo fixtures through `TestSupport.repoRoot()`).
+- Formatting is `swift-format` with `apps/ios/.swift-format` (lint runs in the `macos` check
+  stage); every configuration builds with complete Swift concurrency checking.
 
 ### TypeScript (`apps/edge`, `pi-runtime`)
 
