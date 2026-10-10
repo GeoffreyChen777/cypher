@@ -1,6 +1,6 @@
 //! Rendering: rows, chips, bubbles and the `Render` impl.
 
-use super::comments::ToolGroupRow;
+use super::comments::{MarkdownBlockRow, ToolGroupRow};
 use super::*;
 
 impl Transcript {
@@ -391,12 +391,28 @@ impl Transcript {
                 };
                 self.render_user_row(row, user, wide, theme, cx)
             }
-            RowKind::Markdown { tree, block_ix } => {
-                self.render_markdown_block(&row.id, tree, *block_ix, false, theme, window, cx)
-            }
-            RowKind::LiveMarkdown { tree, block_ix } => {
-                self.render_markdown_block(&row.id, tree, *block_ix, true, theme, window, cx)
-            }
+            RowKind::Markdown { tree, block_ix } => self.render_markdown_block(
+                &row.id,
+                MarkdownBlockRow {
+                    tree,
+                    block_ix: *block_ix,
+                    live: false,
+                },
+                theme,
+                window,
+                cx,
+            ),
+            RowKind::LiveMarkdown { tree, block_ix } => self.render_markdown_block(
+                &row.id,
+                MarkdownBlockRow {
+                    tree,
+                    block_ix: *block_ix,
+                    live: true,
+                },
+                theme,
+                window,
+                cx,
+            ),
             RowKind::ThoughtBlock {
                 tree,
                 block_ix,
@@ -407,8 +423,17 @@ impl Transcript {
                 // blocks, in the muted text tone.
                 let mut muted = theme.clone();
                 muted.text = theme.text_muted;
-                let block =
-                    self.render_markdown_block(&row.id, tree, *block_ix, *live, &muted, window, cx);
+                let block = self.render_markdown_block(
+                    &row.id,
+                    MarkdownBlockRow {
+                        tree,
+                        block_ix: *block_ix,
+                        live: *live,
+                    },
+                    &muted,
+                    window,
+                    cx,
+                );
                 if *nested {
                     // Under its chip, on the run's rail.
                     div()

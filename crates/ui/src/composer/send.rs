@@ -394,16 +394,7 @@ impl Composer {
                     cx.notify();
                 });
                 if let Err(message) = result {
-                    composer.on_send_failed(
-                        &job.target.chat_id,
-                        &job.taken.message_id,
-                        message,
-                        take_draft,
-                        job.text,
-                        &job.taken.staged,
-                        &job.taken.sent_comments,
-                        cx,
-                    );
+                    composer.on_send_failed(job, message, take_draft, cx);
                 }
                 cx.notify();
             })
@@ -680,18 +671,21 @@ impl Composer {
 
     /// The send failed: red banner, echo removed, prompt back in the draft,
     /// staged files back in the chat's stash, comments restored.
-    #[allow(clippy::too_many_arguments)]
     fn on_send_failed(
         &mut self,
-        chat_id: &str,
-        message_id: &str,
+        job: SendJob,
         message: String,
         take_draft: bool,
-        restore_text: String,
-        staged: &[StagedAttachment],
-        sent_comments: &[DraftComment],
         cx: &mut Context<Self>,
     ) {
+        let SendJob {
+            target,
+            text: restore_text,
+            taken,
+            ..
+        } = job;
+        let (chat_id, message_id) = (target.chat_id.as_str(), taken.message_id.as_str());
+        let (staged, sent_comments) = (&taken.staged[..], &taken.sent_comments[..]);
         self.failure = Some(message.into());
         self.state.update(cx, |s, cx| {
             s.remove_echo(chat_id, message_id);
@@ -992,13 +986,12 @@ async fn run_send(
                 // Plain Run (no staged attachments): prompt is the
                 // bare text, no pending ids.
                 let command = run_command(
-                    &target.resolved,
+                    job,
                     content.clone(),
                     cwd,
                     attachment_paths,
                     Vec::new(),
                     run_worktree,
-                    message_id,
                     agent_prompt.clone(),
                 );
                 queue_command(engine, &target.chat_id, &command).await?;
@@ -1171,13 +1164,12 @@ async fn queue_first_run(
         })
         .collect();
     let command = run_command(
-        &target.resolved,
+        job,
         content.clone(),
         cwd,
         Vec::new(),
         pending_attachments.clone(),
         run_worktree,
-        &job.taken.message_id,
         agent_prompt.clone(),
     );
     // Queue FIRST — durable by construction. A queue
@@ -1555,18 +1547,18 @@ async fn load_session_contexts(
     Ok(contexts)
 }
 
-/// A main-surface Run with the resolved model config.
-#[allow(clippy::too_many_arguments)]
+/// A main-surface Run of the send's message with its resolved model config.
 fn run_command(
-    resolved: &crate::pickers::ResolvedRunConfig,
+    job: &SendJob,
     prompt: String,
     cwd: String,
     attachments: Vec<String>,
     pending_attachments: Vec<cypher_proto::PendingAttachment>,
     worktree: Option<cypher_proto::WorktreeSpec>,
-    message_id: &str,
     agent_prompt: Option<String>,
 ) -> SessionCommandPayload {
+    let resolved = &job.target.resolved;
+    let message_id = &job.taken.message_id;
     SessionCommandPayload::Run {
         request: RunRequest {
             prompt,

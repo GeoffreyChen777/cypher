@@ -242,17 +242,19 @@ impl Transcript {
 
     /// One top-level markdown block row: settled, or `live` under the
     /// streaming fade veil.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_markdown_block(
         &mut self,
         row_id: &SharedString,
-        tree: &Arc<BlockTree>,
-        block_ix: usize,
-        live: bool,
+        block: MarkdownBlockRow<'_>,
         theme: &Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let MarkdownBlockRow {
+            tree,
+            block_ix,
+            live,
+        } = block;
         // Per-appended-chunk fade veil (opacity only — layout commits
         // instantly). Reduced motion renders with no veil at all.
         // Baseline rows (text already streamed when the transcript
@@ -973,6 +975,14 @@ impl Transcript {
         }
         row
     }
+}
+
+/// A markdown row's block: which block of which tree, and whether it is
+/// still streaming.
+pub(super) struct MarkdownBlockRow<'a> {
+    pub(super) tree: &'a Arc<BlockTree>,
+    pub(super) block_ix: usize,
+    pub(super) live: bool,
 }
 
 /// A tool-group row's fields, borrowed from its [`RowKind::ToolGroup`].
