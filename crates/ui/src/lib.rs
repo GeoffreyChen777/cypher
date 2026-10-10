@@ -5,7 +5,7 @@
 mod appearance;
 mod attachments;
 mod changes;
-mod comments;
+mod comment_popup;
 mod composer;
 mod files;
 mod history;

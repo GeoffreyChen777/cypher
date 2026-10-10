@@ -537,10 +537,11 @@ pub(super) fn row_match_count(row: &Row, query: &str) -> u32 {
                 crate::markdown::find::count_matches(text, query)
             }
         }
-        RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => tree
-            .blocks
-            .get(*block_ix)
-            .map_or(0, |top| render::count_block_matches(&top.block, query)),
+        RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
+            tree.blocks.get(*block_ix).map_or(0, |top| {
+                markdown::render::count_block_matches(&top.block, query)
+            })
+        }
         // Thinking is not searched: a hit inside a collapsed thought could
         // not be shown.
         RowKind::ToolGroup { .. }
@@ -909,7 +910,7 @@ pub(super) fn user_comments(
     pending: bool,
     theme: &Theme,
     scope: crate::markdown::selection::SelectionScope,
-    selection: Option<render::SelectionUi>,
+    selection: Option<markdown::render::SelectionUi>,
 ) -> gpui::Div {
     let mut list = div()
         .min_w_0()
@@ -959,7 +960,7 @@ fn selectable_text(
     color: gpui::Hsla,
     theme: &Theme,
     scope: crate::markdown::selection::SelectionScope,
-    selection: Option<render::SelectionUi>,
+    selection: Option<markdown::render::SelectionUi>,
 ) -> AnyElement {
     let styled = StyledText::new(text.clone()).with_runs(vec![TextRun {
         len: text.len(),
@@ -974,7 +975,7 @@ fn selectable_text(
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, _| {
-            render::paint_text_selection(
+            markdown::render::paint_text_selection(
                 window, scope, &key, &text, &layout, &sel_theme, selection,
             );
         },
@@ -1803,7 +1804,7 @@ fn part_prefix(id: &str) -> &str {
 /// live→split handoff cannot shift a pixel; the block gap otherwise.
 #[cfg(test)]
 pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
-    top_gap_for_style(prev, row, GAP_TURN, render::MD_BLOCK_GAP)
+    top_gap_for_style(prev, row, GAP_TURN, markdown::render::MD_BLOCK_GAP)
 }
 
 pub(super) fn top_gap_for_style(

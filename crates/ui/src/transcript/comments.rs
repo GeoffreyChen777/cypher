@@ -4,7 +4,7 @@ use super::*;
 
 impl Transcript {
     /// Selection lifecycle callbacks for one row's text elements: a settle
-    /// shows the shared [`crate::comments::CommentPopup`] pill at the
+    /// shows the shared [`crate::comment_popup::CommentPopup`] pill at the
     /// selection endpoint, a new drag or a clear hides it. Built per-row
     /// (each row's elements carry their own key) but target the transcript
     /// entity as a whole.
@@ -12,7 +12,7 @@ impl Transcript {
         &self,
         _row_id: &SharedString,
         cx: &mut Context<Self>,
-    ) -> render::SelectionUi {
+    ) -> markdown::render::SelectionUi {
         let popup = self.comment_popup.clone();
         let entity = cx.weak_entity();
         // Copied: the scope rides the 'static callbacks (Copy), so the
@@ -25,7 +25,7 @@ impl Transcript {
         let started: crate::markdown::render::WindowHandler = Rc::new(move |_window, cx| {
             if let Some(popup) = dismiss_popup.upgrade() {
                 popup.update(cx, |popup, cx| {
-                    popup.selection_started(crate::comments::CommentOwner::Markdown(scope), cx)
+                    popup.selection_started(crate::comment_popup::CommentOwner::Markdown(scope), cx)
                 });
             }
         });
@@ -33,7 +33,7 @@ impl Transcript {
         let cleared: crate::markdown::render::WindowHandler = Rc::new(move |_window, cx| {
             if let Some(popup) = clear_popup.upgrade() {
                 popup.update(cx, |popup, cx| {
-                    popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
+                    popup.dismiss_if_owner(crate::comment_popup::CommentOwner::Markdown(scope), cx)
                 });
             }
         });
@@ -91,8 +91,8 @@ impl Transcript {
                             snapshot.text.clone(),
                             origin,
                             anchor,
-                            crate::comments::CommentOwner::Markdown(scope),
-                            Some(crate::comments::CommentHead {
+                            crate::comment_popup::CommentOwner::Markdown(scope),
+                            Some(crate::comment_popup::CommentHead {
                                 key: snapshot.head_key.clone(),
                                 ix: snapshot.head_ix,
                                 scope,
@@ -105,7 +105,7 @@ impl Transcript {
                 }
             })
         };
-        render::SelectionUi {
+        markdown::render::SelectionUi {
             on_started: started,
             on_cleared: cleared,
             on_settled: settled,
@@ -118,7 +118,7 @@ impl Transcript {
     fn dismiss_comment_ui(&mut self, cx: &mut Context<Self>) {
         if let Some(popup) = self.comment_popup.upgrade() {
             popup.update(cx, |popup, cx| {
-                popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(self.scope), cx)
+                popup.dismiss_if_owner(crate::comment_popup::CommentOwner::Markdown(self.scope), cx)
             });
         }
     }
@@ -283,7 +283,7 @@ impl Transcript {
         let Some(top) = tree.blocks.get(block_ix) else {
             return gpui::Empty.into_any_element();
         };
-        let el = render::render_block(
+        let el = markdown::render::render_block(
             &top.block,
             block_ix,
             block_ix,

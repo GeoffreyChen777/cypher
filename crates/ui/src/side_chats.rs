@@ -353,7 +353,7 @@ impl SideChatPanel {
                             .py(px(5.0))
                             .rounded(px(8.0))
                             .bg(crate::kit::theme::ink(0.035))
-                            .child(crate::comments::quote_rail(&theme))
+                            .child(crate::comment_popup::quote_rail(&theme))
                             .child(
                                 div()
                                     .flex_1()

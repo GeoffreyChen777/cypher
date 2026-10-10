@@ -811,7 +811,7 @@ fn diff_line_row(
     select: Option<(
         crate::markdown::selection::SelectionScope,
         &str,
-        &render::SelectionUi,
+        &markdown::render::SelectionUi,
     )>,
 ) -> AnyElement {
     if line.kind == LineKind::Meta {
@@ -875,7 +875,7 @@ fn diff_line_row(
             ))
     };
     let mono = theme.mono();
-    let runs = render::runs_for_syntax_line_with_plain(
+    let runs = markdown::render::runs_for_syntax_line_with_plain(
         &line.text,
         spans,
         &mono,
@@ -993,7 +993,7 @@ pub(super) fn diff_text_element(
     select: Option<(
         crate::markdown::selection::SelectionScope,
         &str,
-        &render::SelectionUi,
+        &markdown::render::SelectionUi,
     )>,
 ) -> AnyElement {
     let Some((scope, key, selection)) = select else {
@@ -1010,7 +1010,7 @@ pub(super) fn diff_text_element(
     let underlay = gpui::canvas(
         |_, _, _| (),
         move |_, _, window, _| {
-            render::paint_text_selection(
+            markdown::render::paint_text_selection(
                 window,
                 scope,
                 &sel_key,

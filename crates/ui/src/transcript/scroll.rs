@@ -1095,3 +1095,6 @@ impl Transcript {
         entry.toggled_at = Some(Instant::now());
     }
 }
+
+#[cfg(test)]
+mod tests;

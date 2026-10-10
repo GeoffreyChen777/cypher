@@ -477,7 +477,7 @@ fn a_session_leaving_the_screen_drops_the_comment_popup(cx: &mut gpui::TestAppCo
                 "quote".into(),
                 None,
                 gpui::point(px(10.0), px(10.0)),
-                crate::comments::CommentOwner::next_terminal(),
+                crate::comment_popup::CommentOwner::next_terminal(),
                 None,
                 std::rc::Rc::new(|_| {}),
                 None,

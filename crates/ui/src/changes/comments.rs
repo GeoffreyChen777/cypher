@@ -6,13 +6,13 @@ impl Changes {
     /// Selection lifecycle callbacks for the diff's code text elements: a
     /// settle shows the shared Comment pill at the selection endpoint, a new
     /// drag or a clear hides it. Built once per frame; every visible line's
-    /// key rides the SAME [`render::SelectionUi`].
+    /// key rides the SAME [`markdown::render::SelectionUi`].
     pub(super) fn selection_ui_for(
         &self,
         scope: crate::markdown::selection::SelectionScope,
         side: Option<Side>,
         cx: &mut Context<Self>,
-    ) -> render::SelectionUi {
+    ) -> markdown::render::SelectionUi {
         let popup = self.comment_popup.clone();
         let entity = cx.weak_entity();
         // A fresh drag start closes ANY surface's pill — only one floating
@@ -22,7 +22,7 @@ impl Changes {
         let started: crate::markdown::render::WindowHandler = Rc::new(move |_window, cx| {
             if let Some(popup) = dismiss_popup.upgrade() {
                 popup.update(cx, |popup, cx| {
-                    popup.selection_started(crate::comments::CommentOwner::Markdown(scope), cx)
+                    popup.selection_started(crate::comment_popup::CommentOwner::Markdown(scope), cx)
                 });
             }
         });
@@ -30,7 +30,7 @@ impl Changes {
         let cleared: crate::markdown::render::WindowHandler = Rc::new(move |_window, cx| {
             if let Some(popup) = clear_popup.upgrade() {
                 popup.update(cx, |popup, cx| {
-                    popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
+                    popup.dismiss_if_owner(crate::comment_popup::CommentOwner::Markdown(scope), cx)
                 });
             }
         });
@@ -86,8 +86,8 @@ impl Changes {
                             // Diff text is never a displayed translation.
                             None,
                             anchor,
-                            crate::comments::CommentOwner::Markdown(scope),
-                            Some(crate::comments::CommentHead {
+                            crate::comment_popup::CommentOwner::Markdown(scope),
+                            Some(crate::comment_popup::CommentHead {
                                 key: snapshot.head_key.clone(),
                                 ix: snapshot.head_ix,
                                 scope,
@@ -103,7 +103,7 @@ impl Changes {
                 }
             })
         };
-        render::SelectionUi {
+        markdown::render::SelectionUi {
             on_started: started,
             on_cleared: cleared,
             on_settled: settled,
@@ -118,7 +118,7 @@ impl Changes {
             crate::markdown::selection::clear(scope);
             if let Some(popup) = self.comment_popup.upgrade() {
                 popup.update(cx, |popup, cx| {
-                    popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
+                    popup.dismiss_if_owner(crate::comment_popup::CommentOwner::Markdown(scope), cx)
                 });
             }
         }
@@ -706,7 +706,7 @@ impl Changes {
         let scope = self.sel_scope;
         if let Some(popup) = self.comment_popup.upgrade() {
             popup.update(cx, |popup, cx| {
-                popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
+                popup.dismiss_if_owner(crate::comment_popup::CommentOwner::Markdown(scope), cx)
             });
         }
         self.ensure_fold_settle(cx);

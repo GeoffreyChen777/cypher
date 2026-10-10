@@ -41,7 +41,7 @@ use crate::history::{GitHistory, GitHistoryCount, GitHistoryEvent, GitHistoryFet
 use crate::kit::motion::{self, AnimationExt as _, CHEVRON, COLLAPSE};
 use crate::kit::popover::{self, Popup};
 use crate::kit::theme::{MonoStyled, Theme};
-use crate::markdown::render;
+use crate::markdown;
 use crate::state::{AppState, EngineHandle};
 use cypher_syntax::LanguageId as Lang;
 
@@ -53,9 +53,9 @@ pub use resolution::*;
 mod rows;
 pub use rows::*;
 mod comments;
-mod rendering;
+mod render;
 use layout::{DiffLayout, Side};
-pub use rendering::*;
+pub use render::*;
 
 // ---------------------------------------------------------------------------
 // Layout numbers (analytic — they drive the fold tween)
@@ -215,7 +215,7 @@ pub struct Changes {
     /// hidden or background pane never affects the active one.
     sel_scope: crate::markdown::selection::SelectionScope,
     /// The shared shell-level Comment pill/editor (weak — the shell owns it).
-    comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+    comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
     _observe: Subscription,
     _layout_observe: Subscription,
 }
@@ -414,7 +414,7 @@ impl Changes {
             .map(|h| h.spans_for_side(line, side))
             .unwrap_or(&[]);
         let mono = theme.mono();
-        let runs = render::runs_for_syntax_line_with_plain(
+        let runs = markdown::render::runs_for_syntax_line_with_plain(
             &line.text,
             spans,
             &mono,
@@ -476,7 +476,7 @@ impl Changes {
 
     pub fn new(
         state: Entity<AppState>,
-        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+        comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
         cx: &mut Context<Self>,
     ) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
@@ -504,7 +504,10 @@ impl Changes {
             for scope in scopes {
                 if let Some(popup) = scroll_popup.upgrade() {
                     popup.update(cx, |popup, cx| {
-                        popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
+                        popup.dismiss_if_owner(
+                            crate::comment_popup::CommentOwner::Markdown(scope),
+                            cx,
+                        )
                     });
                 }
                 crate::markdown::selection::clear(scope);
@@ -663,7 +666,7 @@ impl Changes {
     /// `parent vs commit` once and never offers the scope menu.
     pub fn for_commit(
         state: Entity<AppState>,
-        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+        comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
         commit: GitHistoryCommit,
         cx: &mut Context<Self>,
     ) -> Self {

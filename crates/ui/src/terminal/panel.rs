@@ -284,17 +284,17 @@ pub struct TerminalPanel {
     /// The shared shell-level Comment pill/editor (weak — the shell owns it):
     /// a settled terminal selection offers its text; scroll/tab/close/chat/
     /// resize/output dismiss it.
-    comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+    comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
     /// THIS panel's popup owner id — allocated per panel so the panels of
     /// different session tiles never dismiss each other's pill.
-    comment_owner: crate::comments::CommentOwner,
+    comment_owner: crate::comment_popup::CommentOwner,
     _observe: Subscription,
 }
 
 impl TerminalPanel {
     pub fn new(
         state: Entity<AppState>,
-        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+        comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
         cx: &mut Context<Self>,
     ) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
@@ -309,7 +309,7 @@ impl TerminalPanel {
             geometry: None,
             selection_drag: None,
             comment_popup,
-            comment_owner: crate::comments::CommentOwner::next_terminal(),
+            comment_owner: crate::comment_popup::CommentOwner::next_terminal(),
             _observe: observe,
         }
     }

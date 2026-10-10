@@ -1186,7 +1186,7 @@ pub struct Shell {
     /// Shared floating Comment pill/editor: rendered above every
     /// clipped surface; surfaces (transcript, diff panes, terminals) drive
     /// it through the weak handles they hold.
-    comment_popup: Entity<crate::comments::CommentPopup>,
+    comment_popup: Entity<crate::comment_popup::CommentPopup>,
     /// CommentPopup → composer comment forwarding (subscribed ONCE).
     _comment_popup_events: Subscription,
     /// The project a project window is dedicated to; `None` in the main
@@ -1316,7 +1316,7 @@ impl Shell {
         });
         // The shared comment popup is created FIRST so every surface can
         // hold a weak handle to it.
-        let comment_popup = cx.new(crate::comments::CommentPopup::new);
+        let comment_popup = cx.new(crate::comment_popup::CommentPopup::new);
         if main_window {
             crate::prefs::slash_commands::publish_shown(Vec::new(), cx);
         }
@@ -1330,51 +1330,53 @@ impl Shell {
         // settled (each surface captured it); the composer's guard still
         // drops a comment whose chat is no longer selected.
         let comment_popup_events = cx.subscribe(&comment_popup, {
-            move |this: &mut Shell, _, event: &crate::comments::CommentPopupEvent, cx| match event {
-                crate::comments::CommentPopupEvent::CommentSaved {
-                    chat_id,
-                    quote,
-                    origin,
-                    comment,
-                } => {
-                    let Some(composer) = this
-                        .slot_for_chat(chat_id, cx)
-                        .and_then(|sid| this.slots.get(&sid))
-                        .map(|slot| slot.composer.clone())
-                    else {
-                        return;
-                    };
-                    composer.update(cx, |composer, cx| {
-                        composer.add_comment(
+            move |this: &mut Shell, _, event: &crate::comment_popup::CommentPopupEvent, cx| {
+                match event {
+                    crate::comment_popup::CommentPopupEvent::CommentSaved {
+                        chat_id,
+                        quote,
+                        origin,
+                        comment,
+                    } => {
+                        let Some(composer) = this
+                            .slot_for_chat(chat_id, cx)
+                            .and_then(|sid| this.slots.get(&sid))
+                            .map(|slot| slot.composer.clone())
+                        else {
+                            return;
+                        };
+                        composer.update(cx, |composer, cx| {
+                            composer.add_comment(
+                                chat_id.clone(),
+                                quote.clone(),
+                                origin.clone(),
+                                comment.clone(),
+                                cx,
+                            )
+                        });
+                    }
+                    crate::comment_popup::CommentPopupEvent::SideChatRequested {
+                        chat_id,
+                        source,
+                        selected_text,
+                        origin,
+                    } => {
+                        // Open a temporary Side Chat from the settled
+                        // selection (the shell owns the StartSideChat call and
+                        // the dock tab). The selected quote rides along so the
+                        // engine validates + injects it on the first send.
+                        let Some(sid) = this.slot_for_chat(chat_id, cx) else {
+                            return;
+                        };
+                        this.open_side_chat(
+                            sid,
                             chat_id.clone(),
-                            quote.clone(),
+                            source.clone(),
+                            selected_text.clone(),
                             origin.clone(),
-                            comment.clone(),
                             cx,
-                        )
-                    });
-                }
-                crate::comments::CommentPopupEvent::SideChatRequested {
-                    chat_id,
-                    source,
-                    selected_text,
-                    origin,
-                } => {
-                    // Open a temporary Side Chat from the settled
-                    // selection (the shell owns the StartSideChat call and
-                    // the dock tab). The selected quote rides along so the
-                    // engine validates + injects it on the first send.
-                    let Some(sid) = this.slot_for_chat(chat_id, cx) else {
-                        return;
-                    };
-                    this.open_side_chat(
-                        sid,
-                        chat_id.clone(),
-                        source.clone(),
-                        selected_text.clone(),
-                        origin.clone(),
-                        cx,
-                    );
+                        );
+                    }
                 }
             }
         });

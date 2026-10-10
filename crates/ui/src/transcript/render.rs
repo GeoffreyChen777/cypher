@@ -876,14 +876,14 @@ impl Transcript {
         cx.notify();
     }
 
-    /// Copy-button wiring for one row's code blocks ([`render::CopyUi`]):
+    /// Copy-button wiring for one row's code blocks ([`markdown::render::CopyUi`]):
     /// click writes the block's code to the clipboard and shows a transient
     /// "Copied" check on that block for ~1.2s (overlay — no layout shift).
     pub(super) fn copy_ui_for(
         &self,
         row_id: &SharedString,
         cx: &mut Context<Self>,
-    ) -> render::CopyUi {
+    ) -> markdown::render::CopyUi {
         let copied_ix = self
             .copied_code
             .as_ref()
@@ -913,7 +913,7 @@ impl Transcript {
                     })
                     .ok();
             });
-        render::CopyUi { handler, copied_ix }
+        markdown::render::CopyUi { handler, copied_ix }
     }
 }
 
@@ -938,7 +938,7 @@ fn user_bubble_text(
     mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
     theme: &Theme,
     scope: crate::markdown::selection::SelectionScope,
-    selection: Option<render::SelectionUi>,
+    selection: Option<markdown::render::SelectionUi>,
 ) -> AnyElement {
     // Split runs at chip boundaries (spans are in order): body text keeps the
     // sans font, chips read as inline code. Size/line-height flow from the
@@ -984,12 +984,12 @@ fn user_bubble_text(
         crate::markdown::selection::row_of_key(&sel_key),
         &text,
     );
-    let find_washes = render::find_wash(theme);
+    let find_washes = markdown::render::find_wash(theme);
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, _| {
             for span in mentions.iter() {
-                for rect in render::range_rects(&layout, &span.range, 0.0, 2.0) {
+                for rect in markdown::render::range_rects(&layout, &span.range, 0.0, 2.0) {
                     window.paint_quad(quad(
                         rect,
                         px(5.0),
@@ -1000,8 +1000,8 @@ fn user_bubble_text(
                     ));
                 }
             }
-            render::paint_find_hits(window, &layout, &find_hits, find_washes);
-            render::paint_text_selection(
+            markdown::render::paint_find_hits(window, &layout, &find_hits, find_washes);
+            markdown::render::paint_text_selection(
                 window, scope, &sel_key, &text, &layout, &sel_theme, selection,
             );
         },

@@ -47,8 +47,11 @@ use crate::kit::motion::{self, AnimationExt as _, RESIZE};
 use crate::kit::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::kit::theme::{MonoStyled, Theme};
 use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
-use crate::markdown::render::{self, RenderCache, RenderOptions};
 use crate::markdown::veil::RowVeil;
+use crate::markdown::{
+    self,
+    render::{RenderCache, RenderOptions},
+};
 use crate::state::AppState;
 use cypher_syntax::LanguageId as Lang;
 mod spring;
@@ -62,9 +65,9 @@ use highlight::*;
 mod attachments;
 mod find;
 pub mod rail;
-mod rendering;
+mod render;
 mod scroll;
-use rendering::*;
+use render::*;
 mod comments;
 
 /// Key context of a transcript holding focus (a click into the chat history).
@@ -175,7 +178,7 @@ struct OwnTurnAnchor {
 }
 
 /// The transcript is a pure viewer now — comments live in the shared
-/// [`crate::comments::CommentPopup`] (shell-rendered, shell-subscribed), so
+/// [`crate::comment_popup::CommentPopup`] (shell-rendered, shell-subscribed), so
 /// the transcript no longer emits events of its own.
 pub struct Transcript {
     state: Entity<AppState>,
@@ -321,7 +324,7 @@ pub struct Transcript {
     blob_fetch_counter: u64,
     /// The shared shell-level Comment pill/editor. Weak: the
     /// shell owns it; the transcript only ever drives and reads it.
-    comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+    comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
     /// In-flight Session Forks, keyed `(chat id, anchor message id)`: while
     /// an entry's fork RPC is pending its affordance shows a spinner and is
     /// inert (double-click guard). The shell begins/ends these around the
@@ -397,7 +400,7 @@ enum BlobFetch {
 impl Transcript {
     pub fn new(
         state: Entity<AppState>,
-        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+        comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::with_options(
@@ -429,7 +432,7 @@ impl Transcript {
 
     fn with_options(
         state: Entity<AppState>,
-        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+        comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
         scope: crate::markdown::selection::SelectionScope,
         rail_enabled: bool,
         embedded: bool,
@@ -527,9 +530,6 @@ impl Transcript {
         this
     }
 }
-
-#[cfg(test)]
-mod scroll_tests;
 
 #[cfg(test)]
 mod tests;
