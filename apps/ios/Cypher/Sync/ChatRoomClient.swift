@@ -84,8 +84,10 @@ actor ChatRoomClient {
     private let pushRequest: @Sendable (String) async -> URLRequest?
     private let delegate: Delegate
     private let previewEnabled: Bool
+    private let transport: any WebSocketTransport
+    private let clock: any RoomClock
 
-    private var socket: URLSessionWebSocketTask?
+    private var socket: (any WebSocketConnection)?
     private var receiveTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
     private var livenessTask: Task<Void, Never>?
@@ -109,12 +111,12 @@ actor ChatRoomClient {
     private var gapRepair = false
     private var gapRepairs = 0
     /// Transport clock — pongs count, so a healthy socket never trips it.
-    private var lastInbound = DispatchTime.now()
+    private var lastInbound: UInt64
     /// Protocol clock — only real frames count (pongs prove nothing).
-    private var lastProtocolRx = DispatchTime.now()
-    private var helloSentAt: DispatchTime?
-    private var backfillStartedAt: DispatchTime?
-    private var probeSentAt: DispatchTime?
+    private var lastProtocolRx: UInt64
+    private var helloSentAt: UInt64?
+    private var backfillStartedAt: UInt64?
+    private var probeSentAt: UInt64?
 
     init(chatId: String,
          device: String,
@@ -122,7 +124,9 @@ actor ChatRoomClient {
          checkpointRequest: @escaping @Sendable () async -> URLRequest?,
          rowsRequest: @escaping @Sendable (UInt64) async -> URLRequest?,
          pushRequest: @escaping @Sendable (String) async -> URLRequest?,
-         delegate: Delegate, previewEnabled: Bool = false) {
+         delegate: Delegate, previewEnabled: Bool = false,
+         transport: any WebSocketTransport = URLSessionWebSocketTransport(),
+         clock: any RoomClock = SystemRoomClock()) {
         self.chatId = chatId
         self.device = device
         self.urlProvider = urlProvider
@@ -131,6 +135,10 @@ actor ChatRoomClient {
         self.pushRequest = pushRequest
         self.delegate = delegate
         self.previewEnabled = previewEnabled
+        self.transport = transport
+        self.clock = clock
+        lastInbound = clock.now()
+        lastProtocolRx = clock.now()
     }
 
     // MARK: Lifecycle
@@ -139,10 +147,10 @@ actor ChatRoomClient {
         closed = false
         connect()
         pullTask?.cancel()
-        pullTask = Task { [weak self] in
+        pullTask = Task { [weak self, clock] in
             await self?.pullSync()
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: ChatRoomClient.httpPollNs)
+                await clock.sleep(nanoseconds: ChatRoomClient.httpPollNs)
                 guard let self, !Task.isCancelled else { return }
                 if await self.shouldPoll() {
                     await self.pullSync()
@@ -338,7 +346,7 @@ actor ChatRoomClient {
         probeSentAt = nil
         gapRepair = false
         gapRepairs = 0
-        lastProtocolRx = .now()
+        lastProtocolRx = clock.now()
         for ix in pending.indices {
             pending[ix].inFlight = false
         }
@@ -361,11 +369,9 @@ actor ChatRoomClient {
         guard gen == generation, !closed else { return }
         var request = URLRequest(url: url)
         if previewEnabled { request.setValue(StreamPreviewWire.capability, forHTTPHeaderField: "x-cypher-preview-capability") }
-        let task = URLSession.shared.webSocketTask(with: request)
-        socket = task
-        task.resume()
-        lastInbound = .now()
-        lastProtocolRx = .now()
+        socket = transport.open(request)
+        lastInbound = clock.now()
+        lastProtocolRx = clock.now()
 
         receiveTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -381,17 +387,17 @@ actor ChatRoomClient {
             }
         }
 
-        pingTask = Task { [weak self] in
+        pingTask = Task { [weak self, clock] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: ChatRoomClient.pingIntervalNs)
+                await clock.sleep(nanoseconds: ChatRoomClient.pingIntervalNs)
                 guard let self else { return }
                 await self.pingTick(gen: gen)
             }
         }
 
-        livenessTask = Task { [weak self] in
+        livenessTask = Task { [weak self, clock] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: ChatRoomClient.livenessTickNs)
+                await clock.sleep(nanoseconds: ChatRoomClient.livenessTickNs)
                 guard let self else { return }
                 await self.livenessTick(gen: gen)
             }
@@ -399,13 +405,13 @@ actor ChatRoomClient {
 
         // Hello with the persisted cursor. The deadline is armed BEFORE the
         // send — an unanswered hello must never hang the session.
-        helloSentAt = .now()
+        helloSentAt = clock.now()
         let cursor = await delegate.cursor()
         await send(ChatWire.encode(ChatFrameType.hello,
                                    header: ["cursor": cursor, "device": device]))
     }
 
-    private func currentSocket(gen: Int) -> URLSessionWebSocketTask? {
+    private func currentSocket(gen: Int) -> (any WebSocketConnection)? {
         gen == generation ? socket : nil
     }
 
@@ -425,8 +431,8 @@ actor ChatRoomClient {
         cancelTasks()
         let delay = backoffMs
         backoffMs = min(backoffMs * 2, ChatRoomClient.backoffCapMs)
-        Task {
-            try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
+        Task { [clock] in
+            await clock.sleep(nanoseconds: UInt64(delay) * 1_000_000)
             await self.connect()
         }
     }
@@ -435,7 +441,7 @@ actor ChatRoomClient {
 
     private func pingTick(gen: Int) async {
         guard gen == generation, let socket else { return }
-        let silence = DispatchTime.now().uptimeNanoseconds - lastInbound.uptimeNanoseconds
+        let silence = clock.now() - lastInbound
         if silence > ChatRoomClient.silenceLeaseNs {
             roomLog.warning("chat2 \(self.chatId, privacy: .public): socket silent past lease; treating as dead")
             await onSocketError(gen: gen)
@@ -451,35 +457,35 @@ actor ChatRoomClient {
     private func livenessTick(gen: Int) async {
         guard gen == generation, socket != nil, !closed else { return }
         if previewEnabled, let frame = await delegate.previewRetry() { await send(frame) }
-        let now = DispatchTime.now().uptimeNanoseconds
-        if let sent = helloSentAt, now - sent.uptimeNanoseconds > ChatRoomClient.helloDeadlineNs {
+        let now = clock.now()
+        if let sent = helloSentAt, now - sent > ChatRoomClient.helloDeadlineNs {
             roomLog.warning("chat2 \(self.chatId, privacy: .public): no state frame within deadline; room presumed wedged, redialing")
             await onSocketError(gen: gen)
             return
         }
         if let started = backfillStartedAt,
-           now - started.uptimeNanoseconds > ChatRoomClient.backfillDeadlineNs {
+           now - started > ChatRoomClient.backfillDeadlineNs {
             roomLog.warning("chat2 \(self.chatId, privacy: .public): backfill did not complete within deadline; redialing")
             await onSocketError(gen: gen)
             return
         }
-        if let sent = probeSentAt, now - sent.uptimeNanoseconds > ChatRoomClient.probeDeadlineNs {
+        if let sent = probeSentAt, now - sent > ChatRoomClient.probeDeadlineNs {
             roomLog.warning("chat2 \(self.chatId, privacy: .public): probe unanswered past deadline; redialing")
             await onSocketError(gen: gen)
             return
         }
         if joined, probeSentAt == nil,
-           now - lastProtocolRx.uptimeNanoseconds > ChatRoomClient.probeQuietNs {
+           now - lastProtocolRx > ChatRoomClient.probeQuietNs {
             await sendProbe()
             // Don't re-arm the quiet timer against the same silence.
-            lastProtocolRx = .now()
+            lastProtocolRx = clock.now()
         }
     }
 
     private func sendProbe() async {
         // Armed BEFORE the send suspends — the actor is reentrant across the
         // await, and the answer must find the deadline already set.
-        probeSentAt = .now()
+        probeSentAt = clock.now()
         await send(ChatWire.encode(ChatFrameType.probe, header: [:]))
     }
 
@@ -487,7 +493,7 @@ actor ChatRoomClient {
 
     private func handleInbound(_ message: URLSessionWebSocketTask.Message, gen: Int) async {
         guard gen == generation else { return }
-        lastInbound = .now()
+        lastInbound = clock.now()
         guard case .data(let data) = message else { return }  // "pong" text
         if previewEnabled, let first = data.first, (0x20...0x26).contains(first) {
             for reply in await delegate.preview(data) { await send(reply) }
@@ -504,7 +510,7 @@ actor ChatRoomClient {
            code.hasPrefix("preview_") || code.hasPrefix("bad_preview_") {
             return // A late receipt/Resume error cannot revoke a newer grant or satisfy a durable probe.
         }
-        lastProtocolRx = .now()
+        lastProtocolRx = clock.now()
         probeSentAt = nil
 
         switch frame.kind {
@@ -580,7 +586,7 @@ actor ChatRoomClient {
         }
         guard helloSentAt != nil else { return }  // late duplicate — ignore
         helloSentAt = nil
-        backfillStartedAt = .now()
+        backfillStartedAt = clock.now()
 
         let cursor = await delegate.cursor()
         if cursor > state.headSeq {
@@ -672,8 +678,8 @@ actor ChatRoomClient {
                 pending[ix].inFlight = false
             }
             quotaTask?.cancel()
-            quotaTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: ChatRoomClient.quotaRetryNs)
+            quotaTask = Task { [weak self, clock] in
+                await clock.sleep(nanoseconds: ChatRoomClient.quotaRetryNs)
                 guard !Task.isCancelled, let self else { return }
                 await self.pushHead(gen: gen)
             }

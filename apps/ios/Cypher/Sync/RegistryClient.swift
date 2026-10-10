@@ -70,8 +70,10 @@ actor RegistryClient {
     private let rowsRequest: @Sendable (UInt64?) async -> URLRequest?
     private let pushRequest: @Sendable () async -> URLRequest?
     private let delegate: Delegate
+    private let transport: any WebSocketTransport
+    private let clock: any RoomClock
 
-    private var socket: URLSessionWebSocketTask?
+    private var socket: (any WebSocketConnection)?
     private var receiveTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
     private var presenceTask: Task<Void, Never>?
@@ -82,11 +84,11 @@ actor RegistryClient {
     private var generation = 0
     private var backoffMs = RegistryClient.backoffBaseMs
     /// Transport clock — pongs count, so a healthy socket never trips it.
-    private var lastInbound = DispatchTime.now()
+    private var lastInbound: UInt64
     /// Protocol clock — only real frames count (pongs prove nothing).
-    private var lastProtocolRx = DispatchTime.now()
-    private var helloSentAt: DispatchTime?
-    private var probeSentAt: DispatchTime?
+    private var lastProtocolRx: UInt64
+    private var helloSentAt: UInt64?
+    private var probeSentAt: UInt64?
 
     private struct HTTPPull: Decodable {
         let seq: UInt64
@@ -110,12 +112,18 @@ actor RegistryClient {
          urlProvider: @escaping @Sendable () async -> URL?,
          rowsRequest: @escaping @Sendable (UInt64?) async -> URLRequest?,
          pushRequest: @escaping @Sendable () async -> URLRequest?,
-         delegate: Delegate) {
+         delegate: Delegate,
+         transport: any WebSocketTransport = URLSessionWebSocketTransport(),
+         clock: any RoomClock = SystemRoomClock()) {
         self.device = device
         self.urlProvider = urlProvider
         self.rowsRequest = rowsRequest
         self.pushRequest = pushRequest
         self.delegate = delegate
+        self.transport = transport
+        self.clock = clock
+        lastInbound = clock.now()
+        lastProtocolRx = clock.now()
     }
 
     // MARK: Lifecycle
@@ -124,10 +132,10 @@ actor RegistryClient {
         closed = false
         connect()
         pullTask?.cancel()
-        pullTask = Task { [weak self] in
+        pullTask = Task { [weak self, clock] in
             await self?.pullSync()
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: RegistryClient.httpPollNs)
+                await clock.sleep(nanoseconds: RegistryClient.httpPollNs)
                 guard let self, !Task.isCancelled else { return }
                 if await self.shouldPoll() { await self.pullSync() }
             }
@@ -228,7 +236,7 @@ actor RegistryClient {
         joined = false
         helloSentAt = nil
         probeSentAt = nil
-        lastProtocolRx = .now()
+        lastProtocolRx = clock.now()
 
         Task {
             guard let url = await urlProvider() else {
@@ -245,11 +253,9 @@ actor RegistryClient {
 
     private func openSocket(url: URL, gen: Int) async {
         guard gen == generation, !closed else { return }
-        let task = URLSession.shared.webSocketTask(with: url)
-        socket = task
-        task.resume()
-        lastInbound = .now()
-        lastProtocolRx = .now()
+        socket = transport.open(URLRequest(url: url))
+        lastInbound = clock.now()
+        lastProtocolRx = clock.now()
 
         receiveTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -265,25 +271,25 @@ actor RegistryClient {
             }
         }
 
-        pingTask = Task { [weak self] in
+        pingTask = Task { [weak self, clock] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: RegistryClient.pingIntervalNs)
+                await clock.sleep(nanoseconds: RegistryClient.pingIntervalNs)
                 guard let self else { return }
                 await self.pingTick(gen: gen)
             }
         }
 
-        presenceTask = Task { [weak self] in
+        presenceTask = Task { [weak self, clock] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: RegistryClient.presenceIntervalNs)
+                await clock.sleep(nanoseconds: RegistryClient.presenceIntervalNs)
                 guard let self else { return }
                 await self.presenceTick(gen: gen)
             }
         }
 
-        livenessTask = Task { [weak self] in
+        livenessTask = Task { [weak self, clock] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: RegistryClient.livenessTickNs)
+                await clock.sleep(nanoseconds: RegistryClient.livenessTickNs)
                 guard let self else { return }
                 await self.livenessTick(gen: gen)
             }
@@ -292,12 +298,12 @@ actor RegistryClient {
         // Hello with the persisted cursor (nil asks for full state). The
         // deadline is armed BEFORE the send — an unanswered hello must never
         // hang the session.
-        helloSentAt = .now()
+        helloSentAt = clock.now()
         let cursor = await delegate.helloCursor()
         await send(HelloFrame(cursor: cursor, device: device))
     }
 
-    private func currentSocket(gen: Int) -> URLSessionWebSocketTask? {
+    private func currentSocket(gen: Int) -> (any WebSocketConnection)? {
         gen == generation ? socket : nil
     }
 
@@ -316,8 +322,8 @@ actor RegistryClient {
         cancelTasks()
         let delay = backoffMs
         backoffMs = min(backoffMs * 2, RegistryClient.backoffCapMs)
-        Task {
-            try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
+        Task { [clock] in
+            await clock.sleep(nanoseconds: UInt64(delay) * 1_000_000)
             await self.connect()
         }
     }
@@ -326,7 +332,7 @@ actor RegistryClient {
 
     private func pingTick(gen: Int) async {
         guard gen == generation, let socket else { return }
-        let silence = DispatchTime.now().uptimeNanoseconds - lastInbound.uptimeNanoseconds
+        let silence = clock.now() - lastInbound
         if silence > RegistryClient.silenceLeaseNs {
             roomLog.warning("registry: socket silent past lease; treating as dead")
             await onSocketError(gen: gen)
@@ -344,29 +350,29 @@ actor RegistryClient {
     /// joined room gets a probe. Any protocol frame clears both deadlines.
     private func livenessTick(gen: Int) async {
         guard gen == generation, socket != nil, !closed else { return }
-        let now = DispatchTime.now().uptimeNanoseconds
-        if let sent = helloSentAt, now - sent.uptimeNanoseconds > RegistryClient.helloDeadlineNs {
+        let now = clock.now()
+        if let sent = helloSentAt, now - sent > RegistryClient.helloDeadlineNs {
             roomLog.warning("registry: no state frame within deadline; room presumed wedged, redialing")
             await onSocketError(gen: gen)
             return
         }
-        if let sent = probeSentAt, now - sent.uptimeNanoseconds > RegistryClient.probeDeadlineNs {
+        if let sent = probeSentAt, now - sent > RegistryClient.probeDeadlineNs {
             roomLog.warning("registry: probe unanswered past deadline; redialing")
             await onSocketError(gen: gen)
             return
         }
         if joined, probeSentAt == nil, helloSentAt == nil,
-           now - lastProtocolRx.uptimeNanoseconds > RegistryClient.probeQuietNs {
+           now - lastProtocolRx > RegistryClient.probeQuietNs {
             await sendProbe()
             // Don't re-arm the quiet timer against the same silence.
-            lastProtocolRx = .now()
+            lastProtocolRx = clock.now()
         }
     }
 
     private func sendProbe() async {
         // Armed BEFORE the send suspends — the actor is reentrant across the
         // await, and the answer must find the deadline already set.
-        probeSentAt = .now()
+        probeSentAt = clock.now()
         await send(ProbeFrame())
     }
 
@@ -374,7 +380,7 @@ actor RegistryClient {
 
     private func handleInbound(_ message: URLSessionWebSocketTask.Message, gen: Int) async {
         guard gen == generation else { return }
-        lastInbound = .now()
+        lastInbound = clock.now()
         guard case .string(let text) = message else { return }
         if text == "pong" { return }  // transport lease refreshed; proves nothing
         let frame: ServerFrame
@@ -387,7 +393,7 @@ actor RegistryClient {
             await onSocketError(gen: gen)
             return
         }
-        lastProtocolRx = .now()
+        lastProtocolRx = clock.now()
         probeSentAt = nil
 
         switch frame {
