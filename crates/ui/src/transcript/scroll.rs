@@ -866,151 +866,29 @@ impl Transcript {
 
         let attached = selected != self.chat_id;
         if attached {
-            self.copied_message = None;
-            self.copied_message_clear = None;
-            let keep_own_turn = self
-                .own_turn
-                .as_ref()
-                .is_some_and(|anchor| selected.as_deref() == Some(anchor.chat_id.as_str()));
-            if !keep_own_turn {
-                self.own_turn = None;
-                self.own_turn_kick = false;
-            }
-            // Switching chats discards the transient comment pill/selection.
-            self.dismiss_comment_ui_and_selection(cx);
-            // … and the find bar with them: its matches, its counter and its
-            // query all belonged to the transcript being left behind.
-            self.find = None;
-            crate::markdown::find::clear(self.scope);
-            self.chat_id = selected;
-            self.rows.clear();
-            self.row_cache.clear();
-            self.live_parsers.clear();
-            self.tree_cache.clear();
-            self.folds.clear();
-            self.tool_overflow.clear();
-            self.toggle_pins.clear();
-            self.veils.clear();
-            self.render_cache.borrow_mut().clear();
-            self.highlights.entries.clear();
-            self.list.reset(0);
-            // A kept own-turn hold (send-created chat) owns the viewport;
-            // otherwise the fresh attach pins to the bottom.
-            self.pinned = self.own_turn.is_none();
-            self.spring.reset();
-            self.spring_last_tick = None;
-            self.spring_settled_at = None;
-            self.spring_kick = false;
-            self.show_jump_button = false;
+            self.reset_for_attach(selected, cx);
         }
 
-        let mut new_rows: Vec<Row> = Vec::new();
-        let mut after_slash_command = false;
-        for entry in &entries {
-            if entry.role == MessageRole::User {
-                after_slash_command = user_entry_is_slash_command(entry);
-            }
-            let mut rows = self.rows_for(entry, false, steers.contains(&entry.id));
-            if after_slash_command && entry.role != MessageRole::User {
-                rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
-            }
-            rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id.as_deref()));
-            fold_closed_toggles(&mut rows, &self.toggle_pins);
-            cap_work_runs(&mut rows, tool_call_limit, &self.tool_overflow);
-            new_rows.extend(rows);
-        }
-        for (echo, pending) in &echoes {
-            if echo.role == MessageRole::User {
-                after_slash_command = user_entry_is_slash_command(echo);
-            }
-            let mut rows = self.rows_for(echo, *pending, steers.contains(&echo.id));
-            if after_slash_command && echo.role != MessageRole::User {
-                rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
-            }
-            rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id.as_deref()));
-            new_rows.extend(rows);
-        }
+        let new_rows = self.build_rows(
+            &entries,
+            &echoes,
+            &steers,
+            pending_request_id.as_deref(),
+            tool_call_limit,
+        );
 
-        // Text already streamed before this (re)attach is the veil BASELINE:
-        // its rows' veils seed instead of fading (render creates them from
-        // this set), so only post-switch appends animate. Captured from the
-        // first NON-EMPTY transcript after attach — the replay frame — never
-        // the attach-time sync, whose transcript is still empty (selection
-        // clears it; the doc watch refills it async).
-        if attached {
-            self.veil_baseline.clear();
-            self.veil_attach_pending = true;
-        }
-        if self.veil_attach_pending && !entries.is_empty() {
-            self.veil_attach_pending = false;
-            self.veil_baseline = new_rows
-                .iter()
-                .filter(|r| is_live_markdown(&r.kind))
-                .map(|r| r.id.clone())
-                .collect();
-        }
-
-        // Veils live exactly as long as their live row — drop them on the
-        // live→complete flip (any mid-fade chunk snaps to full, matching the
-        // row's version splice).
-        self.veils.retain(|id, _| {
-            new_rows
-                .iter()
-                .any(|r| &r.id == id && is_live_markdown(&r.kind))
-        });
-        self.veil_baseline.retain(|id| {
-            new_rows
-                .iter()
-                .any(|r| &r.id == id && is_live_markdown(&r.kind))
-        });
+        self.update_veils(attached, entries.is_empty(), &new_rows);
 
         let was_empty = self.rows.is_empty();
         let old_last = self.rows.len().checked_sub(1);
-        match diff_rows(&self.rows, &new_rows) {
-            None => {
-                // Identical ids AND versions: every row's match count is
-                // already indexed (the memo is keyed on exactly that pair).
-                self.rows = new_rows;
-                self.refresh_protected_attachments(cx);
-                return;
-            }
-            Some((old_range, count)) => {
-                // A doc commit replaced rows: the shared popup's offer anchors
-                // to a replaced row's text — dismiss it (its quote may have
-                // streamed/changed under the selection).
-                if let Some(popup) = self.comment_popup.upgrade()
-                    && popup.read(cx).is_active()
-                    && let Some(row) = popup.read(cx).offer_row().map(str::to_owned)
-                    && self.rows[old_range.clone()]
-                        .iter()
-                        .any(|r| r.id.as_ref() == row)
-                {
-                    self.dismiss_comment_ui_and_selection(cx);
-                }
-                // Any replaced row's cached flatten results are stale — and
-                // because live replies splice only the rows whose content hash
-                // changed (the tail), this is O(changed rows) per commit, never
-                // O(reply).
-                for row in &self.rows[old_range.clone()] {
-                    self.render_cache.borrow_mut().invalidate_row(&row.id);
-                }
-                if old_range.len() == count {
-                    // In-place content change, same row count — notably the
-                    // live→complete flip, where EVERY row of the streamed
-                    // message changes version (streaming bit, tool auto_open,
-                    // timestamp bit) with identical ids. `splice` would reset
-                    // those items to hint-less Unmeasured (heights read 0
-                    // until the next paint) and, when the viewport-top item is
-                    // inside the range, clobber the scroll anchor to the range
-                    // start — the end-of-turn up/down jump the spring then has
-                    // to walk back. `remeasure_items` keeps old sizes as hints
-                    // and holds the anchor across the remeasure.
-                    self.list.remeasure_items(old_range);
-                } else {
-                    self.list.splice(old_range, count);
-                }
-            }
-        }
+        let Some((old_range, count)) = diff_rows(&self.rows, &new_rows) else {
+            // Identical ids AND versions: every row's match count is
+            // already indexed (the memo is keyed on exactly that pair).
+            self.rows = new_rows;
+            self.refresh_protected_attachments(cx);
+            return;
+        };
+        self.splice_changed_rows(old_range, count, cx);
         self.rows = new_rows;
         self.refresh_protected_attachments(cx);
         // Rows moved: re-derive the find counts (memoized per row version, so
@@ -1042,6 +920,167 @@ impl Transcript {
             self.spring_kick = true;
         }
         cx.notify();
+    }
+
+    /// A different chat attached: drop everything that belonged to the one
+    /// being left (rows, caches, folds, find, the comment UI) and re-pin.
+    fn reset_for_attach(&mut self, selected: Option<String>, cx: &mut Context<Self>) {
+        self.copied_message = None;
+        self.copied_message_clear = None;
+        let keep_own_turn = self
+            .own_turn
+            .as_ref()
+            .is_some_and(|anchor| selected.as_deref() == Some(anchor.chat_id.as_str()));
+        if !keep_own_turn {
+            self.own_turn = None;
+            self.own_turn_kick = false;
+        }
+        // Switching chats discards the transient comment pill/selection.
+        self.dismiss_comment_ui_and_selection(cx);
+        // … and the find bar with them: its matches, its counter and its
+        // query all belonged to the transcript being left behind.
+        self.find = None;
+        crate::markdown::find::clear(self.scope);
+        self.chat_id = selected;
+        self.rows.clear();
+        self.row_cache.clear();
+        self.live_parsers.clear();
+        self.tree_cache.clear();
+        self.folds.clear();
+        self.tool_overflow.clear();
+        self.toggle_pins.clear();
+        self.veils.clear();
+        self.render_cache.borrow_mut().clear();
+        self.highlights.entries.clear();
+        self.list.reset(0);
+        // A kept own-turn hold (send-created chat) owns the viewport;
+        // otherwise the fresh attach pins to the bottom.
+        self.pinned = self.own_turn.is_none();
+        self.spring.reset();
+        self.spring_last_tick = None;
+        self.spring_settled_at = None;
+        self.spring_kick = false;
+        self.show_jump_button = false;
+    }
+
+    /// The rows for the confirmed entries then the pending echoes, with
+    /// slash-command input chips and pending-question mirrors filtered out.
+    fn build_rows(
+        &mut self,
+        entries: &[SessionMessageEntry],
+        echoes: &[(SessionMessageEntry, bool)],
+        steers: &std::collections::HashSet<String>,
+        pending_request_id: Option<&str>,
+        tool_call_limit: u32,
+    ) -> Vec<Row> {
+        let mut new_rows: Vec<Row> = Vec::new();
+        let mut after_slash_command = false;
+        for entry in entries {
+            if entry.role == MessageRole::User {
+                after_slash_command = user_entry_is_slash_command(entry);
+            }
+            let mut rows = self.rows_for(entry, false, steers.contains(&entry.id));
+            if after_slash_command && entry.role != MessageRole::User {
+                rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
+            }
+            rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id));
+            fold_closed_toggles(&mut rows, &self.toggle_pins);
+            cap_work_runs(&mut rows, tool_call_limit, &self.tool_overflow);
+            new_rows.extend(rows);
+        }
+        for (echo, pending) in echoes {
+            if echo.role == MessageRole::User {
+                after_slash_command = user_entry_is_slash_command(echo);
+            }
+            let mut rows = self.rows_for(echo, *pending, steers.contains(&echo.id));
+            if after_slash_command && echo.role != MessageRole::User {
+                rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
+            }
+            rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id));
+            new_rows.extend(rows);
+        }
+
+        new_rows
+    }
+
+    /// Seed the veil baseline on (re)attach and drop veils whose live row is
+    /// gone.
+    fn update_veils(&mut self, attached: bool, entries_empty: bool, new_rows: &[Row]) {
+        // Text already streamed before this (re)attach is the veil BASELINE:
+        // its rows' veils seed instead of fading (render creates them from
+        // this set), so only post-switch appends animate. Captured from the
+        // first NON-EMPTY transcript after attach — the replay frame — never
+        // the attach-time sync, whose transcript is still empty (selection
+        // clears it; the doc watch refills it async).
+        if attached {
+            self.veil_baseline.clear();
+            self.veil_attach_pending = true;
+        }
+        if self.veil_attach_pending && !entries_empty {
+            self.veil_attach_pending = false;
+            self.veil_baseline = new_rows
+                .iter()
+                .filter(|r| is_live_markdown(&r.kind))
+                .map(|r| r.id.clone())
+                .collect();
+        }
+
+        // Veils live exactly as long as their live row — drop them on the
+        // live→complete flip (any mid-fade chunk snaps to full, matching the
+        // row's version splice).
+        self.veils.retain(|id, _| {
+            new_rows
+                .iter()
+                .any(|r| &r.id == id && is_live_markdown(&r.kind))
+        });
+        self.veil_baseline.retain(|id| {
+            new_rows
+                .iter()
+                .any(|r| &r.id == id && is_live_markdown(&r.kind))
+        });
+    }
+
+    /// Tell the list which rows a doc commit replaced.
+    fn splice_changed_rows(
+        &mut self,
+        old_range: Range<usize>,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        // A doc commit replaced rows: the shared popup's offer anchors
+        // to a replaced row's text — dismiss it (its quote may have
+        // streamed/changed under the selection).
+        if let Some(popup) = self.comment_popup.upgrade()
+            && popup.read(cx).is_active()
+            && let Some(row) = popup.read(cx).offer_row().map(str::to_owned)
+            && self.rows[old_range.clone()]
+                .iter()
+                .any(|r| r.id.as_ref() == row)
+        {
+            self.dismiss_comment_ui_and_selection(cx);
+        }
+        // Any replaced row's cached flatten results are stale — and
+        // because live replies splice only the rows whose content hash
+        // changed (the tail), this is O(changed rows) per commit, never
+        // O(reply).
+        for row in &self.rows[old_range.clone()] {
+            self.render_cache.borrow_mut().invalidate_row(&row.id);
+        }
+        if old_range.len() == count {
+            // In-place content change, same row count — notably the
+            // live→complete flip, where EVERY row of the streamed
+            // message changes version (streaming bit, tool auto_open,
+            // timestamp bit) with identical ids. `splice` would reset
+            // those items to hint-less Unmeasured (heights read 0
+            // until the next paint) and, when the viewport-top item is
+            // inside the range, clobber the scroll anchor to the range
+            // start — the end-of-turn up/down jump the spring then has
+            // to walk back. `remeasure_items` keeps old sizes as hints
+            // and holds the anchor across the remeasure.
+            self.list.remeasure_items(old_range);
+        } else {
+            self.list.splice(old_range, count);
+        }
     }
 
     /// Cached row build for one entry (streaming entries bypass the cache).
