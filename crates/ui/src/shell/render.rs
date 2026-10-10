@@ -665,11 +665,12 @@ impl Shell {
         // just go (matching the original). First fill and chat switches (which
         // don't reorder) never animate.
         let order: Vec<(String, f32)> = keyed.iter().map(|(k, h, _)| (k.clone(), *h)).collect();
-        if self.sidebar_prev_order != order {
-            if !self.sidebar_prev_order.is_empty() {
-                let offsets = resort_offsets(&self.sidebar_prev_order, &order, GROUP_CARD_GAP);
+        if self.sidebar.prev_order != order {
+            if !self.sidebar.prev_order.is_empty() {
+                let offsets = resort_offsets(&self.sidebar.prev_order, &order, GROUP_CARD_GAP);
                 let prev_keys: std::collections::HashSet<&str> = self
-                    .sidebar_prev_order
+                    .sidebar
+                    .prev_order
                     .iter()
                     .map(|(k, _)| k.as_str())
                     .collect();
@@ -679,18 +680,18 @@ impl Shell {
                     .map(|(k, _)| k.clone())
                     .collect();
                 if !offsets.is_empty() || !new_keys.is_empty() {
-                    self.resort_epoch += 1;
-                    self.sidebar_resort = offsets;
-                    self.sidebar_new_keys = new_keys;
+                    self.sidebar.resort_epoch += 1;
+                    self.sidebar.resort = offsets;
+                    self.sidebar.new_keys = new_keys;
                 }
             }
-            self.sidebar_prev_order = order;
+            self.sidebar.prev_order = order;
         }
-        let epoch = self.resort_epoch;
+        let epoch = self.sidebar.resort_epoch;
         let list_items: Vec<AnyElement> = keyed
             .into_iter()
             .map(|(key, _, element)| {
-                if let Some(dy) = self.sidebar_resort.get(&key).copied() {
+                if let Some(dy) = self.sidebar.resort.get(&key).copied() {
                     let id = SharedString::from(format!("resort-{epoch}-{key}"));
                     div()
                         .child(element)
@@ -698,7 +699,7 @@ impl Shell {
                             el.relative().top(px(dy * (1.0 - t)))
                         })
                         .into_any_element()
-                } else if self.sidebar_new_keys.contains(&key) {
+                } else if self.sidebar.new_keys.contains(&key) {
                     let id = SharedString::from(format!("row-in-{epoch}-{key}"));
                     motion::fade_quick(id, div().child(element)).into_any_element()
                 } else {
@@ -781,7 +782,7 @@ impl Shell {
                             .id("sidebar-lists")
                             .size_full()
                             .overflow_y_scroll()
-                            .track_scroll(&self.sidebar_scroll)
+                            .track_scroll(&self.sidebar.scroll)
                             .px(px(Theme::SPACE_SM))
                             .flex()
                             .flex_col()
@@ -807,7 +808,7 @@ impl Shell {
                             }),
                     ),
                 )
-                .fade_overflow_y(&self.sidebar_scroll),
+                .fade_overflow_y(&self.sidebar.scroll),
             )
             // Update strip (above the user menu; below the lists). App-wide
             // chrome — the main window's alone.
@@ -822,7 +823,7 @@ impl Shell {
                 |el, strip| el.child(strip),
             )
             // Inline mutation-failure notice.
-            .when_some(self.sidebar_notice.clone(), |el, notice| {
+            .when_some(self.sidebar.notice.clone(), |el, notice| {
                 el.child(
                     div()
                         .id("sidebar-notice")
@@ -837,7 +838,7 @@ impl Shell {
                         .text_color(theme.danger)
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.sidebar_notice = None;
+                            this.sidebar.notice = None;
                             cx.notify();
                         }))
                         .child(notice),

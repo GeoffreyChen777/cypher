@@ -81,7 +81,7 @@ impl Shell {
             tracing::warn!(%chat_id, "ForkSession skipped: engine offline");
             let notice = "Cannot fork: the engine is not connected.";
             crate::shell::notify::post("Fork", notice);
-            self.sidebar_notice = Some(notice.into());
+            self.sidebar.notice = Some(notice.into());
             settle(cx);
             cx.notify();
             return;
@@ -118,7 +118,7 @@ impl Shell {
                     crate::shell::notify::post("Fork", &notice);
                     if let Some(shell) = weak.upgrade() {
                         shell.update(cx, |shell, cx| {
-                            shell.sidebar_notice = Some(notice.clone().into());
+                            shell.sidebar.notice = Some(notice.clone().into());
                             cx.notify();
                         });
                     }
@@ -161,7 +161,7 @@ impl Shell {
                     crate::shell::notify::post("Fork", &notice);
                     if let Some(shell) = weak.upgrade() {
                         shell.update(cx, |shell, cx| {
-                            shell.sidebar_notice = Some(notice.clone().into());
+                            shell.sidebar.notice = Some(notice.clone().into());
                             cx.notify();
                         });
                     }
@@ -358,7 +358,7 @@ impl Shell {
             tracing::warn!(%chat_id, "RewindSession skipped: engine offline");
             let notice = "Cannot restart the conversation: the engine is not connected.";
             crate::shell::notify::post("Restart", notice);
-            self.sidebar_notice = Some(notice.into());
+            self.sidebar.notice = Some(notice.into());
             settle(cx);
             cx.notify();
             return;
@@ -424,7 +424,7 @@ impl Shell {
             crate::shell::notify::post("Restart", &notice);
             if let Some(shell) = weak.upgrade() {
                 shell.update(cx, |shell, cx| {
-                    shell.sidebar_notice = Some(notice.clone().into());
+                    shell.sidebar.notice = Some(notice.clone().into());
                     cx.notify();
                 });
             }

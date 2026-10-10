@@ -140,7 +140,7 @@ impl Shell {
         let Some(window) =
             crate::open_project_window(state, self.boot.clone(), self.data_dir.clone(), cx)
         else {
-            self.sidebar_notice = Some("Couldn’t open the project window".into());
+            self.sidebar.notice = Some("Couldn’t open the project window".into());
             cx.notify();
             return;
         };

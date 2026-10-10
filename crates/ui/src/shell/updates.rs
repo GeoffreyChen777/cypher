@@ -159,7 +159,7 @@ impl Shell {
             this.update(cx, |shell, cx| {
                 shell.updates.pi_busy = false;
                 if let Err(err) = result {
-                    shell.sidebar_notice = Some(format!("Pi update failed: {err}").into());
+                    shell.sidebar.notice = Some(format!("Pi update failed: {err}").into());
                 }
                 cx.notify();
             })

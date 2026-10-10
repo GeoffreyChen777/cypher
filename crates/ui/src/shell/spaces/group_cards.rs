@@ -32,15 +32,15 @@ impl Shell {
     /// Is this disclosure group (project card or branch/worktree group)
     /// currently collapsed?
     fn sidebar_group_collapsed(&self, key: &str) -> bool {
-        self.sidebar_collapsed.contains(key)
+        self.sidebar.collapsed.contains(key)
     }
 
     /// Toggle a disclosure group (project card or branch/worktree group).
     /// Collapse state is local Shell UI state — never persisted or synced;
     /// everything starts expanded.
     fn toggle_sidebar_group(&mut self, key: String, cx: &mut Context<Self>) {
-        if !self.sidebar_collapsed.remove(&key) {
-            self.sidebar_collapsed.insert(key);
+        if !self.sidebar.collapsed.remove(&key) {
+            self.sidebar.collapsed.insert(key);
         }
         cx.notify();
     }

@@ -7,14 +7,14 @@ impl Shell {
     /// Fire a Mutate op; failures surface in the sidebar notice strip.
     pub(super) fn mutate(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.sidebar_notice = Some("Engine not connected".into());
+            self.sidebar.notice = Some("Engine not connected".into());
             cx.notify();
             return;
         };
         self.mutate_task = Some(cx.spawn(async move |this, cx| {
             if let Err(err) = engine.client().call(methods::MUTATE, params).await {
                 this.update(cx, |shell, cx| {
-                    shell.sidebar_notice = Some(format!("{err}").into());
+                    shell.sidebar.notice = Some(format!("{err}").into());
                     cx.notify();
                 })
                 .ok();
@@ -331,7 +331,7 @@ impl Shell {
                 .await
             {
                 this.update(cx, |shell, cx| {
-                    shell.sidebar_notice =
+                    shell.sidebar.notice =
                         Some(format!("Scratch folder not removed: {err}").into());
                     cx.notify();
                 })
@@ -343,7 +343,7 @@ impl Shell {
     pub(super) fn delete_worktree(&mut self, orphan: OrphanWorktree, cx: &mut Context<Self>) {
         self.dialogs.delete_worktree = None;
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.sidebar_notice = Some("Engine not connected".into());
+            self.sidebar.notice = Some("Engine not connected".into());
             cx.notify();
             return;
         };
@@ -361,7 +361,7 @@ impl Shell {
                 .await
             {
                 this.update(cx, |shell, cx| {
-                    shell.sidebar_notice = Some(format!("{err}").into());
+                    shell.sidebar.notice = Some(format!("{err}").into());
                     cx.notify();
                 })
                 .ok();
@@ -478,7 +478,7 @@ impl Shell {
                         if local {
                             shell.sync.flow = SyncFlow::Enabling;
                         }
-                        shell.sidebar_notice =
+                        shell.sidebar.notice =
                             Some(format!("Could not cancel sign-in: {err}").into());
                     }
                 }
@@ -801,7 +801,7 @@ impl Shell {
                     {
                         shell.sync.flow = SyncFlow::Idle;
                     }
-                    shell.sidebar_notice = Some(format!("Sign in failed: {err}").into());
+                    shell.sidebar.notice = Some(format!("Sign in failed: {err}").into());
                     cx.notify();
                 }
             })

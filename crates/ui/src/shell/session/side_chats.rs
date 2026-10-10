@@ -57,7 +57,7 @@ impl Shell {
             tracing::warn!(%parent_chat_id, "Side Chat tab cap reached per chat");
             let notice = "Too many side chats open for this chat (max 8).";
             crate::shell::notify::post("Side Chat", notice);
-            self.sidebar_notice = Some(notice.into());
+            self.sidebar.notice = Some(notice.into());
             cx.notify();
             return;
         }
@@ -65,7 +65,7 @@ impl Shell {
             tracing::warn!(%parent_chat_id, "StartSideChat skipped: engine offline");
             let notice = "Cannot open a side chat: engine is not connected.";
             crate::shell::notify::post("Side Chat", notice);
-            self.sidebar_notice = Some(notice.into());
+            self.sidebar.notice = Some(notice.into());
             cx.notify();
             return;
         };
@@ -122,7 +122,7 @@ impl Shell {
                     crate::shell::notify::post("Side Chat", &notice);
                     if let Some(shell) = weak.upgrade() {
                         shell.update(cx, |shell, cx| {
-                            shell.sidebar_notice = Some(notice.clone().into());
+                            shell.sidebar.notice = Some(notice.clone().into());
                             cx.notify();
                         });
                     }

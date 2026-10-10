@@ -1121,6 +1121,30 @@ struct SyncUi {
     import_current: Option<SharedString>,
 }
 
+/// The sidebar's local UI state: scroll, the notice strip, the resort
+/// FLIP glide and the collapsed disclosure groups.
+struct SidebarUi {
+    /// Scroll position of the sidebar lists region (drives its edge fades).
+    scroll: gpui::ScrollHandle,
+    /// Inline sidebar error strip (mutation failures); click dismisses.
+    notice: Option<SharedString>,
+    /// Last rendered sidebar order (key + estimated height) — the FLIP baseline
+    /// for the resort glide.
+    prev_order: Vec<(String, f32)>,
+    /// Per-key paint offsets of the resort in flight, keyed elements restart on
+    /// `resort_epoch` bumps.
+    resort: std::collections::HashMap<String, f32>,
+    /// Keys that just appeared in a live list (fade in, no glide).
+    new_keys: std::collections::HashSet<String>,
+    resort_epoch: usize,
+    /// Collapsed sidebar disclosure groups — local Shell UI state, never
+    /// persisted or synced (see `spaces::project_group_key` /
+    /// `spaces::branch_group_key` for the deterministic key shapes). A
+    /// project key hides the whole card body; a branch/worktree key hides
+    /// that group's session rows. Everything defaults expanded.
+    collapsed: std::collections::HashSet<String>,
+}
+
 pub struct Shell {
     /// The window's main state: lists (sidebar, spaces, sessions) in
     /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
@@ -1160,8 +1184,8 @@ pub struct Shell {
     updates: UpdateUi,
     /// Scratch-folder removal after a quick chat was deleted (host RPC).
     scratch_cleanup_task: Option<Task<()>>,
-    /// Scroll position of the sidebar lists region (drives its edge fades).
-    sidebar_scroll: gpui::ScrollHandle,
+    /// Sidebar scroll, notice strip, resort glide and disclosure state.
+    sidebar: SidebarUi,
     /// `settings.last_space_id` applied once after the first spaces frame.
     space_boot_applied: bool,
     /// Last seen session status per chat — the chime trigger compares against
@@ -1170,8 +1194,6 @@ pub struct Shell {
     /// The count last written to the Dock badge (`None` = never written), so
     /// frequent state notifies only touch AppKit when the number changes.
     dock_badge: Option<usize>,
-    /// Inline sidebar error strip (mutation failures); click dismisses.
-    sidebar_notice: Option<SharedString>,
     /// Session Fork idempotence: `(sourceChatId, anchorMessageId) → requestId`
     /// (the client-minted target chat id). The SAME id is reused across RPC
     /// errors / lost replies so a retry returns the already-created chat;
@@ -1186,21 +1208,6 @@ pub struct Shell {
     boot: EngineBootConfig,
     data_dir: PathBuf,
     settings: UiSettings,
-    /// Last rendered sidebar order (key + estimated height) — the FLIP baseline
-    /// for the resort glide.
-    sidebar_prev_order: Vec<(String, f32)>,
-    /// Per-key paint offsets of the resort in flight, keyed elements restart on
-    /// `resort_epoch` bumps.
-    sidebar_resort: std::collections::HashMap<String, f32>,
-    /// Keys that just appeared in a live list (fade in, no glide).
-    sidebar_new_keys: std::collections::HashSet<String>,
-    resort_epoch: usize,
-    /// Collapsed sidebar disclosure groups — local Shell UI state, never
-    /// persisted or synced (see `spaces::project_group_key` /
-    /// `spaces::branch_group_key` for the deterministic key shapes). A
-    /// project key hides the whole card body; a branch/worktree key hides
-    /// that group's session rows. Everything defaults expanded.
-    sidebar_collapsed: std::collections::HashSet<String>,
     /// Last observed `window.is_window_active()` — rising edge fires a
     /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
     was_window_active: bool,
@@ -1481,11 +1488,18 @@ impl Shell {
                 install: cypher_update::detect_install(),
             },
             scratch_cleanup_task: None,
-            sidebar_scroll: gpui::ScrollHandle::new(),
+            sidebar: SidebarUi {
+                scroll: gpui::ScrollHandle::new(),
+                notice: None,
+                prev_order: Vec::new(),
+                resort: std::collections::HashMap::new(),
+                new_keys: std::collections::HashSet::new(),
+                resort_epoch: 0,
+                collapsed: std::collections::HashSet::new(),
+            },
             space_boot_applied: false,
             sound_prev: std::collections::HashMap::new(),
             dock_badge: None,
-            sidebar_notice: None,
             fork_request_ids: std::collections::HashMap::new(),
             sync: SyncUi {
                 org: None,
@@ -1501,11 +1515,6 @@ impl Shell {
             boot,
             data_dir,
             settings,
-            sidebar_prev_order: Vec::new(),
-            sidebar_resort: std::collections::HashMap::new(),
-            sidebar_new_keys: std::collections::HashSet::new(),
-            resort_epoch: 0,
-            sidebar_collapsed: std::collections::HashSet::new(),
             was_window_active: false,
             notification_activity: Default::default(),
             debug_dialog,
