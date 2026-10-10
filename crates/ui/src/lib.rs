@@ -5,38 +5,31 @@
 mod appearance;
 mod attachments;
 mod changes;
-mod chat_style;
 mod comments;
 mod composer;
-mod edge_fade;
 mod files;
-mod frost;
-mod fs_util;
 mod history;
-mod icons;
-mod loaders;
+mod kit;
 mod markdown;
-mod motion;
 mod pickers;
-mod popover;
 mod prefs;
 mod quote_origin;
 mod settings;
 mod shell;
 mod side_chats;
-mod soft_shadow;
-mod sound;
-mod space_style;
 mod state;
 mod subagents;
-mod surface_style;
-mod syntax_cache;
 mod terminal;
 #[cfg(test)]
 mod test_fixtures;
-mod theme;
 mod transcript;
 mod workspace;
+
+use appearance::{chat_style, space_style, surface_style};
+use kit::{
+    edge_fade, frost, fs_util, icons, loaders, motion, popover, soft_shadow, sound, syntax_cache,
+    theme,
+};
 
 use std::borrow::Cow;
 use std::path::PathBuf;

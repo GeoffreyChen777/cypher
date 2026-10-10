@@ -149,7 +149,7 @@ fn loading_wordmark(theme: &Theme) -> AnyElement {
 }
 
 /// Separate from the landing-page comet asset.
-const LOADING_WORDMARK: &str = include_str!("../assets/loading-wordmark.txt");
+const LOADING_WORDMARK: &str = include_str!("../../assets/loading-wordmark.txt");
 
 /// "L O A D I N G" — `text-[11px] uppercase tracking-[0.32em]
 /// text-muted-foreground/70`; tracking approximated with thin spaces (gpui has

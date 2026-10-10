@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-static SOUND_DONE: &[u8] = include_bytes!("../assets/sounds/done.wav");
-static SOUND_REQUEST: &[u8] = include_bytes!("../assets/sounds/request.wav");
+static SOUND_DONE: &[u8] = include_bytes!("../../assets/sounds/done.wav");
+static SOUND_REQUEST: &[u8] = include_bytes!("../../assets/sounds/request.wav");
 
 /// Which notification chime to play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

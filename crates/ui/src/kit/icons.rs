@@ -37,10 +37,10 @@ macro_rules! icon_assets {
             fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
                 Ok(match path {
                     $(concat!("icons/", $path, ".svg") => Some(Cow::Borrowed(
-                        include_bytes!(concat!("../assets/icons/", $path, ".svg")).as_slice(),
+                        include_bytes!(concat!("../../assets/icons/", $path, ".svg")).as_slice(),
                     )),)+
                     CYPHER_APP_ICON => Some(Cow::Borrowed(
-                        include_bytes!("../../../dist/cypher.png").as_slice(),
+                        include_bytes!("../../../../dist/cypher.png").as_slice(),
                     )),
                     _ => None,
                 })

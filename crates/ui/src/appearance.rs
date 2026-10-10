@@ -19,6 +19,10 @@
 //! per-view prepaint cache for the frame, which is the only thing that forces
 //! already-laid-out elements to re-run their paint with the new palette.
 
+pub mod chat_style;
+pub mod space_style;
+pub mod surface_style;
+
 use std::path::{Path, PathBuf};
 
 use crate::prefs::{AppearanceMode, UiSettings};
