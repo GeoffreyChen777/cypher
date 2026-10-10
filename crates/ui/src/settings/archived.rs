@@ -85,191 +85,19 @@ impl Render for ArchivedPage {
         let busy = self.busy.clone();
         let count = rows.len();
 
+        let ctx = ArchivedRowContext {
+            now,
+            device_names: &device_names,
+            busy: busy.as_deref(),
+        };
         let items: Vec<AnyElement> = rows
             .into_iter()
             .enumerate()
-            .map(|(ix, chat)| {
-                let title: SharedString = chat
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| "Untitled session".into())
-                    .into();
-                // Unknown device → no fragment at all (zeron renders the
-                // device span only when the name resolves).
-                let device: Option<SharedString> =
-                    device_names.get(&chat.device_id).cloned().map(Into::into);
-                let time_ago: SharedString = crate::state::format_time_ago(
-                    chat.last_message_at.unwrap_or(chat.created_at),
-                    now,
-                )
-                .into();
-                let location: Option<SharedString> =
-                    crate::state::chat_location(&chat).map(Into::into);
-                let is_busy = busy.as_deref() == Some(chat.id.as_str());
-                let row_hovered = self.hovered == Some(ix);
-                let chat_id = chat.id.clone();
-                // zeron settings.archived.tsx row: archive tile, medium title
-                // + tabular time, quiet device · location meta, Unarchive.
-                div()
-                    .id(("archived-row", ix))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(12.0))
-                    .rounded(px(8.0))
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .hover(|s| s.bg(crate::kit::theme::ink(0.03)))
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered {
-                            this.hovered = Some(ix);
-                        } else if this.hovered == Some(ix) {
-                            this.hovered = None;
-                        }
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .flex_none()
-                            .size(px(32.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                crate::kit::icons::icon(crate::kit::icons::ARCHIVE_MINIMALISTIC)
-                                    .size(px(16.0))
-                                    .text_color(theme.text_muted.opacity(0.6)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(px(13.0))
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(theme.text)
-                                            .child(title),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_size(px(11.0))
-                                            .text_color(theme.text_muted.opacity(0.5))
-                                            .child(time_ago),
-                                    ),
-                            )
-                            .child({
-                                // device · location, separator at the line's
-                                // own tone (zeron: a plain span inheriting
-                                // `text-muted-foreground/55`).
-                                let mut meta = div()
-                                    .mt(px(2.0))
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .text_size(px(11.0))
-                                    .text_color(theme.text_muted.opacity(0.55));
-                                let both = device.is_some() && location.is_some();
-                                if let Some(device) = device {
-                                    meta = meta.child(device);
-                                }
-                                if both {
-                                    meta = meta.child(SharedString::from("·"));
-                                }
-                                if let Some(location) = location {
-                                    meta = meta.child(div().min_w_0().truncate().child(location));
-                                }
-                                meta
-                            }),
-                    )
-                    .child(
-                        // Hidden until the row is hovered (zeron `opacity-0
-                        // group-hover:opacity-100`); hover fill is the solid
-                        // accent tone (`hover:bg-accent`).
-                        div()
-                            .id(("unarchive", ix))
-                            .flex_none()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .px(px(10.0))
-                            .py(px(4.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .opacity(if row_hovered || is_busy { 1.0 } else { 0.0 })
-                            .when(is_busy, |el| el.opacity(0.4))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.surface_raised).text_color(theme.text))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.unarchive(chat_id.clone(), cx);
-                            }))
-                            .child(
-                                crate::kit::icons::icon(crate::kit::icons::ARCHIVE_UP_MINIMALISTIC)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted),
-                            )
-                            .child(SharedString::from(if is_busy {
-                                "Unarchiving…"
-                            } else {
-                                "Unarchive"
-                            })),
-                    )
-                    .into_any_element()
-            })
+            .map(|(ix, chat)| self.archived_row(ix, chat, &ctx, &theme, cx))
             .collect();
 
         let body: AnyElement = if items.is_empty() {
-            // Centered empty state (zeron settings.archived.tsx).
-            div()
-                .mt(px(96.0))
-                .flex()
-                .flex_col()
-                .items_center()
-                .text_center()
-                .text_color(theme.text_muted.opacity(0.5))
-                .child(
-                    // `opacity-40` on top of the inherited muted/50 — an
-                    // effectively ~20% glyph (zeron settings.archived.tsx).
-                    crate::kit::icons::icon(crate::kit::icons::ARCHIVE_MINIMALISTIC)
-                        .size(px(28.0))
-                        .text_color(theme.text_muted.opacity(0.2)),
-                )
-                .child(
-                    div()
-                        .mt(px(12.0))
-                        .text_size(px(14.0))
-                        .child(SharedString::from("Nothing archived")),
-                )
-                .child(
-                    div()
-                        .mt(px(4.0))
-                        .text_size(px(12.0))
-                        .text_color(theme.text_muted.opacity(0.4))
-                        .child(SharedString::from(
-                            "Right-click a session in the sidebar to archive it.",
-                        )),
-                )
-                .into_any_element()
+            archived_empty_state(&theme).into_any_element()
         } else {
             div()
                 .mt(px(24.0))
@@ -309,6 +137,225 @@ impl Render for ArchivedPage {
                     .child(body),
             )
     }
+}
+
+impl ArchivedPage {
+    /// One archived session (zeron settings.archived.tsx row): archive tile,
+    /// medium title + tabular time, quiet device · location meta, Unarchive.
+    fn archived_row(
+        &self,
+        ix: usize,
+        chat: Chat,
+        ctx: &ArchivedRowContext<'_>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let title: SharedString = chat
+            .title
+            .clone()
+            .unwrap_or_else(|| "Untitled session".into())
+            .into();
+        // Unknown device → no fragment at all (zeron renders the
+        // device span only when the name resolves).
+        let device: Option<SharedString> = ctx
+            .device_names
+            .get(&chat.device_id)
+            .cloned()
+            .map(Into::into);
+        let time_ago: SharedString =
+            crate::state::format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), ctx.now)
+                .into();
+        let location: Option<SharedString> = crate::state::chat_location(&chat).map(Into::into);
+        let is_busy = ctx.busy == Some(chat.id.as_str());
+        let row_hovered = self.hovered == Some(ix);
+        let chat_id = chat.id.clone();
+        div()
+            .id(("archived-row", ix))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .rounded(px(8.0))
+            .px(px(12.0))
+            .py(px(8.0))
+            .hover(|s| s.bg(crate::kit::theme::ink(0.03)))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.hovered = Some(ix);
+                } else if this.hovered == Some(ix) {
+                    this.hovered = None;
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(32.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::kit::icons::icon(crate::kit::icons::ARCHIVE_MINIMALISTIC)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted.opacity(0.6)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(13.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_muted.opacity(0.5))
+                                    .child(time_ago),
+                            ),
+                    )
+                    .child(archived_meta(device, location, theme)),
+            )
+            .child(unarchive_button(
+                ix,
+                chat_id,
+                row_hovered,
+                is_busy,
+                theme,
+                cx,
+            ))
+            .into_any_element()
+    }
+}
+
+/// What every archived row reads from the page.
+struct ArchivedRowContext<'a> {
+    now: chrono::DateTime<chrono::Utc>,
+    device_names: &'a std::collections::HashMap<String, String>,
+    busy: Option<&'a str>,
+}
+
+/// device · location, separator at the line's own tone (zeron: a plain span
+/// inheriting `text-muted-foreground/55`).
+fn archived_meta(
+    device: Option<SharedString>,
+    location: Option<SharedString>,
+    theme: &Theme,
+) -> gpui::Div {
+    let mut meta = div()
+        .mt(px(2.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(11.0))
+        .text_color(theme.text_muted.opacity(0.55));
+    let both = device.is_some() && location.is_some();
+    if let Some(device) = device {
+        meta = meta.child(device);
+    }
+    if both {
+        meta = meta.child(SharedString::from("·"));
+    }
+    if let Some(location) = location {
+        meta = meta.child(div().min_w_0().truncate().child(location));
+    }
+    meta
+}
+
+/// Unarchive: hidden until the row is hovered (zeron `opacity-0
+/// group-hover:opacity-100`); hover fill is the solid accent tone
+/// (`hover:bg-accent`).
+fn unarchive_button(
+    ix: usize,
+    chat_id: String,
+    row_hovered: bool,
+    is_busy: bool,
+    theme: &Theme,
+    cx: &mut Context<ArchivedPage>,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("unarchive", ix))
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(10.0))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(px(12.0))
+        .text_color(theme.text_muted)
+        .opacity(if row_hovered || is_busy { 1.0 } else { 0.0 })
+        .when(is_busy, |el| el.opacity(0.4))
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.surface_raised).text_color(theme.text))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.unarchive(chat_id.clone(), cx);
+        }))
+        .child(
+            crate::kit::icons::icon(crate::kit::icons::ARCHIVE_UP_MINIMALISTIC)
+                .size(px(14.0))
+                .text_color(theme.text_muted),
+        )
+        .child(SharedString::from(if is_busy {
+            "Unarchiving…"
+        } else {
+            "Unarchive"
+        }))
+}
+
+/// Centered empty state (zeron settings.archived.tsx).
+fn archived_empty_state(theme: &Theme) -> gpui::Div {
+    div()
+        .mt(px(96.0))
+        .flex()
+        .flex_col()
+        .items_center()
+        .text_center()
+        .text_color(theme.text_muted.opacity(0.5))
+        .child(
+            // `opacity-40` on top of the inherited muted/50 — an
+            // effectively ~20% glyph (zeron settings.archived.tsx).
+            crate::kit::icons::icon(crate::kit::icons::ARCHIVE_MINIMALISTIC)
+                .size(px(28.0))
+                .text_color(theme.text_muted.opacity(0.2)),
+        )
+        .child(
+            div()
+                .mt(px(12.0))
+                .text_size(px(14.0))
+                .child(SharedString::from("Nothing archived")),
+        )
+        .child(
+            div()
+                .mt(px(4.0))
+                .text_size(px(12.0))
+                .text_color(theme.text_muted.opacity(0.4))
+                .child(SharedString::from(
+                    "Right-click a session in the sidebar to archive it.",
+                )),
+        )
 }
 
 #[cfg(test)]
