@@ -175,7 +175,7 @@ impl TextConnector for WsTextConnector {
         let provider = self.url.clone();
         Box::pin(async move {
             let url = provider.url().await?;
-            let ws = crate::dial::connect_ws(&url)
+            let ws = cypher_net::dial::connect_ws(&url)
                 .await
                 .map_err(|e| SyncError::WebSocket(e.to_string()))?;
             let (out_tx, out_rx) = mpsc::channel(64);
@@ -573,8 +573,8 @@ impl Actor {
         // Suspend/resume and sibling-dial successes are EVENTS that end a
         // backoff wait immediately (see room.rs) — without them a recovered
         // network still waited out the full accumulated delay.
-        let mut wake = crate::wake::subscribe();
-        let mut online = crate::wake::subscribe_online();
+        let mut wake = cypher_net::wake::subscribe();
+        let mut online = cypher_net::wake::subscribe_online();
         loop {
             if *self.shutdown.borrow() {
                 return;

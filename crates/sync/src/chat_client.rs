@@ -272,7 +272,7 @@ impl BinConnector for WsBinConnector {
                         .insert("x-cypher-preview-publisher", value);
                 }
             }
-            let ws = crate::dial::connect_request(request)
+            let ws = cypher_net::dial::connect_request(request)
                 .await
                 .map_err(|e| SyncError::WebSocket(e.to_string()))?;
             let (out_tx, out_rx) = mpsc::channel(64);

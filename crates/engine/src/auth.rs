@@ -468,7 +468,7 @@ impl Auth {
                 return;
             }
             let mut state_rx = auth.watch_state();
-            let mut wake = cypher_sync::wake::subscribe();
+            let mut wake = cypher_net::wake::subscribe();
             // Exponential backoff for failed refreshes: a transient edge/WorkOS
             // outage must never turn into a tight retry loop. A session is only
             // revoked by an explicit permanent rejection, which signs out and

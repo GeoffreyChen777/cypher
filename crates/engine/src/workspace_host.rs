@@ -485,7 +485,7 @@ impl WorkspaceHost {
         let device_id = self.inner.config.device_id.clone();
         let weak = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
-            let mut wake = cypher_sync::wake::subscribe();
+            let mut wake = cypher_net::wake::subscribe();
             // `RegistryClient` only self-reconnects AFTER a first successful
             // join; an INITIAL failure (a 500 from an overloaded DO, a token
             // racing a refresh, an edge deploy) must not end this task and
@@ -1790,7 +1790,7 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await; // consume the immediate first tick
     let client = reqwest::Client::new();
-    let mut system_wake = cypher_sync::wake::subscribe();
+    let mut system_wake = cypher_net::wake::subscribe();
     let Some(probe_wake) = weak.upgrade().map(|inner| inner.relay_probe_wake.clone()) else {
         return;
     };

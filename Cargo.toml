@@ -4,6 +4,7 @@ members = [
     "crates/env",
     "crates/proto",
     "crates/doc",
+    "crates/net",
     "crates/sync",
     "crates/harness",
     "crates/engine",
@@ -24,6 +25,7 @@ publish = false
 cypher-env = { path = "crates/env" }
 cypher-proto = { path = "crates/proto" }
 cypher-doc = { path = "crates/doc" }
+cypher-net = { path = "crates/net" }
 cypher-sync = { path = "crates/sync" }
 cypher-harness = { path = "crates/harness" }
 cypher-engine = { path = "crates/engine" }

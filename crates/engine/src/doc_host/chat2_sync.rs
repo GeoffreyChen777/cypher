@@ -101,7 +101,7 @@ impl DocHost {
                 device.clone(),
             ));
             let url = edge.room_url(format!("/chat2/{chat}/ws"));
-            let mut wake = cypher_sync::wake::subscribe();
+            let mut wake = cypher_net::wake::subscribe();
             let mut backoff = crate::workspace_host::JOIN_RETRY_BASE;
             loop {
                 if weak.upgrade().is_none() {
