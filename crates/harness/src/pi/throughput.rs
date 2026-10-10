@@ -151,11 +151,7 @@ impl ThroughputMeter {
     /// when the provider breaks it out). Always returns a reading, without a
     /// live rate: nothing streams until the next message, so the trailer
     /// keeps the count and the message's average speed while a tool runs.
-    pub fn end_message(
-        &mut self,
-        output: Option<u64>,
-        reasoning: Option<u64>,
-    ) -> Throughput {
+    pub fn end_message(&mut self, output: Option<u64>, reasoning: Option<u64>) -> Throughput {
         let estimate = (self.message_raw * self.calibration).round() as u64;
         let message_tokens = match output.filter(|&n| n > 0) {
             Some(output) => {

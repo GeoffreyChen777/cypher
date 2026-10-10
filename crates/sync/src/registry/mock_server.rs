@@ -6,7 +6,7 @@
 //! by the `--ignored` live-edge tests and scripts/e2e-smoke.sh.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -16,9 +16,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use cypher_doc::{RegistryRow, RowOp, apply_op};
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
+use crate::lock;
 
 #[derive(Default)]
 struct Shared {

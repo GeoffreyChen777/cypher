@@ -25,3 +25,20 @@ pub use chat_client::{
 pub use registry::{RegistryClient, RegistryEvent, RegistryTransport, RegistryTuning};
 pub use store::{DocsStore, StoreError};
 pub use types::{RoomStatsSnapshot, StaticUrl, SyncError, UrlProvider};
+
+/// Lock a mutex, ignoring poisoning: the guarded state stays consistent
+/// across every critical section, so one panicking thread must not take the
+/// room clients down with it.
+pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Wall-clock milliseconds since the Unix epoch (0 if the clock is before it).
+pub(crate) fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}

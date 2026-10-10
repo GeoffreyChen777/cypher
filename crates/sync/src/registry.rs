@@ -13,7 +13,7 @@
 //! tears the session down for a fresh dial.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -27,6 +27,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use cypher_doc::{PendingBatch, RegistryDoc, RegistryRow, StateOutcome};
 
 use crate::types::{RoomStatsSnapshot, StaticUrl, SyncError, UrlProvider};
+use crate::{lock, now_ms};
 
 /// Text `"ping"` keepalive interval (answered by the DO auto-response pair
 /// without waking it — transport liveness only).
@@ -270,17 +271,6 @@ impl Stats {
             rejected: self.rejected.load(Relaxed),
         }
     }
-}
-
-fn epoch_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 // ── the client ──────────────────────────────────────────────────────────────
@@ -713,7 +703,7 @@ impl Actor {
                                 (value["batch"].as_str(), value["seq"].as_u64())
                             {
                                 lock(&doc).ack_batch(batch, seq);
-                                stats.last_ack_ms.store(epoch_ms(), Relaxed);
+                                stats.last_ack_ms.store(now_ms(), Relaxed);
                                 let _ = events.send(RegistryEvent::Applied);
                             } else {
                                 tracing::debug!("registry HTTPS push ACK missing batch/seq");
@@ -766,7 +756,7 @@ impl Actor {
                                     map.insert(device, (at, now));
                                 }
                                 stats.server_known.store(true, Relaxed);
-                                stats.last_pushed_ms.store(epoch_ms(), Relaxed);
+                                stats.last_pushed_ms.store(now_ms(), Relaxed);
                                 let _ = events.send(RegistryEvent::Applied);
                             }
                             Err(err) => {
@@ -882,7 +872,7 @@ impl Actor {
         }
         self.stats.connected.store(true, Relaxed);
         self.stats.server_known.store(true, Relaxed);
-        self.stats.last_pushed_ms.store(epoch_ms(), Relaxed);
+        self.stats.last_pushed_ms.store(now_ms(), Relaxed);
         if ready.is_none() {
             self.stats.rejoins.fetch_add(1, Relaxed);
         }
@@ -1024,7 +1014,7 @@ impl Actor {
         match frame {
             ServerFrame::Rows { seq, rows } => {
                 let contiguous = lock(&self.doc).apply_rows(seq, rows);
-                self.stats.last_pushed_ms.store(epoch_ms(), Relaxed);
+                self.stats.last_pushed_ms.store(now_ms(), Relaxed);
                 let _ = self.events.send(RegistryEvent::Applied);
                 if !contiguous {
                     // The frame itself is useful, but the cursor held at the
@@ -1036,7 +1026,7 @@ impl Actor {
             }
             ServerFrame::Ack { batch, seq, .. } => {
                 lock(&self.doc).ack_batch(&batch, seq);
-                self.stats.last_ack_ms.store(epoch_ms(), Relaxed);
+                self.stats.last_ack_ms.store(now_ms(), Relaxed);
                 let _ = self.events.send(RegistryEvent::Applied);
             }
             ServerFrame::Presence { device, at } => {
@@ -1044,7 +1034,7 @@ impl Actor {
                 let _ = self.events.send(RegistryEvent::Presence);
             }
             ServerFrame::ProbeOk { .. } => {
-                self.stats.last_pushed_ms.store(epoch_ms(), Relaxed);
+                self.stats.last_pushed_ms.store(now_ms(), Relaxed);
             }
             ServerFrame::State {
                 seq,
