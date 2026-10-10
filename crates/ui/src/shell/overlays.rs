@@ -25,45 +25,7 @@ impl Shell {
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_else(|| "?".into())
             .into();
-        // Avatar: the GitHub/WorkOS profile picture when one is on the
-        // account, else (and on any load failure) the white circle with the
-        // initial in near-black (zeron user-menu.tsx).
-        let fallback_avatar = {
-            let initial = initial.clone();
-            let theme = theme.clone();
-            move || {
-                div()
-                    .size(px(26.0))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(theme.text)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.bg)
-                    .child(initial.clone())
-                    .into_any_element()
-            }
-        };
-        // Final UI-side guard: only a bounded HTTPS URL may reach gpui's
-        // `img` — anything else renders the initial-letter avatar instead and
-        // can never be interpreted as a local file.
-        let avatar = match safe_avatar_url(avatar_url) {
-            Some(url) => {
-                let loading = fallback_avatar.clone();
-                gpui::img(url)
-                    .size(px(26.0))
-                    .flex_none()
-                    .rounded_full()
-                    .object_fit(gpui::ObjectFit::Cover)
-                    .with_loading(loading)
-                    .with_fallback(fallback_avatar)
-                    .into_any_element()
-            }
-            None => fallback_avatar(),
-        };
+        let avatar = user_avatar(initial, avatar_url, theme);
         let mut trigger = div()
             .id("user-menu")
             .flex_none()
@@ -130,101 +92,8 @@ impl Shell {
                     }),
             );
         if self.user_menu.get().is_some() {
-            // Floating menus stay on the overall palette, not the sidebar's
-            // independently overridden foreground/background pair.
-            let popup_theme = Theme::of(cx).clone();
-            let theme = &popup_theme;
             let closing = self.user_menu.closing_since();
-            // user-menu.tsx content: `w-[--radix-dropdown-menu-trigger-width]`
-            // (exactly as wide as the trigger row — sidebar minus its p-2
-            // gutters), `flex-col gap-0.5`, then: one small muted email line
-            // (`px-2 pb-1 pt-1.5 text-[11px] text-muted-foreground/70`),
-            // the action selected by the runtime scope, then "Settings".
-            let menu = popover::popover_card(theme)
-                .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.close_user_menu(cx);
-                }))
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .px(px(8.0))
-                        .pt(px(6.0))
-                        .pb(px(4.0))
-                        .text_size(px(11.0))
-                        .text_color(theme.text_muted.opacity(0.7))
-                        .truncate()
-                        .child(menu_identity),
-                )
-                .when_some(action, |menu, action| {
-                    let row = match action {
-                        AccountMenuAction::EnableSync => {
-                            popover::menu_row(theme, false, "user-menu-enable-sync")
-                                .id("user-menu-enable-sync")
-                                .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
-                                .child(
-                                    icon(icons::GLOBAL)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Enable sync"))
-                                .into_any_element()
-                        }
-                        AccountMenuAction::SyncInProgress => {
-                            popover::menu_row(theme, false, "user-menu-sync-progress")
-                                .id("user-menu-sync-progress")
-                                .opacity(0.6)
-                                .child(
-                                    icon(icons::GLOBAL)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Sync setup in progress"))
-                                .into_any_element()
-                        }
-                        AccountMenuAction::RestartPending => {
-                            popover::menu_row(theme, false, "user-menu-sync-restart")
-                                .id("user-menu-sync-restart")
-                                .on_click(cx.listener(|this, _, _, cx| this.reopen_sync_notice(cx)))
-                                .child(
-                                    icon(icons::RESTART)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Finish sync setup"))
-                                .into_any_element()
-                        }
-                        AccountMenuAction::SignOut => {
-                            popover::menu_row(theme, false, "user-menu-signout")
-                                .id("user-menu-signout")
-                                .on_click(cx.listener(|this, _, _, cx| this.request_sign_out(cx)))
-                                .child(
-                                    icon(icons::LOGOUT_2)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Sign out"))
-                                .into_any_element()
-                        }
-                    };
-                    menu.child(row).child(popover::menu_separator())
-                })
-                .child(
-                    popover::menu_row(theme, false, "user-menu-settings")
-                        .id("user-menu-settings")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_settings(SettingsSection::Harnesses, cx)
-                        }))
-                        .child(
-                            icon(icons::SETTINGS_MINIMALISTIC)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(SharedString::from("Settings")),
-                )
-                .into_any_element();
+            let menu = self.render_user_menu_card(menu_identity, action, cx);
             trigger = trigger.child(popover::anchored_menu_above(
                 "user-menu-popover",
                 menu,
@@ -232,6 +101,61 @@ impl Shell {
             ));
         }
         trigger.into_any_element()
+    }
+
+    /// The account menu: the identity line, the scope's account action, then
+    /// Settings.
+    fn render_user_menu_card(
+        &self,
+        menu_identity: SharedString,
+        action: Option<AccountMenuAction>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Floating menus stay on the overall palette, not the sidebar's
+        // independently overridden foreground/background pair.
+        let popup_theme = Theme::of(cx).clone();
+        let theme = &popup_theme;
+        // user-menu.tsx content: `w-[--radix-dropdown-menu-trigger-width]`
+        // (exactly as wide as the trigger row — sidebar minus its p-2
+        // gutters), `flex-col gap-0.5`, then: one small muted email line
+        // (`px-2 pb-1 pt-1.5 text-[11px] text-muted-foreground/70`),
+        // the action selected by the runtime scope, then "Settings".
+        popover::popover_card(theme)
+            .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.close_user_menu(cx);
+            }))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .pt(px(6.0))
+                    .pb(px(4.0))
+                    .text_size(px(11.0))
+                    .text_color(theme.text_muted.opacity(0.7))
+                    .truncate()
+                    .child(menu_identity),
+            )
+            .when_some(action, |menu, action| {
+                let row = account_action_row(action, theme, cx);
+                menu.child(row).child(popover::menu_separator())
+            })
+            .child(
+                popover::menu_row(theme, false, "user-menu-settings")
+                    .id("user-menu-settings")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.open_settings(SettingsSection::Harnesses, cx)
+                    }))
+                    .child(
+                        icon(icons::SETTINGS_MINIMALISTIC)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(SharedString::from("Settings")),
+            )
+            .into_any_element()
     }
 
     fn render_sync_overlay(
@@ -1422,5 +1346,106 @@ impl Shell {
                     .child(motion::fade_in("org-gate-card", card)),
             )
             .into_any_element()
+    }
+}
+
+/// The sidebar avatar (falls back to the initial-letter circle).
+fn user_avatar(
+    initial: SharedString,
+    avatar_url: Option<SharedString>,
+    theme: &Theme,
+) -> AnyElement {
+    // Avatar: the GitHub/WorkOS profile picture when one is on the
+    // account, else (and on any load failure) the white circle with the
+    // initial in near-black (zeron user-menu.tsx).
+    let fallback_avatar = {
+        let initial = initial.clone();
+        let theme = theme.clone();
+        move || {
+            div()
+                .size(px(26.0))
+                .flex_none()
+                .rounded_full()
+                .bg(theme.text)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.bg)
+                .child(initial.clone())
+                .into_any_element()
+        }
+    };
+    // Final UI-side guard: only a bounded HTTPS URL may reach gpui's
+    // `img` — anything else renders the initial-letter avatar instead and
+    // can never be interpreted as a local file.
+    match safe_avatar_url(avatar_url) {
+        Some(url) => {
+            let loading = fallback_avatar.clone();
+            gpui::img(url)
+                .size(px(26.0))
+                .flex_none()
+                .rounded_full()
+                .object_fit(gpui::ObjectFit::Cover)
+                .with_loading(loading)
+                .with_fallback(fallback_avatar)
+                .into_any_element()
+        }
+        None => fallback_avatar(),
+    }
+}
+
+/// The account menu's scope action row.
+fn account_action_row(
+    action: AccountMenuAction,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    match action {
+        AccountMenuAction::EnableSync => popover::menu_row(theme, false, "user-menu-enable-sync")
+            .id("user-menu-enable-sync")
+            .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
+            .child(
+                icon(icons::GLOBAL)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted),
+            )
+            .child(SharedString::from("Enable sync"))
+            .into_any_element(),
+        AccountMenuAction::SyncInProgress => {
+            popover::menu_row(theme, false, "user-menu-sync-progress")
+                .id("user-menu-sync-progress")
+                .opacity(0.6)
+                .child(
+                    icon(icons::GLOBAL)
+                        .size(px(16.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(SharedString::from("Sync setup in progress"))
+                .into_any_element()
+        }
+        AccountMenuAction::RestartPending => {
+            popover::menu_row(theme, false, "user-menu-sync-restart")
+                .id("user-menu-sync-restart")
+                .on_click(cx.listener(|this, _, _, cx| this.reopen_sync_notice(cx)))
+                .child(
+                    icon(icons::RESTART)
+                        .size(px(16.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(SharedString::from("Finish sync setup"))
+                .into_any_element()
+        }
+        AccountMenuAction::SignOut => popover::menu_row(theme, false, "user-menu-signout")
+            .id("user-menu-signout")
+            .on_click(cx.listener(|this, _, _, cx| this.request_sign_out(cx)))
+            .child(
+                icon(icons::LOGOUT_2)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted),
+            )
+            .child(SharedString::from("Sign out"))
+            .into_any_element(),
     }
 }
