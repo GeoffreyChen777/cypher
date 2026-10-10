@@ -942,7 +942,7 @@ fn diff_line_row(
 
 /// Settings preview uses the same rows, gutters, tinting and syntax renderer
 /// as the real diff, but never loads files or issues engine RPCs.
-pub(crate) fn color_preview(theme: &Theme) -> AnyElement {
+pub fn color_preview(theme: &Theme) -> AnyElement {
     use cypher_syntax::{HighlightKind, HighlightSpan};
     let rows = [
         (
@@ -1039,7 +1039,7 @@ pub(super) fn diff_text_element(
 /// pane itself virtualizes these rows individually; this stacked form serves
 /// the transcript and the fold tween's clipped stand-in.)
 /// Full-document old/new highlighting for tool and checkout diffs.
-pub(crate) fn render_file_body_with_syntax(
+pub fn render_file_body_with_syntax(
     file: &FileDiff,
     highlights: Option<Arc<DiffHighlights>>,
     theme: &Theme,

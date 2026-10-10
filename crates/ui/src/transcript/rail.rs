@@ -253,7 +253,7 @@ impl Transcript {
     /// The user's prompts paired with their transcript rows (user rows share
     /// the entry id), in order: the rail's ticks, and the stops ↑/↓ step
     /// between.
-    pub(crate) fn prompt_rows(&self, cx: &App) -> Vec<(RailTick, usize)> {
+    pub fn prompt_rows(&self, cx: &App) -> Vec<(RailTick, usize)> {
         let state = self.state_entity().read(cx);
         rail_ticks(&state.transcript, state.pending_echoes())
             .into_iter()

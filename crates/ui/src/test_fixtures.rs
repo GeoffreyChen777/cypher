@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use cypher_doc::{MessageRole, SessionMessageEntry};
 use cypher_proto::{Chat, Session, SessionStatus, Space};
 
-pub(crate) fn chat() -> Chat {
+pub fn chat() -> Chat {
     Chat {
         id: "chat".into(),
         device_id: "dev".into(),
@@ -31,7 +31,7 @@ pub(crate) fn chat() -> Chat {
     }
 }
 
-pub(crate) fn space() -> Space {
+pub fn space() -> Space {
     Space {
         id: "space".into(),
         device_id: "dev".into(),
@@ -47,7 +47,7 @@ pub(crate) fn space() -> Space {
     }
 }
 
-pub(crate) fn session() -> Session {
+pub fn session() -> Session {
     Session {
         chat_id: "chat".into(),
         device_id: "dev".into(),
@@ -60,7 +60,7 @@ pub(crate) fn session() -> Session {
     }
 }
 
-pub(crate) fn entry() -> SessionMessageEntry {
+pub fn entry() -> SessionMessageEntry {
     SessionMessageEntry {
         id: "entry".into(),
         role: MessageRole::User,

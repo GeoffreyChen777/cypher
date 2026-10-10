@@ -863,7 +863,7 @@ fn selection_wash(theme: &Theme) -> Hsla {
 /// Find tints: `(every match, the active one)`. Amber rather than the accent
 /// hue so a highlight never reads as a selection — they can overlap, and the
 /// browser/editor convention is worth more here than palette purity.
-pub(crate) fn find_wash(theme: &Theme) -> (Hsla, Hsla) {
+pub fn find_wash(theme: &Theme) -> (Hsla, Hsla) {
     (theme.warning.opacity(0.22), theme.warning.opacity(0.58))
 }
 
@@ -876,7 +876,7 @@ const FIND_PAD_X: f32 = 2.0;
 
 /// Paint one element's find matches under its glyphs. `hits` pairs each byte
 /// range with whether it is the surface's active match.
-pub(crate) fn paint_find_hits(
+pub fn paint_find_hits(
     window: &mut Window,
     layout: &gpui::TextLayout,
     hits: &[(Range<usize>, bool)],
@@ -901,7 +901,7 @@ pub(crate) fn paint_find_hits(
 /// into the frame's document-ordered registry (so drags span into adjacent
 /// markdown rows and Cmd+C joins in order), and re-registers the mouse
 /// listeners. Call from a paint-phase canvas that sits UNDER the text.
-pub(crate) fn paint_text_selection(
+pub fn paint_text_selection(
     window: &mut Window,
     scope: super::selection::SelectionScope,
     key: &std::sync::Arc<str>,
@@ -935,7 +935,7 @@ pub(crate) fn paint_text_selection(
 /// A run of plain text that selects + copies under `scope` as `key`. Font,
 /// size and color inherit from the parent div. The surface must paint
 /// [`selection_frame_reset`] for `scope` before any of these.
-pub(crate) fn selectable_plain_text(
+pub fn selectable_plain_text(
     scope: super::selection::SelectionScope,
     key: std::sync::Arc<str>,
     text: SharedString,
@@ -1037,7 +1037,7 @@ fn registry_point(
 /// Current window-space endpoint for a settled selection head. The transcript
 /// uses this to keep its floating Comment affordance attached while scrolling,
 /// streaming, or resize/reflow moves the underlying text.
-pub(crate) fn selection_anchor(
+pub fn selection_anchor(
     scope: super::selection::SelectionScope,
     key: &str,
     index: usize,
@@ -1193,7 +1193,7 @@ fn register_selection_listeners(
 /// text's own geometry. `pad_x` overhangs the box horizontally (inline code);
 /// `inset_y` shrinks it vertically — both 0 for a selection wash, which wants
 /// full-line-height boxes that tile seamlessly across wrapped rows.
-pub(crate) fn range_rects(
+pub fn range_rects(
     layout: &gpui::TextLayout,
     range: &Range<usize>,
     pad_x: f32,

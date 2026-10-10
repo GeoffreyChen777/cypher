@@ -365,7 +365,7 @@ fn chunk_ranges(b64_len: usize) -> Vec<(u64, std::ops::Range<usize>)> {
 
 /// Race an RPC against `timeout` on the gpui background executor (these
 /// futures run under `cx.spawn`, so tokio's timer reactor isn't available).
-pub(crate) async fn call_with_timeout(
+pub async fn call_with_timeout(
     engine: &EngineHandle,
     executor: &BackgroundExecutor,
     method: &str,

@@ -12,7 +12,7 @@ impl Transcript {
         }
     }
 
-    pub(crate) fn rail_enabled(&self) -> bool {
+    pub fn rail_enabled(&self) -> bool {
         self.rail_enabled
     }
 
@@ -58,28 +58,28 @@ impl Transcript {
         cx.notify();
     }
 
-    pub(crate) fn rail_hover(&self) -> Option<usize> {
+    pub fn rail_hover(&self) -> Option<usize> {
         self.rail_hover
     }
 
-    pub(crate) fn set_rail_hover(&mut self, hover: Option<usize>) {
+    pub fn set_rail_hover(&mut self, hover: Option<usize>) {
         self.rail_hover = hover;
     }
 
-    pub(crate) fn rows(&self) -> &[Row] {
+    pub fn rows(&self) -> &[Row] {
         &self.rows
     }
 
-    pub(crate) fn list_state(&self) -> &ListState {
+    pub fn list_state(&self) -> &ListState {
         &self.list
     }
 
-    pub(crate) fn state_entity(&self) -> &Entity<AppState> {
+    pub fn state_entity(&self) -> &Entity<AppState> {
         &self.state
     }
 
     /// Replace the transcript's scroll animation task (rail click / jump).
-    pub(crate) fn set_scroll_task(&mut self, task: Task<()>) {
+    pub fn set_scroll_task(&mut self, task: Task<()>) {
         // Rail navigation within the session RELEASES the hold but keeps the
         // runway (user spec: only leaving and revisiting the session clears
         // it) — scrolling back down re-arms the hold like any restick.
@@ -156,7 +156,7 @@ impl Transcript {
         }
     }
 
-    pub(crate) fn distance_from_bottom(&self) -> f32 {
+    pub fn distance_from_bottom(&self) -> f32 {
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
         let cur = f32::from(self.list.scroll_px_offset_for_scrollbar().y);
         (max + cur).max(0.0)
@@ -720,7 +720,7 @@ impl Transcript {
     /// Whether the scroll offset is in a bottom-glued representation (`None`
     /// or anchored past the end) — states where the next layout hard-snaps to
     /// the new end instead of holding a pixel position.
-    pub(crate) fn is_glued(&self) -> bool {
+    pub fn is_glued(&self) -> bool {
         self.list.logical_scroll_top().item_ix >= self.rows.len()
     }
 

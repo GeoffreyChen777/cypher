@@ -575,7 +575,7 @@ pub fn menu_at(
 /// ratio so the *dark* result is always exactly `alpha_dark` (never routed
 /// through [`Hsla::opacity`], whose `0..=1` clamp would clip a
 /// larger-than-0.6 alpha before it could scale the light side).
-pub(crate) fn scrim_alpha(alpha_dark: f32) -> gpui::Hsla {
+pub fn scrim_alpha(alpha_dark: f32) -> gpui::Hsla {
     crate::kit::theme::scrim(alpha_dark)
 }
 

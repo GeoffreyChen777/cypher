@@ -467,7 +467,7 @@ pub fn merge_restored_comments(
 }
 
 /// One-line quote preview for the comments inspector/editor.
-pub(crate) fn comment_quote_preview(quote: &str) -> String {
+pub fn comment_quote_preview(quote: &str) -> String {
     let single = quote.replace('\n', " ");
     if single.chars().count() > 120 {
         let mut out: String = single.chars().take(120).collect();

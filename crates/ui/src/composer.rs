@@ -987,7 +987,7 @@ impl Composer {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_sending_for_test(&mut self, sending: bool) {
+    pub fn set_sending_for_test(&mut self, sending: bool) {
         self.sending = sending;
     }
 }

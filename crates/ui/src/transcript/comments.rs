@@ -126,7 +126,7 @@ impl Transcript {
     /// Close the floating affordance and remove the transcript selection wash.
     /// Also shell-driven: a tile's tab closing or going to the background
     /// takes its transcript's comment pill/editor and selection with it.
-    pub(crate) fn dismiss_comment_ui_and_selection(&mut self, cx: &mut Context<Self>) {
+    pub fn dismiss_comment_ui_and_selection(&mut self, cx: &mut Context<Self>) {
         self.dismiss_comment_ui(cx);
         crate::markdown::selection::clear(self.scope);
     }

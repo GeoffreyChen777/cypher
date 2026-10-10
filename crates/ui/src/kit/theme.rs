@@ -102,7 +102,7 @@ pub fn theme_generation() -> u32 {
 /// because such tests exist outside this module too (see `motion::tests`).
 /// Tests that flip the appearance restore Dark before releasing the guard.
 #[cfg(test)]
-pub(crate) fn lock_appearance() -> std::sync::MutexGuard<'static, ()> {
+pub fn lock_appearance() -> std::sync::MutexGuard<'static, ()> {
     static APPEARANCE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     APPEARANCE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -1048,7 +1048,7 @@ pub fn oklch(l: f32, c: f32, h_deg: f32) -> Hsla {
 
 /// oklch → sRGB (each 0..1, clamped/gamut-clipped per channel).
 /// Reference: Björn Ottosson's OKLab definition (the same matrices CSS Color 4 uses).
-pub(crate) fn oklch_to_srgb(l: f32, c: f32, h_deg: f32) -> [f32; 3] {
+pub fn oklch_to_srgb(l: f32, c: f32, h_deg: f32) -> [f32; 3] {
     let h = h_deg.to_radians();
     let a = c * h.cos();
     let b = c * h.sin();
@@ -1077,7 +1077,7 @@ fn gamma_encode(x: f32) -> f32 {
 }
 
 /// sRGB (0..1 components) → HSL, all components 0..1 (gpui's Hsla convention).
-pub(crate) fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+pub fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
     let l = (max + min) / 2.0;
@@ -1101,7 +1101,7 @@ pub(crate) fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 }
 
 /// HSL (gpui convention, all 0..1) → sRGB components 0..1.
-pub(crate) fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
+pub fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
     if s <= f32::EPSILON {
         return [l, l, l];
     }

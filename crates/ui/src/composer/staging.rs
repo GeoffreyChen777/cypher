@@ -25,7 +25,7 @@ impl Composer {
     /// Stage files (picker / drop / pasted paths): images preview as
     /// thumbnails, anything else as a file tile. Folders, read failures, and
     /// oversize files surface in the failure notice.
-    pub(crate) fn add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+    pub fn add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let mut staged = Vec::new();
         for path in &paths {
             match attachments::stage_file(path) {

@@ -422,4 +422,4 @@ pub fn word_range(text: &str, ix: usize) -> Range<usize> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+pub mod tests;

@@ -7,12 +7,7 @@ use std::path::Path;
 /// temp file beside it (created with unix `mode`), fsync, then rename over the
 /// destination — a crash mid-write never leaves a torn file. On failure the
 /// staging file is removed and the destination is left untouched.
-pub(crate) fn write_atomic(
-    dir: &Path,
-    file_name: &str,
-    bytes: &[u8],
-    mode: u32,
-) -> std::io::Result<()> {
+pub fn write_atomic(dir: &Path, file_name: &str, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let temp = dir.join(format!(".{file_name}-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {

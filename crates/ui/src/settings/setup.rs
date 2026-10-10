@@ -392,7 +392,7 @@ impl Render for SetupPage {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
     use std::sync::{
@@ -401,11 +401,11 @@ pub(crate) mod tests {
     };
 
     #[derive(Default)]
-    pub(crate) struct RuntimeFixture {
-        pub(crate) installs: AtomicUsize,
-        pub(crate) polls: AtomicUsize,
-        pub(crate) finish: tokio::sync::Notify,
-        pub(crate) requests: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+    pub struct RuntimeFixture {
+        pub installs: AtomicUsize,
+        pub polls: AtomicUsize,
+        pub finish: tokio::sync::Notify,
+        pub requests: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
     }
 
     #[async_trait::async_trait]
@@ -449,7 +449,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn pump_until(cx: &TestAppContext, predicate: impl Fn() -> bool) {
+    pub fn pump_until(cx: &TestAppContext, predicate: impl Fn() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             cx.run_until_parked();
