@@ -5,8 +5,9 @@
 //
 // The registry stores CURRENT STATE ONLY: a row is a bag of fields, each
 // field carries the HLC of its last write, and a write applies iff its clock
-// beats the stored one. The shared conformance vectors live in
-// CypherTests/Sync/RegistryCoreTests.swift — keep all three languages in sync.
+// beats the stored one. All three languages run the shared vectors in
+// protocol/vectors/registry-core-v1.json; change them together
+// (protocol/README.md).
 
 import Foundation
 
