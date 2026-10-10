@@ -130,7 +130,7 @@ impl Shell {
     /// replaces the landing. A project window also opens the chat its state
     /// selected (the chat moves windows with it) into its restored layout.
     pub(super) fn boot_select_chat(&mut self, cx: &mut Context<Self>) {
-        if self.boot_landed {
+        if self.tiles.boot_landed {
             return;
         }
         let (landing, pinned) = {
@@ -151,9 +151,9 @@ impl Shell {
                 (latest, false)
             }
         };
-        self.boot_landed = true;
+        self.tiles.boot_landed = true;
         self.prune_persisted_layout(cx);
-        let saved = self.saved_workspace.take();
+        let saved = self.tiles.saved_workspace.take();
         let presync = self.workspace.tabs().next().is_some();
         if let Some(saved) = saved.filter(|_| !pinned) {
             let live: std::collections::HashSet<String> = {
@@ -171,7 +171,7 @@ impl Shell {
                 for (old, new) in adopt_presync_tabs(&mut restored, &self.workspace) {
                     if let Some(slot) = self
                         .slot_for_tab(&old)
-                        .and_then(|sid| self.slots.get_mut(&sid))
+                        .and_then(|sid| self.tiles.slots.get_mut(&sid))
                     {
                         slot.tab = new;
                     }
@@ -194,7 +194,7 @@ impl Shell {
             }
             _ => {}
         }
-        self.focus_pending = true;
+        self.tiles.focus_pending = true;
         self.workspace_changed(cx);
     }
 
@@ -249,7 +249,7 @@ impl Shell {
     pub(super) fn open_chat_with(&mut self, chat_id: String, split: bool, cx: &mut Context<Self>) {
         self.route = Route::Chat;
         super::workspace_view::route_open(&mut self.workspace, TabKey::Session(chat_id), split);
-        self.focus_pending = true;
+        self.tiles.focus_pending = true;
         self.workspace_changed(cx);
     }
 
@@ -266,7 +266,7 @@ impl Shell {
             match canvas.and_then(|tab| self.workspace.find(&tab)) {
                 Some((group, index)) => {
                     self.workspace.activate(group, index);
-                    self.focus_pending = true;
+                    self.tiles.focus_pending = true;
                     self.workspace_changed(cx);
                 }
                 None => self.open_new_session(cx),
@@ -369,7 +369,7 @@ impl Shell {
     /// before its row lands, and its tab must not close mid-send.
     fn chat_sending(&self, chat_id: &str, cx: &App) -> bool {
         self.slot_for_tab(&TabKey::session(chat_id))
-            .and_then(|sid| self.slots.get(&sid))
+            .and_then(|sid| self.tiles.slots.get(&sid))
             .is_some_and(|slot| slot.composer.read(cx).is_sending())
     }
 
@@ -434,7 +434,7 @@ impl Shell {
                 tab
             }
         };
-        self.focus_pending = true;
+        self.tiles.focus_pending = true;
         self.sync_slots(cx);
         self.slot_for_tab(&tab)
     }
@@ -452,6 +452,7 @@ impl Shell {
             return;
         };
         let Some((state, composer)) = self
+            .tiles
             .slots
             .get(&sid)
             .map(|slot| (slot.state.clone(), slot.composer.clone()))
@@ -496,6 +497,7 @@ impl Shell {
             return;
         };
         let Some((state, composer)) = self
+            .tiles
             .slots
             .get(&sid)
             .map(|slot| (slot.state.clone(), slot.composer.clone()))
@@ -523,7 +525,7 @@ impl Shell {
         self.settings.last_space_id = Some(space_id.clone());
         if let Some(composer) = self
             .open_canvas(cx)
-            .and_then(|sid| self.slots.get(&sid))
+            .and_then(|sid| self.tiles.slots.get(&sid))
             .map(|slot| slot.composer.clone())
         {
             composer.update(cx, |composer, cx| {

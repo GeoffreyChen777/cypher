@@ -946,23 +946,18 @@ struct OrgGateUi {
     task: Option<Task<()>>,
 }
 
-pub struct Shell {
-    /// The window's main state: lists (sidebar, spaces, sessions) in
-    /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
-    /// session (sidebar highlight, nav history, cycle order, space
-    /// implication). Each tile renders from its own session context.
-    state: Entity<AppState>,
-    /// The tiled session layout (docs/design/workspace-layout.md).
-    workspace: crate::workspace::Workspace,
+/// The session slots behind a window's workspace tabs: one per open tab,
+/// the focus/follow bookkeeping, and the boot-time layout restore.
+struct SlotTable {
     /// One slot per open workspace tab (created on open, dropped on close —
     /// dropping the context kills its watches).
     slots: std::collections::HashMap<session::SlotId, session::SessionSlot>,
     next_slot_id: session::SlotId,
     /// The slots on screen at the last workspace change (see
-    /// [`Self::dismiss_hidden_comment_ui`]).
+    /// [`Shell::dismiss_hidden_comment_ui`]).
     shown_slots: Vec<session::SlotId>,
     /// The focused tab main's selection last followed (see
-    /// [`Self::sync_follow`]).
+    /// [`Shell::sync_follow`]).
     followed: Option<crate::workspace::TabKey>,
     /// Land keyboard focus in the focused slot's composer on the next
     /// render (routing changes the focused tile without a window handle).
@@ -975,6 +970,19 @@ pub struct Shell {
     /// `UiSettings.workspace`, a project window's
     /// `UiSettings.project_workspaces[project]`. Taken once.
     saved_workspace: Option<crate::workspace::Workspace>,
+}
+
+pub struct Shell {
+    /// The window's main state: lists (sidebar, spaces, sessions) in
+    /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
+    /// session (sidebar highlight, nav history, cycle order, space
+    /// implication). Each tile renders from its own session context.
+    state: Entity<AppState>,
+    /// The tiled session layout (docs/design/workspace-layout.md).
+    workspace: crate::workspace::Workspace,
+    /// The session slots behind the workspace's tabs, and how main follows
+    /// the focused one.
+    tiles: SlotTable,
     /// Unsent drafts + staged attachments of closed session tabs, restored
     /// when the session's slot is created again (drafts used to survive chat
     /// switches). In memory only. Also holds a background fork's prefill
@@ -1349,13 +1357,15 @@ impl Shell {
         Self {
             state,
             workspace: crate::workspace::Workspace::new(),
-            slots: std::collections::HashMap::new(),
-            shown_slots: Vec::new(),
-            next_slot_id: 0,
-            followed: None,
-            focus_pending: false,
-            boot_landed: false,
-            saved_workspace,
+            tiles: SlotTable {
+                slots: std::collections::HashMap::new(),
+                next_slot_id: 0,
+                shown_slots: Vec::new(),
+                followed: None,
+                focus_pending: false,
+                boot_landed: false,
+                saved_workspace,
+            },
             closed_drafts: std::collections::HashMap::new(),
             parked_terminals: std::collections::HashMap::new(),
             seen_chats_generation: 0,
@@ -1479,7 +1489,7 @@ impl Shell {
                     } => {
                         let Some(composer) = this
                             .slot_for_chat(chat_id, cx)
-                            .and_then(|sid| this.slots.get(&sid))
+                            .and_then(|sid| this.tiles.slots.get(&sid))
                             .map(|slot| slot.composer.clone())
                         else {
                             return;
@@ -1642,7 +1652,7 @@ impl Shell {
             // schedules a save) — once boot restored it, never before.
             let Ok(snapshot) = this.update(cx, |shell, cx| {
                 shell.settings.appearance = crate::appearance::mode(cx);
-                if shell.boot_landed {
+                if shell.tiles.boot_landed {
                     shell.settings.workspace = Some(shell.workspace.clone());
                 }
                 shell.settings.clone()

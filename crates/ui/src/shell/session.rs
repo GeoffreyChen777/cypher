@@ -163,7 +163,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return Empty.into_any_element();
         };
         let area = slot.area.clone();

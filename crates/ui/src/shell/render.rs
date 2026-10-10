@@ -1389,7 +1389,9 @@ impl Shell {
             && matches!(gate, GatePhase::Ready)
             && matches!(self.route, Route::Chat)
             && !self.showing_setup();
-        if chat_ready && (window.focused(cx).is_none() || std::mem::take(&mut self.focus_pending)) {
+        if chat_ready
+            && (window.focused(cx).is_none() || std::mem::take(&mut self.tiles.focus_pending))
+        {
             self.focus_landing(window, cx);
         }
         // The find bar can close out from under the keyboard — selecting
@@ -1397,6 +1399,7 @@ impl Shell {
         // field without ever firing a focus-lost event. Focus would then sit
         // on an element that no longer renders and every key would dead-end.
         let stranded: Vec<session::SlotId> = self
+            .tiles
             .slots
             .iter()
             .filter(|(_, slot)| {
@@ -1406,7 +1409,7 @@ impl Shell {
             .map(|(sid, _)| *sid)
             .collect();
         for sid in stranded {
-            if let Some(slot) = self.slots.get_mut(&sid) {
+            if let Some(slot) = self.tiles.slots.get_mut(&sid) {
                 slot.find_focus_pending = false;
             }
             match self.route {
@@ -1621,7 +1624,7 @@ impl Shell {
         if self.debug_dialog.as_deref() == Some("model")
             && let Some(composer) = self
                 .focused_slot()
-                .and_then(|sid| self.slots.get(&sid))
+                .and_then(|sid| self.tiles.slots.get(&sid))
                 .map(|slot| slot.composer.clone())
         {
             self.debug_dialog = None;

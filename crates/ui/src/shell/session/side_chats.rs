@@ -44,7 +44,7 @@ impl Shell {
         origin: Option<cypher_proto::agent_prompt::AgentQuote>,
         cx: &mut Context<Self>,
     ) {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
         let open = slot
@@ -156,6 +156,7 @@ impl Shell {
     ) {
         let parent_chat_id = created.parent_chat_id.clone();
         let slot_chat = self
+            .tiles
             .slots
             .get(&sid)
             .and_then(|slot| slot.state.read(cx).selected_chat.clone());
@@ -195,7 +196,7 @@ impl Shell {
             }
             return;
         }
-        let Some(slot_state) = self.slots.get(&sid).map(|slot| slot.state.clone()) else {
+        let Some(slot_state) = self.tiles.slots.get(&sid).map(|slot| slot.state.clone()) else {
             return;
         };
         let panel = cx.new(|cx| {
@@ -209,7 +210,7 @@ impl Shell {
                 cx,
             )
         });
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         slot.side_chat_seq += 1;
@@ -229,7 +230,7 @@ impl Shell {
         // Opening a side chat implies the dock is showing it — at its NORMAL
         // width (never a takeover/expanded dock: the conversation stays
         // visible beside the side chat).
-        if let Some(slot) = self.slots.get_mut(&sid) {
+        if let Some(slot) = self.tiles.slots.get_mut(&sid) {
             slot.dock.expanded = false;
             slot.dock.open = true;
         }
@@ -252,6 +253,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let handoff = self
+            .tiles
             .slots
             .get(&sid)
             .and_then(|slot| {
@@ -318,15 +320,19 @@ impl Shell {
         self.expect_chat(&chat_id);
         let tab = crate::workspace::TabKey::session(chat_id.clone());
         let group = self
+            .tiles
             .slots
             .get(&sid)
             .and_then(|slot| self.workspace.find(&slot.tab))
             .map(|(group, _)| group)
             .unwrap_or(self.workspace.focused());
         self.workspace.open_in(group, tab.clone());
-        self.focus_pending = true;
+        self.tiles.focus_pending = true;
         self.sync_slots(cx);
-        if let Some(slot) = self.slot_for_tab(&tab).and_then(|id| self.slots.get(&id)) {
+        if let Some(slot) = self
+            .slot_for_tab(&tab)
+            .and_then(|id| self.tiles.slots.get(&id))
+        {
             // Seed the new tile's transcript from the fork so there is no
             // blank flash while the promoted chat's doc watch reset lands
             // (same content — the doc watch diff is a no-op), and carry any
@@ -352,7 +358,7 @@ impl Shell {
     /// dispose (no-op after promotion) and drop the panel (its transcript /
     /// status tasks die with it).
     fn close_side_chat_tab(&mut self, sid: SlotId, side_chat_id: String, cx: &mut Context<Self>) {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
         if let Some(id) = slot
@@ -375,7 +381,7 @@ impl Shell {
         id: u64,
         cx: &mut Context<Self>,
     ) {
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         let Some(panel) = slot.side_chats.remove(&id) else {

@@ -442,7 +442,7 @@ impl Shell {
 
     fn activate_tab(&mut self, group: GroupId, index: usize, cx: &mut Context<Self>) {
         if self.workspace.activate(group, index) {
-            self.focus_pending = true;
+            self.tiles.focus_pending = true;
             self.workspace_changed(cx);
         }
     }
@@ -450,7 +450,7 @@ impl Shell {
     /// Close a tab (its slot goes with it).
     pub(super) fn close_tab(&mut self, tab: &TabKey, cx: &mut Context<Self>) {
         if self.workspace.close(tab) {
-            self.focus_pending = true;
+            self.tiles.focus_pending = true;
             self.workspace_changed(cx);
         }
     }
@@ -465,7 +465,7 @@ impl Shell {
         }
         let focused = self.workspace.focused();
         if self.workspace.split_group(focused, edge).is_some() {
-            self.focus_pending = true;
+            self.tiles.focus_pending = true;
             self.workspace_changed(cx);
         }
     }
@@ -476,7 +476,7 @@ impl Shell {
         }
         if let Some(group) = self.workspace.neighbour(self.workspace.focused(), edge) {
             self.workspace.focus(group);
-            self.focus_pending = true;
+            self.tiles.focus_pending = true;
             self.workspace_changed(cx);
         }
     }
@@ -496,7 +496,7 @@ impl Shell {
             self.workspace.toggle_zoom(zoomed);
         }
         self.workspace.focus(group);
-        self.focus_pending = true;
+        self.tiles.focus_pending = true;
         self.workspace_changed(cx);
     }
 
@@ -521,7 +521,7 @@ impl Shell {
     /// that inherits its space.
     fn close_focused_group(&mut self, cx: &mut Context<Self>) {
         if self.workspace.close_group(self.workspace.focused()) {
-            self.focus_pending = true;
+            self.tiles.focus_pending = true;
             self.workspace_changed(cx);
         }
     }
@@ -616,7 +616,7 @@ impl Shell {
         self.tab_drop = None;
         self.route = Route::Chat;
         route_drop(&mut self.workspace, drag.tab.clone(), group, placement);
-        self.focus_pending = true;
+        self.tiles.focus_pending = true;
         self.workspace_changed(cx);
     }
 

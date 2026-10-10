@@ -18,7 +18,7 @@ impl Shell {
         let theme_owned = crate::appearance::chat_style::theme(cx);
         let theme = &theme_owned;
         let faint = theme.text_faint;
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return Empty.into_any_element();
         };
         let (transcript, composer, slot_state) = (
@@ -85,7 +85,7 @@ impl Shell {
         // chat area shows the "Drop images to attach" veil; a drop stages the
         // files in the composer. `has_active_drag` gates the veil so a drag
         // that left the window (FileDrop Exited) can't strand it.
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return Empty.into_any_element();
         };
         let file_drag_active = slot.file_drag_active && cx.has_active_drag();
@@ -108,7 +108,7 @@ impl Shell {
             .on_drag_move::<gpui::ExternalPaths>(cx.listener(
                 move |this, e: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
                     let inside = e.bounds.contains(&e.event.position);
-                    if let Some(slot) = this.slots.get_mut(&sid)
+                    if let Some(slot) = this.tiles.slots.get_mut(&sid)
                         && slot.file_drag_active != inside
                     {
                         slot.file_drag_active = inside;
@@ -118,7 +118,7 @@ impl Shell {
             ))
             .on_drop(
                 cx.listener(move |this, paths: &gpui::ExternalPaths, _, cx| {
-                    let Some(slot) = this.slots.get_mut(&sid) else {
+                    let Some(slot) = this.tiles.slots.get_mut(&sid) else {
                         return;
                     };
                     slot.file_drag_active = false;
@@ -209,7 +209,7 @@ impl Shell {
         stack_h: f32,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let transcript = self.slots.get(&sid)?.transcript.clone();
+        let transcript = self.tiles.slots.get(&sid)?.transcript.clone();
         if !transcript.read(cx).jump_button_shown() {
             return None;
         }
@@ -278,7 +278,7 @@ impl Shell {
     /// where the composer pill's rounded top corners finish and become flat,
     /// pulling them slightly inward from the pill's outer edges.
     fn render_status_strip(&mut self, sid: SlotId, cx: &mut Context<Self>) -> AnyElement {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return Empty.into_any_element();
         };
         let (slot_state, composer, subagents) = (

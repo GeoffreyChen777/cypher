@@ -57,7 +57,7 @@ impl Shell {
         anchor_message_id: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(slot_transcript) = self.slots.get(&sid).map(|s| s.transcript.clone()) else {
+        let Some(slot_transcript) = self.tiles.slots.get(&sid).map(|s| s.transcript.clone()) else {
             return;
         };
         slot_transcript.update(cx, |t, cx| {
@@ -267,13 +267,13 @@ impl Shell {
             }
             self.workspace.focus(before);
         } else {
-            self.focus_pending = true;
+            self.tiles.focus_pending = true;
         }
         self.sync_slots(cx);
         if let Some(text) = created.composer_text {
             match self
                 .slot_for_tab(&fork)
-                .and_then(|sid| self.slots.get(&sid))
+                .and_then(|sid| self.tiles.slots.get(&sid))
                 .map(|slot| slot.composer.clone())
             {
                 Some(composer) => composer.update(cx, |composer, cx| {
@@ -331,6 +331,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let Some((slot_transcript, composer)) = self
+            .tiles
             .slots
             .get(&sid)
             .map(|s| (s.transcript.clone(), s.composer.clone()))

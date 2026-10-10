@@ -10,7 +10,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<Entity<TerminalPanel>> {
         let popup = self.comment_popup.clone().downgrade();
-        let slot = self.slots.get_mut(&sid)?;
+        let slot = self.tiles.slots.get_mut(&sid)?;
         if let Some(terminal) = &slot.terminal {
             return Some(terminal.clone());
         }
@@ -50,24 +50,25 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
         let from = self.terminal_target(slot);
         let Some(panel) = self.terminal_panel(sid, cx) else {
             return;
         };
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         slot.terminal_open = !slot.terminal_open;
         let open = slot.terminal_open;
         let composer = slot.composer.clone();
         let to = self
+            .tiles
             .slots
             .get(&sid)
             .map_or(0.0, |slot| self.terminal_target(slot));
-        if let Some(slot) = self.slots.get_mut(&sid) {
+        if let Some(slot) = self.tiles.slots.get_mut(&sid) {
             slot.terminal_tween = Some(WidthTween::new(from, to));
         }
         panel.update(cx, |panel, cx| panel.set_open(open, cx));
@@ -91,14 +92,14 @@ impl Shell {
                 .timer(RESIZE.total() + Duration::from_millis(30))
                 .await;
             this.update(cx, |shell, cx| {
-                if let Some(slot) = shell.slots.get_mut(&sid) {
+                if let Some(slot) = shell.tiles.slots.get_mut(&sid) {
                     slot.terminal_tween = None;
                 }
                 cx.notify();
             })
             .ok();
         });
-        if let Some(slot) = self.slots.get_mut(&sid) {
+        if let Some(slot) = self.tiles.slots.get_mut(&sid) {
             slot.terminal_tween_task = Some(task);
         }
         self.remember_slot_docks(sid, cx);
@@ -112,7 +113,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let sid = event.drag(cx).0;
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         let Some((anchor_y, anchor_h)) = slot.terminal_drag_anchor else {
@@ -135,7 +136,7 @@ impl Shell {
         sid: SlotId,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return gpui::Empty.into_any_element();
         };
         let target = self.terminal_target(slot);
@@ -151,7 +152,7 @@ impl Shell {
         {
             panel.update(cx, |panel, cx| panel.set_open(true, cx));
         }
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return gpui::Empty.into_any_element();
         };
         let Some(panel) = slot.terminal.clone() else {
@@ -170,10 +171,11 @@ impl Shell {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, _, _| {
-                    let Some(height) = this.slots.get(&sid).map(|s| this.terminal_height(s)) else {
+                    let Some(height) = this.tiles.slots.get(&sid).map(|s| this.terminal_height(s))
+                    else {
                         return;
                     };
-                    if let Some(slot) = this.slots.get_mut(&sid) {
+                    if let Some(slot) = this.tiles.slots.get_mut(&sid) {
                         slot.terminal_drag_anchor = Some((f32::from(event.position.y), height));
                     }
                 }),
@@ -189,7 +191,7 @@ impl Shell {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseUpEvent, _, cx| {
                     if event.click_count == 2
-                        && let Some(slot) = this.slots.get_mut(&sid)
+                        && let Some(slot) = this.tiles.slots.get_mut(&sid)
                     {
                         let area_h = f32::from(slot.area.get().size.height);
                         slot.terminal_fraction =

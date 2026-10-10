@@ -238,6 +238,7 @@ impl Shell {
                     // A boot canvas tile opened before the spaces frame
                     // copied main's then-empty pick: aim it too.
                     let canvases: Vec<Entity<AppState>> = self
+                        .tiles
                         .slots
                         .values()
                         .filter(|slot| matches!(slot.tab, crate::workspace::TabKey::NewSession(_)))

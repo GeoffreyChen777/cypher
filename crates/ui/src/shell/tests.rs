@@ -185,8 +185,8 @@ fn boot_lands_the_latest_chat_as_a_tab_and_main_follows_focus(cx: &mut gpui::Tes
     );
     // One slot per tab, each pinned to its own session.
     shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.slots.len(), 2);
-        for slot in shell.slots.values() {
+        assert_eq!(shell.tiles.slots.len(), 2);
+        for slot in shell.tiles.slots.values() {
             assert_eq!(
                 slot.state.read(cx).selected_chat.as_deref(),
                 slot.tab.chat_id()
@@ -208,7 +208,7 @@ fn a_canvas_becomes_its_session_and_vanished_or_archived_chats_close(
     );
     let canvas = shell.read_with(cx, |shell, _| shell.focused_slot().unwrap());
     // The first send selects the minted chat on the canvas's context.
-    let ctx = shell.read_with(cx, |shell, _| shell.slots[&canvas].state.clone());
+    let ctx = shell.read_with(cx, |shell, _| shell.tiles.slots[&canvas].state.clone());
     ctx.update(cx, |s, cx| s.select_chat(Some("new".into()), cx));
     cx.run_until_parked();
     assert_eq!(
@@ -253,7 +253,7 @@ fn a_canvas_becomes_its_session_and_vanished_or_archived_chats_close(
         cx,
     );
     assert_eq!(tab_shape(&shell, cx), vec![vec!["a".to_string()]]);
-    shell.read_with(cx, |shell, _| assert_eq!(shell.slots.len(), 1));
+    shell.read_with(cx, |shell, _| assert_eq!(shell.tiles.slots.len(), 1));
 }
 
 #[gpui::test]
@@ -356,17 +356,22 @@ fn boot_restores_the_saved_layout_and_docks(cx: &mut gpui::TestAppContext) {
     );
     shell.read_with(cx, |shell, _| {
         // Slots only for what's on screen; "c" gets one when shown.
-        let mut open: Vec<_> = shell.slots.values().map(|slot| slot.tab.clone()).collect();
+        let mut open: Vec<_> = shell
+            .tiles
+            .slots
+            .values()
+            .map(|slot| slot.tab.clone())
+            .collect();
         open.sort_by_key(|tab| tab.chat_id().map(str::to_string));
         assert_eq!(open, vec![TabKey::session("a"), TabKey::session("b")]);
         let b = shell.focused_slot().unwrap();
-        let slot = &shell.slots[&b];
+        let slot = &shell.tiles.slots[&b];
         assert!(slot.dock.open, "b's dock was open");
         assert_eq!(slot.right_fraction, Some(0.5));
         // A session without an entry starts from the latest sizes, closed.
         let a = shell.slot_for_tab(&TabKey::session("a")).unwrap();
-        assert!(!shell.slots[&a].dock.open);
-        assert_eq!(shell.slots[&a].right_fraction, Some(0.5));
+        assert!(!shell.tiles.slots[&a].dock.open);
+        assert_eq!(shell.tiles.slots[&a].right_fraction, Some(0.5));
     });
     // Showing "c" creates its slot; the change persists.
     shell.update(cx, |shell, cx| shell.open_chat("c".into(), cx));
@@ -412,7 +417,10 @@ fn a_presync_canvas_joins_the_restored_layout(cx: &mut gpui::TestAppContext) {
     shell.read_with(cx, |shell, _| {
         // The same canvas slot, re-keyed into the restored layout.
         assert_eq!(shell.focused_slot(), Some(canvas));
-        assert!(matches!(shell.slots[&canvas].tab, TabKey::NewSession(_)));
+        assert!(matches!(
+            shell.tiles.slots[&canvas].tab,
+            TabKey::NewSession(_)
+        ));
     });
     shell.update(cx, |shell, cx| shell.save_layout(cx));
     cx.executor()
@@ -447,11 +455,11 @@ fn hidden_tiles_start_no_context(cx: &mut gpui::TestAppContext) {
         cx,
     );
     shell.read_with(cx, |shell, _| {
-        assert_eq!(shell.slots.len(), 1);
+        assert_eq!(shell.tiles.slots.len(), 1);
         assert!(shell.slot_for_tab(&TabKey::session("b")).is_some());
     });
     shell.update(cx, |shell, cx| shell.toggle_zoom_focused(cx));
-    shell.read_with(cx, |shell, _| assert_eq!(shell.slots.len(), 2));
+    shell.read_with(cx, |shell, _| assert_eq!(shell.tiles.slots.len(), 2));
 }
 
 /// Any workspace change that takes a session off screen (here a sidebar
@@ -508,7 +516,7 @@ fn a_tab_stays_while_its_first_send_is_in_flight(cx: &mut gpui::TestAppContext) 
     shell.update(cx, |shell, cx| shell.open_new_session(cx));
     let sid = shell.read_with(cx, |shell, _| shell.focused_slot().unwrap());
     let (ctx, composer) = shell.read_with(cx, |shell, _| {
-        let slot = &shell.slots[&sid];
+        let slot = &shell.tiles.slots[&sid];
         (slot.state.clone(), slot.composer.clone())
     });
     composer.update(cx, |composer, _| composer.set_sending_for_test(true));
@@ -595,8 +603,9 @@ fn a_split_workspace_renders(cx: &mut gpui::TestAppContext) {
     });
     vcx.run_until_parked();
     shell.read_with(vcx, |shell, _| {
-        assert_eq!(shell.slots.len(), 3);
+        assert_eq!(shell.tiles.slots.len(), 3);
         let widths: Vec<f32> = shell
+            .tiles
             .slots
             .values()
             .map(|slot| f32::from(slot.area.get().size.width))

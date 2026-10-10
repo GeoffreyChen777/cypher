@@ -148,7 +148,7 @@ impl Shell {
         // its shell loaded (up to a debounce behind).
         let saved = self.settings.project_workspaces.get(&space_id).cloned();
         window
-            .update(cx, |shell, _, _| shell.saved_workspace = saved)
+            .update(cx, |shell, _, _| shell.tiles.saved_workspace = saved)
             .ok();
         registry(cx).open.push((space_id, window));
         sync_hidden_projects(cx);

@@ -238,7 +238,7 @@ impl Shell {
     /// close button. Not gated on git: the dock is a surface HOST, and only
     /// the Git surface rows check git.
     pub(super) fn toggle_dock(&mut self, sid: SlotId, cx: &mut Context<Self>) {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
         // Never on the new-session canvas (nothing to host yet); closing
@@ -253,7 +253,7 @@ impl Shell {
             DockSurface::Diff(id) => slot.diffs.get(&id).cloned(),
             _ => None,
         };
-        if let Some(slot) = self.slots.get_mut(&sid) {
+        if let Some(slot) = self.tiles.slots.get_mut(&sid) {
             slot.dock.open = open;
             if !open {
                 // Closing always leaves takeover mode — reopening at full
@@ -271,9 +271,9 @@ impl Shell {
                 changes.update(cx, |changes, cx| changes.detach(cx));
             }
         }
-        if let Some(slot) = self.slots.get(&sid) {
+        if let Some(slot) = self.tiles.slots.get(&sid) {
             let to = self.dock_target(slot);
-            if let Some(slot) = self.slots.get_mut(&sid) {
+            if let Some(slot) = self.tiles.slots.get_mut(&sid) {
                 slot.dock.tween = Some(WidthTween::new(from, to));
             }
         }
@@ -287,7 +287,7 @@ impl Shell {
     /// dock is ALREADY a takeover — the toggle returns to the chat (closes
     /// the dock).
     fn toggle_dock_expand(&mut self, sid: SlotId, cx: &mut Context<Self>) {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
         if !slot.dock.expanded && dock_takes_over(f32::from(slot.area.get().size.width)) {
@@ -295,12 +295,12 @@ impl Shell {
             return;
         }
         let from = self.dock_width_now(slot);
-        if let Some(slot) = self.slots.get_mut(&sid) {
+        if let Some(slot) = self.tiles.slots.get_mut(&sid) {
             slot.dock.expanded = !slot.dock.expanded;
         }
-        if let Some(slot) = self.slots.get(&sid) {
+        if let Some(slot) = self.tiles.slots.get(&sid) {
             let to = self.dock_target(slot);
-            if let Some(slot) = self.slots.get_mut(&sid) {
+            if let Some(slot) = self.tiles.slots.get_mut(&sid) {
                 slot.dock.tween = Some(WidthTween::new(from, to));
             }
         }
@@ -314,7 +314,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let sid = event.drag(cx).0;
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         let area = slot.area.get();
@@ -376,7 +376,7 @@ impl Shell {
 
     /// Drag-reorder a surface tab within this dock's strip.
     fn reorder_dock_tabs(&mut self, sid: SlotId, from: usize, to: usize, cx: &mut Context<Self>) {
-        if let Some(slot) = self.slots.get_mut(&sid)
+        if let Some(slot) = self.tiles.slots.get_mut(&sid)
             && reorder_dock_surfaces(&mut slot.dock.surfaces, from, to)
         {
             cx.notify();
@@ -392,7 +392,7 @@ impl Shell {
         over: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         match &mut slot.dock.tab_drag {
@@ -421,7 +421,7 @@ impl Shell {
         surface: DockSurface,
         cx: &mut Context<Self>,
     ) {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
         // The surface being replaced: an outgoing diff's selection/comment
@@ -434,7 +434,7 @@ impl Shell {
         {
             changes.update(cx, |changes, cx| changes.detach(cx));
         }
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         slot.dock.active = surface;
@@ -457,7 +457,7 @@ impl Shell {
     /// The picker's Files card / the `+` menu's Files row: a fresh file
     /// browser tab over the session's checkout.
     fn add_files_surface(&mut self, sid: SlotId, cx: &mut Context<Self>) {
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         slot.files_seq += 1;
@@ -473,7 +473,7 @@ impl Shell {
     /// FRESH diff tab with its own scope/base selection (multiple diff
     /// panels, user request).
     fn add_diff_surface(&mut self, sid: SlotId, cx: &mut Context<Self>) {
-        let Some(state) = self.slots.get(&sid).map(|slot| slot.state.clone()) else {
+        let Some(state) = self.tiles.slots.get(&sid).map(|slot| slot.state.clone()) else {
             return;
         };
         let popup = self.comment_popup.clone().downgrade();
@@ -489,7 +489,7 @@ impl Shell {
         commit: cypher_proto::GitHistoryCommit,
         cx: &mut Context<Self>,
     ) {
-        let Some(state) = self.slots.get(&sid).map(|slot| slot.state.clone()) else {
+        let Some(state) = self.tiles.slots.get(&sid).map(|slot| slot.state.clone()) else {
             return;
         };
         let popup = self.comment_popup.clone().downgrade();
@@ -508,7 +508,7 @@ impl Shell {
                 this.add_commit_diff_surface(sid, commit.clone(), cx);
             }
         });
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         slot.diff_seq += 1;
@@ -526,7 +526,7 @@ impl Shell {
             self.close_side_chat_by_seq(sid, id, cx);
             return;
         }
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         slot.dock.surfaces.retain(|s| *s != surface);
@@ -569,7 +569,7 @@ impl Shell {
         sid: SlotId,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let slot = self.slots.get(&sid)?;
+        let slot = self.tiles.slots.get(&sid)?;
         let target = self.dock_target(slot);
         let tween = slot.dock.tween;
         let width = self.eval_tween(tween, target);
@@ -665,7 +665,7 @@ impl Shell {
         } else {
             gpui::Empty.into_any_element()
         };
-        let slot = self.slots.get(&sid)?;
+        let slot = self.tiles.slots.get(&sid)?;
         let is_side_chat = slot.dock.open
             && matches!(
                 active,
@@ -721,7 +721,7 @@ impl Shell {
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseUpEvent, _, cx| {
                         if event.click_count == 2
-                            && let Some(slot) = this.slots.get_mut(&sid)
+                            && let Some(slot) = this.tiles.slots.get_mut(&sid)
                         {
                             let area_w = f32::from(slot.area.get().size.width);
                             slot.right_fraction = fraction_of(RIGHT_PANE_DEFAULT, area_w);
@@ -758,7 +758,7 @@ impl Shell {
     /// arrangement (user request): the old two-card grid clipped in narrow
     /// panes and wasted short ones.
     fn render_surface_picker(&mut self, sid: SlotId, cx: &mut Context<Self>) -> AnyElement {
-        let (files_available, git) = match self.slots.get(&sid) {
+        let (files_available, git) = match self.tiles.slots.get(&sid) {
             Some(slot) => (
                 self.files_available(slot, cx),
                 self.slot_git_detected(slot, cx),
@@ -896,7 +896,12 @@ impl Shell {
     /// Open the dock if it is closed (a rail surface or `+` pick shows its
     /// surface straight away).
     fn ensure_dock_open(&mut self, sid: SlotId, cx: &mut Context<Self>) {
-        if self.slots.get(&sid).is_some_and(|slot| !slot.dock.open) {
+        if self
+            .tiles
+            .slots
+            .get(&sid)
+            .is_some_and(|slot| !slot.dock.open)
+        {
             self.toggle_dock(sid, cx);
         }
     }
@@ -914,14 +919,14 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let has_drag = cx.has_active_drag();
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return Empty.into_any_element();
         };
         // Heal drag state if the pointer was released outside the rail.
         if slot.dock.tab_drag.is_some() && !has_drag {
             slot.dock.tab_drag = None;
         }
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return Empty.into_any_element();
         };
         let rows = self.dock_surface_rows(slot, cx);
@@ -1152,7 +1157,7 @@ fn render_rail_tabs(
             },
         ))
         .on_drop::<DockTabDrag>(cx.listener(move |this, payload: &DockTabDrag, _, cx| {
-            let Some(slot) = this.slots.get_mut(&sid) else {
+            let Some(slot) = this.tiles.slots.get_mut(&sid) else {
                 return;
             };
             let drag = slot.dock.tab_drag.take();

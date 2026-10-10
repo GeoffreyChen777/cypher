@@ -283,7 +283,7 @@ impl Shell {
         // Its tab closes (the slot's composer, and its per-chat stage, go
         // with it); a stashed draft of a closed tab is dropped too.
         if let Some(sid) = self.slot_for_tab(&crate::workspace::TabKey::session(chat_id.clone()))
-            && let Some(slot) = self.slots.get(&sid)
+            && let Some(slot) = self.tiles.slots.get(&sid)
         {
             slot.composer
                 .update(cx, |composer, _| composer.purge_chat(&chat_id));
