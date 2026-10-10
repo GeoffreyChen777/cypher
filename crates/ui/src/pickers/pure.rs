@@ -289,9 +289,9 @@ pub fn browser_rows(listing: &FolderListing) -> Vec<&cypher_proto::FolderEntry> 
     listing.entries.iter().filter(|e| e.is_dir).collect()
 }
 
-/// Display-side model-list hygiene, mirroring the engine's discovery-side
-/// fold (`models_from_session`) for catalogs served by OLDER engines (the
-/// space's device may run any version): the `default` alias row drops when a
+/// Display-side model-list hygiene for catalogs that still carry alias and
+/// 1M-variant rows (the space's device may run any version): the `default`
+/// alias row drops when a
 /// real row exists, and an orphan `<model>[1m]` variant presents as its base
 /// id with the Context Window trait pinned to 1M. Idempotent over
 /// already-clean lists. The send path recomposes the advertised id from the
