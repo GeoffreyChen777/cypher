@@ -18,3 +18,11 @@ apps/edge/dist/
 **/xcuserdata/
 *.xcarchive/
 *.ipa
+DerivedData/
+
+# Local tool and editor state.
+.venv/
+venv/
+.idea/
+.vscode/
+*.log
