@@ -48,7 +48,7 @@ fn raw_tokens(text: &str) -> f64 {
         .sum()
 }
 
-pub(crate) struct ThroughputMeter {
+pub struct ThroughputMeter {
     /// Calibrated tokens per delta of the current streak within [`WINDOW`],
     /// oldest first.
     samples: VecDeque<(Instant, f64)>,
@@ -91,7 +91,7 @@ impl Default for ThroughputMeter {
 
 impl ThroughputMeter {
     /// A new turn: its token count and speed start from nothing.
-    pub(crate) fn start_turn(&mut self) {
+    pub fn start_turn(&mut self) {
         self.reset_message(None);
         self.turn_tokens = 0;
         self.average = None;
@@ -99,7 +99,7 @@ impl ThroughputMeter {
     }
 
     /// A new assistant message opens (a tool round-trip ended the last one).
-    pub(crate) fn start_message(&mut self, now: Instant) {
+    pub fn start_message(&mut self, now: Instant) {
         self.reset_message(Some(now));
     }
 
@@ -113,7 +113,7 @@ impl ThroughputMeter {
     }
 
     /// One streamed delta. Returns a reading when one is due.
-    pub(crate) fn delta(&mut self, text: &str, thinking: bool, now: Instant) -> Option<Throughput> {
+    pub fn delta(&mut self, text: &str, thinking: bool, now: Instant) -> Option<Throughput> {
         if text.is_empty() {
             return None;
         }
@@ -151,11 +151,7 @@ impl ThroughputMeter {
     /// when the provider breaks it out). Always returns a reading, without a
     /// live rate: nothing streams until the next message, so the trailer
     /// keeps the count and the message's average speed while a tool runs.
-    pub(crate) fn end_message(
-        &mut self,
-        output: Option<u64>,
-        reasoning: Option<u64>,
-    ) -> Throughput {
+    pub fn end_message(&mut self, output: Option<u64>, reasoning: Option<u64>) -> Throughput {
         let estimate = (self.message_raw * self.calibration).round() as u64;
         let message_tokens = match output.filter(|&n| n > 0) {
             Some(output) => {

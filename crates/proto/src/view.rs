@@ -89,9 +89,8 @@ pub fn display_status(chat: &Chat, session: Option<&Session>, now: DateTime<Utc>
 /// fallback), id tiebreak so the sort is total. Deliberately NOT
 /// attention-bucketed: status drives the DOT, never the position — bucketing
 /// meant that merely OPENING a completed session (completed → seen → idle)
-/// dropped its row under the pointer (user report: "their position in the
-/// scrollbar changes"). Matches the old sidebar, which rendered chats in
-/// recency order and let the dots carry urgency.
+/// dropped its row under the pointer. Rows stay in recency order and the dots
+/// carry urgency.
 pub fn sort_active(rows: &mut Vec<(ChatIndicator, &Chat)>) {
     rows.sort_by(|(_, a), (_, b)| {
         let ka = a.last_message_at.unwrap_or(a.created_at);

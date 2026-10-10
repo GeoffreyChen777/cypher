@@ -1,8 +1,9 @@
-//! Client side: request/stream multiplexing over string frames + the WebSocket dialer.
+//! Client side: request/stream multiplexing over string frames, plus the adapter that
+//! runs a client over an already-dialed WebSocket (device-room links).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use futures::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, oneshot};
@@ -27,7 +28,7 @@ struct Shared {
 
 impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Pending>> {
-        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+        crate::lock(&self.pending)
     }
 }
 

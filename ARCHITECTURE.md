@@ -143,6 +143,7 @@ cypher/
     syntax/       cypher-syntax   # tree-sitter syntax highlighting
     doc/          cypher-doc      # session-doc + workspace-registry schemas, mirror layer, parts fold
     update/       cypher-update   # release checking + self-update (engine, CLI, UI)
+    net/          cypher-net      # WebSocket dialing (happy eyeballs, proxies) + wake broadcasts
     sync/         cypher-sync     # Edge room clients (chat2, registry), presence, SQLite DocsStore
     harness/      cypher-harness  # Harness trait; Pi over its native RPC; mock harness
     rpc/          cypher-rpc      # typed RPC protocol, Unix IPC transport, device-room relay
@@ -173,7 +174,7 @@ Each crate depends only on crates in lower layers, dev-dependencies included;
 | Layer | Crates |
 | --- | --- |
 | foundation | `cypher-env`, `cypher-proto`, `cypher-syntax` |
-| model and transport | `cypher-doc`, `cypher-update`, `cypher-net` (planned: the WebSocket dial and wake transport) |
+| model and transport | `cypher-doc`, `cypher-update`, `cypher-net` |
 | clients | `cypher-sync`, `cypher-harness` |
 | relay | `cypher-rpc` |
 | engine | `cypher-engine` |

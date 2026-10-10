@@ -14,7 +14,7 @@
 //! deadlines.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -25,6 +25,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::chat_frames::{self as wire, frame_type};
+use crate::lock;
 use crate::types::{StaticUrl, SyncError, UrlProvider};
 
 mod actor;
@@ -272,7 +273,7 @@ impl BinConnector for WsBinConnector {
                         .insert("x-cypher-preview-publisher", value);
                 }
             }
-            let ws = crate::dial::connect_request(request)
+            let ws = cypher_net::dial::connect_request(request)
                 .await
                 .map_err(|e| SyncError::WebSocket(e.to_string()))?;
             let (out_tx, out_rx) = mpsc::channel(64);
@@ -549,10 +550,6 @@ pub struct ChatStatsSnapshot {
     /// Times a hello found the server behind our cursor (room reset/wiped).
     /// Nonzero means the host owes the room a re-seed checkpoint.
     pub server_resets: u64,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 // ── the client ──────────────────────────────────────────────────────────────

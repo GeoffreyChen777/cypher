@@ -70,8 +70,8 @@ impl Actor {
         // Suspend/resume and sibling-dial successes are EVENTS that end a
         // backoff wait immediately (see room.rs) — without them a recovered
         // network still waited out the full accumulated delay.
-        let mut wake = crate::wake::subscribe();
-        let mut online = crate::wake::subscribe_online();
+        let mut wake = cypher_net::wake::subscribe();
+        let mut online = cypher_net::wake::subscribe_online();
         loop {
             if let Some(preview) = self.sink.preview() {
                 let cursor = lock(&self.shared).cursor;

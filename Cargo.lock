@@ -1596,6 +1596,7 @@ dependencies = [
  "cypher-doc",
  "cypher-env",
  "cypher-harness",
+ "cypher-net",
  "cypher-proto",
  "cypher-rpc",
  "cypher-sync",
@@ -1654,6 +1655,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cypher-net"
+version = "0.3.45"
+dependencies = [
+ "futures",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
 name = "cypher-proto"
 version = "0.3.45"
 dependencies = [
@@ -1669,7 +1680,7 @@ dependencies = [
  "async-trait",
  "cypher-doc",
  "cypher-env",
- "cypher-sync",
+ "cypher-net",
  "futures",
  "libc",
  "serde",
@@ -1690,6 +1701,7 @@ dependencies = [
  "chrono",
  "cypher-doc",
  "cypher-env",
+ "cypher-net",
  "cypher-proto",
  "futures",
  "loro",

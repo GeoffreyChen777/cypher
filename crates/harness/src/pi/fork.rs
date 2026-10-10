@@ -46,7 +46,7 @@ use tokio::process::Command;
 use crate::HarnessError;
 use crate::pi::PiHarness;
 use crate::pi::client::{Incoming, PiClient};
-use crate::{compose_child_path, shutdown_child};
+use crate::process::{compose_child_path, shutdown_child};
 
 /// The custom entry the Cypher translation extension appends when it rewrites
 /// a prompt: `data: {original, translated}`. Pi stores only the translated
@@ -679,7 +679,7 @@ impl PiHarness {
 
     /// Spawn the fork helper: a fresh `pi --mode rpc --session-dir` child with
     /// `--no-extensions`, returning the child + client + incoming channel.
-    /// The helper's stderr is drained by a [`crate::StderrTail`] reader task
+    /// The helper's stderr is drained by a [`crate::process::StderrTail`] reader task
     /// (same pattern as run children) so pipe backpressure can never deadlock
     /// the operation.
     async fn spawn_fork_helper(
@@ -709,11 +709,11 @@ impl PiHarness {
             }
         })?;
         if let Some(stderr) = child.stderr.take() {
-            let tail = crate::StderrTail::default();
+            let tail = crate::process::StderrTail::default();
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "cypher_harness::pi", "fork stderr: {line}");
+                    tracing::debug!(%line, "fork stderr");
                     tail.push(&line);
                 }
             });

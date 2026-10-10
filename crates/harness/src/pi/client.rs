@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::HarnessError;
 
 /// A non-response line, in stdout order.
-pub(crate) enum Incoming {
+pub enum Incoming {
     /// An agent event (any `type` other than response / extension_ui_request).
     Event(Value),
     /// An extension UI request (dialog or fire-and-forget). `payload` is the
@@ -62,7 +62,7 @@ enum Waiter {
 type Pending = Arc<Mutex<Option<HashMap<String, Waiter>>>>;
 
 #[derive(Clone)]
-pub(crate) struct PiClient {
+pub struct PiClient {
     next_id: Arc<AtomicI64>,
     pending: Pending,
     writer: mpsc::UnboundedSender<String>,
@@ -127,7 +127,7 @@ impl PiClient {
         waiter: Waiter,
     ) -> Result<String, HarnessError> {
         let id = format!("z{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
-        match self.pending.lock().expect("pending lock").as_mut() {
+        match crate::lock(&self.pending).as_mut() {
             Some(waiters) => {
                 waiters.insert(id.clone(), waiter);
             }
@@ -141,7 +141,7 @@ impl PiClient {
         params.insert("type".into(), Value::String(command.into()));
         let line = serde_json::to_string(&Value::Object(params)).expect("serializable");
         if self.writer.send(line).is_err() {
-            if let Some(waiters) = self.pending.lock().expect("pending lock").as_mut() {
+            if let Some(waiters) = crate::lock(&self.pending).as_mut() {
                 waiters.remove(&id);
             }
             return Err(HarnessError::Protocol(format!(
@@ -189,7 +189,7 @@ async fn write_loop(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Strin
             stdin.flush().await
         };
         if let Err(e) = write.await {
-            tracing::debug!(target: "cypher_harness::pi", "stdin write failed (tolerated): {e}");
+            tracing::debug!(error = %e, "stdin write failed (tolerated)");
             return;
         }
     }
@@ -200,7 +200,7 @@ async fn write_loop(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Strin
 /// is signalled as [`Incoming::Eof`]; a dropped receiver has nobody to tell.
 async fn read_loop(stdout: ChildStdout, pending: Pending, tx: mpsc::Sender<Incoming>) {
     let eof = read_lines(stdout, &pending, &tx).await;
-    pending.lock().expect("pending lock").take();
+    crate::lock(&pending).take();
     if eof {
         let _ = tx.send(Incoming::Eof).await;
     }
@@ -231,7 +231,7 @@ async fn read_lines(stdout: ChildStdout, pending: &Pending, tx: &mpsc::Sender<In
             continue;
         }
         let Ok(msg) = serde_json::from_str::<Value>(line) else {
-            tracing::debug!(target: "cypher_harness::pi", "non-JSON stdout line (skipped)");
+            tracing::debug!("non-JSON stdout line (skipped)");
             continue;
         };
         match msg.get("type").and_then(Value::as_str) {
@@ -239,9 +239,7 @@ async fn read_lines(stdout: ChildStdout, pending: &Pending, tx: &mpsc::Sender<In
                 let Some(id) = msg.get("id").and_then(Value::as_str).map(str::to_owned) else {
                     continue;
                 };
-                let waiter = pending
-                    .lock()
-                    .expect("pending lock")
+                let waiter = crate::lock(pending)
                     .as_mut()
                     .and_then(|waiters| waiters.remove(&id));
                 let Some(waiter) = waiter else {

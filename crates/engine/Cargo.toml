@@ -16,6 +16,7 @@ development = []
 cypher-env.workspace = true
 cypher-proto.workspace = true
 cypher-doc.workspace = true
+cypher-net.workspace = true
 cypher-sync.workspace = true
 cypher-harness.workspace = true
 cypher-rpc.workspace = true

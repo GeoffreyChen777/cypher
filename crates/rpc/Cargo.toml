@@ -9,8 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-cypher-env.workspace = true
-cypher-sync.workspace = true
+cypher-net.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures.workspace = true
@@ -24,5 +23,6 @@ url.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+cypher-env.workspace = true
 cypher-doc.workspace = true
 tempfile.workspace = true

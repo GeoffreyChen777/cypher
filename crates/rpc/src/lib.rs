@@ -1,5 +1,6 @@
-//! cypher-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket + in-memory
-//! transports, plus the device-room relay transport ({s,k,to,from} frames — [`device_room`]).
+//! cypher-rpc — the typed control plane (UiRpc / ControlRpc) over the private Unix-socket
+//! IPC ([`LocalListener`], [`connect_local`]), in-memory channels, and the device-room relay
+//! transport ({s,k,to,from} frames — [`device_room`]).
 //!
 //! Framing: ndjson envelopes, one JSON object per WebSocket text message (or per line on
 //! byte transports), matching the shape of zeron's Effect RPC without the Effect runtime:
@@ -10,7 +11,7 @@
 //!
 //! The server dispatches into an [`RpcService`]; the [`RpcClient`] offers `call` and
 //! `subscribe`. Both ends run over any pair of string channels, so the in-memory transport
-//! ([`memory_client`]) exercises the exact same code path as the WebSocket one.
+//! ([`memory_client`]) exercises the exact same code path as the socket and relay ones.
 
 use std::sync::Arc;
 
@@ -20,16 +21,24 @@ use serde::{Deserialize, Serialize};
 
 mod client;
 pub mod device_room;
+mod local;
 mod server;
 
 pub use client::RpcClient;
-mod local;
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, StaticToken, TokenSource, decode_device_frame, device_room_ws_url,
     encode_device_frame,
 };
 pub use local::{LocalListener, connect_local, probe_local};
+
+/// Lock a mutex, ignoring poisoning: every critical section leaves its data
+/// consistent, so one panicking task must not wedge the transport.
+pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 use server::serve_connection;
 
 /// RPC method names — single source of truth for both ends.

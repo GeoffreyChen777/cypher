@@ -178,9 +178,7 @@ mod unix {
                         match stdout.read(&mut chunk) {
                             Ok(0) | Err(_) => break,
                             Ok(n) => {
-                                let mut b = buf
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                let mut b = crate::lock(&buf);
                                 if b.len() >= MAX_OUTPUT {
                                     break;
                                 }
@@ -195,9 +193,7 @@ mod unix {
         let mut scanned = 0usize;
         loop {
             {
-                let b = buf
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let b = crate::lock(&buf);
                 // Only scan the unscanned tail (minus marker-length overlap).
                 let from = scanned.saturating_sub(END_MARKER.len());
                 if find_subslice(&b[from..], END_MARKER.as_bytes()).is_some() {
@@ -225,9 +221,7 @@ mod unix {
             let _ = child.kill();
             let _ = child.wait();
         }
-        let b = buf
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let b = crate::lock(&buf);
         b.clone()
     }
 

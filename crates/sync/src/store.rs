@@ -3,10 +3,11 @@
 //! processed BEFORE execution so a crash can never double-execute a command).
 
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, params};
+
+use crate::now_ms;
 
 /// Errors surfaced by [`DocsStore`].
 #[derive(Debug, thiserror::Error)]
@@ -309,7 +310,7 @@ impl DocsStore {
     fn conn(&self) -> MutexGuard<'_, Connection> {
         // A poisoned lock only means another thread panicked mid-query; the
         // connection itself is still usable.
-        self.conn.lock().unwrap_or_else(PoisonError::into_inner)
+        crate::lock(&self.conn)
     }
 }
 
@@ -339,13 +340,6 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
         tx.commit()?;
     }
     Ok(())
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -72,5 +72,13 @@ pub use macos::*;
 pub use managed::*;
 pub use release::*;
 
+/// Lock a mutex, ignoring poisoning: the guarded slots stay consistent
+/// across every critical section.
+pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests;

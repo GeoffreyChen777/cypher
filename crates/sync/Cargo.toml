@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 cypher-doc.workspace = true
+cypher-net.workspace = true
 loro.workspace = true
 serde.workspace = true
 serde_json.workspace = true

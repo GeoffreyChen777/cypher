@@ -14,6 +14,7 @@ product works; this guide is about working on it.
 | `crates/syntax` | `cypher-syntax`: tree-sitter syntax highlighting |
 | `crates/doc` | `cypher-doc`: Loro session-doc and workspace-registry schemas, mirror layer, parts fold |
 | `crates/update` | `cypher-update`: release checking and self-update for the engine, CLI and UI |
+| `crates/net` | `cypher-net`: WebSocket dialing (happy eyeballs, proxies) and wake broadcasts |
 | `crates/sync` | `cypher-sync`: Edge room clients (chat2, registry), presence, the SQLite docs store |
 | `crates/harness` | `cypher-harness`: the `Harness` trait, Pi over its RPC protocol, the mock harness |
 | `crates/rpc` | `cypher-rpc`: the typed RPC protocol, Unix IPC transport and device-room relay |
@@ -43,7 +44,7 @@ added there.
 | Layer | Crates |
 | --- | --- |
 | foundation | `cypher-env`, `cypher-proto`, `cypher-syntax` |
-| model and transport | `cypher-doc`, `cypher-update`, `cypher-net` (planned: the WebSocket dial and wake transport) |
+| model and transport | `cypher-doc`, `cypher-update`, `cypher-net` |
 | clients | `cypher-sync`, `cypher-harness` |
 | relay | `cypher-rpc` |
 | engine | `cypher-engine` |

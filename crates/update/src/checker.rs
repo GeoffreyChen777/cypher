@@ -120,7 +120,7 @@ impl Updater {
             .await;
             for_loop.check_loop(shutdown, checks).await
         });
-        *updater.check_task.lock().unwrap() = Some(task);
+        *crate::lock(&updater.check_task) = Some(task);
         updater
     }
 
@@ -129,11 +129,7 @@ impl Updater {
     /// Idempotent, and callable from any clone.
     pub async fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
-        let task = self
-            .check_task
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .take();
+        let task = crate::lock(&self.check_task).take();
         if let Some(task) = task {
             let _ = task.await;
         }

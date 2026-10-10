@@ -15,9 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-# Lowest layer first. A package listed here but not (yet) in the workspace is
-# allowed: cypher-net is the planned home of the WebSocket dial and wake
-# transport that sync, rpc and engine share.
+# Lowest layer first.
 LAYERS = [
     ("foundation", ["cypher-env", "cypher-proto", "cypher-syntax"]),
     ("model and transport", ["cypher-doc", "cypher-update", "cypher-net"]),

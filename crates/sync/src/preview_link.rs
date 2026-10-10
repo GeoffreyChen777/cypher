@@ -67,37 +67,23 @@ impl PreviewLink {
         })
     }
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        crate::lock(&self.state)
     }
     pub fn options(&self) -> PreviewOptions {
-        self.options
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        crate::lock(&self.options).clone()
     }
     fn is_publisher(&self) -> bool {
-        self.options
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .publisher_token
-            .is_some()
+        crate::lock(&self.options).publisher_token.is_some()
     }
     pub fn set_publisher(&self, token: Option<String>) {
-        self.options
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .publisher_token = token;
+        crate::lock(&self.options).publisher_token = token;
         self.disconnected(); // Caller redials the same ChatClient; pending durable batches survive.
     }
     pub fn on_change(&self, callback: Arc<dyn Fn() + Send + Sync>) {
-        *self.changed.lock().unwrap_or_else(|e| e.into_inner()) = Some(callback);
+        *crate::lock(&self.changed) = Some(callback);
     }
     fn changed(&self) {
-        let callback = self
-            .changed
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let callback = crate::lock(&self.changed).clone();
         if let Some(callback) = callback {
             callback();
         }

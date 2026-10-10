@@ -1,18 +1,21 @@
 //! Wire parsing for pi's RPC stream: the Cypher extension status frames (subagents,
 //! translation) and the mapping of pi tool calls/results onto typed calls.
 
-use super::*;
+use cypher_proto::{SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall};
+use serde_json::Value;
+
+use crate::{OUTPUT_CAP, cap_text};
 
 /// Status key of the cypher subagent status protocol: `extensions/subagents`
 /// publishes `setStatus("cypher.subagents.v1", JSON.stringify({version:1,
 /// runs:[…]}))`. Every other key stays ignored transient TUI furniture.
-pub(crate) const SUBAGENTS_STATUS_KEY: &str = "cypher.subagents.v1";
+pub const SUBAGENTS_STATUS_KEY: &str = "cypher.subagents.v1";
 /// Final-answer translation emitted by the Cypher translation extension.
-pub(crate) const TRANSLATION_STATUS_KEY: &str = "cypher.translation.v1";
+pub const TRANSLATION_STATUS_KEY: &str = "cypher.translation.v1";
 /// Prompt translation emitted by the same extension: the user's own words and
 /// the translation the agent received instead, so the transcript can keep the
 /// pair (`{version:1, source, text}`; capped like a final-answer frame).
-pub(crate) const INPUT_TRANSLATION_STATUS_KEY: &str = "cypher.translation.input.v1";
+pub const INPUT_TRANSLATION_STATUS_KEY: &str = "cypher.translation.input.v1";
 /// Whole-snapshot byte cap for one translation frame.
 ///
 /// A frame carries the full replacement for the message's text, so append mode
@@ -53,7 +56,6 @@ pub(super) fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
     }
     if text.len() > SUBAGENTS_STATUS_MAX_BYTES {
         tracing::warn!(
-            target: "cypher_harness::pi",
             bytes = text.len(),
             "subagent status snapshot over 64KiB; ignoring"
         );
@@ -63,7 +65,6 @@ pub(super) fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
         Ok(value) => value,
         Err(err) => {
             tracing::warn!(
-                target: "cypher_harness::pi",
                 error = %err,
                 "subagent status: invalid JSON; ignoring"
             );
@@ -71,16 +72,12 @@ pub(super) fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
         }
     };
     if value.get("version").and_then(Value::as_u64) != Some(1) {
-        tracing::warn!(
-            target: "cypher_harness::pi",
-            "subagent status: unsupported snapshot version; ignoring"
-        );
+        tracing::warn!("subagent status: unsupported snapshot version; ignoring");
         return None;
     }
     let runs = value.get("runs").and_then(Value::as_array)?;
     if runs.len() > SUBAGENTS_MAX_RUNS {
         tracing::warn!(
-            target: "cypher_harness::pi",
             count = runs.len(),
             "subagent status: too many runs; ignoring"
         );
@@ -91,10 +88,7 @@ pub(super) fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
         match parse_subagent_run(run) {
             Some(parsed) => out.push(parsed),
             None => {
-                tracing::warn!(
-                    target: "cypher_harness::pi",
-                    "subagent status: malformed run; ignoring snapshot"
-                );
+                tracing::warn!("subagent status: malformed run; ignoring snapshot");
                 return None;
             }
         }
@@ -113,7 +107,6 @@ pub(super) fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
 pub(super) fn parse_translation_status(text: &str) -> Option<String> {
     if text.len() > TRANSLATION_STATUS_MAX_BYTES {
         tracing::warn!(
-            target: "cypher_harness::pi",
             bytes = text.len(),
             "translation status snapshot over cap; ignoring"
         );
@@ -136,7 +129,6 @@ pub(super) fn parse_translation_status(text: &str) -> Option<String> {
 pub(super) fn parse_input_translation_status(text: &str) -> Option<(String, String)> {
     if text.len() > TRANSLATION_STATUS_MAX_BYTES {
         tracing::warn!(
-            target: "cypher_harness::pi",
             bytes = text.len(),
             "input translation status over cap; ignoring"
         );

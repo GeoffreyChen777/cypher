@@ -29,7 +29,7 @@ NODE="${NODE:-node}"
 
 # Crates that build without gpui; the Linux CI job checks exactly this set.
 HEADLESS=(-p cypher -p cypher-env -p cypher-proto -p cypher-doc -p cypher-sync
-  -p cypher-harness -p cypher-engine -p cypher-rpc -p cypher-update -p cypher-syntax)
+  -p cypher-net -p cypher-harness -p cypher-engine -p cypher-rpc -p cypher-update -p cypher-syntax)
 
 run() {
   if [[ -n "${GITHUB_ACTIONS:-}" ]]; then echo "::group::$*"; else echo "+ $*"; fi
