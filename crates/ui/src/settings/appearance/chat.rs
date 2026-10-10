@@ -639,10 +639,14 @@ impl ChatStyleEditor {
             ColorField::Background => preview.bg,
             ColorField::Accent => preview.accent,
             ColorField::Bubble => preview.bg.blend(chat_style::bubble(preview)),
-            ColorField::CodeBackground => preview.bg.blend(render::code_block_background(preview)),
+            ColorField::CodeBackground => preview
+                .bg
+                .blend(crate::theme::code_block_background(preview)),
             ColorField::CodeText => preview.code_block_text.unwrap_or(preview.text),
-            ColorField::InlineText => render::inline_code_text(preview),
-            ColorField::InlineBackground => preview.bg.blend(render::inline_code_wash(preview)),
+            ColorField::InlineText => crate::theme::inline_code_text(preview),
+            ColorField::InlineBackground => {
+                preview.bg.blend(crate::theme::inline_code_wash(preview))
+            }
         };
         let index = field.index();
         let input = self.color_inputs[index].clone();

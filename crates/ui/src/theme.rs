@@ -1164,5 +1164,20 @@ pub fn flatten(fg: Hsla, bg: Hsla) -> Hsla {
     hsla(h, s, l, 1.0)
 }
 
+/// Scoped inline-code tint. Defaults to emerald text and a translucent wash;
+/// overrides do not change the shared tokens used by mention chips.
+pub fn inline_code_text(theme: &Theme) -> Hsla {
+    theme.inline_code_text.unwrap_or(theme.code_text)
+}
+pub fn inline_code_wash(theme: &Theme) -> Hsla {
+    theme.inline_code_background.unwrap_or(theme.code_wash)
+}
+/// Fenced code block fill: the chat override, else a faint ink wash.
+pub fn code_block_background(theme: &Theme) -> Hsla {
+    theme
+        .code_block_background
+        .unwrap_or_else(|| theme.ink(0.035))
+}
+
 #[cfg(test)]
 mod tests;

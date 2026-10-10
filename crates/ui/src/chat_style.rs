@@ -312,16 +312,12 @@ pub fn contrast_warnings(theme: &Theme) -> Vec<&'static str> {
         ),
         (
             theme.code_block_text.unwrap_or(theme.text),
-            theme
-                .bg
-                .blend(crate::markdown::render::code_block_background(theme)),
+            theme.bg.blend(crate::theme::code_block_background(theme)),
             "Code text / code block background",
         ),
         (
-            crate::markdown::render::inline_code_text(theme),
-            theme
-                .bg
-                .blend(crate::markdown::render::inline_code_wash(theme)),
+            crate::theme::inline_code_text(theme),
+            theme.bg.blend(crate::theme::inline_code_wash(theme)),
             "Inline code text / inline code background",
         ),
     ] {

@@ -21,7 +21,7 @@ use gpui::{
     size,
 };
 
-use crate::theme::{MonoStyled, Theme};
+use crate::theme::{MonoStyled, Theme, code_block_background, inline_code_text, inline_code_wash};
 
 use super::parser::{Block, BlockTree, InlineRun, TableAlign};
 use super::veil::{RowVeil, apply_veil};
@@ -535,14 +535,6 @@ pub struct FlatText {
     pub code_ranges: Vec<Range<usize>>,
 }
 
-/// Scoped inline-code tint. Defaults to emerald text and a translucent wash;
-/// overrides do not change the shared tokens used by mention chips.
-pub fn inline_code_text(theme: &Theme) -> Hsla {
-    theme.inline_code_text.unwrap_or(theme.code_text)
-}
-pub fn inline_code_wash(theme: &Theme) -> Hsla {
-    theme.inline_code_background.unwrap_or(theme.code_wash)
-}
 /// Rounded-wash geometry: small radius on a box sized from the font, not the
 /// line box (paint-only — x extends 4px past the glyphs; the height is
 /// `INLINE_CODE_HEIGHT_EM × font size`, centered like GPUI centers glyphs).
@@ -1309,12 +1301,6 @@ fn text_element(
         .line_height(px(line_height))
         .child(inner)
         .into_any_element()
-}
-
-pub fn code_block_background(theme: &Theme) -> Hsla {
-    theme
-        .code_block_background
-        .unwrap_or_else(|| theme.ink(0.035))
 }
 
 /// Scoped to fenced blocks: inline code, tool/diff renderers and the installed
