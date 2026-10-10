@@ -675,12 +675,23 @@ impl Theme {
     /// land on it exactly), so the ring gives the card an edge independent of
     /// fill contrast; a dark drop shadow alone vanishes on dark glass.
     pub fn sidebar_card_shadows(&self) -> Vec<gpui::BoxShadow> {
+        self.sidebar_card_shadows_at(1.0)
+    }
+
+    /// [`Self::sidebar_card_shadows`] at `lift` (0..1). Only the focused
+    /// project renders as a card (1); the others are bare groups on the
+    /// sidebar frost (0), so the drop pair and ring fade with the hand-over.
+    pub fn sidebar_card_shadows_at(&self, lift: f32) -> Vec<gpui::BoxShadow> {
+        let lift = lift.clamp(0.0, 1.0);
+        if lift <= 0.0 {
+            return Vec::new();
+        }
         let ring = match self.appearance {
-            Appearance::Dark => self.hairline(0.08),
-            Appearance::Light => hsla(0.0, 0.0, 0.0, 0.07),
+            Appearance::Dark => self.hairline(0.08 * lift),
+            Appearance::Light => hsla(0.0, 0.0, 0.0, 0.07 * lift),
         };
         let drop = |blur: f32, spread: f32| gpui::BoxShadow {
-            color: hsla(0.0, 0.0, 0.0, 0.1),
+            color: hsla(0.0, 0.0, 0.0, 0.1 * lift),
             offset: gpui::point(gpui::px(0.0), gpui::px(1.0)),
             blur_radius: gpui::px(blur),
             spread_radius: gpui::px(spread),
@@ -697,6 +708,12 @@ impl Theme {
                 inset: true,
             },
         ]
+    }
+
+    /// Sidebar project-card fill at `lift` (0..1): the focused project's
+    /// opaque `surface` plate (1), fading to nothing for the bare groups (0).
+    pub fn sidebar_card_fill(&self, lift: f32) -> Hsla {
+        self.surface.opacity(lift.clamp(0.0, 1.0))
     }
 
     /// The standard modal backdrop — see [`scrim`].

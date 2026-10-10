@@ -1193,6 +1193,13 @@ struct SidebarUi {
     /// project key hides the whole card body; a branch/worktree key hides
     /// that group's session rows. Everything defaults expanded.
     collapsed: std::collections::HashSet<String>,
+    /// Key of the project holding the selected session — the one project
+    /// rendered as a floating card; every other one is a bare nav-line group.
+    focused_card: Option<String>,
+    /// The card that held focus before the last move, and the 0→1 tween
+    /// handing the lift from it to `focused_card`.
+    focus_from: Option<String>,
+    focus_tween: Option<WidthTween>,
 }
 
 /// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`); see
@@ -1574,6 +1581,9 @@ impl Shell {
                 new_keys: std::collections::HashSet::new(),
                 resort_epoch: 0,
                 collapsed: std::collections::HashSet::new(),
+                focused_card: None,
+                focus_from: None,
+                focus_tween: None,
             },
             space_boot_applied: false,
             attention: Attention::default(),

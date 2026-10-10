@@ -1,8 +1,9 @@
-//! Spaces sidebar: the project-grouped session cards (one opaque floating
-//! card per Space — every host together, synthetic No-project / Unavailable-
-//! project cards), the fixed Cypher / Add project header, checkout-scoped
-//! hover actions for new sessions, and the add-space palette (⌘K-style:
-//! device tabs + filtered folder browser).
+//! Spaces sidebar: the project-grouped session list (one nav-line group per
+//! Space — every host together, synthetic No-project / Unavailable-project
+//! groups — the selected session's project floating as a card), the fixed
+//! Cypher / Add project header, checkout-scoped hover actions for new
+//! sessions, and the add-space palette (⌘K-style: device tabs + filtered
+//! folder browser).
 //!
 //! A space = a synced (device, folder) pair. The sidebar never filters and
 //! has no target dropdown: the new-session canvas's project/device selectors
@@ -151,6 +152,12 @@ impl GroupCard {
 
     fn chat_count(&self) -> usize {
         self.groups.iter().map(|g| g.chats.len()).sum()
+    }
+
+    fn contains_chat(&self, chat_id: &str) -> bool {
+        self.groups
+            .iter()
+            .any(|g| g.chats.iter().any(|(_, chat)| chat.id == chat_id))
     }
 }
 
