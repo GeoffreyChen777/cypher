@@ -1125,9 +1125,8 @@ impl PiRun {
             self.throughput.start_message(Instant::now());
             // The NEXT assistant message after a queued
             // steer is the steer's reply: split the doc entry
-            // here (before its content streams), exactly like
-            // the ACP harness emits Steered at an injection.
-            // Messages an extension consumed split here too.
+            // here (before its content streams). Messages an
+            // extension consumed split here too.
             let delivered = self.steers_queued.pop_front().is_some();
             if delivered {
                 // A steer delivery opens a turn: even if
@@ -1175,8 +1174,8 @@ impl PiRun {
             // Journal boundary marker: the doc fold treats
             // this as a no-op (one segment per turn until
             // a Steered/Done), but the journal records it
-            // per assistant message like the ACP turn
-            // markers. Rotate the id for the next one.
+            // per assistant message. Rotate the id for the
+            // next one.
             let completed = self.assistant_message_id.clone();
             rotate(&mut self.assistant_message_id);
             if !send(

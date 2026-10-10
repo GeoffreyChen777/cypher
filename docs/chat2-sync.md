@@ -47,21 +47,15 @@ Keeps session docs small: the doc carries summaries, full payloads live elsewher
 - Old readers: both fields are already serde-additive; old app versions render the
   summary as if it were the output. Acceptable.
 
-**A2. Output sidecar.** *[PARKED 2026-08-10 (v0.1.30): product call — no R2
-uploads for now. The fold keeps small outputs inline (≤160 chars,
-fence-stripped) and summarizes big ones; full text survives only in the
-host's run journal. The machinery below (blob routes, `sidecar_payload`,
-`apply_sidecar_refs`, `upload_tool_sidecar`, UI upgrade path) is built,
-tested, and dormant — reintroduction is re-adding one call site in
-`sessions.rs`. M1's rebuild still returns sidecar payloads; the C3 cutover
-must decide their fate (upload or drop) before flipping `roomGen`.]* Full (still 4 KiB-capped at the harness boundary) outputs and
-diffs go to R2 through a Worker route (no DO involvement — the `BLOBS` bucket already
-exists): `PUT/GET /blob/{chatId}/{partId}` , owner-auth via the existing Worker JWT
-check. Host uploads are debounced/batched per commit tick, fire-and-forget (a lost
-upload degrades to "full output unavailable", never blocks the doc). UI fetches on
-expand; offline shows the summary + a greyed affordance.
+**A2. Output sidecar (read-only).** Hosts never upload full outputs: the fold keeps
+small outputs inline (≤160 chars, fence-stripped) and summarizes big ones, and the full
+text survives only in the host's run journal. The upload path, parked by a product call
+in August 2026, was removed after 0.3.45. What remains serves older chats whose parts
+carry an `outputRef`: the Worker answers `GET /blob/{chatId}/{partId}[.diff]` from the
+`BLOBS` bucket (owner auth via the Worker JWT check), and the UI fetches on expand
+(`FetchToolBlob`); offline shows the summary.
 
-**A3. UI.** Tool-part expansion fetches `outputRef` lazily; render summary inline.
+**A3. UI.** Tool-part expansion fetches an existing `outputRef` lazily; render summary inline.
 
 ---
 

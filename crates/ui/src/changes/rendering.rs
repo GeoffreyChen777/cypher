@@ -1025,7 +1025,7 @@ pub(super) fn diff_text_element(
 /// lines with a coloured accent bar, dual line-number gutters, a marker
 /// column, and paint-only syntax runs (zeron checkout-diff-sidebar).
 /// Shared with the transcript's tool-diff detail blocks — the same component
-/// renders a checkout diff section and an inline ACP tool diff. (The changes
+/// renders a checkout diff section and an inline tool diff. (The changes
 /// pane itself virtualizes these rows individually; this stacked form serves
 /// the transcript and the fold tween's clipped stand-in.)
 /// Full-document old/new highlighting for tool and checkout diffs.

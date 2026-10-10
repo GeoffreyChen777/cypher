@@ -27,9 +27,8 @@ pub(crate) const TOOL_SEARCH_QUERY_MAX_CHARS: usize = 500;
 /// sidecar, so this IS the whole record in the doc — the full text survives
 /// only in the host's local run journal:
 ///
-/// - Markdown code fences are stripped first — ACP harnesses fence every
-///   output, so the fence is transport wrapping, never content (pre-fix,
-///   every summary read "```console…").
+/// - Markdown code fences are stripped first: a fence around a whole output
+///   is transport wrapping, never content.
 /// - Outputs keep complete lines, up to [`TOOL_OUTPUT_SUMMARY_MAX_LINES`].
 /// - A long single line is kept whole; the limit is by lines, not characters.
 ///

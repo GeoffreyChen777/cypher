@@ -21,8 +21,7 @@
  *   GET  /device/:deviceId/sidecar/:name
  *   POST /device/:deviceId/sidecar/:name
  *   GET  /device/:deviceId/status
- *   PUT  /blob/:chatId/:partId        — tool-output sidecar (chat2-sync A2)
- *   GET  /blob/:chatId/:partId
+ *   GET  /blob/:chatId/:partId        — tool-output sidecar (chat2-sync A2)
  *   GET  /chat2/:chatId/ws            — chat2 log-relay room (wss, chat2-sync B)
  *   GET|POST /chat2/:chatId/checkpoint — client-built doc snapshot (Range-resumable GET)
  *   GET  /chat2/:chatId/rows           — HTTPS pull (framed state/rows)
@@ -59,7 +58,6 @@ const safeDecode = (segment: string): string | undefined => {
 /** Tool part ids are harness-minted (`tool-1`, `call_x`, `m1#c1`-style) —
  * wider than ID_RE but still no slashes, so a part id can't traverse keys. */
 const PART_RE = /^[A-Za-z0-9._:#~-]{1,200}$/;
-const MAX_TOOL_BLOB_BYTES = 1024 * 1024;
 
 /** Forward into a DO with the verified user stamped on the request. */
 const forward = (
@@ -280,10 +278,9 @@ export default {
       }
     }
 
-    // ── R2 tool-output sidecar (docs/chat2-sync.md A2): full tool outputs
-    //    and diffs live here, keyed `{chatId}/{partId}[.diff]`; the doc keeps
-    //    only a one-line summary + this key. Straight R2, no DO involvement —
-    //    the doc stays thin whether or not these uploads land. Per-user
+    // ── R2 tool-output sidecar (docs/chat2-sync.md A2): read-only. Older
+    //    chats reference full tool outputs and diffs stored here under
+    //    `{chatId}/{partId}[.diff]`; clients no longer upload any. Per-user
     //    prefix = owner auth. ─────────────────────────────────────────────
     if (parts[0] === "blob" && parts.length === 3 && ID_RE.test(parts[1])) {
       // Percent-decode the part segment before validating: PART_RE allows
@@ -295,18 +292,6 @@ export default {
         return json({ error: "bad part id" }, 400);
       }
       const key = `blob/${auth.userId}/${parts[1]}/${partId}`;
-      if (request.method === "PUT") {
-        const body = await request.arrayBuffer();
-        // Outputs are 4KiB-capped at the harness boundary; diffs can run
-        // larger but a sidecar entry is one tool result, never a dump.
-        if (body.byteLength > MAX_TOOL_BLOB_BYTES) return json({ error: "too_large" }, 413);
-        await env.BLOBS.put(key, body, {
-          httpMetadata: {
-            contentType: request.headers.get("content-type") ?? "text/plain; charset=utf-8"
-          }
-        });
-        return json({ ok: true, bytes: body.byteLength });
-      }
       if (request.method === "GET" || request.method === "HEAD") {
         const object =
           request.method === "GET" ? await env.BLOBS.get(key) : await env.BLOBS.head(key);

@@ -360,8 +360,8 @@ event (2026-09-20; fixture `scenario:status-before-ack`).
 
 ## Executable resolution
 `PI_EXECUTABLE` override → PATH → login-shell PATH (`shell_env.rs`) → npm
-global bins + node-version-manager bins (the shared `acp::find_on_paths` +
-`npm_global_bins`). `installed()` = a resolution hit. Discovery and run spawn
+global bins + node-version-manager bins (`find_on_paths` + `npm_global_bins`
+in `crates/harness/src/lib.rs`). `installed()` = a resolution hit. Discovery and run spawn
 the resolved `pi` with `--mode rpc --session-dir`.
 
 ## Citations

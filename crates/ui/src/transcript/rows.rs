@@ -9,7 +9,7 @@ pub struct ToolItem {
     pub is_error: bool,
     pub resolved: bool,
     /// Expandable detail: a code-block of output lines, or a real diff
-    /// section rendered by the changes pane's component (ACP harnesses).
+    /// section rendered by the changes pane's component.
     /// Precomputed here because rows are cached by fingerprint — diffing and
     /// tokenizing per paint would run on every scroll frame.
     pub detail: Option<Arc<ToolDetail>>,

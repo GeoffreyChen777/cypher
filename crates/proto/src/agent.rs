@@ -165,8 +165,8 @@ pub struct WorktreeSpec {
     pub name_hint: Option<String>,
 }
 
-/// The session-scoped singleton id for the live plan/todo chip. ACP plan
-/// updates carry no wire id; adapters emit every update under this one id so
+/// The session-scoped singleton id for the live plan/todo chip. Plan updates
+/// carry no wire id; harnesses emit every update under this one id so
 /// the fold refreshes the same chip in place. Consumers that de-duplicate
 /// tool ids across segment boundaries (the engine's stale-echo filter) must
 /// EXEMPT this id — it legitimately reappears in every segment for the whole
@@ -240,7 +240,7 @@ pub struct TodoItem {
     pub done: bool,
 }
 
-/// A slash command advertised by the agent (ACP `availableCommands`): typed as
+/// A slash command advertised by the agent: typed as
 /// `/name` at the start of the composer, sent to the agent as prompt text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -315,8 +315,9 @@ pub struct SubagentRun {
     pub child_chat_id: Option<String>,
 }
 
-/// A file modification carried inline on a tool result (ACP
-/// `ToolCallContent::Diff`). `old_text: None` means a new file.
+/// A file modification carried inline on a tool result. Only the retired ACP
+/// harnesses wrote these; older transcripts still carry them. `old_text: None`
+/// means a new file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDiff {
@@ -453,12 +454,11 @@ pub enum AgentEvent {
     ToolResult {
         id: String,
         is_error: bool,
-        /// Tool output text, capped by the emitting harness (ACP tool-call
-        /// content; claude/codex adapters never populate it). The doc-side
+        /// Tool output text, capped by the emitting harness. The doc-side
         /// fold applies its own byte cap before anything persists.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
-        /// Inline file diff for edit-shaped tools (ACP `Diff` content).
+        /// Inline file diff for edit-shaped tools (older ACP transcripts only).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<ToolDiff>,
     },
@@ -516,8 +516,7 @@ pub enum AgentEvent {
         input_tokens: u64,
         output_tokens: u64,
     },
-    /// Live context-window occupancy (ACP `usage_update`, pi
-    /// `get_session_stats.contextUsage`). Run-state only, like
+    /// Live context-window occupancy (pi `get_session_stats.contextUsage`). Run-state only, like
     /// `SubagentStatus`: the engine mirrors it onto the chat's local session
     /// projection — never journaled, never folded, never a status driver.
     #[serde(rename_all = "camelCase")]
@@ -525,8 +524,7 @@ pub enum AgentEvent {
         used: u64,
         size: u64,
     },
-    /// The agent advertised (or changed) its slash-command set — ACP
-    /// `available_commands_update`. The engine caches the latest list per
+    /// The agent advertised (or changed) its slash-command set. The engine caches the latest list per
     /// harness for the composer's `/` popup; never persisted to docs.
     #[serde(rename_all = "camelCase")]
     AvailableCommands {
