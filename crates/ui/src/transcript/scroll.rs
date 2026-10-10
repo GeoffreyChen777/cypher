@@ -451,8 +451,50 @@ impl Transcript {
             return;
         }
 
+        let frame = OwnTurnFrame {
+            anchor_ix,
+            last_ix,
+            viewport,
+            viewport_height,
+            inset,
+            base_pad,
+            usable,
+            current,
+        };
         // ---- reservation sizing (skipped while unmeasured: the provisional
         // pad stands; the render gate re-runs this every live frame) --------
+        if self.size_own_turn_reservation(&frame, cx) {
+            return;
+        }
+
+        // ---- entry glide, then absolute hold -------------------------------
+        let (held, positioned) = self
+            .own_turn
+            .as_ref()
+            .map_or((false, false), |a| (a.held, a.positioned));
+        if !held {
+            return;
+        }
+        if positioned {
+            self.hold_own_turn(&frame, cx);
+            return;
+        }
+        self.glide_own_turn(&frame, cx);
+    }
+
+    /// Size the reservation from the measured turn (skipped while
+    /// unmeasured: the provisional pad stands; the render gate re-runs this
+    /// every live frame). Returns true when the step is over: the reply
+    /// outgrew the reservation and the anchor was dropped.
+    fn size_own_turn_reservation(&mut self, frame: &OwnTurnFrame, cx: &mut Context<Self>) -> bool {
+        let OwnTurnFrame {
+            anchor_ix,
+            last_ix,
+            usable,
+            current,
+            base_pad,
+            ..
+        } = *frame;
         if let (Some(anchor_bounds), Some(last_bounds)) = (
             self.list.bounds_for_item(anchor_ix),
             self.list.bounds_for_item(last_ix),
@@ -486,7 +528,7 @@ impl Transcript {
                 } else {
                     cx.notify();
                 }
-                return;
+                return true;
             }
             if (target - current).abs() > 0.5 {
                 if let Some(anchor) = self.own_turn.as_mut() {
@@ -498,84 +540,94 @@ impl Transcript {
                 cx.notify();
             }
         }
+        false
+    }
 
-        // ---- entry glide, then absolute hold -------------------------------
-        let (held, positioned) = self
-            .own_turn
-            .as_ref()
-            .map_or((false, false), |a| (a.held, a.positioned));
-        if !held {
-            return;
-        }
-        if positioned {
-            // Landed: re-assert the prompt's position after every layout.
-            // scroll_to is absolute and bounds-independent, so neither glue
-            // re-snaps, pad-sizing lag, nor a splice's unmeasured flicker can
-            // carry the view off the prompt (each broke the spring-held
-            // variants of this — rig-traced). ONE-SIDED: only upward drift
-            // (view above the hold) is corrected. The scroll slack under the
-            // reservation is legal resting space — wheel-down sinks into it
-            // and stops hard at the list's own clamp; snapping back up from
-            // there made the bottom bounce/stutter on every scroll event
-            // (user report). Way-below-slack (impossible short of a bug)
-            // still re-asserts.
-            let moved = match self.list.bounds_for_item(anchor_ix) {
+    /// The absolute hold after landing (see the comment inside).
+    fn hold_own_turn(&mut self, frame: &OwnTurnFrame, cx: &mut Context<Self>) {
+        let OwnTurnFrame {
+            anchor_ix,
+            viewport,
+            inset,
+            ..
+        } = *frame;
+        // Landed: re-assert the prompt's position after every layout.
+        // scroll_to is absolute and bounds-independent, so neither glue
+        // re-snaps, pad-sizing lag, nor a splice's unmeasured flicker can
+        // carry the view off the prompt (each broke the spring-held
+        // variants of this — rig-traced). ONE-SIDED: only upward drift
+        // (view above the hold) is corrected. The scroll slack under the
+        // reservation is legal resting space — wheel-down sinks into it
+        // and stops hard at the list's own clamp; snapping back up from
+        // there made the bottom bounce/stutter on every scroll event
+        // (user report). Way-below-slack (impossible short of a bug)
+        // still re-asserts.
+        let moved = match self.list.bounds_for_item(anchor_ix) {
+            Some(b) => {
+                let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
+                // The legal rest zone below the hold is the epsilon plus
+                // rounding; anything deeper is a transient-collision sink
+                // and rubber-bands back.
+                err > 0.5 || err < -(OWN_SEND_SCROLL_SLACK_PX + 2.0)
+            }
+            // Bounds vanish in the glued representation (dissolved
+            // above, so at most for this one frame) and through splice
+            // flicker. Near the stop that is dead-band space — no
+            // assert (asserting on None here was the bottom bounce);
+            // far from it the position is unknowable flicker: re-assert.
+            None => self.distance_from_bottom() > OWN_SEND_SCROLL_SLACK_PX + 8.0,
+        };
+        if moved {
+            // Correct with the entry glide's ease, not a snap: the only
+            // in-band escapes are one-frame commit transients and splice
+            // flicker, and an eased ~200ms return reads as native
+            // rubber-banding where an instant re-assert read as stutter
+            // (user report). Bounds-less flicker still snaps — there is
+            // nothing to ease against.
+            match self.list.bounds_for_item(anchor_ix) {
                 Some(b) => {
                     let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
-                    // The legal rest zone below the hold is the epsilon plus
-                    // rounding; anything deeper is a transient-collision sink
-                    // and rubber-bands back.
-                    err > 0.5 || err < -(OWN_SEND_SCROLL_SLACK_PX + 2.0)
-                }
-                // Bounds vanish in the glued representation (dissolved
-                // above, so at most for this one frame) and through splice
-                // flicker. Near the stop that is dead-band space — no
-                // assert (asserting on None here was the bottom bounce);
-                // far from it the position is unknowable flicker: re-assert.
-                None => self.distance_from_bottom() > OWN_SEND_SCROLL_SLACK_PX + 8.0,
-            };
-            if moved {
-                // Correct with the entry glide's ease, not a snap: the only
-                // in-band escapes are one-frame commit transients and splice
-                // flicker, and an eased ~200ms return reads as native
-                // rubber-banding where an instant re-assert read as stutter
-                // (user report). Bounds-less flicker still snaps — there is
-                // nothing to ease against.
-                match self.list.bounds_for_item(anchor_ix) {
-                    Some(b) => {
-                        let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
-                        let now = Instant::now();
-                        let frames = match self.own_turn_last_tick {
-                            Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0
-                                / SPRING_FRAME_MS)
-                                .min(SPRING_MAX_CATCHUP_FRAMES),
-                            None => 1.0,
-                        };
-                        self.own_turn_last_tick = Some(now);
-                        let ease = 1.0 - OWN_SEND_GLIDE_RETAIN.powf(frames);
-                        if err.abs() <= OWN_SEND_GLIDE_SNAP_PX {
-                            self.list.scroll_by(px(err));
-                            self.own_turn_last_tick = None;
-                        } else {
-                            self.list.scroll_by(px(err * ease));
-                        }
-                        self.own_turn_kick = true;
-                    }
-                    None => {
-                        self.list.scroll_to(ListOffset {
-                            item_ix: anchor_ix,
-                            offset_in_item: px(0.0),
-                        });
-                        self.list.scroll_by(px(-inset));
+                    let now = Instant::now();
+                    let frames = match self.own_turn_last_tick {
+                        Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0
+                            / SPRING_FRAME_MS)
+                            .min(SPRING_MAX_CATCHUP_FRAMES),
+                        None => 1.0,
+                    };
+                    self.own_turn_last_tick = Some(now);
+                    let ease = 1.0 - OWN_SEND_GLIDE_RETAIN.powf(frames);
+                    if err.abs() <= OWN_SEND_GLIDE_SNAP_PX {
+                        self.list.scroll_by(px(err));
                         self.own_turn_last_tick = None;
+                    } else {
+                        self.list.scroll_by(px(err * ease));
                     }
+                    self.own_turn_kick = true;
                 }
-                cx.notify();
-            } else {
-                self.own_turn_last_tick = None;
+                None => {
+                    self.list.scroll_to(ListOffset {
+                        item_ix: anchor_ix,
+                        offset_in_item: px(0.0),
+                    });
+                    self.list.scroll_by(px(-inset));
+                    self.own_turn_last_tick = None;
+                }
             }
-            return;
+            cx.notify();
+        } else {
+            self.own_turn_last_tick = None;
         }
+    }
+
+    /// The entry glide toward the hold, landing with an absolute snap.
+    fn glide_own_turn(&mut self, frame: &OwnTurnFrame, cx: &mut Context<Self>) {
+        let OwnTurnFrame {
+            anchor_ix,
+            viewport,
+            viewport_height,
+            inset,
+            ..
+        } = *frame;
         let now = Instant::now();
         let frames = match self.own_turn_last_tick {
             Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0 / SPRING_FRAME_MS)
@@ -814,151 +866,29 @@ impl Transcript {
 
         let attached = selected != self.chat_id;
         if attached {
-            self.copied_message = None;
-            self.copied_message_clear = None;
-            let keep_own_turn = self
-                .own_turn
-                .as_ref()
-                .is_some_and(|anchor| selected.as_deref() == Some(anchor.chat_id.as_str()));
-            if !keep_own_turn {
-                self.own_turn = None;
-                self.own_turn_kick = false;
-            }
-            // Switching chats discards the transient comment pill/selection.
-            self.dismiss_comment_ui_and_selection(cx);
-            // … and the find bar with them: its matches, its counter and its
-            // query all belonged to the transcript being left behind.
-            self.find = None;
-            crate::markdown::find::clear(self.scope);
-            self.chat_id = selected;
-            self.rows.clear();
-            self.row_cache.clear();
-            self.live_parsers.clear();
-            self.tree_cache.clear();
-            self.folds.clear();
-            self.tool_overflow.clear();
-            self.toggle_pins.clear();
-            self.veils.clear();
-            self.render_cache.borrow_mut().clear();
-            self.highlights.entries.clear();
-            self.list.reset(0);
-            // A kept own-turn hold (send-created chat) owns the viewport;
-            // otherwise the fresh attach pins to the bottom.
-            self.pinned = self.own_turn.is_none();
-            self.spring.reset();
-            self.spring_last_tick = None;
-            self.spring_settled_at = None;
-            self.spring_kick = false;
-            self.show_jump_button = false;
+            self.reset_for_attach(selected, cx);
         }
 
-        let mut new_rows: Vec<Row> = Vec::new();
-        let mut after_slash_command = false;
-        for entry in &entries {
-            if entry.role == MessageRole::User {
-                after_slash_command = user_entry_is_slash_command(entry);
-            }
-            let mut rows = self.rows_for(entry, false, steers.contains(&entry.id));
-            if after_slash_command && entry.role != MessageRole::User {
-                rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
-            }
-            rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id.as_deref()));
-            fold_closed_toggles(&mut rows, &self.toggle_pins);
-            cap_work_runs(&mut rows, tool_call_limit, &self.tool_overflow);
-            new_rows.extend(rows);
-        }
-        for (echo, pending) in &echoes {
-            if echo.role == MessageRole::User {
-                after_slash_command = user_entry_is_slash_command(echo);
-            }
-            let mut rows = self.rows_for(echo, *pending, steers.contains(&echo.id));
-            if after_slash_command && echo.role != MessageRole::User {
-                rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
-            }
-            rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id.as_deref()));
-            new_rows.extend(rows);
-        }
+        let new_rows = self.build_rows(
+            &entries,
+            &echoes,
+            &steers,
+            pending_request_id.as_deref(),
+            tool_call_limit,
+        );
 
-        // Text already streamed before this (re)attach is the veil BASELINE:
-        // its rows' veils seed instead of fading (render creates them from
-        // this set), so only post-switch appends animate. Captured from the
-        // first NON-EMPTY transcript after attach — the replay frame — never
-        // the attach-time sync, whose transcript is still empty (selection
-        // clears it; the doc watch refills it async).
-        if attached {
-            self.veil_baseline.clear();
-            self.veil_attach_pending = true;
-        }
-        if self.veil_attach_pending && !entries.is_empty() {
-            self.veil_attach_pending = false;
-            self.veil_baseline = new_rows
-                .iter()
-                .filter(|r| is_live_markdown(&r.kind))
-                .map(|r| r.id.clone())
-                .collect();
-        }
-
-        // Veils live exactly as long as their live row — drop them on the
-        // live→complete flip (any mid-fade chunk snaps to full, matching the
-        // row's version splice).
-        self.veils.retain(|id, _| {
-            new_rows
-                .iter()
-                .any(|r| &r.id == id && is_live_markdown(&r.kind))
-        });
-        self.veil_baseline.retain(|id| {
-            new_rows
-                .iter()
-                .any(|r| &r.id == id && is_live_markdown(&r.kind))
-        });
+        self.update_veils(attached, entries.is_empty(), &new_rows);
 
         let was_empty = self.rows.is_empty();
         let old_last = self.rows.len().checked_sub(1);
-        match diff_rows(&self.rows, &new_rows) {
-            None => {
-                // Identical ids AND versions: every row's match count is
-                // already indexed (the memo is keyed on exactly that pair).
-                self.rows = new_rows;
-                self.refresh_protected_attachments(cx);
-                return;
-            }
-            Some((old_range, count)) => {
-                // A doc commit replaced rows: the shared popup's offer anchors
-                // to a replaced row's text — dismiss it (its quote may have
-                // streamed/changed under the selection).
-                if let Some(popup) = self.comment_popup.upgrade()
-                    && popup.read(cx).is_active()
-                    && let Some(row) = popup.read(cx).offer_row().map(str::to_owned)
-                    && self.rows[old_range.clone()]
-                        .iter()
-                        .any(|r| r.id.as_ref() == row)
-                {
-                    self.dismiss_comment_ui_and_selection(cx);
-                }
-                // Any replaced row's cached flatten results are stale — and
-                // because live replies splice only the rows whose content hash
-                // changed (the tail), this is O(changed rows) per commit, never
-                // O(reply).
-                for row in &self.rows[old_range.clone()] {
-                    self.render_cache.borrow_mut().invalidate_row(&row.id);
-                }
-                if old_range.len() == count {
-                    // In-place content change, same row count — notably the
-                    // live→complete flip, where EVERY row of the streamed
-                    // message changes version (streaming bit, tool auto_open,
-                    // timestamp bit) with identical ids. `splice` would reset
-                    // those items to hint-less Unmeasured (heights read 0
-                    // until the next paint) and, when the viewport-top item is
-                    // inside the range, clobber the scroll anchor to the range
-                    // start — the end-of-turn up/down jump the spring then has
-                    // to walk back. `remeasure_items` keeps old sizes as hints
-                    // and holds the anchor across the remeasure.
-                    self.list.remeasure_items(old_range);
-                } else {
-                    self.list.splice(old_range, count);
-                }
-            }
-        }
+        let Some((old_range, count)) = diff_rows(&self.rows, &new_rows) else {
+            // Identical ids AND versions: every row's match count is
+            // already indexed (the memo is keyed on exactly that pair).
+            self.rows = new_rows;
+            self.refresh_protected_attachments(cx);
+            return;
+        };
+        self.splice_changed_rows(old_range, count, cx);
         self.rows = new_rows;
         self.refresh_protected_attachments(cx);
         // Rows moved: re-derive the find counts (memoized per row version, so
@@ -990,6 +920,167 @@ impl Transcript {
             self.spring_kick = true;
         }
         cx.notify();
+    }
+
+    /// A different chat attached: drop everything that belonged to the one
+    /// being left (rows, caches, folds, find, the comment UI) and re-pin.
+    fn reset_for_attach(&mut self, selected: Option<String>, cx: &mut Context<Self>) {
+        self.copied_message = None;
+        self.copied_message_clear = None;
+        let keep_own_turn = self
+            .own_turn
+            .as_ref()
+            .is_some_and(|anchor| selected.as_deref() == Some(anchor.chat_id.as_str()));
+        if !keep_own_turn {
+            self.own_turn = None;
+            self.own_turn_kick = false;
+        }
+        // Switching chats discards the transient comment pill/selection.
+        self.dismiss_comment_ui_and_selection(cx);
+        // … and the find bar with them: its matches, its counter and its
+        // query all belonged to the transcript being left behind.
+        self.find = None;
+        crate::markdown::find::clear(self.scope);
+        self.chat_id = selected;
+        self.rows.clear();
+        self.row_cache.clear();
+        self.live_parsers.clear();
+        self.tree_cache.clear();
+        self.folds.clear();
+        self.tool_overflow.clear();
+        self.toggle_pins.clear();
+        self.veils.clear();
+        self.render_cache.borrow_mut().clear();
+        self.highlights.entries.clear();
+        self.list.reset(0);
+        // A kept own-turn hold (send-created chat) owns the viewport;
+        // otherwise the fresh attach pins to the bottom.
+        self.pinned = self.own_turn.is_none();
+        self.spring.reset();
+        self.spring_last_tick = None;
+        self.spring_settled_at = None;
+        self.spring_kick = false;
+        self.show_jump_button = false;
+    }
+
+    /// The rows for the confirmed entries then the pending echoes, with
+    /// slash-command input chips and pending-question mirrors filtered out.
+    fn build_rows(
+        &mut self,
+        entries: &[SessionMessageEntry],
+        echoes: &[(SessionMessageEntry, bool)],
+        steers: &std::collections::HashSet<String>,
+        pending_request_id: Option<&str>,
+        tool_call_limit: u32,
+    ) -> Vec<Row> {
+        let mut new_rows: Vec<Row> = Vec::new();
+        let mut after_slash_command = false;
+        for entry in entries {
+            if entry.role == MessageRole::User {
+                after_slash_command = user_entry_is_slash_command(entry);
+            }
+            let mut rows = self.rows_for(entry, false, steers.contains(&entry.id));
+            if after_slash_command && entry.role != MessageRole::User {
+                rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
+            }
+            rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id));
+            fold_closed_toggles(&mut rows, &self.toggle_pins);
+            cap_work_runs(&mut rows, tool_call_limit, &self.tool_overflow);
+            new_rows.extend(rows);
+        }
+        for (echo, pending) in echoes {
+            if echo.role == MessageRole::User {
+                after_slash_command = user_entry_is_slash_command(echo);
+            }
+            let mut rows = self.rows_for(echo, *pending, steers.contains(&echo.id));
+            if after_slash_command && echo.role != MessageRole::User {
+                rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
+            }
+            rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id));
+            new_rows.extend(rows);
+        }
+
+        new_rows
+    }
+
+    /// Seed the veil baseline on (re)attach and drop veils whose live row is
+    /// gone.
+    fn update_veils(&mut self, attached: bool, entries_empty: bool, new_rows: &[Row]) {
+        // Text already streamed before this (re)attach is the veil BASELINE:
+        // its rows' veils seed instead of fading (render creates them from
+        // this set), so only post-switch appends animate. Captured from the
+        // first NON-EMPTY transcript after attach — the replay frame — never
+        // the attach-time sync, whose transcript is still empty (selection
+        // clears it; the doc watch refills it async).
+        if attached {
+            self.veil_baseline.clear();
+            self.veil_attach_pending = true;
+        }
+        if self.veil_attach_pending && !entries_empty {
+            self.veil_attach_pending = false;
+            self.veil_baseline = new_rows
+                .iter()
+                .filter(|r| is_live_markdown(&r.kind))
+                .map(|r| r.id.clone())
+                .collect();
+        }
+
+        // Veils live exactly as long as their live row — drop them on the
+        // live→complete flip (any mid-fade chunk snaps to full, matching the
+        // row's version splice).
+        self.veils.retain(|id, _| {
+            new_rows
+                .iter()
+                .any(|r| &r.id == id && is_live_markdown(&r.kind))
+        });
+        self.veil_baseline.retain(|id| {
+            new_rows
+                .iter()
+                .any(|r| &r.id == id && is_live_markdown(&r.kind))
+        });
+    }
+
+    /// Tell the list which rows a doc commit replaced.
+    fn splice_changed_rows(
+        &mut self,
+        old_range: Range<usize>,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        // A doc commit replaced rows: the shared popup's offer anchors
+        // to a replaced row's text — dismiss it (its quote may have
+        // streamed/changed under the selection).
+        if let Some(popup) = self.comment_popup.upgrade()
+            && popup.read(cx).is_active()
+            && let Some(row) = popup.read(cx).offer_row().map(str::to_owned)
+            && self.rows[old_range.clone()]
+                .iter()
+                .any(|r| r.id.as_ref() == row)
+        {
+            self.dismiss_comment_ui_and_selection(cx);
+        }
+        // Any replaced row's cached flatten results are stale — and
+        // because live replies splice only the rows whose content hash
+        // changed (the tail), this is O(changed rows) per commit, never
+        // O(reply).
+        for row in &self.rows[old_range.clone()] {
+            self.render_cache.borrow_mut().invalidate_row(&row.id);
+        }
+        if old_range.len() == count {
+            // In-place content change, same row count — notably the
+            // live→complete flip, where EVERY row of the streamed
+            // message changes version (streaming bit, tool auto_open,
+            // timestamp bit) with identical ids. `splice` would reset
+            // those items to hint-less Unmeasured (heights read 0
+            // until the next paint) and, when the viewport-top item is
+            // inside the range, clobber the scroll anchor to the range
+            // start — the end-of-turn up/down jump the spring then has
+            // to walk back. `remeasure_items` keeps old sizes as hints
+            // and holds the anchor across the remeasure.
+            self.list.remeasure_items(old_range);
+        } else {
+            self.list.splice(old_range, count);
+        }
     }
 
     /// Cached row build for one entry (streaming entries bypass the cache).
@@ -1094,6 +1185,23 @@ impl Transcript {
         entry.epoch += 1;
         entry.toggled_at = Some(Instant::now());
     }
+}
+
+/// One own-turn step's measurements, shared by its phases.
+#[derive(Clone, Copy)]
+struct OwnTurnFrame {
+    anchor_ix: usize,
+    last_ix: usize,
+    viewport: gpui::Bounds<gpui::Pixels>,
+    viewport_height: f32,
+    /// Where the prompt rests below the viewport top.
+    inset: f32,
+    /// The last row's pad without any reservation.
+    base_pad: f32,
+    /// Room the reservation may fill.
+    usable: f32,
+    /// The reservation already installed.
+    current: f32,
 }
 
 #[cfg(test)]

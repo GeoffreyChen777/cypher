@@ -274,24 +274,7 @@ impl ProvidersPage {
         let refreshing = self.busy.as_ref().is_some_and(|b| {
             b.method == methods::REFRESH_PI_PROVIDER && b.provider.as_deref() == Some(&provider.id)
         });
-        let color = status_color(theme, &provider.state);
-        let status = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(5.0))
-            .rounded_full()
-            .px(px(8.0))
-            .py(px(3.0))
-            .bg(color.opacity(0.08))
-            .text_size(px(11.0))
-            .text_color(color)
-            .child(div().size(px(5.0)).rounded_full().bg(color))
-            .child(SharedString::from(if refreshing {
-                "Refreshing…"
-            } else {
-                status_label(&provider)
-            }));
+        let status = provider_status_pill(&provider, refreshing, theme);
         let model_label = format!(
             "{} {}",
             provider.model_count,
@@ -301,14 +284,53 @@ impl ProvidersPage {
                 "models"
             }
         );
-        let edit = provider.clone();
+        let selected = current.filter(|model| model.starts_with(&format!("{}/", provider.id)));
+        let more = self.provider_more_button(&provider, index, busy, theme, cx);
+        let actions = provider_actions(&provider, index, busy, more, theme, cx);
+        let (mark, tint) = match provider.id.as_str() {
+            "anthropic" | "claude-code" => (icons::CLAUDE_MARK, Some(icons::claude_brand())),
+            "openai-codex" => (icons::OPENAI_MARK, None),
+            _ => (icons::GLOBAL, Some(theme.accent)),
+        };
+        div()
+            .px(px(20.0))
+            .py(px(16.0))
+            .when(!first, |el| el.border_t_1().border_color(theme.border))
+            .flex()
+            .items_start()
+            .gap(px(12.0))
+            .child(
+                widgets::row_tile(theme, mark)
+                    .size(px(36.0))
+                    .bg(tint.unwrap_or(theme.accent).opacity(0.06))
+                    .when_some(tint, |el, color| el.text_color(color)),
+            )
+            .child(provider_details(
+                provider,
+                status,
+                model_label,
+                selected,
+                theme,
+            ))
+            .child(actions)
+            .into_any_element()
+    }
+
+    /// The row's ••• trigger and, while open, its menu.
+    fn provider_more_button(
+        &mut self,
+        provider: &PiProviderInfo,
+        index: usize,
+        busy: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let menu_provider = provider.clone();
         let menu_id = provider.id.clone();
         let menu_open = self
             .menu
             .get()
             .is_some_and(|m| m.provider.id == provider.id);
-        let selected = current.filter(|model| model.starts_with(&format!("{}/", provider.id)));
         let mut more = button(
             theme,
             ("provider-more", index),
@@ -355,171 +377,7 @@ impl ProvidersPage {
         if menu_open {
             more = more.child(self.render_menu(theme, cx));
         }
-        let oauth = is_oauth(&provider);
-        let claude_cli = is_claude_cli(&provider);
-        let (mark, tint) = match provider.id.as_str() {
-            "anthropic" | "claude-code" => (icons::CLAUDE_MARK, Some(icons::claude_brand())),
-            "openai-codex" => (icons::OPENAI_MARK, None),
-            _ => (icons::GLOBAL, Some(theme.accent)),
-        };
-        div()
-            .px(px(20.0))
-            .py(px(16.0))
-            .when(!first, |el| el.border_t_1().border_color(theme.border))
-            .flex()
-            .items_start()
-            .gap(px(12.0))
-            .child(
-                widgets::row_tile(theme, mark)
-                    .size(px(36.0))
-                    .bg(tint.unwrap_or(theme.accent).opacity(0.06))
-                    .when_some(tint, |el, color| el.text_color(color)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                widgets::row_title(theme, provider_title(&provider))
-                                    .text_size(px(14.0)),
-                            )
-                            .child(status)
-                            .when_some(selected, |el, _| el.child(widgets::badge(theme, "In use"))),
-                    )
-                    .when(!oauth && !claude_cli, |el| {
-                        el.child(caption(theme, provider.base_url.clone()).truncate())
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(
-                                caption(
-                                    theme,
-                                    if claude_cli {
-                                        "Claude Code CLI"
-                                    } else if oauth {
-                                        "ChatGPT subscription"
-                                    } else {
-                                        "OpenAI-compatible"
-                                    },
-                                )
-                                .text_size(px(11.5)),
-                            )
-                            .when(claude_cli && !provider.base_url.is_empty(), |el| {
-                                el.child(caption(theme, "·")).child(
-                                    caption(theme, provider.base_url.clone())
-                                        .text_size(px(11.5))
-                                        .truncate(),
-                                )
-                            })
-                            .when(!claude_cli, |el| {
-                                el.child(caption(theme, "·"))
-                                    .child(caption(theme, model_label).text_size(px(11.5)))
-                                    .child(caption(theme, "·"))
-                                    .child(
-                                        caption(
-                                            theme,
-                                            checked_label(
-                                                provider.checked_at,
-                                                chrono::Utc::now().timestamp_millis(),
-                                            ),
-                                        )
-                                        .text_size(px(11.5)),
-                                    )
-                            }),
-                    )
-                    .when_some(provider.message, |el, message| {
-                        el.child(
-                            div()
-                                .mt(px(4.0))
-                                .flex()
-                                .items_start()
-                                .gap(px(6.0))
-                                .child(provider_icon(icons::DANGER_TRIANGLE, 14.0, theme.danger))
-                                .child(caption(theme, message).text_color(theme.danger_muted)),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .when(claude_cli, |el| {
-                        el.child(
-                            button(
-                                theme,
-                                ("provider-claude-manage", index),
-                                "Manage",
-                                ButtonStyle::Secondary,
-                                !busy,
-                            )
-                            .when(!busy, |el| {
-                                el.on_click(cx.listener(|page, _, window, cx| {
-                                    page.open_claude_dialog(window, cx)
-                                }))
-                            }),
-                        )
-                    })
-                    .when(claude_cli && !provider.credential_saved, |el| {
-                        el.child(
-                            button(
-                                theme,
-                                ("provider-manage", index),
-                                "Install Claude Code",
-                                ButtonStyle::Secondary,
-                                true,
-                            )
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.open_url(CLAUDE_CODE_INSTALL);
-                            })),
-                        )
-                    })
-                    .when(
-                        !(claude_cli || (oauth && provider.credential_saved)),
-                        |el| {
-                            el.child(
-                                button(
-                                    theme,
-                                    ("provider-manage", index),
-                                    if oauth {
-                                        "Sign in"
-                                    } else if provider.credential_saved {
-                                        "Manage"
-                                    } else {
-                                        "Connect"
-                                    },
-                                    ButtonStyle::Secondary,
-                                    !busy,
-                                )
-                                .when(!busy, |el| {
-                                    el.on_click(cx.listener(move |page, _, _, cx| {
-                                        if is_oauth(&edit) {
-                                            page.start_oauth(&edit.id, cx);
-                                        } else {
-                                            page.edit(Some(edit.clone()), cx);
-                                        }
-                                    }))
-                                }),
-                            )
-                        },
-                    )
-                    .child(more),
-            )
-            .into_any_element()
+        more
     }
 
     pub(super) fn render_empty(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -543,4 +401,190 @@ impl ProvidersPage {
             .h(px(36.0)))
             .into_any_element()
     }
+}
+
+/// The provider's status pill (with a dot), or "Refreshing…".
+fn provider_status_pill(provider: &PiProviderInfo, refreshing: bool, theme: &Theme) -> gpui::Div {
+    let color = status_color(theme, &provider.state);
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .rounded_full()
+        .px(px(8.0))
+        .py(px(3.0))
+        .bg(color.opacity(0.08))
+        .text_size(px(11.0))
+        .text_color(color)
+        .child(div().size(px(5.0)).rounded_full().bg(color))
+        .child(SharedString::from(if refreshing {
+            "Refreshing…"
+        } else {
+            status_label(provider)
+        }))
+}
+
+/// A provider row's middle column: title, status and "In use", base URL,
+/// kind · models · checked, and any problem message.
+fn provider_details(
+    provider: PiProviderInfo,
+    status: gpui::Div,
+    model_label: String,
+    selected: Option<&str>,
+    theme: &Theme,
+) -> gpui::Div {
+    let oauth = is_oauth(&provider);
+    let claude_cli = is_claude_cli(&provider);
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(8.0))
+                .child(widgets::row_title(theme, provider_title(&provider)).text_size(px(14.0)))
+                .child(status)
+                .when_some(selected, |el, _| el.child(widgets::badge(theme, "In use"))),
+        )
+        .when(!oauth && !claude_cli, |el| {
+            el.child(caption(theme, provider.base_url.clone()).truncate())
+        })
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    caption(
+                        theme,
+                        if claude_cli {
+                            "Claude Code CLI"
+                        } else if oauth {
+                            "ChatGPT subscription"
+                        } else {
+                            "OpenAI-compatible"
+                        },
+                    )
+                    .text_size(px(11.5)),
+                )
+                .when(claude_cli && !provider.base_url.is_empty(), |el| {
+                    el.child(caption(theme, "·")).child(
+                        caption(theme, provider.base_url.clone())
+                            .text_size(px(11.5))
+                            .truncate(),
+                    )
+                })
+                .when(!claude_cli, |el| {
+                    el.child(caption(theme, "·"))
+                        .child(caption(theme, model_label).text_size(px(11.5)))
+                        .child(caption(theme, "·"))
+                        .child(
+                            caption(
+                                theme,
+                                checked_label(
+                                    provider.checked_at,
+                                    chrono::Utc::now().timestamp_millis(),
+                                ),
+                            )
+                            .text_size(px(11.5)),
+                        )
+                }),
+        )
+        .when_some(provider.message, |el, message| {
+            el.child(
+                div()
+                    .mt(px(4.0))
+                    .flex()
+                    .items_start()
+                    .gap(px(6.0))
+                    .child(provider_icon(icons::DANGER_TRIANGLE, 14.0, theme.danger))
+                    .child(caption(theme, message).text_color(theme.danger_muted)),
+            )
+        })
+}
+
+/// A provider row's buttons: Manage / Install / Sign in / Connect, then •••.
+fn provider_actions(
+    provider: &PiProviderInfo,
+    index: usize,
+    busy: bool,
+    more: gpui::Stateful<gpui::Div>,
+    theme: &Theme,
+    cx: &mut Context<ProvidersPage>,
+) -> gpui::Div {
+    let oauth = is_oauth(provider);
+    let claude_cli = is_claude_cli(provider);
+    let edit = provider.clone();
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .when(claude_cli, |el| {
+            el.child(
+                button(
+                    theme,
+                    ("provider-claude-manage", index),
+                    "Manage",
+                    ButtonStyle::Secondary,
+                    !busy,
+                )
+                .when(!busy, |el| {
+                    el.on_click(
+                        cx.listener(|page, _, window, cx| page.open_claude_dialog(window, cx)),
+                    )
+                }),
+            )
+        })
+        .when(claude_cli && !provider.credential_saved, |el| {
+            el.child(
+                button(
+                    theme,
+                    ("provider-manage", index),
+                    "Install Claude Code",
+                    ButtonStyle::Secondary,
+                    true,
+                )
+                .on_click(cx.listener(|_, _, _, cx| {
+                    cx.open_url(CLAUDE_CODE_INSTALL);
+                })),
+            )
+        })
+        .when(
+            !(claude_cli || (oauth && provider.credential_saved)),
+            |el| {
+                el.child(
+                    button(
+                        theme,
+                        ("provider-manage", index),
+                        if oauth {
+                            "Sign in"
+                        } else if provider.credential_saved {
+                            "Manage"
+                        } else {
+                            "Connect"
+                        },
+                        ButtonStyle::Secondary,
+                        !busy,
+                    )
+                    .when(!busy, |el| {
+                        el.on_click(cx.listener(move |page, _, _, cx| {
+                            if is_oauth(&edit) {
+                                page.start_oauth(&edit.id, cx);
+                            } else {
+                                page.edit(Some(edit.clone()), cx);
+                            }
+                        }))
+                    }),
+                )
+            },
+        )
+        .child(more)
 }

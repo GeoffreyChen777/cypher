@@ -238,7 +238,7 @@ impl Shell {
     /// close button. Not gated on git: the dock is a surface HOST, and only
     /// the Git surface rows check git.
     pub(super) fn toggle_dock(&mut self, sid: SlotId, cx: &mut Context<Self>) {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
         // Never on the new-session canvas (nothing to host yet); closing
@@ -253,7 +253,7 @@ impl Shell {
             DockSurface::Diff(id) => slot.diffs.get(&id).cloned(),
             _ => None,
         };
-        if let Some(slot) = self.slots.get_mut(&sid) {
+        if let Some(slot) = self.tiles.slots.get_mut(&sid) {
             slot.dock.open = open;
             if !open {
                 // Closing always leaves takeover mode — reopening at full
@@ -271,9 +271,9 @@ impl Shell {
                 changes.update(cx, |changes, cx| changes.detach(cx));
             }
         }
-        if let Some(slot) = self.slots.get(&sid) {
+        if let Some(slot) = self.tiles.slots.get(&sid) {
             let to = self.dock_target(slot);
-            if let Some(slot) = self.slots.get_mut(&sid) {
+            if let Some(slot) = self.tiles.slots.get_mut(&sid) {
                 slot.dock.tween = Some(WidthTween::new(from, to));
             }
         }
@@ -287,7 +287,7 @@ impl Shell {
     /// dock is ALREADY a takeover — the toggle returns to the chat (closes
     /// the dock).
     fn toggle_dock_expand(&mut self, sid: SlotId, cx: &mut Context<Self>) {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
         if !slot.dock.expanded && dock_takes_over(f32::from(slot.area.get().size.width)) {
@@ -295,12 +295,12 @@ impl Shell {
             return;
         }
         let from = self.dock_width_now(slot);
-        if let Some(slot) = self.slots.get_mut(&sid) {
+        if let Some(slot) = self.tiles.slots.get_mut(&sid) {
             slot.dock.expanded = !slot.dock.expanded;
         }
-        if let Some(slot) = self.slots.get(&sid) {
+        if let Some(slot) = self.tiles.slots.get(&sid) {
             let to = self.dock_target(slot);
-            if let Some(slot) = self.slots.get_mut(&sid) {
+            if let Some(slot) = self.tiles.slots.get_mut(&sid) {
                 slot.dock.tween = Some(WidthTween::new(from, to));
             }
         }
@@ -314,7 +314,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let sid = event.drag(cx).0;
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         let area = slot.area.get();
@@ -376,7 +376,7 @@ impl Shell {
 
     /// Drag-reorder a surface tab within this dock's strip.
     fn reorder_dock_tabs(&mut self, sid: SlotId, from: usize, to: usize, cx: &mut Context<Self>) {
-        if let Some(slot) = self.slots.get_mut(&sid)
+        if let Some(slot) = self.tiles.slots.get_mut(&sid)
             && reorder_dock_surfaces(&mut slot.dock.surfaces, from, to)
         {
             cx.notify();
@@ -392,7 +392,7 @@ impl Shell {
         over: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         match &mut slot.dock.tab_drag {
@@ -421,7 +421,7 @@ impl Shell {
         surface: DockSurface,
         cx: &mut Context<Self>,
     ) {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
         // The surface being replaced: an outgoing diff's selection/comment
@@ -434,7 +434,7 @@ impl Shell {
         {
             changes.update(cx, |changes, cx| changes.detach(cx));
         }
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         slot.dock.active = surface;
@@ -457,7 +457,7 @@ impl Shell {
     /// The picker's Files card / the `+` menu's Files row: a fresh file
     /// browser tab over the session's checkout.
     fn add_files_surface(&mut self, sid: SlotId, cx: &mut Context<Self>) {
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         slot.files_seq += 1;
@@ -473,10 +473,10 @@ impl Shell {
     /// FRESH diff tab with its own scope/base selection (multiple diff
     /// panels, user request).
     fn add_diff_surface(&mut self, sid: SlotId, cx: &mut Context<Self>) {
-        let Some(state) = self.slots.get(&sid).map(|slot| slot.state.clone()) else {
+        let Some(state) = self.tiles.slots.get(&sid).map(|slot| slot.state.clone()) else {
             return;
         };
-        let popup = self.comment_popup.clone().downgrade();
+        let popup = self.comments.popup.clone().downgrade();
         let changes = cx.new(|cx| Changes::new(state, popup, cx));
         self.register_diff_surface(sid, changes, cx);
     }
@@ -489,10 +489,10 @@ impl Shell {
         commit: cypher_proto::GitHistoryCommit,
         cx: &mut Context<Self>,
     ) {
-        let Some(state) = self.slots.get(&sid).map(|slot| slot.state.clone()) else {
+        let Some(state) = self.tiles.slots.get(&sid).map(|slot| slot.state.clone()) else {
             return;
         };
-        let popup = self.comment_popup.clone().downgrade();
+        let popup = self.comments.popup.clone().downgrade();
         let changes = cx.new(|cx| Changes::for_commit(state, popup, commit, cx));
         self.register_diff_surface(sid, changes, cx);
     }
@@ -508,7 +508,7 @@ impl Shell {
                 this.add_commit_diff_surface(sid, commit.clone(), cx);
             }
         });
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         slot.diff_seq += 1;
@@ -526,7 +526,7 @@ impl Shell {
             self.close_side_chat_by_seq(sid, id, cx);
             return;
         }
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         slot.dock.surfaces.retain(|s| *s != surface);
@@ -554,8 +554,8 @@ impl Shell {
     }
 
     pub(super) fn close_right_plus(&mut self, cx: &mut Context<Self>) {
-        if self.right_plus.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.right_plus);
+        if self.menus.right_plus.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.menus.right_plus);
         }
         cx.notify();
     }
@@ -569,7 +569,7 @@ impl Shell {
         sid: SlotId,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let slot = self.slots.get(&sid)?;
+        let slot = self.tiles.slots.get(&sid)?;
         let target = self.dock_target(slot);
         let tween = slot.dock.tween;
         let width = self.eval_tween(tween, target);
@@ -665,7 +665,7 @@ impl Shell {
         } else {
             gpui::Empty.into_any_element()
         };
-        let slot = self.slots.get(&sid)?;
+        let slot = self.tiles.slots.get(&sid)?;
         let is_side_chat = slot.dock.open
             && matches!(
                 active,
@@ -721,7 +721,7 @@ impl Shell {
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseUpEvent, _, cx| {
                         if event.click_count == 2
-                            && let Some(slot) = this.slots.get_mut(&sid)
+                            && let Some(slot) = this.tiles.slots.get_mut(&sid)
                         {
                             let area_w = f32::from(slot.area.get().size.width);
                             slot.right_fraction = fraction_of(RIGHT_PANE_DEFAULT, area_w);
@@ -758,7 +758,7 @@ impl Shell {
     /// arrangement (user request): the old two-card grid clipped in narrow
     /// panes and wasted short ones.
     fn render_surface_picker(&mut self, sid: SlotId, cx: &mut Context<Self>) -> AnyElement {
-        let (files_available, git) = match self.slots.get(&sid) {
+        let (files_available, git) = match self.tiles.slots.get(&sid) {
             Some(slot) => (
                 self.files_available(slot, cx),
                 self.slot_git_detected(slot, cx),
@@ -893,44 +893,40 @@ impl Shell {
         }
     }
 
-    /// The dock's surface strip: one chip per surface tab (icon · title ·
-    /// ✕) plus the `+` menu — the t3code RightPanelTabs bar, in the dock's
-    /// top row; the diff options sit in the pane below.
+    /// Open the dock if it is closed (a rail surface or `+` pick shows its
+    /// surface straight away).
+    fn ensure_dock_open(&mut self, sid: SlotId, cx: &mut Context<Self>) {
+        if self
+            .tiles
+            .slots
+            .get(&sid)
+            .is_some_and(|slot| !slot.dock.open)
+        {
+            self.toggle_dock(sid, cx);
+        }
+    }
+
     /// The session's vertical rail in the tile's top-right corner (user
     /// request; `top` clears native caption buttons), one
     /// raised card: the tile actions (terminal, dock, split, zoom), a divider,
     /// then the dock's surfaces (icon-only, titles on hover) and the `+`
     /// menu; the dock-expand toggle sits under the card while the dock is
     /// open. Surfaces reorder by dragging; middle-click or the hover ✕ closes.
-    /// Open the dock if it is closed (a rail surface or `+` pick shows its
-    /// surface straight away).
-    fn ensure_dock_open(&mut self, sid: SlotId, cx: &mut Context<Self>) {
-        if self.slots.get(&sid).is_some_and(|slot| !slot.dock.open) {
-            self.toggle_dock(sid, cx);
-        }
-    }
-
     pub(super) fn render_session_rail(
         &mut self,
         sid: SlotId,
         top: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        /// Uniform button slot — the drag mechanics (drop-index quantisation
-        /// + slide offsets) assume equal heights.
-        const BUTTON: f32 = 28.0;
-        const GAP: f32 = 4.0;
-        const SLOT: f32 = BUTTON + GAP;
-
         let has_drag = cx.has_active_drag();
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return Empty.into_any_element();
         };
         // Heal drag state if the pointer was released outside the rail.
         if slot.dock.tab_drag.is_some() && !has_drag {
             slot.dock.tab_drag = None;
         }
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return Empty.into_any_element();
         };
         let rows = self.dock_surface_rows(slot, cx);
@@ -953,337 +949,39 @@ impl Shell {
             .as_ref()
             .map(|d| (d.from, d.over, d.epoch, d.prev_over));
 
-        // The column IS the scroller (a short tile can overflow it); drop
-        // math runs in content coordinates (viewport y plus the scrolled-off
-        // height).
-        let scroll_for_drag = tab_scroll.clone();
-        let mut tabs = div()
-            .id(("dock-rail-tabs", sid))
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(GAP))
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&tab_scroll)
-            .on_drag_move::<DockTabDrag>(cx.listener(
-                move |this, event: &gpui::DragMoveEvent<DockTabDrag>, _, cx| {
-                    let payload = event.drag(cx);
-                    if payload.slot != sid {
-                        return;
-                    }
-                    let from = payload.from;
-                    let rel_y = f32::from(event.event.position.y)
-                        - f32::from(event.bounds.top())
-                        - f32::from(scroll_for_drag.offset().y);
-                    let over = crate::terminal::panel::drop_index(rel_y, SLOT, count);
-                    this.update_dock_tab_drag_over(sid, from, over, cx);
-                },
-            ))
-            .on_drop::<DockTabDrag>(cx.listener(move |this, payload: &DockTabDrag, _, cx| {
-                let Some(slot) = this.slots.get_mut(&sid) else {
-                    return;
-                };
-                let drag = slot.dock.tab_drag.take();
-                if payload.slot != sid {
-                    cx.notify();
-                    return;
-                }
-                let to = drag.map(|d| d.over).unwrap_or(payload.from);
-                this.reorder_dock_tabs(sid, payload.from, to, cx);
-            }));
-        for (ix, (surface, title)) in rows.into_iter().enumerate() {
-            let is_active = dock_open && surface == active;
-            let icon_path = match surface {
-                DockSurface::Diff(_) => icons::GIT_BRANCH,
-                DockSurface::Files(_) => icons::FOLDER_WITH_FILES,
-                _ => icons::CHAT_ROUND_LINE,
-            };
-            let group: SharedString = format!("dock-rail-tab-{sid}-{ix}").into();
-            let ghost_title = title.clone();
-            // A diff tab's title is its scope ("Working tree", a commit
-            // subject) — name the surface too, the icon alone is ambiguous.
-            let tooltip: SharedString = match surface {
-                DockSurface::Diff(_) => format!("Git · {title}").into(),
-                _ => title.clone(),
-            };
-            let button = div()
-                .id(("dock-rail-tab", ix))
-                .group(group.clone())
-                .size(px(BUTTON))
-                .flex_none()
-                .relative()
-                .rounded(px(RIGHT_TAB_RADIUS + 2.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                // Not `.occlude()`: a BlockMouse hitbox would end the hit
-                // test before the scrolling column behind the buttons.
-                .block_mouse_except_scroll()
-                .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                    window.prevent_default()
-                })
-                // No fill, active or not (user request): the icon's tone
-                // marks the active surface, and hover lifts an idle one.
-                .tooltip(move |_, cx| {
-                    cx.new(|_| super::session::FindTooltip(tooltip.clone()))
-                        .into()
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.ensure_dock_open(sid, cx);
-                    this.set_dock_active(sid, surface, cx);
-                }))
-                // Middle-click closes, like every tab strip.
-                .on_mouse_down(
-                    gpui::MouseButton::Middle,
-                    cx.listener(move |this, _, _, cx| {
-                        this.close_dock_surface(sid, surface, cx);
-                    }),
-                )
-                .on_drag(
-                    DockTabDrag {
-                        slot: sid,
-                        from: ix,
-                        title: ghost_title,
-                    },
-                    |payload, _point, _, cx| {
-                        let title = payload.title.clone();
-                        cx.stop_propagation();
-                        cx.new(|_| SurfaceTabGhost { title })
-                    },
-                )
-                .child(
-                    icon(icon_path)
-                        .size(px(15.0))
-                        .text_color(if is_active {
-                            theme.text
-                        } else {
-                            theme.text_muted.opacity(0.55)
-                        })
-                        .when(!is_active, |el| {
-                            el.group_hover(group.clone(), |s| s.text_color(theme.text_muted))
-                        }),
-                )
-                // Hover ✕ badge in the corner — closes this surface.
-                .child(
-                    div()
-                        .id(("dock-rail-close", ix))
-                        // Inside the button: the scrolling column clips
-                        // anything past its edge.
-                        .absolute()
-                        .top(px(1.0))
-                        .right(px(1.0))
-                        .size(px(11.0))
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(theme.surface_raised)
-                        .border_1()
-                        .border_color(theme.border_strong)
-                        .opacity(0.0)
-                        .group_hover(group.clone(), |s| s.opacity(1.0))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.close_dock_surface(sid, surface, cx);
-                        }))
-                        .child(
-                            icon(icons::CLOSE)
-                                .size(px(7.0))
-                                .text_color(theme.text_muted),
-                        ),
-                );
-            // Sliding transform while a sibling drags over (the terminal
-            // drawer's recipe, vertical): animate 150ms between committed
-            // offsets; the dragged button leaves an invisible spacer — the
-            // ghost carries it.
-            let wrapped: AnyElement = match drag {
-                Some((from, over, epoch, prev_over)) if ix != from => {
-                    let target = crate::terminal::panel::slide_offset(ix, from, over) * SLOT;
-                    let start = crate::terminal::panel::slide_offset(ix, from, prev_over) * SLOT;
-                    div()
-                        .relative()
-                        .child(button.with_animation(
-                            ("dock-rail-slide", (ix as u64) | ((epoch as u64) << 32)),
-                            TAB_SLIDE.animation(),
-                            move |el, t| el.top(px(motion::lerp(start, target, t))),
-                        ))
-                        .into_any_element()
-                }
-                Some((from, ..)) if ix == from => {
-                    div().size(px(BUTTON)).flex_none().into_any_element()
-                }
-                _ => button.into_any_element(),
-            };
-            tabs = tabs.child(wrapped);
-        }
-        // The `+` — a small menu offering the two surfaces (t3 "Add panel
-        // surface"); mirrors the picker cards. Right-aligned: the rail hugs
-        // the dock's right edge.
-        let plus_open = self.right_plus.get() == Some(&sid);
-        let plus_group: SharedString = format!("right-surface-add-{sid}").into();
-        let mut plus = div()
-            .id(("right-surface-add", sid))
-            .size(px(BUTTON))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(RIGHT_TAB_RADIUS + 2.0))
-            .cursor_pointer()
-            .group(plus_group.clone())
-            // No tooltip over its own open menu.
-            .when(!plus_open, |el| {
-                el.tooltip(|_, cx| {
-                    cx.new(|_| super::session::FindTooltip("Open a surface".into()))
-                        .into()
-                })
-            })
-            .occlude()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, window, _| {
-                    window.prevent_default();
-                    this.right_plus.note_trigger_press();
-                }),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                if this.right_plus.take_press_was_open() {
-                    this.close_right_plus(cx);
-                } else {
-                    this.right_plus.open(sid);
-                    cx.notify();
-                }
-            }))
-            .child(
-                icon(icons::PLUS)
-                    .size(px(15.0))
-                    .text_color(if plus_open {
-                        theme.text
-                    } else {
-                        theme.text_muted.opacity(0.55)
-                    })
-                    .group_hover(plus_group.clone(), |s| s.text_color(theme.text_muted)),
-            );
-        if plus_open {
-            let theme = Theme::of(cx).clone();
-            let closing = self.right_plus.closing_since();
-            let menu = popover::popover_card(&theme)
-                .w(px(168.0))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_right_plus(cx)))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .when(files_available, |el| {
-                            el.child(
-                                popover::menu_row(&theme, false, "right-plus-files")
-                                    .id("right-plus-files-row")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.ensure_dock_open(sid, cx);
-                                        this.add_files_surface(sid, cx);
-                                        this.close_right_plus(cx);
-                                    }))
-                                    .child(
-                                        icon(icons::FOLDER_WITH_FILES)
-                                            .size(px(13.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .child(SharedString::from("Files")),
-                            )
-                        })
-                        // Git only where there IS git — a non-git project's
-                        // diff surface would open a dead pane (same gate as
-                        // the empty-surface picker card).
-                        .when(git, |el| {
-                            el.child(
-                                popover::menu_row(&theme, false, "right-plus-diff")
-                                    .id("right-plus-diff-row")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.ensure_dock_open(sid, cx);
-                                        this.add_diff_surface(sid, cx);
-                                        this.close_right_plus(cx);
-                                    }))
-                                    .child(
-                                        icon(icons::GIT_BRANCH)
-                                            .size(px(13.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    // "Git", not "Git diff" — the surface hosts
-                                    // history and per-commit views too (user
-                                    // request; matches the picker card).
-                                    .child(SharedString::from("Git")),
-                            )
-                        }),
-                )
-                .into_any_element();
-            plus = plus.relative().child(popover::anchored_menu_below_end(
-                "right-plus-menu",
-                menu,
-                closing,
-            ));
-        }
+        let tabs = render_rail_tabs(
+            RailTabs {
+                sid,
+                rows,
+                dock_open,
+                active,
+                drag,
+                tab_scroll,
+            },
+            &theme,
+            cx,
+        );
+        let plus = self.render_rail_plus(sid, files_available, git, &theme, cx);
         let raised_bg = Theme::of(cx).surface_raised;
         let (on, off) = (theme.text, theme.text_muted.opacity(0.55));
         let hover = theme.text_muted;
         let tone = RailTone { on, off, hover };
-        // The tile actions — moved here from the tab row (user request).
-        let mut actions = div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(GAP))
-            .child(rail_button(
-                format!("rail-terminal-{sid}").into(),
-                icons::TERMINAL,
+        let actions = render_rail_actions(
+            sid,
+            RailActions {
                 terminal_open,
-                "Terminal",
-                tone,
-                cx.listener(move |this, _, window, cx| this.toggle_terminal(sid, window, cx)),
-            ));
-        if has_dock {
-            actions = actions.child(rail_button(
-                format!("rail-dock-{sid}").into(),
-                icons::SIDEBAR_MINIMALISTIC,
+                has_dock,
                 dock_open,
-                "Side panel",
-                tone,
-                cx.listener(move |this, _, _, cx| this.toggle_dock(sid, cx)),
-            ));
-        }
-        if let Some(group) = group {
-            actions = actions.child(rail_button(
-                format!("rail-split-{sid}").into(),
-                icons::DIFF_SPLIT,
-                false,
-                "Split right",
-                tone,
-                cx.listener(move |this, _, _, cx| {
-                    this.workspace.focus(group);
-                    this.split_focused(crate::workspace::Edge::Right, cx);
-                }),
-            ));
-            if can_zoom {
-                actions = actions.child(rail_button(
-                    format!("rail-zoom-{sid}").into(),
-                    icons::EXPAND_ARROWS,
-                    zoomed,
-                    if zoomed { "Restore tiles" } else { "Zoom tile" },
-                    tone,
-                    cx.listener(move |this, _, _, cx| {
-                        this.workspace.toggle_zoom(group);
-                        this.workspace_changed(cx);
-                    }),
-                ));
-            }
-        }
+                group,
+                zoomed,
+                can_zoom,
+            },
+            tone,
+            cx,
+        );
         let divider = div()
             .flex_none()
-            .w(px(BUTTON - 10.0))
+            .w(px(RAIL_BUTTON - 10.0))
             .h(px(1.0))
             .my(px(2.0))
             .bg(theme.border);
@@ -1293,7 +991,7 @@ impl Shell {
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(GAP))
+            .gap(px(RAIL_GAP))
             .p(px(3.0))
             .rounded(px(RIGHT_TAB_RADIUS + 5.0))
             .bg(raised_bg)
@@ -1322,12 +1020,439 @@ impl Shell {
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(GAP))
+            .gap(px(RAIL_GAP))
             .child(card)
             .child(div().flex_1())
             .children(expand)
             .into_any_element()
     }
+
+    /// The `+` — a small menu offering the two surfaces (t3 "Add panel
+    /// surface"); mirrors the picker cards. Right-aligned: the rail hugs
+    /// the dock's right edge.
+    fn render_rail_plus(
+        &self,
+        sid: SlotId,
+        files_available: bool,
+        git: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let plus_open = self.menus.right_plus.get() == Some(&sid);
+        let plus_group: SharedString = format!("right-surface-add-{sid}").into();
+        let plus = div()
+            .id(("right-surface-add", sid))
+            .size(px(RAIL_BUTTON))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(RIGHT_TAB_RADIUS + 2.0))
+            .cursor_pointer()
+            .group(plus_group.clone())
+            // No tooltip over its own open menu.
+            .when(!plus_open, |el| {
+                el.tooltip(|_, cx| {
+                    cx.new(|_| super::session::FindTooltip("Open a surface".into()))
+                        .into()
+                })
+            })
+            .occlude()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, _| {
+                    window.prevent_default();
+                    this.menus.right_plus.note_trigger_press();
+                }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                if this.menus.right_plus.take_press_was_open() {
+                    this.close_right_plus(cx);
+                } else {
+                    this.menus.right_plus.open(sid);
+                    cx.notify();
+                }
+            }))
+            .child(
+                icon(icons::PLUS)
+                    .size(px(15.0))
+                    .text_color(if plus_open {
+                        theme.text
+                    } else {
+                        theme.text_muted.opacity(0.55)
+                    })
+                    .group_hover(plus_group.clone(), |s| s.text_color(theme.text_muted)),
+            );
+        if !plus_open {
+            return plus;
+        }
+        let closing = self.menus.right_plus.closing_since();
+        let menu = rail_plus_menu(sid, files_available, git, cx);
+        plus.relative().child(popover::anchored_menu_below_end(
+            "right-plus-menu",
+            menu,
+            closing,
+        ))
+    }
+}
+
+/// The rail's uniform button slot — the drag mechanics (drop-index
+/// quantisation + slide offsets) assume equal heights.
+const RAIL_BUTTON: f32 = 28.0;
+const RAIL_GAP: f32 = 4.0;
+const RAIL_SLOT: f32 = RAIL_BUTTON + RAIL_GAP;
+
+/// What the rail's surface column renders.
+struct RailTabs {
+    sid: SlotId,
+    rows: Vec<(DockSurface, SharedString)>,
+    dock_open: bool,
+    active: DockSurface,
+    /// The in-flight reorder: `(from, over, epoch, prev_over)`.
+    drag: Option<(usize, usize, usize, usize)>,
+    tab_scroll: gpui::ScrollHandle,
+}
+
+/// The dock's surfaces as a draggable, scrolling column of icon buttons.
+fn render_rail_tabs(
+    rail: RailTabs,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> gpui::Stateful<gpui::Div> {
+    let RailTabs {
+        sid,
+        rows,
+        dock_open,
+        active,
+        drag,
+        tab_scroll,
+    } = rail;
+    let count = rows.len();
+    // The column IS the scroller (a short tile can overflow it); drop
+    // math runs in content coordinates (viewport y plus the scrolled-off
+    // height).
+    let scroll_for_drag = tab_scroll.clone();
+    let mut tabs = div()
+        .id(("dock-rail-tabs", sid))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(RAIL_GAP))
+        .min_h_0()
+        .overflow_y_scroll()
+        .track_scroll(&tab_scroll)
+        .on_drag_move::<DockTabDrag>(cx.listener(
+            move |this, event: &gpui::DragMoveEvent<DockTabDrag>, _, cx| {
+                let payload = event.drag(cx);
+                if payload.slot != sid {
+                    return;
+                }
+                let from = payload.from;
+                let rel_y = f32::from(event.event.position.y)
+                    - f32::from(event.bounds.top())
+                    - f32::from(scroll_for_drag.offset().y);
+                let over = crate::terminal::panel::drop_index(rel_y, RAIL_SLOT, count);
+                this.update_dock_tab_drag_over(sid, from, over, cx);
+            },
+        ))
+        .on_drop::<DockTabDrag>(cx.listener(move |this, payload: &DockTabDrag, _, cx| {
+            let Some(slot) = this.tiles.slots.get_mut(&sid) else {
+                return;
+            };
+            let drag = slot.dock.tab_drag.take();
+            if payload.slot != sid {
+                cx.notify();
+                return;
+            }
+            let to = drag.map(|d| d.over).unwrap_or(payload.from);
+            this.reorder_dock_tabs(sid, payload.from, to, cx);
+        }));
+    for (ix, (surface, title)) in rows.into_iter().enumerate() {
+        let is_active = dock_open && surface == active;
+        let button = rail_tab_button(sid, ix, surface, title, is_active, theme, cx);
+        tabs = tabs.child(slide_rail_tab(button, ix, drag));
+    }
+    tabs
+}
+
+/// One surface's icon button: activates on click, closes on middle-click or
+/// its hover ✕, drags to reorder.
+fn rail_tab_button(
+    sid: SlotId,
+    ix: usize,
+    surface: DockSurface,
+    title: SharedString,
+    is_active: bool,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> gpui::Stateful<gpui::Div> {
+    let icon_path = match surface {
+        DockSurface::Diff(_) => icons::GIT_BRANCH,
+        DockSurface::Files(_) => icons::FOLDER_WITH_FILES,
+        _ => icons::CHAT_ROUND_LINE,
+    };
+    let group: SharedString = format!("dock-rail-tab-{sid}-{ix}").into();
+    let ghost_title = title.clone();
+    // A diff tab's title is its scope ("Working tree", a commit
+    // subject) — name the surface too, the icon alone is ambiguous.
+    let tooltip: SharedString = match surface {
+        DockSurface::Diff(_) => format!("Git · {title}").into(),
+        _ => title.clone(),
+    };
+    div()
+        .id(("dock-rail-tab", ix))
+        .group(group.clone())
+        .size(px(RAIL_BUTTON))
+        .flex_none()
+        .relative()
+        .rounded(px(RIGHT_TAB_RADIUS + 2.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        // Not `.occlude()`: a BlockMouse hitbox would end the hit
+        // test before the scrolling column behind the buttons.
+        .block_mouse_except_scroll()
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+            window.prevent_default()
+        })
+        // No fill, active or not (user request): the icon's tone
+        // marks the active surface, and hover lifts an idle one.
+        .tooltip(move |_, cx| {
+            cx.new(|_| super::session::FindTooltip(tooltip.clone()))
+                .into()
+        })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.ensure_dock_open(sid, cx);
+            this.set_dock_active(sid, surface, cx);
+        }))
+        // Middle-click closes, like every tab strip.
+        .on_mouse_down(
+            gpui::MouseButton::Middle,
+            cx.listener(move |this, _, _, cx| {
+                this.close_dock_surface(sid, surface, cx);
+            }),
+        )
+        .on_drag(
+            DockTabDrag {
+                slot: sid,
+                from: ix,
+                title: ghost_title,
+            },
+            |payload, _point, _, cx| {
+                let title = payload.title.clone();
+                cx.stop_propagation();
+                cx.new(|_| SurfaceTabGhost { title })
+            },
+        )
+        .child(
+            icon(icon_path)
+                .size(px(15.0))
+                .text_color(if is_active {
+                    theme.text
+                } else {
+                    theme.text_muted.opacity(0.55)
+                })
+                .when(!is_active, |el| {
+                    el.group_hover(group.clone(), |s| s.text_color(theme.text_muted))
+                }),
+        )
+        // Hover ✕ badge in the corner — closes this surface.
+        .child(
+            div()
+                .id(("dock-rail-close", ix))
+                // Inside the button: the scrolling column clips
+                // anything past its edge.
+                .absolute()
+                .top(px(1.0))
+                .right(px(1.0))
+                .size(px(11.0))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.surface_raised)
+                .border_1()
+                .border_color(theme.border_strong)
+                .opacity(0.0)
+                .group_hover(group.clone(), |s| s.opacity(1.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.close_dock_surface(sid, surface, cx);
+                }))
+                .child(
+                    icon(icons::CLOSE)
+                        .size(px(7.0))
+                        .text_color(theme.text_muted),
+                ),
+        )
+}
+
+/// Sliding transform while a sibling drags over (the terminal drawer's
+/// recipe, vertical): animate 150ms between committed offsets; the dragged
+/// button leaves an invisible spacer — the ghost carries it.
+fn slide_rail_tab(
+    button: gpui::Stateful<gpui::Div>,
+    ix: usize,
+    drag: Option<(usize, usize, usize, usize)>,
+) -> AnyElement {
+    match drag {
+        Some((from, over, epoch, prev_over)) if ix != from => {
+            let target = crate::terminal::panel::slide_offset(ix, from, over) * RAIL_SLOT;
+            let start = crate::terminal::panel::slide_offset(ix, from, prev_over) * RAIL_SLOT;
+            div()
+                .relative()
+                .child(button.with_animation(
+                    ("dock-rail-slide", (ix as u64) | ((epoch as u64) << 32)),
+                    TAB_SLIDE.animation(),
+                    move |el, t| el.top(px(motion::lerp(start, target, t))),
+                ))
+                .into_any_element()
+        }
+        Some((from, ..)) if ix == from => {
+            div().size(px(RAIL_BUTTON)).flex_none().into_any_element()
+        }
+        _ => button.into_any_element(),
+    }
+}
+
+/// The `+` menu's rows: Files, and Git where there is git.
+fn rail_plus_menu(
+    sid: SlotId,
+    files_available: bool,
+    git: bool,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    let theme = Theme::of(cx).clone();
+    popover::popover_card(&theme)
+        .w(px(168.0))
+        .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_right_plus(cx)))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .when(files_available, |el| {
+                    el.child(
+                        popover::menu_row(&theme, false, "right-plus-files")
+                            .id("right-plus-files-row")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.ensure_dock_open(sid, cx);
+                                this.add_files_surface(sid, cx);
+                                this.close_right_plus(cx);
+                            }))
+                            .child(
+                                icon(icons::FOLDER_WITH_FILES)
+                                    .size(px(13.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Files")),
+                    )
+                })
+                // Git only where there IS git — a non-git project's
+                // diff surface would open a dead pane (same gate as
+                // the empty-surface picker card).
+                .when(git, |el| {
+                    el.child(
+                        popover::menu_row(&theme, false, "right-plus-diff")
+                            .id("right-plus-diff-row")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.ensure_dock_open(sid, cx);
+                                this.add_diff_surface(sid, cx);
+                                this.close_right_plus(cx);
+                            }))
+                            .child(
+                                icon(icons::GIT_BRANCH)
+                                    .size(px(13.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            // "Git", not "Git diff" — the surface hosts
+                            // history and per-commit views too (user
+                            // request; matches the picker card).
+                            .child(SharedString::from("Git")),
+                    )
+                }),
+        )
+        .into_any_element()
+}
+
+/// The tile state the rail's action buttons reflect.
+struct RailActions {
+    terminal_open: bool,
+    has_dock: bool,
+    dock_open: bool,
+    group: Option<crate::workspace::GroupId>,
+    zoomed: bool,
+    can_zoom: bool,
+}
+
+/// The tile actions — moved here from the tab row (user request).
+fn render_rail_actions(
+    sid: SlotId,
+    state: RailActions,
+    tone: RailTone,
+    cx: &mut Context<Shell>,
+) -> gpui::Div {
+    let RailActions {
+        terminal_open,
+        has_dock,
+        dock_open,
+        group,
+        zoomed,
+        can_zoom,
+    } = state;
+    let mut actions = div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(RAIL_GAP))
+        .child(rail_button(
+            format!("rail-terminal-{sid}").into(),
+            icons::TERMINAL,
+            terminal_open,
+            "Terminal",
+            tone,
+            cx.listener(move |this, _, window, cx| this.toggle_terminal(sid, window, cx)),
+        ));
+    if has_dock {
+        actions = actions.child(rail_button(
+            format!("rail-dock-{sid}").into(),
+            icons::SIDEBAR_MINIMALISTIC,
+            dock_open,
+            "Side panel",
+            tone,
+            cx.listener(move |this, _, _, cx| this.toggle_dock(sid, cx)),
+        ));
+    }
+    if let Some(group) = group {
+        actions = actions.child(rail_button(
+            format!("rail-split-{sid}").into(),
+            icons::DIFF_SPLIT,
+            false,
+            "Split right",
+            tone,
+            cx.listener(move |this, _, _, cx| {
+                this.workspace.focus(group);
+                this.split_focused(crate::workspace::Edge::Right, cx);
+            }),
+        ));
+        if can_zoom {
+            actions = actions.child(rail_button(
+                format!("rail-zoom-{sid}").into(),
+                icons::EXPAND_ARROWS,
+                zoomed,
+                if zoomed { "Restore tiles" } else { "Zoom tile" },
+                tone,
+                cx.listener(move |this, _, _, cx| {
+                    this.workspace.toggle_zoom(group);
+                    this.workspace_changed(cx);
+                }),
+            ));
+        }
+    }
+    actions
 }
 
 /// The rail's margin around its card (room for the card's shadow too).

@@ -946,23 +946,19 @@ struct OrgGateUi {
     task: Option<Task<()>>,
 }
 
-pub struct Shell {
-    /// The window's main state: lists (sidebar, spaces, sessions) in
-    /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
-    /// session (sidebar highlight, nav history, cycle order, space
-    /// implication). Each tile renders from its own session context.
-    state: Entity<AppState>,
-    /// The tiled session layout (docs/design/workspace-layout.md).
-    workspace: crate::workspace::Workspace,
+/// The session slots behind a window's workspace tabs: one per open tab,
+/// the focus/follow bookkeeping, and the boot-time layout restore.
+#[derive(Default)]
+struct SlotTable {
     /// One slot per open workspace tab (created on open, dropped on close —
     /// dropping the context kills its watches).
     slots: std::collections::HashMap<session::SlotId, session::SessionSlot>,
     next_slot_id: session::SlotId,
     /// The slots on screen at the last workspace change (see
-    /// [`Self::dismiss_hidden_comment_ui`]).
+    /// [`Shell::dismiss_hidden_comment_ui`]).
     shown_slots: Vec<session::SlotId>,
     /// The focused tab main's selection last followed (see
-    /// [`Self::sync_follow`]).
+    /// [`Shell::sync_follow`]).
     followed: Option<crate::workspace::TabKey>,
     /// Land keyboard focus in the focused slot's composer on the next
     /// render (routing changes the focused tile without a window handle).
@@ -975,24 +971,27 @@ pub struct Shell {
     /// `UiSettings.workspace`, a project window's
     /// `UiSettings.project_workspaces[project]`. Taken once.
     saved_workspace: Option<crate::workspace::Workspace>,
+}
+
+/// What closed session tabs leave behind, restored when the session's slot
+/// is created again.
+#[derive(Default)]
+struct ClosedTabStash {
     /// Unsent drafts + staged attachments of closed session tabs, restored
     /// when the session's slot is created again (drafts used to survive chat
     /// switches). In memory only. Also holds a background fork's prefill
     /// until its tab is first shown.
-    closed_drafts:
-        std::collections::HashMap<String, (String, Vec<crate::attachments::StagedAttachment>)>,
+    drafts: std::collections::HashMap<String, (String, Vec<crate::attachments::StagedAttachment>)>,
     /// Terminal panels of closed session tabs, by chat id: their PTYs keep
     /// running (a long job stays reachable) and the panel re-binds to the
     /// session's next slot. Closed for good when the chat is deleted.
-    parked_terminals: std::collections::HashMap<String, Entity<TerminalPanel>>,
-    /// The main state's chats generation `prune_tabs` last judged: only a
-    /// NEW chats frame may close a tab whose chat is missing from the list.
-    seen_chats_generation: u64,
-    /// Chats this window just created (a fork, a promoted side chat) whose
-    /// row may trail a chats frame or two, by creation time: their tabs
-    /// aren't closed as deleted until a frame lists them (which clears the
-    /// entry) or [`tabs::EXPECTED_CHAT_TTL`] passes.
-    expected_chats: std::collections::HashMap<String, std::time::Instant>,
+    terminals: std::collections::HashMap<String, Entity<TerminalPanel>>,
+}
+
+/// Measured tile geometry (paint-time canvases) and the per-tile state that
+/// reads it: tab-strip scrolling, the session rail's entrance, tab drags.
+#[derive(Default)]
+struct TileGeometry {
     /// Per tile: its tab strip's scroll handle and the (active tab, tab
     /// count) last scrolled into view — a change scrolls the active tab
     /// fully into view once.
@@ -1021,105 +1020,103 @@ pub struct Shell {
     >,
     /// A live session-tab drag (tile drop catchers mount while `Some`).
     tab_drop: Option<workspace_view::TabDropState>,
+}
+
+/// The window's popover menus (each a [`popover::Popup`] keyed by what it
+/// opened for).
+#[derive(Default)]
+struct ShellMenus {
     /// The dock surface strip's `+` menu, for the slot that opened it (one
     /// menu is open at a time).
     right_plus: popover::Popup<session::SlotId>,
     /// The titlebar cluster's layout presets popover.
-    layout_menu: popover::Popup<()>,
-    /// Chat outlet vs settings pages.
-    route: Route,
-    /// Route history behind the titlebar back/forward buttons (§ nav history).
-    nav: NavHistory,
-    devices_page: Option<Entity<DevicesPage>>,
-    archived_page: Option<Entity<ArchivedPage>>,
-    appearance_page: Option<Entity<AppearancePage>>,
-    notifications_page: Option<Entity<NotificationsPage>>,
-    shortcuts_page: Option<Entity<ShortcutsPage>>,
-    providers_page: Option<Entity<ProvidersPage>>,
-    titles_page: Option<Entity<crate::settings::titles::TitlesPage>>,
-    settings_target: Entity<DeviceTarget>,
-    harnesses_page: Option<Entity<HarnessesPage>>,
-    commands_page: Option<Entity<CommandsPage>>,
+    layout: popover::Popup<()>,
+    /// Session-row context menu: (chat id, window position).
+    chat: popover::Popup<(String, Point<Pixels>)>,
+    /// Space-row context menu (dropdown rows): (space id, window position).
+    space: popover::Popup<(String, Point<Pixels>)>,
+    /// Sidebar view menu (device filter + sort): window position.
+    sidebar_view: popover::Popup<Point<Pixels>>,
+    /// Project glyph/colour picker: (space id, window position).
+    space_style: popover::Popup<(String, Point<Pixels>)>,
+    user: popover::Popup<()>,
+}
+
+/// The settings pages (each created on first visit and kept for the return
+/// trip), their subscriptions, and the first-run setup overlay.
+struct SettingsPages {
+    devices: Option<Entity<DevicesPage>>,
+    archived: Option<Entity<ArchivedPage>>,
+    appearance: Option<Entity<AppearancePage>>,
+    notifications: Option<Entity<NotificationsPage>>,
+    shortcuts: Option<Entity<ShortcutsPage>>,
+    providers: Option<Entity<ProvidersPage>>,
+    titles: Option<Entity<crate::settings::titles::TitlesPage>>,
+    target: Entity<DeviceTarget>,
+    harnesses: Option<Entity<HarnessesPage>>,
+    commands: Option<Entity<CommandsPage>>,
     commands_sub: Option<Subscription>,
-    mcp_page: Option<Entity<McpPage>>,
-    subagents_page: Option<Entity<SubagentsPage>>,
-    github_page: Option<Entity<crate::settings::github::GithubPage>>,
-    setup_page: Option<Entity<SetupPage>>,
+    mcp: Option<Entity<McpPage>>,
+    subagents: Option<Entity<SubagentsPage>>,
+    github: Option<Entity<crate::settings::github::GithubPage>>,
+    setup: Option<Entity<SetupPage>>,
     setup_sub: Option<Subscription>,
     /// Continue/Skip dismissed the overlay for this process.
     setup_dismissed: bool,
-    /// `CYPHER_FORCE_GATE=setup` keeps the first-run overlay visible.
-    debug_setup: bool,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
-    /// Session-row context menu: (chat id, window position).
-    chat_menu: popover::Popup<(String, Point<Pixels>)>,
-    rename_dialog: Option<RenameChatDialog>,
+}
+
+/// The window's modal dialogs and palettes; each is `Some` while open.
+#[derive(Default)]
+struct ShellDialogs {
+    rename_chat: Option<RenameChatDialog>,
     /// Chat id awaiting delete confirmation.
-    delete_confirm: Option<String>,
-    /// The engine replaced this app's bundle (a Devices → Update, possibly
-    /// from another machine) and armed the relauncher: quit exactly once.
-    relaunch_quit_sent: bool,
+    delete_chat: Option<String>,
     /// The quick-chat device palette (sidebar header "Quick chat").
     quick_chat: Option<spaces::QuickChatFlow>,
-    /// Scratch-folder removal after a quick chat was deleted (host RPC).
-    scratch_cleanup_task: Option<Task<()>>,
     /// Follow-up after the last session of a linked worktree was deleted.
-    delete_worktree_confirm: Option<OrphanWorktree>,
-    /// Space-row context menu (dropdown rows): (space id, window position).
-    space_menu: popover::Popup<(String, Point<Pixels>)>,
-    /// Sidebar view menu (device filter + sort): window position.
-    sidebar_view_menu: popover::Popup<Point<Pixels>>,
-    /// Project glyph/colour picker: (space id, window position).
-    space_style_menu: popover::Popup<(String, Point<Pixels>)>,
-    rename_space_dialog: Option<RenameSpaceDialog>,
+    delete_worktree: Option<OrphanWorktree>,
+    rename_space: Option<RenameSpaceDialog>,
     /// Space id awaiting delete confirmation (hard delete + session cascade).
-    delete_space_confirm: Option<String>,
+    delete_space: Option<String>,
     /// The add-space palette (⌘K-style; device tabs + folder search), `Some`
     /// while open.
     add_space: Option<AddSpaceFlow>,
-    /// Scroll position of the sidebar lists region (drives its edge fades).
-    sidebar_scroll: gpui::ScrollHandle,
-    /// `settings.last_space_id` applied once after the first spaces frame.
-    space_boot_applied: bool,
-    /// Last seen session status per chat — the chime trigger compares against
-    /// it (a row's FIRST appearance never chimes, so boot stays silent).
-    sound_prev: std::collections::HashMap<String, cypher_proto::SessionStatus>,
-    /// The count last written to the Dock badge (`None` = never written), so
-    /// frequent state notifies only touch AppKit when the number changes.
-    dock_badge: Option<usize>,
-    user_menu: popover::Popup<()>,
-    /// Inline sidebar error strip (mutation failures); click dismisses.
-    sidebar_notice: Option<SharedString>,
-    /// Session Fork idempotence: `(sourceChatId, anchorMessageId) → requestId`
-    /// (the client-minted target chat id). The SAME id is reused across RPC
-    /// errors / lost replies so a retry returns the already-created chat;
-    /// the mapping is dropped on a definitive reply (Created or typed
-    /// Unavailable).
-    fork_request_ids: std::collections::HashMap<(String, String), String>,
+}
+
+/// In-app update state: the bundle update's progress, the About dialog,
+/// the one-click Pi update, and the relaunch after a remote update.
+struct UpdateUi {
+    /// The engine replaced this app's bundle (a Devices → Update, possibly
+    /// from another machine) and armed the relauncher: quit exactly once.
+    relaunch_quit_sent: bool,
     /// Local lifecycle of an in-app update (macOS bundle swap) — the engine's
     /// UpdateStatus stream says WHETHER one exists; this says how far the
     /// download/stage of it has come in this process.
-    update_flow: UpdateFlow,
-    update_task: Option<Task<()>>,
+    flow: UpdateFlow,
+    task: Option<Task<()>>,
     about: Option<AboutDialog>,
     about_task: Option<Task<()>>,
     about_runtime_task: Option<Task<()>>,
     /// Version whose update strip the user dismissed (advisory installs only —
     /// a newer release shows the strip again).
-    update_dismissed: Option<String>,
+    dismissed: Option<String>,
     /// One-click Pi CLI + extension update request. The engine publishes the
     /// checker-side applying/error state; this local bit closes the
     /// click-to-first-watch-frame double-click window.
-    pi_update_busy: bool,
-    pi_update_task: Option<Task<()>>,
+    pi_busy: bool,
+    pi_task: Option<Task<()>>,
     /// How this binary was installed — decides the strip's click behavior.
     /// Cached: `detect_install` stats `current_exe` and this renders per frame.
     install: cypher_update::InstallKind,
+}
+
+/// The local→synced account lifecycle: the organization gate, the sync
+/// step, sign-in, runtime switches and the one-time import.
+struct SyncUi {
     org: Option<OrgGateUi>,
-    sync_flow: SyncFlow,
-    mutate_task: Option<Task<()>>,
-    delete_worktree_task: Option<Task<()>>,
+    flow: SyncFlow,
     auth_task: Option<Task<()>>,
     runtime_change_task: Option<Task<()>>,
     runtime_change_error: Option<SharedString>,
@@ -1127,69 +1124,190 @@ pub struct Shell {
     import_task: Option<Task<()>>,
     /// Title of the chat the import stream is copying right now.
     import_current: Option<SharedString>,
-    /// Kept for the failed-gate "Retry" action.
-    boot: EngineBootConfig,
-    data_dir: PathBuf,
-    settings: UiSettings,
+}
+
+/// The sidebar's local UI state: scroll, the notice strip, the resort
+/// FLIP glide and the collapsed disclosure groups.
+struct SidebarUi {
+    /// Scroll position of the sidebar lists region (drives its edge fades).
+    scroll: gpui::ScrollHandle,
+    /// Inline sidebar error strip (mutation failures); click dismisses.
+    notice: Option<SharedString>,
     /// Last rendered sidebar order (key + estimated height) — the FLIP baseline
     /// for the resort glide.
-    sidebar_prev_order: Vec<(String, f32)>,
+    prev_order: Vec<(String, f32)>,
     /// Per-key paint offsets of the resort in flight, keyed elements restart on
     /// `resort_epoch` bumps.
-    sidebar_resort: std::collections::HashMap<String, f32>,
+    resort: std::collections::HashMap<String, f32>,
     /// Keys that just appeared in a live list (fade in, no glide).
-    sidebar_new_keys: std::collections::HashSet<String>,
+    new_keys: std::collections::HashSet<String>,
     resort_epoch: usize,
     /// Collapsed sidebar disclosure groups — local Shell UI state, never
     /// persisted or synced (see `spaces::project_group_key` /
     /// `spaces::branch_group_key` for the deterministic key shapes). A
     /// project key hides the whole card body; a branch/worktree key hides
     /// that group's session rows. Everything defaults expanded.
-    sidebar_collapsed: std::collections::HashSet<String>,
-    /// Last observed `window.is_window_active()` — rising edge fires a
-    /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
-    was_window_active: bool,
-    notification_activity: crate::shell::notification_activity::DesktopActivity,
+    collapsed: std::collections::HashSet<String>,
+}
+
+/// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`); see
+/// [`debug_knobs`]. Main window only.
+struct DevKnobs {
+    /// `CYPHER_FORCE_GATE=setup` keeps the first-run overlay visible.
+    setup: bool,
     /// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`) — see
     /// [`Shell::new`].
-    debug_dialog: Option<String>,
-    debug_gate: Option<GatePhase>,
+    open_dialog: Option<String>,
+    gate: Option<GatePhase>,
+}
+
+/// The shell's manually driven tweens (sidebar width, titlebar cluster)
+/// and this render pass's motion bookkeeping.
+#[derive(Default)]
+struct ShellMotion {
     sidebar_tween: Option<WidthTween>,
-    /// Last observed `window.is_fullscreen()` (`None` before first paint) —
-    /// flips key the traffic-light inset tween.
-    fullscreen: Option<bool>,
     /// 200ms ease-out tween of the cluster start on fullscreen toggles.
     titlebar_tween: Option<WidthTween>,
-    /// Armed by mouse-down on a titlebar strip; the next mouse-move hands the
-    /// drag to the compositor (zed's platform-titlebar pattern).
-    titlebar_should_move: bool,
     /// `motion::reduced_motion` snapshot, refreshed at the top of each render
     /// pass so [`Shell::eval_tween`] (called from `&self` render helpers) can
     /// snap without a `cx`.
     reduced_motion: bool,
     /// Set by [`Shell::eval_tween`] when any tween is mid-flight this frame;
     /// render schedules the next animation frame off it.
-    motion_active: std::cell::Cell<bool>,
-    splash: SplashPhase,
-    splash_task: Option<Task<()>>,
-    save_task: Option<Task<()>>,
+    active: std::cell::Cell<bool>,
+}
+
+/// What the titlebar tracks: fullscreen (the traffic-light inset) and a
+/// window drag armed from its strip.
+#[derive(Default)]
+struct TitlebarState {
+    /// Last observed `window.is_fullscreen()` (`None` before first paint) —
+    /// flips key the traffic-light inset tween.
+    fullscreen: Option<bool>,
+    /// Armed by mouse-down on a titlebar strip; the next mouse-move hands the
+    /// drag to the compositor (zed's platform-titlebar pattern).
+    should_move: bool,
+}
+
+/// Keyboard focus fallback: keyboard shortcuts dispatch through the window
+/// focus chain, so with nothing focused they go dead.
+struct FocusFallback {
     /// Focus fallback (registered on first paint — [`Shell::new`] has no
     /// window): keyboard shortcuts dispatch through the window focus chain, so
     /// with nothing focused they go dead. Initial focus lands on the composer
     /// and focus lost with no successor routes back there.
-    focus_sub: Option<Subscription>,
+    sub: Option<Subscription>,
     /// Keyboard landing spot when the focused tile has no composer (an empty
     /// group): tracked on the root so window shortcuts keep dispatching.
-    root_focus: gpui::FocusHandle,
-    /// 1s heartbeat re-rendering the working indicator (elapsed + flavour word).
-    _ticker: Task<()>,
-    _state_observation: Subscription,
+    root: gpui::FocusHandle,
+}
+
+/// The shared floating Comment pill/editor and its event forwarding.
+struct CommentUi {
     /// Shared floating Comment pill/editor: rendered above every
     /// clipped surface; surfaces (transcript, diff panes, terminals) drive
     /// it through the weak handles they hold.
-    comment_popup: Entity<crate::comment_popup::CommentPopup>,
+    popup: Entity<crate::comment_popup::CommentPopup>,
     /// CommentPopup → composer comment forwarding (subscribed ONCE).
-    _comment_popup_events: Subscription,
+    _events: Subscription,
+}
+
+/// What drives the user's attention outside the window: session chimes,
+/// the Dock badge, and the desktop activity the engine is told about.
+#[derive(Default)]
+struct Attention {
+    /// Last seen session status per chat — the chime trigger compares against
+    /// it (a row's FIRST appearance never chimes, so boot stays silent).
+    sound_prev: std::collections::HashMap<String, cypher_proto::SessionStatus>,
+    /// The count last written to the Dock badge (`None` = never written), so
+    /// frequent state notifies only touch AppKit when the number changes.
+    dock_badge: Option<usize>,
+    /// Last observed `window.is_window_active()` — rising edge fires a
+    /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
+    was_window_active: bool,
+    notification_activity: crate::shell::notification_activity::DesktopActivity,
+}
+
+/// The boot splash: its phase and the fade-out timer.
+struct Splash {
+    phase: SplashPhase,
+    task: Option<Task<()>>,
+}
+
+pub struct Shell {
+    /// The window's main state: lists (sidebar, spaces, sessions) in
+    /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
+    /// session (sidebar highlight, nav history, cycle order, space
+    /// implication). Each tile renders from its own session context.
+    state: Entity<AppState>,
+    /// The tiled session layout (docs/design/workspace-layout.md).
+    workspace: crate::workspace::Workspace,
+    /// The session slots behind the workspace's tabs, and how main follows
+    /// the focused one.
+    tiles: SlotTable,
+    /// What closed session tabs leave behind for their next slot.
+    closed_tabs: ClosedTabStash,
+    /// The main state's chats generation `prune_tabs` last judged: only a
+    /// NEW chats frame may close a tab whose chat is missing from the list.
+    seen_chats_generation: u64,
+    /// Chats this window just created (a fork, a promoted side chat) whose
+    /// row may trail a chats frame or two, by creation time: their tabs
+    /// aren't closed as deleted until a frame lists them (which clears the
+    /// entry) or [`tabs::EXPECTED_CHAT_TTL`] passes.
+    expected_chats: std::collections::HashMap<String, std::time::Instant>,
+    /// Tile measurements and the tab-strip, rail and tab-drag state they drive.
+    geometry: TileGeometry,
+    /// The window's popover menus.
+    menus: ShellMenus,
+    /// Chat outlet vs settings pages.
+    route: Route,
+    /// Route history behind the titlebar back/forward buttons (§ nav history).
+    nav: NavHistory,
+    /// The settings pages, created on first visit, and the first-run setup.
+    pages: SettingsPages,
+    /// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`) — see
+    /// [`debug_knobs`].
+    dev: DevKnobs,
+    /// The window's modal dialogs and palettes (`None` while closed).
+    dialogs: ShellDialogs,
+    /// In-app updates, the About dialog and the Pi runtime update.
+    updates: UpdateUi,
+    /// Scratch-folder removal after a quick chat was deleted (host RPC).
+    scratch_cleanup_task: Option<Task<()>>,
+    /// Sidebar scroll, notice strip, resort glide and disclosure state.
+    sidebar: SidebarUi,
+    /// `settings.last_space_id` applied once after the first spaces frame.
+    space_boot_applied: bool,
+    /// Chimes, the Dock badge and desktop activity.
+    attention: Attention,
+    /// Session Fork idempotence: `(sourceChatId, anchorMessageId) → requestId`
+    /// (the client-minted target chat id). The SAME id is reused across RPC
+    /// errors / lost replies so a retry returns the already-created chat;
+    /// the mapping is dropped on a definitive reply (Created or typed
+    /// Unavailable).
+    fork_request_ids: std::collections::HashMap<(String, String), String>,
+    /// The local→synced account lifecycle and runtime switches.
+    sync: SyncUi,
+    mutate_task: Option<Task<()>>,
+    delete_worktree_task: Option<Task<()>>,
+    /// Kept for the failed-gate "Retry" action.
+    boot: EngineBootConfig,
+    data_dir: PathBuf,
+    settings: UiSettings,
+    /// Manually driven tweens and this frame's motion bookkeeping.
+    motion: ShellMotion,
+    /// Fullscreen tracking and the titlebar's window drag.
+    titlebar: TitlebarState,
+    /// The boot splash.
+    splash: Splash,
+    save_task: Option<Task<()>>,
+    /// Where keyboard focus lands when nothing else holds it.
+    focus: FocusFallback,
+    /// 1s heartbeat re-rendering the working indicator (elapsed + flavour word).
+    _ticker: Task<()>,
+    _state_observation: Subscription,
+    /// The shared Comment pill/editor.
+    comments: CommentUi,
     /// The project a project window is dedicated to; `None` in the main
     /// window (see `shell/windows.rs`).
     project_window: Option<String>,
@@ -1324,13 +1442,140 @@ impl Shell {
         // Lists-only: the session tiles' contexts own the transcripts; this
         // state's selection just follows the focused tile.
         state.update(cx, |s, cx| s.set_transcript_watches(false, cx));
-        // CommentPopup → the owning tile: a comment saved in any surface's
-        // anchored editor lands in the pending list (the status-strip
-        // indicator) of the tile showing that chat. Subscribed ONCE — the
-        // event carries the chat id that was selected when the selection
-        // settled (each surface captured it); the composer's guard still
-        // drops a comment whose chat is no longer selected.
-        let comment_popup_events = cx.subscribe(&comment_popup, {
+        let comment_popup_events = Self::subscribe_comment_popup(&comment_popup, cx);
+        let ticker = Self::spawn_heartbeat(cx);
+        let settings_target = cx.new(|cx| DeviceTarget::new(state.clone(), cx));
+        let settings = UiSettings::load(&data_dir);
+        // A project window's entry here is the file's; the main window's
+        // live copy replaces it right after the window opens
+        // (`open_project_window`).
+        let saved_workspace = match &project_window {
+            None => settings.workspace.clone(),
+            Some(project) => settings.project_workspaces.get(project).cloned(),
+        };
+        if main_window {
+            crate::prefs::slash_commands::publish_shown(settings.shown_slash_commands.clone(), cx);
+            // Bind the customizable shortcuts from the persisted keymap.
+            apply_keymap(cx, &settings.keymap);
+        }
+        let route = Self::boot_route(&state, main_window, cx);
+        let (debug_dialog, debug_setup, debug_gate) = debug_knobs(main_window);
+        let nav = NavHistory::new(match route {
+            Route::Chat => NavEntry::Chat(String::new()),
+            Route::Settings(section) => NavEntry::Settings(section),
+        });
+        Self {
+            state,
+            workspace: crate::workspace::Workspace::new(),
+            tiles: SlotTable {
+                saved_workspace,
+                ..Default::default()
+            },
+            closed_tabs: ClosedTabStash::default(),
+            seen_chats_generation: 0,
+            expected_chats: std::collections::HashMap::new(),
+            geometry: TileGeometry::default(),
+            menus: ShellMenus::default(),
+            route,
+            nav,
+            pages: SettingsPages {
+                devices: None,
+                archived: None,
+                appearance: None,
+                notifications: None,
+                shortcuts: None,
+                providers: None,
+                titles: None,
+                target: settings_target,
+                harnesses: None,
+                commands: None,
+                commands_sub: None,
+                mcp: None,
+                subagents: None,
+                github: None,
+                setup: None,
+                setup_sub: None,
+                setup_dismissed: false,
+                shortcuts_sub: None,
+                notifications_sub: None,
+            },
+            dev: DevKnobs {
+                setup: debug_setup,
+                open_dialog: debug_dialog,
+                gate: debug_gate,
+            },
+            dialogs: ShellDialogs::default(),
+            updates: UpdateUi {
+                relaunch_quit_sent: false,
+                flow: UpdateFlow::Idle,
+                task: None,
+                about: None,
+                about_task: None,
+                about_runtime_task: None,
+                dismissed: None,
+                pi_busy: false,
+                pi_task: None,
+                install: cypher_update::detect_install(),
+            },
+            scratch_cleanup_task: None,
+            sidebar: SidebarUi {
+                scroll: gpui::ScrollHandle::new(),
+                notice: None,
+                prev_order: Vec::new(),
+                resort: std::collections::HashMap::new(),
+                new_keys: std::collections::HashSet::new(),
+                resort_epoch: 0,
+                collapsed: std::collections::HashSet::new(),
+            },
+            space_boot_applied: false,
+            attention: Attention::default(),
+            fork_request_ids: std::collections::HashMap::new(),
+            sync: SyncUi {
+                org: None,
+                flow: SyncFlow::Idle,
+                auth_task: None,
+                runtime_change_task: None,
+                runtime_change_error: None,
+                import_task: None,
+                import_current: None,
+            },
+            mutate_task: None,
+            delete_worktree_task: None,
+            boot,
+            data_dir,
+            settings,
+            motion: ShellMotion::default(),
+            titlebar: TitlebarState::default(),
+            splash: Splash {
+                phase: SplashPhase::Visible,
+                task: None,
+            },
+            save_task: None,
+            focus: FocusFallback {
+                sub: None,
+                root: cx.focus_handle(),
+            },
+            _ticker: ticker,
+            _state_observation: observation,
+            comments: CommentUi {
+                popup: comment_popup,
+                _events: comment_popup_events,
+            },
+            project_window,
+        }
+    }
+
+    /// CommentPopup → the owning tile: a comment saved in any surface's
+    /// anchored editor lands in the pending list (the status-strip
+    /// indicator) of the tile showing that chat. Subscribed ONCE — the
+    /// event carries the chat id that was selected when the selection
+    /// settled (each surface captured it); the composer's guard still
+    /// drops a comment whose chat is no longer selected.
+    fn subscribe_comment_popup(
+        comment_popup: &Entity<crate::comment_popup::CommentPopup>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe(comment_popup, {
             move |this: &mut Shell, _, event: &crate::comment_popup::CommentPopupEvent, cx| {
                 match event {
                     crate::comment_popup::CommentPopupEvent::CommentSaved {
@@ -1341,7 +1586,7 @@ impl Shell {
                     } => {
                         let Some(composer) = this
                             .slot_for_chat(chat_id, cx)
-                            .and_then(|sid| this.slots.get(&sid))
+                            .and_then(|sid| this.tiles.slots.get(&sid))
                             .map(|slot| slot.composer.clone())
                         else {
                             return;
@@ -1380,10 +1625,13 @@ impl Shell {
                     }
                 }
             }
-        });
-        // Working-indicator heartbeat: notify once a second while a session is
-        // live so elapsed time and the flavour word stay fresh.
-        let ticker = cx.spawn(async move |this, cx| {
+        })
+    }
+
+    /// Working-indicator heartbeat: notify once a second while a session is
+    /// live so elapsed time and the flavour word stay fresh.
+    fn spawn_heartbeat(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let alive = this.update(cx, |shell: &mut Shell, cx| {
@@ -1400,6 +1648,7 @@ impl Shell {
                     };
                     if live
                         || shell
+                            .attention
                             .notification_activity
                             .heartbeat_due(std::time::Instant::now())
                     {
@@ -1410,25 +1659,14 @@ impl Shell {
                     break;
                 }
             }
-        });
-        let settings_target = cx.new(|cx| DeviceTarget::new(state.clone(), cx));
-        let settings = UiSettings::load(&data_dir);
-        // A project window's entry here is the file's; the main window's
-        // live copy replaces it right after the window opens
-        // (`open_project_window`).
-        let saved_workspace = match &project_window {
-            None => settings.workspace.clone(),
-            Some(project) => settings.project_workspaces.get(project).cloned(),
-        };
-        if main_window {
-            crate::prefs::slash_commands::publish_shown(settings.shown_slash_commands.clone(), cx);
-            // Bind the customizable shortcuts from the persisted keymap.
-            apply_keymap(cx, &settings.keymap);
-        }
-        // Dev/testing knob: `CYPHER_OPEN_ROUTE=settings[/<section>]` boots
-        // straight into a settings section — these pages have no deep link and
-        // synthetic input can't reach them on headless compositors.
-        let route = match cypher_env::var("OPEN_ROUTE")
+        })
+    }
+
+    /// Dev/testing knob: `CYPHER_OPEN_ROUTE=settings[/<section>]` boots
+    /// straight into a settings section — these pages have no deep link and
+    /// synthetic input can't reach them on headless compositors.
+    fn boot_route(state: &Entity<AppState>, main_window: bool, cx: &mut Context<Self>) -> Route {
+        match cypher_env::var("OPEN_ROUTE")
             .filter(|_| main_window)
             .as_deref()
         {
@@ -1451,136 +1689,6 @@ impl Shell {
                 Route::Chat
             }
             _ => Route::Chat,
-        };
-        // More capture knobs of the same kind: `CYPHER_OPEN_DIALOG=rename|delete`
-        // opens that dialog for the first chat once chats land; `=model` pops
-        // the combined harness/model menu once the shell is Ready;
-        // `CYPHER_FORCE_GATE=signin|org|failed|setup` renders that gate
-        // regardless of real auth state (display-only — for styling passes).
-        let debug_dialog = cypher_env::var("OPEN_DIALOG").filter(|_| main_window);
-        let force_gate = cypher_env::var("FORCE_GATE").filter(|_| main_window);
-        let debug_setup = force_gate.as_deref() == Some("setup");
-        let debug_gate = match force_gate.as_deref() {
-            Some("signin") => Some(GatePhase::SignIn),
-            Some("org") => Some(GatePhase::OrgGate),
-            Some("failed") => Some(GatePhase::Failed(
-                "Could not reach the cypher engine on port 27901".into(),
-            )),
-            _ => None,
-        };
-        let nav = NavHistory::new(match route {
-            Route::Chat => NavEntry::Chat(String::new()),
-            Route::Settings(section) => NavEntry::Settings(section),
-        });
-        Self {
-            state,
-            workspace: crate::workspace::Workspace::new(),
-            slots: std::collections::HashMap::new(),
-            shown_slots: Vec::new(),
-            next_slot_id: 0,
-            followed: None,
-            focus_pending: false,
-            boot_landed: false,
-            saved_workspace,
-            closed_drafts: std::collections::HashMap::new(),
-            parked_terminals: std::collections::HashMap::new(),
-            seen_chats_generation: 0,
-            expected_chats: std::collections::HashMap::new(),
-            tile_tab_scroll: std::collections::HashMap::new(),
-            split_bounds: Default::default(),
-            rail_focus: (None, 0),
-            tile_bounds: Default::default(),
-            tab_drop: None,
-            right_plus: popover::Popup::default(),
-            layout_menu: popover::Popup::default(),
-            route,
-            nav,
-            devices_page: None,
-            archived_page: None,
-            appearance_page: None,
-            notifications_page: None,
-            shortcuts_page: None,
-            providers_page: None,
-            titles_page: None,
-            settings_target,
-            harnesses_page: None,
-            commands_page: None,
-            commands_sub: None,
-            mcp_page: None,
-            subagents_page: None,
-            github_page: None,
-            setup_page: None,
-            setup_sub: None,
-            setup_dismissed: false,
-            debug_setup,
-            shortcuts_sub: None,
-            notifications_sub: None,
-            chat_menu: popover::Popup::default(),
-            rename_dialog: None,
-            delete_confirm: None,
-            relaunch_quit_sent: false,
-            quick_chat: None,
-            scratch_cleanup_task: None,
-            delete_worktree_confirm: None,
-            space_menu: popover::Popup::default(),
-            sidebar_view_menu: popover::Popup::default(),
-            space_style_menu: popover::Popup::default(),
-            rename_space_dialog: None,
-            delete_space_confirm: None,
-            add_space: None,
-            sidebar_scroll: gpui::ScrollHandle::new(),
-            space_boot_applied: false,
-            sound_prev: std::collections::HashMap::new(),
-            dock_badge: None,
-            user_menu: popover::Popup::default(),
-            sidebar_notice: None,
-            fork_request_ids: std::collections::HashMap::new(),
-            update_flow: UpdateFlow::Idle,
-            update_task: None,
-            about: None,
-            about_task: None,
-            about_runtime_task: None,
-            update_dismissed: None,
-            pi_update_busy: false,
-            pi_update_task: None,
-            install: cypher_update::detect_install(),
-            org: None,
-            sync_flow: SyncFlow::Idle,
-            mutate_task: None,
-            delete_worktree_task: None,
-            auth_task: None,
-            runtime_change_task: None,
-            runtime_change_error: None,
-            import_task: None,
-            import_current: None,
-            boot,
-            data_dir,
-            settings,
-            sidebar_prev_order: Vec::new(),
-            sidebar_resort: std::collections::HashMap::new(),
-            sidebar_new_keys: std::collections::HashSet::new(),
-            resort_epoch: 0,
-            sidebar_collapsed: std::collections::HashSet::new(),
-            was_window_active: false,
-            notification_activity: Default::default(),
-            debug_dialog,
-            debug_gate,
-            sidebar_tween: None,
-            fullscreen: None,
-            titlebar_tween: None,
-            titlebar_should_move: false,
-            reduced_motion: false,
-            motion_active: std::cell::Cell::new(false),
-            splash: SplashPhase::Visible,
-            splash_task: None,
-            save_task: None,
-            focus_sub: None,
-            root_focus: cx.focus_handle(),
-            _ticker: ticker,
-            _state_observation: observation,
-            comment_popup,
-            _comment_popup_events: comment_popup_events,
-            project_window,
         }
     }
 
@@ -1597,7 +1705,7 @@ impl Shell {
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         let from = self.sidebar_target();
         self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
-        self.sidebar_tween = Some(WidthTween::new(from, self.sidebar_target()));
+        self.motion.sidebar_tween = Some(WidthTween::new(from, self.sidebar_target()));
         self.schedule_save(cx);
         cx.notify();
     }
@@ -1611,7 +1719,7 @@ impl Shell {
         let x = f32::from(event.event.position.x);
         self.settings.sidebar_width = x.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         self.settings.sidebar_collapsed = false;
-        self.sidebar_tween = None; // live drag tracks the pointer directly
+        self.motion.sidebar_tween = None; // live drag tracks the pointer directly
         self.schedule_save(cx);
         cx.notify();
     }
@@ -1642,7 +1750,7 @@ impl Shell {
             // schedules a save) — once boot restored it, never before.
             let Ok(snapshot) = this.update(cx, |shell, cx| {
                 shell.settings.appearance = crate::appearance::mode(cx);
-                if shell.boot_landed {
+                if shell.tiles.boot_landed {
                     shell.settings.workspace = Some(shell.workspace.clone());
                 }
                 shell.settings.clone()
@@ -1667,6 +1775,28 @@ impl Shell {
             cx,
         );
     }
+}
+
+/// Capture knobs (like `CYPHER_OPEN_ROUTE`, main window only):
+/// `CYPHER_OPEN_DIALOG=rename|delete` opens that dialog for the first chat
+/// once chats land; `=model` pops the combined harness/model menu once the
+/// shell is Ready; `CYPHER_FORCE_GATE=signin|org|failed|setup` renders that
+/// gate regardless of real auth state (display-only — for styling passes).
+/// Returns the dialog knob, whether to force the setup page, and the forced
+/// gate.
+fn debug_knobs(main_window: bool) -> (Option<String>, bool, Option<GatePhase>) {
+    let debug_dialog = cypher_env::var("OPEN_DIALOG").filter(|_| main_window);
+    let force_gate = cypher_env::var("FORCE_GATE").filter(|_| main_window);
+    let debug_setup = force_gate.as_deref() == Some("setup");
+    let debug_gate = match force_gate.as_deref() {
+        Some("signin") => Some(GatePhase::SignIn),
+        Some("org") => Some(GatePhase::OrgGate),
+        Some("failed") => Some(GatePhase::Failed(
+            "Could not reach the cypher engine on port 27901".into(),
+        )),
+        _ => None,
+    };
+    (debug_dialog, debug_setup, debug_gate)
 }
 
 #[cfg(test)]

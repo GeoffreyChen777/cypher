@@ -442,7 +442,7 @@ impl Shell {
 
     fn activate_tab(&mut self, group: GroupId, index: usize, cx: &mut Context<Self>) {
         if self.workspace.activate(group, index) {
-            self.focus_pending = true;
+            self.tiles.focus_pending = true;
             self.workspace_changed(cx);
         }
     }
@@ -450,7 +450,7 @@ impl Shell {
     /// Close a tab (its slot goes with it).
     pub(super) fn close_tab(&mut self, tab: &TabKey, cx: &mut Context<Self>) {
         if self.workspace.close(tab) {
-            self.focus_pending = true;
+            self.tiles.focus_pending = true;
             self.workspace_changed(cx);
         }
     }
@@ -465,7 +465,7 @@ impl Shell {
         }
         let focused = self.workspace.focused();
         if self.workspace.split_group(focused, edge).is_some() {
-            self.focus_pending = true;
+            self.tiles.focus_pending = true;
             self.workspace_changed(cx);
         }
     }
@@ -476,7 +476,7 @@ impl Shell {
         }
         if let Some(group) = self.workspace.neighbour(self.workspace.focused(), edge) {
             self.workspace.focus(group);
-            self.focus_pending = true;
+            self.tiles.focus_pending = true;
             self.workspace_changed(cx);
         }
     }
@@ -496,7 +496,7 @@ impl Shell {
             self.workspace.toggle_zoom(zoomed);
         }
         self.workspace.focus(group);
-        self.focus_pending = true;
+        self.tiles.focus_pending = true;
         self.workspace_changed(cx);
     }
 
@@ -521,7 +521,7 @@ impl Shell {
     /// that inherits its space.
     fn close_focused_group(&mut self, cx: &mut Context<Self>) {
         if self.workspace.close_group(self.workspace.focused()) {
-            self.focus_pending = true;
+            self.tiles.focus_pending = true;
             self.workspace_changed(cx);
         }
     }
@@ -540,8 +540,8 @@ impl Shell {
     }
 
     fn close_layout_menu(&mut self, cx: &mut Context<Self>) {
-        if self.layout_menu.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.layout_menu);
+        if self.menus.layout.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.menus.layout);
         }
         cx.notify();
     }
@@ -554,7 +554,7 @@ impl Shell {
     ) {
         let drag = event.drag(cx);
         let (path, boundary) = (drag.path.clone(), drag.boundary);
-        let Some(bounds) = self.split_bounds.borrow().get(&path).copied() else {
+        let Some(bounds) = self.geometry.split_bounds.borrow().get(&path).copied() else {
             return;
         };
         let Some(Node::Split { axis, children }) = self.workspace.root().at(&path) else {
@@ -592,6 +592,7 @@ impl Shell {
         let pointer = event.event.position;
         let tab = event.drag(cx).tab.clone();
         let hit = self
+            .geometry
             .tile_bounds
             .borrow()
             .iter()
@@ -599,8 +600,8 @@ impl Shell {
         let hover = hit.and_then(|(group, zone)| {
             effective_drop(&self.workspace, &tab, group, zone).map(|drop| (group, drop))
         });
-        if self.tab_drop.as_ref().map(|state| state.hover) != Some(hover) {
-            self.tab_drop = Some(TabDropState { hover });
+        if self.geometry.tab_drop.as_ref().map(|state| state.hover) != Some(hover) {
+            self.geometry.tab_drop = Some(TabDropState { hover });
             cx.notify();
         }
     }
@@ -613,10 +614,10 @@ impl Shell {
         placement: Placement,
         cx: &mut Context<Self>,
     ) {
-        self.tab_drop = None;
+        self.geometry.tab_drop = None;
         self.route = Route::Chat;
         route_drop(&mut self.workspace, drag.tab.clone(), group, placement);
-        self.focus_pending = true;
+        self.tiles.focus_pending = true;
         self.workspace_changed(cx);
     }
 
@@ -629,6 +630,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let zone = self
+            .geometry
             .tile_bounds
             .borrow()
             .get(&group)
@@ -647,14 +649,16 @@ impl Shell {
     ) -> AnyElement {
         // A drag that ended off every drop target leaves no catchers
         // behind; tile bodies re-measure at paint.
-        if self.tab_drop.is_some() && !cx.has_active_drag() {
-            self.tab_drop = None;
+        if self.geometry.tab_drop.is_some() && !cx.has_active_drag() {
+            self.geometry.tab_drop = None;
         }
-        self.tile_bounds.borrow_mut().clear();
+        self.geometry.tile_bounds.borrow_mut().clear();
         let workspace = &self.workspace;
-        self.tile_tab_scroll
+        self.geometry
+            .tile_tab_scroll
             .retain(|group, _| workspace.group(*group).is_some());
-        self.split_bounds
+        self.geometry
+            .split_bounds
             .borrow_mut()
             .retain(|path, _| matches!(workspace.root().at(path), Some(Node::Split { .. })));
         let body = match self.workspace.zoomed() {
@@ -696,7 +700,7 @@ impl Shell {
             Node::Split { axis, children } => {
                 let axis = *axis;
                 let count = children.len();
-                let measured = self.split_bounds.clone();
+                let measured = self.geometry.split_bounds.clone();
                 let key = path.clone();
                 let mut split = div()
                     .size_full()
@@ -821,10 +825,11 @@ impl Shell {
             } else {
                 super::dock::RAIL_MARGIN
             };
-            if self.rail_focus.0 != Some(group) {
-                self.rail_focus = (Some(group), self.rail_focus.1.wrapping_add(1));
+            if self.geometry.rail_focus.0 != Some(group) {
+                self.geometry.rail_focus =
+                    (Some(group), self.geometry.rail_focus.1.wrapping_add(1));
             }
-            let epoch = self.rail_focus.1;
+            let epoch = self.geometry.rail_focus.1;
             let rail = self.render_session_rail(sid, top, cx);
             // Absolute, fixed width: the fade cannot change anyone's layout.
             // A top-right Windows tile starts the buttons under the caption
@@ -852,11 +857,12 @@ impl Shell {
             Some(sid) => self.render_session(sid, window, cx),
             None => self.render_empty_tile(group, cx),
         };
-        let measured = self.tile_bounds.clone();
+        let measured = self.geometry.tile_bounds.clone();
         // While a session tab drags: a catcher over the body takes the drop
         // (and blocks the session's own hover effects) and previews it.
-        let catcher = (self.tab_drop.is_some() && cx.has_active_drag()).then(|| {
+        let catcher = (self.geometry.tab_drop.is_some() && cx.has_active_drag()).then(|| {
             let hover = self
+                .geometry
                 .tab_drop
                 .as_ref()
                 .and_then(|state| state.hover)
@@ -969,6 +975,7 @@ impl Shell {
         // row scrolls. A newly active tab (opened, activated, or a tab count
         // change) is scrolled fully into view once.
         let (scroll, scrolled_to) = self
+            .geometry
             .tile_tab_scroll
             .entry(group)
             .or_insert_with(|| (gpui::ScrollHandle::new(), None));
@@ -1017,7 +1024,7 @@ impl Shell {
         // Same inset as the terminal tab bar below, so the first tabs line up.
         let mut left = 6.0;
         if touch.top && touch.left {
-            let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+            let sidebar_now = self.eval_tween(self.motion.sidebar_tween, self.sidebar_target());
             let plus_inset = 26.0 * self.titlebar_plus_alpha();
             // + the cluster's Layout button slot.
             let cluster_end = self.title_bar_content_start() + plus_inset + 26.0;
@@ -1276,22 +1283,22 @@ impl Shell {
                 icons::WINDOW_FRAME,
                 theme,
                 cx.listener(|this, _, _, cx| {
-                    if this.layout_menu.take_press_was_open() {
+                    if this.menus.layout.take_press_was_open() {
                         this.close_layout_menu(cx);
                     } else {
-                        this.layout_menu.open(());
+                        this.menus.layout.open(());
                         cx.notify();
                     }
                 }),
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.layout_menu.note_trigger_press()),
+                cx.listener(|this, _, _, _| this.menus.layout.note_trigger_press()),
             ),
         );
-        if self.layout_menu.get().is_some() {
+        if self.menus.layout.get().is_some() {
             let theme = Theme::of(cx).clone();
-            let closing = self.layout_menu.closing_since();
+            let closing = self.menus.layout.closing_since();
             let muted = theme.text_muted;
             let mut rows = div().flex().flex_col().gap(px(2.0));
             for preset in Preset::ALL {

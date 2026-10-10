@@ -1,5 +1,6 @@
 //! Rendering: rows, chips, bubbles and the `Render` impl.
 
+use super::comments::{MarkdownBlockRow, ToolGroupRow};
 use super::*;
 
 impl Transcript {
@@ -243,259 +244,14 @@ impl Transcript {
             let style = crate::appearance::chat_style::settings(cx);
             (style.wide, style.message_spacing, style.paragraph_spacing)
         };
-        // The first row's gap clears the small top fade band so a
-        // top-scrolled transcript rests below it. An embedded panel
-        // (temporary Side Chat) has no band to clear — a compact top gap.
-        let top_gap = if ix == 0 {
-            if self.embedded {
-                EMBEDDED_TOP_INSET_PX + 6.0
-            } else {
-                TOP_CHROME_PX + message_spacing + 10.0
-            }
-        } else {
-            top_gap_for_style(
-                ix.checked_sub(1).and_then(|i| self.rows.get(i)),
-                &row,
-                message_spacing,
-                paragraph_spacing,
-            )
-        };
-        // The last row must clear the composer/status stack the transcript
-        // scrolls under PLUS the fade band above it, or the timestamp strip
-        // (the row's lowest content) renders half-faded (or hidden) when the
-        // transcript is pinned to the bottom.
-        let bottom_pad = if ix + 1 == self.rows.len() {
-            let runway = self
-                .own_turn
-                .as_ref()
-                .filter(|anchor| {
-                    self.rows
-                        .iter()
-                        .any(|candidate| candidate.entry_id == anchor.message_id)
-                })
-                .map_or(0.0, |anchor| anchor.runway);
-            self.bottom_clearance + Theme::TRANSCRIPT_FADE_BAND + 8.0 + runway
-        } else {
-            0.0
-        };
+        let (top_gap, bottom_pad) = self.row_gaps(ix, &row, message_spacing, paragraph_spacing);
         // Live-run loader rides under the LAST row's content (above its
         // clearance pad), so it sits right beneath the working reply.
         let trailer = (ix + 1 == self.rows.len())
             .then(|| self.render_working_trailer(cx))
             .flatten();
 
-        let inner: AnyElement = match &row.kind {
-            RowKind::User {
-                text,
-                mentions,
-                attachments,
-                comments,
-                pending,
-                steer,
-            } => {
-                let attachments = attachments.clone();
-                let text = text.clone();
-                let mentions = mentions.clone();
-                let pending = *pending;
-                let steer = *steer;
-                // Attachment thumbnails ride ABOVE the bubble, right-aligned
-                // (chat-view.tsx RowView: UserAttachmentStrip then the text
-                // HStack); image-only sends show no bubble at all.
-                let mut column = div().w_full().flex().flex_col();
-                if steer {
-                    // iOS UserBubble: a muted "↳ Steer" caption over the
-                    // bubble, inset to line up with the bubble's text.
-                    column = column.child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .justify_end()
-                            .pr(px(12.0))
-                            .pb(px(4.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.0))
-                                    .text_size(px(11.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text_muted)
-                                    .when(pending, |el| el.opacity(0.65))
-                                    .child(
-                                        crate::kit::icons::icon(crate::kit::icons::STEER)
-                                            .size(px(12.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .child("Steer"),
-                            ),
-                    );
-                }
-                if !attachments.is_empty() {
-                    column = column.child(self.render_user_attachments(&row.id, &attachments, cx));
-                }
-                if !comments.is_empty() {
-                    column = column.child(user_comments(
-                        &row.id,
-                        comments,
-                        wide,
-                        pending,
-                        &theme,
-                        self.scope,
-                        Some(self.selection_ui_for(&row.id, cx)),
-                    ));
-                }
-                if !text.is_empty() {
-                    if renders_as_command_chip(&text, &mentions, &attachments) {
-                        // Slash-command settings: a quiet action chip, not a
-                        // user bubble that reads as a prompt to the model.
-                        column = column.child(
-                            div().w_full().flex().justify_start().child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .when(pending, |el| el.opacity(0.65))
-                                    .child(
-                                        crate::kit::icons::icon(crate::kit::icons::COMMAND)
-                                            .size(px(13.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(13.0))
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(theme.text_muted)
-                                            .child(text),
-                                    ),
-                            ),
-                        );
-                    } else {
-                        // `min_w_0` is load-bearing: gpui text answers min/max-content
-                        // probes with its UNWRAPPED width, so without it the bubble's
-                        // automatic min-size is the full single-line width — the flex
-                        // item can't shrink, `justify_end` pushes the overflow off the
-                        // left edge, and long prompts render as one clipped line
-                        // instead of wrapping inside the 80% column cap.
-                        column = column.child(
-                            div().w_full().flex().justify_end().child(
-                                div()
-                                    .min_w_0()
-                                    .when(!wide, |el| el.max_w(px(MAX_CONTENT_WIDTH * 0.8)))
-                                    .when(wide, |el| el.max_w(gpui::relative(0.8)))
-                                    .when(!steer, |el| {
-                                        el.bg(crate::appearance::chat_style::bubble(&theme))
-                                    })
-                                    // A steer reads as a side note to the
-                                    // live turn: fainter fill, hairline edge.
-                                    .when(steer, |el| {
-                                        el.bg(crate::appearance::chat_style::bubble(&theme)
-                                            .opacity(0.55))
-                                            .border_1()
-                                            .border_color(theme.border)
-                                    })
-                                    .rounded(px(Theme::BUBBLE_RADIUS))
-                                    .px(px(16.0))
-                                    .py(px(10.0))
-                                    .font_family(theme.font_sans.clone())
-                                    .text_size(px(theme.markdown.body_size))
-                                    .line_height(px(theme.markdown.body_line_height))
-                                    .text_color(theme.text)
-                                    .when(pending, |el| el.opacity(0.65))
-                                    .child(user_bubble_text(
-                                        &row.id,
-                                        text,
-                                        mentions,
-                                        &theme,
-                                        self.scope,
-                                        Some(self.selection_ui_for(&row.id, cx)),
-                                    )),
-                            ),
-                        );
-                    }
-                }
-                column.into_any_element()
-            }
-            RowKind::Markdown { tree, block_ix } => {
-                self.render_markdown_block(&row.id, tree, *block_ix, false, &theme, window, cx)
-            }
-            RowKind::LiveMarkdown { tree, block_ix } => {
-                self.render_markdown_block(&row.id, tree, *block_ix, true, &theme, window, cx)
-            }
-            RowKind::ThoughtBlock {
-                tree,
-                block_ix,
-                live,
-                nested,
-            } => {
-                // Thinking reads as the answer's quieter companion: the same
-                // blocks, in the muted text tone.
-                let mut muted = theme.clone();
-                muted.text = theme.text_muted;
-                let block =
-                    self.render_markdown_block(&row.id, tree, *block_ix, *live, &muted, window, cx);
-                if *nested {
-                    // Under its chip, on the run's rail.
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_row()
-                        .child(guide_rail())
-                        .child(
-                            div()
-                                .ml(px(NESTED_THOUGHT_INSET))
-                                .min_w_0()
-                                .flex_1()
-                                .child(block),
-                        )
-                        .into_any_element()
-                } else {
-                    block
-                }
-            }
-            RowKind::ToolGroup {
-                tools,
-                auto_open,
-                nested,
-                skip,
-            } => self.render_tool_group(&row.id, tools, *auto_open, *nested, *skip, &theme, cx),
-            RowKind::RunOverflow {
-                run,
-                tools,
-                thoughts,
-            } => self.render_run_overflow(&row.id, run, *tools, *thoughts, &theme, cx),
-            RowKind::Activity { summary, .. } => {
-                let open = toggle_open(&row, &self.toggle_pins);
-                self.render_fold_toggle(&row.id, open, summary.clone(), &theme, cx)
-            }
-            RowKind::InputChip {
-                header, resolved, ..
-            } => input_chip(header.clone(), *resolved, &theme),
-            RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
-            RowKind::Worked { label } => worked_rule(label.clone(), &theme),
-            RowKind::TranslationOriginal { .. } => {
-                let open = toggle_open(&row, &self.toggle_pins);
-                let label = if open {
-                    "Hide original"
-                } else {
-                    "Show original"
-                };
-                self.render_fold_toggle(&row.id, open, label.into(), &theme, cx)
-            }
-            RowKind::Thought {
-                live,
-                nested,
-                preview,
-                ..
-            } => {
-                let open = toggle_open(&row, &self.toggle_pins);
-                if *nested {
-                    self.render_thought_chip(&row.id, open, *live, preview.clone(), &theme, cx)
-                } else {
-                    let label = if *live { "Thinking…" } else { "Thought" };
-                    self.render_fold_toggle(&row.id, open, label.into(), &theme, cx)
-                }
-            }
-        };
+        let inner = self.render_row_body(&row, wide, &theme, window, cx);
         // A work run's rows keep its rail unbroken: the gap above each one is
         // drawn inside the row, rail and all, instead of as bare padding.
         let (top_gap, inner) = if is_nested(&row.kind) && top_gap > 0.0 {
@@ -511,286 +267,7 @@ impl Transcript {
             (top_gap, inner)
         };
 
-        // Hover-revealed timestamp strip (zeron chat-view.tsx `Timestamp`):
-        // a RESERVED 16px lane under the entry's last row — the label only
-        // flips opacity, so revealing it never shifts the virtualizer's
-        // layout. User entries align end (under the bubble), assistant start.
-        let is_user_row = match &row.kind {
-            RowKind::User { text, .. } => crate::composer::slash_command_label(text).is_none(),
-            _ => false,
-        };
-        let hovered = self
-            .hovered_entry
-            .as_ref()
-            .is_some_and(|(_, entry)| entry == &row.entry_id);
-        // Vertical breathing room from the source: assistant text blocks sit
-        // in a `VStack padding={4}` (chat-view.tsx:183), so the strip starts
-        // 4px below the message text — the native markdown column has no such
-        // bottom padding, so the strip carries it as top inset (grown into the
-        // reserved height: reveal still never shifts layout). User rows are
-        // flush: the Timestamp follows the bubble HStack directly (VStack gap
-        // defaults to 0 in mugen), the label's centering inside the 16px lane
-        // is all the gap the original has.
-        // Session Fork (v1): the git-branch affordance rides the timestamp
-        // strip of every SETTLED entry, beside the time. Gated on the chat's
-        // forkability (embedded Side Chat / offline / child / non-Pi / live
-        // are inert); a remote Pi chat stays enabled — the shell relays
-        // ForkSession to the source chat's host device.
-        let fork_gate = self.fork_gate_for(cx);
-        let fork_enabled = fork_gate == ForkGate::Enabled;
-        // Role-specific tooltip; System rows never get an affordance at all
-        // (`fork_button` is None below), so no fork action can be emitted.
-        let fork_role = row.role;
-        let fork_tip: SharedString = fork_tooltip(fork_role, &fork_gate).into();
-        let fork_chat_id = self.chat_id.clone().unwrap_or_default();
-        let fork_entry_id = row.entry_id.clone();
-        // In-flight marker for THIS anchor: the affordance becomes a spinner
-        // and is inert (double-click guard) until the shell's ForkSession
-        // RPC settles.
-        let fork_pending = !fork_chat_id.is_empty()
-            && self
-                .fork_pending
-                .contains(&(fork_chat_id.clone(), fork_entry_id.to_string()));
-        let fork_clickable = fork_enabled && !fork_pending;
-        // The affordance is built ONCE per row (before the hover closure) as
-        // an optional child: the MAIN surface shows it (spinner while a fork
-        // is in flight, branch icon otherwise); an embedded Side Chat
-        // transcript and SYSTEM rows never do. `None` keeps the hover branch
-        // untouched.
-        let fork_button: Option<AnyElement> = if self.embedded || row.role == MessageRole::System {
-            None
-        } else {
-            let fork_chat_id = fork_chat_id.clone();
-            let fork_entry_id = fork_entry_id.clone();
-            Some(
-                div()
-                    .id((row.id.clone(), 0usize))
-                    .size(px(12.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(if fork_pending {
-                        crate::kit::loaders::gradient_spinner(
-                            "fork-spinner",
-                            &theme,
-                            2.5,
-                            cx.entity_id(),
-                            cx,
-                        )
-                        .into_any_element()
-                    } else {
-                        crate::kit::icons::icon(crate::kit::icons::GIT_BRANCH)
-                            .size(px(10.0))
-                            .text_color(if fork_enabled {
-                                theme.text_muted
-                            } else {
-                                theme.text_muted.opacity(0.3)
-                            })
-                            .into_any_element()
-                    })
-                    .when(fork_clickable, |el| {
-                        el.cursor_pointer()
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                if fork_chat_id.is_empty() {
-                                    return;
-                                }
-                                cx.emit(TranscriptEvent::ForkRequested {
-                                    chat_id: fork_chat_id.clone(),
-                                    anchor_message_id: fork_entry_id.to_string(),
-                                });
-                            }))
-                    })
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| MessageActionTooltip {
-                            text: fork_tip.clone(),
-                        })
-                        .into()
-                    })
-                    .tooltip_show_delay(Duration::from_millis(350))
-                    .into_any_element(),
-            )
-        };
-        // Session Rewind: the restart affordance rides the same strip, right
-        // after the fork one. Same prerequisites (it drives the same pi
-        // machinery), plus "not the newest entry" — restarting at the tail
-        // would delete nothing. Destructive, so the first click only ARMS it.
-        let is_last_entry = self
-            .rows
-            .last()
-            .is_some_and(|last| last.entry_id == row.entry_id);
-        let rewind_gate = self.rewind_gate_for(is_last_entry, cx);
-        let rewind_enabled = rewind_gate == ForkGate::Enabled;
-        let rewind_key = (fork_chat_id.clone(), fork_entry_id.to_string());
-        let rewind_armed = self.rewind_armed.as_ref() == Some(&rewind_key);
-        let rewind_pending = !fork_chat_id.is_empty() && self.rewind_pending.contains(&rewind_key);
-        let rewind_clickable = rewind_enabled && !rewind_pending;
-        // How much the confirming click deletes — named in the armed tooltip.
-        // (The anchor itself is named separately in the user-role wording.)
-        let later_entries = if rewind_enabled {
-            let state = self.state.read(cx);
-            state
-                .transcript
-                .iter()
-                .position(|e| e.id.as_str() == fork_entry_id.as_ref())
-                .map(|ix| state.transcript.len() - ix - 1)
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        let rewind_tip: SharedString =
-            rewind_tooltip(row.role, &rewind_gate, rewind_armed, later_entries).into();
-        let rewind_button: Option<AnyElement> = if self.embedded || row.role == MessageRole::System
-        {
-            None
-        } else {
-            let rewind_chat_id = fork_chat_id.clone();
-            let rewind_entry_id = fork_entry_id.clone();
-            Some(
-                div()
-                    .id((row.id.clone(), 2usize))
-                    .size(px(12.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(if rewind_pending {
-                        crate::kit::loaders::gradient_spinner(
-                            "rewind-spinner",
-                            &theme,
-                            2.5,
-                            cx.entity_id(),
-                            cx,
-                        )
-                        .into_any_element()
-                    } else {
-                        crate::kit::icons::icon(crate::kit::icons::RESTART)
-                            .size(px(10.0))
-                            .text_color(if rewind_armed {
-                                theme.danger
-                            } else if rewind_enabled {
-                                theme.text_muted
-                            } else {
-                                theme.text_muted.opacity(0.3)
-                            })
-                            .into_any_element()
-                    })
-                    .when(rewind_clickable, |el| {
-                        el.cursor_pointer()
-                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                if rewind_chat_id.is_empty() {
-                                    return;
-                                }
-                                this.arm_or_confirm_rewind(
-                                    rewind_chat_id.clone(),
-                                    rewind_entry_id.to_string(),
-                                    cx,
-                                );
-                            }))
-                    })
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| MessageActionTooltip {
-                            text: rewind_tip.clone(),
-                        })
-                        .into()
-                    })
-                    .tooltip_show_delay(Duration::from_millis(350))
-                    .into_any_element(),
-            )
-        };
-        // Copy belongs to every message strip, including System/Side Chat and
-        // offline/non-Pi chats. Inspect availability only for the hovered last
-        // row; resolve and assemble the complete entry lazily on click.
-        let copy_button = (hovered && row.timestamp.is_some()).then(|| {
-            let can_copy = match &row.kind {
-                RowKind::User { text, .. } => !text.trim().is_empty(),
-                _ => {
-                    let state = self.state.read(cx);
-                    message_for_copy(&state.transcript, state.pending_echoes(), &row.entry_id)
-                        .is_some_and(|entry| {
-                            entry.parts.iter().any(|part| match part {
-                                MessagePart::Text { text, .. } => !text.trim().is_empty(),
-                                MessagePart::Error { message, .. } => !message.trim().is_empty(),
-                                _ => false,
-                            })
-                        })
-                }
-            };
-            let copied = self.copied_message.as_ref() == Some(&row.entry_id);
-            let chat_id = self.chat_id.clone();
-            let entry_id = row.entry_id.clone();
-            let tip: SharedString = if copied {
-                "Copied!"
-            } else if can_copy {
-                "Copy message"
-            } else {
-                "No text to copy"
-            }
-            .into();
-            div()
-                .id((row.id.clone(), 1usize))
-                .size(px(12.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(message_copy_icon(copied, can_copy, &theme))
-                .when(can_copy, |el| {
-                    el.cursor_pointer()
-                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.copy_message(&chat_id, &entry_id, cx);
-                        }))
-                })
-                .tooltip(move |_, cx| {
-                    cx.new(|_| MessageActionTooltip { text: tip.clone() })
-                        .into()
-                })
-                .tooltip_show_delay(Duration::from_millis(350))
-                .into_any_element()
-        });
-        let strip = row.timestamp.map(|ms| {
-            div()
-                .h(px(if is_user_row { 16.0 } else { 20.0 }))
-                .when(!is_user_row, |el| el.pt(px(4.0)))
-                .w_full()
-                .flex()
-                .items_center()
-                // No horizontal inset: the original's `px-1` netted out flush
-                // because its message text was inset by the same amount (group
-                // padding 4 + inner VStack 4 = 8 = group 4 + px-1 4). Here the
-                // markdown text / user bubble sit AT the content column edges,
-                // so the label must too — assistant label's left edge on the
-                // text's first-character x, user label's right edge on the
-                // bubble's right edge (user-reported 4px drift).
-                .when(is_user_row, |el| el.justify_end())
-                .when(hovered, |el| {
-                    el.child(motion::fade_quick(
-                        SharedString::from(format!("ts-{}", row.id)),
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted.opacity(0.55))
-                            .child(SharedString::from(format_timestamp(ms, &chrono::Local)))
-                            .when_some(row.answered.clone(), |el, label| {
-                                el.child(SharedString::from("·"))
-                                    .child(answered_model_label(row.id.clone(), label, &theme))
-                            })
-                            .when_some(fork_button, |el, button| el.child(button))
-                            .when_some(rewind_button, |el, button| el.child(button))
-                            .when_some(copy_button, |el, button| el.child(button)),
-                    ))
-                })
-        });
+        let strip = self.render_timestamp_strip(&row, &theme, cx);
         let entry_id = row.entry_id.clone();
         let row_id = row.id.clone();
         div()
@@ -838,6 +315,600 @@ impl Transcript {
                     .children(trailer),
             )
             .into_any_element()
+    }
+
+    /// The padding above and below row `ix`.
+    fn row_gaps(
+        &self,
+        ix: usize,
+        row: &Row,
+        message_spacing: f32,
+        paragraph_spacing: f32,
+    ) -> (f32, f32) {
+        // The first row's gap clears the small top fade band so a
+        // top-scrolled transcript rests below it. An embedded panel
+        // (temporary Side Chat) has no band to clear — a compact top gap.
+        let top_gap = if ix == 0 {
+            if self.embedded {
+                EMBEDDED_TOP_INSET_PX + 6.0
+            } else {
+                TOP_CHROME_PX + message_spacing + 10.0
+            }
+        } else {
+            top_gap_for_style(
+                ix.checked_sub(1).and_then(|i| self.rows.get(i)),
+                row,
+                message_spacing,
+                paragraph_spacing,
+            )
+        };
+        // The last row must clear the composer/status stack the transcript
+        // scrolls under PLUS the fade band above it, or the timestamp strip
+        // (the row's lowest content) renders half-faded (or hidden) when the
+        // transcript is pinned to the bottom.
+        let bottom_pad = if ix + 1 == self.rows.len() {
+            let runway = self
+                .own_turn
+                .as_ref()
+                .filter(|anchor| {
+                    self.rows
+                        .iter()
+                        .any(|candidate| candidate.entry_id == anchor.message_id)
+                })
+                .map_or(0.0, |anchor| anchor.runway);
+            self.bottom_clearance + Theme::TRANSCRIPT_FADE_BAND + 8.0 + runway
+        } else {
+            0.0
+        };
+        (top_gap, bottom_pad)
+    }
+
+    /// The row's content, by kind.
+    fn render_row_body(
+        &mut self,
+        row: &Row,
+        wide: bool,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match &row.kind {
+            RowKind::User {
+                text,
+                mentions,
+                attachments,
+                comments,
+                pending,
+                steer,
+            } => {
+                let user = UserRowView {
+                    text,
+                    mentions,
+                    attachments,
+                    comments,
+                    pending: *pending,
+                    steer: *steer,
+                };
+                self.render_user_row(row, user, wide, theme, cx)
+            }
+            RowKind::Markdown { tree, block_ix } => self.render_markdown_block(
+                &row.id,
+                MarkdownBlockRow {
+                    tree,
+                    block_ix: *block_ix,
+                    live: false,
+                },
+                theme,
+                window,
+                cx,
+            ),
+            RowKind::LiveMarkdown { tree, block_ix } => self.render_markdown_block(
+                &row.id,
+                MarkdownBlockRow {
+                    tree,
+                    block_ix: *block_ix,
+                    live: true,
+                },
+                theme,
+                window,
+                cx,
+            ),
+            RowKind::ThoughtBlock {
+                tree,
+                block_ix,
+                live,
+                nested,
+            } => {
+                // Thinking reads as the answer's quieter companion: the same
+                // blocks, in the muted text tone.
+                let mut muted = theme.clone();
+                muted.text = theme.text_muted;
+                let block = self.render_markdown_block(
+                    &row.id,
+                    MarkdownBlockRow {
+                        tree,
+                        block_ix: *block_ix,
+                        live: *live,
+                    },
+                    &muted,
+                    window,
+                    cx,
+                );
+                if *nested {
+                    // Under its chip, on the run's rail.
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .child(guide_rail())
+                        .child(
+                            div()
+                                .ml(px(NESTED_THOUGHT_INSET))
+                                .min_w_0()
+                                .flex_1()
+                                .child(block),
+                        )
+                        .into_any_element()
+                } else {
+                    block
+                }
+            }
+            RowKind::ToolGroup {
+                tools,
+                auto_open,
+                nested,
+                skip,
+            } => self.render_tool_group(
+                &row.id,
+                ToolGroupRow {
+                    tools,
+                    auto_open: *auto_open,
+                    nested: *nested,
+                    skip: *skip,
+                },
+                theme,
+                cx,
+            ),
+            RowKind::RunOverflow {
+                run,
+                tools,
+                thoughts,
+            } => self.render_run_overflow(&row.id, run, *tools, *thoughts, theme, cx),
+            RowKind::Activity { summary, .. } => {
+                let open = toggle_open(row, &self.toggle_pins);
+                self.render_fold_toggle(&row.id, open, summary.clone(), theme, cx)
+            }
+            RowKind::InputChip {
+                header, resolved, ..
+            } => input_chip(header.clone(), *resolved, theme),
+            RowKind::ErrorChip { message } => error_chip(message.clone(), theme),
+            RowKind::Worked { label } => worked_rule(label.clone(), theme),
+            RowKind::TranslationOriginal { .. } => {
+                let open = toggle_open(row, &self.toggle_pins);
+                let label = if open {
+                    "Hide original"
+                } else {
+                    "Show original"
+                };
+                self.render_fold_toggle(&row.id, open, label.into(), theme, cx)
+            }
+            RowKind::Thought {
+                live,
+                nested,
+                preview,
+                ..
+            } => {
+                let open = toggle_open(row, &self.toggle_pins);
+                if *nested {
+                    self.render_thought_chip(&row.id, open, *live, preview.clone(), theme, cx)
+                } else {
+                    let label = if *live { "Thinking…" } else { "Thought" };
+                    self.render_fold_toggle(&row.id, open, label.into(), theme, cx)
+                }
+            }
+        }
+    }
+
+    /// A user prompt: steer caption, attachment strip, comments, then the
+    /// bubble (or a command chip).
+    fn render_user_row(
+        &mut self,
+        row: &Row,
+        user: UserRowView<'_>,
+        wide: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let attachments = user.attachments.clone();
+        let text = user.text.clone();
+        let mentions = user.mentions.clone();
+        let pending = user.pending;
+        let steer = user.steer;
+        // Attachment thumbnails ride ABOVE the bubble, right-aligned
+        // (chat-view.tsx RowView: UserAttachmentStrip then the text
+        // HStack); image-only sends show no bubble at all.
+        let mut column = div().w_full().flex().flex_col();
+        if steer {
+            column = column.child(steer_caption(pending, theme));
+        }
+        if !attachments.is_empty() {
+            column = column.child(self.render_user_attachments(&row.id, &attachments, cx));
+        }
+        if !user.comments.is_empty() {
+            column = column.child(user_comments(
+                &row.id,
+                user.comments,
+                wide,
+                pending,
+                theme,
+                self.scope,
+                Some(self.selection_ui_for(&row.id, cx)),
+            ));
+        }
+        if !text.is_empty() {
+            if renders_as_command_chip(&text, &mentions, &attachments) {
+                column = column.child(command_chip(text, pending, theme));
+            } else {
+                // `min_w_0` is load-bearing: gpui text answers min/max-content
+                // probes with its UNWRAPPED width, so without it the bubble's
+                // automatic min-size is the full single-line width — the flex
+                // item can't shrink, `justify_end` pushes the overflow off the
+                // left edge, and long prompts render as one clipped line
+                // instead of wrapping inside the 80% column cap.
+                column = column.child(
+                    div().w_full().flex().justify_end().child(
+                        div()
+                            .min_w_0()
+                            .when(!wide, |el| el.max_w(px(MAX_CONTENT_WIDTH * 0.8)))
+                            .when(wide, |el| el.max_w(gpui::relative(0.8)))
+                            .when(!steer, |el| {
+                                el.bg(crate::appearance::chat_style::bubble(theme))
+                            })
+                            // A steer reads as a side note to the
+                            // live turn: fainter fill, hairline edge.
+                            .when(steer, |el| {
+                                el.bg(crate::appearance::chat_style::bubble(theme).opacity(0.55))
+                                    .border_1()
+                                    .border_color(theme.border)
+                            })
+                            .rounded(px(Theme::BUBBLE_RADIUS))
+                            .px(px(16.0))
+                            .py(px(10.0))
+                            .font_family(theme.font_sans.clone())
+                            .text_size(px(theme.markdown.body_size))
+                            .line_height(px(theme.markdown.body_line_height))
+                            .text_color(theme.text)
+                            .when(pending, |el| el.opacity(0.65))
+                            .child(user_bubble_text(
+                                &row.id,
+                                text,
+                                mentions,
+                                theme,
+                                self.scope,
+                                Some(self.selection_ui_for(&row.id, cx)),
+                            )),
+                    ),
+                );
+            }
+        }
+        column.into_any_element()
+    }
+
+    /// Hover-revealed timestamp strip (zeron chat-view.tsx `Timestamp`): a
+    /// RESERVED 16px lane under the entry's last row — the label only flips
+    /// opacity, so revealing it never shifts the virtualizer's layout. User
+    /// entries align end (under the bubble), assistant start.
+    fn render_timestamp_strip(
+        &self,
+        row: &Row,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        let is_user_row = match &row.kind {
+            RowKind::User { text, .. } => crate::composer::slash_command_label(text).is_none(),
+            _ => false,
+        };
+        let hovered = self
+            .hovered_entry
+            .as_ref()
+            .is_some_and(|(_, entry)| entry == &row.entry_id);
+        // Vertical breathing room from the source: assistant text blocks sit
+        // in a `VStack padding={4}` (chat-view.tsx:183), so the strip starts
+        // 4px below the message text — the native markdown column has no such
+        // bottom padding, so the strip carries it as top inset (grown into the
+        // reserved height: reveal still never shifts layout). User rows are
+        // flush: the Timestamp follows the bubble HStack directly (VStack gap
+        // defaults to 0 in mugen), the label's centering inside the 16px lane
+        // is all the gap the original has.
+        let fork_button = self.fork_affordance(row, theme, cx);
+        let rewind_button = self.rewind_affordance(row, theme, cx);
+        let copy_button = self.copy_affordance(row, hovered, theme, cx);
+        row.timestamp.map(|ms| {
+            div()
+                .h(px(if is_user_row { 16.0 } else { 20.0 }))
+                .when(!is_user_row, |el| el.pt(px(4.0)))
+                .w_full()
+                .flex()
+                .items_center()
+                // No horizontal inset: the original's `px-1` netted out flush
+                // because its message text was inset by the same amount (group
+                // padding 4 + inner VStack 4 = 8 = group 4 + px-1 4). Here the
+                // markdown text / user bubble sit AT the content column edges,
+                // so the label must too — assistant label's left edge on the
+                // text's first-character x, user label's right edge on the
+                // bubble's right edge (user-reported 4px drift).
+                .when(is_user_row, |el| el.justify_end())
+                .when(hovered, |el| {
+                    el.child(motion::fade_quick(
+                        SharedString::from(format!("ts-{}", row.id)),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted.opacity(0.55))
+                            .child(SharedString::from(format_timestamp(ms, &chrono::Local)))
+                            .when_some(row.answered.clone(), |el, label| {
+                                el.child(SharedString::from("·"))
+                                    .child(answered_model_label(row.id.clone(), label, theme))
+                            })
+                            .when_some(fork_button, |el, button| el.child(button))
+                            .when_some(rewind_button, |el, button| el.child(button))
+                            .when_some(copy_button, |el, button| el.child(button)),
+                    ))
+                })
+        })
+    }
+
+    /// Session Fork (v1): the git-branch affordance rides the timestamp
+    /// strip of every SETTLED entry, beside the time. Gated on the chat's
+    /// forkability (embedded Side Chat / offline / child / non-Pi / live
+    /// are inert); a remote Pi chat stays enabled — the shell relays
+    /// ForkSession to the source chat's host device.
+    fn fork_affordance(
+        &self,
+        row: &Row,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let fork_gate = self.fork_gate_for(cx);
+        let fork_enabled = fork_gate == ForkGate::Enabled;
+        // Role-specific tooltip; System rows never get an affordance at all
+        // (`fork_button` is None below), so no fork action can be emitted.
+        let fork_role = row.role;
+        let fork_tip: SharedString = fork_tooltip(fork_role, &fork_gate).into();
+        let fork_chat_id = self.chat_id.clone().unwrap_or_default();
+        let fork_entry_id = row.entry_id.clone();
+        // In-flight marker for THIS anchor: the affordance becomes a spinner
+        // and is inert (double-click guard) until the shell's ForkSession
+        // RPC settles.
+        let fork_pending = !fork_chat_id.is_empty()
+            && self
+                .fork_pending
+                .contains(&(fork_chat_id.clone(), fork_entry_id.to_string()));
+        let fork_clickable = fork_enabled && !fork_pending;
+        // The affordance is built ONCE per row (before the hover closure) as
+        // an optional child: the MAIN surface shows it (spinner while a fork
+        // is in flight, branch icon otherwise); an embedded Side Chat
+        // transcript and SYSTEM rows never do. `None` keeps the hover branch
+        // untouched.
+        if self.embedded || row.role == MessageRole::System {
+            None
+        } else {
+            let fork_chat_id = fork_chat_id.clone();
+            let fork_entry_id = fork_entry_id.clone();
+            Some(
+                div()
+                    .id((row.id.clone(), 0usize))
+                    .size(px(12.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(if fork_pending {
+                        crate::kit::loaders::gradient_spinner(
+                            "fork-spinner",
+                            theme,
+                            2.5,
+                            cx.entity_id(),
+                            cx,
+                        )
+                        .into_any_element()
+                    } else {
+                        crate::kit::icons::icon(crate::kit::icons::GIT_BRANCH)
+                            .size(px(10.0))
+                            .text_color(if fork_enabled {
+                                theme.text_muted
+                            } else {
+                                theme.text_muted.opacity(0.3)
+                            })
+                            .into_any_element()
+                    })
+                    .when(fork_clickable, |el| {
+                        el.cursor_pointer()
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                if fork_chat_id.is_empty() {
+                                    return;
+                                }
+                                cx.emit(TranscriptEvent::ForkRequested {
+                                    chat_id: fork_chat_id.clone(),
+                                    anchor_message_id: fork_entry_id.to_string(),
+                                });
+                            }))
+                    })
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| MessageActionTooltip {
+                            text: fork_tip.clone(),
+                        })
+                        .into()
+                    })
+                    .tooltip_show_delay(Duration::from_millis(350))
+                    .into_any_element(),
+            )
+        }
+    }
+
+    /// Session Rewind: the restart affordance rides the same strip, right
+    /// after the fork one. Same prerequisites (it drives the same pi
+    /// machinery), plus "not the newest entry" — restarting at the tail
+    /// would delete nothing. Destructive, so the first click only ARMS it.
+    fn rewind_affordance(
+        &self,
+        row: &Row,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let fork_chat_id = self.chat_id.clone().unwrap_or_default();
+        let fork_entry_id = row.entry_id.clone();
+        let is_last_entry = self
+            .rows
+            .last()
+            .is_some_and(|last| last.entry_id == row.entry_id);
+        let rewind_gate = self.rewind_gate_for(is_last_entry, cx);
+        let rewind_enabled = rewind_gate == ForkGate::Enabled;
+        let rewind_key = (fork_chat_id.clone(), fork_entry_id.to_string());
+        let rewind_armed = self.rewind_armed.as_ref() == Some(&rewind_key);
+        let rewind_pending = !fork_chat_id.is_empty() && self.rewind_pending.contains(&rewind_key);
+        let rewind_clickable = rewind_enabled && !rewind_pending;
+        // How much the confirming click deletes — named in the armed tooltip.
+        // (The anchor itself is named separately in the user-role wording.)
+        let later_entries = if rewind_enabled {
+            let state = self.state.read(cx);
+            state
+                .transcript
+                .iter()
+                .position(|e| e.id.as_str() == fork_entry_id.as_ref())
+                .map(|ix| state.transcript.len() - ix - 1)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let rewind_tip: SharedString =
+            rewind_tooltip(row.role, &rewind_gate, rewind_armed, later_entries).into();
+        if self.embedded || row.role == MessageRole::System {
+            None
+        } else {
+            let rewind_chat_id = fork_chat_id.clone();
+            let rewind_entry_id = fork_entry_id.clone();
+            Some(
+                div()
+                    .id((row.id.clone(), 2usize))
+                    .size(px(12.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(if rewind_pending {
+                        crate::kit::loaders::gradient_spinner(
+                            "rewind-spinner",
+                            theme,
+                            2.5,
+                            cx.entity_id(),
+                            cx,
+                        )
+                        .into_any_element()
+                    } else {
+                        crate::kit::icons::icon(crate::kit::icons::RESTART)
+                            .size(px(10.0))
+                            .text_color(if rewind_armed {
+                                theme.danger
+                            } else if rewind_enabled {
+                                theme.text_muted
+                            } else {
+                                theme.text_muted.opacity(0.3)
+                            })
+                            .into_any_element()
+                    })
+                    .when(rewind_clickable, |el| {
+                        el.cursor_pointer()
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if rewind_chat_id.is_empty() {
+                                    return;
+                                }
+                                this.arm_or_confirm_rewind(
+                                    rewind_chat_id.clone(),
+                                    rewind_entry_id.to_string(),
+                                    cx,
+                                );
+                            }))
+                    })
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| MessageActionTooltip {
+                            text: rewind_tip.clone(),
+                        })
+                        .into()
+                    })
+                    .tooltip_show_delay(Duration::from_millis(350))
+                    .into_any_element(),
+            )
+        }
+    }
+
+    /// Copy belongs to every message strip, including System/Side Chat and
+    /// offline/non-Pi chats. Inspect availability only for the hovered last
+    /// row; resolve and assemble the complete entry lazily on click.
+    fn copy_affordance(
+        &self,
+        row: &Row,
+        hovered: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        (hovered && row.timestamp.is_some()).then(|| {
+            let can_copy = match &row.kind {
+                RowKind::User { text, .. } => !text.trim().is_empty(),
+                _ => {
+                    let state = self.state.read(cx);
+                    message_for_copy(&state.transcript, state.pending_echoes(), &row.entry_id)
+                        .is_some_and(|entry| {
+                            entry.parts.iter().any(|part| match part {
+                                MessagePart::Text { text, .. } => !text.trim().is_empty(),
+                                MessagePart::Error { message, .. } => !message.trim().is_empty(),
+                                _ => false,
+                            })
+                        })
+                }
+            };
+            let copied = self.copied_message.as_ref() == Some(&row.entry_id);
+            let chat_id = self.chat_id.clone();
+            let entry_id = row.entry_id.clone();
+            let tip: SharedString = if copied {
+                "Copied!"
+            } else if can_copy {
+                "Copy message"
+            } else {
+                "No text to copy"
+            }
+            .into();
+            div()
+                .id((row.id.clone(), 1usize))
+                .size(px(12.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(message_copy_icon(copied, can_copy, theme))
+                .when(can_copy, |el| {
+                    el.cursor_pointer()
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.copy_message(&chat_id, &entry_id, cx);
+                        }))
+                })
+                .tooltip(move |_, cx| {
+                    cx.new(|_| MessageActionTooltip { text: tip.clone() })
+                        .into()
+                })
+                .tooltip_show_delay(Duration::from_millis(350))
+                .into_any_element()
+        })
     }
 
     fn copy_message(
@@ -915,6 +986,67 @@ impl Transcript {
             });
         markdown::render::CopyUi { handler, copied_ix }
     }
+}
+
+/// The fields of a [`RowKind::User`] row, borrowed for rendering.
+struct UserRowView<'a> {
+    text: &'a SharedString,
+    mentions: &'a Arc<Vec<crate::composer::SentMentionSpan>>,
+    attachments: &'a Arc<Vec<crate::attachments::UserAttachment>>,
+    comments: &'a [MessageComment],
+    pending: bool,
+    steer: bool,
+}
+
+/// iOS UserBubble: a muted "↳ Steer" caption over the bubble, inset to line
+/// up with the bubble's text.
+fn steer_caption(pending: bool, theme: &Theme) -> gpui::Div {
+    div()
+        .w_full()
+        .flex()
+        .justify_end()
+        .pr(px(12.0))
+        .pb(px(4.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .text_size(px(11.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text_muted)
+                .when(pending, |el| el.opacity(0.65))
+                .child(
+                    crate::kit::icons::icon(crate::kit::icons::STEER)
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
+                )
+                .child("Steer"),
+        )
+}
+
+/// Slash-command settings: a quiet action chip, not a user bubble that reads
+/// as a prompt to the model.
+fn command_chip(text: SharedString, pending: bool, theme: &Theme) -> gpui::Div {
+    div().w_full().flex().justify_start().child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .when(pending, |el| el.opacity(0.65))
+            .child(
+                crate::kit::icons::icon(crate::kit::icons::COMMAND)
+                    .size(px(13.0))
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(text),
+            ),
+    )
 }
 
 /// A sent message's text with its file-mention chips. The same recipe as the

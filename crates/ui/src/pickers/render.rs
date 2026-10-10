@@ -3,18 +3,20 @@
 use super::*;
 
 impl Pickers {
-    // Chip builder: every argument is one visual slot of the chip.
-    #[allow(clippy::too_many_arguments)]
+    /// A picker's trigger chip, one visual slot per [`TriggerChip`] field.
     fn trigger_chip(
         &self,
-        kind: PickerKind,
-        label: SharedString,
-        set: bool,
-        chip_icon: Option<(&'static str, Option<gpui::Hsla>)>,
-        suffix: Option<(SharedString, Option<gpui::Hsla>)>,
+        chip: TriggerChip,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
+        let TriggerChip {
+            kind,
+            label,
+            set,
+            icon: chip_icon,
+            suffix,
+        } = chip;
         let id: &'static str = match kind {
             PickerKind::Branch => "picker-branch",
             PickerKind::Checkout => "picker-checkout",
@@ -756,15 +758,13 @@ impl Pickers {
     /// Rows are two lines — model name over the provider icon + name. Searching
     /// hides the rail and spans every provider.
     fn render_harness_model_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        const HEIGHT: f32 = 346.0; // t3 max-h-86.5
-
         let theme = Theme::of(cx).clone();
 
         // Catalog-level loading/error take over the whole card.
         match &self.harnesses {
             Loadable::Loading | Loadable::Idle => {
                 return div()
-                    .h(px(HEIGHT))
+                    .h(px(MODEL_POPOVER_HEIGHT))
                     .p(px(8.0))
                     .child(popover::skeleton_rows(
                         "harness-skeleton",
@@ -778,7 +778,7 @@ impl Pickers {
             Loadable::Error(message) => {
                 let message = message.clone();
                 return div()
-                    .h(px(HEIGHT))
+                    .h(px(MODEL_POPOVER_HEIGHT))
                     .p(px(8.0))
                     .child(self.retry_row(
                         "harness-retry",
@@ -804,307 +804,30 @@ impl Pickers {
         let active = self.active;
         let selected_id = self.selected_model(cx).map(|m| m.id.clone());
 
+        let view = ModelListView {
+            locked,
+            effective,
+            searching,
+            favorites_view,
+            active,
+            selected_id,
+        };
+
         // ── rail: icons only — the favorites star, a divider, one brand
         //    icon per provider. Hidden while a search is live.
-        let rail: Option<AnyElement> = (!searching).then(|| {
-            let mut column = div()
-                .w(px(44.0))
-                .flex_none()
-                .p(px(4.0))
-                .flex()
-                .flex_col()
-                .gap(px(4.0));
-            column = column.child(
-                div()
-                    .id("model-rail-favorites")
-                    .relative()
-                    .w(px(36.0))
-                    .h(px(36.0))
-                    .rounded(px(8.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .when(!favorites_view, |el| {
-                        el.hover(|s| s.bg(crate::kit::theme::ink(0.06)))
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.model_rail = ModelRail::Favorites;
-                        // Anchor on the selected row when it's starred, else
-                        // the top — never a stray second highlight.
-                        this.active = this.selected_model_index(cx);
-                        this.model_scroll.set_offset(gpui::Point::default());
-                        this.model_scroll.scroll_to_item(this.active);
-                        cx.notify();
-                    }))
-                    .child(
-                        crate::kit::icons::icon(crate::kit::icons::STAR_BOLD)
-                            .size(px(17.0))
-                            .text_color(if favorites_view {
-                                theme.text
-                            } else {
-                                theme.text_muted.opacity(0.75)
-                            }),
-                    )
-                    .when(favorites_view, |el| {
-                        el.child(rail_indicator(picker_purple(&theme)))
-                    }),
-            );
-            // Full-bleed divider, aligned with the search row's bottom
-            // hairline (see the height math there) — one line across.
-            column = column.child(
-                div()
-                    .h(px(1.0))
-                    .mx(px(-4.0))
-                    .my(px(1.0))
-                    .bg(crate::kit::theme::hairline(0.08)),
-            );
-            for (ix, provider) in provider_tabs.iter().enumerate() {
-                let provider = provider.clone();
-                let is_viewed =
-                    !favorites_view && viewed_provider.as_deref() == Some(provider.as_str());
-                let is_disabled = locked
-                    && ((provider == "mock" && effective != Some(HarnessId::Mock))
-                        || (provider != "mock" && effective == Some(HarnessId::Mock)));
-                let (icon_path, tint) = provider_brand_icon(&provider);
-                column = column.child(
-                    div()
-                        .id(("provider-tab", ix))
-                        .aria_label(provider_display_name(&provider).to_string())
-                        .relative()
-                        .w(px(36.0))
-                        .h(px(36.0))
-                        .rounded(px(8.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .when(is_disabled, |el| el.opacity(0.35))
-                        .when(!is_disabled, |el| el.cursor_pointer())
-                        .when(!is_disabled && !is_viewed, |el| {
-                            el.hover(|s| s.bg(crate::kit::theme::ink(0.06)))
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.pick_provider(provider.clone(), cx);
-                        }))
-                        .child(
-                            crate::kit::icons::icon(icon_path)
-                                .size(px(18.0))
-                                .text_color(tint.unwrap_or(if is_viewed {
-                                    theme.text
-                                } else {
-                                    theme.text_muted
-                                })),
-                        )
-                        .when(is_viewed, |el| {
-                            el.child(rail_indicator(picker_purple(&theme)))
-                        }),
-                );
-            }
-            column.into_any_element()
-        });
-
-        // ── search row: icon + borderless input over a FULL-BLEED hairline
-        //    (it meets the rail's divider at the same y, one line across the
-        //    card — user request; no accent tint). Height matches the rail's
-        //    star tab band exactly: 4px pad + 36px tab + 4px gap + 1px
-        //    divider margin = the hairline at y 45–46, same as this row's
-        //    inside-drawn bottom border at h 46.
-        let search_row = div()
-            .flex_none()
-            .h(px(46.0))
-            .px(px(10.0))
-            .border_b_1()
-            .border_color(crate::kit::theme::hairline(0.08))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .child(
-                crate::kit::icons::icon(crate::kit::icons::MAGNIFER)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(theme.text_muted.opacity(0.7)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(13.0))
-                    .child(self.search.clone()),
-            );
+        let rail: Option<AnyElement> = (!searching)
+            .then(|| self.model_rail(&view, &provider_tabs, viewed_provider, &theme, cx));
+        let search_row = self.model_search_row(&theme);
 
         // ── model rows, flat — the scroll container's direct children so
         //    keyboard `scroll_to_item(active)` maps 1:1.
-        let effective_models = effective.and_then(|h| self.models.get(&h));
         let list_children: Vec<AnyElement> = if !rows.is_empty() {
             rows.iter()
                 .enumerate()
-                .map(|(ix, row)| {
-                    let is_selected = Some(row.harness) == effective
-                        && selected_id.as_deref() == Some(row.model.id.as_str());
-                    let is_active = ix == active;
-                    let is_fav = self.defaults.is_favorite(row.harness, &row.model.id);
-                    let (icon_path, tint) = provider_brand_icon(&row.provider_id);
-                    let label: SharedString = row.model.label.clone().into();
-                    let subline: SharedString = match &row.model.description {
-                        Some(description) if !favorites_view && !searching => {
-                            description.clone().into()
-                        }
-                        Some(description) => {
-                            format!("{} · {description}", row.provider_title).into()
-                        }
-                        None => row.provider_title.clone(),
-                    };
-                    let harness = row.harness;
-                    let star_model = row.model.id.clone();
-                    let mut el = div()
-                        .id(("model-row", ix))
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .rounded(px(8.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(10.0))
-                        .cursor_pointer();
-                    // ONE moving highlight (t3/Base-UI combobox): hovering
-                    // moves the keyboard cursor instead of painting its own
-                    // wash, so hover + arrow cursor can never wear two
-                    // washes at once. Selection is the distinct stronger
-                    // treatment (wash + ring).
-                    if is_selected {
-                        el = el
-                            .bg(crate::kit::theme::card_selected_bg())
-                            .shadow(crate::kit::theme::card_selected_shadows());
-                    } else if is_active {
-                        el = el.bg(crate::kit::theme::ink(0.05));
-                    }
-                    el = el.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered && this.active != ix {
-                            this.active = ix;
-                            cx.notify();
-                        }
-                    }));
-                    el = el
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.activate_model_index(ix, cx);
-                        }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .truncate()
-                                        .text_size(px(12.5))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.text)
-                                        .child(label),
-                                )
-                                .child(
-                                    // Harness identity subline (t3
-                                    // `showProvider`) — replaces the model
-                                    // description.
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(6.0))
-                                        .child(
-                                            crate::kit::icons::icon(icon_path)
-                                                .size(px(11.0))
-                                                .flex_none()
-                                                .text_color(
-                                                    tint.unwrap_or(theme.text_muted.opacity(0.7)),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .text_size(px(11.0))
-                                                .text_color(theme.text_muted.opacity(0.7))
-                                                .child(subline),
-                                        ),
-                                ),
-                        );
-                    if ix < 9 {
-                        el = el.child(popover::kbd_hint(&theme, &format!("⌘{}", ix + 1)));
-                    }
-                    el = el.child(
-                        div()
-                            .id(("model-star", ix))
-                            .flex_none()
-                            .w(px(22.0))
-                            .h(px(22.0))
-                            .rounded(px(6.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(crate::kit::theme::ink(0.08)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.toggle_model_favorite(harness, &star_model, cx);
-                            }))
-                            .child(
-                                crate::kit::icons::icon(if is_fav {
-                                    crate::kit::icons::STAR_BOLD
-                                } else {
-                                    crate::kit::icons::STAR
-                                })
-                                .size(px(13.0))
-                                .text_color(if is_fav {
-                                    theme.warning
-                                } else {
-                                    theme.text_muted.opacity(0.45)
-                                }),
-                            ),
-                    );
-                    el.into_any_element()
-                })
+                .map(|(ix, row)| self.model_row(&view, ix, row, &theme, cx))
                 .collect()
-        } else if searching {
-            vec![empty_list_note(&theme, "No models found")]
-        } else if favorites_view {
-            vec![empty_list_note(
-                &theme,
-                "No starred models yet — hit a row's star",
-            )]
         } else {
-            match effective_models {
-                Some(Loadable::Error(message)) => {
-                    let message = message.clone();
-                    if missing_pi_runtime(effective, &message) {
-                        vec![self.runtime_missing_row(&theme, cx)]
-                    } else {
-                        vec![self.retry_row(
-                            "model-retry",
-                            &message,
-                            PickerKind::HarnessModel,
-                            &theme,
-                            cx,
-                        )]
-                    }
-                }
-                Some(Loadable::Ready(models)) if models.is_empty() => {
-                    vec![empty_list_note(
-                        &theme,
-                        "No models available — add a service in Settings → Providers",
-                    )]
-                }
-                _ => vec![popover::skeleton_rows(
-                    "model-skeleton",
-                    &theme,
-                    4,
-                    cx.entity_id(),
-                    cx,
-                )],
-            }
+            vec![self.model_list_empty_state(&view, &theme, cx)]
         };
 
         let pane = div()
@@ -1136,13 +859,331 @@ impl Pickers {
             );
 
         div()
-            .h(px(HEIGHT))
+            .h(px(MODEL_POPOVER_HEIGHT))
             .flex()
             .flex_row()
             .items_stretch()
             .children(rail)
             .child(pane)
             .into_any_element()
+    }
+
+    /// The provider rail: the favorites star, a full-bleed divider, then one
+    /// brand icon per provider (dimmed where the locked harness rules it out).
+    fn model_rail(
+        &self,
+        view: &ModelListView,
+        provider_tabs: &[String],
+        viewed_provider: Option<String>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ModelListView {
+            locked,
+            effective,
+            favorites_view,
+            ..
+        } = *view;
+        let mut column = div()
+            .w(px(44.0))
+            .flex_none()
+            .p(px(4.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0));
+        column = column.child(
+            div()
+                .id("model-rail-favorites")
+                .relative()
+                .w(px(36.0))
+                .h(px(36.0))
+                .rounded(px(8.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .when(!favorites_view, |el| {
+                    el.hover(|s| s.bg(crate::kit::theme::ink(0.06)))
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.model_rail = ModelRail::Favorites;
+                    // Anchor on the selected row when it's starred, else
+                    // the top — never a stray second highlight.
+                    this.active = this.selected_model_index(cx);
+                    this.model_scroll.set_offset(gpui::Point::default());
+                    this.model_scroll.scroll_to_item(this.active);
+                    cx.notify();
+                }))
+                .child(
+                    crate::kit::icons::icon(crate::kit::icons::STAR_BOLD)
+                        .size(px(17.0))
+                        .text_color(if favorites_view {
+                            theme.text
+                        } else {
+                            theme.text_muted.opacity(0.75)
+                        }),
+                )
+                .when(favorites_view, |el| {
+                    el.child(rail_indicator(picker_purple(theme)))
+                }),
+        );
+        // Full-bleed divider, aligned with the search row's bottom
+        // hairline (see the height math there) — one line across.
+        column = column.child(
+            div()
+                .h(px(1.0))
+                .mx(px(-4.0))
+                .my(px(1.0))
+                .bg(crate::kit::theme::hairline(0.08)),
+        );
+        for (ix, provider) in provider_tabs.iter().enumerate() {
+            let provider = provider.clone();
+            let is_viewed =
+                !favorites_view && viewed_provider.as_deref() == Some(provider.as_str());
+            let is_disabled = locked
+                && ((provider == "mock" && effective != Some(HarnessId::Mock))
+                    || (provider != "mock" && effective == Some(HarnessId::Mock)));
+            let (icon_path, tint) = provider_brand_icon(&provider);
+            column = column.child(
+                div()
+                    .id(("provider-tab", ix))
+                    .aria_label(provider_display_name(&provider).to_string())
+                    .relative()
+                    .w(px(36.0))
+                    .h(px(36.0))
+                    .rounded(px(8.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(is_disabled, |el| el.opacity(0.35))
+                    .when(!is_disabled, |el| el.cursor_pointer())
+                    .when(!is_disabled && !is_viewed, |el| {
+                        el.hover(|s| s.bg(crate::kit::theme::ink(0.06)))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.pick_provider(provider.clone(), cx);
+                    }))
+                    .child(
+                        crate::kit::icons::icon(icon_path)
+                            .size(px(18.0))
+                            .text_color(tint.unwrap_or(if is_viewed {
+                                theme.text
+                            } else {
+                                theme.text_muted
+                            })),
+                    )
+                    .when(is_viewed, |el| {
+                        el.child(rail_indicator(picker_purple(theme)))
+                    }),
+            );
+        }
+        column.into_any_element()
+    }
+
+    /// The search row: icon + borderless input over a FULL-BLEED hairline
+    /// (it meets the rail's divider at the same y, one line across the
+    /// card — user request; no accent tint). Height matches the rail's
+    /// star tab band exactly: 4px pad + 36px tab + 4px gap + 1px
+    /// divider margin = the hairline at y 45–46, same as this row's
+    /// inside-drawn bottom border at h 46.
+    fn model_search_row(&self, theme: &Theme) -> gpui::Div {
+        div()
+            .flex_none()
+            .h(px(46.0))
+            .px(px(10.0))
+            .border_b_1()
+            .border_color(crate::kit::theme::hairline(0.08))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                crate::kit::icons::icon(crate::kit::icons::MAGNIFER)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted.opacity(0.7)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(13.0))
+                    .child(self.search.clone()),
+            )
+    }
+
+    /// One model row: name over the provider subline, the ⌘n hint and the
+    /// favorite star.
+    fn model_row(
+        &self,
+        view: &ModelListView,
+        ix: usize,
+        row: &ModelRowData,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ModelListView {
+            effective,
+            searching,
+            favorites_view,
+            active,
+            ..
+        } = *view;
+        let selected_id = &view.selected_id;
+        let is_selected =
+            Some(row.harness) == effective && selected_id.as_deref() == Some(row.model.id.as_str());
+        let is_active = ix == active;
+        let is_fav = self.defaults.is_favorite(row.harness, &row.model.id);
+        let (icon_path, tint) = provider_brand_icon(&row.provider_id);
+        let label: SharedString = row.model.label.clone().into();
+        let subline: SharedString = match &row.model.description {
+            Some(description) if !favorites_view && !searching => description.clone().into(),
+            Some(description) => format!("{} · {description}", row.provider_title).into(),
+            None => row.provider_title.clone(),
+        };
+        let harness = row.harness;
+        let star_model = row.model.id.clone();
+        let mut el = div()
+            .id(("model-row", ix))
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(8.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .cursor_pointer();
+        // ONE moving highlight (t3/Base-UI combobox): hovering
+        // moves the keyboard cursor instead of painting its own
+        // wash, so hover + arrow cursor can never wear two
+        // washes at once. Selection is the distinct stronger
+        // treatment (wash + ring).
+        if is_selected {
+            el = el
+                .bg(crate::kit::theme::card_selected_bg())
+                .shadow(crate::kit::theme::card_selected_shadows());
+        } else if is_active {
+            el = el.bg(crate::kit::theme::ink(0.05));
+        }
+        el = el.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            if *hovered && this.active != ix {
+                this.active = ix;
+                cx.notify();
+            }
+        }));
+        el = el
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.activate_model_index(ix, cx);
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(label),
+                    )
+                    .child(
+                        // Harness identity subline (t3
+                        // `showProvider`) — replaces the model
+                        // description.
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                crate::kit::icons::icon(icon_path)
+                                    .size(px(11.0))
+                                    .flex_none()
+                                    .text_color(tint.unwrap_or(theme.text_muted.opacity(0.7))),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_muted.opacity(0.7))
+                                    .child(subline),
+                            ),
+                    ),
+            );
+        if ix < 9 {
+            el = el.child(popover::kbd_hint(theme, &format!("⌘{}", ix + 1)));
+        }
+        el = el.child(
+            div()
+                .id(("model-star", ix))
+                .flex_none()
+                .w(px(22.0))
+                .h(px(22.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(crate::kit::theme::ink(0.08)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.toggle_model_favorite(harness, &star_model, cx);
+                }))
+                .child(
+                    crate::kit::icons::icon(if is_fav {
+                        crate::kit::icons::STAR_BOLD
+                    } else {
+                        crate::kit::icons::STAR
+                    })
+                    .size(px(13.0))
+                    .text_color(if is_fav {
+                        theme.warning
+                    } else {
+                        theme.text_muted.opacity(0.45)
+                    }),
+                ),
+        );
+        el.into_any_element()
+    }
+
+    /// What the list shows with no rows: no search hits, no favorites, the
+    /// provider's load error (or missing runtime), an empty catalog, or the
+    /// loading skeleton.
+    fn model_list_empty_state(
+        &self,
+        view: &ModelListView,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let effective = view.effective;
+        let effective_models = effective.and_then(|h| self.models.get(&h));
+        if view.searching {
+            empty_list_note(theme, "No models found")
+        } else if view.favorites_view {
+            empty_list_note(theme, "No starred models yet — hit a row's star")
+        } else {
+            match effective_models {
+                Some(Loadable::Error(message)) => {
+                    let message = message.clone();
+                    if missing_pi_runtime(effective, &message) {
+                        self.runtime_missing_row(theme, cx)
+                    } else {
+                        self.retry_row("model-retry", &message, PickerKind::HarnessModel, theme, cx)
+                    }
+                }
+                Some(Loadable::Ready(models)) if models.is_empty() => empty_list_note(
+                    theme,
+                    "No models available — add a service in Settings → Providers",
+                ),
+                _ => popover::skeleton_rows("model-skeleton", theme, 4, cx.entity_id(), cx),
+            }
+        }
     }
 
     /// The traits dropdown body (t3code TraitsPicker): the reasoning ladder
@@ -1253,6 +1294,30 @@ impl Pickers {
             .children(sections)
             .into_any_element()
     }
+}
+
+/// A trigger chip's slots: which picker it opens, its label, whether a
+/// value is set (brighter text), a leading icon with optional tint, and a
+/// trailing suffix with optional tint.
+struct TriggerChip {
+    kind: PickerKind,
+    label: SharedString,
+    set: bool,
+    icon: Option<(&'static str, Option<gpui::Hsla>)>,
+    suffix: Option<(SharedString, Option<gpui::Hsla>)>,
+}
+
+/// The model popover's height (t3 max-h-86.5).
+const MODEL_POPOVER_HEIGHT: f32 = 346.0;
+
+/// The model popover's per-frame state, shared by its rail and rows.
+struct ModelListView {
+    locked: bool,
+    effective: Option<HarnessId>,
+    searching: bool,
+    favorites_view: bool,
+    active: usize,
+    selected_id: Option<String>,
 }
 
 /// The "Default" marker beside a section's default choice: a ghost badge —
@@ -1478,11 +1543,13 @@ impl Render for Pickers {
         // departs from its default. No chip at all when the model has neither
         // a ladder nor options — a dead trigger reads as broken.
         let model_chip = self.trigger_chip(
-            PickerKind::HarnessModel,
-            model_label,
-            true,
-            Some(harness_icon),
-            None,
+            TriggerChip {
+                kind: PickerKind::HarnessModel,
+                label: model_label,
+                set: true,
+                icon: Some(harness_icon),
+                suffix: None,
+            },
             &theme,
             cx,
         );
@@ -1492,11 +1559,13 @@ impl Render for Pickers {
                 .is_some_and(|m| !m.options.is_empty());
         let traits_chip = has_traits.then(|| {
             self.trigger_chip(
-                PickerKind::Traits,
-                traits_label,
-                traits_active,
-                None,
-                None,
+                TriggerChip {
+                    kind: PickerKind::Traits,
+                    label: traits_label,
+                    set: traits_active,
+                    icon: None,
+                    suffix: None,
+                },
                 &theme,
                 cx,
             )

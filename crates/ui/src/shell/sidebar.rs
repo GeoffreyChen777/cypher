@@ -7,14 +7,14 @@ impl Shell {
     /// Fire a Mutate op; failures surface in the sidebar notice strip.
     pub(super) fn mutate(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.sidebar_notice = Some("Engine not connected".into());
+            self.sidebar.notice = Some("Engine not connected".into());
             cx.notify();
             return;
         };
         self.mutate_task = Some(cx.spawn(async move |this, cx| {
             if let Err(err) = engine.client().call(methods::MUTATE, params).await {
                 this.update(cx, |shell, cx| {
-                    shell.sidebar_notice = Some(format!("{err}").into());
+                    shell.sidebar.notice = Some(format!("{err}").into());
                     cx.notify();
                 })
                 .ok();
@@ -39,7 +39,7 @@ impl Shell {
                 this.submit_rename_chat(cx);
             }
         });
-        self.rename_dialog = Some(RenameChatDialog {
+        self.dialogs.rename_chat = Some(RenameChatDialog {
             chat_id,
             input,
             focus_pending: true,
@@ -49,7 +49,7 @@ impl Shell {
     }
 
     pub(super) fn submit_rename_chat(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = self.rename_dialog.take() else {
+        let Some(dialog) = self.dialogs.rename_chat.take() else {
             return;
         };
         let title = dialog.input.read(cx).text().trim().to_string();
@@ -81,8 +81,8 @@ impl Shell {
     }
 
     pub(super) fn close_sidebar_view_menu(&mut self, cx: &mut Context<Self>) {
-        if self.sidebar_view_menu.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.sidebar_view_menu);
+        if self.menus.sidebar_view.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.menus.sidebar_view);
             cx.notify();
         }
     }
@@ -144,8 +144,8 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let position = *self.sidebar_view_menu.get()?;
-        let closing = self.sidebar_view_menu.closing_since();
+        let position = *self.menus.sidebar_view.get()?;
+        let closing = self.menus.sidebar_view.closing_since();
         let (filter, sort) = (
             self.settings.sidebar_device_filter.clone(),
             self.settings.sidebar_sort,
@@ -266,7 +266,7 @@ impl Shell {
     }
 
     pub(super) fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        self.delete_confirm = None;
+        self.dialogs.delete_chat = None;
         let orphan = {
             let state = self.state.read(cx);
             spaces::orphan_worktree_after_delete(&state.chats, &state.spaces, &chat_id)
@@ -283,13 +283,13 @@ impl Shell {
         // Its tab closes (the slot's composer, and its per-chat stage, go
         // with it); a stashed draft of a closed tab is dropped too.
         if let Some(sid) = self.slot_for_tab(&crate::workspace::TabKey::session(chat_id.clone()))
-            && let Some(slot) = self.slots.get(&sid)
+            && let Some(slot) = self.tiles.slots.get(&sid)
         {
             slot.composer
                 .update(cx, |composer, _| composer.purge_chat(&chat_id));
         }
         self.close_tab(&crate::workspace::TabKey::session(chat_id.clone()), cx);
-        self.closed_drafts.remove(&chat_id);
+        self.closed_tabs.drafts.remove(&chat_id);
         self.mutate(
             serde_json::json!({ "op": "deleteChat", "chatId": chat_id.clone() }),
             cx,
@@ -300,7 +300,7 @@ impl Shell {
         // Last session of a linked worktree: ask whether to remove the
         // checkout too. Captured before the mutate so the row is still in
         // the local list; children of this chat cascade and don't count.
-        self.delete_worktree_confirm = orphan;
+        self.dialogs.delete_worktree = orphan;
         cx.notify();
     }
 
@@ -331,7 +331,7 @@ impl Shell {
                 .await
             {
                 this.update(cx, |shell, cx| {
-                    shell.sidebar_notice =
+                    shell.sidebar.notice =
                         Some(format!("Scratch folder not removed: {err}").into());
                     cx.notify();
                 })
@@ -341,9 +341,9 @@ impl Shell {
     }
 
     pub(super) fn delete_worktree(&mut self, orphan: OrphanWorktree, cx: &mut Context<Self>) {
-        self.delete_worktree_confirm = None;
+        self.dialogs.delete_worktree = None;
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.sidebar_notice = Some("Engine not connected".into());
+            self.sidebar.notice = Some("Engine not connected".into());
             cx.notify();
             return;
         };
@@ -361,7 +361,7 @@ impl Shell {
                 .await
             {
                 this.update(cx, |shell, cx| {
-                    shell.sidebar_notice = Some(format!("{err}").into());
+                    shell.sidebar.notice = Some(format!("{err}").into());
                     cx.notify();
                 })
                 .ok();
@@ -375,7 +375,7 @@ impl Shell {
         if self.state.read(cx).workspace_scope != Some(WorkspaceScope::Synced) {
             return;
         }
-        self.sync_flow = SyncFlow::SignOutConfirm;
+        self.sync.flow = SyncFlow::SignOutConfirm;
         cx.notify();
     }
 
@@ -388,17 +388,17 @@ impl Shell {
         sign_out: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.runtime_change_task.is_some() {
+        if self.sync.runtime_change_task.is_some() {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.runtime_change_error = Some("Engine not connected".into());
-            self.sync_flow = SyncFlow::SignedOutRestartRequired;
+            self.sync.runtime_change_error = Some("Engine not connected".into());
+            self.sync.flow = SyncFlow::SignedOutRestartRequired;
             cx.notify();
             return;
         };
-        self.sync_flow = SyncFlow::SigningOut;
-        self.runtime_change_error = None;
+        self.sync.flow = SyncFlow::SigningOut;
+        self.sync.runtime_change_error = None;
         let ipc_socket = self.boot.ipc_socket.clone();
         let data_dir = self.boot.data_dir.clone();
         let shutdown_dir = data_dir.clone();
@@ -414,26 +414,26 @@ impl Shell {
         });
         let state = self.state.clone();
         let boot = self.boot.clone();
-        self.runtime_change_task = Some(cx.spawn(async move |this, cx| {
+        self.sync.runtime_change_task = Some(cx.spawn(async move |this, cx| {
             let result = match transition.await {
                 Ok(result) => result,
                 Err(error) => Err(error.to_string()),
             };
             this.update(cx, |shell, cx| {
-                shell.runtime_change_task = None;
+                shell.sync.runtime_change_task = None;
                 match result {
                     Ok(()) => {
-                        shell.sync_flow = SyncFlow::Idle;
-                        shell.runtime_change_error = None;
-                        shell.org = None;
+                        shell.sync.flow = SyncFlow::Idle;
+                        shell.sync.runtime_change_error = None;
+                        shell.sync.org = None;
                         shell.route = Route::Chat;
                         shell.space_boot_applied = false;
                         state.update(cx, |state, cx| state.prepare_runtime_replacement(cx));
                         AppState::bootstrap(state.clone(), shell.data_dir.clone(), boot, cx);
                     }
                     Err(error) => {
-                        shell.sync_flow = SyncFlow::SignedOutRestartRequired;
-                        shell.runtime_change_error = Some(error.into());
+                        shell.sync.flow = SyncFlow::SignedOutRestartRequired;
+                        shell.sync.runtime_change_error = Some(error.into());
                         cx.notify();
                     }
                 }
@@ -448,12 +448,12 @@ impl Shell {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let pending_auth = self.auth_task.take();
-        let pending_org = self.org.as_mut().and_then(|org| org.task.take());
+        let pending_auth = self.sync.auth_task.take();
+        let pending_org = self.sync.org.as_mut().and_then(|org| org.task.take());
         if local {
-            self.sync_flow = SyncFlow::Canceling;
+            self.sync.flow = SyncFlow::Canceling;
         }
-        self.auth_task = Some(cx.spawn(async move |this, cx| {
+        self.sync.auth_task = Some(cx.spawn(async move |this, cx| {
             // Do not race SignOut against an exchange or organization write
             // that can still persist a session after credentials were cleared.
             if let Some(task) = pending_auth {
@@ -469,16 +469,16 @@ impl Shell {
             this.update(cx, |shell, cx| {
                 match result {
                     Ok(_) => {
-                        shell.org = None;
+                        shell.sync.org = None;
                         if local {
-                            shell.sync_flow = SyncFlow::Idle;
+                            shell.sync.flow = SyncFlow::Idle;
                         }
                     }
                     Err(err) => {
                         if local {
-                            shell.sync_flow = SyncFlow::Enabling;
+                            shell.sync.flow = SyncFlow::Enabling;
                         }
-                        shell.sidebar_notice =
+                        shell.sidebar.notice =
                             Some(format!("Could not cancel sign-in: {err}").into());
                     }
                 }
@@ -490,15 +490,15 @@ impl Shell {
     }
 
     pub(super) fn postpone_sync_restart(&mut self, cx: &mut Context<Self>) {
-        match self.sync_flow {
+        match self.sync.flow {
             SyncFlow::RestartPending { .. } => {
-                self.sync_flow = SyncFlow::RestartPending { notice_open: false };
+                self.sync.flow = SyncFlow::RestartPending { notice_open: false };
             }
             SyncFlow::SwitchOffer { .. } => {
-                self.sync_flow = SyncFlow::SwitchOffer { notice_open: false };
+                self.sync.flow = SyncFlow::SwitchOffer { notice_open: false };
             }
             SyncFlow::ImportFailed { .. } => {
-                self.sync_flow = SyncFlow::ImportFailed { notice_open: false };
+                self.sync.flow = SyncFlow::ImportFailed { notice_open: false };
             }
             _ => return,
         }
@@ -507,15 +507,15 @@ impl Shell {
 
     pub(super) fn reopen_sync_notice(&mut self, cx: &mut Context<Self>) {
         self.close_user_menu(cx);
-        match self.sync_flow {
+        match self.sync.flow {
             SyncFlow::RestartPending { .. } => {
-                self.sync_flow = SyncFlow::RestartPending { notice_open: true };
+                self.sync.flow = SyncFlow::RestartPending { notice_open: true };
             }
             SyncFlow::SwitchOffer { .. } => {
-                self.sync_flow = SyncFlow::SwitchOffer { notice_open: true };
+                self.sync.flow = SyncFlow::SwitchOffer { notice_open: true };
             }
             SyncFlow::ImportFailed { .. } => {
-                self.sync_flow = SyncFlow::ImportFailed { notice_open: true };
+                self.sync.flow = SyncFlow::ImportFailed { notice_open: true };
             }
             _ => return,
         }
@@ -528,18 +528,18 @@ impl Shell {
     /// Failure falls back to the quit-and-reopen dialog — the local profile is
     /// untouched, so the old path is always a safe exit.
     pub(super) fn start_synced_switch(&mut self, import: bool, cx: &mut Context<Self>) {
-        if self.runtime_change_task.is_some() {
+        if self.sync.runtime_change_task.is_some() {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.runtime_change_error = Some("Engine not connected".into());
-            self.sync_flow = SyncFlow::RestartPending { notice_open: true };
+            self.sync.runtime_change_error = Some("Engine not connected".into());
+            self.sync.flow = SyncFlow::RestartPending { notice_open: true };
             cx.notify();
             return;
         };
-        self.sync_flow = SyncFlow::Switching { import };
-        self.runtime_change_error = None;
-        self.import_current = None;
+        self.sync.flow = SyncFlow::Switching { import };
+        self.sync.runtime_change_error = None;
+        self.sync.import_current = None;
         let ipc_socket = self.boot.ipc_socket.clone();
         let data_dir = self.boot.data_dir.clone();
         let transition = Tokio::spawn(cx, async move {
@@ -547,27 +547,27 @@ impl Shell {
         });
         let state = self.state.clone();
         let boot = self.boot.clone();
-        self.runtime_change_task = Some(cx.spawn(async move |this, cx| {
+        self.sync.runtime_change_task = Some(cx.spawn(async move |this, cx| {
             let result = match transition.await {
                 Ok(result) => result,
                 Err(error) => Err(error.to_string()),
             };
             this.update(cx, |shell, cx| {
-                shell.runtime_change_task = None;
+                shell.sync.runtime_change_task = None;
                 match result {
                     Ok(()) => {
                         // Keep `Switching { import }`: the state observer sees
                         // the replacement runtime reach Ready and advances the
                         // wizard from there.
-                        shell.org = None;
+                        shell.sync.org = None;
                         shell.route = Route::Chat;
                         shell.space_boot_applied = false;
                         state.update(cx, |state, cx| state.prepare_runtime_replacement(cx));
                         AppState::bootstrap(state.clone(), shell.data_dir.clone(), boot, cx);
                     }
                     Err(error) => {
-                        shell.sync_flow = SyncFlow::RestartPending { notice_open: true };
-                        shell.runtime_change_error = Some(error.into());
+                        shell.sync.flow = SyncFlow::RestartPending { notice_open: true };
+                        shell.sync.runtime_change_error = Some(error.into());
                         cx.notify();
                     }
                 }
@@ -582,10 +582,10 @@ impl Shell {
     /// chose a fresh start); a runtime that comes back non-synced fell out of
     /// the swap — surface the quit fallback rather than pretend.
     pub(super) fn drive_sync_switch(&mut self, cx: &mut Context<Self>) {
-        let SyncFlow::Switching { import } = self.sync_flow else {
+        let SyncFlow::Switching { import } = self.sync.flow else {
             return;
         };
-        if self.runtime_change_task.is_some() {
+        if self.sync.runtime_change_task.is_some() {
             return; // still stopping the local runtime
         }
         let (ready, scope) = {
@@ -597,8 +597,8 @@ impl Shell {
         };
         if !ready {
             if let ConnectionStatus::Failed(error) = &self.state.read(cx).connection {
-                self.sync_flow = SyncFlow::RestartPending { notice_open: true };
-                self.runtime_change_error = Some(error.clone().into());
+                self.sync.flow = SyncFlow::RestartPending { notice_open: true };
+                self.sync.runtime_change_error = Some(error.clone().into());
                 cx.notify();
             }
             return;
@@ -608,13 +608,13 @@ impl Shell {
                 if import {
                     self.spawn_local_import(cx);
                 } else {
-                    self.sync_flow = SyncFlow::Idle;
+                    self.sync.flow = SyncFlow::Idle;
                     cx.notify();
                 }
             }
             Some(_) => {
-                self.sync_flow = SyncFlow::RestartPending { notice_open: true };
-                self.runtime_change_error =
+                self.sync.flow = SyncFlow::RestartPending { notice_open: true };
+                self.sync.runtime_change_error =
                     Some("The synced workspace did not come up — restart to finish.".into());
                 cx.notify();
             }
@@ -625,17 +625,17 @@ impl Shell {
     /// Subscribe to the engine's one-time import stream and mirror its
     /// progress into the wizard.
     pub(super) fn spawn_local_import(&mut self, cx: &mut Context<Self>) {
-        if self.import_task.is_some() {
+        if self.sync.import_task.is_some() {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.sync_flow = SyncFlow::RestartPending { notice_open: true };
-            self.runtime_change_error = Some("Engine not connected".into());
+            self.sync.flow = SyncFlow::RestartPending { notice_open: true };
+            self.sync.runtime_change_error = Some("Engine not connected".into());
             cx.notify();
             return;
         };
-        self.sync_flow = SyncFlow::Importing { done: 0, total: 0 };
-        self.runtime_change_error = None;
+        self.sync.flow = SyncFlow::Importing { done: 0, total: 0 };
+        self.sync.runtime_change_error = None;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
         let stream = Tokio::spawn(cx, async move {
             let mut items = engine
@@ -648,7 +648,7 @@ impl Shell {
             }
             Ok::<(), String>(())
         });
-        self.import_task = Some(cx.spawn(async move |this, cx| {
+        self.sync.import_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 let item = rx.recv().await;
                 let ended = item.is_none();
@@ -657,13 +657,13 @@ impl Shell {
                         shell.apply_import_event(item, cx);
                     }
                     if ended {
-                        shell.import_task = None;
-                        shell.import_current = None;
+                        shell.sync.import_task = None;
+                        shell.sync.import_current = None;
                         // A stream that died before its summary is a failure —
                         // offer the in-place retry (idempotent).
-                        if matches!(shell.sync_flow, SyncFlow::Importing { .. }) {
-                            shell.sync_flow = SyncFlow::ImportFailed { notice_open: true };
-                            shell.runtime_change_error =
+                        if matches!(shell.sync.flow, SyncFlow::Importing { .. }) {
+                            shell.sync.flow = SyncFlow::ImportFailed { notice_open: true };
+                            shell.sync.runtime_change_error =
                                 Some("The import stream ended before it finished.".into());
                         }
                         cx.notify();
@@ -676,10 +676,10 @@ impl Shell {
             }
             if let Ok(Err(error)) = stream.await {
                 this.update(cx, |shell, cx| {
-                    shell.import_task = None;
-                    if matches!(shell.sync_flow, SyncFlow::Importing { .. }) {
-                        shell.sync_flow = SyncFlow::ImportFailed { notice_open: true };
-                        shell.runtime_change_error = Some(error.into());
+                    shell.sync.import_task = None;
+                    if matches!(shell.sync.flow, SyncFlow::Importing { .. }) {
+                        shell.sync.flow = SyncFlow::ImportFailed { notice_open: true };
+                        shell.sync.runtime_change_error = Some(error.into());
                         cx.notify();
                     }
                 })
@@ -693,30 +693,30 @@ impl Shell {
         match item.get("kind").and_then(|k| k.as_str()) {
             Some("start") => {
                 let total = item.get("chats").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                self.sync_flow = SyncFlow::Importing { done: 0, total };
+                self.sync.flow = SyncFlow::Importing { done: 0, total };
             }
             Some("chat") => {
                 let index = item.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let total = item.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                self.import_current = item
+                self.sync.import_current = item
                     .get("title")
                     .and_then(|v| v.as_str())
                     .map(|t| SharedString::from(t.to_string()));
-                self.sync_flow = SyncFlow::Importing { done: index, total };
+                self.sync.flow = SyncFlow::Importing { done: index, total };
             }
             Some("summary") => {
-                self.import_current = None;
+                self.sync.import_current = None;
                 // A summary with errors is a FAILED import, however normally
                 // the stream ended — never present a partial migration as
                 // complete (the engine keeps collecting per-item failures
                 // precisely so this can be surfaced).
                 match import_summary_outcome(item) {
                     Ok((imported, skipped)) => {
-                        self.sync_flow = SyncFlow::ImportDone { imported, skipped };
+                        self.sync.flow = SyncFlow::ImportDone { imported, skipped };
                     }
                     Err(message) => {
-                        self.sync_flow = SyncFlow::ImportFailed { notice_open: true };
-                        self.runtime_change_error = Some(message.into());
+                        self.sync.flow = SyncFlow::ImportFailed { notice_open: true };
+                        self.sync.runtime_change_error = Some(message.into());
                     }
                 }
             }
@@ -727,7 +727,7 @@ impl Shell {
 
     pub(super) fn quit_for_runtime_change(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.runtime_change_error = Some("Engine not connected".into());
+            self.sync.runtime_change_error = Some("Engine not connected".into());
             cx.notify();
             return;
         };
@@ -735,11 +735,11 @@ impl Shell {
             cx.quit();
             return;
         }
-        if self.runtime_change_task.is_some() {
+        if self.sync.runtime_change_task.is_some() {
             return;
         }
 
-        self.runtime_change_error = None;
+        self.sync.runtime_change_error = None;
         let ipc_socket = self.boot.ipc_socket.clone();
         let data_dir = self.boot.data_dir.clone();
         let shutdown = Tokio::spawn(cx, async move {
@@ -750,17 +750,17 @@ impl Shell {
                 .map_err(|err| err.to_string())?;
             wait_for_remote_engine_shutdown(ipc_socket, &data_dir, RUNTIME_CHANGE_TIMEOUT).await
         });
-        self.runtime_change_task = Some(cx.spawn(async move |this, cx| {
+        self.sync.runtime_change_task = Some(cx.spawn(async move |this, cx| {
             let result = match shutdown.await {
                 Ok(result) => result,
                 Err(err) => Err(err.to_string()),
             };
             this.update(cx, |shell, cx| {
-                shell.runtime_change_task = None;
+                shell.sync.runtime_change_task = None;
                 match result {
                     Ok(_) => cx.quit(),
                     Err(err) => {
-                        shell.runtime_change_error = Some(format!(
+                        shell.sync.runtime_change_error = Some(format!(
                             "Could not stop the remote engine: {err}. Run `cypher daemon stop`, then quit and reopen Cypher."
                         ).into());
                         cx.notify();
@@ -779,12 +779,12 @@ impl Shell {
         }
         self.close_user_menu(cx);
         if scope == Some(WorkspaceScope::Local) {
-            self.sync_flow = SyncFlow::Enabling;
+            self.sync.flow = SyncFlow::Enabling;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        self.auth_task = Some(cx.spawn(async move |this, cx| {
+        self.sync.auth_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call(methods::SIGN_IN, serde_json::json!({}))
@@ -797,11 +797,11 @@ impl Shell {
                     cx.notify();
                 }
                 Err(err) => {
-                    if scope == Some(WorkspaceScope::Local) && shell.sync_flow == SyncFlow::Enabling
+                    if scope == Some(WorkspaceScope::Local) && shell.sync.flow == SyncFlow::Enabling
                     {
-                        shell.sync_flow = SyncFlow::Idle;
+                        shell.sync.flow = SyncFlow::Idle;
                     }
-                    shell.sidebar_notice = Some(format!("Sign in failed: {err}").into());
+                    shell.sidebar.notice = Some(format!("Sign in failed: {err}").into());
                     cx.notify();
                 }
             })

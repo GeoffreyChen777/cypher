@@ -4,8 +4,8 @@ use super::*;
 
 impl Shell {
     fn close_space_style_menu(&mut self, cx: &mut Context<Self>) {
-        if self.space_style_menu.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.space_style_menu);
+        if self.menus.space_style.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.menus.space_style);
             cx.notify();
         }
     }
@@ -39,8 +39,8 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (space_id, position) = self.space_style_menu.get().cloned()?;
-        let closing = self.space_style_menu.closing_since();
+        let (space_id, position) = self.menus.space_style.get().cloned()?;
+        let closing = self.menus.space_style.closing_since();
         let (icon_key, color_key) = {
             let state = self.state.read(cx);
             let space = state.space_row(&space_id);

@@ -297,7 +297,7 @@ impl Shell {
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
                     this.close_space_menu(cx);
-                    this.sidebar_view_menu.open(event.position);
+                    this.menus.sidebar_view.open(event.position);
                     cx.notify();
                 }),
             )

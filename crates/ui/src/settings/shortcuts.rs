@@ -10,6 +10,7 @@ use gpui::{
 
 use crate::kit::theme::{MonoStyled, Theme};
 use crate::prefs::{KeymapConfig, ShortcutGroup, ShortcutId, combo_from_keystroke, display_combo};
+use crate::settings::widgets;
 use crate::state::AppState;
 
 /// Outcome of one keystroke while recording. Pure.
@@ -149,145 +150,14 @@ fn description(id: ShortcutId) -> &'static str {
 
 impl Render for ShortcutsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        use crate::settings::widgets;
         let theme = Theme::of(cx).clone();
         let recording = self.recording;
         let customized = self.keymap != KeymapConfig::default();
 
-        let row = |ix: usize, first: bool, id: ShortcutId, cx: &mut Context<Self>| {
-            let combo = self.keymap.get(id).to_string();
-            let is_recording = recording == Some(id);
-            let non_default = combo != id.default_combo();
-            let chip_text: SharedString = if is_recording {
-                "Press keys…".into()
-            } else {
-                display_combo(&combo).into()
-            };
-            // zeron settings.shortcuts.tsx row: min-h-[72px] px-5 gap-5, label
-            // + description left, Reset (only when modified), then the combo
-            // chip — recording inverts it to white-on-black.
-            div()
-                .min_h(px(72.0))
-                .px(px(20.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(20.0))
-                .when(!first, |el| el.border_t_1().border_color(theme.border))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(SharedString::from(id.label())),
-                        )
-                        .child(
-                            div()
-                                .mt(px(2.0))
-                                .text_size(px(12.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(description(id))),
-                        ),
-                )
-                .when(non_default && !is_recording, |el| {
-                    el.child(
-                        div()
-                            .id(("shortcut-reset", ix))
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted.opacity(0.7))
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.text))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.keymap.reset(id);
-                                this.recording = None;
-                                this.commit(cx);
-                            }))
-                            .child(SharedString::from("Reset")),
-                    )
-                })
-                .child(
-                    div()
-                        .id(("shortcut-combo", ix))
-                        .min_w(px(96.0))
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .flex()
-                        .justify_center()
-                        .mono(&theme)
-                        .text_size(px(12.0))
-                        .cursor_pointer()
-                        .map(|el| {
-                            if is_recording {
-                                el.border_color(theme.text.opacity(0.3))
-                                    .bg(theme.text)
-                                    .text_color(theme.on_solid)
-                            } else {
-                                el.border_color(theme.border)
-                                    .bg(theme.bg)
-                                    .text_color(theme.text)
-                                    .hover(|s| {
-                                        // `hover:border-foreground/20` — the
-                                        // neutral foreground, not pure white.
-                                        s.border_color(theme.text.opacity(0.2))
-                                            .bg(crate::kit::theme::ink(0.03))
-                                    })
-                            }
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.recording = Some(id);
-                            this.conflict_notice = None;
-                            window.focus(&this.focus, cx);
-                            cx.notify();
-                        }))
-                        .child(chip_text),
-                )
-        };
-        // One card per group; ids index `ShortcutId::ALL` so they stay unique
-        // across cards.
-        let mut sections = Vec::new();
-        for group in ShortcutGroup::ALL {
-            let ids: Vec<(usize, ShortcutId)> = ShortcutId::ALL
-                .into_iter()
-                .enumerate()
-                .filter(|(_, id)| id.group() == group)
-                .collect();
-            let rows: Vec<_> = ids
-                .iter()
-                .enumerate()
-                .map(|(n, &(ix, id))| row(ix, n == 0, id, cx))
-                .collect();
-            sections.push(
-                div()
-                    .mt(px(32.0))
-                    .flex()
-                    .flex_col()
-                    .child(widgets::field_label(&theme, group.label()).px(px(4.0)))
-                    .child(widgets::section_card(&theme).mt(px(8.0)).children(rows))
-                    .when(group == ShortcutGroup::Workspace, |el| {
-                        // The fixed tile keys, next to the verbs they extend.
-                        el.child(
-                            div()
-                                .mt(px(8.0))
-                                .px(px(4.0))
-                                .text_size(px(12.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(format!(
-                                    "{}…{} focus the first to ninth tile.",
-                                    display_combo("mod-1"),
-                                    display_combo("mod-9")
-                                ))),
-                        )
-                    }),
-            );
-        }
+        let sections: Vec<_> = ShortcutGroup::ALL
+            .into_iter()
+            .map(|group| self.shortcut_section(group, &theme, cx))
+            .collect();
 
         // Helper line stays in the muted tone even for a rejected conflict —
         // the message names the specific clash (zeron settings.shortcuts.tsx).
@@ -309,59 +179,12 @@ impl Render for ShortcutsPage {
             )
             .child(
                 widgets::page_column()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_start()
-                            .justify_between()
-                            .gap(px(24.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .child(widgets::page_header(&theme, "Keyboard shortcuts", None))
-                                    .child(
-                                        widgets::page_subtitle(
-                                            &theme,
-                                            "Click a binding, then press the key combination you \
-                                             want to use. Changes apply immediately and stay on \
-                                             this device.",
-                                        )
-                                        .max_w(px(512.0))
-                                        .line_height(px(20.0)),
-                                    ),
-                            )
-                            .child({
-                                // `disabled:opacity-35` when nothing is
-                                // customized or while recording.
-                                let disabled = !customized || recording.is_some();
-                                widgets::ghost_action(&theme)
-                                    .id("shortcuts-restore-defaults")
-                                    .flex_none()
-                                    .when(disabled, |el| el.opacity(0.35))
-                                    .when(!disabled, |el| {
-                                        el.hover(|s| {
-                                            s.bg(crate::kit::theme::ink(0.04))
-                                                .text_color(theme.text)
-                                        })
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.keymap = KeymapConfig::default();
-                                                this.recording = None;
-                                                this.conflict_notice = None;
-                                                this.commit(cx);
-                                            }),
-                                        )
-                                    })
-                                    .child(
-                                        crate::kit::icons::icon(crate::kit::icons::RESTART)
-                                            .size(px(14.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .child(SharedString::from("Restore defaults"))
-                            }),
-                    )
+                    .child(shortcuts_header(
+                        customized,
+                        recording.is_some(),
+                        &theme,
+                        cx,
+                    ))
                     .children(sections)
                     .child(
                         div()
@@ -374,6 +197,208 @@ impl Render for ShortcutsPage {
                     ),
             )
     }
+}
+
+impl ShortcutsPage {
+    /// One shortcut (zeron settings.shortcuts.tsx row: min-h-[72px] px-5
+    /// gap-5): label + description left, Reset (only when modified), then
+    /// the combo chip — recording inverts it to white-on-black.
+    fn shortcut_row(
+        &self,
+        ix: usize,
+        first: bool,
+        id: ShortcutId,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let combo = self.keymap.get(id).to_string();
+        let is_recording = self.recording == Some(id);
+        let non_default = combo != id.default_combo();
+        let chip_text: SharedString = if is_recording {
+            "Press keys…".into()
+        } else {
+            display_combo(&combo).into()
+        };
+        div()
+            .min_h(px(72.0))
+            .px(px(20.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(20.0))
+            .when(!first, |el| el.border_t_1().border_color(theme.border))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(SharedString::from(id.label())),
+                    )
+                    .child(
+                        div()
+                            .mt(px(2.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(description(id))),
+                    ),
+            )
+            .when(non_default && !is_recording, |el| {
+                el.child(
+                    div()
+                        .id(("shortcut-reset", ix))
+                        .text_size(px(11.0))
+                        .text_color(theme.text_muted.opacity(0.7))
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.keymap.reset(id);
+                            this.recording = None;
+                            this.commit(cx);
+                        }))
+                        .child(SharedString::from("Reset")),
+                )
+            })
+            .child(
+                div()
+                    .id(("shortcut-combo", ix))
+                    .min_w(px(96.0))
+                    .px(px(12.0))
+                    .py(px(6.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .flex()
+                    .justify_center()
+                    .mono(theme)
+                    .text_size(px(12.0))
+                    .cursor_pointer()
+                    .map(|el| {
+                        if is_recording {
+                            el.border_color(theme.text.opacity(0.3))
+                                .bg(theme.text)
+                                .text_color(theme.on_solid)
+                        } else {
+                            el.border_color(theme.border)
+                                .bg(theme.bg)
+                                .text_color(theme.text)
+                                .hover(|s| {
+                                    // `hover:border-foreground/20` — the
+                                    // neutral foreground, not pure white.
+                                    s.border_color(theme.text.opacity(0.2))
+                                        .bg(crate::kit::theme::ink(0.03))
+                                })
+                        }
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.recording = Some(id);
+                        this.conflict_notice = None;
+                        window.focus(&this.focus, cx);
+                        cx.notify();
+                    }))
+                    .child(chip_text),
+            )
+    }
+
+    /// One card per group; ids index `ShortcutId::ALL` so they stay unique
+    /// across cards.
+    fn shortcut_section(
+        &self,
+        group: ShortcutGroup,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let ids: Vec<(usize, ShortcutId)> = ShortcutId::ALL
+            .into_iter()
+            .enumerate()
+            .filter(|(_, id)| id.group() == group)
+            .collect();
+        let rows: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(n, &(ix, id))| self.shortcut_row(ix, n == 0, id, theme, cx))
+            .collect();
+        div()
+            .mt(px(32.0))
+            .flex()
+            .flex_col()
+            .child(widgets::field_label(theme, group.label()).px(px(4.0)))
+            .child(widgets::section_card(theme).mt(px(8.0)).children(rows))
+            .when(group == ShortcutGroup::Workspace, |el| {
+                // The fixed tile keys, next to the verbs they extend.
+                el.child(
+                    div()
+                        .mt(px(8.0))
+                        .px(px(4.0))
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(format!(
+                            "{}…{} focus the first to ninth tile.",
+                            display_combo("mod-1"),
+                            display_combo("mod-9")
+                        ))),
+                )
+            })
+    }
+}
+
+/// The page title and caption, with Restore defaults.
+fn shortcuts_header(
+    customized: bool,
+    recording: bool,
+    theme: &Theme,
+    cx: &mut Context<ShortcutsPage>,
+) -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .justify_between()
+        .gap(px(24.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(widgets::page_header(theme, "Keyboard shortcuts", None))
+                .child(
+                    widgets::page_subtitle(
+                        theme,
+                        "Click a binding, then press the key combination you \
+                             want to use. Changes apply immediately and stay on \
+                             this device.",
+                    )
+                    .max_w(px(512.0))
+                    .line_height(px(20.0)),
+                ),
+        )
+        .child({
+            // `disabled:opacity-35` when nothing is
+            // customized or while recording.
+            let disabled = !customized || recording;
+            widgets::ghost_action(theme)
+                .id("shortcuts-restore-defaults")
+                .flex_none()
+                .when(disabled, |el| el.opacity(0.35))
+                .when(!disabled, |el| {
+                    el.hover(|s| s.bg(crate::kit::theme::ink(0.04)).text_color(theme.text))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.keymap = KeymapConfig::default();
+                            this.recording = None;
+                            this.conflict_notice = None;
+                            this.commit(cx);
+                        }))
+                })
+                .child(
+                    crate::kit::icons::icon(crate::kit::icons::RESTART)
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(SharedString::from("Restore defaults"))
+        })
 }
 
 #[cfg(test)]

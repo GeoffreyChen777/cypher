@@ -15,8 +15,8 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self.user_menu.is_open();
-        let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
+        let open = self.menus.user.is_open();
+        let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync.flow);
         // Bottom-of-sidebar identity: avatar circle + scope/account label and
         // its secondary status line.
         let initial: SharedString = user_line
@@ -25,45 +25,7 @@ impl Shell {
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_else(|| "?".into())
             .into();
-        // Avatar: the GitHub/WorkOS profile picture when one is on the
-        // account, else (and on any load failure) the white circle with the
-        // initial in near-black (zeron user-menu.tsx).
-        let fallback_avatar = {
-            let initial = initial.clone();
-            let theme = theme.clone();
-            move || {
-                div()
-                    .size(px(26.0))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(theme.text)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.bg)
-                    .child(initial.clone())
-                    .into_any_element()
-            }
-        };
-        // Final UI-side guard: only a bounded HTTPS URL may reach gpui's
-        // `img` — anything else renders the initial-letter avatar instead and
-        // can never be interpreted as a local file.
-        let avatar = match safe_avatar_url(avatar_url) {
-            Some(url) => {
-                let loading = fallback_avatar.clone();
-                gpui::img(url)
-                    .size(px(26.0))
-                    .flex_none()
-                    .rounded_full()
-                    .object_fit(gpui::ObjectFit::Cover)
-                    .with_loading(loading)
-                    .with_fallback(fallback_avatar)
-                    .into_any_element()
-            }
-            None => fallback_avatar(),
-        };
+        let avatar = user_avatar(initial, avatar_url, theme);
         let mut trigger = div()
             .id("user-menu")
             .flex_none()
@@ -90,15 +52,15 @@ impl Shell {
             .on_hover(motion::hover_listener("user-menu-trigger"))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.user_menu.note_trigger_press()),
+                cx.listener(|this, _, _, _| this.menus.user.note_trigger_press()),
             )
             .on_click(cx.listener(|this, _, _, cx| {
                 // A press that found the menu open closes it (the card's
                 // mouse-down-out already began the close) — never reopen.
-                if this.user_menu.take_press_was_open() {
+                if this.menus.user.take_press_was_open() {
                     this.close_user_menu(cx);
                 } else {
-                    this.user_menu.open(());
+                    this.menus.user.open(());
                 }
                 cx.notify();
             }))
@@ -129,102 +91,9 @@ impl Shell {
                         )
                     }),
             );
-        if self.user_menu.get().is_some() {
-            // Floating menus stay on the overall palette, not the sidebar's
-            // independently overridden foreground/background pair.
-            let popup_theme = Theme::of(cx).clone();
-            let theme = &popup_theme;
-            let closing = self.user_menu.closing_since();
-            // user-menu.tsx content: `w-[--radix-dropdown-menu-trigger-width]`
-            // (exactly as wide as the trigger row — sidebar minus its p-2
-            // gutters), `flex-col gap-0.5`, then: one small muted email line
-            // (`px-2 pb-1 pt-1.5 text-[11px] text-muted-foreground/70`),
-            // the action selected by the runtime scope, then "Settings".
-            let menu = popover::popover_card(theme)
-                .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.close_user_menu(cx);
-                }))
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .px(px(8.0))
-                        .pt(px(6.0))
-                        .pb(px(4.0))
-                        .text_size(px(11.0))
-                        .text_color(theme.text_muted.opacity(0.7))
-                        .truncate()
-                        .child(menu_identity),
-                )
-                .when_some(action, |menu, action| {
-                    let row = match action {
-                        AccountMenuAction::EnableSync => {
-                            popover::menu_row(theme, false, "user-menu-enable-sync")
-                                .id("user-menu-enable-sync")
-                                .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
-                                .child(
-                                    icon(icons::GLOBAL)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Enable sync"))
-                                .into_any_element()
-                        }
-                        AccountMenuAction::SyncInProgress => {
-                            popover::menu_row(theme, false, "user-menu-sync-progress")
-                                .id("user-menu-sync-progress")
-                                .opacity(0.6)
-                                .child(
-                                    icon(icons::GLOBAL)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Sync setup in progress"))
-                                .into_any_element()
-                        }
-                        AccountMenuAction::RestartPending => {
-                            popover::menu_row(theme, false, "user-menu-sync-restart")
-                                .id("user-menu-sync-restart")
-                                .on_click(cx.listener(|this, _, _, cx| this.reopen_sync_notice(cx)))
-                                .child(
-                                    icon(icons::RESTART)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Finish sync setup"))
-                                .into_any_element()
-                        }
-                        AccountMenuAction::SignOut => {
-                            popover::menu_row(theme, false, "user-menu-signout")
-                                .id("user-menu-signout")
-                                .on_click(cx.listener(|this, _, _, cx| this.request_sign_out(cx)))
-                                .child(
-                                    icon(icons::LOGOUT_2)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Sign out"))
-                                .into_any_element()
-                        }
-                    };
-                    menu.child(row).child(popover::menu_separator())
-                })
-                .child(
-                    popover::menu_row(theme, false, "user-menu-settings")
-                        .id("user-menu-settings")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_settings(SettingsSection::Harnesses, cx)
-                        }))
-                        .child(
-                            icon(icons::SETTINGS_MINIMALISTIC)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(SharedString::from("Settings")),
-                )
-                .into_any_element();
+        if self.menus.user.get().is_some() {
+            let closing = self.menus.user.closing_since();
+            let menu = self.render_user_menu_card(menu_identity, action, cx);
             trigger = trigger.child(popover::anchored_menu_above(
                 "user-menu-popover",
                 menu,
@@ -232,6 +101,61 @@ impl Shell {
             ));
         }
         trigger.into_any_element()
+    }
+
+    /// The account menu: the identity line, the scope's account action, then
+    /// Settings.
+    fn render_user_menu_card(
+        &self,
+        menu_identity: SharedString,
+        action: Option<AccountMenuAction>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Floating menus stay on the overall palette, not the sidebar's
+        // independently overridden foreground/background pair.
+        let popup_theme = Theme::of(cx).clone();
+        let theme = &popup_theme;
+        // user-menu.tsx content: `w-[--radix-dropdown-menu-trigger-width]`
+        // (exactly as wide as the trigger row — sidebar minus its p-2
+        // gutters), `flex-col gap-0.5`, then: one small muted email line
+        // (`px-2 pb-1 pt-1.5 text-[11px] text-muted-foreground/70`),
+        // the action selected by the runtime scope, then "Settings".
+        popover::popover_card(theme)
+            .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.close_user_menu(cx);
+            }))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .pt(px(6.0))
+                    .pb(px(4.0))
+                    .text_size(px(11.0))
+                    .text_color(theme.text_muted.opacity(0.7))
+                    .truncate()
+                    .child(menu_identity),
+            )
+            .when_some(action, |menu, action| {
+                let row = account_action_row(action, theme, cx);
+                menu.child(row).child(popover::menu_separator())
+            })
+            .child(
+                popover::menu_row(theme, false, "user-menu-settings")
+                    .id("user-menu-settings")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.open_settings(SettingsSection::Harnesses, cx)
+                    }))
+                    .child(
+                        icon(icons::SETTINGS_MINIMALISTIC)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(SharedString::from("Settings")),
+            )
+            .into_any_element()
     }
 
     fn render_sync_overlay(
@@ -249,7 +173,7 @@ impl Shell {
             .read(cx)
             .engine()
             .is_some_and(|engine| matches!(engine.mode(), EngineMode::Remote { .. }));
-        let runtime_change_label = if self.runtime_change_task.is_some() {
+        let runtime_change_label = if self.sync.runtime_change_task.is_some() {
             "Stopping engine…"
         } else if remote_engine {
             "Stop daemon and quit"
@@ -257,7 +181,7 @@ impl Shell {
             "Quit Cypher"
         };
 
-        if self.sync_flow == SyncFlow::Enabling && needs_org {
+        if self.sync.flow == SyncFlow::Enabling && needs_org {
             return Some(self.render_org_gate(cx));
         }
 
@@ -273,38 +197,8 @@ impl Shell {
         };
         let work_phrase = local_work_phrase(local_chats, local_spaces);
 
-        let card = match self.sync_flow {
-            SyncFlow::Enabling => popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Enable sync"))
-                .child(
-                    div().mt(px(6.0)).child(popover::dialog_body(
-                        &theme,
-                        "Finish signing in in your browser. Cypher will keep using this local workspace until you quit and reopen.",
-                    )),
-                )
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Cancel", "sync-enable-cancel")
-                                .id("sync-enable-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.cancel_auth_setup(cx)
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, "Open browser again")
-                                .id("sync-enable-open-browser")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_sign_in(cx)
-                                })),
-                        ),
-                )
-                .into_any_element(),
+        let card = match self.sync.flow {
+            SyncFlow::Enabling => self.sync_card_enabling(&theme, cx),
             SyncFlow::Canceling => popover::dialog_card(&theme)
                 .child(popover::dialog_title(&theme, "Canceling sync setup…"))
                 .child(
@@ -316,65 +210,7 @@ impl Shell {
                 .into_any_element(),
             // ── in-place switch wizard ────────────────────────────────────
             SyncFlow::SwitchOffer { notice_open: true } => {
-                let has_local_work = work_phrase.is_some();
-                let body: SharedString = match (&signed_in_email, &work_phrase) {
-                    (Some(email), Some(phrase)) => format!(
-                        "You're signed in as {email}. Bring {phrase} from this device into your synced workspace, or start it fresh."
-                    )
-                    .into(),
-                    (Some(email), None) => format!(
-                        "You're signed in as {email}. Cypher can switch to your synced workspace now."
-                    )
-                    .into(),
-                    (None, Some(phrase)) => format!(
-                        "Bring {phrase} from this device into your synced workspace, or start it fresh."
-                    )
-                    .into(),
-                    (None, None) => "Cypher can switch to your synced workspace now.".into(),
-                };
-                let mut actions = div()
-                    .mt(px(16.0))
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap(px(8.0))
-                    .child(
-                        popover::btn_ghost(&theme, "Later", "sync-switch-later")
-                            .id("sync-switch-later")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.postpone_sync_restart(cx)
-                            })),
-                    );
-                if has_local_work {
-                    actions = actions
-                        .child(
-                            popover::btn_ghost(&theme, "Start fresh", "sync-switch-fresh")
-                                .id("sync-switch-fresh")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_synced_switch(false, cx)
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, "Bring my work")
-                                .id("sync-switch-import")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_synced_switch(true, cx)
-                                })),
-                        );
-                } else {
-                    actions = actions.child(
-                        popover::btn_primary(&theme, "Switch now")
-                            .id("sync-switch-now")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.start_synced_switch(false, cx)
-                            })),
-                    );
-                }
-                popover::dialog_card(&theme)
-                    .child(popover::dialog_title(&theme, "Sync is ready"))
-                    .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, body)))
-                    .child(actions)
-                    .into_any_element()
+                self.sync_card_switch_offer(&signed_in_email, &work_phrase, &theme, cx)
             }
             SyncFlow::Switching { import } => popover::dialog_card(&theme)
                 .child(popover::dialog_title(
@@ -391,208 +227,18 @@ impl Shell {
                 )))
                 .into_any_element(),
             SyncFlow::Importing { done, total } => {
-                let fraction = if total == 0 {
-                    0.0
-                } else {
-                    (done as f32 / total as f32).clamp(0.0, 1.0)
-                };
-                let label: SharedString = if total == 0 {
-                    "Looking for local sessions…".into()
-                } else {
-                    format!("Importing session {} of {total}", (done + 1).min(total)).into()
-                };
-                let mut card = popover::dialog_card(&theme)
-                    .child(popover::dialog_title(&theme, "Bringing your work over"))
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .child(popover::dialog_body(&theme, label)),
-                    );
-                if let Some(current) = self.import_current.clone() {
-                    card = card.child(
-                        div()
-                            .mt(px(4.0))
-                            .text_size(px(12.0))
-                            .line_height(px(17.0))
-                            .text_color(theme.text_muted)
-                            .overflow_hidden()
-                            .child(current),
-                    );
-                }
-                card.child(
-                    // Determinate progress: a hairline track with an accent fill.
-                    div()
-                        .mt(px(14.0))
-                        .h(px(4.0))
-                        .w_full()
-                        .rounded(px(2.0))
-                        .bg(theme.border)
-                        .child(
-                            div()
-                                .h_full()
-                                .rounded(px(2.0))
-                                .bg(theme.accent_strong)
-                                .w(gpui::relative(fraction.max(0.04))),
-                        ),
-                )
-                .into_any_element()
+                self.sync_card_importing(done, total, &theme)
             }
             SyncFlow::ImportDone { imported, skipped } => {
-                let body: SharedString = match (imported, skipped) {
-                    (0, 0) => "Your synced workspace is ready.".into(),
-                    (n, 0) => format!(
-                        "{n} session{} moved into your synced workspace.",
-                        if n == 1 { "" } else { "s" },
-                    )
-                    .into(),
-                    (n, s) => format!(
-                        "{n} session{} imported, {s} already present.",
-                        if n == 1 { "" } else { "s" },
-                    )
-                    .into(),
-                };
-                popover::dialog_card(&theme)
-                    .child(popover::dialog_title(&theme, "You're all set"))
-                    .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, body)))
-                    .child(
-                        div()
-                            .mt(px(16.0))
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .child(
-                                popover::btn_primary(&theme, "Continue")
-                                    .id("sync-switch-done")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.sync_flow = SyncFlow::Idle;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .into_any_element()
+                self.sync_card_import_done(imported, skipped, &theme, cx)
             }
-            SyncFlow::ImportFailed { notice_open: true } => popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Import didn't finish"))
-                .child(div().mt(px(6.0)).child(popover::dialog_body(
-                    &theme,
-                    "Anything already imported is kept; retrying only copies what's missing.",
-                )))
-                .when_some(self.runtime_change_error.clone(), |card, error| {
-                    card.child(
-                        div()
-                            .mt(px(10.0))
-                            .text_size(px(12.0))
-                            .line_height(px(17.0))
-                            .text_color(theme.danger)
-                            .child(error),
-                    )
-                })
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Later", "import-failed-dismiss")
-                                .id("import-failed-dismiss")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.postpone_sync_restart(cx)
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, "Retry import")
-                                .id("import-failed-retry")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.spawn_local_import(cx)
-                                })),
-                        ),
-                )
-                .into_any_element(),
-            SyncFlow::RestartPending { notice_open: true } => popover::dialog_card(&theme)
-                .child(popover::dialog_title(
-                    &theme,
-                    "Sync needs a restart",
-                ))
-                .child(
-                    div().mt(px(6.0)).child(popover::dialog_body(
-                        &theme,
-                        if remote_engine {
-                            "Cypher is using a background daemon. Stop it and quit Cypher, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
-                        } else {
-                            "Quit and reopen Cypher to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
-                        },
-                    )),
-                )
-                .when_some(self.runtime_change_error.clone(), |card, error| {
-                    card.child(
-                        div()
-                            .mt(px(10.0))
-                            .text_size(px(12.0))
-                            .line_height(px(17.0))
-                            .text_color(theme.danger)
-                            .child(error),
-                    )
-                })
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Later", "sync-restart-later")
-                                .id("sync-restart-later")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.postpone_sync_restart(cx)
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, runtime_change_label)
-                                .id("sync-restart-quit")
-                                .when(self.runtime_change_task.is_some(), |button| {
-                                    button.opacity(0.6)
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.quit_for_runtime_change(cx)
-                                })),
-                        ),
-                )
-                .into_any_element(),
-            SyncFlow::SignOutConfirm => popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Sign out?"))
-                .child(
-                    div().mt(px(6.0)).child(popover::dialog_body(
-                        &theme,
-                        "Cypher will remove your credentials, close the synced workspace, and continue in local mode.",
-                    )),
-                )
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Cancel", "signout-cancel")
-                                .id("signout-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.sync_flow = SyncFlow::Idle;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            popover::btn_danger(&theme, "Sign out")
-                                .id("signout-confirm")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.confirm_sign_out(cx)
-                                })),
-                        ),
-                )
-                .into_any_element(),
+            SyncFlow::ImportFailed { notice_open: true } => {
+                self.sync_card_import_failed(&theme, cx)
+            }
+            SyncFlow::RestartPending { notice_open: true } => {
+                self.sync_card_restart_pending(remote_engine, runtime_change_label, &theme, cx)
+            }
+            SyncFlow::SignOutConfirm => self.sync_card_sign_out_confirm(&theme, cx),
             SyncFlow::SigningOut => popover::dialog_card(&theme)
                 .child(popover::dialog_title(&theme, "Signing out…"))
                 .child(
@@ -612,6 +258,323 @@ impl Shell {
         Some(popover::modal("sync-lifecycle-dialog", viewport, card))
     }
 
+    /// Enabling sync: the browser sign-in is under way.
+    fn sync_card_enabling(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        popover::dialog_card(theme)
+            .child(popover::dialog_title(theme, "Enable sync"))
+            .child(
+                div().mt(px(6.0)).child(popover::dialog_body(
+                    theme,
+                    "Finish signing in in your browser. Cypher will keep using this local workspace until you quit and reopen.",
+                )),
+            )
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(theme, "Cancel", "sync-enable-cancel")
+                            .id("sync-enable-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.cancel_auth_setup(cx)
+                            })),
+                    )
+                    .child(
+                        popover::btn_primary(theme, "Open browser again")
+                            .id("sync-enable-open-browser")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_sign_in(cx)
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The in-place switch wizard: bring local work along, start fresh, or
+    /// switch now when there is nothing to bring.
+    fn sync_card_switch_offer(
+        &self,
+        signed_in_email: &Option<SharedString>,
+        work_phrase: &Option<String>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let has_local_work = work_phrase.is_some();
+        let body: SharedString = match (signed_in_email, work_phrase) {
+            (Some(email), Some(phrase)) => format!(
+                "You're signed in as {email}. Bring {phrase} from this device into your synced workspace, or start it fresh."
+            )
+            .into(),
+            (Some(email), None) => format!(
+                "You're signed in as {email}. Cypher can switch to your synced workspace now."
+            )
+            .into(),
+            (None, Some(phrase)) => format!(
+                "Bring {phrase} from this device into your synced workspace, or start it fresh."
+            )
+            .into(),
+            (None, None) => "Cypher can switch to your synced workspace now.".into(),
+        };
+        let mut actions = div()
+            .mt(px(16.0))
+            .flex()
+            .flex_row()
+            .justify_end()
+            .gap(px(8.0))
+            .child(
+                popover::btn_ghost(theme, "Later", "sync-switch-later")
+                    .id("sync-switch-later")
+                    .on_click(cx.listener(|this, _, _, cx| this.postpone_sync_restart(cx))),
+            );
+        if has_local_work {
+            actions = actions
+                .child(
+                    popover::btn_ghost(theme, "Start fresh", "sync-switch-fresh")
+                        .id("sync-switch-fresh")
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.start_synced_switch(false, cx)),
+                        ),
+                )
+                .child(
+                    popover::btn_primary(theme, "Bring my work")
+                        .id("sync-switch-import")
+                        .on_click(cx.listener(|this, _, _, cx| this.start_synced_switch(true, cx))),
+                );
+        } else {
+            actions = actions.child(
+                popover::btn_primary(theme, "Switch now")
+                    .id("sync-switch-now")
+                    .on_click(cx.listener(|this, _, _, cx| this.start_synced_switch(false, cx))),
+            );
+        }
+        popover::dialog_card(theme)
+            .child(popover::dialog_title(theme, "Sync is ready"))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(theme, body)))
+            .child(actions)
+            .into_any_element()
+    }
+
+    /// Importing local sessions: the current one and a determinate bar.
+    fn sync_card_importing(&self, done: usize, total: usize, theme: &Theme) -> AnyElement {
+        let fraction = if total == 0 {
+            0.0
+        } else {
+            (done as f32 / total as f32).clamp(0.0, 1.0)
+        };
+        let label: SharedString = if total == 0 {
+            "Looking for local sessions…".into()
+        } else {
+            format!("Importing session {} of {total}", (done + 1).min(total)).into()
+        };
+        let mut card = popover::dialog_card(theme)
+            .child(popover::dialog_title(theme, "Bringing your work over"))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(theme, label)));
+        if let Some(current) = self.sync.import_current.clone() {
+            card = card.child(
+                div()
+                    .mt(px(4.0))
+                    .text_size(px(12.0))
+                    .line_height(px(17.0))
+                    .text_color(theme.text_muted)
+                    .overflow_hidden()
+                    .child(current),
+            );
+        }
+        card.child(
+            // Determinate progress: a hairline track with an accent fill.
+            div()
+                .mt(px(14.0))
+                .h(px(4.0))
+                .w_full()
+                .rounded(px(2.0))
+                .bg(theme.border)
+                .child(
+                    div()
+                        .h_full()
+                        .rounded(px(2.0))
+                        .bg(theme.accent_strong)
+                        .w(gpui::relative(fraction.max(0.04))),
+                ),
+        )
+        .into_any_element()
+    }
+
+    /// The import finished: how many sessions moved.
+    fn sync_card_import_done(
+        &self,
+        imported: usize,
+        skipped: usize,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let body: SharedString = match (imported, skipped) {
+            (0, 0) => "Your synced workspace is ready.".into(),
+            (n, 0) => format!(
+                "{n} session{} moved into your synced workspace.",
+                if n == 1 { "" } else { "s" },
+            )
+            .into(),
+            (n, s) => format!(
+                "{n} session{} imported, {s} already present.",
+                if n == 1 { "" } else { "s" },
+            )
+            .into(),
+        };
+        popover::dialog_card(theme)
+            .child(popover::dialog_title(theme, "You're all set"))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(theme, body)))
+            .child(
+                div().mt(px(16.0)).flex().flex_row().justify_end().child(
+                    popover::btn_primary(theme, "Continue")
+                        .id("sync-switch-done")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.sync.flow = SyncFlow::Idle;
+                            cx.notify();
+                        })),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// The import stopped partway: retry or postpone.
+    fn sync_card_import_failed(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        popover::dialog_card(theme)
+            .child(popover::dialog_title(theme, "Import didn't finish"))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(
+                theme,
+                "Anything already imported is kept; retrying only copies what's missing.",
+            )))
+            .when_some(self.sync.runtime_change_error.clone(), |card, error| {
+                card.child(
+                    div()
+                        .mt(px(10.0))
+                        .text_size(px(12.0))
+                        .line_height(px(17.0))
+                        .text_color(theme.danger)
+                        .child(error),
+                )
+            })
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(theme, "Later", "import-failed-dismiss")
+                            .id("import-failed-dismiss")
+                            .on_click(cx.listener(|this, _, _, cx| this.postpone_sync_restart(cx))),
+                    )
+                    .child(
+                        popover::btn_primary(theme, "Retry import")
+                            .id("import-failed-retry")
+                            .on_click(cx.listener(|this, _, _, cx| this.spawn_local_import(cx))),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Sync needs a restart (of the daemon too, for a remote engine).
+    fn sync_card_restart_pending(
+        &self,
+        remote_engine: bool,
+        runtime_change_label: &'static str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        popover::dialog_card(theme)
+            .child(popover::dialog_title(
+                theme,
+                "Sync needs a restart",
+            ))
+            .child(
+                div().mt(px(6.0)).child(popover::dialog_body(
+                    theme,
+                    if remote_engine {
+                        "Cypher is using a background daemon. Stop it and quit Cypher, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                    } else {
+                        "Quit and reopen Cypher to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                    },
+                )),
+            )
+            .when_some(self.sync.runtime_change_error.clone(), |card, error| {
+                card.child(
+                    div()
+                        .mt(px(10.0))
+                        .text_size(px(12.0))
+                        .line_height(px(17.0))
+                        .text_color(theme.danger)
+                        .child(error),
+                )
+            })
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(theme, "Later", "sync-restart-later")
+                            .id("sync-restart-later")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.postpone_sync_restart(cx)
+                            })),
+                    )
+                    .child(
+                        popover::btn_primary(theme, runtime_change_label)
+                            .id("sync-restart-quit")
+                            .when(self.sync.runtime_change_task.is_some(), |button| {
+                                button.opacity(0.6)
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.quit_for_runtime_change(cx)
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Confirming sign-out.
+    fn sync_card_sign_out_confirm(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        popover::dialog_card(theme)
+            .child(popover::dialog_title(theme, "Sign out?"))
+            .child(
+                div().mt(px(6.0)).child(popover::dialog_body(
+                    theme,
+                    "Cypher will remove your credentials, close the synced workspace, and continue in local mode.",
+                )),
+            )
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(theme, "Cancel", "signout-cancel")
+                            .id("signout-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sync.flow = SyncFlow::Idle;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_danger(theme, "Sign out")
+                            .id("signout-confirm")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.confirm_sign_out(cx)
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// Floating layers owned by the shell: context menus, edit dialogs, and
     /// the local-to-synced account lifecycle.
     pub(super) fn render_overlays(
@@ -623,125 +586,12 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let mut overlays: Vec<AnyElement> = Vec::new();
 
-        if let Some((chat_id, position)) = self.chat_menu.get().cloned() {
-            let chat_menu_closing = self.chat_menu.closing_since();
-            let rename_id = chat_id.clone();
-            let archive_id = chat_id.clone();
-            let delete_id = chat_id.clone();
-            let pin_id = chat_id.clone();
-            let pinned = self
-                .state
-                .read(cx)
-                .chats
-                .iter()
-                .any(|c| c.id == chat_id && c.pinned);
-            let menu = popover::popover_card(&theme)
-                .w(px(170.0))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.close_chat_menu(cx);
-                }))
-                .flex()
-                .flex_col()
-                .child(
-                    popover::menu_row(&theme, false, format!("chat-menu-pin-{chat_id}"))
-                        .id("chat-menu-pin")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_chat_pinned(pin_id.clone(), !pinned, cx)
-                        }))
-                        .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
-                        .child(SharedString::from(if pinned { "Unpin" } else { "Pin" })),
-                )
-                .child(
-                    popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
-                        .id("chat-menu-rename")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_rename_chat(rename_id.clone(), cx)
-                        }))
-                        .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
-                        .child(SharedString::from("Rename…")),
-                )
-                .child(
-                    popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
-                        .id("chat-menu-archive")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.archive_chat(archive_id.clone(), cx)
-                        }))
-                        .child(
-                            icon(icons::ARCHIVE_MINIMALISTIC)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(SharedString::from("Archive")),
-                )
-                .child(popover::menu_separator())
-                .child(
-                    popover::menu_row(&theme, false, format!("chat-menu-delete-{chat_id}"))
-                        .id("chat-menu-delete")
-                        .text_color(theme.danger)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.close_chat_menu(cx);
-                            this.delete_confirm = Some(delete_id.clone());
-                            cx.notify();
-                        }))
-                        .child(
-                            icon(icons::TRASH_BIN_MINIMALISTIC)
-                                .size(px(16.0))
-                                .text_color(theme.danger),
-                        )
-                        .child(SharedString::from("Delete…")),
-                )
-                .into_any_element();
-            overlays.push(popover::menu_at(
-                "chat-context-menu",
-                position,
-                menu,
-                chat_menu_closing,
-            ));
+        if let Some(overlay) = self.render_chat_menu_overlay(&theme, cx) {
+            overlays.push(overlay);
         }
 
-        if let Some(dialog) = &mut self.rename_dialog {
-            if std::mem::take(&mut dialog.focus_pending) {
-                window.focus(&dialog.input.focus_handle(cx), cx);
-            }
-            let input = dialog.input.clone();
-            let card = popover::dialog_card(&theme)
-                .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
-                    if ev.keystroke.key == "escape" {
-                        this.rename_dialog = None;
-                        cx.notify();
-                    }
-                }))
-                .child(popover::dialog_title(&theme, "Rename session"))
-                .child(
-                    div()
-                        .mt(px(12.0))
-                        .child(popover::dialog_field(input.into_any_element())),
-                )
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Cancel", "rename-chat-cancel")
-                                .id("rename-chat-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.rename_dialog = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, "Rename")
-                                .id("rename-chat-save")
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.submit_rename_chat(cx)),
-                                ),
-                        ),
-                )
-                .into_any_element();
-            overlays.push(popover::modal("rename-chat-dialog", viewport, card));
+        if let Some(overlay) = self.render_rename_chat_dialog(viewport, &theme, window, cx) {
+            overlays.push(overlay);
         }
 
         overlays.extend(self.render_space_overlays(viewport, window, cx));
@@ -749,85 +599,12 @@ impl Shell {
             overlays.push(overlay);
         }
 
-        if let Some(chat_id) = self.delete_confirm.clone() {
-            let title = transcript::single_line(
-                &self
-                    .state
-                    .read(cx)
-                    .chats
-                    .iter()
-                    .find(|c| c.id == chat_id)
-                    .and_then(|c| c.title.clone())
-                    .unwrap_or_else(|| "New session".into()),
-            );
-            let card = popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Delete session?"))
-                .child(div().mt(px(6.0)).child(popover::dialog_body(
-                    &theme,
-                    format!("\u{201C}{title}\u{201D} will be permanently deleted. This can\u{2019}t be undone."),
-                )))
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Cancel", "delete-chat-cancel")
-                                .id("delete-chat-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.delete_confirm = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            popover::btn_danger(&theme, "Delete")
-                                .id("delete-chat-confirm")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.delete_chat(chat_id.clone(), cx)
-                                })),
-                        ),
-                )
-                .into_any_element();
-            overlays.push(popover::modal("delete-chat-dialog", viewport, card));
+        if let Some(overlay) = self.render_delete_chat_dialog(viewport, &theme, cx) {
+            overlays.push(overlay);
         }
 
-        if let Some(orphan) = self.delete_worktree_confirm.clone() {
-            let label = orphan.label.clone();
-            let card = popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Delete worktree too?"))
-                .child(div().mt(px(6.0)).child(popover::dialog_body(
-                    &theme,
-                    format!(
-                        "No other sessions are using the \u{201C}{label}\u{201D} worktree. Delete it as well? This can\u{2019}t be undone."
-                    ),
-                )))
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Keep", "delete-worktree-keep")
-                                .id("delete-worktree-keep")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.delete_worktree_confirm = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            popover::btn_danger(&theme, "Delete")
-                                .id("delete-worktree-confirm")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.delete_worktree(orphan.clone(), cx)
-                                })),
-                        ),
-                )
-                .into_any_element();
-            overlays.push(popover::modal("delete-worktree-dialog", viewport, card));
+        if let Some(overlay) = self.render_delete_worktree_dialog(viewport, &theme, cx) {
+            overlays.push(overlay);
         }
 
         if let Some(sync) = self.render_sync_overlay(viewport, cx) {
@@ -836,7 +613,7 @@ impl Shell {
 
         // The shared Comment pill/editor, LAST so it paints above every
         // clipped surface (transcript, diff panes, terminal).
-        self.comment_popup.update(cx, |popup, cx| {
+        self.comments.popup.update(cx, |popup, cx| {
             if let Some(ui) = popup.render(window, cx) {
                 overlays.push(ui);
             }
@@ -853,15 +630,244 @@ impl Shell {
         overlays
     }
 
+    /// A chat row's context menu: pin, rename, archive, delete.
+    fn render_chat_menu_overlay(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (chat_id, position) = self.menus.chat.get().cloned()?;
+        let chat_menu_closing = self.menus.chat.closing_since();
+        let rename_id = chat_id.clone();
+        let archive_id = chat_id.clone();
+        let delete_id = chat_id.clone();
+        let pin_id = chat_id.clone();
+        let pinned = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .any(|c| c.id == chat_id && c.pinned);
+        let menu =
+            popover::popover_card(theme)
+                .w(px(170.0))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.close_chat_menu(cx);
+                }))
+                .flex()
+                .flex_col()
+                .child(
+                    popover::menu_row(theme, false, format!("chat-menu-pin-{chat_id}"))
+                        .id("chat-menu-pin")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_chat_pinned(pin_id.clone(), !pinned, cx)
+                        }))
+                        .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
+                        .child(SharedString::from(if pinned { "Unpin" } else { "Pin" })),
+                )
+                .child(
+                    popover::menu_row(theme, false, format!("chat-menu-rename-{chat_id}"))
+                        .id("chat-menu-rename")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_rename_chat(rename_id.clone(), cx)
+                        }))
+                        .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
+                        .child(SharedString::from("Rename…")),
+                )
+                .child(
+                    popover::menu_row(theme, false, format!("chat-menu-archive-{chat_id}"))
+                        .id("chat-menu-archive")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.archive_chat(archive_id.clone(), cx)
+                        }))
+                        .child(
+                            icon(icons::ARCHIVE_MINIMALISTIC)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from("Archive")),
+                )
+                .child(popover::menu_separator())
+                .child(
+                    popover::menu_row(theme, false, format!("chat-menu-delete-{chat_id}"))
+                        .id("chat-menu-delete")
+                        .text_color(theme.danger)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.close_chat_menu(cx);
+                            this.dialogs.delete_chat = Some(delete_id.clone());
+                            cx.notify();
+                        }))
+                        .child(
+                            icon(icons::TRASH_BIN_MINIMALISTIC)
+                                .size(px(16.0))
+                                .text_color(theme.danger),
+                        )
+                        .child(SharedString::from("Delete…")),
+                )
+                .into_any_element();
+        Some(popover::menu_at(
+            "chat-context-menu",
+            position,
+            menu,
+            chat_menu_closing,
+        ))
+    }
+
+    /// The rename-session dialog.
+    fn render_rename_chat_dialog(
+        &mut self,
+        viewport: gpui::Size<Pixels>,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let dialog = self.dialogs.rename_chat.as_mut()?;
+        if std::mem::take(&mut dialog.focus_pending) {
+            window.focus(&dialog.input.focus_handle(cx), cx);
+        }
+        let input = dialog.input.clone();
+        let card = popover::dialog_card(theme)
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" {
+                    this.dialogs.rename_chat = None;
+                    cx.notify();
+                }
+            }))
+            .child(popover::dialog_title(theme, "Rename session"))
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .child(popover::dialog_field(input.into_any_element())),
+            )
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(theme, "Cancel", "rename-chat-cancel")
+                            .id("rename-chat-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.dialogs.rename_chat = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_primary(theme, "Rename")
+                            .id("rename-chat-save")
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_rename_chat(cx))),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("rename-chat-dialog", viewport, card))
+    }
+
+    /// Confirming a session delete.
+    fn render_delete_chat_dialog(
+        &self,
+        viewport: gpui::Size<Pixels>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let chat_id = self.dialogs.delete_chat.clone()?;
+        let title = transcript::single_line(
+            &self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .find(|c| c.id == chat_id)
+                .and_then(|c| c.title.clone())
+                .unwrap_or_else(|| "New session".into()),
+        );
+        let card = popover::dialog_card(theme)
+            .child(popover::dialog_title(theme, "Delete session?"))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(
+                theme,
+                format!("\u{201C}{title}\u{201D} will be permanently deleted. This can\u{2019}t be undone."),
+            )))
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(theme, "Cancel", "delete-chat-cancel")
+                            .id("delete-chat-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.dialogs.delete_chat = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_danger(theme, "Delete")
+                            .id("delete-chat-confirm")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.delete_chat(chat_id.clone(), cx)
+                            })),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("delete-chat-dialog", viewport, card))
+    }
+
+    /// Offering to delete a worktree no other session uses.
+    fn render_delete_worktree_dialog(
+        &self,
+        viewport: gpui::Size<Pixels>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let orphan = self.dialogs.delete_worktree.clone()?;
+        let label = orphan.label.clone();
+        let card = popover::dialog_card(theme)
+            .child(popover::dialog_title(theme, "Delete worktree too?"))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(
+                theme,
+                format!(
+                    "No other sessions are using the \u{201C}{label}\u{201D} worktree. Delete it as well? This can\u{2019}t be undone."
+                ),
+            )))
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(theme, "Keep", "delete-worktree-keep")
+                            .id("delete-worktree-keep")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.dialogs.delete_worktree = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_danger(theme, "Delete")
+                            .id("delete-worktree-confirm")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.delete_worktree(orphan.clone(), cx)
+                            })),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("delete-worktree-dialog", viewport, card))
+    }
+
     fn render_about_overlay(
         &mut self,
         viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let about = self.about.as_ref()?;
+        let about = self.updates.about.as_ref()?;
         let theme = Theme::of(cx).clone();
         let version = cypher_update::current_version();
-        let install = install_kind_label(&self.install);
+        let install = install_kind_label(&self.updates.install);
         let checking = matches!(about.check, AboutCheck::Checking);
         let runtime_line = about_runtime_line(
             self.state.read(cx).pi_update.as_ref(),
@@ -879,7 +885,7 @@ impl Shell {
             .id("about-cypher-dialog")
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" {
-                    this.about = None;
+                    this.updates.about = None;
                     cx.notify();
                 }
             }))
@@ -919,7 +925,7 @@ impl Shell {
                     popover::btn_ghost(&theme, "OK", "about-cypher-ok")
                         .id("about-cypher-ok")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.about = None;
+                            this.updates.about = None;
                             cx.notify();
                         })),
                 )
@@ -1015,7 +1021,7 @@ impl Shell {
 
     pub(super) fn render_signed_out_restart(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let runtime_change_label = if self.runtime_change_task.is_some() {
+        let runtime_change_label = if self.sync.runtime_change_task.is_some() {
             "Stopping engine…"
         } else {
             "Retry local mode"
@@ -1057,7 +1063,7 @@ impl Shell {
                         "Cypher removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
                     )),
             )
-            .when_some(self.runtime_change_error.clone(), |card, error| {
+            .when_some(self.sync.runtime_change_error.clone(), |card, error| {
                 card.child(
                     div()
                         .mb(px(16.0))
@@ -1070,7 +1076,7 @@ impl Shell {
             .child(
                 popover::btn_primary(&theme, runtime_change_label)
                     .id("signed-out-quit")
-                    .when(self.runtime_change_task.is_some(), |button| {
+                    .when(self.sync.runtime_change_task.is_some(), |button| {
                         button.opacity(0.6)
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1223,7 +1229,7 @@ impl Shell {
         self.ensure_org_ui(cx);
         let theme = Theme::of(cx).clone();
         let local_setup = self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local);
-        let Some(org) = self.org.as_ref() else {
+        let Some(org) = self.sync.org.as_ref() else {
             return Empty.into_any_element();
         };
         let submitting = org.submitting;
@@ -1383,5 +1389,106 @@ impl Shell {
                     .child(motion::fade_in("org-gate-card", card)),
             )
             .into_any_element()
+    }
+}
+
+/// The sidebar avatar (falls back to the initial-letter circle).
+fn user_avatar(
+    initial: SharedString,
+    avatar_url: Option<SharedString>,
+    theme: &Theme,
+) -> AnyElement {
+    // Avatar: the GitHub/WorkOS profile picture when one is on the
+    // account, else (and on any load failure) the white circle with the
+    // initial in near-black (zeron user-menu.tsx).
+    let fallback_avatar = {
+        let initial = initial.clone();
+        let theme = theme.clone();
+        move || {
+            div()
+                .size(px(26.0))
+                .flex_none()
+                .rounded_full()
+                .bg(theme.text)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.bg)
+                .child(initial.clone())
+                .into_any_element()
+        }
+    };
+    // Final UI-side guard: only a bounded HTTPS URL may reach gpui's
+    // `img` — anything else renders the initial-letter avatar instead and
+    // can never be interpreted as a local file.
+    match safe_avatar_url(avatar_url) {
+        Some(url) => {
+            let loading = fallback_avatar.clone();
+            gpui::img(url)
+                .size(px(26.0))
+                .flex_none()
+                .rounded_full()
+                .object_fit(gpui::ObjectFit::Cover)
+                .with_loading(loading)
+                .with_fallback(fallback_avatar)
+                .into_any_element()
+        }
+        None => fallback_avatar(),
+    }
+}
+
+/// The account menu's scope action row.
+fn account_action_row(
+    action: AccountMenuAction,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    match action {
+        AccountMenuAction::EnableSync => popover::menu_row(theme, false, "user-menu-enable-sync")
+            .id("user-menu-enable-sync")
+            .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
+            .child(
+                icon(icons::GLOBAL)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted),
+            )
+            .child(SharedString::from("Enable sync"))
+            .into_any_element(),
+        AccountMenuAction::SyncInProgress => {
+            popover::menu_row(theme, false, "user-menu-sync-progress")
+                .id("user-menu-sync-progress")
+                .opacity(0.6)
+                .child(
+                    icon(icons::GLOBAL)
+                        .size(px(16.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(SharedString::from("Sync setup in progress"))
+                .into_any_element()
+        }
+        AccountMenuAction::RestartPending => {
+            popover::menu_row(theme, false, "user-menu-sync-restart")
+                .id("user-menu-sync-restart")
+                .on_click(cx.listener(|this, _, _, cx| this.reopen_sync_notice(cx)))
+                .child(
+                    icon(icons::RESTART)
+                        .size(px(16.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(SharedString::from("Finish sync setup"))
+                .into_any_element()
+        }
+        AccountMenuAction::SignOut => popover::menu_row(theme, false, "user-menu-signout")
+            .id("user-menu-signout")
+            .on_click(cx.listener(|this, _, _, cx| this.request_sign_out(cx)))
+            .child(
+                icon(icons::LOGOUT_2)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted),
+            )
+            .child(SharedString::from("Sign out"))
+            .into_any_element(),
     }
 }

@@ -623,6 +623,107 @@ impl Render for ProvidersPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let dialog_open = self.form.is_some() || self.confirm.is_some() || self.oauth.is_some();
+        self.route_dialog_focus(dialog_open, window, cx);
+        let count = self.snapshot.ready().map(|s| s.providers.len());
+        let busy = self.busy.is_some();
+        let blocked = busy || !self.target.read(cx).can_write(cx);
+        let current = self
+            .state
+            .read(cx)
+            .selected_chat_row()
+            .filter(|chat| Some(chat.device_id.as_str()) == self.target.read(cx).id())
+            .and_then(|chat| chat.config.as_ref())
+            .filter(|c| c.harness == cypher_proto::HarnessId::Pi)
+            .and_then(|c| c.model.clone());
+        let header = self.render_title_row(count, blocked, &theme, cx);
+        let mut body = widgets::page_column()
+            .pt(px(36.0))
+            .child(header)
+            .child(self.render_connections_bar(count, busy, &theme, cx));
+        if let Some(error) = self.target.read(cx).unavailable(cx) {
+            body = body.child(widgets::warning_strip(&theme, error));
+        }
+        if !dialog_open {
+            if let Some(error) = &self.error {
+                body = body.child(widgets::error_strip(&theme, error.clone()).mt(px(16.0)));
+            }
+            if let Some(notice) = &self.notice {
+                body = body.child(
+                    div()
+                        .mt(px(16.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(provider_icon(icons::CHECK, 14.0, theme.success))
+                        .child(caption(&theme, notice.clone()).text_color(theme.success_muted)),
+                );
+            }
+        }
+        body = self.with_connections(body, count, busy, current.as_deref(), &theme, cx);
+        if count.is_some_and(|n| n > 0) {
+            body = body.child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(provider_icon(
+                        icons::KEY_MINIMALISTIC,
+                        14.0,
+                        theme.text_muted,
+                    ))
+                    .child(caption(
+                        &theme,
+                        format!(
+                            "API keys stay on {}, separate from your chats.",
+                            self.target.read(cx).label(cx)
+                        ),
+                    )),
+            );
+        }
+        let modal = self.render_modal(window, &theme, cx);
+        div()
+            .id("providers-page")
+            .key_context("ProviderPage")
+            .track_focus(&self.page_focus)
+            .tab_group()
+            .size_full()
+            .relative()
+            .on_key_down(cx.listener(|page, event: &KeyDownEvent, window, cx| {
+                if page.form.is_some() || page.confirm.is_some() {
+                    return;
+                }
+                if event.keystroke.key == "tab" {
+                    if event.keystroke.modifiers.shift {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
+                    cx.stop_propagation();
+                }
+            }))
+            .child(
+                div()
+                    .id("provider-list-scroll")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(body),
+            )
+            .children(modal)
+    }
+}
+
+impl ProvidersPage {
+    /// Focus bookkeeping for the dialogs: restore the page's focus after one
+    /// closes, remember where it was when one opens, and land a pending
+    /// field, callback or Cancel focus.
+    fn route_dialog_focus(
+        &mut self,
+        dialog_open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.restore_focus {
             self.restore_focus = false;
             self.return_focus
@@ -667,19 +768,18 @@ impl Render for ProvidersPage {
                 self.dialog_focus.focus(window, cx);
             }
         }
-        let count = self.snapshot.ready().map(|s| s.providers.len());
-        let busy = self.busy.is_some();
-        let blocked = busy || !self.target.read(cx).can_write(cx);
-        let loaded = count.is_some();
-        let current = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .filter(|chat| Some(chat.device_id.as_str()) == self.target.read(cx).id())
-            .and_then(|chat| chat.config.as_ref())
-            .filter(|c| c.harness == cypher_proto::HarnessId::Pi)
-            .and_then(|c| c.model.clone());
-        let header = div()
+    }
+
+    /// The page title, its caption, and the add trigger once something is
+    /// connected.
+    fn render_title_row(
+        &mut self,
+        count: Option<usize>,
+        blocked: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        div()
             .w_full()
             .flex()
             .flex_wrap()
@@ -697,89 +797,81 @@ impl Render for ProvidersPage {
                             .text_color(theme.text)
                             .child("Providers"),
                     )
-                    .child(
-                        caption(&theme, "Connect the models you want to work with.").mt(px(8.0)),
-                    ),
+                    .child(caption(theme, "Connect the models you want to work with.").mt(px(8.0))),
             )
             .children(
                 count
                     .is_some_and(|n| n > 0)
-                    .then(|| self.render_add_trigger(&theme, "provider-add", !blocked, true, cx)),
-            );
-        let mut body = widgets::page_column().pt(px(36.0)).child(header).child(
-            div()
-                .w_full()
-                .mt(px(32.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(widgets::field_label(&theme, "Connections"))
-                        .when_some(count, |el, n| {
-                            el.child(widgets::badge(&theme, n.to_string()))
+                    .then(|| self.render_add_trigger(theme, "provider-add", !blocked, true, cx)),
+            )
+    }
+
+    /// "Connections" with its count, and the reload button.
+    fn render_connections_bar(
+        &self,
+        count: Option<usize>,
+        busy: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        div()
+            .w_full()
+            .mt(px(32.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(widgets::field_label(theme, "Connections"))
+                    .when_some(count, |el, n| {
+                        el.child(widgets::badge(theme, n.to_string()))
+                    }),
+            )
+            .child(
+                div()
+                    .ml_auto()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(
+                        icon_button(
+                            theme,
+                            "provider-reload",
+                            icons::REFRESH,
+                            "Reload providers",
+                            !busy,
+                        )
+                        .when(!busy, |el| {
+                            el.on_click(cx.listener(|page, _, _, cx| {
+                                page.call(methods::LIST_PI_PROVIDERS, serde_json::json!({}), cx)
+                            }))
                         }),
-                )
-                .child(
-                    div()
-                        .ml_auto()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(12.0))
-                        .child(
-                            icon_button(
-                                &theme,
-                                "provider-reload",
-                                icons::REFRESH,
-                                "Reload providers",
-                                !busy,
-                            )
-                            .when(!busy, |el| {
-                                el.on_click(cx.listener(|page, _, _, cx| {
-                                    page.call(methods::LIST_PI_PROVIDERS, serde_json::json!({}), cx)
-                                }))
-                            }),
-                        ),
-                ),
-        );
-        if let Some(error) = self.target.read(cx).unavailable(cx) {
-            body = body.child(widgets::warning_strip(&theme, error));
-        }
-        if !dialog_open {
-            if let Some(error) = &self.error {
-                body = body.child(widgets::error_strip(&theme, error.clone()).mt(px(16.0)));
-            }
-            if let Some(notice) = &self.notice {
-                body = body.child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(provider_icon(icons::CHECK, 14.0, theme.success))
-                        .child(caption(&theme, notice.clone()).text_color(theme.success_muted)),
-                );
-            }
-        }
+                    ),
+            )
+    }
+
+    /// The connections: a loading card, the empty state, or the
+    /// subscription groups (Claude, ChatGPT) then the gateway rows.
+    fn with_connections(
+        &mut self,
+        mut body: gpui::Div,
+        count: Option<usize>,
+        busy: bool,
+        current: Option<&str>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let loaded = count.is_some();
         if !loaded && busy {
-            body = body.child(
-                widgets::section_card(&theme)
-                    .mt(px(12.0))
-                    .p(px(20.0))
-                    .child(popover::skeleton_rows(
-                        "providers-loading",
-                        &theme,
-                        3,
-                        cx.entity_id(),
-                        cx,
-                    )),
-            );
+            body = body.child(widgets::section_card(theme).mt(px(12.0)).p(px(20.0)).child(
+                popover::skeleton_rows("providers-loading", theme, 3, cx.entity_id(), cx),
+            ));
         } else if count == Some(0) {
-            body = body.child(self.render_empty(&theme, cx));
+            body = body.child(self.render_empty(theme, cx));
         } else if let Some(snapshot) = self.snapshot.ready().cloned() {
             let claude = snapshot
                 .providers
@@ -800,22 +892,22 @@ impl Render for ProvidersPage {
             let mut first_group = true;
             if let Some(provider) = claude {
                 body = body.child(self.subscription_group(
-                    &theme,
+                    theme,
                     provider,
                     0,
                     first_group,
-                    current.as_deref(),
+                    current,
                     cx,
                 ));
                 first_group = false;
             }
             if let Some(provider) = chatgpt {
                 body = body.child(self.subscription_group(
-                    &theme,
+                    theme,
                     provider,
                     1,
                     first_group,
-                    current.as_deref(),
+                    current,
                     cx,
                 ));
                 first_group = false;
@@ -825,100 +917,54 @@ impl Render for ProvidersPage {
                     .into_iter()
                     .enumerate()
                     .map(|(index, provider)| {
-                        self.provider_row(
-                            provider,
-                            index + 8,
-                            index == 0,
-                            current.as_deref(),
-                            &theme,
-                            cx,
-                        )
+                        self.provider_row(provider, index + 8, index == 0, current, theme, cx)
                     })
                     .collect::<Vec<_>>();
                 body = body.child(
-                    widgets::section_card(&theme)
+                    widgets::section_card(theme)
                         .when(first_group, |el| el.mt(px(12.0)))
                         .children(rows),
                 );
             }
         }
-        if count.is_some_and(|n| n > 0) {
-            body = body.child(
-                div()
-                    .mt(px(16.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(provider_icon(
-                        icons::KEY_MINIMALISTIC,
-                        14.0,
-                        theme.text_muted,
-                    ))
-                    .child(caption(
-                        &theme,
-                        format!(
-                            "API keys stay on {}, separate from your chats.",
-                            self.target.read(cx).label(cx)
-                        ),
-                    )),
-            );
-        }
-        let modal = if self.form.is_some() {
+        body
+    }
+
+    /// The open dialog, if any: the provider form, a confirmation, OAuth, or
+    /// the Claude dialog.
+    fn render_modal(
+        &mut self,
+        window: &mut Window,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.form.is_some() {
             Some(popover::modal(
                 "provider-form-modal",
                 window.viewport_size(),
-                self.render_form(window, &theme, cx),
+                self.render_form(window, theme, cx),
             ))
         } else if self.confirm.is_some() {
             Some(popover::modal(
                 "provider-confirm-modal",
                 window.viewport_size(),
-                self.render_confirmation(window, &theme, cx),
+                self.render_confirmation(window, theme, cx),
             ))
         } else if self.oauth.is_some() {
             Some(popover::modal(
                 "provider-oauth-modal",
                 window.viewport_size(),
-                self.render_oauth(window, &theme, cx),
+                self.render_oauth(window, theme, cx),
             ))
         } else if self.claude_dialog {
             Some(popover::modal(
                 "provider-claude-modal",
                 window.viewport_size(),
-                self.render_claude_dialog(window, &theme, cx),
+                self.render_claude_dialog(window, theme, cx),
             ))
         } else {
             None
-        };
-        div()
-            .id("providers-page")
-            .key_context("ProviderPage")
-            .track_focus(&self.page_focus)
-            .tab_group()
-            .size_full()
-            .relative()
-            .on_key_down(cx.listener(|page, event: &KeyDownEvent, window, cx| {
-                if page.form.is_some() || page.confirm.is_some() {
-                    return;
-                }
-                if event.keystroke.key == "tab" {
-                    if event.keystroke.modifiers.shift {
-                        window.focus_prev(cx);
-                    } else {
-                        window.focus_next(cx);
-                    }
-                    cx.stop_propagation();
-                }
-            }))
-            .child(
-                div()
-                    .id("provider-list-scroll")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .child(body),
-            )
-            .children(modal)
+        }
     }
 }
 

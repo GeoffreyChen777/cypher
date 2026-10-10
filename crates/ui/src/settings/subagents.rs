@@ -1062,249 +1062,41 @@ impl SubagentsPage {
         let model_trigger_label = self.model_label(editor);
         let menu = editor.model_menu_open.then(|| self.model_menu(theme, cx));
         let editor = self.editor.as_ref().unwrap();
-
-        let input_row =
-            |label: &'static str, hint: Option<&'static str>, input: &Entity<TextInput>| {
-                let mut column = div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(5.0))
-                    .child(widgets::field_label(theme, label))
-                    .child(
-                        div()
-                            .w_full()
-                            .px(px(10.0))
-                            .py(px(8.0))
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(theme.border_strong)
-                            .bg(theme.input_glass_bg())
-                            .child(input.clone()),
-                    );
-                if let Some(hint) = hint {
-                    column = column.child(widgets::page_subtitle(theme, hint));
-                }
-                column
-            };
+        let view = EditorView {
+            busy,
+            creating,
+            from_builtin,
+            original_label,
+            label,
+            selected_tools,
+            custom_tools,
+            thinking,
+            levels,
+            model_unknown,
+            model_trigger_label,
+        };
+        let label = &view.label;
 
         let mut fields = div()
             .flex()
             .flex_col()
             .gap(px(14.0))
-            .child(input_row("Name", None, &editor.name))
-            .child(input_row(
+            .child(editor_input_row(theme, "Name", None, &editor.name))
+            .child(editor_input_row(
+                theme,
                 "Description",
                 Some("Required: the extension ignores a profile without one, and the model reads it to pick an agent."),
                 &editor.description,
             ));
-
-        // Model — picked from the device's own catalog.
-        fields = fields.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(5.0))
-                .child(widgets::field_label(theme, "Model"))
-                .child(
-                    widgets::ghost_action(theme)
-                        .id("subagent-model-trigger")
-                        .debug_selector(|| "subagent-model-trigger".into())
-                        .role(gpui::Role::Button)
-                        .aria_label("Subagent model")
-                        .track_focus(&editor.model_trigger)
-                        .relative()
-                        .w_full()
-                        .px(px(10.0))
-                        .py(px(8.0))
-                        .border_1()
-                        .border_color(theme.border_strong)
-                        .bg(theme.input_glass_bg())
-                        .hover(|s| widgets::ghost_hover(theme, s))
-                        .when(busy, |el| el.opacity(0.45))
-                        .when(!busy, |el| {
-                            el.on_click(cx.listener(|page, _, window, cx| {
-                                if let Some(editor) = &mut page.editor {
-                                    editor.model_menu_open = !editor.model_menu_open;
-                                    if editor.model_menu_open {
-                                        editor.model_search.focus_handle(cx).focus(window, cx);
-                                    }
-                                }
-                                cx.notify();
-                            }))
-                        })
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(theme.text)
-                                .child(SharedString::from(model_trigger_label)),
-                        )
-                        .child(
-                            icons::icon(icons::ALT_ARROW_DOWN)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .children(menu),
-                )
-                .when(model_unknown, |el| {
-                    el.child(widgets::warning_strip(
-                        theme,
-                        "This model is not in the device's Pi catalog right now. It is kept as written until you pick another.",
-                    ))
-                }),
-        );
-
-        // Thinking — Pi's ladder, narrowed by what the model supports.
-        let mut thinking_row = div().flex().flex_row().flex_wrap().gap(px(6.0)).child(
-            Self::chip(
-                theme,
-                "subagent-thinking-inherit",
-                "Inherit",
-                thinking.is_none(),
-                !busy,
-            )
-            .on_click(cx.listener(|page, _, _, cx| {
-                if let Some(editor) = &mut page.editor {
-                    editor.thinking = None;
-                }
-                cx.notify();
-            })),
-        );
-        for level in &levels {
-            let level = *level;
-            let selected = thinking.as_deref() == Some(level);
-            thinking_row = thinking_row.child(
-                Self::chip(
-                    theme,
-                    SharedString::from(format!("subagent-thinking-{level}")),
-                    level,
-                    selected,
-                    !busy,
-                )
-                .on_click(cx.listener(move |page, _, _, cx| {
-                    if let Some(editor) = &mut page.editor {
-                        editor.thinking = Some(level.to_string());
-                    }
-                    cx.notify();
-                })),
-            );
-        }
-        // A level the file carries that is not on the ladder stays selectable
-        // rather than vanishing on the next save.
-        if let Some(current) = thinking.as_deref()
-            && !levels.contains(&current)
-        {
-            thinking_row = thinking_row.child(Self::chip(
-                theme,
-                "subagent-thinking-custom",
-                format!("{current} (from the file)"),
-                true,
-                false,
-            ));
-        }
-        let mut thinking_column = div()
-            .flex()
-            .flex_col()
-            .gap(px(5.0))
-            .child(widgets::field_label(theme, "Thinking"))
-            .child(thinking_row);
-        if levels.is_empty() {
-            thinking_column = thinking_column.child(widgets::page_subtitle(
-                theme,
-                "The selected model has no reasoning levels, so Pi ignores this setting.",
-            ));
-        }
-        fields = fields.child(thinking_column);
-
-        // Tools — built-in toggles plus free-form extension/MCP names.
-        let mut tool_row = div().flex().flex_row().flex_wrap().gap(px(6.0));
-        for tool in BUILTIN_TOOLS {
-            let selected = selected_tools.iter().any(|t| t == tool);
-            tool_row = tool_row.child(
-                Self::chip(
-                    theme,
-                    SharedString::from(format!("subagent-tool-{tool}")),
-                    tool,
-                    selected,
-                    !busy,
-                )
-                .on_click(cx.listener(move |page, _, _, cx| {
-                    page.toggle_tool(tool.to_string(), cx);
-                })),
-            );
-        }
-        for tool in &custom_tools {
-            let name = tool.clone();
-            tool_row = tool_row.child(
-                Self::chip(
-                    theme,
-                    SharedString::from(format!("subagent-custom-tool-{name}")),
-                    format!("{name}  ×"),
-                    true,
-                    !busy,
-                )
-                .on_click(cx.listener(move |page, _, _, cx| {
-                    page.toggle_tool(name.clone(), cx);
-                })),
-            );
-        }
-        fields = fields.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(5.0))
-                .child(widgets::field_label(theme, "Tools"))
-                .child(tool_row)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .px(px(10.0))
-                                .py(px(8.0))
-                                .rounded(px(8.0))
-                                .border_1()
-                                .border_color(theme.border_strong)
-                                .bg(theme.input_glass_bg())
-                                .child(editor.tool_entry.clone()),
-                        )
-                        .child(
-                            widgets::ghost_action(theme)
-                                .id("subagent-tool-add")
-                                .debug_selector(|| "subagent-tool-add".into())
-                                .flex_none()
-                                .text_color(theme.text)
-                                .hover(|s| widgets::ghost_hover(theme, s))
-                                .child("Add")
-                                .when(busy, |el| el.opacity(0.45))
-                                .when(!busy, |el| {
-                                    el.on_click(
-                                        cx.listener(|page, _, _, cx| page.add_custom_tool(cx)),
-                                    )
-                                }),
-                        ),
-                )
-                .child(widgets::page_subtitle(
-                    theme,
-                    if selected_tools.is_empty() {
-                        format!(
-                            "Nothing selected — the agent gets every tool. {MESSAGING_TOOLS} are always added."
-                        )
-                    } else {
-                        format!(
-                            "{} selected. {MESSAGING_TOOLS} are always added.",
-                            selected_tools.len()
-                        )
-                    },
-                )),
-        );
-
-        fields = fields.child(input_row("System prompt", None, &editor.prompt));
+        fields = fields.child(editor_model_row(editor, &view, menu, theme, cx));
+        fields = fields.child(editor_thinking_row(&view, theme, cx));
+        fields = fields.child(editor_tools_section(editor, &view, theme, cx));
+        fields = fields.child(editor_input_row(
+            theme,
+            "System prompt",
+            None,
+            &editor.prompt,
+        ));
 
         fields = fields.child(
             div()
@@ -1341,56 +1133,8 @@ impl SubagentsPage {
             },
         ));
 
-        let save_label = if busy {
-            "Saving…"
-        } else if creating {
-            "Add subagent"
-        } else {
-            "Save subagent"
-        };
-        let footer = div()
-            .px(px(20.0))
-            .py(px(14.0))
-            .border_t_1()
-            .border_color(theme.border)
-            .flex()
-            .justify_end()
-            .gap(px(8.0))
-            .child(
-                widgets::ghost_action(theme)
-                    .id("subagent-cancel")
-                    .debug_selector(|| "subagent-cancel".into())
-                    .text_color(theme.text)
-                    .hover(|s| widgets::ghost_hover(theme, s))
-                    .child("Cancel")
-                    .when(busy, |el| el.opacity(0.45))
-                    .when(!busy, |el| {
-                        el.on_click(
-                            cx.listener(|page, _, window, cx| page.close_dialog(window, cx)),
-                        )
-                    }),
-            )
-            .child(
-                popover::btn_primary(theme, save_label)
-                    .id("subagent-save")
-                    .debug_selector(|| "subagent-save".into())
-                    .when(busy, |el| el.opacity(0.45))
-                    .when(!busy, |el| {
-                        el.on_click(cx.listener(|page, _, _, cx| page.save(cx)))
-                    }),
-            );
-
-        let heading_title = match (creating, from_builtin, original_label.as_deref()) {
-            (true, _, _) => "New subagent".to_string(),
-            (false, true, Some(name)) => format!("Customize “{name}”"),
-            (false, _, Some(name)) => format!("Edit “{name}”"),
-            (false, _, None) => "Subagent".to_string(),
-        };
-        let heading_copy = if from_builtin {
-            "Saving keeps the built-in and adds your own copy of it."
-        } else {
-            "How this specialist runs when a chat spawns it."
-        };
+        let footer = editor_footer(&view, theme, cx);
+        let heading = editor_heading(&view, theme, cx);
 
         popover::dialog_card(theme)
             .id("subagent-editor-dialog")
@@ -1403,44 +1147,7 @@ impl SubagentsPage {
             .w(px(EDITOR_WIDTH))
             .overflow_hidden()
             .on_key_down(cx.listener(Self::on_dialog_key))
-            .child(
-                div()
-                    .px(px(20.0))
-                    .pt(px(20.0))
-                    .flex()
-                    .items_start()
-                    .gap(px(12.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(popover::dialog_title(theme, &heading_title).text_size(px(17.0)))
-                            .child(caption(theme, heading_copy).mt(px(6.0)))
-                            .child(caption(theme, format!("Target device: {label}")).mt(px(4.0))),
-                    )
-                    .child(
-                        widgets::ghost_action(theme)
-                            .id("subagent-dialog-close")
-                            .debug_selector(|| "subagent-dialog-close".into())
-                            .role(gpui::Role::Button)
-                            .aria_label("Close")
-                            .flex_none()
-                            .hover(|s| widgets::ghost_hover(theme, s))
-                            .child(
-                                icons::icon(icons::CLOSE)
-                                    .size(px(16.0))
-                                    .text_color(theme.text_muted),
-                            )
-                            .when(busy, |el| el.opacity(0.45))
-                            .when(!busy, |el| {
-                                el.on_click(
-                                    cx.listener(|page, _, window, cx| {
-                                        page.close_dialog(window, cx)
-                                    }),
-                                )
-                            }),
-                    ),
-            )
+            .child(heading)
             .child(
                 div()
                     .id("subagent-editor-scroll")
@@ -1530,6 +1237,394 @@ impl SubagentsPage {
             )
             .into_any_element()
     }
+}
+
+/// One labelled text field of the editor, with an optional hint under it.
+fn editor_input_row(
+    theme: &Theme,
+    label: &'static str,
+    hint: Option<&'static str>,
+    input: &Entity<TextInput>,
+) -> gpui::Div {
+    let mut column = div()
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .child(widgets::field_label(theme, label))
+        .child(
+            div()
+                .w_full()
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .bg(theme.input_glass_bg())
+                .child(input.clone()),
+        );
+    if let Some(hint) = hint {
+        column = column.child(widgets::page_subtitle(theme, hint));
+    }
+    column
+}
+
+/// Model — picked from the device's own catalog.
+fn editor_model_row(
+    editor: &Editor,
+    view: &EditorView,
+    menu: Option<AnyElement>,
+    theme: &Theme,
+    cx: &mut Context<SubagentsPage>,
+) -> gpui::Div {
+    let EditorView {
+        busy,
+        model_unknown,
+        model_trigger_label,
+        ..
+    } = view;
+    let busy = *busy;
+    div()
+            .flex()
+            .flex_col()
+            .gap(px(5.0))
+            .child(widgets::field_label(theme, "Model"))
+            .child(
+                widgets::ghost_action(theme)
+                    .id("subagent-model-trigger")
+                    .debug_selector(|| "subagent-model-trigger".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("Subagent model")
+                    .track_focus(&editor.model_trigger)
+                    .relative()
+                    .w_full()
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .bg(theme.input_glass_bg())
+                    .hover(|s| widgets::ghost_hover(theme, s))
+                    .when(busy, |el| el.opacity(0.45))
+                    .when(!busy, |el| {
+                        el.on_click(cx.listener(|page, _, window, cx| {
+                            if let Some(editor) = &mut page.editor {
+                                editor.model_menu_open = !editor.model_menu_open;
+                                if editor.model_menu_open {
+                                    editor.model_search.focus_handle(cx).focus(window, cx);
+                                }
+                            }
+                            cx.notify();
+                        }))
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text)
+                            .child(SharedString::from(model_trigger_label.clone())),
+                    )
+                    .child(
+                        icons::icon(icons::ALT_ARROW_DOWN)
+                            .size(px(12.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .children(menu),
+            )
+            .when(*model_unknown, |el| {
+                el.child(widgets::warning_strip(
+                    theme,
+                    "This model is not in the device's Pi catalog right now. It is kept as written until you pick another.",
+                ))
+            })
+}
+
+/// Thinking — Pi's ladder, narrowed by what the model supports.
+fn editor_thinking_row(
+    view: &EditorView,
+    theme: &Theme,
+    cx: &mut Context<SubagentsPage>,
+) -> gpui::Div {
+    let EditorView {
+        busy,
+        thinking,
+        levels,
+        ..
+    } = view;
+    let busy = *busy;
+    let mut thinking_row = div().flex().flex_row().flex_wrap().gap(px(6.0)).child(
+        SubagentsPage::chip(
+            theme,
+            "subagent-thinking-inherit",
+            "Inherit",
+            thinking.is_none(),
+            !busy,
+        )
+        .on_click(cx.listener(|page, _, _, cx| {
+            if let Some(editor) = &mut page.editor {
+                editor.thinking = None;
+            }
+            cx.notify();
+        })),
+    );
+    for level in levels {
+        let level = *level;
+        let selected = thinking.as_deref() == Some(level);
+        thinking_row = thinking_row.child(
+            SubagentsPage::chip(
+                theme,
+                SharedString::from(format!("subagent-thinking-{level}")),
+                level,
+                selected,
+                !busy,
+            )
+            .on_click(cx.listener(move |page, _, _, cx| {
+                if let Some(editor) = &mut page.editor {
+                    editor.thinking = Some(level.to_string());
+                }
+                cx.notify();
+            })),
+        );
+    }
+    // A level the file carries that is not on the ladder stays selectable
+    // rather than vanishing on the next save.
+    if let Some(current) = thinking.as_deref()
+        && !levels.contains(&current)
+    {
+        thinking_row = thinking_row.child(SubagentsPage::chip(
+            theme,
+            "subagent-thinking-custom",
+            format!("{current} (from the file)"),
+            true,
+            false,
+        ));
+    }
+    let mut thinking_column = div()
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .child(widgets::field_label(theme, "Thinking"))
+        .child(thinking_row);
+    if levels.is_empty() {
+        thinking_column = thinking_column.child(widgets::page_subtitle(
+            theme,
+            "The selected model has no reasoning levels, so Pi ignores this setting.",
+        ));
+    }
+    thinking_column
+}
+
+/// Tools — built-in toggles plus free-form extension/MCP names.
+fn editor_tools_section(
+    editor: &Editor,
+    view: &EditorView,
+    theme: &Theme,
+    cx: &mut Context<SubagentsPage>,
+) -> gpui::Div {
+    let EditorView {
+        busy,
+        selected_tools,
+        custom_tools,
+        ..
+    } = view;
+    let busy = *busy;
+    let mut tool_row = div().flex().flex_row().flex_wrap().gap(px(6.0));
+    for tool in BUILTIN_TOOLS {
+        let selected = selected_tools.iter().any(|t| t == tool);
+        tool_row = tool_row.child(
+            SubagentsPage::chip(
+                theme,
+                SharedString::from(format!("subagent-tool-{tool}")),
+                tool,
+                selected,
+                !busy,
+            )
+            .on_click(cx.listener(move |page, _, _, cx| {
+                page.toggle_tool(tool.to_string(), cx);
+            })),
+        );
+    }
+    for tool in custom_tools {
+        let name = tool.clone();
+        tool_row = tool_row.child(
+            SubagentsPage::chip(
+                theme,
+                SharedString::from(format!("subagent-custom-tool-{name}")),
+                format!("{name}  ×"),
+                true,
+                !busy,
+            )
+            .on_click(cx.listener(move |page, _, _, cx| {
+                page.toggle_tool(name.clone(), cx);
+            })),
+        );
+    }
+    div()
+            .flex()
+            .flex_col()
+            .gap(px(5.0))
+            .child(widgets::field_label(theme, "Tools"))
+            .child(tool_row)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px(px(10.0))
+                            .py(px(8.0))
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(theme.border_strong)
+                            .bg(theme.input_glass_bg())
+                            .child(editor.tool_entry.clone()),
+                    )
+                    .child(
+                        widgets::ghost_action(theme)
+                            .id("subagent-tool-add")
+                            .debug_selector(|| "subagent-tool-add".into())
+                            .flex_none()
+                            .text_color(theme.text)
+                            .hover(|s| widgets::ghost_hover(theme, s))
+                            .child("Add")
+                            .when(busy, |el| el.opacity(0.45))
+                            .when(!busy, |el| {
+                                el.on_click(
+                                    cx.listener(|page, _, _, cx| page.add_custom_tool(cx)),
+                                )
+                            }),
+                    ),
+            )
+            .child(widgets::page_subtitle(
+                theme,
+                if selected_tools.is_empty() {
+                    format!(
+                        "Nothing selected — the agent gets every tool. {MESSAGING_TOOLS} are always added."
+                    )
+                } else {
+                    format!(
+                        "{} selected. {MESSAGING_TOOLS} are always added.",
+                        selected_tools.len()
+                    )
+                },
+            ))
+}
+
+/// The editor's Cancel / Save footer.
+fn editor_footer(view: &EditorView, theme: &Theme, cx: &mut Context<SubagentsPage>) -> gpui::Div {
+    let EditorView { busy, creating, .. } = view;
+    let (busy, creating) = (*busy, *creating);
+    let save_label = if busy {
+        "Saving…"
+    } else if creating {
+        "Add subagent"
+    } else {
+        "Save subagent"
+    };
+    div()
+        .px(px(20.0))
+        .py(px(14.0))
+        .border_t_1()
+        .border_color(theme.border)
+        .flex()
+        .justify_end()
+        .gap(px(8.0))
+        .child(
+            widgets::ghost_action(theme)
+                .id("subagent-cancel")
+                .debug_selector(|| "subagent-cancel".into())
+                .text_color(theme.text)
+                .hover(|s| widgets::ghost_hover(theme, s))
+                .child("Cancel")
+                .when(busy, |el| el.opacity(0.45))
+                .when(!busy, |el| {
+                    el.on_click(cx.listener(|page, _, window, cx| page.close_dialog(window, cx)))
+                }),
+        )
+        .child(
+            popover::btn_primary(theme, save_label)
+                .id("subagent-save")
+                .debug_selector(|| "subagent-save".into())
+                .when(busy, |el| el.opacity(0.45))
+                .when(!busy, |el| {
+                    el.on_click(cx.listener(|page, _, _, cx| page.save(cx)))
+                }),
+        )
+}
+
+/// The editor's title, its copy and target device, and the close button.
+fn editor_heading(view: &EditorView, theme: &Theme, cx: &mut Context<SubagentsPage>) -> gpui::Div {
+    let EditorView {
+        busy,
+        creating,
+        from_builtin,
+        original_label,
+        label,
+        ..
+    } = view;
+    let (busy, creating, from_builtin) = (*busy, *creating, *from_builtin);
+    let heading_title = match (creating, from_builtin, original_label.as_deref()) {
+        (true, _, _) => "New subagent".to_string(),
+        (false, true, Some(name)) => format!("Customize “{name}”"),
+        (false, _, Some(name)) => format!("Edit “{name}”"),
+        (false, _, None) => "Subagent".to_string(),
+    };
+    let heading_copy = if from_builtin {
+        "Saving keeps the built-in and adds your own copy of it."
+    } else {
+        "How this specialist runs when a chat spawns it."
+    };
+
+    div()
+        .px(px(20.0))
+        .pt(px(20.0))
+        .flex()
+        .items_start()
+        .gap(px(12.0))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(popover::dialog_title(theme, &heading_title).text_size(px(17.0)))
+                .child(caption(theme, heading_copy).mt(px(6.0)))
+                .child(caption(theme, format!("Target device: {label}")).mt(px(4.0))),
+        )
+        .child(
+            widgets::ghost_action(theme)
+                .id("subagent-dialog-close")
+                .debug_selector(|| "subagent-dialog-close".into())
+                .role(gpui::Role::Button)
+                .aria_label("Close")
+                .flex_none()
+                .hover(|s| widgets::ghost_hover(theme, s))
+                .child(
+                    icons::icon(icons::CLOSE)
+                        .size(px(16.0))
+                        .text_color(theme.text_muted),
+                )
+                .when(busy, |el| el.opacity(0.45))
+                .when(!busy, |el| {
+                    el.on_click(cx.listener(|page, _, window, cx| page.close_dialog(window, cx)))
+                }),
+        )
+}
+
+/// The editor's per-frame snapshot, taken before the model menu re-borrows
+/// the page.
+struct EditorView {
+    busy: bool,
+    creating: bool,
+    from_builtin: bool,
+    original_label: Option<String>,
+    label: String,
+    selected_tools: Vec<String>,
+    custom_tools: Vec<String>,
+    thinking: Option<String>,
+    levels: Vec<&'static str>,
+    model_unknown: bool,
+    model_trigger_label: String,
 }
 
 impl Render for SubagentsPage {

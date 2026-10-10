@@ -448,34 +448,7 @@ impl Composer {
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_slash(cx)));
         // The rows come first (the composer's actions are there even while
         // the agent's list loads or fails), then a line for that list.
-        let status: Option<gpui::AnyElement> = if self.slash.loading && commands.is_empty() {
-            Some(
-                crate::kit::popover::skeleton_rows("slash-loading", theme, 2, cx.entity_id(), cx)
-                    .into_any_element(),
-            )
-        } else if let Some(error) = self.slash.error.clone() {
-            Some(
-                div()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.danger_muted)
-                    .child(error)
-                    .into_any_element(),
-            )
-        } else if self.slash.menu.selectable.is_empty() {
-            Some(
-                div()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .child("No matching commands")
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
+        let status = self.slash_status_line(commands.is_empty(), theme, cx);
         if !self.slash.menu.rows.is_empty() {
             let parent = self.slash.parent.clone();
             let chevron_column = self.slash.menu.rows.iter().any(|row| match row {
@@ -486,34 +459,8 @@ impl Composer {
             });
             // A command's choices: which command, and what is in effect now.
             if let Some(parent) = &parent {
-                let summary = slash_menu::choice_summary(parent, &facts);
                 card = card
-                    .child(
-                        div()
-                            .px(px(8.0))
-                            .pt(px(4.0))
-                            .pb(px(2.0))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0))
-                            .text_size(px(12.0))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(format!("/{parent}"))),
-                            )
-                            .children(summary.map(|summary| {
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .truncate()
-                                    .text_color(theme.text_muted)
-                                    .child(SharedString::from(summary))
-                            })),
-                    )
+                    .child(slash_choice_header(parent, &facts, theme))
                     .child(crate::kit::popover::menu_separator());
             }
             let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.slash.menu.rows.len());
@@ -545,137 +492,15 @@ impl Composer {
                         );
                         continue;
                     }
-                    Row::Action(action) => line
-                        .child(
-                            crate::kit::icons::icon(action.icon())
-                                .size(px(14.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(px(12.5))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(SharedString::from(action.label())),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .overflow_hidden()
-                                .truncate()
-                                .text_size(px(12.0))
-                                .text_color(theme.text_muted.opacity(0.65))
-                                .child(SharedString::from(action.description())),
-                        )
-                        .when(chevron_column, |line| {
-                            line.child(div().size(px(12.0)).flex_none())
-                        }),
+                    Row::Action(action) => slash_action_line(line, *action, chevron_column, theme),
                     Row::Command(ix) => {
                         let Some(command) = commands.get(*ix) else {
                             continue;
                         };
-                        let mut description = command.description.clone();
-                        if let Some(hint) = &command.input_hint {
-                            if description.is_empty() {
-                                description = format!("<{hint}>");
-                            } else {
-                                description = format!("{description} · <{hint}>");
-                            }
-                        }
-                        let badge = slash_menu::command_badge(&command.name, &facts);
-                        let has_choices = !slash_menu::choices(&command.name).is_empty();
-                        line.child(
-                            crate::kit::icons::icon(crate::prefs::slash_commands::icon(
-                                &command.name,
-                            ))
-                            .size(px(14.0))
-                            .text_color(theme.text_muted),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(px(12.5))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(SharedString::from(format!("/{}", command.name))),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .overflow_hidden()
-                                .truncate()
-                                .text_size(px(12.0))
-                                // A shade under the menu's other muted text: the tone Settings →
-                                // Commands gives the same descriptions.
-                                .text_color(theme.text_muted.opacity(0.65))
-                                .child(SharedString::from(description)),
-                        )
-                        .children(badge.map(|badge| slash_badge(theme, badge)))
-                        // The chevron has a column of its own on every row
-                        // once any command has choices, so the badges end at
-                        // one edge whether a chevron follows them or not.
-                        .when(chevron_column, |line| {
-                            line.child(
-                                div()
-                                    .size(px(12.0))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .when(has_choices, |slot| {
-                                        slot.child(
-                                            crate::kit::icons::icon(
-                                                crate::kit::icons::ALT_ARROW_RIGHT,
-                                            )
-                                            .size(px(12.0))
-                                            .text_color(theme.text_muted.opacity(0.7)),
-                                        )
-                                    }),
-                            )
-                        })
+                        slash_command_line(line, command, &facts, chevron_column, theme)
                     }
                     Row::Choice(choice) => {
-                        let in_effect = parent.as_deref().is_some_and(|parent| {
-                            slash_menu::choice_in_effect(parent, choice, &facts)
-                        });
-                        line.child(
-                            // The check marks the choice in effect; the slot
-                            // keeps every value aligned either way.
-                            div()
-                                .size(px(14.0))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when(in_effect, |slot| {
-                                    slot.child(
-                                        crate::kit::icons::icon(crate::kit::icons::CHECK)
-                                            .size(px(12.0))
-                                            .text_color(theme.success),
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(px(12.5))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(SharedString::from(choice.value)),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .overflow_hidden()
-                                .truncate()
-                                .text_size(px(12.0))
-                                .text_color(theme.text_muted.opacity(0.65))
-                                .child(SharedString::from(choice.description)),
-                        )
+                        slash_choice_line(line, choice, parent.as_deref(), &facts, theme)
                     }
                 };
                 rows.push(
@@ -718,4 +543,227 @@ impl Composer {
             None,
         ))
     }
+}
+
+impl Composer {
+    /// The line under the rows for the agent's list: loading, its error, or
+    /// no matches.
+    fn slash_status_line(
+        &self,
+        commands_empty: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if self.slash.loading && commands_empty {
+            Some(
+                crate::kit::popover::skeleton_rows("slash-loading", theme, 2, cx.entity_id(), cx)
+                    .into_any_element(),
+            )
+        } else if let Some(error) = self.slash.error.clone() {
+            Some(
+                div()
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.danger_muted)
+                    .child(error)
+                    .into_any_element(),
+            )
+        } else if self.slash.menu.selectable.is_empty() {
+            Some(
+                div()
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child("No matching commands")
+                    .into_any_element(),
+            )
+        } else {
+            None
+        }
+    }
+}
+
+/// The open choices' heading: the command, and what is in effect now.
+fn slash_choice_header(
+    parent: &str,
+    facts: &crate::composer::slash_menu::Facts<'_>,
+    theme: &Theme,
+) -> gpui::Div {
+    let summary = crate::composer::slash_menu::choice_summary(parent, facts);
+    div()
+        .px(px(8.0))
+        .pt(px(4.0))
+        .pb(px(2.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(px(12.0))
+        .child(
+            div()
+                .flex_none()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(SharedString::from(format!("/{parent}"))),
+        )
+        .children(summary.map(|summary| {
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_color(theme.text_muted)
+                .child(SharedString::from(summary))
+        }))
+}
+
+/// One of the composer's own actions: icon, label, description.
+fn slash_action_line(
+    line: gpui::Div,
+    action: crate::composer::slash_menu::Action,
+    chevron_column: bool,
+    theme: &Theme,
+) -> gpui::Div {
+    line.child(
+        crate::kit::icons::icon(action.icon())
+            .size(px(14.0))
+            .text_color(theme.text_muted),
+    )
+    .child(
+        div()
+            .flex_none()
+            .text_size(px(12.5))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.text)
+            .child(SharedString::from(action.label())),
+    )
+    .child(
+        div()
+            .min_w_0()
+            .flex_1()
+            .overflow_hidden()
+            .truncate()
+            .text_size(px(12.0))
+            .text_color(theme.text_muted.opacity(0.65))
+            .child(SharedString::from(action.description())),
+    )
+    .when(chevron_column, |line| {
+        line.child(div().size(px(12.0)).flex_none())
+    })
+}
+
+/// One agent command: icon, `/name`, description (with its input hint), the
+/// badge, and the chevron when it has choices.
+fn slash_command_line(
+    line: gpui::Div,
+    command: &SlashCommand,
+    facts: &crate::composer::slash_menu::Facts<'_>,
+    chevron_column: bool,
+    theme: &Theme,
+) -> gpui::Div {
+    use crate::composer::slash_menu;
+    let mut description = command.description.clone();
+    if let Some(hint) = &command.input_hint {
+        if description.is_empty() {
+            description = format!("<{hint}>");
+        } else {
+            description = format!("{description} · <{hint}>");
+        }
+    }
+    let badge = slash_menu::command_badge(&command.name, facts);
+    let has_choices = !slash_menu::choices(&command.name).is_empty();
+    line.child(
+        crate::kit::icons::icon(crate::prefs::slash_commands::icon(&command.name))
+            .size(px(14.0))
+            .text_color(theme.text_muted),
+    )
+    .child(
+        div()
+            .flex_none()
+            .text_size(px(12.5))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.text)
+            .child(SharedString::from(format!("/{}", command.name))),
+    )
+    .child(
+        div()
+            .min_w_0()
+            .flex_1()
+            .overflow_hidden()
+            .truncate()
+            .text_size(px(12.0))
+            // A shade under the menu's other muted text: the tone Settings →
+            // Commands gives the same descriptions.
+            .text_color(theme.text_muted.opacity(0.65))
+            .child(SharedString::from(description)),
+    )
+    .children(badge.map(|badge| slash_badge(theme, badge)))
+    // The chevron has a column of its own on every row
+    // once any command has choices, so the badges end at
+    // one edge whether a chevron follows them or not.
+    .when(chevron_column, |line| {
+        line.child(
+            div()
+                .size(px(12.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(has_choices, |slot| {
+                    slot.child(
+                        crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_RIGHT)
+                            .size(px(12.0))
+                            .text_color(theme.text_muted.opacity(0.7)),
+                    )
+                }),
+        )
+    })
+}
+
+/// One choice of the open command, checked when it is in effect.
+fn slash_choice_line(
+    line: gpui::Div,
+    choice: &crate::composer::slash_menu::Choice,
+    parent: Option<&str>,
+    facts: &crate::composer::slash_menu::Facts<'_>,
+    theme: &Theme,
+) -> gpui::Div {
+    let in_effect = parent
+        .is_some_and(|parent| crate::composer::slash_menu::choice_in_effect(parent, choice, facts));
+    line.child(
+        // The check marks the choice in effect; the slot
+        // keeps every value aligned either way.
+        div()
+            .size(px(14.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(in_effect, |slot| {
+                slot.child(
+                    crate::kit::icons::icon(crate::kit::icons::CHECK)
+                        .size(px(12.0))
+                        .text_color(theme.success),
+                )
+            }),
+    )
+    .child(
+        div()
+            .flex_none()
+            .text_size(px(12.5))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.text)
+            .child(SharedString::from(choice.value)),
+    )
+    .child(
+        div()
+            .min_w_0()
+            .flex_1()
+            .overflow_hidden()
+            .truncate()
+            .text_size(px(12.0))
+            .text_color(theme.text_muted.opacity(0.65))
+            .child(SharedString::from(choice.description)),
+    )
 }

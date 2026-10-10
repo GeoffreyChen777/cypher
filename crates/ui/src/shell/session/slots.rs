@@ -8,7 +8,8 @@ impl Shell {
     // ---- slot lookup ----
 
     pub(in crate::shell) fn slot_for_tab(&self, tab: &TabKey) -> Option<SlotId> {
-        self.slots
+        self.tiles
+            .slots
             .iter()
             .find(|(_, slot)| slot.tab == *tab)
             .map(|(sid, _)| *sid)
@@ -22,7 +23,8 @@ impl Shell {
     /// The slot whose context shows `chat_id` (comment / side-chat routing).
     pub(in crate::shell) fn slot_for_chat(&self, chat_id: &str, cx: &App) -> Option<SlotId> {
         self.slot_for_tab(&TabKey::session(chat_id)).or_else(|| {
-            self.slots
+            self.tiles
+                .slots
                 .iter()
                 .find(|(_, slot)| slot.state.read(cx).selected_chat.as_deref() == Some(chat_id))
                 .map(|(sid, _)| *sid)
@@ -42,20 +44,23 @@ impl Shell {
     /// Land keyboard focus in the focused tile's composer — or on the root
     /// when that tile is empty, so window shortcuts keep dispatching.
     pub(in crate::shell) fn focus_landing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.focused_slot().and_then(|sid| self.slots.get(&sid)) {
+        match self
+            .focused_slot()
+            .and_then(|sid| self.tiles.slots.get(&sid))
+        {
             Some(slot) => window.focus(&slot.composer.focus_handle(cx), cx),
-            None => window.focus(&self.root_focus, cx),
+            None => window.focus(&self.focus.root, cx),
         }
     }
 
     // ---- slot lifecycle ----
 
     fn create_slot(&mut self, tab: TabKey, cx: &mut Context<Self>) -> SlotId {
-        let sid = self.next_slot_id;
-        self.next_slot_id += 1;
+        let sid = self.tiles.next_slot_id;
+        self.tiles.next_slot_id += 1;
         let chat_id = tab.chat_id().map(str::to_string);
         let state = AppState::new_session_context(&self.state, chat_id.clone(), cx);
-        let popup = self.comment_popup.clone().downgrade();
+        let popup = self.comments.popup.clone().downgrade();
         let transcript = cx.new(|cx| Transcript::new(state.clone(), popup, cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let subagents = cx.new(|cx| SubagentsPanel::new(state.clone(), cx));
@@ -143,7 +148,7 @@ impl Shell {
         // fork's prefill landing on a background tab) gets back the one
         // stashed for it.
         if let Some(chat_id) = &chat_id
-            && let Some((draft, staged)) = self.closed_drafts.remove(chat_id)
+            && let Some((draft, staged)) = self.closed_tabs.drafts.remove(chat_id)
         {
             composer.update(cx, |composer, cx| {
                 composer.seed_draft(chat_id, draft, cx);
@@ -153,7 +158,7 @@ impl Shell {
         // The session's terminals outlived its last tab: re-bind them here.
         let terminal = chat_id
             .as_ref()
-            .and_then(|id| self.parked_terminals.remove(id));
+            .and_then(|id| self.closed_tabs.terminals.remove(id));
         if let Some(panel) = &terminal {
             let open = docks.terminal_open;
             panel.update(cx, |panel, cx| {
@@ -161,7 +166,7 @@ impl Shell {
                 panel.set_open(open, cx);
             });
         }
-        self.slots.insert(
+        self.tiles.slots.insert(
             sid,
             SessionSlot {
                 tab,
@@ -210,7 +215,7 @@ impl Shell {
     /// comment state before the entities go, and park its terminals (their
     /// PTYs outlive the tab) — or close them when the chat is gone.
     fn dispose_slot(&mut self, sid: SlotId, cx: &mut Context<Self>) {
-        let Some(slot) = self.slots.remove(&sid) else {
+        let Some(slot) = self.tiles.slots.remove(&sid) else {
             return;
         };
         if let Some(chat_id) = slot.tab.chat_id() {
@@ -218,7 +223,8 @@ impl Shell {
             let draft = composer.current_draft(cx);
             let staged = composer.staged_attachments();
             if !draft.trim().is_empty() || !staged.is_empty() {
-                self.closed_drafts
+                self.closed_tabs
+                    .drafts
                     .insert(chat_id.to_string(), (draft, staged));
             }
         }
@@ -242,12 +248,14 @@ impl Shell {
                     // mirror and transcript watches.
                     slot.state.update(cx, |s, _| s.park_session_context());
                     terminal.update(cx, |terminal, cx| terminal.set_open(false, cx));
-                    self.parked_terminals.insert(chat_id.to_string(), terminal);
+                    self.closed_tabs
+                        .terminals
+                        .insert(chat_id.to_string(), terminal);
                 }
                 None => terminal.update(cx, |terminal, cx| terminal.close_all(cx)),
             }
         }
-        if self.right_plus.get() == Some(&sid) {
+        if self.menus.right_plus.get() == Some(&sid) {
             self.close_right_plus(cx);
         }
     }
@@ -259,6 +267,7 @@ impl Shell {
     pub(in crate::shell) fn sync_slots(&mut self, cx: &mut Context<Self>) {
         let tabs: std::collections::HashSet<TabKey> = self.workspace.tabs().cloned().collect();
         let stale: Vec<SlotId> = self
+            .tiles
             .slots
             .iter()
             .filter(|(_, slot)| !tabs.contains(&slot.tab))
@@ -284,7 +293,7 @@ impl Shell {
     /// Persist a slot's docks under its session (sizes + open flags; a
     /// canvas has no session to key them by yet).
     pub(in crate::shell) fn remember_slot_docks(&mut self, sid: SlotId, cx: &mut Context<Self>) {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
         let Some(chat_id) = slot.tab.chat_id().map(str::to_string) else {
@@ -307,7 +316,7 @@ impl Shell {
     /// [`Self::workspace_changed`]; split drags call it directly); held until
     /// boot restored the saved one.
     pub(in crate::shell) fn save_layout(&mut self, cx: &mut Context<Self>) {
-        if !self.boot_landed {
+        if !self.tiles.boot_landed {
             return;
         }
         match self.project_window.clone() {
@@ -330,11 +339,12 @@ impl Shell {
     /// main's own notifies never feed back into the workspace.
     pub(in crate::shell) fn sync_follow(&mut self, cx: &mut Context<Self>) {
         let focused = self.workspace.focused_tab().cloned();
-        if focused == self.followed {
+        if focused == self.tiles.followed {
             return;
         }
-        self.followed = focused;
+        self.tiles.followed = focused;
         let chat = self
+            .tiles
             .followed
             .as_ref()
             .and_then(|tab| tab.chat_id())
@@ -381,16 +391,16 @@ impl Shell {
             .into_iter()
             .filter_map(|tab| self.slot_for_tab(tab))
             .collect();
-        let before = std::mem::replace(&mut self.shown_slots, shown);
+        let before = std::mem::replace(&mut self.tiles.shown_slots, shown);
         let hidden: Vec<SlotId> = before
             .into_iter()
-            .filter(|sid| !self.shown_slots.contains(sid))
+            .filter(|sid| !self.tiles.shown_slots.contains(sid))
             .collect();
         if hidden.is_empty() {
             return;
         }
         for sid in hidden {
-            if let Some(slot) = self.slots.get(&sid) {
+            if let Some(slot) = self.tiles.slots.get(&sid) {
                 slot.transcript
                     .update(cx, |t, cx| t.dismiss_comment_ui_and_selection(cx));
             }
@@ -410,7 +420,7 @@ impl Shell {
     ///   still on the way ([`Self::chat_awaited`]): the context re-selects
     ///   it and waits.
     fn on_slot_state_changed(&mut self, sid: SlotId, cx: &mut Context<Self>) {
-        let Some(slot) = self.slots.get(&sid) else {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
         let selected = slot.state.read(cx).selected_chat.clone();
@@ -420,7 +430,7 @@ impl Shell {
                 let session = TabKey::Session(chat_id);
                 let open_elsewhere = self.workspace.contains(&session);
                 self.workspace.replace_tab(&tab, session.clone());
-                if !open_elsewhere && let Some(slot) = self.slots.get_mut(&sid) {
+                if !open_elsewhere && let Some(slot) = self.tiles.slots.get_mut(&sid) {
                     slot.tab = session;
                 }
                 self.workspace_changed(cx);
@@ -453,6 +463,7 @@ impl Shell {
 
     fn on_composer_event(&mut self, sid: SlotId, event: &ComposerEvent, cx: &mut Context<Self>) {
         let Some((composer, transcript)) = self
+            .tiles
             .slots
             .get(&sid)
             .map(|slot| (slot.composer.clone(), slot.transcript.clone()))
@@ -461,7 +472,7 @@ impl Shell {
         };
         match event {
             ComposerEvent::OpenAgentSettings { target_device } => {
-                let result = self.settings_target.update(cx, |target, cx| {
+                let result = self.pages.target.update(cx, |target, cx| {
                     target.select(Some(target_device.clone()), cx)
                 });
                 match result {
@@ -472,7 +483,7 @@ impl Shell {
                 }
             }
             ComposerEvent::OpenGithubSettings { target_device } => {
-                let result = self.settings_target.update(cx, |target, cx| {
+                let result = self.pages.target.update(cx, |target, cx| {
                     target.select(Some(target_device.clone()), cx)
                 });
                 match result {
@@ -487,7 +498,8 @@ impl Shell {
                 target_device,
             } => {
                 let result = self
-                    .settings_target
+                    .pages
+                    .target
                     .update(cx, |target, cx| target.select(target_device.clone(), cx));
                 match result {
                     Ok(()) => self.open_providers(intent.clone(), cx),

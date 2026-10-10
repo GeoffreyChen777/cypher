@@ -85,8 +85,8 @@ impl Shell {
         let mut shell = Self::build(state, boot, data_dir, project.clone(), cx);
         // The state arrives attached and populated — no boot splash, and no
         // first-run setup (the main window owns that flow).
-        shell.splash = SplashPhase::Gone;
-        shell.setup_dismissed = true;
+        shell.splash.phase = SplashPhase::Gone;
+        shell.pages.setup_dismissed = true;
         shell.space_boot_applied = true;
         cx.on_release(move |_, cx| {
             let Some(project) = project else {
@@ -140,7 +140,7 @@ impl Shell {
         let Some(window) =
             crate::open_project_window(state, self.boot.clone(), self.data_dir.clone(), cx)
         else {
-            self.sidebar_notice = Some("Couldn’t open the project window".into());
+            self.sidebar.notice = Some("Couldn’t open the project window".into());
             cx.notify();
             return;
         };
@@ -148,7 +148,7 @@ impl Shell {
         // its shell loaded (up to a debounce behind).
         let saved = self.settings.project_workspaces.get(&space_id).cloned();
         window
-            .update(cx, |shell, _, _| shell.saved_workspace = saved)
+            .update(cx, |shell, _, _| shell.tiles.saved_workspace = saved)
             .ok();
         registry(cx).open.push((space_id, window));
         sync_hidden_projects(cx);

@@ -4,10 +4,10 @@ use super::*;
 
 impl Shell {
     pub(super) fn ensure_org_ui(&mut self, cx: &mut Context<Self>) {
-        if self.org.is_some() {
+        if self.sync.org.is_some() {
             return;
         }
-        self.org = Some(OrgGateUi {
+        self.sync.org = Some(OrgGateUi {
             orgs: Loadable::Idle,
             submitting: true,
             error: None,
@@ -20,7 +20,9 @@ impl Shell {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let Some(org) = self.org.as_mut() else { return };
+        let Some(org) = self.sync.org.as_mut() else {
+            return;
+        };
         org.orgs = Loadable::Loading;
         org.submitting = true;
         org.error = None;
@@ -61,7 +63,7 @@ impl Shell {
             }
             .await;
             this.update(cx, |shell, cx| {
-                if let Some(org) = shell.org.as_mut() {
+                if let Some(org) = shell.sync.org.as_mut() {
                     match result {
                         Ok(Some(rows)) => {
                             org.orgs = Loadable::Ready(rows);
@@ -90,7 +92,9 @@ impl Shell {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let Some(org) = self.org.as_mut() else { return };
+        let Some(org) = self.sync.org.as_mut() else {
+            return;
+        };
         org.submitting = true;
         org.error = None;
         org.task = Some(cx.spawn(async move |this, cx| {
@@ -102,7 +106,7 @@ impl Shell {
                 )
                 .await;
             this.update(cx, |shell, cx| {
-                if let Some(org) = shell.org.as_mut() {
+                if let Some(org) = shell.sync.org.as_mut() {
                     org.submitting = false;
                     if let Err(err) = result {
                         org.error = Some(format!("{err}").into());

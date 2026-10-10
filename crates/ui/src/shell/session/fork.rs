@@ -57,7 +57,7 @@ impl Shell {
         anchor_message_id: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(slot_transcript) = self.slots.get(&sid).map(|s| s.transcript.clone()) else {
+        let Some(slot_transcript) = self.tiles.slots.get(&sid).map(|s| s.transcript.clone()) else {
             return;
         };
         slot_transcript.update(cx, |t, cx| {
@@ -81,44 +81,12 @@ impl Shell {
             tracing::warn!(%chat_id, "ForkSession skipped: engine offline");
             let notice = "Cannot fork: the engine is not connected.";
             crate::shell::notify::post("Fork", notice);
-            self.sidebar_notice = Some(notice.into());
+            self.sidebar.notice = Some(notice.into());
             settle(cx);
             cx.notify();
             return;
         };
-        // The request id is the client-minted TARGET chat id — reuse the
-        // cached id for this (source, anchor) so a lost-reply retry returns
-        // the SAME chat (idempotent); mint + remember it on first click.
-        let key = (chat_id.clone(), anchor_message_id.clone());
-        let request_id = self.fork_request_ids.get(&key).cloned().unwrap_or_else(|| {
-            let id = uuid::Uuid::new_v4().to_string();
-            self.fork_request_ids.insert(key, id.clone());
-            id
-        });
-        let mut params = serde_json::Map::new();
-        params.insert("requestId".into(), serde_json::Value::String(request_id));
-        params.insert(
-            "sourceChatId".into(),
-            serde_json::Value::String(chat_id.clone()),
-        );
-        params.insert(
-            "anchorMessageId".into(),
-            serde_json::Value::String(anchor_message_id.clone()),
-        );
-        {
-            let state = self.state.read(cx);
-            if let (Some(chat), Some(local)) = (
-                state.chats.iter().find(|c| c.id == chat_id),
-                state.local_device_id.clone(),
-            ) && chat.device_id != local
-            {
-                params.insert(
-                    "targetDeviceId".into(),
-                    serde_json::Value::String(chat.device_id.clone()),
-                );
-            }
-        }
-        let params = serde_json::Value::Object(params);
+        let params = self.fork_request_params(&chat_id, &anchor_message_id, cx);
         let weak = cx.weak_entity();
         let state = self.state.clone();
         cx.spawn(async move |_this, cx| {
@@ -150,7 +118,7 @@ impl Shell {
                     crate::shell::notify::post("Fork", &notice);
                     if let Some(shell) = weak.upgrade() {
                         shell.update(cx, |shell, cx| {
-                            shell.sidebar_notice = Some(notice.clone().into());
+                            shell.sidebar.notice = Some(notice.clone().into());
                             cx.notify();
                         });
                     }
@@ -161,82 +129,19 @@ impl Shell {
                 cypher_proto::SessionForkResponse::Created(created) => {
                     // Insert the new chat first: the fork tab's context
                     // mirrors main's list when it is created.
-                    let fork_id = created.chat.id.clone();
-                    let title = created
-                        .chat
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| "Fork".to_string());
                     state.update(cx, |state, cx| {
                         state.insert_chat_optimistic(created.chat.clone());
                         cx.notify();
                     });
                     if let Some(shell) = weak.upgrade() {
                         shell.update(cx, |shell, cx| {
-                            // Definitive reply: this fork is settled, drop the
-                            // idempotence mapping (a fresh future fork mints a
-                            // fresh id). Errors/lost replies retain it.
-                            if !retained {
-                                shell
-                                    .fork_request_ids
-                                    .remove(&(chat_id.clone(), anchor_message_id.clone()));
-                            }
-                            // Its row may trail the next chats frame.
-                            shell.expect_chat(&fork_id);
-                            // The fork opens as a tab in the source tab's
-                            // group, its prefill seeded into the new tile's
-                            // composer. Focused only when the user is still
-                            // on the source — a late reply (user moved on)
-                            // opens it in the background, never yanks focus.
-                            let source = crate::workspace::TabKey::session(chat_id.clone());
-                            let fork = crate::workspace::TabKey::session(fork_id.clone());
-                            let on_source = shell.workspace.focused_tab() == Some(&source);
-                            let before = shell.workspace.focused();
-                            let group = shell
-                                .workspace
-                                .find(&source)
-                                .map(|(group, _)| group)
-                                .unwrap_or(before);
-                            let shown = shell
-                                .workspace
-                                .group(group)
-                                .and_then(|g| g.active_tab().cloned());
-                            shell.workspace.open_in(group, fork.clone());
-                            if !on_source {
-                                // Background: the group keeps showing what it
-                                // showed, and focus stays where it was.
-                                if let Some((g, index)) =
-                                    shown.and_then(|tab| shell.workspace.find(&tab))
-                                {
-                                    shell.workspace.activate(g, index);
-                                }
-                                shell.workspace.focus(before);
-                            } else {
-                                shell.focus_pending = true;
-                            }
-                            shell.sync_slots(cx);
-                            if let Some(text) = created.composer_text {
-                                match shell
-                                    .slot_for_tab(&fork)
-                                    .and_then(|sid| shell.slots.get(&sid))
-                                    .map(|slot| slot.composer.clone())
-                                {
-                                    Some(composer) => composer.update(cx, |composer, cx| {
-                                        composer.seed_draft(&fork_id, text, cx);
-                                    }),
-                                    // A background tab gets its slot when
-                                    // first shown; the prefill waits with
-                                    // the closed-tab drafts.
-                                    None => {
-                                        shell
-                                            .closed_drafts
-                                            .insert(fork_id.clone(), (text, Vec::new()));
-                                    }
-                                }
-                            }
-                            let notice = format!("Fork created: {title}");
-                            crate::shell::notify::post("Fork", &notice);
-                            shell.workspace_changed(cx);
+                            shell.open_created_fork(
+                                &chat_id,
+                                &anchor_message_id,
+                                retained,
+                                created,
+                                cx,
+                            );
                         });
                     }
                 }
@@ -256,7 +161,7 @@ impl Shell {
                     crate::shell::notify::post("Fork", &notice);
                     if let Some(shell) = weak.upgrade() {
                         shell.update(cx, |shell, cx| {
-                            shell.sidebar_notice = Some(notice.clone().into());
+                            shell.sidebar.notice = Some(notice.clone().into());
                             cx.notify();
                         });
                     }
@@ -264,6 +169,129 @@ impl Shell {
             }
         })
         .detach();
+    }
+
+    /// The `ForkSession` params: the cached (or freshly minted) request id,
+    /// the source and anchor, and the host device when it is not this one.
+    fn fork_request_params(
+        &mut self,
+        chat_id: &str,
+        anchor_message_id: &str,
+        cx: &mut Context<Self>,
+    ) -> serde_json::Value {
+        // The request id is the client-minted TARGET chat id — reuse the
+        // cached id for this (source, anchor) so a lost-reply retry returns
+        // the SAME chat (idempotent); mint + remember it on first click.
+        let key = (chat_id.to_string(), anchor_message_id.to_string());
+        let request_id = self.fork_request_ids.get(&key).cloned().unwrap_or_else(|| {
+            let id = uuid::Uuid::new_v4().to_string();
+            self.fork_request_ids.insert(key, id.clone());
+            id
+        });
+        let mut params = serde_json::Map::new();
+        params.insert("requestId".into(), serde_json::Value::String(request_id));
+        params.insert(
+            "sourceChatId".into(),
+            serde_json::Value::String(chat_id.to_string()),
+        );
+        params.insert(
+            "anchorMessageId".into(),
+            serde_json::Value::String(anchor_message_id.to_string()),
+        );
+        {
+            let state = self.state.read(cx);
+            if let (Some(chat), Some(local)) = (
+                state.chats.iter().find(|c| c.id == chat_id),
+                state.local_device_id.clone(),
+            ) && chat.device_id != local
+            {
+                params.insert(
+                    "targetDeviceId".into(),
+                    serde_json::Value::String(chat.device_id.clone()),
+                );
+            }
+        }
+        serde_json::Value::Object(params)
+    }
+
+    /// A fork was created: drop its idempotence mapping, open it as a tab
+    /// beside its source (focused only while the user is still there) and
+    /// seed its composer prefill.
+    fn open_created_fork(
+        &mut self,
+        chat_id: &str,
+        anchor_message_id: &str,
+        retained: bool,
+        created: cypher_proto::SessionForkCreated,
+        cx: &mut Context<Self>,
+    ) {
+        let fork_id = created.chat.id.clone();
+        let title = created
+            .chat
+            .title
+            .clone()
+            .unwrap_or_else(|| "Fork".to_string());
+        // Definitive reply: this fork is settled, drop the
+        // idempotence mapping (a fresh future fork mints a
+        // fresh id). Errors/lost replies retain it.
+        if !retained {
+            self.fork_request_ids
+                .remove(&(chat_id.to_string(), anchor_message_id.to_string()));
+        }
+        // Its row may trail the next chats frame.
+        self.expect_chat(&fork_id);
+        // The fork opens as a tab in the source tab's
+        // group, its prefill seeded into the new tile's
+        // composer. Focused only when the user is still
+        // on the source — a late reply (user moved on)
+        // opens it in the background, never yanks focus.
+        let source = crate::workspace::TabKey::session(chat_id.to_string());
+        let fork = crate::workspace::TabKey::session(fork_id.clone());
+        let on_source = self.workspace.focused_tab() == Some(&source);
+        let before = self.workspace.focused();
+        let group = self
+            .workspace
+            .find(&source)
+            .map(|(group, _)| group)
+            .unwrap_or(before);
+        let shown = self
+            .workspace
+            .group(group)
+            .and_then(|g| g.active_tab().cloned());
+        self.workspace.open_in(group, fork.clone());
+        if !on_source {
+            // Background: the group keeps showing what it
+            // showed, and focus stays where it was.
+            if let Some((g, index)) = shown.and_then(|tab| self.workspace.find(&tab)) {
+                self.workspace.activate(g, index);
+            }
+            self.workspace.focus(before);
+        } else {
+            self.tiles.focus_pending = true;
+        }
+        self.sync_slots(cx);
+        if let Some(text) = created.composer_text {
+            match self
+                .slot_for_tab(&fork)
+                .and_then(|sid| self.tiles.slots.get(&sid))
+                .map(|slot| slot.composer.clone())
+            {
+                Some(composer) => composer.update(cx, |composer, cx| {
+                    composer.seed_draft(&fork_id, text, cx);
+                }),
+                // A background tab gets its slot when
+                // first shown; the prefill waits with
+                // the closed-tab drafts.
+                None => {
+                    self.closed_tabs
+                        .drafts
+                        .insert(fork_id.clone(), (text, Vec::new()));
+                }
+            }
+        }
+        let notice = format!("Fork created: {title}");
+        crate::shell::notify::post("Fork", &notice);
+        self.workspace_changed(cx);
     }
 
     /// User-facing notice text for a failed `RewindSession` RPC, mirroring
@@ -304,6 +332,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let Some((slot_transcript, composer)) = self
+            .tiles
             .slots
             .get(&sid)
             .map(|s| (s.transcript.clone(), s.composer.clone()))
@@ -329,7 +358,7 @@ impl Shell {
             tracing::warn!(%chat_id, "RewindSession skipped: engine offline");
             let notice = "Cannot restart the conversation: the engine is not connected.";
             crate::shell::notify::post("Restart", notice);
-            self.sidebar_notice = Some(notice.into());
+            self.sidebar.notice = Some(notice.into());
             settle(cx);
             cx.notify();
             return;
@@ -395,7 +424,7 @@ impl Shell {
             crate::shell::notify::post("Restart", &notice);
             if let Some(shell) = weak.upgrade() {
                 shell.update(cx, |shell, cx| {
-                    shell.sidebar_notice = Some(notice.clone().into());
+                    shell.sidebar.notice = Some(notice.clone().into());
                     cx.notify();
                 });
             }

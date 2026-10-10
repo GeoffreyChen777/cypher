@@ -32,15 +32,15 @@ impl Shell {
     /// Is this disclosure group (project card or branch/worktree group)
     /// currently collapsed?
     fn sidebar_group_collapsed(&self, key: &str) -> bool {
-        self.sidebar_collapsed.contains(key)
+        self.sidebar.collapsed.contains(key)
     }
 
     /// Toggle a disclosure group (project card or branch/worktree group).
     /// Collapse state is local Shell UI state — never persisted or synced;
     /// everything starts expanded.
     fn toggle_sidebar_group(&mut self, key: String, cx: &mut Context<Self>) {
-        if !self.sidebar_collapsed.remove(&key) {
-            self.sidebar_collapsed.insert(key);
+        if !self.sidebar.collapsed.remove(&key) {
+            self.sidebar.collapsed.insert(key);
         }
         cx.notify();
     }
@@ -220,17 +220,19 @@ impl Shell {
                                 .show_harness
                                 .then(|| chat.config.as_ref().map(|c| c.harness));
                             self.render_chat_row(
-                                chat.id.clone(),
-                                transcript::single_line(
-                                    &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                                )
-                                .into(),
-                                time_ago,
-                                harness,
-                                *status,
-                                is_selected,
-                                chat.pinned,
-                                !flat,
+                                ChatRow {
+                                    id: chat.id.clone(),
+                                    title: transcript::single_line(
+                                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                                    )
+                                    .into(),
+                                    time_ago,
+                                    harness,
+                                    status: *status,
+                                    selected: is_selected,
+                                    pinned: chat.pinned,
+                                    nested: !flat,
+                                },
                                 theme,
                                 cx,
                             )
@@ -595,7 +597,7 @@ impl Shell {
             header = header.on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.space_menu.open((menu_id.clone(), event.position));
+                    this.menus.space.open((menu_id.clone(), event.position));
                     cx.notify();
                 }),
             );
@@ -640,7 +642,8 @@ impl Shell {
                     window.prevent_default();
                     cx.stop_propagation();
                     this.close_space_menu(cx);
-                    this.space_style_menu
+                    this.menus
+                        .space_style
                         .open((space_id.clone(), event.position));
                     cx.notify();
                 }),

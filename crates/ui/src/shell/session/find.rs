@@ -13,7 +13,7 @@ impl Shell {
     /// Settings, so both are no-ops rather than an empty bar.
     pub(in crate::shell) fn open_find(&mut self, sid: SlotId, cx: &mut Context<Self>) {
         let showing_setup = self.showing_setup();
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         if !matches!(self.route, Route::Chat)
@@ -36,7 +36,7 @@ impl Shell {
     /// Close the bar and hand the keyboard back to the composer — where it
     /// was before ⌘F, and the only place in the chat route that wants it.
     fn close_find(&mut self, sid: SlotId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(slot) = self.slots.get_mut(&sid) else {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
         slot.transcript
@@ -47,7 +47,7 @@ impl Shell {
     }
 
     fn step_find(&mut self, sid: SlotId, delta: isize, cx: &mut Context<Self>) {
-        if let Some(slot) = self.slots.get(&sid) {
+        if let Some(slot) = self.tiles.slots.get(&sid) {
             slot.transcript
                 .update(cx, |transcript, cx| transcript.step_find(delta, cx));
         }
@@ -89,7 +89,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let slot = self.slots.get_mut(&sid)?;
+        let slot = self.tiles.slots.get_mut(&sid)?;
         if !slot.transcript.read(cx).find_open() {
             return None;
         }

@@ -318,18 +318,23 @@ impl Changes {
             }))
             .into_any_element()
     }
-    #[allow(clippy::too_many_arguments)]
+
+    /// One side of a split diff row: gutter number, marker and the
+    /// horizontally scrolled, selectable code.
     fn split_cell(
         &self,
-        row: usize,
+        split: &SplitRow<'_>,
         side: Side,
         line: Option<&DiffLine>,
         key: Option<String>,
-        highlights: Option<&DiffHighlights>,
-        gutter: f32,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let SplitRow {
+            row,
+            highlights,
+            gutter,
+        } = *split;
         let mut cell = div()
             .id(SharedString::from(format!(
                 "split-cell-{}-{row}",
@@ -686,6 +691,14 @@ impl Changes {
         }
         gpui::SharedString::from(self.scope.label())
     }
+}
+
+/// What both cells of a split diff row share.
+#[derive(Clone, Copy)]
+struct SplitRow<'a> {
+    row: usize,
+    highlights: Option<&'a DiffHighlights>,
+    gutter: f32,
 }
 
 #[cfg(test)]

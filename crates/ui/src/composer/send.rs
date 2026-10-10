@@ -1,5 +1,7 @@
 //! State observation, sending, steering, interrupting and retrying.
 
+use gpui::{AsyncApp, WeakEntity};
+
 use super::*;
 
 impl Composer {
@@ -339,6 +341,71 @@ impl Composer {
             cx.notify();
             return;
         };
+        let target = match self.resolve_send_target(cx) {
+            Ok(target) => target,
+            Err(message) => {
+                self.failure = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let refs = match self.snapshot_send_refs(&text, &target, cx) {
+            Ok(refs) => refs,
+            Err(message) => {
+                self.failure = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let taken = self.begin_optimistic_send(&text, steer, take_draft, &target, cx);
+
+        let steer_cmd = steer && !target.is_new;
+        // Transport identity rides the async block (the side-chat branch
+        // dispatches through `SEND_SIDE_CHAT`); the inherited sandbox comes
+        // from the fork's synthetic row (the parent's config).
+        let transport = self.transport.clone();
+        let inherited_sandbox = self
+            .state
+            .read(cx)
+            .selected_chat_row()
+            .and_then(|c| c.config.as_ref())
+            .map(|c| c.sandbox)
+            .unwrap_or(SandboxLevel::WorkspaceWrite);
+        let job = SendJob {
+            engine,
+            target,
+            refs,
+            text,
+            steer_cmd,
+            transport,
+            inherited_sandbox,
+            taken,
+        };
+        self.send_task = Some(cx.spawn(async move |this, cx| {
+            let result = run_send(&job, &this, cx).await;
+            this.update(cx, |composer, cx| {
+                composer.sending = false;
+                // The send has left the streaming stage on EVERY path (sealed,
+                // failed mid-upload, or never uploaded at all) — retire the
+                // "Uploading n%" trailer so the working spinner goes back to
+                // narrating the run instead of a finished upload forever.
+                composer.state.update(cx, |s, cx| {
+                    s.end_upload_progress(&job.target.chat_id);
+                    cx.notify();
+                });
+                if let Err(message) = result {
+                    composer.on_send_failed(job, message, take_draft, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Resolve where a send goes — chat id, checkout plan, model config,
+    /// devices and project — NOW, so the async block needs no picker or
+    /// state access.
+    fn resolve_send_target(&self, cx: &App) -> Result<SendTarget, SharedString> {
         // Chat id: existing selection, or client-minted for the new-chat canvas
         // (the chat then appears from the doc host once the doc materializes).
         let (chat_id, is_new) = match self.state.read(cx).selected_chat.clone() {
@@ -359,10 +426,7 @@ impl Composer {
                 crate::pickers::CheckoutPlan::NewWorktree { base: None }
             )
         {
-            self.failure =
-                Some("Choose a base ref first — New worktree can't start without one.".into());
-            cx.notify();
-            return;
+            return Err("Choose a base ref first — New worktree can't start without one.".into());
         }
         // Fully-resolved model/reasoning/options — concrete values (chat config
         // or defaults), so the engine never has to guess a "default".
@@ -408,31 +472,54 @@ impl Composer {
         };
         let space_id = space.as_ref().map(|s| s.id.clone());
         let space_path = space.as_ref().map(|s| s.path.clone());
+        Ok(SendTarget {
+            chat_id,
+            is_new,
+            plan,
+            resolved,
+            existing_cwd,
+            scratch,
+            local_device_id,
+            device_id,
+            host_device_id,
+            space_id,
+            space_path,
+        })
+    }
+
+    /// Snapshot the issue and session references the prompt carries, and
+    /// reject the ones that can never resolve before anything is staged.
+    fn snapshot_send_refs(
+        &self,
+        text: &str,
+        target: &SendTarget,
+        cx: &App,
+    ) -> Result<SendRefs, SharedString> {
         // Issue references (main transport only): each is snapshotted at send
         // time through the chat's host device's `gh`, before anything is
         // created or queued, so a failed lookup leaves nothing behind. A new
         // worktree for a session started from an issue is named after the
         // first one.
-        let issue_ref_list: Vec<IssueRef> = if matches!(self.transport, ComposerTransport::Main) {
-            issue_refs(&text)
+        let issues: Vec<IssueRef> = if matches!(self.transport, ComposerTransport::Main) {
+            issue_refs(text)
         } else {
             Vec::new()
         };
-        let worktree_hint = issue_ref_list.first().map(issue_worktree_hint);
+        let worktree_hint = issues.first().map(issue_worktree_hint);
         // Session references (main transport only): the distinct chat ids the
         // prompt references, in mention order. The referenced rows are
         // resolved against the synced chats snapshot at send time inside the
         // async block; any missing/unreachable/malformed/timeout ref fails
         // the send visibly (the existing failure path restores everything).
-        let session_ref_ids: Vec<String> = if matches!(self.transport, ComposerTransport::Main) {
-            session_ref_chat_ids(&text)
+        let session_ids: Vec<String> = if matches!(self.transport, ComposerTransport::Main) {
+            session_ref_chat_ids(text)
         } else {
             Vec::new()
         };
         // Snapshot the chats rows now (the async block can't read state):
         // referenced ids are resolved against this snapshot at send time, and
         // an id with no row fails the send visibly.
-        let session_chats: Vec<Chat> = if session_ref_ids.is_empty() {
+        let session_chats: Vec<Chat> = if session_ids.is_empty() {
             Vec::new()
         } else {
             self.state.read(cx).chats.clone()
@@ -440,10 +527,10 @@ impl Composer {
         // Host presence for the referenced sessions, snapshotted with the
         // rows: an offline host is read from this device's synced replica
         // instead of waiting out a relay read that can't succeed.
-        let offline_session_hosts: HashSet<String> = {
+        let offline_hosts: HashSet<String> = {
             let state = self.state.read(cx);
             let now = chrono::Utc::now();
-            session_ref_ids
+            session_ids
                 .iter()
                 .filter_map(|id| session_chats.iter().find(|c| &c.id == id))
                 .filter(|chat| !state.device_online(&chat.device_id, now))
@@ -457,14 +544,34 @@ impl Composer {
         // and other devices are legitimate references. Unknown ids still
         // fail later in async loading.
         if let Some(message) = session_refs_authoritative_error(
-            &session_ref_ids,
-            (!is_new).then_some(chat_id.as_str()),
+            &session_ids,
+            (!target.is_new).then_some(target.chat_id.as_str()),
             &session_chats,
         ) {
-            self.failure = Some(message.into());
-            cx.notify();
-            return;
+            return Err(message.into());
         }
+        Ok(SendRefs {
+            issues,
+            worktree_hint,
+            session_ids,
+            session_chats,
+            offline_hosts,
+        })
+    }
+
+    /// Take the draft and show the send at once: the attachment strip and
+    /// input empty, the optimistic echo lands, comments clear, and `Sent` is
+    /// emitted — all before the RPCs start.
+    fn begin_optimistic_send(
+        &mut self,
+        text: &str,
+        steer: bool,
+        take_draft: bool,
+        target: &SendTarget,
+        cx: &mut Context<Self>,
+    ) -> TakenDraft {
+        let chat_id = &target.chat_id;
+        let is_new = target.is_new;
         // Snapshot-and-clear NOW (use-attachments.ts takeAttachments): the
         // strip empties the instant you hit send; a failure hands the files
         // back into the chat's stash.
@@ -490,8 +597,13 @@ impl Composer {
             .iter()
             .map(|att| format!("pending/{}/{}", att.id, att.name))
             .collect();
-        let echo_text = attachments::with_attachments(&text, &echo_paths);
-        seed_echo_images(&staged, &echo_paths, &device_id, local_device_id.as_deref());
+        let echo_text = attachments::with_attachments(text, &echo_paths);
+        seed_echo_images(
+            &staged,
+            &echo_paths,
+            &target.device_id,
+            target.local_device_id.as_deref(),
+        );
 
         // Optimistic echo (client-minted id doubles as the persisted message id,
         // so the doc frame dedups it away). It shows the comments this send
@@ -515,11 +627,11 @@ impl Composer {
             if marks_steer {
                 s.mark_steer(&message_id);
             }
-            s.push_echo(&chat_id, echo);
+            s.push_echo(chat_id, echo);
             // Working overlay until the host executes the queued command —
             // without it a remote send flashed Completed (and could ring the
             // done-chime) in the queue→drain→sync gap.
-            s.begin_pending_send(&chat_id, &message_id, chrono::Utc::now());
+            s.begin_pending_send(chat_id, &message_id, chrono::Utc::now());
             cx.notify();
         });
 
@@ -548,425 +660,32 @@ impl Composer {
             message_id: message_id.clone(),
         });
         cx.notify();
-
-        let steer_cmd = steer && !is_new;
-        let restore_text = text.clone();
-        let err_chat_id = chat_id.clone();
-        let err_message_id = message_id.clone();
-        // Transport identity rides the async block (the side-chat branch
-        // dispatches through `SEND_SIDE_CHAT`); the inherited sandbox comes
-        // from the fork's synthetic row (the parent's config).
-        let transport = self.transport.clone();
-        let inherited_sandbox = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .and_then(|c| c.config.as_ref())
-            .map(|c| c.sandbox)
-            .unwrap_or(SandboxLevel::WorkspaceWrite);
-        self.send_task = Some(cx.spawn(async move |this, cx| {
-            let result: Result<(), String> = async {
-                let issue_snapshots = fetch_issue_snapshots(
-                    &engine,
-                    cx.background_executor(),
-                    host_device_id.as_deref(),
-                    &issue_ref_list,
-                )
-                .await?;
-                // Resolve the working directory: existing chats keep theirs;
-                // new chats run per the checkout plan (t3code env-mode): the
-                // space's folder as-is, an EXISTING worktree of the picked ref
-                // (a plain cwd override — multiple sessions share one
-                // worktree), or a fresh isolated worktree the HOST creates off
-                // the picked base ref at command-drain time (the durable
-                // WorktreeSpec below — never a pre-queue RPC).
-                let mut cwd = if is_new {
-                    // Project-less sessions run from the host's home dir —
-                    // "~" is expanded on the host when the run spawns.
-                    space_path.clone().or_else(|| Some("~".to_string()))
-                } else {
-                    existing_cwd
-                }
-                .unwrap_or_else(|| ".".to_string());
-                let mut worktree_cwd: Option<String> = None;
-                if scratch {
-                    // The folder must exist on the HOST before the row names
-                    // it as cwd. Bounded: a lost relay frame fails the send
-                    // visibly instead of wedging it on "Sending…".
-                    let path = create_scratch_dir(
-                        &engine,
-                        cx.background_executor(),
-                        host_device_id.as_deref(),
-                        &chat_id,
-                    )
-                    .await?;
-                    cwd = path.clone();
-                    worktree_cwd = Some(path);
-                }
-                // Fresh-worktree plans ride the QUEUED Run command (a
-                // WorktreeSpec the HOST materializes at drain time) instead of
-                // a blocking CreateWorktree relay RPC here: the RPC had no
-                // timeout, so a lost relay frame wedged the send on "Sending…"
-                // forever while the session ran remotely anyway.
-                // The picked ref rides createChat so the session footer names
-                // it from the first frame (it read "Select ref" until the
-                // host's diff reconciler got around to stamping the branch).
-                let (chat_branch, run_worktree) = if is_new {
-                    plan_checkout(
-                        &plan,
-                        space_path.as_deref(),
-                        worktree_hint.clone(),
-                        &mut cwd,
-                        &mut worktree_cwd,
-                    )
-                } else {
-                    (None, None)
-                };
-
-                // Best-effort Mutate createChat with the picked config: the
-                // engine resolves device + cwd from the PROJECT row when one
-                // is picked; project-less chats name the host device outright
-                // (idempotent; the doc host would materialize the chat on
-                // first command anyway, so failures are non-fatal).
-                if is_new {
-                    let mutate = create_chat_mutation(
-                        &chat_id,
-                        space_id.as_deref(),
-                        &device_id,
-                        worktree_cwd.as_deref(),
-                        chat_branch.as_deref(),
-                        &resolved,
-                    );
-                    if let Err(err) = engine.client().call(methods::MUTATE, mutate).await {
-                        tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
-                    }
-                }
-
-                // Queue-first sends (a Main-transport Run with staged
-                // attachments) queue the durable command BEFORE any bytes
-                // upload: a lost relay frame can't wedge the send and the
-                // user's Run intent survives any upload hiccup. Those uploads
-                // happen after the queue in the Main branch below. Steer
-                // (refs ride the prompt text only — no separate attachments
-                // field) and Side Chat (non-durable RPC) keep the pre-upload
-                // path. Attachment-less sends have nothing to upload here.
-                let queue_first_upload = matches!(&transport, ComposerTransport::Main)
-                    && !steer_cmd
-                    && !staged.is_empty();
-                let mut content = text.clone();
-                let mut attachment_paths: Vec<String> = Vec::new();
-                if !staged.is_empty() && !queue_first_upload {
-                    for att in &staged {
-                        // Legacy pre-upload path (Steer / Side Chat): the
-                        // upload id is internal-only (no durable command
-                        // references it) and no chat seal is needed.
-                        let upload_id = uuid::Uuid::new_v4().to_string();
-                        match attachments::upload_attachment(
-                            &engine,
-                            cx.background_executor(),
-                            host_device_id.as_deref(),
-                            att,
-                            &upload_id,
-                            None,
-                            None,
-                        )
-                        .await
-                        {
-                            Ok(path) => attachment_paths.push(path),
-                            Err(err) => {
-                                tracing::warn!(name = %att.name, error = %err, "attachment upload failed");
-                                return Err(
-                                    "Couldn't upload the attachment — the device may be offline."
-                                        .to_string(),
-                                );
-                            }
-                        }
-                    }
-                    // Seed the transcript cache from local bytes so the sent
-                    // bubble's thumbnails never round-trip (seedTranscript-
-                    // Attachment in the original send path).
-                    let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
-                    seed_echo_images(&staged, &attachment_paths, &seed_device, Some(&device_id));
-                    content = attachments::with_attachments(&text, &attachment_paths);
-                    // Refresh the echo in place with the attachment refs
-                    // (same id, same clock — the bubble grows its thumbnails
-                    // without flickering).
-                    let refreshed =
-                        echo_entry(&message_id, content.clone(), created_at, echo_comments.clone());
-                    let echo_chat_id = chat_id.clone();
-                    this.update(cx, |composer, cx| {
-                        composer.state.update(cx, |s, cx| {
-                            s.remove_echo(&echo_chat_id, &message_id);
-                            s.push_echo(&echo_chat_id, refreshed);
-                            cx.notify();
-                        });
-                    })
-                    .ok();
-                }
-
-                // Build the effective prompt only after attachment refs have
-                // been added to the visible content. This is essential for an
-                // annotated Steer (which has no separate attachments field)
-                // and keeps Run's harness prompt identical to the visible
-                // request transport apart from the annotations.
-                //
-                // Session references: each referenced transcript is loaded at
-                // send time (WatchDocMessages reset, bounded) and composed as
-                // UNTRUSTED REFERENCE CONTEXT — background only — ahead of
-                // the comments block and the visible request. A missing/
-                // unreachable/malformed/timed-out ref fails the send visibly
-                // (never silently omitted) and the failure path restores the
-                // draft, attachments, and comments.
-                let session_contexts = load_session_contexts(
-                    &engine,
-                    cx.background_executor(),
-                    local_device_id.as_deref(),
-                    &session_ref_ids,
-                    &session_chats,
-                    &offline_session_hosts,
-                )
-                .await?;
-                let agent_prompt = if sent_comments.is_empty()
-                    && session_contexts.is_empty()
-                    && issue_snapshots.is_empty()
-                {
-                    None
-                } else {
-                    Some(serialize_reference_prompt(
-                        &session_contexts,
-                        &issue_snapshots,
-                        &sent_comments,
-                        &content,
-                    ))
-                };
-
-                match &transport {
-                    ComposerTransport::Main => {
-                        if steer_cmd {
-                            // Steer: the pre-upload path already embedded the
-                            // attachment refs in `content` (Steer carries no
-                            // separate attachments field).
-                            let command = SessionCommandPayload::Steer {
-                                prompt: content.clone(),
-                                message_id: Some(message_id.clone()),
-                                agent_prompt: agent_prompt.clone(),
-                            };
-                            queue_command(&engine, &chat_id, &command).await?;
-                        } else if queue_first_upload {
-                            // Queue-first Run: the durable command carries the
-                            // Run intent + PENDING attachment descriptors
-                            // (never the bytes, never pending refs in the
-                            // transcript — the prompt is the bare text). The
-                            // host holds the command at WaitForAttachments
-                            // until every upload is sealed, then resolves the
-                            // ids to final paths and appends the refs trailer.
-                            let pending_attachments: Vec<cypher_proto::PendingAttachment> =
-                                staged
-                                    .iter()
-                                    .map(|att| cypher_proto::PendingAttachment {
-                                        upload_id: uuid::Uuid::new_v4().to_string(),
-                                        file_name: att.name.clone(),
-                                    })
-                                    .collect();
-                            let command = run_command(
-                                &resolved,
-                                content.clone(),
-                                cwd,
-                                Vec::new(),
-                                pending_attachments.clone(),
-                                run_worktree,
-                                &message_id,
-                                agent_prompt.clone(),
-                            );
-                            // Queue FIRST — durable by construction. A queue
-                            // failure returns Err and the outer failure path
-                            // restores the draft/stash/comments (nothing was
-                            // uploaded yet).
-                            queue_command(&engine, &chat_id, &command).await?;
-                            let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
-                            let total_bytes = staged
-                                .iter()
-                                .map(|attachment| attachment.bytes().len() as u64)
-                                .sum();
-                            let progress_for_state = progress.clone();
-                            let progress_chat_id = chat_id.clone();
-                            this.update(cx, |composer, cx| {
-                                composer.state.update(cx, |state, cx| {
-                                    state.begin_upload_progress(
-                                        &progress_chat_id,
-                                        total_bytes,
-                                        progress_for_state,
-                                    );
-                                    cx.notify();
-                                });
-                            })
-                            .ok();
-                            // The command is durable — now stream the bytes.
-                            // Each UploadCommit seals against this chat so the
-                            // host's drain releases the Run. An upload failure
-                            // does NOT delete the durable command: the host's
-                            // attachment grace window eventually expires it
-                            // and the user can Retry. (The optimistic echo
-                            // stays, seeded from local bytes; once the host
-                            // rejects, the ledger's failed row takes over.)
-                            for (att, pending) in staged.iter().zip(&pending_attachments) {
-                                match attachments::upload_attachment(
-                                    &engine,
-                                    cx.background_executor(),
-                                    host_device_id.as_deref(),
-                                    att,
-                                    &pending.upload_id,
-                                    Some(&chat_id),
-                                    Some(progress.clone()),
-                                )
-                                .await
-                                {
-                                    Ok(path) => attachment_paths.push(path),
-                                    Err(err) => {
-                                        tracing::warn!(
-                                            name = %att.name,
-                                            error = %err,
-                                            "post-queue attachment upload failed"
-                                        );
-                                        this.update(cx, |composer, cx| {
-                                            composer.sending = false;
-                                            composer.failure = Some(
-                                                "Attachments couldn't finish uploading — the message stays queued but the host will fail it unless the upload completes. Retry once the device is reachable."
-                                                    .into(),
-                                            );
-                                            cx.notify();
-                                        })
-                                        .ok();
-                                        return Ok(());
-                                    }
-                                }
-                            }
-                            // Seed the transcript cache from local bytes and
-                            // refresh the echo with the REAL refs (the queued
-                            // command's bare prompt is replaced in the doc by
-                            // the host's entry carrying the trailer).
-                            let seed_device =
-                                host_device_id.clone().unwrap_or_else(|| device_id.clone());
-                            seed_echo_images(
-                                &staged,
-                                &attachment_paths,
-                                &seed_device,
-                                Some(&device_id),
-                            );
-                            let refreshed = echo_entry(
-                                &message_id,
-                                attachments::with_attachments(&text, &attachment_paths),
-                                created_at,
-                                echo_comments.clone(),
-                            );
-                            let echo_chat_id = chat_id.clone();
-                            this.update(cx, |composer, cx| {
-                                composer.state.update(cx, |s, cx| {
-                                    s.remove_echo(&echo_chat_id, &message_id);
-                                    s.push_echo(&echo_chat_id, refreshed);
-                                    cx.notify();
-                                });
-                            })
-                            .ok();
-                        } else {
-                            // Plain Run (no staged attachments): prompt is the
-                            // bare text, no pending ids.
-                            let command = run_command(
-                                &resolved,
-                                content.clone(),
-                                cwd,
-                                attachment_paths,
-                                Vec::new(),
-                                run_worktree,
-                                &message_id,
-                                agent_prompt.clone(),
-                            );
-                            queue_command(&engine, &chat_id, &command).await?;
-                        }
-                    }
-                    ComposerTransport::SideChat(side) => {
-                        // Send AND live steer both ride `SendSideChat` with the
-                        // RunRequest + messageId (the engine resumes the same
-                        // temporary chat; there is no separate steer verb). The
-                        // inherited sandbox (parent config) is threaded through
-                        // instead of the main surface's hardcoded default.
-                        let request = ComposerSideChat::run_request(
-                            content.clone(),
-                            cwd,
-                            resolved.harness,
-                            resolved.model.clone(),
-                            resolved.reasoning,
-                            resolved.model_options.clone(),
-                            inherited_sandbox,
-                            attachment_paths,
-                        );
-                        let mut params = serde_json::Map::new();
-                        params.insert(
-                            "sideChatId".into(),
-                            serde_json::Value::String(side.side_chat_id.clone()),
-                        );
-                        params.insert(
-                            "request".into(),
-                            serde_json::to_value(&request)
-                                .map_err(|e| format!("Send failed: {e}"))?,
-                        );
-                        params.insert(
-                            "messageId".into(),
-                            serde_json::Value::String(message_id.clone()),
-                        );
-                        side.with_target(&mut params, local_device_id.as_deref());
-                        engine
-                            .client()
-                            .call(methods::SEND_SIDE_CHAT, serde_json::Value::Object(params))
-                            .await
-                            .map_err(|e| format!("Send failed: {e}"))?;
-                    }
-                }
-                Ok(())
-            }
-            .await;
-            this.update(cx, |composer, cx| {
-                composer.sending = false;
-                // The send has left the streaming stage on EVERY path (sealed,
-                // failed mid-upload, or never uploaded at all) — retire the
-                // "Uploading n%" trailer so the working spinner goes back to
-                // narrating the run instead of a finished upload forever.
-                composer.state.update(cx, |s, cx| {
-                    s.end_upload_progress(&err_chat_id);
-                    cx.notify();
-                });
-                if let Err(message) = result {
-                    composer.on_send_failed(
-                        &err_chat_id,
-                        &err_message_id,
-                        message,
-                        take_draft,
-                        restore_text,
-                        &staged,
-                        &sent_comments,
-                        cx,
-                    );
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
+        TakenDraft {
+            staged,
+            message_id,
+            created_at,
+            echo_comments,
+            sent_comments,
+        }
     }
 
     /// The send failed: red banner, echo removed, prompt back in the draft,
     /// staged files back in the chat's stash, comments restored.
-    #[allow(clippy::too_many_arguments)]
     fn on_send_failed(
         &mut self,
-        chat_id: &str,
-        message_id: &str,
+        job: SendJob,
         message: String,
         take_draft: bool,
-        restore_text: String,
-        staged: &[StagedAttachment],
-        sent_comments: &[DraftComment],
         cx: &mut Context<Self>,
     ) {
+        let SendJob {
+            target,
+            text: restore_text,
+            taken,
+            ..
+        } = job;
+        let (chat_id, message_id) = (target.chat_id.as_str(), taken.message_id.as_str());
+        let (staged, sent_comments) = (&taken.staged[..], &taken.sent_comments[..]);
         self.failure = Some(message.into());
         self.state.update(cx, |s, cx| {
             s.remove_echo(chat_id, message_id);
@@ -1083,6 +802,492 @@ impl Composer {
             }
         }));
     }
+}
+
+/// Where a send goes, resolved before anything is staged.
+struct SendTarget {
+    chat_id: String,
+    is_new: bool,
+    plan: crate::pickers::CheckoutPlan,
+    resolved: crate::pickers::ResolvedRunConfig,
+    existing_cwd: Option<String>,
+    scratch: bool,
+    local_device_id: Option<String>,
+    device_id: String,
+    host_device_id: Option<String>,
+    space_id: Option<String>,
+    space_path: Option<String>,
+}
+
+/// The references a prompt carries, snapshotted at send time (the async
+/// block can't read state).
+struct SendRefs {
+    issues: Vec<IssueRef>,
+    worktree_hint: Option<String>,
+    session_ids: Vec<String>,
+    session_chats: Vec<Chat>,
+    offline_hosts: HashSet<String>,
+}
+
+/// What the optimistic send took from the composer: the staged files and
+/// comments to restore on failure, and the echo's identity.
+struct TakenDraft {
+    staged: Vec<StagedAttachment>,
+    message_id: String,
+    created_at: i64,
+    echo_comments: Vec<cypher_doc::MessageComment>,
+    sent_comments: Vec<DraftComment>,
+}
+
+/// Everything the async half of a send owns.
+struct SendJob {
+    engine: EngineHandle,
+    target: SendTarget,
+    refs: SendRefs,
+    text: String,
+    steer_cmd: bool,
+    transport: ComposerTransport,
+    inherited_sandbox: SandboxLevel,
+    taken: TakenDraft,
+}
+
+/// A send's working directory: the run's cwd, the chat row's cwd, the
+/// branch the footer names and the worktree the host should create.
+struct SendCwd {
+    cwd: String,
+    worktree_cwd: Option<String>,
+    chat_branch: Option<String>,
+    run_worktree: Option<cypher_proto::WorktreeSpec>,
+}
+
+/// The async half of a send: snapshot references, resolve the working
+/// directory, create the chat, upload (pre-queue paths), then queue or send.
+async fn run_send(
+    job: &SendJob,
+    this: &WeakEntity<Composer>,
+    cx: &mut AsyncApp,
+) -> Result<(), String> {
+    let SendJob {
+        engine,
+        target,
+        refs,
+        text,
+        steer_cmd,
+        transport,
+        ..
+    } = job;
+    let staged = &job.taken.staged;
+    let is_new = target.is_new;
+    let issue_snapshots = fetch_issue_snapshots(
+        engine,
+        cx.background_executor(),
+        target.host_device_id.as_deref(),
+        &refs.issues,
+    )
+    .await?;
+    let SendCwd {
+        cwd,
+        worktree_cwd,
+        chat_branch,
+        run_worktree,
+    } = resolve_send_cwd(job, cx.background_executor()).await?;
+
+    // Best-effort Mutate createChat with the picked config: the
+    // engine resolves device + cwd from the PROJECT row when one
+    // is picked; project-less chats name the host device outright
+    // (idempotent; the doc host would materialize the chat on
+    // first command anyway, so failures are non-fatal).
+    if is_new {
+        let mutate = create_chat_mutation(
+            &target.chat_id,
+            target.space_id.as_deref(),
+            &target.device_id,
+            worktree_cwd.as_deref(),
+            chat_branch.as_deref(),
+            &target.resolved,
+        );
+        if let Err(err) = engine.client().call(methods::MUTATE, mutate).await {
+            tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
+        }
+    }
+
+    // Queue-first sends (a Main-transport Run with staged
+    // attachments) queue the durable command BEFORE any bytes
+    // upload: a lost relay frame can't wedge the send and the
+    // user's Run intent survives any upload hiccup. Those uploads
+    // happen after the queue in the Main branch below. Steer
+    // (refs ride the prompt text only — no separate attachments
+    // field) and Side Chat (non-durable RPC) keep the pre-upload
+    // path. Attachment-less sends have nothing to upload here.
+    let queue_first_upload =
+        matches!(transport, ComposerTransport::Main) && !steer_cmd && !staged.is_empty();
+    let mut content = text.clone();
+    let mut attachment_paths: Vec<String> = Vec::new();
+    if !staged.is_empty() && !queue_first_upload {
+        attachment_paths = pre_upload_attachments(job, cx).await?;
+        content = attachments::with_attachments(text, &attachment_paths);
+        // Refresh the echo in place with the attachment refs
+        // (same id, same clock — the bubble grows its thumbnails
+        // without flickering).
+        refresh_echo(job, content.clone(), this, cx);
+    }
+
+    // Build the effective prompt only after attachment refs have
+    // been added to the visible content. This is essential for an
+    // annotated Steer (which has no separate attachments field)
+    // and keeps Run's harness prompt identical to the visible
+    // request transport apart from the annotations.
+    //
+    // Session references: each referenced transcript is loaded at
+    // send time (WatchDocMessages reset, bounded) and composed as
+    // UNTRUSTED REFERENCE CONTEXT — background only — ahead of
+    // the comments block and the visible request. A missing/
+    // unreachable/malformed/timed-out ref fails the send visibly
+    // (never silently omitted) and the failure path restores the
+    // draft, attachments, and comments.
+    let session_contexts = load_session_contexts(
+        engine,
+        cx.background_executor(),
+        target.local_device_id.as_deref(),
+        &refs.session_ids,
+        &refs.session_chats,
+        &refs.offline_hosts,
+    )
+    .await?;
+    let sent_comments = &job.taken.sent_comments;
+    let agent_prompt =
+        if sent_comments.is_empty() && session_contexts.is_empty() && issue_snapshots.is_empty() {
+            None
+        } else {
+            Some(serialize_reference_prompt(
+                &session_contexts,
+                &issue_snapshots,
+                sent_comments,
+                &content,
+            ))
+        };
+
+    let message_id = &job.taken.message_id;
+    match transport {
+        ComposerTransport::Main => {
+            if *steer_cmd {
+                // Steer: the pre-upload path already embedded the
+                // attachment refs in `content` (Steer carries no
+                // separate attachments field).
+                let command = SessionCommandPayload::Steer {
+                    prompt: content.clone(),
+                    message_id: Some(message_id.clone()),
+                    agent_prompt: agent_prompt.clone(),
+                };
+                queue_command(engine, &target.chat_id, &command).await?;
+            } else if queue_first_upload {
+                queue_first_run(job, content, cwd, run_worktree, agent_prompt, this, cx).await?;
+            } else {
+                // Plain Run (no staged attachments): prompt is the
+                // bare text, no pending ids.
+                let command = run_command(
+                    job,
+                    content.clone(),
+                    cwd,
+                    attachment_paths,
+                    Vec::new(),
+                    run_worktree,
+                    agent_prompt.clone(),
+                );
+                queue_command(engine, &target.chat_id, &command).await?;
+            }
+        }
+        ComposerTransport::SideChat(side) => {
+            send_side_chat(job, side, content, cwd, attachment_paths).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the working directory: existing chats keep theirs; new chats run
+/// per the checkout plan (t3code env-mode): the space's folder as-is, an
+/// EXISTING worktree of the picked ref (a plain cwd override — multiple
+/// sessions share one worktree), or a fresh isolated worktree the HOST
+/// creates off the picked base ref at command-drain time (the durable
+/// WorktreeSpec — never a pre-queue RPC).
+async fn resolve_send_cwd(job: &SendJob, executor: &BackgroundExecutor) -> Result<SendCwd, String> {
+    let target = &job.target;
+    let is_new = target.is_new;
+    let mut cwd = if is_new {
+        // Project-less sessions run from the host's home dir —
+        // "~" is expanded on the host when the run spawns.
+        target.space_path.clone().or_else(|| Some("~".to_string()))
+    } else {
+        target.existing_cwd.clone()
+    }
+    .unwrap_or_else(|| ".".to_string());
+    let mut worktree_cwd: Option<String> = None;
+    if target.scratch {
+        // The folder must exist on the HOST before the row names
+        // it as cwd. Bounded: a lost relay frame fails the send
+        // visibly instead of wedging it on "Sending…".
+        let path = create_scratch_dir(
+            &job.engine,
+            executor,
+            target.host_device_id.as_deref(),
+            &target.chat_id,
+        )
+        .await?;
+        cwd = path.clone();
+        worktree_cwd = Some(path);
+    }
+    // Fresh-worktree plans ride the QUEUED Run command (a
+    // WorktreeSpec the HOST materializes at drain time) instead of
+    // a blocking CreateWorktree relay RPC here: the RPC had no
+    // timeout, so a lost relay frame wedged the send on "Sending…"
+    // forever while the session ran remotely anyway.
+    // The picked ref rides createChat so the session footer names
+    // it from the first frame (it read "Select ref" until the
+    // host's diff reconciler got around to stamping the branch).
+    let (chat_branch, run_worktree) = if is_new {
+        plan_checkout(
+            &target.plan,
+            target.space_path.as_deref(),
+            job.refs.worktree_hint.clone(),
+            &mut cwd,
+            &mut worktree_cwd,
+        )
+    } else {
+        (None, None)
+    };
+    Ok(SendCwd {
+        cwd,
+        worktree_cwd,
+        chat_branch,
+        run_worktree,
+    })
+}
+
+/// The legacy pre-upload path (Steer / Side Chat): upload every staged file
+/// before the send and seed the transcript cache; returns the final paths.
+async fn pre_upload_attachments(job: &SendJob, cx: &mut AsyncApp) -> Result<Vec<String>, String> {
+    let target = &job.target;
+    let staged = &job.taken.staged;
+    let mut attachment_paths: Vec<String> = Vec::new();
+    for att in staged {
+        // Legacy pre-upload path (Steer / Side Chat): the
+        // upload id is internal-only (no durable command
+        // references it) and no chat seal is needed.
+        let upload_id = uuid::Uuid::new_v4().to_string();
+        match attachments::upload_attachment(
+            &job.engine,
+            cx.background_executor(),
+            target.host_device_id.as_deref(),
+            att,
+            &upload_id,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(path) => attachment_paths.push(path),
+            Err(err) => {
+                tracing::warn!(name = %att.name, error = %err, "attachment upload failed");
+                return Err(
+                    "Couldn't upload the attachment — the device may be offline.".to_string(),
+                );
+            }
+        }
+    }
+    // Seed the transcript cache from local bytes so the sent
+    // bubble's thumbnails never round-trip (seedTranscript-
+    // Attachment in the original send path).
+    let seed_device = target
+        .host_device_id
+        .clone()
+        .unwrap_or_else(|| target.device_id.clone());
+    seed_echo_images(
+        staged,
+        &attachment_paths,
+        &seed_device,
+        Some(&target.device_id),
+    );
+    Ok(attachment_paths)
+}
+
+/// Replace the optimistic echo with one carrying `content` (same id, same
+/// clock).
+fn refresh_echo(job: &SendJob, content: String, this: &WeakEntity<Composer>, cx: &mut AsyncApp) {
+    let refreshed = echo_entry(
+        &job.taken.message_id,
+        content,
+        job.taken.created_at,
+        job.taken.echo_comments.clone(),
+    );
+    let echo_chat_id = job.target.chat_id.clone();
+    let message_id = &job.taken.message_id;
+    this.update(cx, |composer, cx| {
+        composer.state.update(cx, |s, cx| {
+            s.remove_echo(&echo_chat_id, message_id);
+            s.push_echo(&echo_chat_id, refreshed);
+            cx.notify();
+        });
+    })
+    .ok();
+}
+
+/// Queue-first Run: the durable command carries the Run intent + PENDING
+/// attachment descriptors (never the bytes, never pending refs in the
+/// transcript — the prompt is the bare text). The host holds the command at
+/// WaitForAttachments until every upload is sealed, then resolves the ids to
+/// final paths and appends the refs trailer.
+async fn queue_first_run(
+    job: &SendJob,
+    content: String,
+    cwd: String,
+    run_worktree: Option<cypher_proto::WorktreeSpec>,
+    agent_prompt: Option<String>,
+    this: &WeakEntity<Composer>,
+    cx: &mut AsyncApp,
+) -> Result<(), String> {
+    let SendJob {
+        engine,
+        target,
+        text,
+        ..
+    } = job;
+    let staged = &job.taken.staged;
+    let chat_id = &target.chat_id;
+    let device_id = &target.device_id;
+    let host_device_id = &target.host_device_id;
+    let mut attachment_paths: Vec<String> = Vec::new();
+    let pending_attachments: Vec<cypher_proto::PendingAttachment> = staged
+        .iter()
+        .map(|att| cypher_proto::PendingAttachment {
+            upload_id: uuid::Uuid::new_v4().to_string(),
+            file_name: att.name.clone(),
+        })
+        .collect();
+    let command = run_command(
+        job,
+        content.clone(),
+        cwd,
+        Vec::new(),
+        pending_attachments.clone(),
+        run_worktree,
+        agent_prompt.clone(),
+    );
+    // Queue FIRST — durable by construction. A queue
+    // failure returns Err and the outer failure path
+    // restores the draft/stash/comments (nothing was
+    // uploaded yet).
+    queue_command(engine, chat_id, &command).await?;
+    let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total_bytes = staged
+        .iter()
+        .map(|attachment| attachment.bytes().len() as u64)
+        .sum();
+    let progress_for_state = progress.clone();
+    let progress_chat_id = chat_id.clone();
+    this.update(cx, |composer, cx| {
+        composer.state.update(cx, |state, cx| {
+            state.begin_upload_progress(&progress_chat_id, total_bytes, progress_for_state);
+            cx.notify();
+        });
+    })
+    .ok();
+    // The command is durable — now stream the bytes.
+    // Each UploadCommit seals against this chat so the
+    // host's drain releases the Run. An upload failure
+    // does NOT delete the durable command: the host's
+    // attachment grace window eventually expires it
+    // and the user can Retry. (The optimistic echo
+    // stays, seeded from local bytes; once the host
+    // rejects, the ledger's failed row takes over.)
+    for (att, pending) in staged.iter().zip(&pending_attachments) {
+        match attachments::upload_attachment(
+            engine,
+            cx.background_executor(),
+            host_device_id.as_deref(),
+            att,
+            &pending.upload_id,
+            Some(chat_id),
+            Some(progress.clone()),
+        )
+        .await
+        {
+            Ok(path) => attachment_paths.push(path),
+            Err(err) => {
+                tracing::warn!(
+                    name = %att.name,
+                    error = %err,
+                    "post-queue attachment upload failed"
+                );
+                this.update(cx, |composer, cx| {
+                    composer.sending = false;
+                    composer.failure = Some(
+                        "Attachments couldn't finish uploading — the message stays queued but the host will fail it unless the upload completes. Retry once the device is reachable."
+                            .into(),
+                    );
+                    cx.notify();
+                })
+                .ok();
+                return Ok(());
+            }
+        }
+    }
+    // Seed the transcript cache from local bytes and
+    // refresh the echo with the REAL refs (the queued
+    // command's bare prompt is replaced in the doc by
+    // the host's entry carrying the trailer).
+    let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
+    seed_echo_images(staged, &attachment_paths, &seed_device, Some(device_id));
+    refresh_echo(
+        job,
+        attachments::with_attachments(text, &attachment_paths),
+        this,
+        cx,
+    );
+    Ok(())
+}
+
+/// Send AND live steer both ride `SendSideChat` with the RunRequest +
+/// messageId (the engine resumes the same temporary chat; there is no
+/// separate steer verb). The inherited sandbox (parent config) is threaded
+/// through instead of the main surface's hardcoded default.
+async fn send_side_chat(
+    job: &SendJob,
+    side: &ComposerSideChat,
+    content: String,
+    cwd: String,
+    attachment_paths: Vec<String>,
+) -> Result<(), String> {
+    let resolved = &job.target.resolved;
+    let request = ComposerSideChat::run_request(
+        content.clone(),
+        cwd,
+        resolved.harness,
+        resolved.model.clone(),
+        resolved.reasoning,
+        resolved.model_options.clone(),
+        job.inherited_sandbox,
+        attachment_paths,
+    );
+    let mut params = serde_json::Map::new();
+    params.insert(
+        "sideChatId".into(),
+        serde_json::Value::String(side.side_chat_id.clone()),
+    );
+    params.insert(
+        "request".into(),
+        serde_json::to_value(&request).map_err(|e| format!("Send failed: {e}"))?,
+    );
+    params.insert(
+        "messageId".into(),
+        serde_json::Value::String(job.taken.message_id.clone()),
+    );
+    side.with_target(&mut params, job.target.local_device_id.as_deref());
+    job.engine
+        .client()
+        .call(methods::SEND_SIDE_CHAT, serde_json::Value::Object(params))
+        .await
+        .map_err(|e| format!("Send failed: {e}"))?;
+    Ok(())
 }
 
 /// The optimistic user entry for a send (the client-minted id doubles as the
@@ -1342,18 +1547,18 @@ async fn load_session_contexts(
     Ok(contexts)
 }
 
-/// A main-surface Run with the resolved model config.
-#[allow(clippy::too_many_arguments)]
+/// A main-surface Run of the send's message with its resolved model config.
 fn run_command(
-    resolved: &crate::pickers::ResolvedRunConfig,
+    job: &SendJob,
     prompt: String,
     cwd: String,
     attachments: Vec<String>,
     pending_attachments: Vec<cypher_proto::PendingAttachment>,
     worktree: Option<cypher_proto::WorktreeSpec>,
-    message_id: &str,
     agent_prompt: Option<String>,
 ) -> SessionCommandPayload {
+    let resolved = &job.target.resolved;
+    let message_id = &job.taken.message_id;
     SessionCommandPayload::Run {
         request: RunRequest {
             prompt,

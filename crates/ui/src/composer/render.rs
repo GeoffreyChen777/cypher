@@ -47,159 +47,192 @@ impl Composer {
         // Card text selects + copies like transcript text. Keys carry the
         // request and page, so a selection never washes another page's copy.
         let scope = self.wizard_selection;
-        let text_key = {
-            let prefix = format!("{}:{page}", wizard.request_id);
-            move |part: &str| -> Arc<str> { format!("{prefix}:{part}").into() }
+        let key_prefix = format!("{}:{page}", wizard.request_id);
+        let frame = WizardFrame {
+            theme,
+            wizard,
+            question,
+            view,
+            page,
+            pages,
+            last,
+            typed_empty,
+            pick_only,
+            optional_comment,
+            can_advance,
+            prompt,
+            chrome_title,
+            multi,
+            scope,
+            key_prefix,
         };
 
-        let options = question.options.iter().enumerate().map(|(ix, label)| {
-            let picked = wizard.is_picked(ix) && typed_empty;
-            let custom = view.custom_ix == Some(ix);
-            let description = view.descriptions.get(ix).cloned().flatten();
-            let hover_key = format!("wizard-option-{ix}");
-            let number = (ix < 9).then(|| SharedString::from(format!("{}", ix + 1)));
+        let header = self.wizard_header(&frame, cx);
+        let body = self.wizard_body(&frame, cx);
+        let footer = self.wizard_footer(&frame, cx);
+        let theme = &frame.theme;
 
-            // Leading marker: the option's number key (a checkbox on
-            // multi-select pages); a solid check once picked.
-            let marker = div()
-                .flex_none()
-                .size(px(20.0))
-                .mt(px(if description.is_some() { 0.0 } else { -1.0 }))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(if multi { 5.0 } else { 6.0 }))
-                .when(picked, |el| el.bg(theme.text))
-                .when(!picked && multi, |el| {
-                    el.border_1().border_color(theme.border_strong)
-                })
-                .when(!picked && !multi, |el| el.bg(crate::kit::theme::ink(0.06)))
-                .map(|el| {
-                    if picked {
-                        el.child(
-                            crate::kit::icons::icon(crate::kit::icons::CHECK)
-                                .size(px(12.0))
-                                .text_color(theme.on_solid),
-                        )
-                    } else if custom {
-                        el.child(
-                            crate::kit::icons::icon(crate::kit::icons::PEN)
-                                .size(px(11.0))
-                                .text_color(theme.text_muted),
-                        )
-                    } else if multi {
-                        el
+        div()
+            .id("question-panel")
+            .track_focus(&self.wizard_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.on_wizard_key(event, window, cx)
+            }))
+            .occlude()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .w_full()
+            .min_w_0()
+            .max_w(px(560.0))
+            .mx_auto()
+            .overflow_hidden()
+            .rounded(px(14.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.surface_dialog)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .child(crate::markdown::render::selection_frame_reset(scope))
+            .child(header)
+            .child(body)
+            .child(footer)
+            .into_any_element()
+    }
+
+    /// One answer option: its number-key (or checkbox) marker, label and
+    /// description.
+    fn wizard_option(
+        &self,
+        frame: &WizardFrame,
+        ix: usize,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = &frame.theme;
+        let multi = frame.multi;
+        let scope = frame.scope;
+        let picked = frame.wizard.is_picked(ix) && frame.typed_empty;
+        let custom = frame.view.custom_ix == Some(ix);
+        let description = frame.view.descriptions.get(ix).cloned().flatten();
+        let hover_key = format!("wizard-option-{ix}");
+        let number = (ix < 9).then(|| SharedString::from(format!("{}", ix + 1)));
+
+        let marker = wizard_option_marker(
+            picked,
+            custom,
+            multi,
+            description.is_some(),
+            number.clone(),
+            theme,
+        );
+
+        let text = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .line_height(px(18.0))
+                    .font_weight(if custom {
+                        gpui::FontWeight::NORMAL
                     } else {
-                        el.text_size(px(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted)
-                            .children(number.clone())
-                    }
-                });
-
-            let text = div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .line_height(px(18.0))
-                        .font_weight(if custom {
-                            gpui::FontWeight::NORMAL
+                        gpui::FontWeight::MEDIUM
+                    })
+                    .text_color(if custom { theme.text_muted } else { theme.text })
+                    .map(|el| {
+                        if custom {
+                            el.child("Write a different answer…")
                         } else {
-                            gpui::FontWeight::MEDIUM
-                        })
-                        .text_color(if custom { theme.text_muted } else { theme.text })
-                        .map(|el| {
-                            if custom {
-                                el.child("Write a different answer…")
-                            } else {
-                                el.child(crate::markdown::render::selectable_plain_text(
-                                    scope,
-                                    text_key(&format!("option{ix}")),
-                                    SharedString::from(label.clone()),
-                                    &theme,
-                                ))
-                            }
-                        }),
-                )
-                .children(description.map(|description| {
-                    div()
-                        .text_size(px(12.0))
-                        .line_height(px(17.0))
-                        .text_color(theme.text_muted)
-                        .child(crate::markdown::render::selectable_plain_text(
-                            scope,
-                            text_key(&format!("option{ix}-description")),
-                            SharedString::from(description),
-                            &theme,
-                        ))
-                }));
-
-            div()
-                .id(("wizard-option", ix))
-                .w_full()
-                .min_w_0()
-                .flex()
-                .flex_row()
-                .items_start()
-                .gap(px(10.0))
-                .px(px(10.0))
-                .py(px(9.0))
-                .rounded(px(10.0))
-                .border_1()
-                .when(custom && !picked, |el| el.border_dashed())
-                .border_color(if picked {
-                    theme.border_strong
-                } else {
-                    theme.border
-                })
-                .bg(if picked {
-                    crate::kit::theme::ink(0.07)
-                } else {
-                    motion::hover_blend(
-                        &hover_key,
-                        crate::kit::theme::ink(if custom { 0.0 } else { 0.02 }),
-                        crate::kit::theme::ink(0.05),
-                    )
-                })
-                .on_hover(motion::hover_listener(hover_key))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                    // A drag or double-click over the copy is a text
-                    // selection, not a pick.
-                    if let gpui::ClickEvent::Mouse(click) = event {
-                        let moved = click.up.position - click.down.position;
-                        if click.down.click_count > 1
-                            || f32::from(moved.x).abs() > 3.0
-                            || f32::from(moved.y).abs() > 3.0
-                        {
-                            return;
+                            el.child(crate::markdown::render::selectable_plain_text(
+                                scope,
+                                frame.text_key(&format!("option{ix}")),
+                                SharedString::from(label.to_owned()),
+                                theme,
+                            ))
                         }
-                    }
-                    this.wizard_select(ix, cx)
-                }))
-                .child(marker)
-                .child(text)
-                // Multi-select and the custom row keep their number key on the
-                // trailing edge, where it doesn't read as a checkbox state.
-                .when(multi || custom, |el| {
-                    el.children(number.map(|number| {
-                        div()
-                            .flex_none()
-                            .text_size(px(11.0))
-                            .line_height(px(18.0))
-                            .text_color(theme.text_faint)
-                            .child(number)
-                    }))
-                })
-        });
+                    }),
+            )
+            .children(description.map(|description| {
+                div()
+                    .text_size(px(12.0))
+                    .line_height(px(17.0))
+                    .text_color(theme.text_muted)
+                    .child(crate::markdown::render::selectable_plain_text(
+                        scope,
+                        frame.text_key(&format!("option{ix}-description")),
+                        SharedString::from(description),
+                        theme,
+                    ))
+            }));
 
-        // ---- top row: who is asking, and where in the set this page is ----
-        let header = div()
+        div()
+            .id(("wizard-option", ix))
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap(px(10.0))
+            .px(px(10.0))
+            .py(px(9.0))
+            .rounded(px(10.0))
+            .border_1()
+            .when(custom && !picked, |el| el.border_dashed())
+            .border_color(if picked {
+                theme.border_strong
+            } else {
+                theme.border
+            })
+            .bg(if picked {
+                crate::kit::theme::ink(0.07)
+            } else {
+                motion::hover_blend(
+                    &hover_key,
+                    crate::kit::theme::ink(if custom { 0.0 } else { 0.02 }),
+                    crate::kit::theme::ink(0.05),
+                )
+            })
+            .on_hover(motion::hover_listener(hover_key))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                // A drag or double-click over the copy is a text
+                // selection, not a pick.
+                if let gpui::ClickEvent::Mouse(click) = event {
+                    let moved = click.up.position - click.down.position;
+                    if click.down.click_count > 1
+                        || f32::from(moved.x).abs() > 3.0
+                        || f32::from(moved.y).abs() > 3.0
+                    {
+                        return;
+                    }
+                }
+                this.wizard_select(ix, cx)
+            }))
+            .child(marker)
+            .child(text)
+            // Multi-select and the custom row keep their number key on the
+            // trailing edge, where it doesn't read as a checkbox state.
+            .when(multi || custom, |el| {
+                el.children(number.map(|number| {
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .line_height(px(18.0))
+                        .text_color(theme.text_faint)
+                        .child(number)
+                }))
+            })
+    }
+
+    /// Top row: who is asking, and where in the set this page is.
+    fn wizard_header(&self, frame: &WizardFrame, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = &frame.theme;
+        let pages = frame.pages;
+        let page = frame.page;
+        div()
             .flex_none()
             .h(px(40.0))
             .pl(px(16.0))
@@ -209,7 +242,7 @@ impl Composer {
             .items_center()
             .gap(px(8.0))
             .child(
-                crate::kit::icons::icon(if wizard.slash.is_some() {
+                crate::kit::icons::icon(if frame.wizard.slash.is_some() {
                     crate::kit::icons::TUNING
                 } else {
                     crate::kit::icons::QUESTION_CIRCLE
@@ -224,7 +257,7 @@ impl Composer {
                     .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text_muted)
-                    .child(chrome_title),
+                    .child(frame.chrome_title.clone()),
             )
             .when(pages > 1, |el| {
                 el.child(
@@ -273,9 +306,19 @@ impl Composer {
                             .size(px(12.0))
                             .text_color(theme.text_muted),
                     ),
-            );
+            )
+    }
 
-        // ---- body: the question, its context, then the answer ----
+    /// Body: the question, its context, then the answer.
+    fn wizard_body(
+        &self,
+        frame: &WizardFrame,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = &frame.theme;
+        let scope = frame.scope;
+        let question = &frame.question;
+        let optional_comment = &frame.optional_comment;
         let mut body = div()
             .id("wizard-scroll")
             .min_w_0()
@@ -288,7 +331,7 @@ impl Composer {
             .flex_col();
         let (question_text, context) = match optional_comment.as_ref() {
             Some(copy) => (copy.question.clone(), copy.context.clone()),
-            None => split_question_context(&prompt),
+            None => split_question_context(&frame.prompt),
         };
         body = body.child(
             div()
@@ -299,97 +342,41 @@ impl Composer {
                 .cursor_text()
                 .child(crate::markdown::render::selectable_plain_text(
                     scope,
-                    text_key("question"),
+                    frame.text_key("question"),
                     SharedString::from(question_text),
-                    &theme,
+                    theme,
                 )),
         );
         if let Some(context) = context {
             body = body.child(wizard_context_block(
                 &context,
                 scope,
-                text_key("context"),
-                &theme,
+                frame.text_key("context"),
+                theme,
             ));
         }
         if let Some(copy) = optional_comment.as_ref() {
-            // What the user already picked, shown as the answer it is.
-            body = body.child(
-                div()
-                    .mt(px(16.0))
-                    .flex()
-                    .flex_col()
-                    .child(wizard_section_label(
-                        if copy.selected_label == "Selected options" {
-                            "Your picks"
-                        } else {
-                            "Your pick"
-                        },
-                        &theme,
-                    ))
-                    .child(div().flex().flex_col().gap(px(6.0)).children(
-                        copy.selected.lines().enumerate().map(|(ix, line)| {
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_start()
-                                .gap(px(10.0))
-                                .px(px(10.0))
-                                .py(px(9.0))
-                                .rounded(px(10.0))
-                                .border_1()
-                                .border_color(theme.border_strong)
-                                .bg(crate::kit::theme::ink(0.07))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .size(px(20.0))
-                                        .mt(px(-1.0))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(6.0))
-                                        .bg(theme.text)
-                                        .child(
-                                            crate::kit::icons::icon(crate::kit::icons::CHECK)
-                                                .size(px(12.0))
-                                                .text_color(theme.on_solid),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(px(13.0))
-                                        .line_height(px(18.0))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.text)
-                                        .cursor_text()
-                                        .child(crate::markdown::render::selectable_plain_text(
-                                            scope,
-                                            text_key(&format!("picked{ix}")),
-                                            SharedString::from(line.to_owned()),
-                                            &theme,
-                                        )),
-                                )
-                        }),
-                    )),
-            );
+            body = body.child(wizard_picked_answers(frame, copy));
         }
         if !question.options.is_empty() {
+            let options = question
+                .options
+                .iter()
+                .enumerate()
+                .map(|(ix, label)| self.wizard_option(frame, ix, label, cx));
             body = body.child(
                 div()
                     .mt(px(16.0))
                     .flex()
                     .flex_col()
                     // Single-select needs no label: the numbered rows say it.
-                    .when(multi, |el| {
-                        el.child(wizard_section_label("Pick any that apply", &theme))
+                    .when(frame.multi, |el| {
+                        el.child(wizard_section_label("Pick any that apply", theme))
                     })
                     .child(div().flex().flex_col().gap(px(6.0)).children(options)),
             );
         }
-        if !pick_only {
+        if !frame.pick_only {
             let (label, hint) = if optional_comment.is_some() {
                 (
                     "Add a comment (optional)",
@@ -408,7 +395,7 @@ impl Composer {
                     .mt(px(16.0))
                     .flex()
                     .flex_col()
-                    .child(wizard_section_label(label, &theme))
+                    .child(wizard_section_label(label, theme))
                     .child(
                         div()
                             .w_full()
@@ -430,9 +417,17 @@ impl Composer {
                     })),
             );
         }
+        body
+    }
 
-        // ---- footer: keyboard hints on the left, actions on the right ----
-        let option_count = question.options.len().min(9);
+    /// Footer: keyboard hints on the left, actions on the right.
+    fn wizard_footer(&self, frame: &WizardFrame, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = &frame.theme;
+        let page = frame.page;
+        let pick_only = frame.pick_only;
+        let last = frame.last;
+        let can_advance = frame.can_advance;
+        let option_count = frame.question.options.len().min(9);
         let esc_action = if page > 0 {
             Some("back")
         } else if pick_only {
@@ -455,28 +450,28 @@ impl Composer {
                 };
                 el.child(wizard_key_hint(
                     &keys,
-                    if multi { "toggle" } else { "choose" },
-                    &theme,
+                    if frame.multi { "toggle" } else { "choose" },
+                    theme,
                 ))
             })
             .when(!pick_only, |el| {
                 el.child(wizard_key_hint(
                     "↵",
                     if last { "submit" } else { "next" },
-                    &theme,
+                    theme,
                 ))
             })
-            .children(esc_action.map(|action| wizard_key_hint("esc", action, &theme)));
-        let back = if optional_comment.is_some() {
+            .children(esc_action.map(|action| wizard_key_hint("esc", action, theme)));
+        let back = if frame.optional_comment.is_some() {
             Some(
-                crate::kit::popover::btn_ghost(&theme, "Skip", "wizard-comment-skip")
+                crate::kit::popover::btn_ghost(theme, "Skip", "wizard-comment-skip")
                     .id("wizard-comment-skip")
                     .on_click(cx.listener(|this, _, _, cx| this.wizard_skip_comment(cx)))
                     .into_any_element(),
             )
         } else if page > 0 {
             Some(
-                crate::kit::popover::btn_ghost(&theme, "Back", "wizard-back")
+                crate::kit::popover::btn_ghost(theme, "Back", "wizard-back")
                     .id("wizard-back")
                     .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
                     .into_any_element(),
@@ -486,8 +481,8 @@ impl Composer {
         };
         // A single-select page answers on the click itself; a primary button
         // appears only where the answer needs confirming.
-        let show_primary = !pick_only || pages > 1;
-        let footer = div()
+        let show_primary = !pick_only || frame.pages > 1;
+        div()
             .flex_none()
             .h(px(48.0))
             .pl(px(16.0))
@@ -502,7 +497,7 @@ impl Composer {
             .children(back)
             .when(show_primary, |el| {
                 el.child(
-                    crate::kit::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
+                    crate::kit::popover::btn_primary(theme, if last { "Submit" } else { "Next" })
                         .id("wizard-submit")
                         .px(px(14.0))
                         .when(!can_advance, |el| el.opacity(0.4).cursor_default())
@@ -512,33 +507,7 @@ impl Composer {
                             }
                         })),
                 )
-            });
-
-        div()
-            .id("question-panel")
-            .track_focus(&self.wizard_focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.on_wizard_key(event, window, cx)
-            }))
-            .occlude()
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .w_full()
-            .min_w_0()
-            .max_w(px(560.0))
-            .mx_auto()
-            .overflow_hidden()
-            .rounded(px(14.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_dialog)
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .child(crate::markdown::render::selection_frame_reset(scope))
-            .child(header)
-            .child(body)
-            .child(footer)
-            .into_any_element()
+            })
     }
 
     /// What the context gauge shows: the selected session's latest
@@ -710,6 +679,145 @@ impl Composer {
     }
 }
 
+/// The question card's per-frame snapshot, shared by its sections.
+struct WizardFrame {
+    theme: Theme,
+    wizard: Wizard,
+    question: UserInputQuestion,
+    view: PageView,
+    page: usize,
+    pages: usize,
+    last: bool,
+    typed_empty: bool,
+    pick_only: bool,
+    optional_comment: Option<OptionalCommentCopy>,
+    can_advance: bool,
+    prompt: String,
+    chrome_title: SharedString,
+    multi: bool,
+    scope: crate::markdown::selection::SelectionScope,
+    key_prefix: String,
+}
+
+impl WizardFrame {
+    /// A selectable text's key: the request and page, then `part`.
+    fn text_key(&self, part: &str) -> Arc<str> {
+        format!("{}:{part}", self.key_prefix).into()
+    }
+}
+
+/// An option's leading marker: its number key (a checkbox on multi-select
+/// pages); a solid check once picked.
+fn wizard_option_marker(
+    picked: bool,
+    custom: bool,
+    multi: bool,
+    described: bool,
+    number: Option<SharedString>,
+    theme: &Theme,
+) -> gpui::Div {
+    div()
+        .flex_none()
+        .size(px(20.0))
+        .mt(px(if described { 0.0 } else { -1.0 }))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(if multi { 5.0 } else { 6.0 }))
+        .when(picked, |el| el.bg(theme.text))
+        .when(!picked && multi, |el| {
+            el.border_1().border_color(theme.border_strong)
+        })
+        .when(!picked && !multi, |el| el.bg(crate::kit::theme::ink(0.06)))
+        .map(|el| {
+            if picked {
+                el.child(
+                    crate::kit::icons::icon(crate::kit::icons::CHECK)
+                        .size(px(12.0))
+                        .text_color(theme.on_solid),
+                )
+            } else if custom {
+                el.child(
+                    crate::kit::icons::icon(crate::kit::icons::PEN)
+                        .size(px(11.0))
+                        .text_color(theme.text_muted),
+                )
+            } else if multi {
+                el
+            } else {
+                el.text_size(px(11.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .children(number)
+            }
+        })
+}
+
+/// What the user already picked, shown as the answer it is.
+fn wizard_picked_answers(frame: &WizardFrame, copy: &OptionalCommentCopy) -> gpui::Div {
+    let theme = &frame.theme;
+    let scope = frame.scope;
+    div()
+        .mt(px(16.0))
+        .flex()
+        .flex_col()
+        .child(wizard_section_label(
+            if copy.selected_label == "Selected options" {
+                "Your picks"
+            } else {
+                "Your pick"
+            },
+            theme,
+        ))
+        .child(div().flex().flex_col().gap(px(6.0)).children(
+            copy.selected.lines().enumerate().map(|(ix, line)| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(10.0))
+                    .px(px(10.0))
+                    .py(px(9.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .bg(crate::kit::theme::ink(0.07))
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(20.0))
+                            .mt(px(-1.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.0))
+                            .bg(theme.text)
+                            .child(
+                                crate::kit::icons::icon(crate::kit::icons::CHECK)
+                                    .size(px(12.0))
+                                    .text_color(theme.on_solid),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(13.0))
+                            .line_height(px(18.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .cursor_text()
+                            .child(crate::markdown::render::selectable_plain_text(
+                                scope,
+                                frame.text_key(&format!("picked{ix}")),
+                                SharedString::from(line.to_owned()),
+                                theme,
+                            )),
+                    )
+            }),
+        ))
+}
+
 /// Focus lands on the prompt input (window-level focus fallbacks — e.g. after
 /// the focused terminal panel is hidden — route here).
 impl Focusable for Composer {
@@ -731,6 +839,86 @@ impl Render for Composer {
             crate::appearance::chat_style::settings(cx).input_line_height(),
         );
         let wizard_active = self.wizard.is_some();
+        self.close_unfocused_popups(wizard_active, window, cx);
+        let mode = self.button_mode(cx);
+        let layout = self.update_layout_mode(cx);
+        let container = self.render_notices(mode, wide, &theme, cx);
+
+        if wizard_active {
+            // A card that follows an answer swaps straight in: the composer
+            // came back a moment ago, and fading this one over it is what the
+            // eye reads as a flicker (see [`WIZARD_HANDOFF_QUIET_MS`]).
+            let quiet = self
+                .wizard
+                .as_ref()
+                .is_some_and(|wizard| wizard.quiet_entry);
+            let wizard = div().w_full().min_w_0().child(self.render_wizard(cx));
+            return container.child(if quiet {
+                wizard.into_any_element()
+            } else {
+                motion::fade_quick("composer-wizard", wizard).into_any_element()
+            });
+        }
+
+        // New chats always use the expanded layout: the repo/branch pickers
+        // need the full-width actions row (zeron composer-actions.tsx
+        // `mustExpand = isNew || …`).
+        let expanded = layout.expanded || layout.new_chat;
+        let frame = self.advance_pill_morph(expanded, &layout, compact_height, window);
+        let body = self.render_pill(&frame, mode, &theme, cx);
+        let container = container.child(self.render_pill_stack(body, &theme));
+        // Branch/worktree toolbar under the pill (t3code BranchToolbar): the
+        // checkout-kind selector + ref picker for new sessions, read-only
+        // labels once the session exists. Git spaces only.
+        let footer = self
+            .pickers
+            .update(cx, |pickers, cx| pickers.render_footer(cx));
+        let container = match footer {
+            Some(footer) => container.child(footer),
+            None => container,
+        };
+        self.with_preview(container, window, cx)
+    }
+}
+
+/// This frame's input measurements and layout mode, after the flip state
+/// machine has run.
+struct LayoutFrame {
+    last_width: f32,
+    content_height: f32,
+    new_chat: bool,
+    now_ms: f32,
+    expanded: bool,
+}
+
+/// The pill's geometry this frame, mid-morph or settled.
+struct PillFrame {
+    expanded: bool,
+    compact_height: f32,
+    base_height: f32,
+    pill_height: f32,
+    morph_t: f32,
+    morphing: bool,
+}
+
+/// The pieces both pill layouts arrange.
+struct PillParts {
+    pill: gpui::Div,
+    strip: Option<gpui::Div>,
+    send_button: AnyElement,
+    edge_ring: Option<AnyElement>,
+    cluster_dy: f32,
+}
+
+impl Composer {
+    /// Completion popups never outlive the input's focus, nor show under the
+    /// question card.
+    fn close_unfocused_popups(
+        &mut self,
+        wizard_active: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
         {
@@ -746,7 +934,12 @@ impl Render for Composer {
         {
             self.reset_issue(None, cx);
         }
-        let mode = self.button_mode(cx);
+    }
+
+    /// The compact/expanded state machine: read the input's measurements,
+    /// track resizes, flip the mode when the text no longer fits, and step
+    /// the height morph. At most one flip per layout pass.
+    fn update_layout_mode(&mut self, cx: &mut Context<Self>) -> LayoutFrame {
         let (text_width, has_newline, content_height, last_width, epoch) = {
             let input = self.input.read(cx);
             (
@@ -850,8 +1043,24 @@ impl Render for Composer {
             motion::reduced_motion(cx),
             route_snap,
         );
-        let expanded = self.expanded_mode;
+        LayoutFrame {
+            last_width,
+            content_height,
+            new_chat,
+            now_ms,
+            expanded: self.expanded_mode,
+        }
+    }
 
+    /// The composer column with its notices: the send failure, a failed
+    /// durable delivery, and the turn-boundary steering hint.
+    fn render_notices(
+        &self,
+        mode: SendButtonMode,
+        wide: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let failure = self.failure.clone();
         let failed_delivery = if matches!(self.transport, ComposerTransport::Main) {
             self.state.read(cx).failed_commands().into_iter().next()
@@ -877,124 +1086,10 @@ impl Render for Composer {
             ))
             .pb(px(Theme::SPACE_LG))
             .when_some(failure, |el, message| {
-                // zeron composer.tsx `Notice` (matches the transcript
-                // ErrorChip palette): `flex items-start gap-2 rounded-xl
-                // border px-3 py-2 text-[12px] leading-snug` with a 14px
-                // DangerTriangle — a subtle tinted wash, not a bare red
-                // stroke. Amber for the offline-ish case (engine not
-                // connected), red for send/run failures. Click dismisses.
-                let offline = message.as_ref() == "Engine not connected";
-                let (border_c, wash, text_c) = if offline {
-                    let amber = theme.warning; // amber-400
-                    let amber_200 = theme.warning_muted;
-                    (
-                        amber.opacity(0.16),
-                        amber.opacity(0.05),
-                        amber_200.opacity(0.9),
-                    )
-                } else {
-                    let danger = theme.danger; // red-400
-                    let red_300 = theme.danger_muted;
-                    (
-                        danger.opacity(0.16),
-                        danger.opacity(0.05),
-                        red_300.opacity(0.9),
-                    )
-                };
-                el.child(
-                    div()
-                        .id("composer-failure")
-                        .mx(px(4.0))
-                        .mt(px(6.0))
-                        .flex()
-                        .items_start()
-                        .gap(px(8.0))
-                        .rounded(px(12.0))
-                        .border_1()
-                        .border_color(border_c)
-                        .bg(wash)
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .text_color(text_c)
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.failure = None;
-                            cx.notify();
-                        }))
-                        .child(
-                            crate::kit::icons::icon(crate::kit::icons::DANGER_TRIANGLE)
-                                .size(px(14.0))
-                                .mt(px(2.0))
-                                .text_color(text_c),
-                        )
-                        .child(div().min_w_0().child(message)),
-                )
+                el.child(failure_notice(message, theme, cx))
             });
         let container = container.when_some(failed_delivery, |el, failed| {
-            let command_id = failed.command_id.clone();
-            let resolution = failed
-                .resolution
-                .clone()
-                .unwrap_or_else(|| "The host did not complete this send.".into());
-            el.child(
-                div()
-                    .id("composer-delivery-failure")
-                    .mx(px(4.0))
-                    .mt(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .rounded(px(12.0))
-                    .border_1()
-                    .border_color(theme.danger.opacity(0.16))
-                    .bg(theme.danger.opacity(0.05))
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.danger_muted.opacity(0.9))
-                    .child(
-                        crate::kit::icons::icon(crate::kit::icons::DANGER_TRIANGLE)
-                            .size(px(14.0))
-                            .text_color(theme.danger_muted.opacity(0.9)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .child(format!("Send failed: {}", failed.prompt)),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(11.0))
-                                    .text_color(theme.text_muted)
-                                    .child(resolution),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("composer-delivery-retry")
-                            .flex_none()
-                            .rounded(px(7.0))
-                            .bg(theme.danger.opacity(0.12))
-                            .px(px(9.0))
-                            .py(px(5.0))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.danger.opacity(0.18)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.retry_failed_command(command_id.clone(), cx);
-                            }))
-                            .child("Retry"),
-                    ),
-            )
+            el.child(delivery_failure_notice(failed, theme, cx))
         });
 
         // Turn-boundary steering notice: for agents without mid-turn
@@ -1003,7 +1098,7 @@ impl Render for Composer {
         let steer_queues = mode == SendButtonMode::Steer
             && self.pickers.read(cx).resolved_steering_mode(cx)
                 == Some(cypher_proto::SteeringMode::TurnBoundary);
-        let container = container.when(steer_queues, |el| {
+        container.when(steer_queues, |el| {
             el.child(
                 div()
                     .mt(px(6.0))
@@ -1013,40 +1108,32 @@ impl Render for Composer {
                     .text_color(theme.text_muted.opacity(0.8))
                     .child("This agent can't be steered mid-turn — your message will be queued and sent when the current turn finishes."),
             )
-        });
+        })
+    }
 
-        if wizard_active {
-            // A card that follows an answer swaps straight in: the composer
-            // came back a moment ago, and fading this one over it is what the
-            // eye reads as a flicker (see [`WIZARD_HANDOFF_QUIET_MS`]).
-            let quiet = self
-                .wizard
-                .as_ref()
-                .is_some_and(|wizard| wizard.quiet_entry);
-            let wizard = div().w_full().min_w_0().child(self.render_wizard(cx));
-            return container.child(if quiet {
-                wizard.into_any_element()
-            } else {
-                motion::fade_quick("composer-wizard", wizard).into_any_element()
-            });
-        }
-
-        // New chats always use the expanded layout: the repo/branch pickers
-        // need the full-width actions row (zeron composer-actions.tsx
-        // `mustExpand = isNew || …`).
-        let expanded = expanded || new_chat;
-
-        // Committed-height morph: the layout below is already the NEW mode's;
-        // only the pill's height (and the entrance fade/text glide driven by
-        // `morph_t`) animates. Steady state renders exactly the target.
-        // Staged attachments add the wrap strip's height to the pill in BOTH
-        // modes (attachment-ui.tsx AttachmentStrip sits above the input row).
+    /// Committed-height morph: the layout below is already the NEW mode's;
+    /// only the pill's height (and the entrance fade/text glide driven by
+    /// `morph_t`) animates. Steady state renders exactly the target.
+    /// Staged attachments add the wrap strip's height to the pill in BOTH
+    /// modes (attachment-ui.tsx AttachmentStrip sits above the input row).
+    fn advance_pill_morph(
+        &mut self,
+        expanded: bool,
+        layout: &LayoutFrame,
+        compact_height: f32,
+        window: &mut Window,
+    ) -> PillFrame {
+        let now_ms = layout.now_ms;
         let staged_images = self.staged().iter().filter(|a| a.image().is_some()).count();
         let staged_files = self.staged().len() - staged_images;
-        let strip_width_hint = if last_width > 0.0 { last_width } else { 720.0 };
+        let strip_width_hint = if layout.last_width > 0.0 {
+            layout.last_width
+        } else {
+            720.0
+        };
         let strip_h = attachment_strip_height(staged_images, staged_files, strip_width_hint);
         let base_height = if expanded {
-            composer_total_height(content_height)
+            composer_total_height(layout.content_height)
         } else {
             compact_height
         };
@@ -1064,13 +1151,30 @@ impl Render for Composer {
             window.request_animation_frame();
         }
         self.last_rendered_height = pill_height;
+        PillFrame {
+            expanded,
+            compact_height,
+            base_height,
+            pill_height,
+            morph_t,
+            morphing,
+        }
+    }
 
+    /// The pill and everything inside it, in the frame's layout mode.
+    fn render_pill(
+        &mut self,
+        frame: &PillFrame,
+        mode: SendButtonMode,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let send_button = self.render_send_button(mode, cx);
         // Attaching lives in the `/` menu (Attach files), not on the pill;
         // paste and drop feed the same strip.
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
-        let strip = self.render_attachment_strip(&theme, cx);
+        let strip = self.render_attachment_strip(theme, cx);
 
         // The pill chrome (zeron composer.tsx): `rounded-[26px] border
         // border-white/[0.08] bg-white/[0.03] shadow-xl` — a floating pill with
@@ -1106,137 +1210,182 @@ impl Render for Composer {
         // controls pin to the bottom and only the text glides with the reveal
         // (the send/attach/chips must not ride the height, and none of them
         // fade — the full cluster stays visible throughout).
-        let cluster_dy = morph_cluster_dy(morph_t);
+        let cluster_dy = morph_cluster_dy(frame.morph_t);
         // The context gauge round the send button, drawn once a mode change
         // has landed: mid-morph the pill's end is still the old one's shape.
         // The send button's bottom inset: centered in the compact row, or in
         // the expanded actions row's 32px zone above its 10px bottom pad.
-        let send_bottom_inset = if expanded {
+        let send_bottom_inset = if frame.expanded {
             10.0 + (ACTIONS_ROW_HEIGHT - 4.0 - 10.0 - SEND_BUTTON_SIZE) / 2.0
         } else {
-            (compact_height - PILL_BORDER_V - SEND_BUTTON_SIZE) / 2.0
+            (frame.compact_height - PILL_BORDER_V - SEND_BUTTON_SIZE) / 2.0
         };
-        let edge_ring = (!morphing)
+        let edge_ring = (!frame.morphing)
             .then(|| self.context_ring_reading(cx))
             .flatten()
             .map(|reading| {
                 self.render_edge_ring(
                     reading,
-                    pill_height - PILL_BORDER_V,
+                    frame.pill_height - PILL_BORDER_V,
                     send_bottom_inset,
-                    &theme,
+                    theme,
                     cx,
                 )
             });
-        let body = if expanded {
-            // Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
-            // (`px-3 pb-2.5 pt-1`, h-8 chips → 46px) ABSOLUTE at the pill's
-            // stationary bottom — constant screen-y through the morph, with
-            // the 2.5px compact↔expanded centering delta gliding out. The
-            // text container is laid out at TARGET size (committed layout
-            // never reflows mid-tween — the caret can't jump); its top pad
-            // eases 12→16 so the first line glides from its compact resting
-            // place. The whole control cluster stays at full alpha — chips,
-            // attach and send are all (near-)stationary on the bottom anchor.
-            let text_pt = morph_text_pad(morph_t);
-            pill.h(px(pill_height))
-                .overflow_hidden()
-                .relative()
-                .flex()
-                .flex_col()
-                .children(strip)
-                .child(
-                    div()
-                        .h(px(
-                            (base_height - PILL_BORDER_V - ACTIONS_ROW_HEIGHT).max(0.0)
-                        ))
-                        .px(px(16.0))
-                        .pt(px(text_pt))
-                        .pb(px(4.0))
-                        .child(self.render_input_with_completion(&theme, cx)),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom(px(-cluster_dy))
-                        .h(px(ACTIONS_ROW_HEIGHT))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        // Shared cluster metrics (see CLUSTER_INSET): gap-1
-                        // internals and the right inset (12) are the compact
-                        // ones, so the buttons never step sideways.
-                        .gap(px(4.0))
-                        .pl(px(12.0))
-                        .pr(px(CLUSTER_INSET))
-                        .pt(px(4.0))
-                        .pb(px(10.0))
-                        .child(div().flex_1().min_w_0().child(self.pickers.clone()))
-                        .child(send_button),
-                )
-                .children(edge_ring)
-        } else {
-            // Compact pill: input and the actions cluster on one 47px line
-            // (`py-3 pl-4 pr-2` textarea, `gap-2 py-1.5 pl-1 pr-2` cluster;
-            // the 22.75px line centers to the same 12px inset as `py-3`).
-            // The row is BOTTOM-justified: during the collapse morph the pill
-            // top sweeps down over a stationary row, the text walks down from
-            // its expanded resting place via a decaying relative offset, and
-            // the whole inline cluster (chips + send) holds its spot at
-            // full alpha (2.5px centering delta gliding in).
-            let text_glide = match self.flip_morph {
-                Some(m) if morphing => collapse_text_glide(m.from, morph_t),
-                _ => 0.0,
-            };
-            pill.h(px(pill_height))
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                .justify_end()
-                .children(strip)
-                .child(
-                    div()
-                        .h(px(compact_height - PILL_BORDER_V))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .child(
-                            div()
-                                .flex_1()
-                                // Narrow tiles: the cluster's chips shrink
-                                // before the input loses its last word.
-                                .min_w(px(96.0))
-                                .pl(px(16.0))
-                                .pr(px(8.0))
-                                .relative()
-                                .top(px(-text_glide))
-                                .child(self.render_input_with_completion(&theme, cx)),
-                        )
-                        .child(
-                            div()
-                                // Shrinkable (basis = content): the picker
-                                // chips ellipsize under row pressure.
-                                .min_w_0()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                // Shared cluster metrics (`gap-1 pl-1`, zeron
-                                // composer-actions.tsx): identical internals
-                                // to expanded, right inset included
-                                // (CLUSTER_INSET).
-                                .gap(px(4.0))
-                                .pl(px(4.0))
-                                .pr(px(CLUSTER_INSET))
-                                .relative()
-                                .top(px(-cluster_dy))
-                                .child(div().min_w_0().child(self.pickers.clone()))
-                                .child(send_button),
-                        ),
-                )
-                .children(edge_ring)
+        let parts = PillParts {
+            pill,
+            strip,
+            send_button,
+            edge_ring,
+            cluster_dy,
         };
+        if frame.expanded {
+            self.render_pill_expanded(parts, frame, theme, cx)
+        } else {
+            self.render_pill_compact(parts, frame, theme, cx)
+        }
+    }
+
+    /// Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
+    /// (`px-3 pb-2.5 pt-1`, h-8 chips → 46px) ABSOLUTE at the pill's
+    /// stationary bottom — constant screen-y through the morph, with
+    /// the 2.5px compact↔expanded centering delta gliding out. The
+    /// text container is laid out at TARGET size (committed layout
+    /// never reflows mid-tween — the caret can't jump); its top pad
+    /// eases 12→16 so the first line glides from its compact resting
+    /// place. The whole control cluster stays at full alpha — chips,
+    /// attach and send are all (near-)stationary on the bottom anchor.
+    fn render_pill_expanded(
+        &self,
+        parts: PillParts,
+        frame: &PillFrame,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let PillParts {
+            pill,
+            strip,
+            send_button,
+            edge_ring,
+            cluster_dy,
+        } = parts;
+        let text_pt = morph_text_pad(frame.morph_t);
+        pill.h(px(frame.pill_height))
+            .overflow_hidden()
+            .relative()
+            .flex()
+            .flex_col()
+            .children(strip)
+            .child(
+                div()
+                    .h(px(
+                        (frame.base_height - PILL_BORDER_V - ACTIONS_ROW_HEIGHT).max(0.0)
+                    ))
+                    .px(px(16.0))
+                    .pt(px(text_pt))
+                    .pb(px(4.0))
+                    .child(self.render_input_with_completion(theme, cx)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(-cluster_dy))
+                    .h(px(ACTIONS_ROW_HEIGHT))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    // Shared cluster metrics (see CLUSTER_INSET): gap-1
+                    // internals and the right inset (12) are the compact
+                    // ones, so the buttons never step sideways.
+                    .gap(px(4.0))
+                    .pl(px(12.0))
+                    .pr(px(CLUSTER_INSET))
+                    .pt(px(4.0))
+                    .pb(px(10.0))
+                    .child(div().flex_1().min_w_0().child(self.pickers.clone()))
+                    .child(send_button),
+            )
+            .children(edge_ring)
+    }
+
+    /// Compact pill: input and the actions cluster on one 47px line
+    /// (`py-3 pl-4 pr-2` textarea, `gap-2 py-1.5 pl-1 pr-2` cluster;
+    /// the 22.75px line centers to the same 12px inset as `py-3`).
+    /// The row is BOTTOM-justified: during the collapse morph the pill
+    /// top sweeps down over a stationary row, the text walks down from
+    /// its expanded resting place via a decaying relative offset, and
+    /// the whole inline cluster (chips + send) holds its spot at
+    /// full alpha (2.5px centering delta gliding in).
+    fn render_pill_compact(
+        &self,
+        parts: PillParts,
+        frame: &PillFrame,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let PillParts {
+            pill,
+            strip,
+            send_button,
+            edge_ring,
+            cluster_dy,
+        } = parts;
+        let text_glide = match self.flip_morph {
+            Some(m) if frame.morphing => collapse_text_glide(m.from, frame.morph_t),
+            _ => 0.0,
+        };
+        pill.h(px(frame.pill_height))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .justify_end()
+            .children(strip)
+            .child(
+                div()
+                    .h(px(frame.compact_height - PILL_BORDER_V))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            // Narrow tiles: the cluster's chips shrink
+                            // before the input loses its last word.
+                            .min_w(px(96.0))
+                            .pl(px(16.0))
+                            .pr(px(8.0))
+                            .relative()
+                            .top(px(-text_glide))
+                            .child(self.render_input_with_completion(theme, cx)),
+                    )
+                    .child(
+                        div()
+                            // Shrinkable (basis = content): the picker
+                            // chips ellipsize under row pressure.
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            // Shared cluster metrics (`gap-1 pl-1`, zeron
+                            // composer-actions.tsx): identical internals
+                            // to expanded, right inset included
+                            // (CLUSTER_INSET).
+                            .gap(px(4.0))
+                            .pl(px(4.0))
+                            .pr(px(CLUSTER_INSET))
+                            .relative()
+                            .top(px(-cluster_dy))
+                            .child(div().min_w_0().child(self.pickers.clone()))
+                            .child(send_button),
+                    ),
+            )
+            .children(edge_ring)
+    }
+
+    /// The pill frosted over the transcript, with its soft lift shadow.
+    fn render_pill_stack(&self, body: gpui::Div, theme: &Theme) -> gpui::Div {
         // The file dropzone lives in the shell (the whole conversation column,
         // not just the pill — shell.rs `chat-dropzone`); drops land back here
         // via `add_paths`.
@@ -1272,25 +1421,21 @@ impl Render for Composer {
         } else {
             motion::fade_quick("composer-input-shadow", pill_shadow).into_any_element()
         };
-        let container = container.child(
-            div()
-                .relative()
-                .flex()
-                .flex_col()
-                .child(frosted)
-                .child(pill_shadow),
-        );
-        // Branch/worktree toolbar under the pill (t3code BranchToolbar): the
-        // checkout-kind selector + ref picker for new sessions, read-only
-        // labels once the session exists. Git spaces only.
-        let footer = self
-            .pickers
-            .update(cx, |pickers, cx| pickers.render_footer(cx));
-        let container = match footer {
-            Some(footer) => container.child(footer),
-            None => container,
-        };
-        // Full-size preview of a staged thumbnail (AttachmentPreviewDialog).
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .child(frosted)
+            .child(pill_shadow)
+    }
+
+    /// Full-size preview of a staged thumbnail (AttachmentPreviewDialog).
+    fn with_preview(
+        &mut self,
+        container: gpui::Div,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         if let Some(preview) = self.preview.clone() {
             if std::mem::take(&mut self.preview_focus_pending) {
                 window.focus(&self.preview_focus, cx);
@@ -1315,4 +1460,131 @@ impl Render for Composer {
         }
         container
     }
+}
+
+/// zeron composer.tsx `Notice` (matches the transcript ErrorChip palette):
+/// `flex items-start gap-2 rounded-xl border px-3 py-2 text-[12px]
+/// leading-snug` with a 14px DangerTriangle — a subtle tinted wash, not a
+/// bare red stroke. Amber for the offline-ish case (engine not connected),
+/// red for send/run failures. Click dismisses.
+fn failure_notice(
+    message: SharedString,
+    theme: &Theme,
+    cx: &mut Context<Composer>,
+) -> gpui::Stateful<gpui::Div> {
+    let offline = message.as_ref() == "Engine not connected";
+    let (border_c, wash, text_c) = if offline {
+        let amber = theme.warning; // amber-400
+        let amber_200 = theme.warning_muted;
+        (
+            amber.opacity(0.16),
+            amber.opacity(0.05),
+            amber_200.opacity(0.9),
+        )
+    } else {
+        let danger = theme.danger; // red-400
+        let red_300 = theme.danger_muted;
+        (
+            danger.opacity(0.16),
+            danger.opacity(0.05),
+            red_300.opacity(0.9),
+        )
+    };
+    div()
+        .id("composer-failure")
+        .mx(px(4.0))
+        .mt(px(6.0))
+        .flex()
+        .items_start()
+        .gap(px(8.0))
+        .rounded(px(12.0))
+        .border_1()
+        .border_color(border_c)
+        .bg(wash)
+        .px(px(12.0))
+        .py(px(8.0))
+        .text_size(px(12.0))
+        .line_height(px(16.0))
+        .text_color(text_c)
+        .cursor_pointer()
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.failure = None;
+            cx.notify();
+        }))
+        .child(
+            crate::kit::icons::icon(crate::kit::icons::DANGER_TRIANGLE)
+                .size(px(14.0))
+                .mt(px(2.0))
+                .text_color(text_c),
+        )
+        .child(div().min_w_0().child(message))
+}
+
+/// A durable send the host failed: its prompt, the host's resolution, and
+/// Retry.
+fn delivery_failure_notice(
+    failed: crate::state::FailedCommand,
+    theme: &Theme,
+    cx: &mut Context<Composer>,
+) -> gpui::Stateful<gpui::Div> {
+    let command_id = failed.command_id.clone();
+    let resolution = failed
+        .resolution
+        .clone()
+        .unwrap_or_else(|| "The host did not complete this send.".into());
+    div()
+        .id("composer-delivery-failure")
+        .mx(px(4.0))
+        .mt(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .rounded(px(12.0))
+        .border_1()
+        .border_color(theme.danger.opacity(0.16))
+        .bg(theme.danger.opacity(0.05))
+        .px(px(12.0))
+        .py(px(8.0))
+        .text_size(px(12.0))
+        .text_color(theme.danger_muted.opacity(0.9))
+        .child(
+            crate::kit::icons::icon(crate::kit::icons::DANGER_TRIANGLE)
+                .size(px(14.0))
+                .text_color(theme.danger_muted.opacity(0.9)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .truncate()
+                        .child(format!("Send failed: {}", failed.prompt)),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_muted)
+                        .child(resolution),
+                ),
+        )
+        .child(
+            div()
+                .id("composer-delivery-retry")
+                .flex_none()
+                .rounded(px(7.0))
+                .bg(theme.danger.opacity(0.12))
+                .px(px(9.0))
+                .py(px(5.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.danger.opacity(0.18)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.retry_failed_command(command_id.clone(), cx);
+                }))
+                .child("Retry"),
+        )
 }
