@@ -389,152 +389,19 @@ fn preflight(method: &str, params: &serde_json::Value) -> Result<(), RpcError> {
     Ok(())
 }
 
-/// ControlRpc methods that honor `targetDeviceId`. Extend this
-/// list (plus [`is_stream_method`] for streams) to make more of the surface
-/// device-addressable — the handlers themselves need no changes.
+/// Methods that honor `targetDeviceId` (see `cypher_rpc::methods::SPECS`).
 fn forwardable(method: &str) -> bool {
-    matches!(
-        method,
-        methods::LIST_HARNESSES
-            | methods::SET_HARNESS_ENABLED
-            | methods::LIST_PI_PACKAGES
-            | methods::INSTALL_PI
-            | methods::INSTALL_PI_PACKAGE
-            | methods::SET_PI_PACKAGE_ENABLED
-            | methods::PI_RUNTIME_STATUS
-            | methods::LIST_PI_SUBAGENTS
-            | methods::SAVE_PI_SUBAGENT
-            | methods::DELETE_PI_SUBAGENT
-            | methods::GET_PI_TRANSLATION_SETTINGS
-            | methods::SET_PI_TRANSLATION_SETTINGS
-            | methods::DETECT_PI_LANGUAGE
-            | methods::LIST_PI_PROVIDERS
-            | methods::SAVE_PI_PROVIDER
-            | methods::REFRESH_PI_PROVIDER
-            | methods::LOGOUT_PI_PROVIDER
-            | methods::REMOVE_PI_PROVIDER
-            | methods::BEGIN_PI_PROVIDER_LOGIN
-            | methods::PI_PROVIDER_LOGIN_STATUS
-            | methods::COMPLETE_PI_PROVIDER_LOGIN
-            | methods::CANCEL_PI_PROVIDER_LOGIN
-            | methods::PI_UPDATE_STATUS
-            | methods::CHECK_PI_UPDATE
-            | methods::APPLY_PI_UPDATES
-            | methods::LIST_MCP_SERVERS
-            | methods::ADD_MCP_SERVERS
-            | methods::REMOVE_MCP_SERVER
-            | methods::SET_MCP_SERVER_ENABLED
-            | methods::START_MCP_AUTH
-            | methods::BEGIN_MCP_LOGIN
-            | methods::MCP_LOGIN_STATUS
-            | methods::COMPLETE_MCP_LOGIN
-            | methods::CANCEL_MCP_LOGIN
-            | methods::LOGOUT_MCP_SERVER
-            | methods::LIST_MODELS
-            | methods::GET_TITLE_MODEL_SETTINGS
-            | methods::SET_TITLE_MODEL_SETTINGS
-            | methods::GET_WEB_SEARCH_FALLBACK
-            | methods::SET_WEB_SEARCH_FALLBACK
-            | methods::LIST_COMMANDS
-            // Read from the chat's Pi session, which lives on its host.
-            | methods::PI_SESSION_MODES
-            | methods::QUEUE_COMMAND
-            | methods::RETRY_COMMAND
-            | methods::WATCH_DOC_MESSAGES
-            | methods::WATCH_DOC_COMMANDS
-            // Repos/worktrees/folders are device-local filesystem state.
-            | methods::LIST_REPOS
-            | methods::ADD_REPO
-            | methods::CLONE_REPO
-            | methods::CREATE_REPO
-            | methods::LIST_BRANCHES
-            | methods::LIST_REFS
-            | methods::LIST_GIT_HISTORY
-            | methods::FETCH_ALL
-            | methods::SWITCH_REF
-            | methods::LIST_FOLDERS
-            | methods::SEARCH_FILES
-            | methods::SEARCH_GITHUB_ISSUES
-            | methods::GET_GITHUB_ISSUE
-            // GitHub logins are per-device, like agent CLI logins.
-            | methods::GITHUB_ACCOUNT_STATUS
-            | methods::START_GITHUB_LOGIN
-            | methods::POLL_GITHUB_LOGIN
-            | methods::CANCEL_GITHUB_LOGIN
-            | methods::SIGN_OUT_GITHUB
-            | methods::LIST_WORKSPACE_FILES
-            | methods::READ_WORKSPACE_FILE
-            | methods::WRITE_WORKSPACE_FILE
-            | methods::CREATE_WORKTREE
-            | methods::DELETE_WORKTREE
-            | methods::CREATE_SCRATCH_DIR
-            | methods::DELETE_SCRATCH_DIR
-            // Checkout diffs are produced on the device holding the checkout.
-            | methods::WATCH_CHECKOUT_DIFFS
-            | methods::GET_CHECKOUT_DIFF
-            | methods::GET_CHECKOUT_FILE_DIFF_TEXT
-            // Terminals live on the chat's host device.
-            | methods::OPEN_TERMINAL
-            | methods::SUBSCRIBE_TERMINAL
-            | methods::WRITE_TERMINAL
-            | methods::RESIZE_TERMINAL
-            | methods::CLOSE_TERMINAL
-            // Uploads/attachments target the chat's host device (the agent reads
-            // the committed file from that device's disk).
-            | methods::UPLOAD_CHUNK
-            | methods::UPLOAD_COMMIT
-            | methods::READ_ATTACHMENT_CHUNK
-            // Updates report/apply on the device whose binary they concern.
-            | methods::UPDATE_STATUS
-            | methods::CHECK_UPDATE
-            | methods::UPDATE_ON_ACTIVATION
-            | methods::APPLY_UPDATE
-            // Side Chats are owned by the parent chat's host device.
-            | methods::START_SIDE_CHAT
-            | methods::SEND_SIDE_CHAT
-            | methods::INTERRUPT_SIDE_CHAT
-            | methods::RESPOND_SIDE_CHAT_INPUT
-            | methods::WATCH_SIDE_CHAT_STATUS
-            | methods::PROMOTE_SIDE_CHAT
-            | methods::DISPOSE_SIDE_CHAT
-            // Session Forks are owned by the source chat's host device (the
-            // Pi session store lives there).
-            | methods::FORK_SESSION
-            // A rewind rewrites the same chat's Pi session: host device too.
-            | methods::REWIND_SESSION
-    )
+    methods::spec(method).is_some_and(|spec| spec.forwardable)
 }
 
 /// Forwarded methods that carry credentials or server configuration.
 fn needs_credential_transport(method: &str) -> bool {
-    matches!(
-        method,
-        methods::SAVE_PI_PROVIDER
-            | methods::ADD_MCP_SERVERS
-            | methods::REMOVE_MCP_SERVER
-            | methods::BEGIN_MCP_LOGIN
-            | methods::MCP_LOGIN_STATUS
-            | methods::COMPLETE_MCP_LOGIN
-            | methods::CANCEL_MCP_LOGIN
-            | methods::BEGIN_PI_PROVIDER_LOGIN
-            | methods::PI_PROVIDER_LOGIN_STATUS
-            | methods::COMPLETE_PI_PROVIDER_LOGIN
-            | methods::CANCEL_PI_PROVIDER_LOGIN
-    )
+    methods::spec(method).is_some_and(|spec| spec.credentials)
 }
 
 /// Forwardable methods whose reply is a stream (proxied item-by-item).
 fn is_stream_method(method: &str) -> bool {
-    matches!(
-        method,
-        methods::WATCH_DOC_MESSAGES
-            | methods::WATCH_DOC_COMMANDS
-            | methods::SUBSCRIBE_TERMINAL
-            | methods::WATCH_CHECKOUT_DIFFS
-            | methods::UPDATE_STATUS
-            | methods::PI_UPDATE_STATUS
-            | methods::WATCH_SIDE_CHAT_STATUS
-    )
+    methods::spec(method).is_some_and(|spec| spec.forwardable && spec.stream)
 }
 
 /// A watch receiver as a stream: current value first, then every change.
@@ -602,19 +469,9 @@ impl AuthRpc {
         Self { auth }
     }
 
+    /// Methods this auth-only surface answers.
     pub fn handles(method: &str) -> bool {
-        matches!(
-            method,
-            methods::AUTH_STATUS
-                | methods::SIGN_IN
-                | methods::SIGN_IN_HEADLESS
-                | methods::COMPLETE_SIGN_IN
-                | methods::SIGN_OUT
-                | methods::LIST_ORGS
-                | methods::CREATE_ORG
-                | methods::SELECT_ORG
-                | methods::NOTIFICATION_ACTIVITY
-        )
+        methods::spec(method).is_some_and(|spec| spec.auth)
     }
 }
 

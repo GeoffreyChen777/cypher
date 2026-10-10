@@ -381,6 +381,7 @@ pub mod methods {
         MethodSpec::unary(GET_WEB_SEARCH_FALLBACK).forwardable(),
         MethodSpec::unary(SET_WEB_SEARCH_FALLBACK).forwardable(),
         MethodSpec::unary(LIST_COMMANDS).forwardable(),
+        // Read from the chat's Pi session, which lives on its host.
         MethodSpec::unary(PI_SESSION_MODES).forwardable(),
         MethodSpec::unary(QUEUE_COMMAND).forwardable(),
         MethodSpec::unary(RETRY_COMMAND).forwardable(),
@@ -407,6 +408,7 @@ pub mod methods {
         MethodSpec::unary(SELECT_ORG).auth(),
         MethodSpec::unary(LOCAL_IMPORT_STATUS),
         MethodSpec::stream(IMPORT_LOCAL_WORKSPACE),
+        // Repos/worktrees/folders are device-local filesystem state.
         MethodSpec::unary(LIST_REPOS).forwardable(),
         MethodSpec::unary(ADD_REPO).forwardable(),
         MethodSpec::unary(CLONE_REPO).forwardable(),
@@ -420,6 +422,7 @@ pub mod methods {
         MethodSpec::unary(SEARCH_FILES).forwardable(),
         MethodSpec::unary(SEARCH_GITHUB_ISSUES).forwardable(),
         MethodSpec::unary(GET_GITHUB_ISSUE).forwardable(),
+        // GitHub logins are per-device, like agent CLI logins.
         MethodSpec::unary(GITHUB_ACCOUNT_STATUS).forwardable(),
         MethodSpec::unary(START_GITHUB_LOGIN).forwardable(),
         MethodSpec::unary(POLL_GITHUB_LOGIN).forwardable(),
@@ -432,24 +435,30 @@ pub mod methods {
         MethodSpec::unary(DELETE_WORKTREE).forwardable(),
         MethodSpec::unary(CREATE_SCRATCH_DIR).forwardable(),
         MethodSpec::unary(DELETE_SCRATCH_DIR).forwardable(),
+        // Terminals live on the chat's host device.
         MethodSpec::unary(OPEN_TERMINAL).forwardable(),
         MethodSpec::stream(SUBSCRIBE_TERMINAL).forwardable(),
         MethodSpec::unary(WRITE_TERMINAL).forwardable(),
         MethodSpec::unary(RESIZE_TERMINAL).forwardable(),
         MethodSpec::unary(CLOSE_TERMINAL).forwardable(),
+        // Checkout diffs are produced on the device holding the checkout.
         MethodSpec::stream(WATCH_CHECKOUT_DIFFS).forwardable(),
         MethodSpec::unary(GET_CHECKOUT_DIFF).forwardable(),
         MethodSpec::unary(GET_CHECKOUT_FILE_DIFF_TEXT).forwardable(),
+        // Uploads/attachments target the chat's host device (the agent reads
+        // the committed file from that device's disk).
         MethodSpec::unary(UPLOAD_CHUNK).forwardable(),
         MethodSpec::unary(UPLOAD_COMMIT).forwardable(),
         MethodSpec::unary(READ_ATTACHMENT_CHUNK).forwardable(),
         MethodSpec::unary(FETCH_TOOL_BLOB),
+        // Updates report/apply on the device whose binary they concern.
         MethodSpec::stream(UPDATE_STATUS).forwardable(),
         MethodSpec::unary(CHECK_UPDATE).forwardable(),
         MethodSpec::unary(UPDATE_ON_ACTIVATION).forwardable(),
         MethodSpec::unary(APPLY_UPDATE).forwardable(),
         MethodSpec::unary(START_SUBAGENT),
         MethodSpec::stream(WATCH_AGENT_EVENTS),
+        // Side Chats are owned by the parent chat's host device.
         MethodSpec::unary(START_SIDE_CHAT).forwardable(),
         MethodSpec::unary(SEND_SIDE_CHAT).forwardable(),
         MethodSpec::unary(INTERRUPT_SIDE_CHAT).forwardable(),
@@ -457,6 +466,9 @@ pub mod methods {
         MethodSpec::stream(WATCH_SIDE_CHAT_STATUS).forwardable(),
         MethodSpec::unary(PROMOTE_SIDE_CHAT).forwardable(),
         MethodSpec::unary(DISPOSE_SIDE_CHAT).forwardable(),
+        // Session Forks are owned by the source chat's host device (the Pi
+        // session store lives there); a rewind rewrites the same chat's Pi
+        // session there too.
         MethodSpec::unary(FORK_SESSION).forwardable(),
         MethodSpec::unary(REWIND_SESSION).forwardable(),
     ];
