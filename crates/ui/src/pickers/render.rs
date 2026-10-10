@@ -3,35 +3,6 @@
 use super::*;
 
 impl Pickers {
-    /// What the composer's context gauge shows: the selected session's latest
-    /// context-window reading, and whether a click compacts it (the harness
-    /// has `/compact` and no turn is running). `None` — no ring at all —
-    /// until the host engine has a reading (new chats, hosts on an older
-    /// version), and in a Side Chat. A remote host's reading can trail a
-    /// running turn by up to the session row's 20s freshness write; it
-    /// catches up when the turn settles.
-    pub fn context_ring_reading(
-        &self,
-        cx: &App,
-    ) -> Option<crate::composer::context_ring::RingReading> {
-        if self.side_chat {
-            return None;
-        }
-        let state = self.state.read(cx);
-        let chat_id = state.selected_chat.as_deref()?;
-        let usage = state.session_for(chat_id)?.context_usage?;
-        let busy = matches!(
-            state.indicator_for(chat_id, chrono::Utc::now()),
-            crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
-        );
-        let compactable = matches!(self.effective_harness(cx), Some(HarnessId::Pi));
-        Some(crate::composer::context_ring::RingReading {
-            usage,
-            compactable,
-            busy,
-        })
-    }
-
     // Chip builder: every argument is one visual slot of the chip.
     #[allow(clippy::too_many_arguments)]
     fn trigger_chip(

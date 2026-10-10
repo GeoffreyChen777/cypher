@@ -541,6 +541,33 @@ impl Composer {
             .into_any_element()
     }
 
+    /// What the context gauge shows: the selected session's latest
+    /// context-window reading, and whether a click compacts it (the harness
+    /// has `/compact` and no turn is running). `None` — no ring at all —
+    /// until the host engine has a reading (new chats, hosts on an older
+    /// version), and in a Side Chat. A remote host's reading can trail a
+    /// running turn by up to the session row's 20s freshness write; it
+    /// catches up when the turn settles.
+    fn context_ring_reading(&self, cx: &App) -> Option<context_ring::RingReading> {
+        let pickers = self.pickers.read(cx);
+        if pickers.is_side_chat() {
+            return None;
+        }
+        let state = self.state.read(cx);
+        let chat_id = state.selected_chat.as_deref()?;
+        let usage = state.session_for(chat_id)?.context_usage?;
+        let busy = matches!(
+            state.indicator_for(chat_id, chrono::Utc::now()),
+            crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
+        );
+        let compactable = matches!(pickers.effective_harness(cx), Some(HarnessId::Pi));
+        Some(context_ring::RingReading {
+            usage,
+            compactable,
+            busy,
+        })
+    }
+
     /// The context gauge: the reading along the pill's rounded right end,
     /// round the send button and held off the border (the pill clips
     /// children to its inside), on the single-line pill and the multi-line
@@ -1087,7 +1114,7 @@ impl Render for Composer {
             (compact_height - PILL_BORDER_V - SEND_BUTTON_SIZE) / 2.0
         };
         let edge_ring = (!morphing)
-            .then(|| self.pickers.read(cx).context_ring_reading(cx))
+            .then(|| self.context_ring_reading(cx))
             .flatten()
             .map(|reading| {
                 self.render_edge_ring(

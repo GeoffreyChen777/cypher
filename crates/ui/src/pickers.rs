@@ -467,8 +467,13 @@ impl Pickers {
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
+    /// Whether this picker set belongs to a Side Chat composer.
+    pub fn is_side_chat(&self) -> bool {
+        self.side_chat
+    }
+
     /// Effective harness: picked, or the chat's config, or the first listed.
-    fn effective_harness(&self, cx: &App) -> Option<HarnessId> {
+    pub fn effective_harness(&self, cx: &App) -> Option<HarnessId> {
         if let Some(harness) = self.config.harness {
             return Some(harness);
         }
