@@ -15,7 +15,7 @@ pub(super) struct Session {
     pub(super) handshake_timeout: Duration,
     pub(super) no_activity_grace: Duration,
     pub(super) model_catalog_wait: Duration,
-    pub(super) stderr_tail: crate::StderrTail,
+    pub(super) stderr_tail: crate::process::StderrTail,
     /// Which synthesized built-in commands this run intercepts (computed from
     /// the discovery cache at run start).
     pub(super) intercept: BuiltinIntercept,
@@ -1532,7 +1532,7 @@ impl PiRun {
     async fn on_eof(
         &mut self,
         child: &mut Child,
-        stderr_tail: &crate::StderrTail,
+        stderr_tail: &crate::process::StderrTail,
         agent_name: &str,
     ) -> Flow {
         // A child death while PARKED (turn already settled) ends

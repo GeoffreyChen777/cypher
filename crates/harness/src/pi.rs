@@ -44,7 +44,7 @@
 //!
 //! One child per run (persistent across turns within the run, parked between
 //! them while the steering mailbox lives), child-lifecycle hardening
-//! (StderrTail, SIGTERM→SIGKILL, PATH composition) reused from `lib.rs`.
+//! (StderrTail, SIGTERM→SIGKILL, PATH composition) reused from `process.rs`.
 
 mod client;
 pub mod fork;
@@ -79,9 +79,9 @@ use cypher_proto::{
 };
 
 use crate::pi::client::{Incoming, PiClient};
+use crate::process::{Signal, crash_message, send_signal, shutdown_child};
 use crate::{
-    Harness, HarnessError, OUTPUT_CAP, RunControls, RunHostContext, Signal, cap_text,
-    crash_message, parse_commands, send_signal, shutdown_child,
+    Harness, HarnessError, OUTPUT_CAP, RunControls, RunHostContext, cap_text, parse_commands,
 };
 
 /// Env vars the subagents extension keys on (mirrors
@@ -594,7 +594,7 @@ impl PiHarness {
         append_prompt: Option<&PathBuf>,
         requested_model: Option<&str>,
         requested_thinking: Option<&str>,
-    ) -> Result<(Child, crate::StderrTail), HarnessError> {
+    ) -> Result<(Child, crate::process::StderrTail), HarnessError> {
         let mut cmd = self.spawn_command_with_config(
             cwd,
             host,
@@ -614,7 +614,7 @@ impl PiHarness {
                 HarnessError::Io(e)
             }
         })?;
-        let stderr_tail = crate::StderrTail::default();
+        let stderr_tail = crate::process::StderrTail::default();
         if let Some(stderr) = child.stderr.take() {
             let tail = stderr_tail.clone();
             tokio::spawn(async move {
