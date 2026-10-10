@@ -30,6 +30,14 @@ pub use device_room::{
     encode_device_frame,
 };
 pub use local::{LocalListener, connect_local, probe_local};
+
+/// Lock a mutex, ignoring poisoning: every critical section leaves its data
+/// consistent, so one panicking task must not wedge the transport.
+pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 use server::serve_connection;
 
 /// RPC method names — single source of truth for both ends.
