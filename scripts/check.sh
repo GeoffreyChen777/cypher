@@ -12,9 +12,9 @@
 #   scripts    script, release and installer tests; documentation links
 #   runtime    the Pi runtime suites that need no staged runtime
 #   workflows  actionlint and the workflow policy (downloads actionlint)
-#   macos      macOS only: icon, swift-format lint, workspace clippy (gpui included),
-#              UI tests, and the Rust/Swift preview vectors
-#   ios        the iOS unit tests on a simulator (needs Xcode 27)
+#   macos      macOS only: icon, workspace clippy (gpui included), UI tests, and the
+#              Rust/Swift preview vectors
+#   ios        swift-format lint and the iOS unit tests on a simulator (needs Xcode 27)
 #   all        fmt lint rust edge scripts runtime workflows, plus macos on macOS
 #
 # CARGO, PYTHON and NODE override the tools used (for example a wrapper that
@@ -103,8 +103,6 @@ stage_workflows() {
 stage_macos() {
   [[ "$(uname -s)" == Darwin ]] || { echo "the macos stage needs a macOS host" >&2; return 1; }
   run bash scripts/tests/test-macos-icon.sh
-  run xcrun swift-format lint --strict --recursive --parallel apps/ios/Cypher apps/ios/CypherTests \
-    apps/ios/CypherUITests
   run "$CARGO" clippy --workspace --all-targets --locked -- -D warnings
   run "$CARGO" clippy --locked -p cypher-ui -p cypher --features cypher/dev-capture -- -D warnings
   run "$CARGO" test --locked -p cypher-ui --lib
@@ -120,6 +118,10 @@ stage_macos() {
 }
 
 stage_ios() {
+  # Formatting is checked with the same Xcode the iOS tests pin; swift-format's
+  # output differs between toolchain versions.
+  run xcrun swift-format lint --strict --recursive --parallel apps/ios/Cypher apps/ios/CypherTests \
+    apps/ios/CypherUITests
   run bash scripts/ci/ios-unit-tests.sh
 }
 

@@ -68,9 +68,9 @@ bash scripts/check.sh edge       # apps/edge typecheck, unit and workerd tests
 bash scripts/check.sh scripts    # script/release/installer tests, doc links
 bash scripts/check.sh runtime    # Pi runtime suites that need no staged runtime
 bash scripts/check.sh workflows  # actionlint + workflow policy (downloads actionlint)
-bash scripts/check.sh macos      # macOS: icon, swift-format lint, workspace clippy,
-                                 # cypher-ui tests, Rust/Swift preview vectors
-bash scripts/check.sh ios        # iOS unit tests on a simulator (Xcode 27)
+bash scripts/check.sh macos      # macOS: icon, workspace clippy, cypher-ui tests,
+                                 # Rust/Swift preview vectors
+bash scripts/check.sh ios        # swift-format lint + iOS unit tests (Xcode 27)
 bash scripts/check.sh all        # everything except ios; macos only on a Mac
 ```
 
@@ -168,8 +168,8 @@ local suppression.
   are `private` by default.
 - Tests are named for behaviour, in folders mirroring the app's; helpers live only in
   `TestSupport` (repo fixtures through `TestSupport.repoRoot()`).
-- Formatting is `swift-format` with `apps/ios/.swift-format` (lint runs in the `macos` check
-  stage); every configuration builds with complete Swift concurrency checking.
+- Formatting is `swift-format` with `apps/ios/.swift-format` (lint runs in the `ios` check
+  stage, with the Xcode the iOS tests pin); every configuration builds with complete Swift concurrency checking.
 
 ### TypeScript (`apps/edge`, `pi-runtime`)
 
