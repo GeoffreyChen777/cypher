@@ -8,8 +8,9 @@
  * 33% on the wire, which matters at the 1.2 Mbps links the whale incident
  * surfaced. The server owns no CRDT semantics.
  *
- * Shared shape across Rust (crates/sync) and Swift clients — change it only
- * with cross-language test vectors (registry precedent).
+ * Shared shape across Rust (crates/sync) and Swift clients; all three codecs
+ * run protocol/vectors/chat-frames-v1.json, so change them together
+ * (protocol/README.md).
  */
 
 // Import-free so scripts/chat2-crosscheck.mjs can load this file directly.

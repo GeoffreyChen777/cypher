@@ -135,8 +135,8 @@ root).
   must be online to execute commands anyway, so lag is bounded in practice).
 
 **C4. iOS** (`apps/ios/Cypher/Sync/`): `ChatRoomClient.swift`, modeled on
-`RegistryClient.swift`. Framing test vectors are shared across Rust/TS/Swift (registry
-precedent).
+`RegistryClient.swift`. Framing test vectors are shared across Rust/TS/Swift
+([`protocol/vectors/chat-frames-v1.json`](../../protocol/README.md)).
 
 ---
 

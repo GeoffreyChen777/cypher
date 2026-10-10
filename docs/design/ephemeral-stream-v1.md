@@ -154,7 +154,7 @@ echo 清理仍使用 durable entries，而非加了预览的显示数组。
 - iOS `CypherDev` 用 `-dev-stream-preview` 启动；正式构建恒为关闭。独立单元测试可在
   AppConfig 中显式注入开发开关，但同样受构建/地址限制。
 - 服务端 relay 已移除（见上方状态），客户端开关在重建前不会产生预览。
-- 共享向量：`crates/sync/tests/fixtures/stream-preview-v1.json`（wire，48 例）与
+- 共享向量：`protocol/vectors/stream-preview-v1.json`（wire，48 例）与
   `preview-reducer-v1.json`（状态机，13 例）。macOS job 的 "Preview protocol" 步骤运行
   `cargo test -p cypher-sync --lib preview`，并直接编译 iOS 的 Swift 源文件执行同一份
   向量（`scripts/tests/stream-preview-vectors.swift`）。iOS Simulator 另有

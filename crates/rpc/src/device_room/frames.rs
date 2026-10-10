@@ -1,5 +1,6 @@
 //! The device-frame codec: `uleb128(header_len) ‖ JSON header ‖ payload`,
-//! byte-identical to `apps/edge/src/device/device-frame.ts`.
+//! byte-identical to `apps/edge/src/device/device-frame.ts` and the Swift client
+//! (shared vectors: `protocol/vectors/device-frames-v1.json`).
 
 use serde::{Deserialize, Serialize};
 

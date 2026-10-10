@@ -114,8 +114,8 @@ stage_macos() {
   run xcrun swiftc apps/ios/Cypher/Sync/ChatFrames.swift apps/ios/Cypher/Sync/StreamPreview.swift \
     apps/ios/Cypher/Sync/PreviewProjection.swift scripts/tests/stream-preview-vectors.swift \
     -o "$out/preview-vectors"
-  run "$out/preview-vectors" crates/sync/tests/fixtures/stream-preview-v1.json \
-    crates/sync/tests/fixtures/preview-reducer-v1.json
+  run "$out/preview-vectors" protocol/vectors/stream-preview-v1.json \
+    protocol/vectors/preview-reducer-v1.json
   rm -rf "$out"
 }
 

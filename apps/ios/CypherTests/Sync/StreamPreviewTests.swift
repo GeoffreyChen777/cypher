@@ -5,7 +5,7 @@ final class StreamPreviewTests: XCTestCase {
     func testSharedVectors() throws {
         let root = try TestSupport.repoRoot()
         let data = try Data(
-            contentsOf: root.appendingPathComponent("crates/sync/tests/fixtures/stream-preview-v1.json"))
+            contentsOf: root.appendingPathComponent("protocol/vectors/stream-preview-v1.json"))
         let vectors = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
         for v in vectors {
             let name = try XCTUnwrap(v["name"] as? String)

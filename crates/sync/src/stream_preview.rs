@@ -1,6 +1,7 @@
 //! Ephemeral stream-preview frame codec (`ephemeral-stream-v1`), driven by
 //! [`crate::preview_link`]. Parsing is NOT authorization; see
-//! docs/design/ephemeral-stream-v1.md.
+//! docs/design/ephemeral-stream-v1.md. Mirrored by the Swift client; both run
+//! `protocol/vectors/stream-preview-v1.json` (`protocol/README.md`).
 
 use crate::chat_frames::{self, WireFrame};
 
@@ -114,8 +115,10 @@ mod tests {
 
     #[test]
     fn shared_vectors() {
-        let vectors: Vec<Value> =
-            serde_json::from_str(include_str!("../tests/fixtures/stream-preview-v1.json")).unwrap();
+        let vectors: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../protocol/vectors/stream-preview-v1.json"
+        ))
+        .unwrap();
         for v in vectors {
             let bytes = if let Some(hex) = v["hex"].as_str() {
                 (0..hex.len())

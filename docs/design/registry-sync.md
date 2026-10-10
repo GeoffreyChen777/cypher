@@ -73,7 +73,10 @@ Server→client:
 `Op = {kind, id, op: "upsert"|"update"|"delete", set?: {field: value|null}, hlc, clocks?}`
 `Row = {kind, id, seq, deleted, delHlc?, fields, clocks}`
 
-## Merge rules (identical in TS and Rust; shared test vectors)
+## Merge rules (identical in TS, Rust and Swift; shared test vectors)
+
+The vectors are in `protocol/vectors/registry-core-v1.json`; see
+[protocol/README.md](../../protocol/README.md).
 
 - HLC strings `"{ms:013}-{counter:06}-{device}"` — lexicographic order = causal order,
   device id breaks ties totally.

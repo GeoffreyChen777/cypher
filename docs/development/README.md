@@ -26,6 +26,7 @@ product works; this guide is about working on it.
 | `apps/landing`, `apps/www-redirect` | the landing page and the www redirect Workers |
 | `pi-runtime/` | the curated Pi runtime bundle: extensions, patches, release metadata ([README](../../pi-runtime/README.md)) |
 | `packaging/` | packaging inputs: app icon, macOS `Info.plist` template and dmg art ([README](../../packaging/README.md)) |
+| `protocol/` | the cross-language mirror inventory and shared test vectors ([README](../../protocol/README.md)) |
 | `scripts/` | `dev-*` (local dev loop), `package-*` (release packaging), `check.sh` (all checks) |
 | `scripts/ci/` | release tooling and CI helpers (`release.py`, actionlint, ShellCheck, crate layers, Xcode selection) |
 | `scripts/tests/` | tests of the scripts and installer, cross-language vector runners, the doc link checker |
@@ -94,8 +95,10 @@ Tests per platform:
   [pi-runtime/README.md](../../pi-runtime/README.md#tests)).
 - **iOS**: `bash scripts/check.sh ios`, or Xcode; see
   [apps/ios/README.md](../../apps/ios/README.md).
-- **Cross-language vectors**: the registry merge vectors (Rust, TS, Swift) and the
-  preview vectors in `crates/sync/tests/fixtures` (Rust and Swift) must change together.
+- **Cross-language vectors**: `protocol/vectors/*.json` (registry merge core, chat2
+  frames, device-room frames, preview codec and reducer) are loaded by the Rust,
+  TypeScript and Swift tests; [protocol/README.md](../../protocol/README.md) lists every
+  mirror, its tests and the vector schemas.
 - **Scripts**: `scripts/tests/`; `test-linux-cli.py` also runs under Python 3.8 in
   an Ubuntu 20.04 container, so it and `apps/edge/src/install.sh` stay 3.8- and
   POSIX-sh-compatible.
@@ -199,6 +202,6 @@ library, except `scripts/dmg-background.py`, which needs Pillow.
   files and release artifact names are unchanged, or the change says so.
 - Docs that describe the changed code are updated, and links still resolve
   (`python3 scripts/tests/check-doc-links.py`).
-- A cross-language contract (registry merge, chat2 frames, device frames, preview
-  vectors) changed in every implementation and its shared vectors.
+- A cross-language contract (any row in [protocol/README.md](../../protocol/README.md))
+  changed in every implementation and its shared vectors, in one commit.
 - Release notes for user-visible changes go in `docs/releases/` with the release.

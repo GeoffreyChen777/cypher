@@ -1,4 +1,6 @@
 //! Bounded, disposable native preview state. No disk, command, or HTTP access.
+//! Mirrored by the Swift client; both run `protocol/vectors/preview-reducer-v1.json`
+//! (`protocol/README.md`).
 use crate::stream_preview as wire;
 use cypher_doc::{MessagePart, PreviewCoverage};
 use serde_json::json;
@@ -560,9 +562,10 @@ mod tests {
                 publisher_token: None,
             },
         );
-        let cases: Vec<serde_json::Value> =
-            serde_json::from_str(include_str!("../tests/fixtures/preview-reducer-v1.json"))
-                .unwrap();
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../protocol/vectors/preview-reducer-v1.json"
+        ))
+        .unwrap();
         for c in cases {
             link.receive(
                 &wire::encode(

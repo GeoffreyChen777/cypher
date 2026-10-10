@@ -2,9 +2,9 @@
 //! merge. Pure data and functions — no doc state, no I/O.
 //!
 //! Mirrored 1:1 by `apps/edge/src/registry/registry-core.ts` (the server merge) and
-//! `apps/ios/Cypher/Sync/RegistryCore.swift`; the shared test vectors live in
-//! `registry/tests.rs`, `apps/edge/src/registry/registry-core.test.ts` and
-//! `CypherTests/RegistryCoreTests.swift`. Change all three together.
+//! `apps/ios/Cypher/Sync/RegistryCore.swift`; all three run the shared vectors in
+//! `protocol/vectors/registry-core-v1.json`. Change them together
+//! (`protocol/README.md`).
 
 use std::collections::BTreeMap;
 
@@ -21,7 +21,7 @@ pub(crate) fn encode_hlc(ms: i64, counter: u32, device: &str) -> String {
 }
 
 /// `a` strictly newer than `b` (`None` = never written, loses to any).
-fn hlc_newer(a: &str, b: Option<&str>) -> bool {
+pub(super) fn hlc_newer(a: &str, b: Option<&str>) -> bool {
     match b {
         None => true,
         Some(b) => a > b,
@@ -88,7 +88,7 @@ impl RegistryRow {
     }
 
     /// The newest clock anywhere on the row (delete-vs-live comparison base).
-    fn max_clock(&self) -> Option<&str> {
+    pub(super) fn max_clock(&self) -> Option<&str> {
         let mut max = self.del_hlc.as_deref();
         for clock in self.clocks.values() {
             if max.is_none_or(|m| clock.as_str() > m) {

@@ -1,4 +1,6 @@
 // Disposable display state. Never imports into Loro or advances its cursor.
+// Mirrors the reducer in crates/sync/src/preview_link.rs; both run
+// protocol/vectors/preview-reducer-v1.json (protocol/README.md).
 import Foundation
 
 struct PreviewCoverage: Codable, Equatable, Sendable {

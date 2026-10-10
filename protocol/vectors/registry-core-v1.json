@@ -1,0 +1,265 @@
+{
+  "encodeHlc": [
+    {"name": "zero-pads ms and counter", "ms": 1000, "counter": 0, "device": "dev-a", "hlc": "0000000001000-000000-dev-a"},
+    {"name": "carries the counter", "ms": 1, "counter": 2, "device": "a", "hlc": "0000000000001-000002-a"},
+    {"name": "five-digit ms keeps the fixed width", "ms": 10000, "counter": 0, "device": "dev-a", "hlc": "0000000010000-000000-dev-a"},
+    {"name": "full-width values", "ms": 1767225600000, "counter": 999999, "device": "Dev_9-x", "hlc": "1767225600000-999999-Dev_9-x"}
+  ],
+  "hlcNewer": [
+    {"name": "later ms wins", "a": "0000000000002-000000-dev-a", "b": "0000000000001-000000-dev-a", "newer": true},
+    {"name": "earlier ms loses", "a": "0000000000001-000000-dev-a", "b": "0000000000002-000000-dev-a", "newer": false},
+    {"name": "same ms, higher counter wins", "a": "0000000000001-000002-a", "b": "0000000000001-000001-a", "newer": true},
+    {"name": "same ms and counter, device id breaks the tie", "a": "0000000000001-000001-b", "b": "0000000000001-000001-a", "newer": true},
+    {"name": "fixed width orders 10000 after 999", "a": "0000000010000-000000-dev-a", "b": "0000000000999-000000-dev-a", "newer": true},
+    {"name": "anything beats never written", "a": "0000000000001-000000-dev-a", "b": null, "newer": true},
+    {"name": "an equal clock is not newer", "a": "0000000000001-000000-dev-a", "b": "0000000000001-000000-dev-a", "newer": false}
+  ],
+  "applyOp": [
+    {
+      "name": "upsert creates a row",
+      "row": null,
+      "steps": [
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "upsert", "set": {"title": "hello", "archived": false}, "hlc": "0000000001000-000000-dev-a"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "hello", "archived": false}, "clocks": {"title": "0000000001000-000000-dev-a", "archived": "0000000001000-000000-dev-a"}}
+        }
+      ]
+    },
+    {
+      "name": "update never creates a row",
+      "row": null,
+      "steps": [
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"title": "hello", "archived": false}, "hlc": "0000000001000-000000-dev-a"},
+          "changed": false
+        }
+      ]
+    },
+    {
+      "name": "field LWW: older and equal clocks lose, newer wins per field",
+      "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "hello", "archived": false}, "clocks": {"title": "0000000001000-000000-dev-a", "archived": "0000000001000-000000-dev-a"}},
+      "steps": [
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"title": "stale"}, "hlc": "0000000000500-000000-dev-a"},
+          "changed": false
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "upsert", "set": {"title": "hello", "archived": false}, "hlc": "0000000001000-000000-dev-a"},
+          "changed": false
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"title": "renamed"}, "hlc": "0000000002000-000000-dev-b"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "renamed", "archived": false}, "clocks": {"title": "0000000002000-000000-dev-b", "archived": "0000000001000-000000-dev-a"}}
+        }
+      ]
+    },
+    {
+      "name": "same-ms conflict settles by device id (a then b)",
+      "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "hello", "archived": false}, "clocks": {"title": "0000000001000-000000-dev-a", "archived": "0000000001000-000000-dev-a"}},
+      "steps": [
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"title": "A"}, "hlc": "0000000005000-000000-dev-a"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "A", "archived": false}, "clocks": {"title": "0000000005000-000000-dev-a", "archived": "0000000001000-000000-dev-a"}}
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"title": "B"}, "hlc": "0000000005000-000000-dev-b"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "B", "archived": false}, "clocks": {"title": "0000000005000-000000-dev-b", "archived": "0000000001000-000000-dev-a"}}
+        }
+      ]
+    },
+    {
+      "name": "same-ms conflict settles by device id (b then a)",
+      "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "hello", "archived": false}, "clocks": {"title": "0000000001000-000000-dev-a", "archived": "0000000001000-000000-dev-a"}},
+      "steps": [
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"title": "B"}, "hlc": "0000000005000-000000-dev-b"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "B", "archived": false}, "clocks": {"title": "0000000005000-000000-dev-b", "archived": "0000000001000-000000-dev-a"}}
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"title": "A"}, "hlc": "0000000005000-000000-dev-a"},
+          "changed": false
+        }
+      ]
+    },
+    {
+      "name": "null deletes a field with a clock that blocks older writes",
+      "row": null,
+      "steps": [
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "upsert", "set": {"title": "x", "name": "y"}, "hlc": "0000000001000-000000-dev-a"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "x", "name": "y"}, "clocks": {"title": "0000000001000-000000-dev-a", "name": "0000000001000-000000-dev-a"}}
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"name": null}, "hlc": "0000000002000-000000-dev-a"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "x"}, "clocks": {"title": "0000000001000-000000-dev-a", "name": "0000000002000-000000-dev-a"}}
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"name": "zombie"}, "hlc": "0000000001500-000000-dev-a"},
+          "changed": false
+        }
+      ]
+    },
+    {
+      "name": "delete tombstones only when newer; only a newer upsert revives",
+      "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "hello", "archived": false}, "clocks": {"title": "0000000001000-000000-dev-a", "archived": "0000000001000-000000-dev-a"}},
+      "steps": [
+        {"op": {"kind": "chats", "id": "chat-1", "op": "delete", "hlc": "0000000000500-000000-dev-a"}, "changed": false},
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "delete", "hlc": "0000000002000-000000-dev-a"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": true, "delHlc": "0000000002000-000000-dev-a", "fields": {}, "clocks": {}}
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"title": "ghost"}, "hlc": "0000000003000-000000-dev-a"},
+          "changed": false
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "upsert", "set": {"title": "hello", "archived": false}, "hlc": "0000000001500-000000-dev-a"},
+          "changed": false
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "upsert", "set": {"title": "back"}, "hlc": "0000000004000-000000-dev-a"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "delHlc": "0000000002000-000000-dev-a", "fields": {"title": "back"}, "clocks": {"title": "0000000004000-000000-dev-a"}}
+        }
+      ]
+    },
+    {
+      "name": "delete on a missing row plants a guard tombstone",
+      "row": null,
+      "steps": [
+        {
+          "op": {"kind": "chats", "id": "chat-9", "op": "delete", "hlc": "0000000001000-000000-dev-a"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-9", "seq": 0, "deleted": true, "delHlc": "0000000001000-000000-dev-a", "fields": {}, "clocks": {}}
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-9", "op": "upsert", "set": {"title": "hello", "archived": false}, "hlc": "0000000000500-000000-dev-a"},
+          "changed": false
+        }
+      ]
+    },
+    {
+      "name": "a newer delete over a tombstone moves its clock",
+      "row": null,
+      "steps": [
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "delete", "hlc": "0000000001000-000000-dev-a"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": true, "delHlc": "0000000001000-000000-dev-a", "fields": {}, "clocks": {}}
+        },
+        {"op": {"kind": "chats", "id": "chat-1", "op": "delete", "hlc": "0000000001000-000000-dev-a"}, "changed": false},
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "delete", "hlc": "0000000003000-000000-dev-a"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": true, "delHlc": "0000000003000-000000-dev-a", "fields": {}, "clocks": {}}
+        }
+      ]
+    },
+    {
+      "name": "an update that outruns its create is dropped",
+      "row": null,
+      "steps": [
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"title": "too early"}, "hlc": "0000000003000-000000-dev-a"},
+          "changed": false
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "upsert", "set": {"title": "hello", "archived": false}, "hlc": "0000000001000-000000-dev-a"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "hello", "archived": false}, "clocks": {"title": "0000000001000-000000-dev-a", "archived": "0000000001000-000000-dev-a"}}
+        }
+      ]
+    },
+    {
+      "name": "per-field clock overrides apply per field",
+      "row": null,
+      "steps": [
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "upsert", "set": {"title": "old", "status": "idle"}, "hlc": "0000000001000-000000-dev-a"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "old", "status": "idle"}, "clocks": {"title": "0000000001000-000000-dev-a", "status": "0000000001000-000000-dev-a"}}
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"status": "working"}, "hlc": "0000000009000-000000-dev-a"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "old", "status": "working"}, "clocks": {"title": "0000000001000-000000-dev-a", "status": "0000000009000-000000-dev-a"}}
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"status": "errored"}, "hlc": "0000000005000-000000-dev-a"},
+          "changed": false
+        }
+      ]
+    },
+    {
+      "name": "a re-seeded row keeps its original causality",
+      "row": null,
+      "steps": [
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "upsert", "set": {"title": "old", "status": "working"}, "hlc": "0000000009000-000000-dev-a", "clocks": {"title": "0000000001000-000000-dev-a", "status": "0000000009000-000000-dev-a"}},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "old", "status": "working"}, "clocks": {"title": "0000000001000-000000-dev-a", "status": "0000000009000-000000-dev-a"}}
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"status": "errored"}, "hlc": "0000000005000-000000-dev-a"},
+          "changed": false
+        },
+        {
+          "op": {"kind": "chats", "id": "chat-1", "op": "update", "set": {"title": "new"}, "hlc": "0000000005000-000000-dev-a"},
+          "changed": true,
+          "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "new", "status": "working"}, "clocks": {"title": "0000000005000-000000-dev-a", "status": "0000000009000-000000-dev-a"}}
+        }
+      ]
+    }
+  ],
+  "maxClock": [
+    {
+      "name": "newest field clock",
+      "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"a": 1, "b": 3}, "clocks": {"a": "0000000001000-000000-dev-a", "b": "0000000005000-000000-dev-a"}},
+      "hlc": "0000000005000-000000-dev-a"
+    },
+    {
+      "name": "tombstone clock",
+      "row": {"kind": "x", "id": "y", "seq": 0, "deleted": true, "delHlc": "0000000000009-000000-dev-a", "fields": {}, "clocks": {}},
+      "hlc": "0000000000009-000000-dev-a"
+    },
+    {
+      "name": "no clocks",
+      "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {}, "clocks": {}},
+      "hlc": null
+    }
+  ],
+  "rowToSeedOp": [
+    {
+      "name": "live row seeds an upsert with its per-field clocks",
+      "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "old", "status": "working"}, "clocks": {"title": "0000000001000-000000-dev-a", "status": "0000000009000-000000-dev-a"}},
+      "op": {"kind": "chats", "id": "chat-1", "op": "upsert", "set": {"title": "old", "status": "working"}, "hlc": "0000000009000-000000-dev-a", "clocks": {"title": "0000000001000-000000-dev-a", "status": "0000000009000-000000-dev-a"}}
+    },
+    {
+      "name": "tombstone seeds a delete at its clock",
+      "row": {"kind": "spaces", "id": "sp-1", "seq": 0, "deleted": true, "delHlc": "0000000007000-000000-dev-a", "fields": {}, "clocks": {}},
+      "op": {"kind": "spaces", "id": "sp-1", "op": "delete", "hlc": "0000000007000-000000-dev-a"}
+    }
+  ],
+  "convergence": [
+    {
+      "name": "cross-device races after the create converge in every order",
+      "prefix": [
+        {"kind": "chats", "id": "chat-1", "op": "upsert", "set": {"title": "hello", "archived": false}, "hlc": "0000000001000-000000-dev-a"}
+      ],
+      "permute": [
+        {"kind": "chats", "id": "chat-1", "op": "update", "set": {"title": "renamed"}, "hlc": "0000000003000-000000-dev-b"},
+        {"kind": "chats", "id": "chat-1", "op": "update", "set": {"archived": true}, "hlc": "0000000002000-000000-dev-c"},
+        {"kind": "chats", "id": "chat-1", "op": "upsert", "set": {"title": "other", "cwd": "/tmp"}, "hlc": "0000000002500-000000-dev-d"}
+      ],
+      "row": {"kind": "chats", "id": "chat-1", "seq": 0, "deleted": false, "fields": {"title": "renamed", "archived": true, "cwd": "/tmp"}, "clocks": {"title": "0000000003000-000000-dev-b", "archived": "0000000002000-000000-dev-c", "cwd": "0000000002500-000000-dev-d"}}
+    }
+  ]
+}

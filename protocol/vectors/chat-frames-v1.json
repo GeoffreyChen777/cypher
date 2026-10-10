@@ -1,0 +1,29 @@
+{
+  "maxHeaderBytes": 4096,
+  "types": {"hello": 1, "state": 2, "rowsReq": 3, "row": 4, "rowsDone": 5, "push": 6, "ack": 7, "presence": 8, "probe": 9, "probeOk": 10, "error": 11},
+  "encode": [
+    {"name": "push with a payload", "type": 6, "header": {"batchId": "b1"}, "payload": "090807", "hex": "06100000007b2262617463684964223a226231227d090807"},
+    {"name": "hello without a payload", "type": 1, "header": {"cursor": 5, "device": "dev-a"}, "payload": "", "hex": "011d0000007b22637572736f72223a352c22646576696365223a226465762d61227d"},
+    {"name": "row with seq and payload", "type": 4, "header": {"seq": 7}, "payload": "0101010101010101", "hex": "04090000007b22736571223a377d0101010101010101"},
+    {"name": "empty header", "type": 9, "header": {}, "payload": "", "hex": "09020000007b7d"},
+    {"name": "non-ASCII header stays raw UTF-8", "type": 11, "header": {"code": "bad", "message": "naïve 你好"}, "payload": "", "hex": "0b280000007b22636f6465223a22626164222c226d657373616765223a226e61c3af766520e4bda0e5a5bd227d"}
+  ],
+  "malformed": [
+    {"name": "empty buffer", "hex": ""},
+    {"name": "type byte only", "hex": "01"},
+    {"name": "length cut short", "hex": "010200"},
+    {"name": "empty header span is not JSON", "hex": "0100000000"},
+    {"name": "header length past the buffer", "hex": "010f2700007b7d"},
+    {"name": "junk JSON header", "hex": "01020000007b7b"},
+    {"name": "array header", "hex": "01030000005b315d"},
+    {"name": "string header", "hex": "0103000000227822"},
+    {"name": "null header", "hex": "01040000006e756c6c"}
+  ],
+  "unknownType": [
+    {"name": "future type byte", "hex": "7f020000007b7d05", "type": 127, "header": {}, "payload": "05"}
+  ],
+  "headerSize": [
+    {"name": "header at the limit decodes", "bytes": 4096, "valid": true},
+    {"name": "header one byte over the limit is rejected", "bytes": 4097, "valid": false}
+  ]
+}

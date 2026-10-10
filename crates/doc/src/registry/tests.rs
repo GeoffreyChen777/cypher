@@ -1,9 +1,9 @@
-//! RegistryDoc unit tests. The merge cases mirror
-//! `apps/edge/src/registry/registry-core.test.ts` — shared vectors; change both together.
-//! The typed-API cases cover the reads and writes the engine's workspace host
-//! makes through RegistryDoc.
+//! RegistryDoc unit tests. The merge cases run the shared vectors in
+//! `protocol/vectors/registry-core-v1.json`, which the TypeScript and Swift
+//! mirrors run too (`protocol/README.md`). The typed-API cases cover the reads
+//! and writes the engine's workspace host makes through RegistryDoc.
 
-use super::core::encode_hlc;
+use super::core::{encode_hlc, hlc_newer};
 use super::*;
 use cypher_proto::{
     HarnessId, SandboxLevel, SessionStatus, SubagentRun, SubagentRunMode, SubagentRunStatus,
@@ -13,53 +13,8 @@ fn ts(ms: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ms).unwrap_or(DateTime::UNIX_EPOCH)
 }
 
-fn hlc(ms: i64) -> String {
-    encode_hlc(ms, 0, "dev-a")
-}
-
 fn hlc_by(ms: i64, device: &str) -> String {
     encode_hlc(ms, 0, device)
-}
-
-fn upsert(set: &[(&str, Value)], at: i64) -> RowOp {
-    RowOp {
-        kind: "chats".into(),
-        id: "chat-1".into(),
-        op: OpKind::Upsert,
-        set: Some(
-            set.iter()
-                .map(|(k, v)| (k.to_string(), v.clone()))
-                .collect(),
-        ),
-        hlc: hlc(at),
-        clocks: None,
-    }
-}
-
-fn update(set: &[(&str, Value)], hlc: String) -> RowOp {
-    RowOp {
-        kind: "chats".into(),
-        id: "chat-1".into(),
-        op: OpKind::Update,
-        set: Some(
-            set.iter()
-                .map(|(k, v)| (k.to_string(), v.clone()))
-                .collect(),
-        ),
-        hlc,
-        clocks: None,
-    }
-}
-
-fn delete(at: i64) -> RowOp {
-    RowOp {
-        kind: "chats".into(),
-        id: "chat-1".into(),
-        op: OpKind::Delete,
-        set: None,
-        hlc: hlc(at),
-        clocks: None,
-    }
 }
 
 fn applied(row: Option<&RegistryRow>, op: &RowOp) -> RegistryRow {
@@ -68,14 +23,156 @@ fn applied(row: Option<&RegistryRow>, op: &RowOp) -> RegistryRow {
     next.expect("row after change")
 }
 
-// ── merge semantics (mirror of registry-core.test.ts) ───────────────────────
+// ── merge semantics (protocol/vectors/registry-core-v1.json) ───────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Vectors {
+    encode_hlc: Vec<EncodeHlcVector>,
+    hlc_newer: Vec<HlcNewerVector>,
+    apply_op: Vec<ApplyOpVector>,
+    max_clock: Vec<MaxClockVector>,
+    row_to_seed_op: Vec<SeedOpVector>,
+    convergence: Vec<ConvergenceVector>,
+}
+
+#[derive(Deserialize)]
+struct EncodeHlcVector {
+    name: String,
+    ms: i64,
+    counter: u32,
+    device: String,
+    hlc: String,
+}
+
+#[derive(Deserialize)]
+struct HlcNewerVector {
+    name: String,
+    a: String,
+    b: Option<String>,
+    newer: bool,
+}
+
+#[derive(Deserialize)]
+struct ApplyOpVector {
+    name: String,
+    row: Option<RegistryRow>,
+    steps: Vec<ApplyOpStep>,
+}
+
+#[derive(Deserialize)]
+struct ApplyOpStep {
+    op: RowOp,
+    changed: bool,
+    row: Option<RegistryRow>,
+}
+
+#[derive(Deserialize)]
+struct MaxClockVector {
+    name: String,
+    row: RegistryRow,
+    hlc: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SeedOpVector {
+    name: String,
+    row: RegistryRow,
+    op: RowOp,
+}
+
+#[derive(Deserialize)]
+struct ConvergenceVector {
+    name: String,
+    prefix: Vec<RowOp>,
+    permute: Vec<RowOp>,
+    row: RegistryRow,
+}
+
+fn vectors() -> Vectors {
+    serde_json::from_str(include_str!(
+        "../../../../protocol/vectors/registry-core-v1.json"
+    ))
+    .expect("registry-core vectors parse")
+}
+
+fn permutations(ops: &[RowOp]) -> Vec<Vec<RowOp>> {
+    if ops.is_empty() {
+        return vec![Vec::new()];
+    }
+    let mut out = Vec::new();
+    for i in 0..ops.len() {
+        let mut rest = ops.to_vec();
+        let first = rest.remove(i);
+        for mut tail in permutations(&rest) {
+            tail.insert(0, first.clone());
+            out.push(tail);
+        }
+    }
+    out
+}
 
 #[test]
-fn hlc_orders_lexicographically() {
-    assert!(hlc(2) > hlc(1));
-    assert!(encode_hlc(1, 2, "a") > encode_hlc(1, 1, "a"));
-    assert!(encode_hlc(1, 1, "b") > encode_hlc(1, 1, "a"));
-    assert!(hlc(10_000) > hlc(999));
+fn shared_vectors_encode_hlc() {
+    for v in vectors().encode_hlc {
+        assert_eq!(encode_hlc(v.ms, v.counter, &v.device), v.hlc, "{}", v.name);
+    }
+}
+
+#[test]
+fn shared_vectors_hlc_newer() {
+    for v in vectors().hlc_newer {
+        assert_eq!(hlc_newer(&v.a, v.b.as_deref()), v.newer, "{}", v.name);
+    }
+}
+
+#[test]
+fn shared_vectors_apply_op() {
+    for v in vectors().apply_op {
+        let mut row = v.row;
+        for (i, step) in v.steps.into_iter().enumerate() {
+            let (next, changed) = apply_op(row.as_ref(), &step.op);
+            assert_eq!(changed, step.changed, "{} step {i}: changed", v.name);
+            let expected = if step.changed { step.row } else { row };
+            assert_eq!(next, expected, "{} step {i}: row", v.name);
+            row = next;
+        }
+    }
+}
+
+#[test]
+fn shared_vectors_max_clock() {
+    for v in vectors().max_clock {
+        assert_eq!(v.row.max_clock(), v.hlc.as_deref(), "{}", v.name);
+    }
+}
+
+#[test]
+fn shared_vectors_row_to_seed_op() {
+    for v in vectors().row_to_seed_op {
+        let op = row_to_seed_op(&v.row);
+        assert_eq!(op, v.op, "{}: seed op", v.name);
+        assert_eq!(
+            apply_op(None, &op),
+            (Some(v.row), true),
+            "{}: re-seeded row",
+            v.name
+        );
+    }
+}
+
+#[test]
+fn shared_vectors_convergence() {
+    for v in vectors().convergence {
+        for order in permutations(&v.permute) {
+            let mut row: Option<RegistryRow> = None;
+            for op in v.prefix.iter().chain(&order) {
+                let (next, _) = apply_op(row.as_ref(), op);
+                row = next.or(row);
+            }
+            assert_eq!(row.as_ref(), Some(&v.row), "{}", v.name);
+        }
+    }
 }
 
 #[test]
@@ -86,127 +183,6 @@ fn hlc_clock_is_monotonic_across_regressions() {
     let c = clock.next(1_000, "d"); // and stalled
     assert!(b > a);
     assert!(c > b);
-}
-
-#[test]
-fn upsert_creates_update_never_does() {
-    let row = applied(None, &upsert(&[("title", json!("hello"))], 1000));
-    assert_eq!(row.fields["title"], json!("hello"));
-    let (missing, changed) = apply_op(None, &update(&[("title", json!("x"))], hlc(2000)));
-    assert!(!changed);
-    assert!(missing.is_none());
-}
-
-#[test]
-fn field_lww_newer_wins_older_and_ties_lose() {
-    let row = applied(
-        None,
-        &upsert(
-            &[("title", json!("hello")), ("archived", json!(false))],
-            1000,
-        ),
-    );
-    let (_, changed) = apply_op(Some(&row), &update(&[("title", json!("stale"))], hlc(500)));
-    assert!(!changed);
-    // Exact replay: strict-> compare makes re-pushes idempotent.
-    let (_, changed) = apply_op(
-        Some(&row),
-        &upsert(
-            &[("title", json!("hello")), ("archived", json!(false))],
-            1000,
-        ),
-    );
-    assert!(!changed);
-    let renamed = applied(
-        Some(&row),
-        &update(&[("title", json!("renamed"))], hlc_by(2000, "dev-b")),
-    );
-    assert_eq!(renamed.fields["title"], json!("renamed"));
-    assert_eq!(renamed.clocks["archived"], hlc(1000));
-}
-
-#[test]
-fn same_ms_conflicts_settle_by_device_deterministically() {
-    let base = applied(None, &upsert(&[("title", json!("hello"))], 1000));
-    let from_a = update(&[("title", json!("A"))], hlc_by(5000, "dev-a"));
-    let from_b = update(&[("title", json!("B"))], hlc_by(5000, "dev-b"));
-    let ab = apply_op(apply_op(Some(&base), &from_a).0.as_ref(), &from_b)
-        .0
-        .unwrap();
-    let ba = apply_op(apply_op(Some(&base), &from_b).0.as_ref(), &from_a)
-        .0
-        .unwrap();
-    assert_eq!(ab.fields["title"], json!("B"));
-    assert_eq!(ba.fields["title"], json!("B"));
-}
-
-#[test]
-fn null_deletes_fields_with_a_clock() {
-    let row = applied(
-        None,
-        &upsert(&[("title", json!("x")), ("name", json!("y"))], 1000),
-    );
-    let row = applied(Some(&row), &update(&[("name", Value::Null)], hlc(2000)));
-    assert!(!row.fields.contains_key("name"));
-    assert_eq!(row.clocks["name"], hlc(2000));
-    let (_, changed) = apply_op(Some(&row), &update(&[("name", json!("zombie"))], hlc(1500)));
-    assert!(!changed);
-}
-
-#[test]
-fn delete_only_wins_when_causally_newer() {
-    let row = applied(None, &upsert(&[("title", json!("hello"))], 1000));
-    let (_, changed) = apply_op(Some(&row), &delete(500));
-    assert!(!changed);
-    let gone = applied(Some(&row), &delete(2000));
-    assert!(gone.deleted);
-    assert!(gone.fields.is_empty());
-    // Updates never touch tombstones.
-    let (_, changed) = apply_op(
-        Some(&gone),
-        &update(&[("title", json!("ghost"))], hlc(3000)),
-    );
-    assert!(!changed);
-    // Older upsert can't revive; newer revives from ONLY its own fields.
-    let (_, changed) = apply_op(Some(&gone), &upsert(&[("title", json!("old"))], 1500));
-    assert!(!changed);
-    let revived = applied(Some(&gone), &upsert(&[("title", json!("back"))], 4000));
-    assert!(!revived.deleted);
-    assert_eq!(revived.fields.len(), 1);
-    assert_eq!(revived.fields["title"], json!("back"));
-}
-
-#[test]
-fn delete_on_missing_plants_guard_tombstone() {
-    let gone = applied(None, &delete(1000));
-    assert!(gone.deleted);
-    let (_, changed) = apply_op(Some(&gone), &upsert(&[("title", json!("late"))], 500));
-    assert!(!changed);
-}
-
-#[test]
-fn seed_ops_preserve_original_causality() {
-    let row = applied(
-        None,
-        &upsert(&[("title", json!("old")), ("status", json!("idle"))], 1000),
-    );
-    let row = applied(
-        Some(&row),
-        &update(&[("status", json!("working"))], hlc(9000)),
-    );
-    let seeded = applied(None, &row_to_seed_op(&row));
-    assert_eq!(seeded.fields, row.fields);
-    assert_eq!(seeded.clocks, row.clocks);
-    let (_, changed) = apply_op(
-        Some(&seeded),
-        &update(&[("status", json!("errored"))], hlc(5000)),
-    );
-    assert!(!changed);
-    // Tombstones round-trip too.
-    let gone = applied(None, &delete(7000));
-    let reseeded = applied(None, &row_to_seed_op(&gone));
-    assert!(reseeded.deleted);
-    assert_eq!(reseeded.del_hlc.as_deref(), Some(hlc(7000).as_str()));
 }
 
 #[test]

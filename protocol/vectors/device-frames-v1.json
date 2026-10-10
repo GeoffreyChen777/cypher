@@ -1,0 +1,26 @@
+{
+  "frames": [
+    {"name": "routed term frame with a binary payload", "header": {"s": "term-42", "k": "term", "to": "conn-9"}, "json": "{\"s\":\"term-42\",\"k\":\"term\",\"to\":\"conn-9\"}", "payload": "010203faff", "hex": "287b2273223a227465726d2d3432222c226b223a227465726d222c22746f223a22636f6e6e2d39227d010203faff"},
+    {"name": "minimal rpc frame", "header": {"s": "a", "k": "rpc"}, "json": "{\"s\":\"a\",\"k\":\"rpc\"}", "payload": "0102", "hex": "137b2273223a2261222c226b223a22727063227d0102"},
+    {"name": "routed frame with a one-byte payload", "header": {"s": "s1", "k": "term", "to": "c9"}, "json": "{\"s\":\"s1\",\"k\":\"term\",\"to\":\"c9\"}", "payload": "78", "hex": "1f7b2273223a227331222c226b223a227465726d222c22746f223a226339227d78"},
+    {"name": "minimal frame keeps its trailing payload", "header": {"s": "a", "k": "b"}, "json": "{\"s\":\"a\",\"k\":\"b\"}", "payload": "09", "hex": "117b2273223a2261222c226b223a2262227d09"},
+    {"name": "127-byte header is the last one-byte length", "header": {"s": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "k": "rpc"}, "json": "{\"s\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"k\":\"rpc\"}", "payload": "", "hex": "7f7b2273223a2278787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878222c226b223a22727063227d"},
+    {"name": "128-byte header takes a two-byte length", "header": {"s": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "k": "rpc"}, "json": "{\"s\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"k\":\"rpc\"}", "payload": "", "hex": "80017b2273223a227878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878222c226b223a22727063227d"},
+    {"name": "200-char stream id with an empty payload", "header": {"s": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "k": "rpc", "from": "conn-1"}, "json": "{\"s\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"k\":\"rpc\",\"from\":\"conn-1\"}", "payload": "", "hex": "ea017b2273223a227878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878222c226b223a22727063222c2266726f6d223a22636f6e6e2d31227d"},
+    {"name": "header length counts UTF-8 bytes", "header": {"s": "终端-1", "k": "term"}, "json": "{\"s\":\"终端-1\",\"k\":\"term\"}", "payload": "00", "hex": "1b7b2273223a22e7bb88e7abaf2d31222c226b223a227465726d227d00"},
+    {"name": "relay control frame to a client", "header": {"s": "", "k": " relay"}, "json": "{\"s\":\"\",\"k\":\" relay\"}", "payload": "7b226572726f72223a22686f73745f6f66666c696e65227d", "hex": "157b2273223a22222c226b223a222072656c6179227d7b226572726f72223a22686f73745f6f66666c696e65227d"},
+    {"name": "relay control frame to the host", "header": {"s": "", "k": " relay", "from": "conn-1"}, "json": "{\"s\":\"\",\"k\":\" relay\",\"from\":\"conn-1\"}", "payload": "7b226572726f72223a22636c69656e745f636c6f736564227d", "hex": "257b2273223a22222c226b223a222072656c6179222c2266726f6d223a22636f6e6e2d31227d7b226572726f72223a22636c69656e745f636c6f736564227d"}
+  ],
+  "malformed": [
+    {"name": "empty buffer", "hex": ""},
+    {"name": "continuation bit with no next byte", "hex": "85"},
+    {"name": "length prefix cut mid-varint", "hex": "da"},
+    {"name": "header cut short", "hex": "da017b2273223a227878"},
+    {"name": "header shorter than its length", "hex": "0a7b"},
+    {"name": "length that cuts the JSON", "hex": "0f7b2273223a2261222c226b223a2262"},
+    {"name": "junk JSON header", "hex": "027b7b"},
+    {"name": "five-byte length past the buffer", "hex": "ffffffff0f7b7d"},
+    {"name": "sixth length byte overflows instead of wrapping", "hex": "8080808080017b7d"},
+    {"name": "sixth length byte after all-ones", "hex": "ffffffffff01"}
+  ]
+}

@@ -1,7 +1,9 @@
 /**
  * Device-room frame codec: uleb128 header-length ‖ UTF-8 JSON header ‖ payload.
- * Byte-identical to crates/rpc/src/device_room.rs. Pure and import-free so
- * scripts/smoke.mjs can load this file directly (Node type stripping).
+ * Byte-identical to crates/rpc/src/device_room/frames.rs and the Swift client;
+ * all three run protocol/vectors/device-frames-v1.json (protocol/README.md).
+ * Pure and import-free so scripts/smoke.mjs can load this file directly (Node
+ * type stripping).
  */
 export interface DeviceFrameHeader {
   /** Stream id, unique per (connId, logical stream). */

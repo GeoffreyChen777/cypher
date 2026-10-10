@@ -2,7 +2,9 @@
  * Registry merge core — the pure row/op semantics behind RegistryRoom
  * (docs/design/registry-sync.md). No storage, no sockets: everything here is unit
  * tested in registry-core.test.ts and mirrored 1:1 by
- * crates/doc/src/registry.rs (shared test vectors — keep both in sync).
+ * crates/doc/src/registry/core.rs and apps/ios/Cypher/Sync/RegistryCore.swift;
+ * all three run protocol/vectors/registry-core-v1.json, so change them together
+ * (protocol/README.md).
  *
  * The registry stores CURRENT STATE ONLY: a row is a bag of fields, each field
  * carries the HLC of its last write, and a write applies iff its clock beats
