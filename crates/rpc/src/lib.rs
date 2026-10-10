@@ -316,6 +316,11 @@ impl RpcReply {
             .map(RpcReply::Value)
             .map_err(|e| RpcError::Failed(format!("serialize response: {e}")))
     }
+
+    /// The `{"ok": true}` acknowledgement.
+    pub fn ok() -> Result<Self, RpcError> {
+        Ok(RpcReply::Value(serde_json::json!({ "ok": true })))
+    }
 }
 
 /// Server-side dispatch: one implementation serves every transport.

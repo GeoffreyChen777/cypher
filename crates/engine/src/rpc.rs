@@ -25,8 +25,8 @@ use tokio::sync::watch;
 
 use cypher_doc::{MessagePart, SessionCommandPayload, SessionCommandStatus};
 use cypher_proto::{
-    ChildAgentProfile, EngineInfo, HarnessId, RunRequest, SessionForkRequest, SideChatSource,
-    ToolCall, WorkspaceScope,
+    ChildAgentProfile, EngineInfo, HarnessId, RunRequest, SessionForkRequest, ToolCall,
+    WorkspaceScope,
 };
 use cypher_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
@@ -47,6 +47,19 @@ use params::*;
 
 const FILE_SEARCH_RPC_TIMEOUT: Duration = Duration::from_secs(6);
 const FILE_SEARCH_FEATURED_PATHS: usize = 32;
+
+fn failed(e: impl std::fmt::Display) -> RpcError {
+    RpcError::Failed(e.to_string())
+}
+
+/// Drop the routing field before a strict parse: the forwarder has consumed it,
+/// and an explicit local target still carries it.
+fn strip_target(mut params: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = params.as_object_mut() {
+        object.remove("targetDeviceId");
+    }
+    params
+}
 
 fn tool_file_path(call: &ToolCall) -> Option<&str> {
     match call {
@@ -221,6 +234,30 @@ impl EngineRpc {
         self.sessions.recycle_idle_sessions().await;
     }
 
+    /// Reject a selection naming a model outside THIS device's Pi catalog.
+    async fn require_pi_catalog_models(
+        &self,
+        models: &[impl AsRef<str>],
+        timeout: Duration,
+        missing: &'static str,
+    ) -> Result<(), RpcError> {
+        let harness = self.registry.resolve(HarnessId::Pi).map_err(failed)?;
+        let available = tokio::time::timeout(timeout, harness.models())
+            .await
+            .map_err(|_| RpcError::Failed("Model catalog timed out".into()))?
+            .map_err(failed)?
+            .into_iter()
+            .map(|model| model.id)
+            .collect::<HashSet<_>>();
+        if models
+            .iter()
+            .any(|model| !available.contains(model.as_ref()))
+        {
+            return Err(RpcError::BadParams(missing.into()));
+        }
+        Ok(())
+    }
+
     fn local_importer(&self) -> Result<&crate::local_import::LocalImporter, RpcError> {
         self.local_import
             .as_ref()
@@ -245,7 +282,7 @@ impl EngineRpc {
                 let chat = self
                     .workspace
                     .chat(chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .map_err(failed)?
                     .ok_or_else(|| RpcError::Failed("chat not found".into()))?;
                 if chat.device_id != local_device {
                     return Err(RpcError::Failed("chat belongs to another device".into()));
@@ -260,7 +297,7 @@ impl EngineRpc {
                 let space = self
                     .workspace
                     .space(&space_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .map_err(failed)?
                     .ok_or_else(|| RpcError::Failed("chat workspace space not found".into()))?;
                 if space.device_id != local_device {
                     return Err(RpcError::Failed(
@@ -283,7 +320,7 @@ impl EngineRpc {
                 let space = self
                     .workspace
                     .space(space_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .map_err(failed)?
                     .ok_or_else(|| RpcError::Failed("space not found".into()))?;
                 if space.device_id != local_device {
                     return Err(RpcError::Failed("space belongs to another device".into()));
@@ -448,7 +485,7 @@ impl EngineRpc {
         let parent = self
             .workspace
             .chat(&params.parent_chat_id)
-            .map_err(|e| RpcError::Failed(e.to_string()))?
+            .map_err(failed)?
             .ok_or_else(|| RpcError::Failed("parent chat not found".into()))?;
         if parent.device_id != self.doc_host.device_id() {
             return Err(RpcError::Failed(
@@ -488,7 +525,7 @@ impl EngineRpc {
                 &title,
                 child_cwd.clone(),
             )
-            .map_err(|e| RpcError::Failed(e.to_string()))?;
+            .map_err(failed)?;
         let child_id = child_chat_id.id().to_string();
 
         // Does the initial Run still need to be queued? A FRESH child always
@@ -576,10 +613,7 @@ impl EngineRpc {
     /// then recovers by registering the fresh channel and queueing exactly one
     /// initial Run.
     fn child_initial_run_evident(&self, child_id: &str) -> Result<bool, RpcError> {
-        if let Some(chat) = self
-            .workspace
-            .chat(child_id)
-            .map_err(|e| RpcError::Failed(e.to_string()))?
+        if let Some(chat) = self.workspace.chat(child_id).map_err(failed)?
             && (chat.last_message_at.is_some() || chat.harness_session_id.is_some())
         {
             // A message or a harness session means the initial run dispatched —
@@ -588,10 +622,7 @@ impl EngineRpc {
         }
         match self.doc_host.open(child_id) {
             Ok(handle) => {
-                let commands = handle
-                    .doc()
-                    .read_commands()
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let commands = handle.doc().read_commands().map_err(failed)?;
                 Ok(commands.iter().any(|c| {
                     matches!(c.payload, SessionCommandPayload::Run { .. })
                         && matches!(
@@ -614,14 +645,16 @@ impl EngineRpc {
         let (replay, rx) = self
             .sessions
             .subscribe(&chat_id, after_seq)
-            .map_err(|e| RpcError::Failed(e.to_string()))?;
+            .map_err(failed)?;
         // The hub subscription opens before the journal is read, so an event
         // published in between is in both; the live leg starts after the
         // newest replayed seq (a doubled text delta would double the text).
         let replayed_through = replay.last().map(|entry| entry.seq).unwrap_or(0);
-        let replay = futures::stream::iter(replay.into_iter().map(|entry| {
-            serde_json::to_value(&entry.event).map_err(|e| RpcError::Failed(e.to_string()))
-        }));
+        let replay = futures::stream::iter(
+            replay
+                .into_iter()
+                .map(|entry| serde_json::to_value(&entry.event).map_err(failed)),
+        );
         // Journaled events are tagged JSON (`AgentEvent`'s own serde); the
         // live hub carries the same shape. A lagging subscriber skips the
         // deltas it missed rather than ending the stream: the parent extension
@@ -632,8 +665,7 @@ impl EngineRpc {
                 match rx.recv().await {
                     Ok(entry) if entry.seq != 0 && entry.seq <= replayed_through => continue,
                     Ok(entry) => {
-                        let value = serde_json::to_value(&entry.event)
-                            .map_err(|e| RpcError::Failed(e.to_string()));
+                        let value = serde_json::to_value(&entry.event).map_err(failed);
                         return Some((value, rx));
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -660,6 +692,38 @@ impl EngineRpc {
             })
             .boxed();
         Ok(RpcReply::Stream(stream))
+    }
+
+    /// Config changes the active MCP / provider sign-in would race.
+    fn refuse_during_login(&self, method: &str) -> Result<(), RpcError> {
+        if self.mcp_logins.active()
+            && matches!(
+                method,
+                methods::ADD_MCP_SERVERS
+                    | methods::REMOVE_MCP_SERVER
+                    | methods::SET_MCP_SERVER_ENABLED
+                    | methods::START_MCP_AUTH
+                    | methods::LOGOUT_MCP_SERVER
+            )
+        {
+            return Err(RpcError::Failed(
+                "Finish or cancel the active MCP sign-in before changing MCP configuration.".into(),
+            ));
+        }
+        if self.provider_logins.active()
+            && matches!(
+                method,
+                methods::SAVE_PI_PROVIDER
+                    | methods::LOGOUT_PI_PROVIDER
+                    | methods::REMOVE_PI_PROVIDER
+                    | methods::BEGIN_PI_PROVIDER_LOGIN
+            )
+        {
+            return Err(RpcError::Failed(
+                "Finish or cancel the active provider sign-in before changing providers.".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Forward a device-addressed call over the target device's relay. On transport
@@ -725,7 +789,6 @@ impl EngineRpc {
     }
 
     fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
-        let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
         match params {
             MutateParams::CreateChat {
                 chat_id,
@@ -909,6 +972,54 @@ impl EngineRpc {
             }
         }
     }
+}
+
+/// Checks that run before a call can be forwarded: a blank `targetDeviceId`, and
+/// bodies that must never reach another device unvalidated.
+fn preflight(method: &str, params: &serde_json::Value) -> Result<(), RpcError> {
+    if forwardable(method)
+        && let Some(target) = params.get("targetDeviceId")
+        && !target.as_str().is_some_and(|id| !id.trim().is_empty())
+    {
+        return Err(RpcError::BadParams("Invalid target device.".into()));
+    }
+    if method == methods::SAVE_PI_PROVIDER {
+        // Validate before forwarding, without echoing malformed credentials.
+        let body = strip_target(params.clone());
+        serde_json::from_value::<crate::pi_providers::SaveProvider>(body)
+            .map_err(|_| RpcError::BadParams("Invalid provider settings.".into()))?;
+    }
+    if method == methods::ADD_MCP_SERVERS {
+        if !params
+            .get("targetDeviceId")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            return Err(RpcError::BadParams(
+                "Select a target device before adding MCP servers.".into(),
+            ));
+        }
+        let body = strip_target(params.clone());
+        let request = serde_json::from_value::<crate::mcp::AddMcpServers>(body)
+            .map_err(|_| RpcError::BadParams("Invalid MCP configuration.".into()))?;
+        request.validate().map_err(RpcError::BadParams)?;
+    }
+    if method == methods::REMOVE_MCP_SERVER {
+        if !params
+            .get("targetDeviceId")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            return Err(RpcError::BadParams(
+                "Select a target device before deleting an MCP server.".into(),
+            ));
+        }
+        let body = strip_target(params.clone());
+        let request = serde_json::from_value::<crate::mcp::RemoveMcpServer>(body)
+            .map_err(|_| RpcError::BadParams("Invalid MCP deletion request.".into()))?;
+        request.validate().map_err(RpcError::BadParams)?;
+    }
+    Ok(())
 }
 
 /// ControlRpc methods that honor `targetDeviceId`. Extend this
@@ -1217,16 +1328,12 @@ impl RpcService for AuthRpc {
                     .auth
                     .report_notification_activity(&p.expected_user_id, &p.expected_org_id, activity)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&response)
             }
             methods::AUTH_STATUS => Ok(RpcReply::Stream(watch_stream(self.auth.watch_state()))),
             methods::SIGN_IN => {
-                let url = self
-                    .auth
-                    .start_sign_in()
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let url = self.auth.start_sign_in().await.map_err(failed)?;
                 RpcReply::value(&serde_json::json!({ "url": url }))
             }
             methods::SIGN_IN_HEADLESS => {
@@ -1239,22 +1346,15 @@ impl RpcService for AuthRpc {
                     code: String,
                 }
                 let p: P = parse_params(params)?;
-                self.auth
-                    .complete_sign_in(&p.code)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                self.auth.complete_sign_in(&p.code).await.map_err(failed)?;
+                RpcReply::ok()
             }
             methods::SIGN_OUT => {
                 self.auth.sign_out();
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                RpcReply::ok()
             }
             methods::LIST_ORGS => {
-                let orgs = self
-                    .auth
-                    .list_orgs()
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let orgs = self.auth.list_orgs().await.map_err(failed)?;
                 RpcReply::value(&serde_json::json!({ "orgs": orgs }))
             }
             methods::CREATE_ORG => {
@@ -1263,11 +1363,8 @@ impl RpcService for AuthRpc {
                     name: String,
                 }
                 let p: P = parse_params(params)?;
-                self.auth
-                    .create_org(&p.name)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                self.auth.create_org(&p.name).await.map_err(failed)?;
+                RpcReply::ok()
             }
             methods::SELECT_ORG => {
                 #[derive(Deserialize)]
@@ -1279,8 +1376,8 @@ impl RpcService for AuthRpc {
                 self.auth
                     .select_org(&p.organization_id)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                    .map_err(failed)?;
+                RpcReply::ok()
             }
             _ => Err(RpcError::UnknownMethod(method.to_string())),
         }
@@ -1290,67 +1387,7 @@ impl RpcService for AuthRpc {
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        let provider_method = matches!(
-            method,
-            methods::LIST_PI_PROVIDERS
-                | methods::SAVE_PI_PROVIDER
-                | methods::REFRESH_PI_PROVIDER
-                | methods::LOGOUT_PI_PROVIDER
-                | methods::REMOVE_PI_PROVIDER
-        );
-        if forwardable(method)
-            && let Some(target) = params.get("targetDeviceId")
-            && !target.as_str().is_some_and(|id| !id.trim().is_empty())
-        {
-            return Err(RpcError::BadParams("Invalid target device.".into()));
-        }
-        if provider_method {
-            // Validate before forwarding, without echoing malformed credentials.
-            if method == methods::SAVE_PI_PROVIDER {
-                let mut body = params.clone();
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
-                serde_json::from_value::<crate::pi_providers::SaveProvider>(body)
-                    .map_err(|_| RpcError::BadParams("Invalid provider settings.".into()))?;
-            }
-        }
-        if method == methods::ADD_MCP_SERVERS {
-            if !params
-                .get("targetDeviceId")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| !id.trim().is_empty())
-            {
-                return Err(RpcError::BadParams(
-                    "Select a target device before adding MCP servers.".into(),
-                ));
-            }
-            let mut body = params.clone();
-            if let Some(object) = body.as_object_mut() {
-                object.remove("targetDeviceId");
-            }
-            let request = serde_json::from_value::<crate::mcp::AddMcpServers>(body)
-                .map_err(|_| RpcError::BadParams("Invalid MCP configuration.".into()))?;
-            request.validate().map_err(RpcError::BadParams)?;
-        }
-        if method == methods::REMOVE_MCP_SERVER {
-            if !params
-                .get("targetDeviceId")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| !id.trim().is_empty())
-            {
-                return Err(RpcError::BadParams(
-                    "Select a target device before deleting an MCP server.".into(),
-                ));
-            }
-            let mut body = params.clone();
-            if let Some(object) = body.as_object_mut() {
-                object.remove("targetDeviceId");
-            }
-            let request = serde_json::from_value::<crate::mcp::RemoveMcpServer>(body)
-                .map_err(|_| RpcError::BadParams("Invalid MCP deletion request.".into()))?;
-            request.validate().map_err(RpcError::BadParams)?;
-        }
+        preflight(method, &params)?;
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
@@ -1365,33 +1402,7 @@ impl RpcService for EngineRpc {
                 .handle(method, params)
                 .await;
         }
-        if self.mcp_logins.active()
-            && matches!(
-                method,
-                methods::ADD_MCP_SERVERS
-                    | methods::REMOVE_MCP_SERVER
-                    | methods::SET_MCP_SERVER_ENABLED
-                    | methods::START_MCP_AUTH
-                    | methods::LOGOUT_MCP_SERVER
-            )
-        {
-            return Err(RpcError::Failed(
-                "Finish or cancel the active MCP sign-in before changing MCP configuration.".into(),
-            ));
-        }
-        if self.provider_logins.active()
-            && matches!(
-                method,
-                methods::SAVE_PI_PROVIDER
-                    | methods::LOGOUT_PI_PROVIDER
-                    | methods::REMOVE_PI_PROVIDER
-                    | methods::BEGIN_PI_PROVIDER_LOGIN
-            )
-        {
-            return Err(RpcError::Failed(
-                "Finish or cancel the active provider sign-in before changing providers.".into(),
-            ));
-        }
+        self.refuse_during_login(method)?;
         match method {
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
@@ -1440,10 +1451,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&agents)
             }
             methods::SAVE_PI_SUBAGENT => {
-                let mut body = params;
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
+                let body = strip_target(params);
                 let request: SavePiSubagentParams = parse_params(body)?;
                 request.agent.validate().map_err(RpcError::BadParams)?;
                 let paths = self.pi_runtime()?.paths().clone();
@@ -1467,10 +1475,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&agents)
             }
             methods::DELETE_PI_SUBAGENT => {
-                let mut body = params;
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
+                let body = strip_target(params);
                 let request: DeletePiSubagentParams = parse_params(body)?;
                 let paths = self.pi_runtime()?.paths().clone();
                 let list_paths = paths.clone();
@@ -1492,10 +1497,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&settings)
             }
             methods::SET_PI_TRANSLATION_SETTINGS => {
-                let mut body = params;
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
+                let body = strip_target(params);
                 let settings: crate::pi_translation::PiTranslationSettings = parse_params(body)?;
                 settings.validate().map_err(RpcError::BadParams)?;
                 let paths = self.pi_runtime()?.paths().clone();
@@ -1508,23 +1510,12 @@ impl RpcService for EngineRpc {
                 // discovery. Only newly selected ids require catalog validation.
                 let added = settings.new_model_selections(&previous);
                 if !added.is_empty() {
-                    let harness = self
-                        .registry
-                        .resolve(HarnessId::Pi)
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    let available = tokio::time::timeout(Duration::from_secs(10), harness.models())
-                        .await
-                        .map_err(|_| RpcError::Failed("Model catalog timed out".into()))?
-                        .map_err(|e| RpcError::Failed(e.to_string()))?
-                        .into_iter()
-                        .map(|model| model.id)
-                        .collect::<HashSet<_>>();
-                    if added.iter().any(|model| !available.contains(*model)) {
-                        return Err(RpcError::BadParams(
-                            "Selected model is not in this device's Pi catalog; refresh and choose again"
-                                .into(),
-                        ));
-                    }
+                    self.require_pi_catalog_models(
+                        &added,
+                        Duration::from_secs(10),
+                        "Selected model is not in this device's Pi catalog; refresh and choose again",
+                    )
+                    .await?;
                 }
                 let saved =
                     crate::off_runtime(move || crate::pi_translation::save(&paths, settings))
@@ -1551,10 +1542,7 @@ impl RpcService for EngineRpc {
             | methods::REMOVE_PI_PROVIDER => {
                 // Routing is consumed here, never passed to the Runtime helper.
                 // Non-local requests have already been forwarded above.
-                let mut params = params;
-                if let Some(object) = params.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
+                let params = strip_target(params);
                 let (action, args) = match method {
                     methods::LIST_PI_PROVIDERS => ("list", serde_json::json!({})),
                     methods::SAVE_PI_PROVIDER => {
@@ -1637,10 +1625,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&snapshot)
             }
             methods::ADD_MCP_SERVERS => {
-                let mut body = params;
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
+                let body = strip_target(params);
                 let request = serde_json::from_value::<crate::mcp::AddMcpServers>(body)
                     .map_err(|_| RpcError::BadParams("Invalid MCP configuration.".into()))?;
                 let paths = self.pi_runtime()?.paths().clone();
@@ -1662,10 +1647,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&snapshot)
             }
             methods::REMOVE_MCP_SERVER => {
-                let mut body = params;
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
+                let body = strip_target(params);
                 let request = serde_json::from_value::<crate::mcp::RemoveMcpServer>(body)
                     .map_err(|_| RpcError::BadParams("Invalid MCP deletion request.".into()))?;
                 if self.sessions.any_active() {
@@ -1724,7 +1706,7 @@ impl RpcService for EngineRpc {
                 let harness = self
                     .registry
                     .resolve(cypher_proto::HarnessId::Pi)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 let snapshot =
                     crate::mcp::authenticate(self.pi_runtime()?.paths(), &p.name, harness.as_ref())
                         .await
@@ -1748,10 +1730,7 @@ impl RpcService for EngineRpc {
             methods::SET_WEB_SEARCH_FALLBACK => {
                 // Routing is consumed by the forwarder; strip it before the
                 // strict parse (an explicit local target also carries it).
-                let mut body = params;
-                if let Some(object) = body.as_object_mut() {
-                    object.remove("targetDeviceId");
-                }
+                let body = strip_target(params);
                 let request: crate::web_search_fallback::SetWebSearchFallback = parse_params(body)?;
                 // Pinning points a real tool at one model: it must exist in
                 // THIS device's catalog (the same rule as the title model).
@@ -1760,21 +1739,12 @@ impl RpcService for EngineRpc {
                 if let (true, Some(pinned)) = (request.enabled, request.model.as_deref()) {
                     crate::web_search_fallback::validate_model(pinned)
                         .map_err(RpcError::BadParams)?;
-                    let harness = self
-                        .registry
-                        .resolve(HarnessId::Pi)
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    let models =
-                        tokio::time::timeout(std::time::Duration::from_secs(20), harness.models())
-                            .await
-                            .map_err(|_| RpcError::Failed("Model catalog timed out".into()))?
-                            .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    if !models.iter().any(|model| model.id == pinned) {
-                        return Err(RpcError::BadParams(
-                            "Model is not in this device's Pi catalog; refresh and choose again"
-                                .into(),
-                        ));
-                    }
+                    self.require_pi_catalog_models(
+                        &[pinned],
+                        Duration::from_secs(20),
+                        "Model is not in this device's Pi catalog; refresh and choose again",
+                    )
+                    .await?;
                 }
                 let paths = self.pi_runtime()?.paths();
                 let settings =
@@ -1790,7 +1760,7 @@ impl RpcService for EngineRpc {
                         "Title settings unavailable; update this device's engine".into(),
                     )
                 })?;
-                let settings = store.load().map_err(|e| RpcError::Failed(e.to_string()))?;
+                let settings = store.load().map_err(failed)?;
                 RpcReply::value(&settings)
             }
             methods::SET_TITLE_MODEL_SETTINGS => {
@@ -1810,37 +1780,20 @@ impl RpcService for EngineRpc {
                     )
                 })?;
                 if let Some(model) = &settings.model {
-                    let harness = self
-                        .registry
-                        .resolve(HarnessId::Pi)
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    let models =
-                        tokio::time::timeout(std::time::Duration::from_secs(20), harness.models())
-                            .await
-                            .map_err(|_| RpcError::Failed("Model catalog timed out".into()))?
-                            .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    if !models.iter().any(|candidate| candidate.id == *model) {
-                        return Err(RpcError::BadParams(
-                            "Model is not in this device's Pi catalog; refresh and choose again"
-                                .into(),
-                        ));
-                    }
+                    self.require_pi_catalog_models(
+                        &[model.as_str()],
+                        Duration::from_secs(20),
+                        "Model is not in this device's Pi catalog; refresh and choose again",
+                    )
+                    .await?;
                 }
-                store
-                    .save(&settings)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                store.save(&settings).map_err(failed)?;
                 RpcReply::value(&settings)
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;
-                let harness = self
-                    .registry
-                    .resolve(p.harness)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let models = harness
-                    .models()
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let harness = self.registry.resolve(p.harness).map_err(failed)?;
+                let models = harness.models().await.map_err(failed)?;
                 RpcReply::value(&models)
             }
             methods::LIST_COMMANDS => {
@@ -1848,14 +1801,8 @@ impl RpcService for EngineRpc {
                 // harness's own (cached) discovery. Non-ACP harnesses return
                 // an empty list from the trait default.
                 let p: ListModelsParams = parse_params(params)?;
-                let harness = self
-                    .registry
-                    .resolve(p.harness)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let commands = harness
-                    .commands()
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let harness = self.registry.resolve(p.harness).map_err(failed)?;
+                let commands = harness.commands().await.map_err(failed)?;
                 RpcReply::value(&commands)
             }
             methods::PI_SESSION_MODES => {
@@ -1878,7 +1825,7 @@ impl RpcService for EngineRpc {
                 let command_id = self
                     .doc_host
                     .queue_command(&p.chat_id, p.command)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
             methods::RETRY_COMMAND => {
@@ -1886,25 +1833,19 @@ impl RpcService for EngineRpc {
                 let command_id = self
                     .doc_host
                     .retry_command(&p.chat_id, &p.command_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
             methods::WATCH_DOC_MESSAGES => {
                 let p: ChatParams = parse_params(params)?;
-                let handle = self
-                    .doc_host
-                    .open(&p.chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let handle = self.doc_host.open(&p.chat_id).map_err(failed)?;
                 Ok(RpcReply::Stream(doc_messages_stream(
                     handle.watch_messages(),
                 )))
             }
             methods::WATCH_DOC_COMMANDS => {
                 let p: ChatParams = parse_params(params)?;
-                let handle = self
-                    .doc_host
-                    .open(&p.chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let handle = self.doc_host.open(&p.chat_id).map_err(failed)?;
                 // Same watch_stream shape as the other standing watches: the
                 // current command ledger first, then every doc change.
                 Ok(RpcReply::Stream(watch_stream(handle.watch_commands())))
@@ -1983,8 +1924,8 @@ impl RpcService for EngineRpc {
                 let importer = self.local_importer()?.clone();
                 let status = tokio::task::spawn_blocking(move || importer.status())
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?
+                    .map_err(failed)?;
                 RpcReply::value(&status)
             }
             methods::IMPORT_LOCAL_WORKSPACE => {
@@ -2054,7 +1995,7 @@ impl RpcService for EngineRpc {
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
                 self.mutate(p)?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                RpcReply::ok()
             }
             methods::WATCH_CHECKOUT_DIFFS => {
                 Ok(RpcReply::Stream(watch_stream(self.diff_sync.watch_diffs())))
@@ -2067,22 +2008,12 @@ impl RpcService for EngineRpc {
                 // Keep the scoped-diff future off the dispatcher's stack. The
                 // per-commit path adds another nested git-capture future.
                 Box::pin(async move {
-                    #[derive(Deserialize)]
-                    #[serde(rename_all = "camelCase")]
-                    struct P {
-                        cwd: String,
-                        #[serde(default)]
-                        mode: String,
-                        base_ref: Option<String>,
-                        chat_id: Option<String>,
-                        commit_sha: Option<String>,
-                    }
-                    let p: P = parse_params(params)?;
+                    let p: CheckoutDiffParams = parse_params(params)?;
                     let identity = self
                         .repos
                         .checkout_identity(std::path::Path::new(&p.cwd))
                         .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                        .map_err(failed)?;
                     let root = identity.root.as_path();
                     let snapshot = match p.mode.as_str() {
                         "branch" => {
@@ -2092,7 +2023,7 @@ impl RpcService for EngineRpc {
                                 .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
                             let base = crate::diff_sync::merge_base(root, base_ref)
                                 .await
-                                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                                .map_err(failed)?;
                             crate::diff_sync::capture_diff_against(&self.repos, root, Some(&base))
                                 .await
                         }
@@ -2120,7 +2051,7 @@ impl RpcService for EngineRpc {
                         }
                         _ => crate::diff_sync::capture_diff(&self.repos, root).await,
                     }
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                     RpcReply::value(&cypher_proto::CheckoutDiff {
                         checkout_id: identity.id,
                         device_id: self.doc_host.device_id().to_string(),
@@ -2145,7 +2076,7 @@ impl RpcService for EngineRpc {
                     let identity =
                         Box::pin(self.repos.checkout_identity(std::path::Path::new(&p.cwd)))
                             .await
-                            .map_err(|error| RpcError::Failed(error.to_string()))?;
+                            .map_err(failed)?;
                     if identity.id != p.checkout_id {
                         return Err(RpcError::Failed("checkoutId does not match cwd".into()));
                     }
@@ -2158,14 +2089,14 @@ impl RpcService for EngineRpc {
                                 .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
                             let base = Box::pin(crate::diff_sync::merge_base(root, base_ref))
                                 .await
-                                .map_err(|error| RpcError::Failed(error.to_string()))?;
+                                .map_err(failed)?;
                             let snapshot = Box::pin(crate::diff_sync::capture_diff_against(
                                 &self.repos,
                                 root,
                                 Some(&base),
                             ))
                             .await
-                            .map_err(|error| RpcError::Failed(error.to_string()))?;
+                            .map_err(failed)?;
                             (snapshot, base, None)
                         }
                         "commit" => {
@@ -2181,7 +2112,7 @@ impl RpcService for EngineRpc {
                                 sha,
                             ))
                             .await
-                            .map_err(|error| RpcError::Failed(error.to_string()))?;
+                            .map_err(failed)?;
                             (snapshot, base, Some(sha.to_string()))
                         }
                         "turn" => {
@@ -2200,17 +2131,17 @@ impl RpcService for EngineRpc {
                                 &turn.tree,
                             ))
                             .await
-                            .map_err(|error| RpcError::Failed(error.to_string()))?;
+                            .map_err(failed)?;
                             (snapshot, turn.tree, None)
                         }
                         _ => {
                             let base = Box::pin(crate::diff_sync::working_diff_base(root))
                                 .await
-                                .map_err(|error| RpcError::Failed(error.to_string()))?;
+                                .map_err(failed)?;
                             let snapshot =
                                 Box::pin(crate::diff_sync::capture_diff(&self.repos, root))
                                     .await
-                                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                                    .map_err(failed)?;
                             (snapshot, base, None)
                         }
                     };
@@ -2241,7 +2172,7 @@ impl RpcService for EngineRpc {
                         file,
                     ))
                     .await
-                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                    .map_err(failed)?;
                     let current = match p.mode.as_str() {
                         "branch" => {
                             Box::pin(crate::diff_sync::capture_diff_against(
@@ -2273,7 +2204,7 @@ impl RpcService for EngineRpc {
                         }
                         _ => Box::pin(crate::diff_sync::capture_diff(&self.repos, root)).await,
                     }
-                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                    .map_err(failed)?;
                     if current.checksum != p.diff_checksum {
                         return RpcReply::value(&stale());
                     }
@@ -2292,42 +2223,18 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_REPOS => RpcReply::value(&self.repos.list().await),
             methods::ADD_REPO => {
-                #[derive(Deserialize)]
-                struct P {
-                    path: String,
-                }
-                let p: P = parse_params(params)?;
-                let repo = self
-                    .repos
-                    .add(&p.path)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let p: PathParams = parse_params(params)?;
+                let repo = self.repos.add(&p.path).await.map_err(failed)?;
                 RpcReply::value(&repo)
             }
             methods::CLONE_REPO => {
-                #[derive(Deserialize)]
-                struct P {
-                    url: String,
-                }
-                let p: P = parse_params(params)?;
-                let repo = self
-                    .repos
-                    .clone_repo(&p.url)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let p: UrlParams = parse_params(params)?;
+                let repo = self.repos.clone_repo(&p.url).await.map_err(failed)?;
                 RpcReply::value(&repo)
             }
             methods::CREATE_REPO => {
-                #[derive(Deserialize)]
-                struct P {
-                    name: String,
-                }
-                let p: P = parse_params(params)?;
-                let repo = self
-                    .repos
-                    .create(&p.name)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let p: NameParams = parse_params(params)?;
+                let repo = self.repos.create(&p.name).await.map_err(failed)?;
                 RpcReply::value(&repo)
             }
             methods::LIST_BRANCHES => {
@@ -2336,7 +2243,7 @@ impl RpcService for EngineRpc {
                     .repos
                     .branches(std::path::Path::new(&p.repo_path))
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&branches)
             }
             methods::LIST_REFS => {
@@ -2345,28 +2252,16 @@ impl RpcService for EngineRpc {
                     .repos
                     .refs(std::path::Path::new(&p.repo_path))
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&refs)
             }
             methods::LIST_GIT_HISTORY => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    cwd: String,
-                    #[serde(default)]
-                    cursor: usize,
-                    #[serde(default = "default_git_history_limit")]
-                    limit: usize,
-                }
-                fn default_git_history_limit() -> usize {
-                    crate::repos::GIT_HISTORY_DEFAULT_LIMIT
-                }
-                let p: P = parse_params(params)?;
+                let p: GitHistoryParams = parse_params(params)?;
                 let history = self
                     .repos
                     .history(std::path::Path::new(&p.cwd), p.cursor, p.limit)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&history)
             }
             methods::FETCH_ALL => {
@@ -2374,12 +2269,12 @@ impl RpcService for EngineRpc {
                 self.repos
                     .fetch_all(std::path::Path::new(&p.repo_path))
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 // Remote refs are repository state too. Force the checkout
                 // watchers to publish a fresh snapshot instead of waiting for
                 // the repair tick (some platforms do not report packed-refs).
                 self.diff_sync.sync_all();
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                RpcReply::ok()
             }
             methods::SWITCH_REF => {
                 let p: SwitchRefParams = parse_params(params)?;
@@ -2387,16 +2282,12 @@ impl RpcService for EngineRpc {
                     .repos
                     .switch_ref(std::path::Path::new(&p.repo_path), &p.ref_name)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&serde_json::json!({ "branch": branch }))
             }
             methods::LIST_FOLDERS => {
                 let p: ListFoldersParams = parse_params(params)?;
-                let listing = self
-                    .repos
-                    .list_folders(p.path)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let listing = self.repos.list_folders(p.path).await.map_err(failed)?;
                 RpcReply::value(&listing)
             }
             methods::LIST_WORKSPACE_FILES
@@ -2416,7 +2307,7 @@ impl RpcService for EngineRpc {
                         let chat = self
                             .workspace
                             .chat(&p.chat_id)
-                            .map_err(|e| RpcError::Failed(e.to_string()))?
+                            .map_err(failed)?
                             .ok_or_else(|| RpcError::Failed("chat not found".into()))?;
                         if chat.device_id != self.doc_host.device_id()
                             || chat.cwd.as_deref() != Some(p.cwd.as_str())
@@ -2443,7 +2334,7 @@ impl RpcService for EngineRpc {
                         }
                         None => crate::workspace_files::read(root, p.path.clone(), directory).await,
                     }
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                     same_checkout()?;
                     RpcReply::value(&value)
                 })
@@ -2468,7 +2359,7 @@ impl RpcService for EngineRpc {
                     self.repos
                         .search_files(root, p.query, featured_paths)
                         .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))
+                        .map_err(failed)
                 })
                 .await
                 .map_err(|_| RpcError::Failed("file search timed out".into()))??;
@@ -2486,16 +2377,11 @@ impl RpcService for EngineRpc {
                 let search = github
                     .search_issues(&root, &p.query)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&search)
             }
             methods::GET_GITHUB_ISSUE => {
-                #[derive(Deserialize)]
-                struct P {
-                    repo: String,
-                    number: u64,
-                }
-                let p: P = parse_params(params)?;
+                let p: GithubIssueParams = parse_params(params)?;
                 if !crate::github::valid_repo(&p.repo) || p.number == 0 {
                     return Err(RpcError::BadParams("invalid GitHub issue reference".into()));
                 }
@@ -2503,36 +2389,27 @@ impl RpcService for EngineRpc {
                     .github()?
                     .issue_snapshot(&p.repo, p.number)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&snapshot)
             }
             methods::GITHUB_ACCOUNT_STATUS => RpcReply::value(&self.github()?.status().await),
             methods::START_GITHUB_LOGIN => {
-                let start = self
-                    .github()?
-                    .start_login()
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let start = self.github()?.start_login().await.map_err(failed)?;
                 RpcReply::value(&start)
             }
             methods::POLL_GITHUB_LOGIN | methods::CANCEL_GITHUB_LOGIN => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    login_id: String,
-                }
-                let p: P = parse_params(params)?;
+                let p: GithubLoginParams = parse_params(params)?;
                 let github = self.github()?;
                 if method == methods::CANCEL_GITHUB_LOGIN {
                     github.cancel_login(&p.login_id);
-                    RpcReply::value(&serde_json::json!({ "ok": true }))
+                    RpcReply::ok()
                 } else {
                     RpcReply::value(&github.poll_login(&p.login_id))
                 }
             }
             methods::SIGN_OUT_GITHUB => {
                 self.github()?.sign_out().await;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                RpcReply::ok()
             }
             methods::CREATE_WORKTREE => {
                 let p: CreateWorktreeParams = parse_params(params)?;
@@ -2540,7 +2417,7 @@ impl RpcService for EngineRpc {
                     .repos
                     .create_worktree(std::path::Path::new(&p.repo_path), &p.branch)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&worktree)
             }
             methods::DELETE_WORKTREE => {
@@ -2551,27 +2428,16 @@ impl RpcService for EngineRpc {
                         std::path::Path::new(&p.worktree_path),
                     )
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                    .map_err(failed)?;
+                RpcReply::ok()
             }
             methods::CREATE_SCRATCH_DIR => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    chat_id: String,
-                }
-                let p: P = parse_params(params)?;
+                let p: ChatParams = parse_params(params)?;
                 let path = crate::scratch::create(&p.chat_id).map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "path": path }))
             }
             methods::DELETE_SCRATCH_DIR => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    chat_id: String,
-                    path: String,
-                }
-                let p: P = parse_params(params)?;
+                let p: DeleteScratchDirParams = parse_params(params)?;
                 let removed =
                     crate::scratch::delete(&p.chat_id, &p.path).map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "ok": true, "removed": removed }))
@@ -2589,10 +2455,7 @@ impl RpcService for EngineRpc {
                     .and_then(|chat| chat.cwd)
                     .map(|cwd| expand_home(&cwd))
                     .unwrap_or_else(|| home_dir().to_string_lossy().to_string());
-                let session = self
-                    .terminals
-                    .open(&cwd, p.cols, p.rows)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let session = self.terminals.open(&cwd, p.cols, p.rows).map_err(failed)?;
                 RpcReply::value(&session)
             }
             methods::SUBSCRIBE_TERMINAL => {
@@ -2600,7 +2463,7 @@ impl RpcService for EngineRpc {
                 let rx = self
                     .terminals
                     .subscribe(&p.terminal_id, p.after_seq)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 let stream = futures::stream::unfold(rx, |mut rx| async move {
                     let event = rx.recv().await?;
                     let value = serde_json::to_value(&event).ok()?;
@@ -2612,36 +2475,34 @@ impl RpcService for EngineRpc {
                 let p: WriteTerminalParams = parse_params(params)?;
                 self.terminals
                     .write(&p.terminal_id, &p.data)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                    .map_err(failed)?;
+                RpcReply::ok()
             }
             methods::RESIZE_TERMINAL => {
                 let p: ResizeTerminalParams = parse_params(params)?;
                 self.terminals
                     .resize(&p.terminal_id, p.cols, p.rows)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                    .map_err(failed)?;
+                RpcReply::ok()
             }
             methods::CLOSE_TERMINAL => {
                 let p: TerminalIdParams = parse_params(params)?;
-                self.terminals
-                    .close(&p.terminal_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                self.terminals.close(&p.terminal_id).map_err(failed)?;
+                RpcReply::ok()
             }
             methods::UPLOAD_CHUNK => {
                 let p: UploadChunkParams = parse_params(params)?;
                 self.uploads
                     .append(&p.upload_id, &p.data, p.seq)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                    .map_err(failed)?;
+                RpcReply::ok()
             }
             methods::UPLOAD_COMMIT => {
                 let p: UploadCommitParams = parse_params(params)?;
                 let path = self
                     .uploads
                     .commit(&p.upload_id, &p.file_name)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 if let Some(chat_id) = &p.chat_id {
                     // Queue-first send: seal against the chat so its host's
                     // drain releases the waiting Run. Best-effort — the
@@ -2666,7 +2527,7 @@ impl RpcService for EngineRpc {
                 let chunk = self
                     .uploads
                     .read_chunk(&p.path, p.offset, &roots)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&chunk)
             }
             methods::FETCH_TOOL_BLOB => {
@@ -2675,7 +2536,7 @@ impl RpcService for EngineRpc {
                     .doc_host
                     .fetch_tool_blob(&p.blob_ref)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&serde_json::json!({ "text": text }))
             }
             methods::START_SUBAGENT => {
@@ -2683,136 +2544,74 @@ impl RpcService for EngineRpc {
                 self.start_subagent(p).await
             }
             methods::START_SIDE_CHAT => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    parent_chat_id: String,
-                    source: SideChatSource,
-                    selected_text: String,
-                    #[serde(default)]
-                    origin: Option<cypher_proto::agent_prompt::AgentQuote>,
-                }
-                let p: P = parse_params(params)?;
+                let p: StartSideChatParams = parse_params(params)?;
                 let created = self
                     .side_chats
                     .start(&p.parent_chat_id, p.source, p.selected_text, p.origin)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&created)
             }
             methods::SEND_SIDE_CHAT => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    side_chat_id: String,
-                    request: RunRequest,
-                    #[serde(default)]
-                    message_id: Option<String>,
-                }
-                let p: P = parse_params(params)?;
+                let p: SendSideChatParams = parse_params(params)?;
                 self.side_chats
                     .send(&p.side_chat_id, p.request, p.message_id)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                    .map_err(failed)?;
+                RpcReply::ok()
             }
             methods::INTERRUPT_SIDE_CHAT => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    side_chat_id: String,
-                }
-                let p: P = parse_params(params)?;
+                let p: SideChatIdParams = parse_params(params)?;
                 let interrupted = self
                     .side_chats
                     .interrupt(&p.side_chat_id)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&serde_json::json!({ "interrupted": interrupted }))
             }
             methods::RESPOND_SIDE_CHAT_INPUT => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    side_chat_id: String,
-                    request_id: String,
-                    answers: Vec<cypher_proto::UserInputAnswer>,
-                }
-                let p: P = parse_params(params)?;
+                let p: RespondSideChatInputParams = parse_params(params)?;
                 let resolved = self
                     .side_chats
                     .respond_input(&p.side_chat_id, &p.request_id, p.answers)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 RpcReply::value(&serde_json::json!({ "resolved": resolved }))
             }
             methods::WATCH_SIDE_CHAT_STATUS => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    side_chat_id: String,
-                }
-                let p: P = parse_params(params)?;
+                let p: SideChatIdParams = parse_params(params)?;
                 let rx = self
                     .side_chats
                     .watch_status(&p.side_chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(failed)?;
                 Ok(RpcReply::Stream(side_chat_status_stream(
                     p.side_chat_id,
                     rx,
                 )))
             }
             methods::PROMOTE_SIDE_CHAT => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    side_chat_id: String,
-                }
-                let p: P = parse_params(params)?;
-                let promoted = self
-                    .side_chats
-                    .promote(&p.side_chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let p: SideChatIdParams = parse_params(params)?;
+                let promoted = self.side_chats.promote(&p.side_chat_id).map_err(failed)?;
                 RpcReply::value(&promoted)
             }
             methods::DISPOSE_SIDE_CHAT => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    side_chat_id: String,
-                }
-                let p: P = parse_params(params)?;
+                let p: SideChatIdParams = parse_params(params)?;
                 self.side_chats
                     .dispose(&p.side_chat_id)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                    .map_err(failed)?;
+                RpcReply::ok()
             }
             methods::FORK_SESSION => {
                 let p: SessionForkRequest = parse_params(params)?;
-                let reply = self
-                    .session_forks
-                    .fork(p)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let reply = self.session_forks.fork(p).await.map_err(failed)?;
                 RpcReply::value(&reply)
             }
             methods::REWIND_SESSION => {
                 let p: cypher_proto::SessionRewindRequest = parse_params(params)?;
-                let reply = self
-                    .session_forks
-                    .rewind(p)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let reply = self.session_forks.rewind(p).await.map_err(failed)?;
                 RpcReply::value(&reply)
             }
             methods::WATCH_AGENT_EVENTS => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    chat_id: String,
-                    #[serde(default)]
-                    after_seq: Option<u64>,
-                }
-                let p: P = parse_params(params)?;
+                let p: WatchAgentEventsParams = parse_params(params)?;
                 if p.chat_id.chars().count() > 256 {
                     return Err(RpcError::BadParams("chatId too long".into()));
                 }
