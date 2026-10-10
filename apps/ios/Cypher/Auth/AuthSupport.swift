@@ -28,15 +28,6 @@ enum PKCE {
         base64URLEncode(Data(SHA256.hash(data: Data(verifier.utf8))))
     }
 
-    /// Well-formed per the edge's `PKCE_VERIFIER_RE`
-    /// (`^[A-Za-z0-9\-._~]{43,128}$`).
-    static func isValidVerifier(_ verifier: String) -> Bool {
-        (43...128).contains(verifier.count)
-            && verifier.allSatisfy { c in
-                c.isASCII && (c.isLetter || c.isNumber || "-._~".contains(c))
-            }
-    }
-
     private static func base64URLEncode(_ data: Data) -> String {
         data.base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")

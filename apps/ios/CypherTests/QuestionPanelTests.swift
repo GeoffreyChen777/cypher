@@ -102,13 +102,10 @@ final class QuestionPanelTests: XCTestCase {
     func testTranscriptChipDoesNotRepeatContextAndResolutionChangesVersion() throws {
         let q = question("Choose?\n\nContext:\nLong private background")
         func row(resolved: Bool) throws -> TranscriptRow {
-            let entry = MessageEntry(id: "entry", role: .assistant,
+            let entry = MessageEntry.fixture("entry",
                 parts: [.input(id: "input", requestId: "request", questions: [q], resolved: resolved)],
-                createdAt: 0, deviceId: "device", status: .complete)
-            var parsers: [String: IncrementalMarkdownParser] = [:]
-            var completed: [String: CompletedParse] = [:]
-            return try XCTUnwrap(TranscriptRowBuilder.rows(entries: [entry], pendingSends: [],
-                parsers: &parsers, completed: &completed).first)
+                createdAt: 0, deviceId: "device")
+            return try XCTUnwrap(buildRows([entry]).first)
         }
         let pending = try row(resolved: false)
         let resolved = try row(resolved: true)

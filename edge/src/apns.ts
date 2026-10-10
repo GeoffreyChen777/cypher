@@ -42,10 +42,10 @@ async function providerToken(env: Env): Promise<string> {
   return jwt;
 }
 export interface BadgeSnapshot { badgeCount: number; badgeRevision: number }
-export interface AlertPushMessage extends Partial<BadgeSnapshot> {
+interface AlertPushMessage extends Partial<BadgeSnapshot> {
   id: string; scope: string; chatId: string; projectId: string; kind: NoticeKind; expires: number;
 }
-export interface BadgePushMessage extends BadgeSnapshot {
+interface BadgePushMessage extends BadgeSnapshot {
   id: string; scope: string; kind: "badge"; expires: number;
 }
 export type PushMessage = AlertPushMessage | BadgePushMessage;

@@ -30,7 +30,7 @@ final class MentionsTests: XCTestCase {
     }
 
     func testFileLinksRejectExternalOrNoncanonicalMarkdown() {
-        for raw in ["[composer.rs](zeron-file:src/composer.rs)", "[site](https://example.com/a)",
+        for raw in ["[composer.rs](other-file:src/composer.rs)", "[site](https://example.com/a)",
                     "[a.rs](../a.rs)", "[other](cypher-file:src/a.rs)", "[a.rs](cypher-file:/etc/a.rs)",
                     "[a.rs](cypher-file:src/../a.rs)", "[a.rs](cypher-file:src%5Cfake%5Ca.rs)",
                     "[a.rs](cypher-file:src/a%0A.rs)", "[a.rs](cypher-file:src/%61.rs)"] {
@@ -179,8 +179,8 @@ final class MentionsTests: XCTestCase {
 
     // MARK: Reference prompt
 
-    private func entry(_ id: String, _ role: MessageRole, _ lines: [String], continuing: String? = nil) -> ReferenceEntry {
-        ReferenceEntry(id: id, role: role, continuationOf: continuing, lines: lines)
+    private func entry(_ id: String, _ role: MessageRole, _ lines: [String]) -> ReferenceEntry {
+        ReferenceEntry(id: id, role: role, lines: lines)
     }
 
     func testBoundedContextKeepsTheNewestWholeMessages() {
@@ -209,7 +209,9 @@ final class MentionsTests: XCTestCase {
             ]],
             ["id": "a2", "role": "assistant", "continuationOf": "a1", "parts": [
                 ["id": "e", "kind": "error", "message": " boom "],
-                ["id": "q", "kind": "input", "questions": [["question": "Proceed?"]]],
+                ["id": "q", "kind": "input", "questions": [
+                    ["id": "q1", "header": "Go", "question": "Proceed?", "options": ["Yes", "No"]],
+                ]],
             ]],
         ]]
         let root = try XCTUnwrap(LoroValue.fromJSON(json).mapValue)

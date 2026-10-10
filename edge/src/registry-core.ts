@@ -13,7 +13,7 @@
 /** Hybrid-logical-clock string: `{ms:013}-{counter:06}-{device}`. Fixed-width
  * zero padding makes lexicographic order = (ms, counter, device) order, and
  * the device suffix makes it total — two distinct writers can never tie. */
-export type Hlc = string;
+type Hlc = string;
 
 export const encodeHlc = (ms: number, counter: number, device: string): Hlc =>
   `${String(ms).padStart(13, "0")}-${String(counter).padStart(6, "0")}-${device}`;
@@ -21,7 +21,7 @@ export const encodeHlc = (ms: number, counter: number, device: string): Hlc =>
 /** `a` strictly newer than `b` (undefined = never written, loses to any). */
 export const hlcNewer = (a: Hlc, b: Hlc | undefined): boolean => b === undefined || a > b;
 
-export type FieldValue = string | number | boolean | null | FieldValue[] | { [k: string]: FieldValue };
+type FieldValue = string | number | boolean | null | FieldValue[] | { [k: string]: FieldValue };
 
 export interface Row {
   kind: string;
@@ -36,7 +36,7 @@ export interface Row {
   clocks: Record<string, Hlc>;
 }
 
-export type OpKind = "upsert" | "update" | "delete";
+type OpKind = "upsert" | "update" | "delete";
 
 export interface Op {
   kind: string;
@@ -57,7 +57,7 @@ const KIND_RE = /^[a-z][a-zA-Z0-9]{0,31}$/;
 const FIELD_RE = /^[a-zA-Z][a-zA-Z0-9]{0,63}$/;
 const HLC_RE = /^\d{13}-\d{6}-[A-Za-z0-9_-]{1,128}$/;
 /** Per-op serialized budget — a row is an index entry, never a document. */
-export const MAX_OP_BYTES = 16 * 1024;
+const MAX_OP_BYTES = 16 * 1024;
 
 /** Structural validation for an op arriving off the wire. Returns an error
  * string or null. Merge assumes validated input. */
@@ -86,7 +86,7 @@ export const validateOp = (op: Op): string | null => {
   return null;
 };
 
-export interface ApplyResult {
+interface ApplyResult {
   /** Undefined only for an `update` op on a missing row (nothing to store). */
   row: Row | undefined;
   changed: boolean;

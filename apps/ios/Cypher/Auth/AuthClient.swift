@@ -50,8 +50,6 @@ enum AuthError: LocalizedError, Equatable {
         return status == 401 && code == "invalid_grant"
     }
 
-    var isTransient: Bool { !isPermanent }
-
     var errorDescription: String? {
         switch self {
         case .emailVerificationRequired:

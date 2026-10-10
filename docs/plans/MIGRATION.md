@@ -678,7 +678,7 @@ DO 存储没有官方 dump API。做法：
 | chat2 帧封装 `[type u8][len u32 LE][header][payload]`、拒绝畸形/超长 header | `edge/src/chat-frames.test.ts`（5 例） | `crates/sync/src/chat_frames.rs:151-209`（3 例） | `apps/ios/CypherTests/ChatFramesTests.swift`（4 例，头注释声明三端镜像） | 镜像 |
 | 注册表合并核心（HLC 序、字段 LWW、tombstone/revive、guard tombstone、re-seed 保留时钟、任意到达序收敛、`validateOp`、`maxClock`） | `edge/src/registry-core.test.ts`（13 例） | `crates/doc/src/registry/tests.rs`（31 例，`:1-2` 声明镜像） | `apps/ios/CypherTests/RegistryCoreTests.swift`（16 例，`:1-4` 声明三端向量） | 镜像 |
 | 设备帧 `uleb128(len) ‖ JSON ‖ payload`、relay 错误载荷 | `edge/src/device-frame.test.ts`（2 例） | `crates/rpc/src/device_room.rs:973-1088`（7 例，含 `byte_parity_with_ts_encoder`） | **无独立测试文件**（`DeviceRelayClient.swift:5-10` 只有注释） | 镜像（Swift 缺） |
-| 预览帧 wire + 状态机 | `edge/src/stream-preview.test.ts` 读 `fixtures/stream-preview-v1.json`（48 例） | `crates/sync/src/stream_preview.rs:116-117`（48）、`preview_link.rs:571-573` 读 `preview-reducer-v1.json`（13） | `CypherTests/StreamPreviewTests.swift:9`、`PreviewProjectionTests.swift:8`；CI macOS "Preview protocol" 步骤独立编译 Swift 跑同一 JSON | **共享 JSON** |
+| 预览帧 wire + 状态机 | `crates/sync/tests/fixtures/stream-preview-v1.json`（48 例；TS codec 已删除） | `crates/sync/src/stream_preview.rs:116-117`（48）、`preview_link.rs:571-573` 读 `preview-reducer-v1.json`（13） | `CypherTests/StreamPreviewTests.swift:9`、`PreviewProjectionTests.swift:8`；CI macOS "Preview protocol" 步骤独立编译 Swift 跑同一 JSON | **共享 JSON** |
 
 Rust 服务端复用 `cypher-sync`/`cypher-doc`/`cypher-rpc` 的这些 codec/核心后，上表自动覆盖服务端；需要补的是 Swift 设备帧向量（不阻塞切换，客户端已在线上验证）。
 
@@ -763,7 +763,7 @@ room actor 随时可能被逐出并重建（Cloudflare 的 hibernation，Rust �
 - **【建议】设备绑定的发布者身份，在 ingress 准入时判定**，两个候选（§11 第 24 项选一）：
   - **(a) WorkOS 会话绑定**：JWT 的 `sid`（`auth.ts:14-20` 已提取）由服务端验证；某个 `(userId, sid)` 以 `role=host` 成功占有 `d2/{deviceId}`（`device-room.ts:151-158` 的 owner claim）即证明该会话控制该设备；chat2 WS 准入时，ingress 向 DeviceRoomActor 查询"`(userId, sid, device)` 是否为当前存活 host"，是则该 socket 获发布者资格。零新密钥、零客户端改动（chat2 socket 已带 `device`，token 已带 `sid`）；代价：桌面 UI 与 Engine 共享会话不影响（发布者是 Engine），但同一用户在两台设备上各自的 `sid` 不同，隔离成立。需确认 WorkOS refresh 后 `sid` 稳定【假设】。
   - **(b) 服务端签发设备发布密钥**：host 占有 DeviceRoom 时服务端签发一把随机密钥并通过已鉴权的 host socket 下发，Engine 在 chat2 upgrade 时以 `x-cypher-preview-publisher` 头（原开发 relay 已使用此头名）出示；服务端按 `(deviceId → 当前密钥)` 校验。需要 Engine 一处改动（收密钥、带头）；隔离更强（不依赖 IdP 的 `sid` 语义）。
-- 其余：去掉四道 dev 门（服务端默认注入 relay；客户端按能力协商，不再看环境变量）；文本 only、60 KiB 段上限（`stream-preview.ts:9-10`）、原开发 relay 的 `PREVIEW_LIMITS`（见 `docs/ephemeral-stream-v1.md` 的上限）按生产重新评估；`baseSeq` 不推进 cursor、Finished 不是 ACK 等接收契约不变。
+- 其余：去掉四道 dev 门（服务端默认注入 relay；客户端按能力协商，不再看环境变量）；文本 only、60 KiB 段上限（`crates/sync/src/stream_preview.rs:15-16`）、原开发 relay 的 `PREVIEW_LIMITS`（见 `docs/ephemeral-stream-v1.md` 的上限）按生产重新评估；`baseSeq` 不推进 cursor、Finished 不是 ACK 等接收契约不变。
 - **对计费请求是增加，不是减少【实测推算】**：预览 delta 是入站 WS 消息，按 20:1 计费。若 delta 与 120 ms 提交节拍同频，一个 5 分钟轮次约 2,500 条消息 = 125 个计费请求，而今天 2 秒窗口下的约 150 次 durable push 只折合约 7.5 个——chat 路径的计费请求约 **×16**。按 2026-09-18 的 chat WS 量推算，全量启用后 chat 计费请求从每天约 1,400 涨到约 22,000。仍远在额度内，但**方向是增加**：UX-2 是用请求数换延迟，不是省钱，排期时不要和降本项混在一起算收益。
 - **发布**：服务端 + 桌面 + iOS 各一次发版；iOS 走 TestFlight，故排在 UX-1 之后。
 
@@ -796,7 +796,7 @@ room actor 随时可能被逐出并重建（Cloudflare 的 hibernation，Rust �
 | `device-room.ts` codec | `cypher_rpc::device_room::{encode_device_frame, decode_device_frame, relay_error_code}` | ✅ 复用 |
 | `device-room.ts` 其余 | `rooms/device.rs` | — |
 | `push-device.ts`、`apns.ts`、`apns-sender.ts` | `rooms/push.rs`、`apns.rs`（reqwest h2 + `jsonwebtoken` ES256） | — |
-| `stream-preview.ts` | `cypher_sync::stream_preview` + `rooms/preview.rs`（UX-2 时新建 relay） | ✅ codec 复用 |
+| `stream-preview.ts`（已删除） | `cypher_sync::stream_preview` + `rooms/preview.rs`（UX-2 时新建 relay） | ✅ codec 复用 |
 | `development.ts`、`development-budget.ts` | 无（预算门随 Cloudflare 退役） | — |
 | `session-room.ts`、`update-log.ts`、`session-doc/` | 无（410；数据冷归档） | — |
 | `install.sh` | 原文件以 `include_str!` 嵌入 | ✅ 原样 |

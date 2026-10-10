@@ -14,11 +14,10 @@
  * snapshot for instant new-chat pickers §8.1; capability metadata) so pickers
  * render last-known state while the live RPC happens at confirm time.
  */
-import { BytesReader, BytesWriter } from "loro-protocol";
 import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blobs";
-import { AUTH_USER_HEADER, type Env } from "./env";
+import { AUTH_USER_HEADER, json, type Env } from "./env";
 
-export interface DeviceFrameHeader {
+interface DeviceFrameHeader {
   /** Stream id, unique per (connId, logical stream). */
   s: string;
   /** Stream kind: "rpc" | "term" | ... — opaque to the relay. */
@@ -30,19 +29,37 @@ export interface DeviceFrameHeader {
 }
 
 export const encodeDeviceFrame = (header: DeviceFrameHeader, payload: Uint8Array): Uint8Array => {
-  const writer = new BytesWriter();
-  writer.pushVarString(JSON.stringify(header));
-  writer.pushBytes(payload);
-  return writer.finalize();
+  const headerBytes = new TextEncoder().encode(JSON.stringify(header));
+  const length: number[] = [];
+  let n = headerBytes.length;
+  do {
+    length.push((n & 0x7f) | (n >= 0x80 ? 0x80 : 0));
+    n >>>= 7;
+  } while (n > 0);
+  const out = new Uint8Array(length.length + headerBytes.length + payload.length);
+  out.set(length, 0);
+  out.set(headerBytes, length.length);
+  out.set(payload, length.length + headerBytes.length);
+  return out;
 };
 
+/** Throws on a truncated or oversized length prefix, a short header, or
+ * non-JSON header bytes. */
 export const decodeDeviceFrame = (
   bytes: Uint8Array
 ): { header: DeviceFrameHeader; payload: Uint8Array } => {
-  const reader = new BytesReader(bytes);
-  const header = JSON.parse(reader.readVarString()) as DeviceFrameHeader;
-  const payload = reader.readBytes(reader.remaining);
-  return { header, payload };
+  let offset = 0;
+  let length = 0;
+  for (let shift = 0; ; shift += 7) {
+    if (shift > 35 || offset >= bytes.length) throw new Error("bad frame length");
+    const byte = bytes[offset++]!;
+    length |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) break;
+  }
+  length >>>= 0;
+  if (offset + length > bytes.length) throw new Error("frame header out of bounds");
+  const header = JSON.parse(new TextDecoder().decode(bytes.subarray(offset, offset + length))) as DeviceFrameHeader;
+  return { header, payload: bytes.subarray(offset + length) };
 };
 
 interface SocketState {
@@ -83,7 +100,7 @@ const RELAY_KIND = " relay";
  * host "this chat's doc has pending commands — open it and drain". Durable:
  * queued in the DO while the host is offline, replayed on its next join, so a
  * command sent to a chat the host hasn't warm-opened is never stranded. */
-export const NUDGE_KIND = "nudge";
+const NUDGE_KIND = "nudge";
 const NUDGE_MAX_PENDING = 256;
 const CHAT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -341,8 +358,3 @@ export const pickLiveHost = <T>(
 const encodeRelayError = (code: string): Uint8Array =>
   new TextEncoder().encode(JSON.stringify({ error: code }));
 
-const json = (value: unknown, status = 200): Response =>
-  new Response(JSON.stringify(value), {
-    status,
-    headers: { "content-type": "application/json" }
-  });

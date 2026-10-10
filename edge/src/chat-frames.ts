@@ -6,7 +6,7 @@
  * updates, checkpoint frontiers, presence ephemera) that only CLIENTS parse —
  * the DO relays them untouched. Binary because base64'ing update bytes costs
  * 33% on the wire, which matters at the 1.2 Mbps links the whale incident
- * surfaced; no loro-protocol because the server owns no CRDT semantics.
+ * surfaced. The server owns no CRDT semantics.
  *
  * Shared shape across Rust (crates/sync) and Swift clients — change it only
  * with cross-language test vectors (registry precedent).

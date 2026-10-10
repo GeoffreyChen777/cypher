@@ -5,17 +5,7 @@ import XCTest
 /// choices, and a typed name finding the rest.
 final class SlashMenuUITests: XCTestCase {
     private func launch(_ appearance: String = "dark") -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchArguments = ["-demo", "-route", "chat:chat-tabs", "-appAppearance", appearance]
-        app.launch()
-        return app
-    }
-
-    private func capture(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        .launchDemo(["-route", "chat:chat-tabs", "-appAppearance", appearance])
     }
 
     private func editor(_ app: XCUIApplication) -> XCUIElement {

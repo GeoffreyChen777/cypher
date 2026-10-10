@@ -31,7 +31,7 @@ import {
   setMeta
 } from "./chat-log";
 import { decodeFrame, encodeFrame, FRAME } from "./chat-frames";
-import { AUTH_USER_HEADER, type Env } from "./env";
+import { AUTH_USER_HEADER, json, type Env } from "./env";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Inbound frame budget: one pushed row (+ header slack). */
@@ -627,12 +627,6 @@ const send = (
     /* socket already gone; hibernation API cleans it up */
   }
 };
-
-const json = (value: unknown, status = 200): Response =>
-  new Response(JSON.stringify(value), {
-    status,
-    headers: { "content-type": "application/json" }
-  });
 
 /** `bytes=N-` (open-ended resume) only; anything fancier is ignored → 200. */
 const parseRangeStart = (header: string | null): number | null => {

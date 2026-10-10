@@ -1,4 +1,4 @@
-// Temporary Side Chat (desktop side_chats.rs, round 21): a throwaway chat
+// Temporary Side Chat (desktop side_chats.rs): a throwaway chat
 // about a selection, hosted by the parent chat's device in memory only — no
 // registry row, no synced room — until it's opened as a normal chat.
 //

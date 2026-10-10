@@ -7,15 +7,14 @@
     "dev": "wrangler dev --port 27640 --var AUTH_MODE:dev",
     "deploy": "wrangler deploy",
     "build": "wrangler deploy --dry-run --outdir dist",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.preview.json",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.workerd.json",
     "test": "npm run test:unit && npm run test:workerd",
     "test:unit": "vitest run",
     "test:workerd": "vitest run -c vitest.workerd.config.ts",
     "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
-    "jose": "^6.0.11",
-    "loro-protocol": "^0.3.0"
+    "jose": "^6.0.11"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.20.2",

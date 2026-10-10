@@ -216,7 +216,7 @@ final class WorkspaceStore {
             if let rawChild = f["child"], rawChild != .null, child == nil { return nil }
             var chatConfig: ChatConfig?
             if let c = f["config"]?.objectValue {
-                chatConfig = ChatConfig(harness: c["harness"]?.stringValue ?? "claude-code",
+                chatConfig = ChatConfig(harness: c["harness"]?.stringValue ?? "pi",
                                         model: c["model"]?.stringValue,
                                         reasoning: c["reasoning"]?.stringValue,
                                         modelOptions: c["modelOptions"]?.objectValue ?? [:],
@@ -440,12 +440,6 @@ final class WorkspaceStore {
         let reply: Reply? = try? await relay(for: deviceId)
             .call(method: "CreateWorktree", params: ["repoPath": repoPath, "branch": branch])
         return reply?.path
-    }
-
-    /// Retarget a session onto another checkout (the desktop's
-    /// setChatCwd/setChatBranch mutates — LWW field writes here).
-    func setChatCheckout(chatId: String, cwd: String, branch: String) {
-        updateChat(chatId, set: ["cwd": .string(cwd), "branch": .string(branch)])
     }
 
     // MARK: Writes (viewer-device discipline → op batches)

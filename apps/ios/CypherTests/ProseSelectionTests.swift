@@ -8,12 +8,7 @@ import UIKit
 @MainActor
 final class ProseSelectionTests: XCTestCase {
     private func rows(_ text: String, status: MessageStatus = .complete) -> [TranscriptRow] {
-        var parsers: [String: IncrementalMarkdownParser] = [:]
-        var completed: [String: CompletedParse] = [:]
-        let entry = MessageEntry(id: "m", role: .assistant, parts: [.text(id: "t", text: text)],
-                                 createdAt: 1, deviceId: "d", status: status, continuationOf: nil)
-        return TranscriptRowBuilder.rows(entries: [entry], pendingSends: [],
-                                         parsers: &parsers, completed: &completed)
+        buildRows([.fixture(parts: [.text(id: "t", text: text)], status: status)])
     }
 
     private func kinds(_ rows: [TranscriptRow]) -> [String] {
@@ -114,5 +109,15 @@ final class ProseSelectionTests: XCTestCase {
         view.selectedRange = NSRange(location: 0, length: view.attributedText.length)
         XCTAssertEqual(CommentPrompt.selectedText(view.text, range: view.selectedRange),
                        "First.\nSecond with code.\n\u{2022}\titem")
+    }
+
+    func testTranscriptRowsCarryTheirEntrysRole() {
+        let entries: [MessageEntry] = [
+            .fixture("u", role: .user, parts: [.text(id: "t", text: "hi")]),
+            .fixture("a", parts: [.text(id: "t", text: "one\n\ntwo")], createdAt: 2),
+        ]
+        let rows = buildRows(entries, pending: [PendingSend(messageId: "p", text: "later", at: 3)])
+        // "one" and "two" are one prose row: a selection crosses them.
+        XCTAssertEqual(rows.map(\.role), [.user, .assistant, .user])
     }
 }

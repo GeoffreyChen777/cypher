@@ -32,26 +32,13 @@
 //
 // Usage: node pi-agent-squad-prompt-options.mjs <pi-agent-squad-package-dir>
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { packageDirArg, patchFile, requireVersion } from "./lib/apply-anchors.mjs";
 
-const [, , packageDir] = process.argv;
-if (!packageDir) {
-  console.error("usage: pi-agent-squad-prompt-options.mjs <pi-agent-squad-package-dir>");
-  process.exit(1);
-}
+const packageDir = packageDirArg("pi-agent-squad-prompt-options.mjs <pi-agent-squad-package-dir>");
 
 const MARKER = "CYPHER-RUNTIME-PATCH: prompt-options";
 const EXPECTED_VERSION = "0.9.0";
-
-const version = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf-8")).version;
-if (version !== EXPECTED_VERSION) {
-  console.error(
-    `pi-agent-squad patch: expected ${EXPECTED_VERSION}, found ${version}.\n` +
-      "Re-check dist/pi-runtime/patches/pi-agent-squad-prompt-options.mjs against the new version.",
-  );
-  process.exit(1);
-}
+requireVersion(packageDir, { name: "pi-agent-squad", expected: EXPECTED_VERSION, script: "pi-agent-squad-prompt-options.mjs" });
 
 const EDITS = [
   {
@@ -97,27 +84,8 @@ function orchestratorPromptPath(): string {`,
   },
 ];
 
-const target = join(packageDir, "index.ts");
-if (!existsSync(target)) {
-  console.error(`pi-agent-squad patch: ${target} not found`);
-  process.exit(1);
-}
-const source = readFileSync(target, "utf-8");
-if (source.includes(MARKER)) {
+if (!patchFile(packageDir, "index.ts", { name: "pi-agent-squad", marker: MARKER, edits: EDITS })) {
   console.log("pi-agent-squad patch: prompt options already applied");
   process.exit(0);
 }
-let out = source;
-for (const { label, from, to } of EDITS) {
-  const at = out.indexOf(from);
-  if (at < 0 || out.indexOf(from, at + 1) >= 0) {
-    console.error(
-      `pi-agent-squad patch: anchor ${at < 0 ? "not found" : "not unique"} (index.ts: ${label}).\n` +
-        "pi-agent-squad changed shape — update dist/pi-runtime/patches/ before packaging.",
-    );
-    process.exit(1);
-  }
-  out = out.replace(from, to);
-}
-writeFileSync(target, out);
 console.log("pi-agent-squad patch: prompt sections through appendSystemPrompt (index.ts)");

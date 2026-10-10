@@ -175,48 +175,6 @@ struct RegistryOp: Hashable, Codable, Sendable {
     var clocks: [String: Hlc]?
 }
 
-// MARK: - Validation (structural, mirrors validateOp in registry-core.ts)
-
-/// Per-op serialized budget — a row is an index entry, never a document.
-let registryMaxOpBytes = 16 * 1024
-
-private let idRe = try! NSRegularExpression(pattern: "^[A-Za-z0-9_.:@/-]{1,256}$")
-private let kindRe = try! NSRegularExpression(pattern: "^[a-z][a-zA-Z0-9]{0,31}$")
-private let fieldRe = try! NSRegularExpression(pattern: "^[a-zA-Z][a-zA-Z0-9]{0,63}$")
-private let hlcRe = try! NSRegularExpression(pattern: "^\\d{13}-\\d{6}-[A-Za-z0-9_-]{1,128}$")
-
-private func matches(_ re: NSRegularExpression, _ s: String) -> Bool {
-    let range = NSRange(s.startIndex..., in: s)
-    return re.firstMatch(in: s, range: range) != nil
-}
-
-/// Structural validation for an op. Returns an error string or nil. The
-/// server re-validates and rejects whole batches — a client that builds one
-/// bad op is a client bug to surface, not to ship.
-func validateOp(_ op: RegistryOp) -> String? {
-    if !matches(kindRe, op.kind) { return "bad kind" }
-    if !matches(idRe, op.id) { return "bad id" }
-    if !matches(hlcRe, op.hlc) { return "bad hlc" }
-    if op.op == .delete {
-        if op.set != nil { return "delete carries set" }
-    } else {
-        guard let set = op.set else { return "missing set" }
-        for key in set.keys where !matches(fieldRe, key) {
-            return "bad field: \(key)"
-        }
-    }
-    if let clocks = op.clocks {
-        for (key, hlc) in clocks {
-            if !matches(fieldRe, key) { return "bad clock field: \(key)" }
-            if !matches(hlcRe, hlc) { return "bad clock: \(key)" }
-        }
-    }
-    if let data = try? JSONEncoder().encode(op), data.count > registryMaxOpBytes {
-        return "op too large"
-    }
-    return nil
-}
-
 // MARK: - Merge (mirrors applyOp in registry-core.ts exactly)
 
 struct RegistryApplyResult {

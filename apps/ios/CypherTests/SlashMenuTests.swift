@@ -155,4 +155,30 @@ final class SlashMenuTests: XCTestCase {
         XCTAssertNil(catalog.modes, "another chat starts with no badges")
         XCTAssertEqual(catalog.chatId, "b")
     }
+
+    // MARK: Slash commands
+
+    func testSlashMenuBelongsToTheCommandNameOnly() {
+        XCTAssertEqual(SlashMenu.query(in: "/"), "")
+        XCTAssertEqual(SlashMenu.query(in: "/co"), "co")
+        XCTAssertNil(SlashMenu.query(in: "/goal ship it"), "arguments close the menu")
+        XCTAssertNil(SlashMenu.query(in: "/Users/dev"), "a typed path isn't a command")
+        XCTAssertNil(SlashMenu.query(in: " /co"))
+        XCTAssertNil(SlashMenu.query(in: "hello /co"))
+    }
+
+    func testSlashCommandDecodesTheWireShape() throws {
+        let json = #"[{"name":"compact","description":"Compact","inputHint":"custom instructions"},{"name":"x"},{"name":"y","inputHint":"path"}]"#
+        let decoded = try JSONDecoder().decode([SlashCommand].self, from: Data(json.utf8))
+        XCTAssertEqual(decoded[0].detail, "Compact · <custom instructions>")
+        XCTAssertNil(decoded[1].detail)
+        XCTAssertEqual(decoded[2].detail, "<path>")
+        XCTAssertEqual(SlashMenu.accept(SlashCommand(name: "goal")), "/goal ")
+    }
+
+    func testSlashErrorsReadLikeTheDesktop() {
+        XCTAssertTrue(SlashMenu.errorMessage(RelayError.rpc("unknown method: ListCommands")).contains("older Cypher"))
+        XCTAssertEqual(SlashMenu.errorMessage(RelayError.hostOffline), "The session's device is unreachable")
+        XCTAssertEqual(SlashMenu.errorMessage(RelayError.rpc("boom")), "Couldn't load this agent's commands")
+    }
 }

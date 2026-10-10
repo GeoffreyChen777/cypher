@@ -5,7 +5,7 @@ final class PreviewProjectionTests: XCTestCase {
     func testSharedReducerVectors() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        let data = try Data(contentsOf: root.appendingPathComponent("edge/src/fixtures/preview-reducer-v1.json"))
+        let data = try Data(contentsOf: root.appendingPathComponent("crates/sync/tests/fixtures/preview-reducer-v1.json"))
         let cases = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
         var p = PreviewProjection()
         for c in cases {

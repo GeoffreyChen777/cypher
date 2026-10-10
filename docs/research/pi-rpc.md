@@ -1,5 +1,9 @@
 # Native pi RPC harness (2026-08)
 
+Status: Pi is now the only agent harness. The ACP harness this record compares
+against was retired with the Claude Code, Codex, Cursor, Grok and Hermes
+agents; ACP references below are historical.
+
 ## Decision
 - Replace the community **pi-acp** adapter path with a **native pi harness**
   (`crates/harness/src/pi/`) that speaks pi's OWN RPC protocol

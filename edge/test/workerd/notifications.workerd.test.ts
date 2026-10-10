@@ -6,9 +6,8 @@ import { defaultNotificationSettings } from "../../src/notifications-model";
 import type { Row } from "../../src/registry-core";
 import { AUTH_USER_HEADER, type Env } from "../../src/env";
 import { RegistryRoom } from "../../src/registry-room";
+import { APNS_TEST_ENV, recordingPushEnv, row, seedRecipient } from "./support";
 
-const row = (kind: string, id: string, fields: Row["fields"]): Row =>
-  ({ kind, id, seq: 1, deleted: false, fields, clocks: {} });
 
 describe("notification outbox on real Durable Object SQLite", () => {
   it("falls back from an expired desktop session target to iOS recipients", async () => {
@@ -19,18 +18,8 @@ describe("notification outbox on real Durable Object SQLite", () => {
         ["chats/chat", row("chats", "chat", { deviceId: "host", spaceId: "project" })],
         ["spaces/project", row("spaces", "project", {})]
       ]);
-      const ns = { idFromString: (id: string) => id, get: () => ({ fetch: async (r: Request) => {
-        const body = await r.json() as { message: { kind: string } };
-        if (body.message.kind !== "badge") sends.push(body);
-        return Response.json({ sent: true });
-      } }) };
-      const config = { NOTIFICATIONS_ENABLED: "true", PUSH_DEVICES: ns,
-        APNS_TEAM_ID: "TEAM123456", APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test" } as unknown as Env;
-      const service = new Notifications(state, config, (kind, id) => rows.get(`${kind}/${id}`), () => {});
-      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('recipients',?)",
-        JSON.stringify([{ id: "b".repeat(64), lease: crypto.randomUUID(), installationId: "phone", epoch: 1 }]));
-      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('target:chat',?)",
-        JSON.stringify({ clientId: "desktop", platform: "desktop", at: start }));
+      const service = new Notifications(state, recordingPushEnv(sends), (kind, id) => rows.get(`${kind}/${id}`), () => {});
+      seedRecipient(state.storage.sql, start, "desktop", "desktop");
       const running = row("sessions", "chat", { chatId: "chat", deviceId: "host", status: "working",
         startedAt: start - 60_000, updatedAt: start });
       const done = row("sessions", "chat", { ...running.fields, status: "idle" });
@@ -52,19 +41,8 @@ describe("notification outbox on real Durable Object SQLite", () => {
         ["chats/chat", row("chats", "chat", { deviceId: "host", spaceId: "project" })],
         ["spaces/project", row("spaces", "project", {})]
       ]);
-      const config = { NOTIFICATIONS_ENABLED: "true", APNS_TEAM_ID: "TEAM123456",
-        APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test", PUSH_DEVICES: {
-          idFromString: (id: string) => id, get: () => ({ fetch: async (r: Request) => {
-            const body = await r.json() as { message: { kind: string } };
-            if (body.message.kind !== "badge") sent.push(body);
-            return Response.json({ sent: true });
-          } })
-        } } as unknown as Env;
-      const service = new Notifications(state, config, (kind, id) => rows.get(`${kind}/${id}`), () => {});
-      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('recipients',?)",
-        JSON.stringify([{ id: "b".repeat(64), lease: crypto.randomUUID(), installationId: "phone", epoch: 1 }]));
-      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('target:chat',?)",
-        JSON.stringify({ clientId: "phone", platform: "ios", at: start }));
+      const service = new Notifications(state, recordingPushEnv(sent), (kind, id) => rows.get(`${kind}/${id}`), () => {});
+      seedRecipient(state.storage.sql, start);
       const running = row("sessions", "chat", { chatId: "chat", deviceId: "host", status: "working",
         startedAt: start - 60_000, updatedAt: start, subagents: [{ mode: "async", status: "running", updatedAt: start }] });
       const launched = row("sessions", "chat", { ...running.fields, status: "idle" });
@@ -116,19 +94,10 @@ describe("notification outbox on real Durable Object SQLite", () => {
       const rows = new Map<string, Row>();
       rows.set("chats/chat", row("chats", "chat", { deviceId: "host", spaceId: "project" }));
       rows.set("spaces/project", row("spaces", "project", { deviceId: "host" }));
-      const ns = { idFromString: (id: string) => id, get: () => ({ fetch: async (request: Request) => {
-        const body = await request.json() as { message: { kind: string } };
-        if (body.message.kind !== "badge") sends.push(body);
-        return Response.json({ sent: true });
-      } }) };
-      const config = { NOTIFICATIONS_ENABLED: "true", PUSH_DEVICES: ns,
-        APNS_TEAM_ID: "TEAM123456", APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test-only" } as unknown as Env;
+      const config = recordingPushEnv(sends);
       const make = () => new Notifications(state, config, (kind, id) => rows.get(`${kind}/${id}`), () => {});
       let service = make();
-      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES(?,?)", "recipients",
-        JSON.stringify([{ id: "b".repeat(64), lease: crypto.randomUUID(), installationId: "phone", epoch: 1 }]));
-      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('target:chat',?)",
-        JSON.stringify({ clientId: "phone", platform: "ios", at: start }));
+      seedRecipient(state.storage.sql, start);
       const running = row("sessions", "chat", { chatId: "chat", deviceId: "host", status: "working", startedAt: start - 60_000, updatedAt: start });
       service.observe([{ before: undefined, after: running }], "host");
       const done = row("sessions", "chat", { ...running.fields, status: "idle" });
@@ -161,18 +130,9 @@ describe("notification outbox on real Durable Object SQLite", () => {
         ["chats/chat", row("chats", "chat", { deviceId: "host", spaceId: "project" })],
         ["spaces/project", row("spaces", "project", {})]
       ]);
-      const ns = { idFromString: (id: string) => id, get: () => ({ fetch: async (request: Request) => {
-        const body = await request.json() as { message: { kind: string } };
-        if (body.message.kind !== "badge") sends.push(body);
-        return Response.json({ sent: true });
-      } }) };
-      const config = { NOTIFICATIONS_ENABLED: "true", PUSH_DEVICES: ns,
-        APNS_TEAM_ID: "TEAM123456", APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test-only" } as unknown as Env;
+      const config = recordingPushEnv(sends);
       const service = new Notifications(state, config, (kind, id) => rows.get(`${kind}/${id}`), () => {});
-      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES(?,?)", "recipients",
-        JSON.stringify([{ id: "b".repeat(64), lease: crypto.randomUUID(), installationId: "phone", epoch: 1 }]));
-      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('target:chat',?)",
-        JSON.stringify({ clientId: "phone", platform: "ios", at: start }));
+      seedRecipient(state.storage.sql, start);
       const running = row("sessions", "chat", { chatId: "chat", deviceId: "host", status: "working", startedAt: start - 60_000, updatedAt: start });
       const input = row("sessions", "chat", { ...running.fields, status: "awaitingInput" });
       service.observe([{ before: undefined, after: running }], "host");
@@ -205,13 +165,9 @@ describe("notification outbox on real Durable Object SQLite", () => {
         ["chats/chat", row("chats", "chat", { deviceId: "host", spaceId: "project" })],
         ["spaces/project", row("spaces", "project", {})]
       ]);
-      const service = new Notifications(state, { NOTIFICATIONS_ENABLED: "true", PUSH_DEVICES: {},
-        APNS_TEAM_ID: "TEAM123456", APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test" } as Env,
+      const service = new Notifications(state, { ...APNS_TEST_ENV, PUSH_DEVICES: {} } as unknown as Env,
         (kind, id) => rows.get(`${kind}/${id}`), () => {});
-      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('recipients',?)",
-        JSON.stringify([{ id: "b".repeat(64), lease: crypto.randomUUID(), installationId: "phone", epoch: 1 }]));
-      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('target:chat',?)",
-        JSON.stringify({ clientId: "phone", platform: "ios", at: now }));
+      seedRecipient(state.storage.sql, now);
       const a = row("sessions", "chat", { deviceId: "host", chatId: "chat", status: "working", startedAt: now - 1000, updatedAt: now });
       const b = row("sessions", "chat", { ...a.fields, status: "idle" });
       service.observe([{ before: undefined, after: b }], "host");

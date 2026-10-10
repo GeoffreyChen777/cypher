@@ -25,26 +25,13 @@
 //
 // Usage: node pi-claude-bridge-response-model.mjs <pi-claude-bridge-package-dir>
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { packageDirArg, patchFile, requireVersion } from "./lib/apply-anchors.mjs";
 
-const [, , packageDir] = process.argv;
-if (!packageDir) {
-  console.error("usage: pi-claude-bridge-response-model.mjs <pi-claude-bridge-package-dir>");
-  process.exit(1);
-}
+const packageDir = packageDirArg("pi-claude-bridge-response-model.mjs <pi-claude-bridge-package-dir>");
 
 const MARKER = "CYPHER-RUNTIME-PATCH: response-model";
 const EXPECTED_VERSION = "0.9.1";
-
-const version = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf-8")).version;
-if (version !== EXPECTED_VERSION) {
-  console.error(
-    `pi-claude-bridge patch: expected ${EXPECTED_VERSION}, found ${version}.\n` +
-      "Re-check dist/pi-runtime/patches/pi-claude-bridge-response-model.mjs against the new version.",
-  );
-  process.exit(1);
-}
+requireVersion(packageDir, { name: "pi-claude-bridge", expected: EXPECTED_VERSION, script: "pi-claude-bridge-response-model.mjs" });
 
 const EDITS = [
   {
@@ -86,27 +73,8 @@ function noteResponseModel(output: AssistantMessage, served: unknown, model: Mod
   },
 ];
 
-const target = join(packageDir, "src", "index.ts");
-if (!existsSync(target)) {
-  console.error(`pi-claude-bridge patch: ${target} not found`);
-  process.exit(1);
-}
-const source = readFileSync(target, "utf-8");
-if (source.includes(MARKER)) {
+if (!patchFile(packageDir, "src/index.ts", { name: "pi-claude-bridge", marker: MARKER, edits: EDITS })) {
   console.log("pi-claude-bridge patch: response model already applied");
   process.exit(0);
 }
-let out = source;
-for (const { label, from, to } of EDITS) {
-  const at = out.indexOf(from);
-  if (at < 0 || out.indexOf(from, at + 1) >= 0) {
-    console.error(
-      `pi-claude-bridge patch: anchor ${at < 0 ? "not found" : "not unique"} (index.ts: ${label}).\n` +
-        "pi-claude-bridge changed shape — update dist/pi-runtime/patches/ before packaging.",
-    );
-    process.exit(1);
-  }
-  out = out.replace(from, to);
-}
-writeFileSync(target, out);
 console.log("pi-claude-bridge patch: messages record responseModel (index.ts)");

@@ -461,21 +461,13 @@ final class WorkspaceDiffWebTests: XCTestCase {
     }
 
     func testSourceRendererFailureFallsBackWithoutLosingText() async throws {
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let previous = scene.windows.first(where: \.isKeyWindow)
-        let window = UIWindow(windowScene: scene)
         let source = WorkspaceBrowserSession.readerExample
-        let host = UIHostingController(rootView: WorkspaceSourceView(path: "Example.swift", text: source, partial: true))
-        window.rootViewController = host
-        window.makeKeyAndVisible()
-        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
-        func find<T: UIView>(_ type: T.Type, in view: UIView) -> T? {
-            if let result = view as? T { return result }
-            return view.subviews.lazy.compactMap { find(type, in: $0) }.first
-        }
+        let hosted = try HostedWindow(WorkspaceSourceView(path: "Example.swift", text: source, partial: true))
+        defer { hosted.close() }
+        let host = hosted.host
         var web: WKWebView?
         for _ in 0..<100 {
-            web = find(WKWebView.self, in: host.view)
+            web = firstSubview(WKWebView.self, in: host.view)
             if let web, let state = try? await web.evaluateJavaScript("window.cypherDiff?.inspect().status"),
                state as? String == "rendered" { break }
             try await Task.sleep(for: .milliseconds(100))
@@ -487,13 +479,13 @@ final class WorkspaceDiffWebTests: XCTestCase {
         }); true
         """)
         for _ in 0..<50 {
-            if find(UITextView.self, in: host.view) != nil { break }
+            if firstSubview(UITextView.self, in: host.view) != nil { break }
             try await Task.sleep(for: .milliseconds(100))
         }
-        let plain = try XCTUnwrap(find(UITextView.self, in: host.view))
+        let plain = try XCTUnwrap(firstSubview(UITextView.self, in: host.view))
         XCTAssertEqual(plain.text, source)
         XCTAssertFalse(plain.isEditable)
         XCTAssertTrue(plain.isSelectable)
-        XCTAssertNil(find(WKWebView.self, in: host.view))
+        XCTAssertNil(firstSubview(WKWebView.self, in: host.view))
     }
 }

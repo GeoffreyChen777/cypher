@@ -41,11 +41,6 @@ struct SessionView: View {
         chat?.unseen == true && scenePhase == .active && path.last == .chat(chatId)
     }
 
-    private var chatSpace: Space? {
-        guard let spaceId = chat?.spaceId else { return nil }
-        return model.spaces.first { $0.id == spaceId }
-    }
-
     // `body` is split into layers (chrome → sheets → lifecycle) so each
     // type-checks on its own: as one expression it took ~0.9s here, close to
     // what timed out HomeView on CI's older Xcode.

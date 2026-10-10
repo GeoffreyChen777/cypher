@@ -8,9 +8,8 @@
 //
 // Every chat syncs through its chat2 room, whatever the registry row's
 // `roomGen` says. The local doc is always the chat2 lineage; a cached pre-chat2
-// snapshot is never imported (unrelated Loro histories would duplicate every
-// message), only mined for our own pending commands (M3) and left on disk as
-// rollback.
+// snapshot is never read (unrelated Loro histories would duplicate every
+// message).
 
 import Foundation
 import Loro
@@ -119,11 +118,6 @@ final class SessionStore {
         if let saved = DocDisk.loadChat2(into: doc, id: chatId) {
             cursor = saved
             project()
-        } else if DocDisk.legacySnapshotExists(id: chatId) {
-            // M3 discard-and-adopt: this device's cached doc predates the
-            // chat2 lineage. Carry over OUR OWN unresolved commands as fresh
-            // entries; the chat2 catch-up repopulates the transcript.
-            adoptLegacyCommands()
         }
         saver = DocSaver { [weak self] in
             guard let self else { return }
@@ -247,43 +241,6 @@ final class SessionStore {
         Task { await client.start() }
     }
 
-    /// Mine the retired s2 snapshot for OUR OWN still-pending commands and
-    /// re-queue them into the fresh lineage (doc_host.rs M3 requeue: same
-    /// command ids — the host's processed_commands ledger guards double
-    /// execution; basedOn is dropped, its turn ids don't exist here).
-    private func adoptLegacyCommands() {
-        let legacy = LoroDoc()
-        guard DocDisk.load(into: legacy, id: chatId),
-              let root = legacy.getDeepValue().mapValue,
-              let commands = root["commands"]?.listValue, !commands.isEmpty else { return }
-        let now = nowMs()
-        var carried = 0
-        let fresh = doc.getList(id: "commands")
-        for value in commands {
-            guard let m = value.mapValue,
-                  m["status"]?.stringValue == "pending",
-                  m["issuedBy"]?.stringValue == config.deviceId,
-                  let id = m["id"]?.stringValue,
-                  let kind = m["kind"]?.stringValue,
-                  let payload = m["payload"] else { continue }
-            if let expires = m["expiresAt"]?.i64Value, expires <= now { continue }
-            do {
-                let map = try fresh.pushContainer(child: LoroMap())
-                try map.insert(key: "id", v: id)
-                try map.insert(key: "kind", v: kind)
-                try map.insert(key: "payload", v: payload)
-                try map.insert(key: "issuedBy", v: config.deviceId)
-                try map.insert(key: "issuedAt", v: m["issuedAt"]?.i64Value ?? now)
-                try map.insert(key: "expiresAt", v: m["expiresAt"]?.i64Value ?? (now + commandDefaultTtlMs))
-                try map.insert(key: "status", v: "pending")
-                carried += 1
-            } catch {}
-        }
-        guard carried > 0 else { return }
-        doc.commit()
-        roomLog.info("chat2 \(self.chatId, privacy: .public): adopt carried \(carried) pending command(s) from the s2 lineage")
-    }
-
     /// Backgrounding hook: persist immediately.
     func flushToDisk() {
         saver?.flush()
@@ -391,7 +348,7 @@ final class SessionStore {
         return decodeEntries(root: root)
     }
 
-    nonisolated private static func decodeEntries(root: [String: LoroValue]) -> [MessageEntry] {
+    nonisolated static func decodeEntries(root: [String: LoroValue]) -> [MessageEntry] {
         // Commands are append-only and sync with the transcript. Join explicit
         // steer message IDs instead of guessing from timing/status, so the
         // optimistic echo and a reopened/cross-device transcript agree.
@@ -514,10 +471,6 @@ final class SessionStore {
     // MARK: Derived
 
     var lastEntryId: String? { durableEntries.last?.id }
-
-    var liveEntry: MessageEntry? {
-        entries.last(where: { $0.status == .streaming })
-    }
 
     /// The unresolved input request to surface in the question panel.
     var openInputRequest: (entryId: String, requestId: String, questions: [UserInputQuestion])? {

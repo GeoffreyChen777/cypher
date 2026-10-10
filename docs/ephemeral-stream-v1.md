@@ -1,8 +1,9 @@
 # Ephemeral stream v1 — P1 协议切片
 
-状态：**三端 codec、Engine 发送和 Desktop/iOS 展示已实现，默认关闭；服务端 relay 已移除**。
-Edge 的开发 relay（`development-preview.ts`）及其 `dev-locked` 鉴权已随托管开发 Worker
-一并删除；生产 `ChatRoom` 对 `0x20–0x26` 帧回 `bad_frame`。启用本功能需在新服务端
+状态：**Rust/iOS codec、Engine 发送和 Desktop/iOS 展示已实现，默认关闭；服务端 relay 已移除**。
+Edge 的开发 relay 及其 `dev-locked` 鉴权已随托管开发 Worker 一并删除，Edge 的 TS codec
+（`stream-preview.ts`）随后也已删除（可从 git 历史取回）；生产 `ChatRoom` 对 `0x20–0x26`
+帧回 `bad_frame`（`edge/test/workerd/preview.workerd.test.ts`）。启用本功能需在新服务端
 （`docs/plans/MIGRATION.md` §13 UX-2）上按下文契约重建 relay。正式设备身份、全故障矩阵
 与云端性能仍待验收。现有 HELLO、STATE、PUSH、ACK 和 durable 提交频率完全不变。
 
@@ -153,9 +154,8 @@ echo 清理仍使用 durable entries，而非加了预览的显示数组。
 - iOS `CypherDev` 用 `-dev-stream-preview` 启动；正式构建恒为关闭。独立单元测试可在
   AppConfig 中显式注入开发开关，但同样受构建/地址限制。
 - 服务端 relay 已移除（见上方状态），客户端开关在重建前不会产生预览。
-- 共享向量：`edge/src/fixtures/stream-preview-v1.json`（wire，48 例）与
-  `preview-reducer-v1.json`（状态机，13 例）。CI 的 Edge job 运行 TS 向量
-  （`edge/src/stream-preview.test.ts`）；macOS job 的 "Preview protocol" 步骤运行
+- 共享向量：`crates/sync/tests/fixtures/stream-preview-v1.json`（wire，48 例）与
+  `preview-reducer-v1.json`（状态机，13 例）。macOS job 的 "Preview protocol" 步骤运行
   `cargo test -p cypher-sync --lib preview`，并直接编译 iOS 的 Swift 源文件执行同一份
   向量（`scripts/tests/stream-preview-vectors.swift`）。iOS Simulator 另有
   `CypherTests/StreamPreviewTests`、`PreviewProjectionTests`。

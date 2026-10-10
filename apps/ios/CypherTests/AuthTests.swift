@@ -46,6 +46,21 @@ private func userTokensJSON() -> Data {
     Data(#"{"user":{"id":"u1","email":"a@b.c","firstName":"A","lastName":"B"},"accessToken":"at","refreshToken":"rt"}"#.utf8)
 }
 
+private extension PKCE {
+    /// Well-formed per the edge's `PKCE_VERIFIER_RE`
+    /// (`^[A-Za-z0-9\-._~]{43,128}$`).
+    static func isValidVerifier(_ verifier: String) -> Bool {
+        (43...128).contains(verifier.count)
+            && verifier.allSatisfy { c in
+                c.isASCII && (c.isLetter || c.isNumber || "-._~".contains(c))
+            }
+    }
+}
+
+private extension AuthError {
+    var isTransient: Bool { !isPermanent }
+}
+
 final class AuthPkceTests: XCTestCase {
     func testVerifierIsFreshUrlSafeAndInRange() {
         let a = PKCE.newVerifier()

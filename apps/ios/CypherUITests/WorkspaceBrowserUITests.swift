@@ -1,13 +1,6 @@
 import XCTest
 
 final class WorkspaceBrowserUITests: XCTestCase {
-    private func capture(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
-    }
-
     func testChangesPresentationStates() {
         let app = XCUIApplication()
         for appearance in ["light", "dark"] {

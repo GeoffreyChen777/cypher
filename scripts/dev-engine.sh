@@ -4,11 +4,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mode="${1:-local}"
 case "$mode" in local|dev) ;; *) echo 'Usage: dev-engine.sh [local|dev]' >&2; exit 2;; esac
-export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
+# CYPHER_DEV_INSTANCE=<name> keeps a second checkout's dev data apart:
+# ~/.cypher-development/<mode>-engine-<name> (and -ui-<name>).
+instance="${CYPHER_DEV_INSTANCE:-}"
+[[ "$instance" =~ ^[A-Za-z0-9._-]*$ ]] || { echo 'CYPHER_DEV_INSTANCE: letters, digits, . _ - only' >&2; exit 2; }
+unset CYPHER_DEV_INSTANCE
 export CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
 cargo build --locked -p cypher --features development
 unset CYPHER_EDGE_TOKEN CYPHER_EDGE_URL CYPHER_WORKOS_CLIENT_ID CYPHER_ENGINE_DATA_DIR CYPHER_ORG_ID CYPHER_USER_ID CYPHER_DEV_ACCESS_TOKEN
-export CYPHER_DATA_DIR="$HOME/.cypher-development/$mode-engine"
+export CYPHER_DATA_DIR="$HOME/.cypher-development/$mode-engine${instance:+-$instance}"
 umask 077
 mkdir -p "$CYPHER_DATA_DIR"
 if [[ "$mode" == dev ]]; then
@@ -17,7 +21,9 @@ if [[ "$mode" == dev ]]; then
   #   CYPHER_DEV_EDGE_URL=https://edge-dev.example.com scripts/dev-engine.sh dev
   # A caller-supplied value wins over the private file.
   dev_edge_override="${CYPHER_DEV_EDGE_URL:-}"
-  set -a; source "$HOME/Documents/cypher-development.env"; set +a
+  env_file="${CYPHER_DEV_ENV_FILE:-$HOME/Documents/cypher-development.env}"
+  [[ -f "$env_file" ]] || { echo "Missing $env_file (set CYPHER_DEV_ENV_FILE to the private development env file)" >&2; exit 1; }
+  set -a; source "$env_file"; set +a
   if [[ -n "$dev_edge_override" ]]; then
     export CYPHER_DEV_EDGE_URL="$dev_edge_override"
   elif [[ "${CYPHER_DEV_EDGE_URL:-}" == *cypher-edge-development* ]]; then

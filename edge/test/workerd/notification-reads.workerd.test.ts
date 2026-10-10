@@ -1,13 +1,11 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { Notifications } from "../../src/notifications";
-import type { Env } from "../../src/env";
 import type { Row } from "../../src/registry-core";
+import { pushEnv, row } from "./support";
 
 function fixture(state: DurableObjectState) {
   const rows = new Map<string, Row>();
-  const row = (kind: string, id: string, fields: Row["fields"]): Row =>
-    ({ kind, id, seq: 1, deleted: false, fields, clocks: {} });
   for (const id of ["chat", "other"]) {
     rows.set(`chats/${id}`, row("chats", id, { deviceId: "host", spaceId: "project" }));
   }
@@ -15,17 +13,13 @@ function fixture(state: DurableObjectState) {
   const sends: { message: { id: string; chatId: string } }[] = [];
   let duringSend: (() => Promise<void>) | undefined;
   let replay: (() => Promise<void>) | undefined;
-  const config = {
-    NOTIFICATIONS_ENABLED: "true", APNS_TEAM_ID: "TEAM123456",
-    APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test",
-    PUSH_DEVICES: { idFromString: (id: string) => id, get: () => ({ fetch: async (request: Request) => {
-      const body = await request.json() as typeof sends[number] & { message: { kind: string } };
-      if (body.message.kind === "badge") return Response.json({ sent: true });
-      sends.push(body);
-      await duringSend?.();
-      return Response.json({ sent: false }); // failures normally schedule retry
-    } }) }
-  } as unknown as Env;
+  const config = pushEnv(async request => {
+    const body = await request.json() as typeof sends[number] & { message: { kind: string } };
+    if (body.message.kind === "badge") return Response.json({ sent: true });
+    sends.push(body);
+    await duringSend?.();
+    return Response.json({ sent: false }); // failures normally schedule retry
+  });
   const make = () => new Notifications(state, config, (kind, id) => rows.get(`${kind}/${id}`), () => {});
   let service = make();
   state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('recipients',?)", JSON.stringify([
@@ -90,7 +84,7 @@ describe("reading cancels pending events, not future runs", () => {
           await f.activity(2, null, false);
           f.restart(); // cancellation survives durable-object reconstruction
           await f.replay();
-          expect(f.ids()).toEqual([], "Replayed terminal state must not resurrect a read event");
+          expect(f.ids(), "Replayed terminal state must not resurrect a read event").toEqual([]);
           clock.mockReturnValue(start + 20_000);
           await f.flush();
           expect(f.sends).toHaveLength(0);

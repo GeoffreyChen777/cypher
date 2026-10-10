@@ -1,8 +1,10 @@
 # Cypher
 
-Control your coding agents (Claude Code, Codex, Cursor, Grok, Hermes, Pi) locally by default, with optional multi-device sync.
+Control your Pi coding agent locally by default, with optional multi-device sync.
+Chats from the retired Claude Code, Codex, Cursor, Grok and Hermes harnesses stay
+readable but cannot continue; start a new Pi chat instead.
 
-![Cypher driving a Claude Code session with a live branch diff sidebar](apps/landing/public/assets/app-screenshot.jpg)
+![Cypher driving an agent session with a live branch diff sidebar](apps/landing/public/assets/app-screenshot.jpg)
 
 Every device runs a small engine that stores sessions on that device. The engine
 remains local-only unless you explicitly connect an account.

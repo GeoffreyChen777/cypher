@@ -21,8 +21,8 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   open a project to create or resume its sessions, or access its archive.
   `Space`/`spaceId` remain the shared wire-schema names — no schema migration.
 - **Pi-only:** new sessions use Pi. Existing non-Pi sessions remain readable
-  but cannot be driven from the mobile composer. The internal mock E2E rig
-  remains test infrastructure, not a selectable agent.
+  but cannot be driven from the mobile composer. The engine's mock harness
+  is test infrastructure, not a selectable agent.
 - **Target-device catalogs:** installed/enabled Pi and available models are
   read from that project's engine. One composer chip shows the model and its
   thinking level ("Claude Opus 5.5 · High", with the provider's mark) and
@@ -305,8 +305,9 @@ Run these commands from the repository root.
 
 ```
 Sync/
-  LoroProtocol.swift    loro-protocol 0.3 wire codec (byte-compatible port of
-                        the crate's encoding.rs: magic/varBytes/type/payload)
+  ChatFrames.swift      chat2 binary frame codec (type byte, u32le header
+                        length, JSON header, payload)
+  LoroValueJSON.swift   Loro value ↔ JSON bridging for doc projections
   RegistryClient.swift  registry snapshot/ops relay, cursor and reconnect
   ChatRoomClient.swift  chat2 snapshot/row backfill, push/ack and reconnect
   DeviceRelayClient.swift  explicit target-device RPC over Edge
@@ -328,8 +329,9 @@ Transcript/
                         ids ({msg}#{part}.{block}, {msg}#g{n}), fingerprint
                         versions, consecutive-tool grouping
   TranscriptView.swift  lazy stack + stick-to-bottom (pin breaks only on user
-                        scroll, 70pt re-engage band, 320pt jump button),
-                        tool-group folds, error/input chips
+                        scroll, 70pt re-engage band, 320pt jump button)
+  TranscriptRowViews.swift  user bubble, prose, tool-group folds, error/input
+                        chips
   Veil.swift            paint-only streaming fade (EMA-tracked duration,
                         1−(1−p)^1.6 curve)
 Composer/               glass pill, Send→Steer→Stop morph, QuestionPanel

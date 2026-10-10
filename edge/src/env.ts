@@ -17,8 +17,7 @@ export interface Env {
   WORKOS_ISSUER?: string;
   WORKOS_JWKS_URL?: string;
   /** WorkOS secret API key (wrangler secret) — powers the absorbed /auth/*
-   * routes (code exchange, refresh, orgs). Unset ⇒ those routes answer 501,
-   * matching the old apps/server dev-mode behavior. */
+   * routes (code exchange, refresh, orgs). Unset ⇒ those routes answer 501. */
   WORKOS_API_KEY?: string;
   PUSH_DEVICES?: DurableObjectNamespace;
   APNS_SENDER?: Fetcher;
@@ -33,3 +32,9 @@ export interface Env {
  * the caller's JWT. DOs trust it blindly — they are only reachable through
  * the Worker (design §2: "DO never sees an unauthenticated frame"). */
 export const AUTH_USER_HEADER = "x-cypher-auth-user";
+
+export const json = (value: unknown, status = 200): Response =>
+  new Response(JSON.stringify(value), {
+    status,
+    headers: { "content-type": "application/json" }
+  });

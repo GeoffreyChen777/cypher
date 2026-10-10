@@ -26,26 +26,13 @@
 //
 // Usage: node pi-ai-response-model.mjs <@earendil-works/pi-ai-package-dir>
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { packageDirArg, patchFile, requireVersion } from "./lib/apply-anchors.mjs";
 
-const [, , packageDir] = process.argv;
-if (!packageDir) {
-  console.error("usage: pi-ai-response-model.mjs <pi-ai-package-dir>");
-  process.exit(1);
-}
+const packageDir = packageDirArg("pi-ai-response-model.mjs <pi-ai-package-dir>");
 
 const MARKER = "CYPHER-RUNTIME-PATCH: response-model";
 const EXPECTED_VERSION = "1.0.1";
-
-const version = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf-8")).version;
-if (version !== EXPECTED_VERSION) {
-  console.error(
-    `pi-ai patch: expected ${EXPECTED_VERSION}, found ${version}.\n` +
-      "Re-check dist/pi-runtime/patches/pi-ai-response-model.mjs against the new version.",
-  );
-  process.exit(1);
-}
+requireVersion(packageDir, { name: "pi-ai", expected: EXPECTED_VERSION, script: "pi-ai-response-model.mjs" });
 
 const EDITS = [
   {
@@ -86,27 +73,8 @@ const EDITS = [
   },
 ];
 
-const target = join(packageDir, "dist", "api", "openai-responses-shared.js");
-if (!existsSync(target)) {
-  console.error(`pi-ai patch: ${target} not found`);
-  process.exit(1);
-}
-const source = readFileSync(target, "utf-8");
-if (source.includes(MARKER)) {
+if (!patchFile(packageDir, "dist/api/openai-responses-shared.js", { name: "pi-ai", marker: MARKER, edits: EDITS })) {
   console.log("pi-ai patch: response model already applied");
   process.exit(0);
 }
-let out = source;
-for (const { label, from, to } of EDITS) {
-  const at = out.indexOf(from);
-  if (at < 0 || out.indexOf(from, at + 1) >= 0) {
-    console.error(
-      `pi-ai patch: anchor ${at < 0 ? "not found" : "not unique"} (openai-responses-shared.js: ${label}).\n` +
-        "pi-ai changed shape — update dist/pi-runtime/patches/ before packaging.",
-    );
-    process.exit(1);
-  }
-  out = out.replace(from, to);
-}
-writeFileSync(target, out);
 console.log("pi-ai patch: Responses streams record responseModel (openai-responses-shared.js)");

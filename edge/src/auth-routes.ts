@@ -1,5 +1,5 @@
 /**
- * The /auth/* HTTP surface absorbed from zeron's apps/server:
+ * The /auth/* HTTP surface (originally a separate auth server, now absorbed):
  *
  *  - POST /auth/exchange     — WorkOS code → tokens (see `workos.ts`).
  *  - POST /auth/verify-email — continue a paused email-verification flow.
@@ -19,7 +19,7 @@
  * device session.
  */
 import { bearerFromRequest, verifyToken } from "./auth";
-import type { Env } from "./env";
+import { json, type Env } from "./env";
 import {
   WorkOsAuthError,
   WorkOsEmailVerificationRequired,
@@ -29,12 +29,6 @@ import {
   refresh,
   verifyEmail
 } from "./workos";
-
-const json = (value: unknown, status = 200): Response =>
-  new Response(JSON.stringify(value), {
-    status,
-    headers: { "content-type": "application/json" }
-  });
 
 const notConfigured = (): Response => json({ error: "workos not configured" }, 501);
 

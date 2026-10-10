@@ -22,12 +22,7 @@ final class ScriptChipTests: XCTestCase {
     }
 
     private func groups(_ parts: [MessagePart]) -> [(tools: [ToolItem], version: UInt64)] {
-        var parsers: [String: IncrementalMarkdownParser] = [:]
-        var completed: [String: CompletedParse] = [:]
-        let entry = MessageEntry(id: "m", role: .assistant, parts: parts, createdAt: 1,
-                                 deviceId: "d", status: .complete, continuationOf: nil)
-        return TranscriptRowBuilder.rows(entries: [entry], pendingSends: [],
-                                         parsers: &parsers, completed: &completed)
+        buildRows([.fixture(parts: parts)])
             .compactMap { row in
                 guard case .toolGroup(let tools, _) = row.kind else { return nil }
                 return (tools, row.version)

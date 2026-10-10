@@ -13,6 +13,7 @@ import { ChatRoom } from "../../src/chat-room";
 import { RegistryRoom } from "../../src/registry-room";
 import { encodeFrame, FRAME } from "../../src/chat-frames";
 import { AUTH_USER_HEADER, type Env } from "../../src/env";
+import { peer } from "./support";
 
 /** Counts billed writes: SQL rows plus alarm API calls, which never reach
  * `storage.sql` and so are invisible to a SQL-only proxy. */
@@ -72,19 +73,6 @@ function writes(state: DurableObjectState, sockets: WebSocket[] = []) {
   return { context, take, settle };
 }
 
-function socket(device: string) {
-  let attachment: unknown = { userId: "u", device, ready: true };
-  const frames: Uint8Array[] = [];
-  return {
-    frames,
-    ws: {
-      deserializeAttachment: () => attachment,
-      serializeAttachment: (v: unknown) => { attachment = v; },
-      send: (b: ArrayBuffer) => frames.push(new Uint8Array(b)),
-      close: () => {}
-    } as unknown as WebSocket
-  };
-}
 
 const req = (path: string, method = "GET", body?: BodyInit) =>
   new Request(`https://test${path}`, {
@@ -103,7 +91,7 @@ const push = (room: ChatRoom, ws: WebSocket, batchId: string, byte = 1) =>
 
 it("T1.1: chat push attribution costs no write, and /stats still counts it", async () => {
   await runInDurableObject(env.TEST_LOG.get(env.TEST_LOG.idFromName("t11-chat")), async (_, state) => {
-    const host = socket("host"), m = writes(state, [host.ws]);
+    const host = peer("host"), m = writes(state, [host.ws]);
     const room = new ChatRoom(m.context, {} as Env);
     state.storage.sql.exec("INSERT INTO meta(key,value) VALUES('owner','u')");
     m.take();
@@ -123,7 +111,7 @@ it("T1.1: chat push attribution costs no write, and /stats still counts it", asy
 
 it("T1.1: closing the socket flushes counters, and a fresh instance keeps counting from them", async () => {
   await runInDurableObject(env.TEST_LOG.get(env.TEST_LOG.idFromName("t11-flush")), async (_, state) => {
-    const host = socket("host"), m = writes(state, [host.ws]);
+    const host = peer("host"), m = writes(state, [host.ws]);
     const first = new ChatRoom(m.context, {} as Env);
     state.storage.sql.exec("INSERT INTO meta(key,value) VALUES('owner','u')");
     for (let i = 0; i < 3; i++) await push(first, host.ws, `b${i}`);
@@ -146,7 +134,7 @@ it("T1.1: closing the socket flushes counters, and a fresh instance keeps counti
 
 it("T1.1: the alarm flushes counters even when the backup is idle", async () => {
   await runInDurableObject(env.TEST_LOG.get(env.TEST_LOG.idFromName("t11-alarm")), async (_, state) => {
-    const host = socket("host"), m = writes(state, [host.ws]);
+    const host = peer("host"), m = writes(state, [host.ws]);
     const room = new ChatRoom(m.context, {} as Env);
     state.storage.sql.exec("INSERT INTO meta(key,value) VALUES('owner','u')");
     await push(room, host.ws, "b0");
@@ -164,7 +152,7 @@ it("T1.1: the alarm flushes counters even when the backup is idle", async () => 
 
 it("T1.2: backupDirty is written on the 0→1 edge only, and again after the alarm clears it", async () => {
   await runInDurableObject(env.TEST_LOG.get(env.TEST_LOG.idFromName("t12-edge")), async (_, state) => {
-    const host = socket("host"), m = writes(state, [host.ws]);
+    const host = peer("host"), m = writes(state, [host.ws]);
     // alarm() runs the real nightly backup, so this one needs a blob sink.
     const room = new ChatRoom(m.context, { BLOBS: { put: async () => {} } } as unknown as Env);
     state.storage.sql.exec("INSERT INTO meta(key,value) VALUES('owner','u')");
@@ -191,7 +179,7 @@ it("T1.2: backupDirty is written on the 0→1 edge only, and again after the ala
 
 it("T1.2: a fresh instance on an already-dirty room does not rewrite the flag", async () => {
   await runInDurableObject(env.TEST_LOG.get(env.TEST_LOG.idFromName("t12-rebuild")), async (_, state) => {
-    const host = socket("host"), m = writes(state, [host.ws]);
+    const host = peer("host"), m = writes(state, [host.ws]);
     const first = new ChatRoom(m.context, {} as Env);
     state.storage.sql.exec("INSERT INTO meta(key,value) VALUES('owner','u')");
     await push(first, host.ws, "b0");

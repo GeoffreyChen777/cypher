@@ -16,24 +16,6 @@ enum DocDisk {
         return base
     }
 
-    static func url(for id: String) -> URL {
-        let safe = id.replacingOccurrences(of: "/", with: "_")
-        return directory.appendingPathComponent("\(safe).loro")
-    }
-
-    /// Import the saved snapshot, if any. Returns whether anything loaded.
-    @discardableResult
-    static func load(into doc: LoroDoc, id: String) -> Bool {
-        guard let data = try? Data(contentsOf: url(for: id)), !data.isEmpty else { return false }
-        return (try? doc.importWith(bytes: data, origin: "disk")) != nil
-    }
-
-    /// Atomically persist the doc's snapshot.
-    static func save(doc: LoroDoc, id: String) {
-        guard let data = try? doc.export(mode: .snapshot) else { return }
-        try? data.write(to: url(for: id), options: .atomic)
-    }
-
     /// The workspace registry's persisted blob ({rows, cursor, gcFloor,
     /// clock, pending} JSON — RegistryDoc.toData). Replaces the old `ws3_`
     /// Loro workspace snapshot; session docs stay Loro snapshots unchanged.
@@ -46,19 +28,14 @@ enum DocDisk {
     /// `c2_<id>.loro` = 8-byte magic + UInt64 LE room cursor + snapshot,
     /// written atomically in ONE file so doc content and cursor can never
     /// diverge (a restored/copied doc that disagreed with its own cursor was
-    /// the root of the s2 redownload-forever class). The un-prefixed
-    /// `<id>.loro` files are the retired s2 lineage — never loaded into a
-    /// chat2 doc (unrelated Loro histories would duplicate every message),
-    /// kept on disk for rollback until LRU pruning ages them out.
+    /// the root of the s2 redownload-forever class). Un-prefixed `<id>.loro`
+    /// files from the retired s2 lineage are never read; LRU pruning ages
+    /// them out.
     private static let chat2Magic = Data("C2SNAP01".utf8)
 
     static func chat2URL(for id: String) -> URL {
         let safe = id.replacingOccurrences(of: "/", with: "_")
         return directory.appendingPathComponent("c2_\(safe).loro")
-    }
-
-    static func legacySnapshotExists(id: String) -> Bool {
-        FileManager.default.fileExists(atPath: url(for: id).path)
     }
 
     /// Import the chat2 snapshot; returns its cursor, or nil when absent or

@@ -11,7 +11,7 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { Env } from "./env";
 
-export interface Verified {
+interface Verified {
   readonly userId: string;
   readonly sessionId?: string;
   /** WorkOS `org_id` claim — the org the caller's session is scoped to. */
@@ -38,7 +38,7 @@ export const bearerFromRequest = (request: Request): string | undefined => {
 
 export const verifyToken = async (env: Env, token: string): Promise<Verified | undefined> => {
   if (env.AUTH_MODE === "dev") {
-    // Dev mode mirrors the old apps/server: the bearer string IS the user id.
+    // Dev mode: the bearer string IS the user id.
     // `userId@orgId` additionally carries a fake org claim so workspace-room
     // membership is exercisable locally.
     if (!token) return undefined;
