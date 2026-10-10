@@ -1,18 +1,21 @@
 //! Wire parsing for pi's RPC stream: the Cypher extension status frames (subagents,
 //! translation) and the mapping of pi tool calls/results onto typed calls.
 
-use super::*;
+use cypher_proto::{SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall};
+use serde_json::Value;
+
+use crate::{OUTPUT_CAP, cap_text};
 
 /// Status key of the cypher subagent status protocol: `extensions/subagents`
 /// publishes `setStatus("cypher.subagents.v1", JSON.stringify({version:1,
 /// runs:[…]}))`. Every other key stays ignored transient TUI furniture.
-pub(crate) const SUBAGENTS_STATUS_KEY: &str = "cypher.subagents.v1";
+pub const SUBAGENTS_STATUS_KEY: &str = "cypher.subagents.v1";
 /// Final-answer translation emitted by the Cypher translation extension.
-pub(crate) const TRANSLATION_STATUS_KEY: &str = "cypher.translation.v1";
+pub const TRANSLATION_STATUS_KEY: &str = "cypher.translation.v1";
 /// Prompt translation emitted by the same extension: the user's own words and
 /// the translation the agent received instead, so the transcript can keep the
 /// pair (`{version:1, source, text}`; capped like a final-answer frame).
-pub(crate) const INPUT_TRANSLATION_STATUS_KEY: &str = "cypher.translation.input.v1";
+pub const INPUT_TRANSLATION_STATUS_KEY: &str = "cypher.translation.input.v1";
 /// Whole-snapshot byte cap for one translation frame.
 ///
 /// A frame carries the full replacement for the message's text, so append mode

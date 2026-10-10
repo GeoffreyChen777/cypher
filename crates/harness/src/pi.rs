@@ -57,10 +57,17 @@ mod throughput;
 mod wire;
 
 use discovery::synthesize_commands;
-use models::*;
+use models::{
+    DiscoveredModels, MODEL_CATALOG_POLL, MODEL_CATALOG_STABLE, catalog_covers,
+    expected_model_providers, models_from_response, models_from_responses,
+};
 use session::*;
 use spawn::{resolve_executable, write_temp_prompt};
-use wire::*;
+use wire::{
+    INPUT_TRANSLATION_STATUS_KEY, SUBAGENTS_STATUS_KEY, TRANSLATION_STATUS_KEY, mcp_server_names,
+    parse_input_translation_status, parse_subagent_status, parse_translation_status, pi_typed_call,
+    tool_output_text, without_codemode_header,
+};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -79,15 +86,12 @@ use tokio::sync::mpsc;
 
 use cypher_proto::{
     AgentEvent, AnsweredModel, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
-    SlashCommand, SteeringMode, SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall,
-    UserInputQuestion,
+    SlashCommand, SteeringMode, UserInputQuestion,
 };
 
 use crate::pi::client::{Incoming, PiClient};
 use crate::process::{Signal, crash_message, send_signal, shutdown_child};
-use crate::{
-    Harness, HarnessError, OUTPUT_CAP, RunControls, RunHostContext, cap_text, parse_commands,
-};
+use crate::{Harness, HarnessError, RunControls, RunHostContext, parse_commands};
 
 /// pi's thinking ladder in cypher terms (its extra "off" tier has no cypher
 /// equivalent and stays the agent default). Each model offers a subset of it

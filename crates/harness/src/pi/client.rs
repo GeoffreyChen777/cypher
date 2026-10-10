@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::HarnessError;
 
 /// A non-response line, in stdout order.
-pub(crate) enum Incoming {
+pub enum Incoming {
     /// An agent event (any `type` other than response / extension_ui_request).
     Event(Value),
     /// An extension UI request (dialog or fire-and-forget). `payload` is the
@@ -62,7 +62,7 @@ enum Waiter {
 type Pending = Arc<Mutex<Option<HashMap<String, Waiter>>>>;
 
 #[derive(Clone)]
-pub(crate) struct PiClient {
+pub struct PiClient {
     next_id: Arc<AtomicI64>,
     pending: Pending,
     writer: mpsc::UnboundedSender<String>,

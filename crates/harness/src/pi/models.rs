@@ -1,6 +1,12 @@
 //! Model catalog discovery: mapping pi's model directory onto [`Model`] rows.
 
-use super::*;
+use std::collections::HashSet;
+use std::time::Duration;
+
+use cypher_proto::Model;
+use serde_json::Value;
+
+use super::model_ladder;
 
 /// Human-readable context-window tag: `1M` at a million and up (`1.5M`
 /// for fractional), `k` below that — never "1000k".
