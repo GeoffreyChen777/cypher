@@ -3,6 +3,7 @@
 //! The typed-API cases mirror `workspace.rs`'s tests so the drop-in claim is
 //! tested, not asserted.
 
+use super::core::encode_hlc;
 use super::*;
 use cypher_proto::{
     HarnessId, SandboxLevel, SessionStatus, SubagentRun, SubagentRunMode, SubagentRunStatus,
