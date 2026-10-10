@@ -138,19 +138,24 @@ enum MarkdownParser {
         case let text as Markdown.Text:
             runs.append(InlineRun(text: text.string, style: style))
         case let code as InlineCode:
-            var s = style; s.code = true
+            var s = style
+            s.code = true
             runs.append(InlineRun(text: code.code, style: s))
         case let strong as Strong:
-            var s = style; s.bold = true
+            var s = style
+            s.bold = true
             strong.children.forEach { collectInline($0, style: s, into: &runs) }
         case let em as Emphasis:
-            var s = style; s.italic = true
+            var s = style
+            s.italic = true
             em.children.forEach { collectInline($0, style: s, into: &runs) }
         case let strike as Strikethrough:
-            var s = style; s.strikethrough = true
+            var s = style
+            s.strikethrough = true
             strike.children.forEach { collectInline($0, style: s, into: &runs) }
         case let link as Markdown.Link:
-            var s = style; s.link = link.destination
+            var s = style
+            s.link = link.destination
             link.children.forEach { collectInline($0, style: s, into: &runs) }
         case let image as Markdown.Image:
             // Images render as their alt text (desktop parity: no inline images).
@@ -246,7 +251,8 @@ final class IncrementalMarkdownParser {
         return String(text[index...])
     }
 
-    private static let linkDefPattern = /(?m)^\s{0,3}\[[^\]]+\]:/
+    // A regex literal is never mutated; `Regex` just isn't marked Sendable.
+    nonisolated(unsafe) private static let linkDefPattern = /(?m)^\s{0,3}\[[^\]]+\]:/
     static func hasLinkDefs(_ text: String) -> Bool {
         text.contains(linkDefPattern)
     }

@@ -97,7 +97,9 @@ enum LineIcon {
             )
         case .command:
             return (
-                paths: ["M8 8h8v8H8zm8 8.001h3a3 3 0 1 1-3 3zm-7.999 0h-3a3 3 0 1 0 3 3zM16 8h3a3 3 0 1 0-3-3zM8.001 8h-3a3 3 0 1 1 3-3z"],
+                paths: [
+                    "M8 8h8v8H8zm8 8.001h3a3 3 0 1 1-3 3zm-7.999 0h-3a3 3 0 1 0 3 3zM16 8h3a3 3 0 1 0-3-3zM8.001 8h-3a3 3 0 1 1 3-3z"
+                ],
                 circles: []
             )
         case .chevronRight:
@@ -138,8 +140,9 @@ struct LineIconShape: Shape {
         let scale = min(rect.width, rect.height) / 24
         let dx = rect.minX + (rect.width - 24 * scale) / 2
         let dy = rect.minY + (rect.height - 24 * scale) / 2
-        return combined.applying(CGAffineTransform(scaleX: scale, y: scale)
-            .concatenating(CGAffineTransform(translationX: dx, y: dy)))
+        return combined.applying(
+            CGAffineTransform(scaleX: scale, y: scale)
+                .concatenating(CGAffineTransform(translationX: dx, y: dy)))
     }
 }
 
@@ -157,8 +160,12 @@ struct LineIconView: View {
 
     var body: some View {
         LineIconShape(icon: icon)
-            .stroke(color, style: StrokeStyle(lineWidth: 1.5 * size / 24,
-                                              lineCap: .round, lineJoin: .round))
+            .stroke(
+                color,
+                style: StrokeStyle(
+                    lineWidth: 1.5 * size / 24,
+                    lineCap: .round, lineJoin: .round)
+            )
             .frame(width: size, height: size)
     }
 }

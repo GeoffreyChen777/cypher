@@ -108,8 +108,8 @@ final class RowVeil {
             let lo = max(0, span.range.lowerBound - sourceOffset)
             let hi = min(length, span.range.upperBound - sourceOffset)
             guard lo < hi,
-                  let start = attr.characters.index(attr.startIndex, offsetBy: lo, limitedBy: attr.endIndex),
-                  let end = attr.characters.index(attr.startIndex, offsetBy: hi, limitedBy: attr.endIndex)
+                let start = attr.characters.index(attr.startIndex, offsetBy: lo, limitedBy: attr.endIndex),
+                let end = attr.characters.index(attr.startIndex, offsetBy: hi, limitedBy: attr.endIndex)
             else { continue }
             for run in attr[start..<end].runs {
                 let base: Color = attr[run.range].foregroundColor ?? Theme.text

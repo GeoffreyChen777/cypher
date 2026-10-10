@@ -1,6 +1,7 @@
 import XCTest
 
 /// Real typing and taps through the `@` menu, on the offline demo.
+@MainActor
 final class MentionMenuUITests: XCTestCase {
     private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: id).firstMatch
@@ -33,8 +34,9 @@ final class MentionMenuUITests: XCTestCase {
         let session = element(app, "mention-session-chat-picker")
         XCTAssertTrue(session.waitForHittable(timeout: 5))
         session.tap()
-        XCTAssertEqual(input.value as? String,
-                       "Compare \u{a0}@composer.rs\u{a0} with \u{a0}@Model\u{a0}picker\u{a0}catalog\u{a0}sync\u{a0} ")
+        XCTAssertEqual(
+            input.value as? String,
+            "Compare \u{a0}@composer.rs\u{a0} with \u{a0}@Model\u{a0}picker\u{a0}catalog\u{a0}sync\u{a0} ")
         capture(app, "mention-chips")
 
         // Backspace past the trailing space takes the whole chip.
@@ -44,7 +46,8 @@ final class MentionMenuUITests: XCTestCase {
         XCTAssertTrue(session.waitForHittable(timeout: 5))
         session.tap()
 
-        let send = app.buttons.matching(NSPredicate(format: "label == 'Up Arrow' OR identifier == 'arrow.up'")).firstMatch
+        let send = app.buttons.matching(NSPredicate(format: "label == 'Up Arrow' OR identifier == 'arrow.up'"))
+            .firstMatch
         XCTAssertTrue(send.waitForHittable(timeout: 5))
         send.tap()
         let bubble = app.descendants(matching: .any)

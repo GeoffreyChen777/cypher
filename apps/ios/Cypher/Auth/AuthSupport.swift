@@ -1,7 +1,7 @@
 // Pure auth helpers: RFC 7636 PKCE and sign-in org routing. Foundation-only
 // so the unit tests can pin them without a UI target — the iOS side of the
 // PKCE flow the edge already enforces
-// (`PKCE_VERIFIER_RE` + `codeVerifier` in apps/edge/src/auth-routes.ts).
+// (`PKCE_VERIFIER_RE` + `codeVerifier` in apps/edge/src/auth/auth-routes.ts).
 
 import CryptoKit
 import Foundation

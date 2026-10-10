@@ -25,7 +25,8 @@ struct TranscriptRound: Equatable {
 
     /// The prompt's first non-blank line, whitespace collapsed.
     static func previewLine(_ text: String) -> String {
-        let line = text.split(whereSeparator: \.isNewline)
+        let line =
+            text.split(whereSeparator: \.isNewline)
             .first { !$0.allSatisfy(\.isWhitespace) } ?? ""
         return String(line.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(140))
     }
@@ -92,7 +93,9 @@ struct TurnAnchor: ViewModifier {
     func body(content: Content) -> some View {
         if let round {
             content
-                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .scrollView).minY } action: { [tracker, scroll] top in
+                .onGeometryChange(for: CGFloat.self) {
+                    $0.frame(in: .scrollView).minY
+                } action: { [tracker, scroll] top in
                     // A little above center: a prompt that has scrolled up
                     // past this is the one being read.
                     tracker.report(round: round, top: top, line: scroll.viewportHeight * 0.4)
@@ -124,8 +127,8 @@ struct TurnScrubber: View {
 
     /// Tick pitch (center to center): the reference's airy 12pt, packed down
     /// to 4pt on long sessions before ticks start standing for several rounds.
-    static let pitchMax: CGFloat = 12
-    static let pitchMin: CGFloat = 4
+    nonisolated static let pitchMax: CGFloat = 12
+    nonisolated static let pitchMin: CGFloat = 4
     static let tickWidth: CGFloat = 12
     /// Touch slop beyond the first and last tick.
     static let slop: CGFloat = 16
@@ -134,8 +137,9 @@ struct TurnScrubber: View {
 
     var body: some View {
         GeometryReader { geo in
-            let layout = TickLayout(rounds: rounds.count,
-                                    maxHeight: min(geo.size.height * 0.55, 360))
+            let layout = TickLayout(
+                rounds: rounds.count,
+                maxHeight: min(geo.size.height * 0.55, 360))
             strip(layout)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         }

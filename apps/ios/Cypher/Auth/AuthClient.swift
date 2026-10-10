@@ -1,5 +1,5 @@
 // Edge auth client — /auth/exchange, /auth/refresh, /auth/orgs
-// (apps/edge/src/auth-routes.ts). Two modes, mirroring the engine:
+// (apps/edge/src/auth/auth-routes.ts). Two modes, mirroring the engine:
 // - WorkOS: paste-code exchange → access/refresh tokens; refresh scoped to an
 //   org adds the org_id claim the workspace room requires.
 // - Dev (AUTH_MODE=dev edge): the bearer string IS the user id; "user@org"
@@ -106,7 +106,7 @@ struct AuthClient {
             "auth/verify-email",
             body: [
                 "pendingAuthenticationToken": pendingAuthenticationToken,
-                "code": code
+                "code": code,
             ]
         )
         return (r.user, AuthTokens(accessToken: r.accessToken, refreshToken: r.refreshToken))
@@ -168,7 +168,8 @@ struct AuthClient {
         guard (200..<300).contains(statusCode) else {
             let envelope = try? JSONDecoder().decode(ErrorEnvelope.self, from: data)
             if envelope?.code == "email_verification_required",
-               let token = envelope?.pendingAuthenticationToken {
+                let token = envelope?.pendingAuthenticationToken
+            {
                 throw AuthError.emailVerificationRequired(
                     pendingAuthenticationToken: token,
                     email: envelope?.email
@@ -188,9 +189,9 @@ struct AuthClient {
 
 enum Keychain {
     #if CYPHER_DEVELOPMENT
-    private static let service = "ai.mvp-lab.cypher.ios.dev"
+        private static let service = "ai.mvp-lab.cypher.ios.dev"
     #else
-    private static let service = "ai.mvp-lab.cypher.ios"
+        private static let service = "ai.mvp-lab.cypher.ios"
     #endif
 
     @discardableResult
@@ -204,7 +205,8 @@ enum Keychain {
         SecItemDelete(query as CFDictionary)
         var add = query
         add[kSecValueData as String] = data
-        add[kSecAttrAccessible as String] = thisDeviceOnly
+        add[kSecAttrAccessible as String] =
+            thisDeviceOnly
             ? kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly : kSecAttrAccessibleAfterFirstUnlock
         return SecItemAdd(add as CFDictionary, nil)
     }
@@ -219,7 +221,8 @@ enum Keychain {
         ]
         var result: AnyObject?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
+            let data = result as? Data
+        else { return nil }
         return String(data: data, encoding: .utf8)
     }
 

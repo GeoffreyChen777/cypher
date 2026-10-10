@@ -42,41 +42,53 @@ enum HighlightLanguage: String {
     var keywords: Set<String> {
         switch self {
         case .rust:
-            return ["as", "async", "await", "break", "const", "continue", "crate", "dyn", "else",
-                    "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop",
-                    "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static",
-                    "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while"]
+            return [
+                "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else",
+                "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop",
+                "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static",
+                "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while",
+            ]
         case .javascript:
-            return ["async", "await", "break", "case", "catch", "class", "const", "continue",
-                    "default", "delete", "do", "else", "export", "extends", "false", "finally",
-                    "for", "function", "if", "import", "in", "instanceof", "interface", "let",
-                    "new", "null", "of", "return", "static", "super", "switch", "this", "throw",
-                    "true", "try", "type", "typeof", "undefined", "var", "void", "while", "yield"]
+            return [
+                "async", "await", "break", "case", "catch", "class", "const", "continue",
+                "default", "delete", "do", "else", "export", "extends", "false", "finally",
+                "for", "function", "if", "import", "in", "instanceof", "interface", "let",
+                "new", "null", "of", "return", "static", "super", "switch", "this", "throw",
+                "true", "try", "type", "typeof", "undefined", "var", "void", "while", "yield",
+            ]
         case .python:
-            return ["and", "as", "assert", "async", "await", "break", "class", "continue", "def",
-                    "del", "elif", "else", "except", "False", "finally", "for", "from", "global",
-                    "if", "import", "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass",
-                    "raise", "return", "True", "try", "while", "with", "yield"]
+            return [
+                "and", "as", "assert", "async", "await", "break", "class", "continue", "def",
+                "del", "elif", "else", "except", "False", "finally", "for", "from", "global",
+                "if", "import", "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass",
+                "raise", "return", "True", "try", "while", "with", "yield",
+            ]
         case .go:
-            return ["break", "case", "chan", "const", "continue", "default", "defer", "else",
-                    "fallthrough", "false", "for", "func", "go", "goto", "if", "import",
-                    "interface", "map", "nil", "package", "range", "return", "select", "struct",
-                    "switch", "true", "type", "var"]
+            return [
+                "break", "case", "chan", "const", "continue", "default", "defer", "else",
+                "fallthrough", "false", "for", "func", "go", "goto", "if", "import",
+                "interface", "map", "nil", "package", "range", "return", "select", "struct",
+                "switch", "true", "type", "var",
+            ]
         case .json:
             return ["true", "false", "null"]
         case .bash:
-            return ["case", "do", "done", "elif", "else", "esac", "export", "fi", "for", "function",
-                    "if", "in", "local", "return", "then", "until", "while"]
+            return [
+                "case", "do", "done", "elif", "else", "esac", "export", "fi", "for", "function",
+                "if", "in", "local", "return", "then", "until", "while",
+            ]
         case .toml:
             return ["true", "false"]
         case .markdown:
             return []
         case .swift:
-            return ["as", "async", "await", "break", "case", "catch", "class", "continue",
-                    "default", "defer", "do", "else", "enum", "extension", "false", "final",
-                    "for", "func", "guard", "if", "import", "in", "init", "internal", "is", "let",
-                    "nil", "private", "protocol", "public", "return", "self", "Self", "static",
-                    "struct", "switch", "throw", "throws", "true", "try", "var", "where", "while"]
+            return [
+                "as", "async", "await", "break", "case", "catch", "class", "continue",
+                "default", "defer", "do", "else", "enum", "extension", "false", "final",
+                "for", "func", "guard", "if", "import", "in", "init", "internal", "is", "let",
+                "nil", "private", "protocol", "public", "return", "self", "Self", "static",
+                "struct", "switch", "throw", "throws", "true", "try", "var", "where", "while",
+            ]
         }
     }
 
@@ -118,7 +130,9 @@ enum Highlighter {
         }
     }
 
-    static func tokenizeLine(_ chars: [Character], language lang: HighlightLanguage, carry: inout LineCarry) -> [TokenSpan] {
+    static func tokenizeLine(_ chars: [Character], language lang: HighlightLanguage, carry: inout LineCarry)
+        -> [TokenSpan]
+    {
         var spans: [TokenSpan] = []
         var i = 0
         let n = chars.count
@@ -187,8 +201,14 @@ enum Highlighter {
                 let start = i
                 i += 1
                 while i < n {
-                    if chars[i] == "\\" { i += min(2, n - i); continue }
-                    if chars[i] == quote { i += 1; break }
+                    if chars[i] == "\\" {
+                        i += min(2, n - i)
+                        continue
+                    }
+                    if chars[i] == quote {
+                        i += 1
+                        break
+                    }
                     i += 1
                 }
                 spans.append(TokenSpan(range: start..<i, cls: .stringLit))
@@ -198,8 +218,10 @@ enum Highlighter {
             // Numbers
             if c.isNumber {
                 let start = i
-                while i < n, chars[i].isHexDigit || chars[i] == "." || chars[i] == "_"
-                    || chars[i] == "x" || chars[i] == "o" || chars[i] == "b" || chars[i] == "e" {
+                while i < n,
+                    chars[i].isHexDigit || chars[i] == "." || chars[i] == "_"
+                        || chars[i] == "x" || chars[i] == "o" || chars[i] == "b" || chars[i] == "e"
+                {
                     i += 1
                 }
                 // Guard against identifiers that merely start with a digit-ish tail.

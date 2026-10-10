@@ -1,12 +1,12 @@
 // Registry merge core + client-side doc — the Swift mirror of
-// apps/edge/src/registry-core.ts (pure op/row semantics) and
+// apps/edge/src/registry/registry-core.ts (pure op/row semantics) and
 // crates/doc/src/registry.rs (RegistryDoc: authoritative rows + pending
 // overlay). See docs/design/registry-sync.md.
 //
 // The registry stores CURRENT STATE ONLY: a row is a bag of fields, each
 // field carries the HLC of its last write, and a write applies iff its clock
 // beats the stored one. The shared conformance vectors live in
-// CypherTests/RegistryCoreTests.swift — keep all three languages in sync.
+// CypherTests/Sync/RegistryCoreTests.swift — keep all three languages in sync.
 
 import Foundation
 
@@ -90,7 +90,8 @@ extension JSONValue {
     /// Bridge an Encodable (e.g. ChatConfig) into a field value.
     init?<T: Encodable>(encodable: T) {
         guard let data = try? JSONEncoder().encode(encodable),
-              let value = try? JSONDecoder().decode(JSONValue.self, from: data) else { return nil }
+            let value = try? JSONDecoder().decode(JSONValue.self, from: data)
+        else { return nil }
         self = value
     }
 }
@@ -137,7 +138,7 @@ struct HlcClock: Codable, Hashable, Sendable {
     }
 }
 
-// MARK: - Rows and ops (wire-compatible with apps/edge/src/registry-core.ts)
+// MARK: - Rows and ops (wire-compatible with apps/edge/src/registry/registry-core.ts)
 
 struct RegistryRow: Hashable, Codable, Sendable {
     var kind: String
@@ -199,8 +200,9 @@ func applyOp(_ row: RegistryRow?, _ op: RegistryOp) -> RegistryApplyResult {
         guard var gone = row else {
             // Tombstone-on-missing guards against a late create racing the delete.
             return RegistryApplyResult(
-                row: RegistryRow(kind: op.kind, id: op.id, seq: 0, deleted: true,
-                                 delHlc: op.hlc, fields: [:], clocks: [:]),
+                row: RegistryRow(
+                    kind: op.kind, id: op.id, seq: 0, deleted: true,
+                    delHlc: op.hlc, fields: [:], clocks: [:]),
                 changed: true)
         }
         let beats = gone.deleted ? hlcNewer(op.hlc, gone.delHlc) : hlcNewer(op.hlc, maxClock(gone))
@@ -218,15 +220,17 @@ func applyOp(_ row: RegistryRow?, _ op: RegistryOp) -> RegistryApplyResult {
             if op.op == .update { return RegistryApplyResult(row: row, changed: false) }
             if !hlcNewer(op.hlc, row.delHlc) { return RegistryApplyResult(row: row, changed: false) }
             // Revival: the tombstone loses wholesale; the upsert's fields are the row.
-            base = RegistryRow(kind: row.kind, id: row.id, seq: row.seq, deleted: false,
-                               delHlc: row.delHlc, fields: [:], clocks: [:])
+            base = RegistryRow(
+                kind: row.kind, id: row.id, seq: row.seq, deleted: false,
+                delHlc: row.delHlc, fields: [:], clocks: [:])
         } else {
             base = row
         }
     } else {
         if op.op == .update { return RegistryApplyResult(row: nil, changed: false) }
-        base = RegistryRow(kind: op.kind, id: op.id, seq: 0, deleted: false,
-                           delHlc: nil, fields: [:], clocks: [:])
+        base = RegistryRow(
+            kind: op.kind, id: op.id, seq: 0, deleted: false,
+            delHlc: nil, fields: [:], clocks: [:])
     }
 
     var changed = row == nil || (row?.deleted == true && !base.deleted)
@@ -260,13 +264,15 @@ func maxClock(_ row: RegistryRow) -> Hlc? {
 /// the row's ORIGINAL per-field clocks, or a delete for tombstones.
 func rowToSeedOp(_ row: RegistryRow) -> RegistryOp {
     if row.deleted {
-        return RegistryOp(kind: row.kind, id: row.id, op: .delete, set: nil,
-                          hlc: row.delHlc ?? encodeHlc(ms: 0, counter: 0, device: "seed"),
-                          clocks: nil)
+        return RegistryOp(
+            kind: row.kind, id: row.id, op: .delete, set: nil,
+            hlc: row.delHlc ?? encodeHlc(ms: 0, counter: 0, device: "seed"),
+            clocks: nil)
     }
-    return RegistryOp(kind: row.kind, id: row.id, op: .upsert, set: row.fields,
-                      hlc: maxClock(row) ?? encodeHlc(ms: 0, counter: 0, device: "seed"),
-                      clocks: row.clocks)
+    return RegistryOp(
+        kind: row.kind, id: row.id, op: .upsert, set: row.fields,
+        hlc: maxClock(row) ?? encodeHlc(ms: 0, counter: 0, device: "seed"),
+        clocks: row.clocks)
 }
 
 // MARK: - Pending batches
@@ -344,16 +350,18 @@ final class RegistryDoc {
     }
 
     func toData() throws -> Data {
-        let state = Persisted(v: 1, resyncEpoch: 1, deviceId: deviceId, serverSeq: serverSeq, gcFloor: gcFloor,
-                              clock: clock, rows: authoritative.values.flatMap(\.values),
-                              pending: pending)
+        let state = Persisted(
+            v: 1, resyncEpoch: 1, deviceId: deviceId, serverSeq: serverSeq, gcFloor: gcFloor,
+            clock: clock, rows: authoritative.values.flatMap(\.values),
+            pending: pending)
         return try JSONEncoder().encode(state)
     }
 
     static func from(data: Data, deviceId: String) throws -> RegistryDoc {
         let state = try JSONDecoder().decode(Persisted.self, from: data)
         guard state.v == 1 else {
-            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "unknown registry snapshot version \(state.v)"))
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: [], debugDescription: "unknown registry snapshot version \(state.v)"))
         }
         let doc = RegistryDoc(deviceId: deviceId)
         doc.serverSeq = (state.resyncEpoch ?? 0) < 1 ? 0 : state.serverSeq
@@ -478,9 +486,10 @@ final class RegistryDoc {
     /// sessions atomically).
     func deleteRows(_ keys: [(kind: String, id: String)]) {
         let hlc = nextHlc()
-        enqueue(ops: keys.map {
-            RegistryOp(kind: $0.kind, id: $0.id, op: .delete, set: nil, hlc: hlc, clocks: nil)
-        })
+        enqueue(
+            ops: keys.map {
+                RegistryOp(kind: $0.kind, id: $0.id, op: .delete, set: nil, hlc: hlc, clocks: nil)
+            })
     }
 
     // MARK: Overlay reads (authoritative + pending ops replayed)

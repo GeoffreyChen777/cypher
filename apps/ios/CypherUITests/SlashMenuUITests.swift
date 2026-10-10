@@ -3,6 +3,7 @@ import XCTest
 /// The composer's `/` menu by real taps on the offline demo: the stateful
 /// commands under their headings with what each controls, a command's
 /// choices, and a typed name finding the rest.
+@MainActor
 final class SlashMenuUITests: XCTestCase {
     private func launch(_ appearance: String = "dark") -> XCUIApplication {
         .launchDemo(["-route", "chat:chat-tabs", "-appAppearance", appearance])
@@ -59,8 +60,9 @@ final class SlashMenuUITests: XCTestCase {
         XCTAssertEqual(input.value as? String, "/orchestrate ")
         let on = element(app, "slash-choice-on")
         XCTAssertTrue(on.waitForHittable(timeout: 5), "the choices open")
-        XCTAssertTrue(app.staticTexts["Adaptive orchestration is off"].waitForExistence(timeout: 5),
-                      "what is in effect heads the choices")
+        XCTAssertTrue(
+            app.staticTexts["Adaptive orchestration is off"].waitForExistence(timeout: 5),
+            "what is in effect heads the choices")
         XCTAssertEqual(element(app, "slash-choice-off").value as? String, "In effect")
         XCTAssertNotEqual(element(app, "slash-choice-on").value as? String, "In effect")
         // One line a row: the name is the whole label.

@@ -2,6 +2,7 @@ import XCTest
 
 /// The composer's one model chip and the card it opens, by real taps on the
 /// offline demo: providers, models and the thinking level in one place.
+@MainActor
 final class ModelPickerUITests: XCTestCase {
     private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: id).firstMatch
@@ -18,8 +19,9 @@ final class ModelPickerUITests: XCTestCase {
 
         let chip = element(app, "model-chip")
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
-        XCTAssertTrue(chip.label.contains("Pi demo model") && chip.label.contains("High"),
-                      "one chip carries the model and its level: \(chip.label)")
+        XCTAssertTrue(
+            chip.label.contains("Pi demo model") && chip.label.contains("High"),
+            "one chip carries the model and its level: \(chip.label)")
         chip.tap()
 
         // Providers, the viewed provider's models, the pinned thinking track.
@@ -49,7 +51,8 @@ final class ModelPickerUITests: XCTestCase {
 
         app.buttons["Close"].tap()
         XCTAssertTrue(chip.waitForHittable(timeout: 5))
-        XCTAssertTrue(chip.label.contains("Claude Opus 5.5") && chip.label.contains("X-High"),
-                      "the chip shows the new pick: \(chip.label)")
+        XCTAssertTrue(
+            chip.label.contains("Claude Opus 5.5") && chip.label.contains("X-High"),
+            "the chip shows the new pick: \(chip.label)")
     }
 }

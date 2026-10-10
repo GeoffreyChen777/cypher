@@ -42,9 +42,11 @@ struct MarkdownBlockView: View {
 
         case .heading(let level, let runs):
             let m = MD.headingMetrics(level)
-            SelectableTranscriptText(attributed: TranscriptTextStyle.inline(
-                runs, size: m.size, weight: .semibold, lineHeight: m.line))
-                .frame(maxWidth: .infinity, alignment: .leading)
+            SelectableTranscriptText(
+                attributed: TranscriptTextStyle.inline(
+                    runs, size: m.size, weight: .semibold, lineHeight: m.line)
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
 
         case .codeBlock(let language, let code):
             CodeBlockView(language: language, code: code, cacheKey: cacheKey)
@@ -110,10 +112,12 @@ struct HighlightedCodeView: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            SelectableTranscriptText(attributed: TranscriptTextStyle.code(code, spans: spans, size: size),
-                                     wraps: false)
-                .padding(.horizontal, MD.codePaddingX)
-                .padding(.vertical, MD.codePaddingY)
+            SelectableTranscriptText(
+                attributed: TranscriptTextStyle.code(code, spans: spans, size: size),
+                wraps: false
+            )
+            .padding(.horizontal, MD.codePaddingX)
+            .padding(.vertical, MD.codePaddingY)
         }
         .task(id: code) {
             guard let lang = HighlightLanguage.forTag(language) else { return }
@@ -146,9 +150,11 @@ struct BlockquoteView: View {
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0,
-                                   bottomTrailingRadius: 6, topTrailingRadius: 6)
-                .fill(Theme.accent.opacity(0.05))
+            UnevenRoundedRectangle(
+                topLeadingRadius: 0, bottomLeadingRadius: 0,
+                bottomTrailingRadius: 6, topTrailingRadius: 6
+            )
+            .fill(Theme.accent.opacity(0.05))
         )
         .overlay(alignment: .leading) {
             Rectangle().fill(Theme.accent.opacity(0.6)).frame(width: 2)
@@ -236,12 +242,15 @@ struct TableBlockView: View {
     }
 
     private func cellView(_ runs: [InlineRun], weight: Font.Weight, column: Int) -> some View {
-        let alignment: Alignment = column < align.count
+        let alignment: Alignment =
+            column < align.count
             ? (align[column] == .center ? .center : align[column] == .right ? .trailing : .leading)
             : .leading
-        return SelectableTranscriptText(attributed: TranscriptTextStyle.inline(
-            runs, weight: weight == .bold ? .bold : .regular), wraps: false, hugsContent: true)
-            .padding(12)
-            .frame(minWidth: 48, maxWidth: .infinity, alignment: alignment)
+        return SelectableTranscriptText(
+            attributed: TranscriptTextStyle.inline(
+                runs, weight: weight == .bold ? .bold : .regular), wraps: false, hugsContent: true
+        )
+        .padding(12)
+        .frame(minWidth: 48, maxWidth: .infinity, alignment: alignment)
     }
 }

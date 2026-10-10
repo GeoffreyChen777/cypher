@@ -104,30 +104,35 @@ enum TranscriptRowBuilder {
     /// Split entries into rows. `parsers` caches one incremental parser per
     /// "{entryId}#{partId}" so the streaming tail re-parses O(delta + tail);
     /// `completed` memoizes settled parts so they parse exactly once.
-    static func rows(entries: [MessageEntry],
-                     pendingSends: [PendingSend],
-                     parsers: inout [String: IncrementalMarkdownParser],
-                     completed: inout [String: CompletedParse]) -> [TranscriptRow] {
+    static func rows(
+        entries: [MessageEntry],
+        pendingSends: [PendingSend],
+        parsers: inout [String: IncrementalMarkdownParser],
+        completed: inout [String: CompletedParse]
+    ) -> [TranscriptRow] {
         var rows: [TranscriptRow] = []
         var live = Set<String>()
         for entry in entries {
             let first = rows.count
-            rowsForEntry(entry, into: &rows, parsers: &parsers,
-                         completed: &completed, live: &live)
+            rowsForEntry(
+                entry, into: &rows, parsers: &parsers,
+                completed: &completed, live: &live)
             for ix in first..<rows.count { rows[ix].role = entry.role }
         }
         // Optimistic echo: pending sends share their client-minted id, so the
         // host's real entry replaces them without a flicker.
         let ids = Set(entries.map(\.id))
         for pending in pendingSends where !ids.contains(pending.messageId) {
-            rows.append(TranscriptRow(id: pending.messageId,
-                                      version: userVersion(pending.text, isSteer: pending.isSteer) | 1,
-                                      turnStart: true,
-                                      kind: .user(text: pending.text, isSteer: pending.isSteer),
-                                      entryId: pending.messageId,
-                                      timestamp: nil,
-                                      partKey: nil,
-                                      role: .user))
+            rows.append(
+                TranscriptRow(
+                    id: pending.messageId,
+                    version: userVersion(pending.text, isSteer: pending.isSteer) | 1,
+                    turnStart: true,
+                    kind: .user(text: pending.text, isSteer: pending.isSteer),
+                    entryId: pending.messageId,
+                    timestamp: nil,
+                    partKey: nil,
+                    role: .user))
         }
         // Drop memos for parts that no longer exist. The count guard keeps the
         // common (append-only) rebuild from copying the dict every token.
@@ -135,16 +140,19 @@ enum TranscriptRowBuilder {
             completed = completed.filter { live.contains($0.key) }
         }
         for ix in rows.indices {
-            rows[ix].topGap = gap(for: rows[ix],
-                                  previous: ix > 0 ? rows[ix - 1] : nil,
-                                  isFirst: ix == 0)
+            rows[ix].topGap = gap(
+                for: rows[ix],
+                previous: ix > 0 ? rows[ix - 1] : nil,
+                isFirst: ix == 0)
         }
         return rows
     }
 
-    private static func gap(for row: TranscriptRow,
-                            previous: TranscriptRow?,
-                            isFirst: Bool) -> CGFloat {
+    private static func gap(
+        for row: TranscriptRow,
+        previous: TranscriptRow?,
+        isFirst: Bool
+    ) -> CGFloat {
         if isFirst { return TranscriptView.gapTurn + 10 }
         // Separate exchanges without pulling a user's prompt away from its
         // reply. Pending sends follow this same path as confirmed messages.
@@ -171,11 +179,13 @@ enum TranscriptRowBuilder {
         return isBlock(previous) ? 6 : 0
     }
 
-    private static func rowsForEntry(_ entry: MessageEntry,
-                                     into rows: inout [TranscriptRow],
-                                     parsers: inout [String: IncrementalMarkdownParser],
-                                     completed: inout [String: CompletedParse],
-                                     live: inout Set<String>) {
+    private static func rowsForEntry(
+        _ entry: MessageEntry,
+        into rows: inout [TranscriptRow],
+        parsers: inout [String: IncrementalMarkdownParser],
+        completed: inout [String: CompletedParse],
+        live: inout Set<String>
+    ) {
         let streaming = entry.status == .streaming
         let settled = entry.status != nil && !streaming
 
@@ -186,10 +196,12 @@ enum TranscriptRowBuilder {
                 return nil
             }.joined(separator: "\n")
             guard !text.isEmpty else { return }
-            rows.append(TranscriptRow(id: entry.id, version: userVersion(text, isSteer: entry.isSteer),
-                                      turnStart: true, kind: .user(text: text, isSteer: entry.isSteer),
-                                      entryId: entry.id, timestamp: entry.createdAt,
-                                      partKey: nil))
+            rows.append(
+                TranscriptRow(
+                    id: entry.id, version: userVersion(text, isSteer: entry.isSteer),
+                    turnStart: true, kind: .user(text: text, isSteer: entry.isSteer),
+                    entryId: entry.id, timestamp: entry.createdAt,
+                    partKey: nil))
             return
         }
 
@@ -230,11 +242,12 @@ enum TranscriptRowBuilder {
             }
             let summary = toolGroupSummary(tools, thoughts: thoughts)
             let count = rows.count - start
-            let activity = TranscriptRow(id: "\(entry.id)#\(open.firstPart).activity",
-                                         version: (fnv1a(summary) ^ UInt64(count)) << 1 | (autoOpen ? 1 : 0),
-                                         turnStart: rows[start].turnStart,
-                                         kind: .activity(rows: count, summary: summary, autoOpen: autoOpen),
-                                         entryId: entry.id, timestamp: nil, partKey: nil)
+            let activity = TranscriptRow(
+                id: "\(entry.id)#\(open.firstPart).activity",
+                version: (fnv1a(summary) ^ UInt64(count)) << 1 | (autoOpen ? 1 : 0),
+                turnStart: rows[start].turnStart,
+                kind: .activity(rows: count, summary: summary, autoOpen: autoOpen),
+                entryId: entry.id, timestamp: nil, partKey: nil)
             rows[start].turnStart = false
             rows.insert(activity, at: start)
         }
@@ -246,9 +259,11 @@ enum TranscriptRowBuilder {
             let tools = nestToolCalls(pendingTools)
             var version = toolFingerprint(tools)
             if autoOpen { version ^= 1 }
-            rows.append(TranscriptRow(id: id, version: version, turnStart: first,
-                                      kind: .toolGroup(tools: tools, autoOpen: autoOpen),
-                                      entryId: entry.id, timestamp: nil, partKey: nil))
+            rows.append(
+                TranscriptRow(
+                    id: id, version: version, turnStart: first,
+                    kind: .toolGroup(tools: tools, autoOpen: autoOpen),
+                    entryId: entry.id, timestamp: nil, partKey: nil))
             first = false
             pendingTools = []
             groupIx += 1
@@ -256,8 +271,10 @@ enum TranscriptRowBuilder {
 
         /// One row per prose run / other block of a part, named by its first
         /// block so a run keeps its id as blocks join it.
-        func appendBlockRows(key: String, blocks: [TopBlock], runs: [Range<Int>], partIx: Int,
-                             liveTail: Bool, muted: Bool) {
+        func appendBlockRows(
+            key: String, blocks: [TopBlock], runs: [Range<Int>], partIx: Int,
+            liveTail: Bool, muted: Bool
+        ) {
             for run in runs {
                 let lastOfPart = run.upperBound == blocks.count
                 let live = liveTail && lastOfPart
@@ -265,8 +282,8 @@ enum TranscriptRowBuilder {
                 let kind: RowKind
                 var version: UInt64
                 if TranscriptTextStyle.isProse(blocks[run.lowerBound].block) {
-                    var hash: UInt64 = 0xcbf29ce484222325
-                    for top in blocks[run] { hash = (hash ^ top.fingerprint) &* 0x100000001b3 }
+                    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+                    for top in blocks[run] { hash = (hash ^ top.fingerprint) &* 0x100_0000_01b3 }
                     version = (hash << 1) | (live ? 1 : 0)
                     kind = .prose(blocks: blocks[run].map(\.block), streaming: live)
                 } else {
@@ -276,13 +293,14 @@ enum TranscriptRowBuilder {
                 if stamped {
                     version ^= 1 << 62  // timestamp attach keeps the diff key honest
                 }
-                rows.append(TranscriptRow(
-                    id: "\(key).\(run.lowerBound)", version: version, turnStart: first,
-                    kind: kind,
-                    entryId: entry.id,
-                    timestamp: stamped ? entry.createdAt : nil,
-                    partKey: key,
-                    muted: muted))
+                rows.append(
+                    TranscriptRow(
+                        id: "\(key).\(run.lowerBound)", version: version, turnStart: first,
+                        kind: kind,
+                        entryId: entry.id,
+                        timestamp: stamped ? entry.createdAt : nil,
+                        partKey: key,
+                        muted: muted))
                 first = false
             }
         }
@@ -304,23 +322,28 @@ enum TranscriptRowBuilder {
                 let key = "\(entry.id)#\(partId)"
                 live.insert(key)
                 let isLiveTail = streaming && ix == lastPartIx
-                let blocks = parse(text: text, key: key, streaming: isLiveTail,
-                                   parsers: &parsers, completed: &completed)
+                let blocks = parse(
+                    text: text, key: key, streaming: isLiveTail,
+                    parsers: &parsers, completed: &completed)
                 let runs = proseRuns(blocks, liveTail: isLiveTail)
                 // Block rows keep their ids either way, so the toggle only
                 // ever hides or shows rows. The rule closing the original is
                 // never prose, so no run straddles the fold.
                 if let agentText,
-                   let folded = appendedOriginalBlocks(text: text, agent: agentText, blocks: blocks) {
+                    let folded = appendedOriginalBlocks(text: text, agent: agentText, blocks: blocks)
+                {
                     let hidden = runs.filter { $0.lowerBound < folded }.count
-                    rows.append(TranscriptRow(id: "\(key).original", version: UInt64(hidden) << 1,
-                                              turnStart: first,
-                                              kind: .translationOriginal(rows: hidden),
-                                              entryId: entry.id, timestamp: nil, partKey: nil))
+                    rows.append(
+                        TranscriptRow(
+                            id: "\(key).original", version: UInt64(hidden) << 1,
+                            turnStart: first,
+                            kind: .translationOriginal(rows: hidden),
+                            entryId: entry.id, timestamp: nil, partKey: nil))
                     first = false
                 }
-                appendBlockRows(key: key, blocks: blocks, runs: runs, partIx: ix,
-                                liveTail: isLiveTail, muted: false)
+                appendBlockRows(
+                    key: key, blocks: blocks, runs: runs, partIx: ix,
+                    liveTail: isLiveTail, muted: false)
 
             case .reasoning(let partId, let text):
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
@@ -330,38 +353,46 @@ enum TranscriptRowBuilder {
                 live.insert(key)
                 // Still thinking: the reasoning is the live tail.
                 let isLiveTail = streaming && ix == lastPartIx
-                let blocks = parse(text: text, key: key, streaming: isLiveTail,
-                                   parsers: &parsers, completed: &completed)
+                let blocks = parse(
+                    text: text, key: key, streaming: isLiveTail,
+                    parsers: &parsers, completed: &completed)
                 let runs = proseRuns(blocks, liveTail: isLiveTail)
                 let preview = thoughtPreview(text)
-                rows.append(TranscriptRow(id: "\(key).thought",
-                                          version: (UInt64(runs.count) << 1 | (isLiveTail ? 1 : 0))
-                                              ^ fnv1a(preview) << 8,
-                                          turnStart: first,
-                                          kind: .thought(rows: runs.count, live: isLiveTail, preview: preview),
-                                          entryId: entry.id, timestamp: nil, partKey: nil))
+                rows.append(
+                    TranscriptRow(
+                        id: "\(key).thought",
+                        version: (UInt64(runs.count) << 1 | (isLiveTail ? 1 : 0))
+                            ^ fnv1a(preview) << 8,
+                        turnStart: first,
+                        kind: .thought(rows: runs.count, live: isLiveTail, preview: preview),
+                        entryId: entry.id, timestamp: nil, partKey: nil))
                 first = false
-                appendBlockRows(key: key, blocks: blocks, runs: runs, partIx: ix,
-                                liveTail: isLiveTail, muted: true)
+                appendBlockRows(
+                    key: key, blocks: blocks, runs: runs, partIx: ix,
+                    liveTail: isLiveTail, muted: true)
 
             case .input(let partId, _, let questions, let resolved):
                 flushTools(lastIx: ix - 1)
                 closeRun(autoOpen: false)
                 let header = questions.first.map { QuestionPresentation($0).header } ?? "Question"
-                rows.append(TranscriptRow(id: "\(entry.id)#\(partId)",
-                                          version: (fnv1a(header) << 1) | (resolved ? 1 : 0),
-                                          turnStart: first,
-                                          kind: .inputChip(header: header, resolved: resolved),
-                                          entryId: entry.id, timestamp: nil, partKey: nil))
+                rows.append(
+                    TranscriptRow(
+                        id: "\(entry.id)#\(partId)",
+                        version: (fnv1a(header) << 1) | (resolved ? 1 : 0),
+                        turnStart: first,
+                        kind: .inputChip(header: header, resolved: resolved),
+                        entryId: entry.id, timestamp: nil, partKey: nil))
                 first = false
 
             case .error(let partId, let message):
                 flushTools(lastIx: ix - 1)
                 closeRun(autoOpen: false)
-                rows.append(TranscriptRow(id: "\(entry.id)#\(partId)", version: fnv1a(message),
-                                          turnStart: first,
-                                          kind: .errorChip(message: message),
-                                          entryId: entry.id, timestamp: nil, partKey: nil))
+                rows.append(
+                    TranscriptRow(
+                        id: "\(entry.id)#\(partId)", version: fnv1a(message),
+                        turnStart: first,
+                        kind: .errorChip(message: message),
+                        entryId: entry.id, timestamp: nil, partKey: nil))
                 first = false
             }
         }
@@ -374,7 +405,8 @@ enum TranscriptRowBuilder {
     /// first line, without the heading or emphasis markers models often
     /// title a thought with ("**Planning**").
     static func thoughtPreview(_ text: String) -> String {
-        let line = text.split(whereSeparator: \.isNewline)
+        let line =
+            text.split(whereSeparator: \.isNewline)
             .lazy
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { !$0.isEmpty } ?? ""
@@ -396,13 +428,15 @@ enum TranscriptRowBuilder {
     static func appendedOriginalBlocks(text: String, agent: String, blocks: [TopBlock]) -> Int? {
         let rest = text.utf8.dropFirst(agent.utf8.count)
         guard text.utf8.starts(with: agent.utf8),
-              rest.starts(with: translationAppendSeparator.utf8) else { return nil }
+            rest.starts(with: translationAppendSeparator.utf8)
+        else { return nil }
         // Blocks carry source lines, not offsets: the original ends on line
         // `agentLines`, so the first block past it must be the rule.
         let agentLines = agent.utf8.reduce(1) { $1 == UInt8(ascii: "\n") ? $0 + 1 : $0 }
         guard let rule = blocks.firstIndex(where: { $0.startLine > agentLines }),
-              rule > 0, rule + 1 < blocks.count,
-              case .rule = blocks[rule].block else { return nil }
+            rule > 0, rule + 1 < blocks.count,
+            case .rule = blocks[rule].block
+        else { return nil }
         return rule + 1
     }
 
@@ -481,9 +515,11 @@ enum TranscriptRowBuilder {
         fnv1a(text) ^ (isSteer ? UInt64(1) << 63 : 0)
     }
 
-    private static func parse(text: String, key: String, streaming: Bool,
-                              parsers: inout [String: IncrementalMarkdownParser],
-                              completed: inout [String: CompletedParse]) -> [TopBlock] {
+    private static func parse(
+        text: String, key: String, streaming: Bool,
+        parsers: inout [String: IncrementalMarkdownParser],
+        completed: inout [String: CompletedParse]
+    ) -> [TopBlock] {
         if streaming {
             let parser = parsers[key] ?? IncrementalMarkdownParser()
             parser.setText(text)
@@ -499,7 +535,8 @@ enum TranscriptRowBuilder {
             return hit.blocks
         }
         // Adopt the live parser's tree on the live→complete flip, else parse.
-        let blocks = handoff?.source == text
+        let blocks =
+            handoff?.source == text
             ? (handoff?.blocks ?? MarkdownParser.parse(text))
             : MarkdownParser.parse(text)
         completed[key] = CompletedParse(source: text, blocks: blocks)
@@ -507,22 +544,22 @@ enum TranscriptRowBuilder {
     }
 
     private static func toolFingerprint(_ tools: [ToolItem]) -> UInt64 {
-        var hash: UInt64 = 0xcbf29ce484222325
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
         for tool in tools {
             for byte in tool.call.tag.utf8 {
                 hash ^= UInt64(byte)
-                hash = hash &* 0x100000001b3
+                hash = hash &* 0x100_0000_01b3
             }
             hash ^= UInt64(tool.call.fields.count) &+ (tool.isError ? 2 : 0) &+ (tool.resolved ? 4 : 0)
-            hash = hash &* 0x100000001b3
+            hash = hash &* 0x100_0000_01b3
             // A call nesting under its caller once the caller's part arrives
             // re-indents the chip.
             hash ^= UInt64(tool.depth)
-            hash = hash &* 0x100000001b3
+            hash = hash &* 0x100_0000_01b3
             for (k, v) in tool.call.fields.sorted(by: { $0.key < $1.key }) {
                 for byte in "\(k)=\(v)".utf8 {
                     hash ^= UInt64(byte)
-                    hash = hash &* 0x100000001b3
+                    hash = hash &* 0x100_0000_01b3
                 }
             }
         }
@@ -549,7 +586,8 @@ enum TranscriptRowBuilder {
             // A caller's id is a strict prefix of its calls' ids, so this
             // never cycles.
             if let slash = item.id.lastIndex(of: "/"),
-               let caller = index[String(item.id[..<slash])] {
+                let caller = index[String(item.id[..<slash])]
+            {
                 children[caller].append(ix)
             } else {
                 roots.append(ix)
@@ -571,10 +609,10 @@ enum TranscriptRowBuilder {
     }
 
     static func fnv1a(_ text: String) -> UInt64 {
-        var hash: UInt64 = 0xcbf29ce484222325
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
         for byte in text.utf8 {
             hash ^= UInt64(byte)
-            hash = hash &* 0x100000001b3
+            hash = hash &* 0x100_0000_01b3
         }
         return hash << 1
     }

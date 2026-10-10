@@ -71,9 +71,10 @@ enum Theme {
     static func adaptive(light: Color, dark: Color) -> Color {
         let lightColor = UIColor(light)
         let darkColor = UIColor(dark)
-        return Color(uiColor: UIColor { traits in
-            traits.userInterfaceStyle == .dark ? darkColor : lightColor
-        })
+        return Color(
+            uiColor: UIColor { traits in
+                traits.userInterfaceStyle == .dark ? darkColor : lightColor
+            })
     }
 
     // ---- numbers drive layout (pt) ----
@@ -87,8 +88,10 @@ extension Theme {
     static let fontMonoName = "GeistMono-Regular"
 
     /// `relativeTo` scales with Dynamic Type from `size` at the default setting.
-    static func sans(_ size: CGFloat, weight: Font.Weight = .regular,
-                     relativeTo style: Font.TextStyle? = nil) -> Font {
+    static func sans(
+        _ size: CGFloat, weight: Font.Weight = .regular,
+        relativeTo style: Font.TextStyle? = nil
+    ) -> Font {
         // Static weight cuts register as separate families — select by
         // PostScript name so weights actually resolve.
         let name: String
@@ -131,8 +134,10 @@ extension Theme {
             return .monospacedSystemFont(ofSize: size, weight: .regular)
         }
         let off = ["liga", "calt", "dlig"].map {
-            [kCTFontOpenTypeFeatureTag as UIFontDescriptor.FeatureKey: $0,
-             kCTFontOpenTypeFeatureValue as UIFontDescriptor.FeatureKey: 0] as [UIFontDescriptor.FeatureKey: Any]
+            [
+                kCTFontOpenTypeFeatureTag as UIFontDescriptor.FeatureKey: $0,
+                kCTFontOpenTypeFeatureValue as UIFontDescriptor.FeatureKey: 0,
+            ] as [UIFontDescriptor.FeatureKey: Any]
         }
         return UIFont(descriptor: font.fontDescriptor.addingAttributes([.featureSettings: off]), size: size)
     }
@@ -171,10 +176,10 @@ func oklchToSrgb(l: Double, c: Double, hDeg: Double) -> [Double] {
     let b = c * sin(h)
 
     // OKLab → LMS (cube roots undone)
-    let l_ = l + 0.39633778 * a + 0.21580376 * b
-    let m_ = l - 0.105561346 * a - 0.06385417 * b
-    let s_ = l - 0.08948418 * a - 1.2914855 * b
-    let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_)
+    let lPrime = l + 0.39633778 * a + 0.21580376 * b
+    let mPrime = l - 0.105561346 * a - 0.06385417 * b
+    let sPrime = l - 0.08948418 * a - 1.2914855 * b
+    let (l3, m3, s3) = (lPrime * lPrime * lPrime, mPrime * mPrime * mPrime, sPrime * sPrime * sPrime)
 
     // LMS → linear sRGB
     let r = 4.0767417 * l3 - 3.3077116 * m3 + 0.23096993 * s3

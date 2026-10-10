@@ -9,8 +9,9 @@ import Loro
 
 enum DocDisk {
     static var directory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask)[0]
+        let base = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask)[0]
             .appendingPathComponent("CypherDocs", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
@@ -42,14 +43,18 @@ enum DocDisk {
     /// unreadable (caller starts fresh at cursor 0 — the room re-serves).
     static func loadChat2(into doc: LoroDoc, id: String) -> UInt64? {
         guard let data = try? Data(contentsOf: chat2URL(for: id)),
-              data.count >= 16, data.prefix(8) == chat2Magic else { return nil }
+            data.count >= 16, data.prefix(8) == chat2Magic
+        else { return nil }
         var cursor: UInt64 = 0
         for (ix, byte) in data.subdata(in: 8..<16).enumerated() {
             cursor |= UInt64(byte) << (8 * ix)
         }
         guard data.count > 16 else { return cursor }
-        guard (try? doc.importWith(bytes: data.subdata(in: 16..<data.count),
-                                   origin: "disk")) != nil else { return nil }
+        guard
+            (try? doc.importWith(
+                bytes: data.subdata(in: 16..<data.count),
+                origin: "disk")) != nil
+        else { return nil }
         return cursor
     }
 
@@ -67,16 +72,20 @@ enum DocDisk {
     /// kept; a leftover `ws3_` Loro snapshot is retained for rollback).
     static func prune(keep: Int) {
         let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(at: directory,
-                                                      includingPropertiesForKeys: [.contentModificationDateKey])
+        guard
+            let files = try? fm.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey])
         else { return }
         let sessions = files.filter {
             !$0.lastPathComponent.hasPrefix("ws3_") && !$0.lastPathComponent.hasPrefix("registry1_")
         }
         guard sessions.count > keep else { return }
         let sorted = sessions.sorted {
-            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let a =
+                (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let b =
+                (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             return a > b
         }
         for stale in sorted.dropFirst(keep) {

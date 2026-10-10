@@ -44,10 +44,13 @@ final class MentionSearch {
     private(set) var error: String?
     @ObservationIgnored private var filesScope: MentionScope.Files?
 
-    func run(query: String, scope: MentionScope, chats: [Chat],
-             fetch: (MentionScope.Files, String) async throws -> [FileSearchMatch]) async {
-        sessions = Mentions.sessionCandidates(chats, query: query, currentChat: scope.currentChat,
-                                              project: scope.project, device: scope.device)
+    func run(
+        query: String, scope: MentionScope, chats: [Chat],
+        fetch: (MentionScope.Files, String) async throws -> [FileSearchMatch]
+    ) async {
+        sessions = Mentions.sessionCandidates(
+            chats, query: query, currentChat: scope.currentChat,
+            project: scope.project, device: scope.device)
         if filesScope != scope.files {
             filesScope = scope.files
             files = []
@@ -96,9 +99,11 @@ struct MentionMenuView: View {
                     }
                     .padding(.vertical, 14)
                 } else {
-                    status(search.error ?? (query.isEmpty ? "No files available" : "No matching sessions or files"),
-                           color: search.error == nil ? Theme.textMuted : Theme.danger)
-                        .padding(.vertical, 14)
+                    status(
+                        search.error ?? (query.isEmpty ? "No files available" : "No matching sessions or files"),
+                        color: search.error == nil ? Theme.textMuted : Theme.danger
+                    )
+                    .padding(.vertical, 14)
                 }
             } else {
                 ScrollView {
@@ -119,8 +124,10 @@ struct MentionMenuView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .glassEffect(.regular.tint(Theme.surface.opacity(0.72)),
-                     in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .glassEffect(
+            .regular.tint(Theme.surface.opacity(0.72)),
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+        )
         .accessibilityIdentifier("mention-menu")
     }
 

@@ -27,10 +27,10 @@ enum Motion {
 
     static func flavourSeed(_ chatId: String) -> UInt64 {
         // FNV-1a, matching the desktop's per-chat seeding.
-        var hash: UInt64 = 0xcbf29ce484222325
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
         for byte in chatId.utf8 {
             hash ^= UInt64(byte)
-            hash = hash &* 0x100000001b3
+            hash = hash &* 0x100_0000_01b3
         }
         return hash
     }

@@ -55,11 +55,12 @@ func parseUserMessageImages(_ content: String) -> ParsedUserMessage {
     for (ix, raw) in lines.enumerated() where ix > 0 {
         let line = raw.trimmingCharacters(in: .whitespaces)
         if lines[ix - 1].trimmingCharacters(in: .whitespaces).isEmpty,
-           // Desktop switches to "Attached files" when a send carries any
-           // non-image file (cypher_proto::attachment_refs); accept both.
-           line.lowercased().hasPrefix("attached images (local files")
-               || line.lowercased().hasPrefix("attached files (local files"),
-           line.hasSuffix("):") {
+            // Desktop switches to "Attached files" when a send carries any
+            // non-image file (cypher_proto::attachment_refs); accept both.
+            line.lowercased().hasPrefix("attached images (local files")
+                || line.lowercased().hasPrefix("attached files (local files"),
+            line.hasSuffix("):")
+        {
             markerIx = ix
             break
         }
@@ -81,8 +82,9 @@ func parseUserMessageImages(_ content: String) -> ParsedUserMessage {
     let body = lines[..<(markerIx - 1)].joined(separator: "\n")
         .trimmingCharacters(in: .whitespacesAndNewlines)
     let placeholder = body == attachmentOnlyText || body == fileAttachmentOnlyText
-    return ParsedUserMessage(text: placeholder ? "" : body,
-                             attachments: attachments)
+    return ParsedUserMessage(
+        text: placeholder ? "" : body,
+        attachments: attachments)
 }
 
 // MARK: - Staging (use-attachments.ts intake)
@@ -113,15 +115,18 @@ struct StagedAttachment: Identifiable, Hashable {
         var ext = sniffExtension(data)
         if ext == nil {
             guard let image = UIImage(data: data),
-                  let jpeg = image.jpegData(compressionQuality: 0.9) else { return nil }
+                let jpeg = image.jpegData(compressionQuality: 0.9)
+            else { return nil }
             bytes = jpeg
             ext = "jpg"
         }
         guard bytes.count <= maxAttachmentBytes, let ext,
-              let image = UIImage(data: bytes) else { return nil }
+            let image = UIImage(data: bytes)
+        else { return nil }
         let id = UUID().uuidString.lowercased()
-        return StagedAttachment(id: id, name: "photo-\(id.prefix(8)).\(ext)",
-                                data: bytes, image: image)
+        return StagedAttachment(
+            id: id, name: "photo-\(id.prefix(8)).\(ext)",
+            data: bytes, image: image)
     }
 
     /// Magic-byte sniff for the formats both ends support.
@@ -132,7 +137,10 @@ struct StagedAttachment: Identifiable, Hashable {
         if b[0] == 0xFF, b[1] == 0xD8, b[2] == 0xFF { return "jpg" }
         if b[0] == 0x47, b[1] == 0x49, b[2] == 0x46, b[3] == 0x38 { return "gif" }
         if b[0] == 0x52, b[1] == 0x49, b[2] == 0x46, b[3] == 0x46,
-           b[8] == 0x57, b[9] == 0x45, b[10] == 0x42, b[11] == 0x50 { return "webp" }
+            b[8] == 0x57, b[9] == 0x45, b[10] == 0x42, b[11] == 0x50
+        {
+            return "webp"
+        }
         return nil
     }
 }
@@ -159,8 +167,9 @@ func uploadAttachmentChunked(relay: DeviceRelayClient, name: String, data: Data)
         var attempt = 0
         while true {
             do {
-                let _: OkReply = try await relay.call(method: "UploadChunk", params: params,
-                                                      timeoutSeconds: seq == 0 ? 90 : 30)
+                let _: OkReply = try await relay.call(
+                    method: "UploadChunk", params: params,
+                    timeoutSeconds: seq == 0 ? 90 : 30)
                 break
             } catch {
                 attempt += 1
@@ -227,7 +236,7 @@ final class AttachmentImageCache {
         case .loaded(let name, let image, _, _):
             return .loaded(name: name, image: image)
         case .error(let attempts, let at)
-            where Date().timeIntervalSince(at) < Self.retryDelay(attempts):
+        where Date().timeIntervalSince(at) < Self.retryDelay(attempts):
             return .error
         case .error:
             return .loading  // ladder elapsed; the next load() attempt owns it
@@ -252,11 +261,13 @@ final class AttachmentImageCache {
         }
         guard let config else { return }
         entries[key] = .loading(attempts: attempts)
-        let relay = relays[deviceId] ?? {
-            let client = DeviceRelayClient(deviceId: deviceId, config: config)
-            relays[deviceId] = client
-            return client
-        }()
+        let relay =
+            relays[deviceId]
+            ?? {
+                let client = DeviceRelayClient(deviceId: deviceId, config: config)
+                relays[deviceId] = client
+                return client
+            }()
         Task { @MainActor [weak self] in
             let loaded = await Self.readImage(relay: relay, path: path)
             guard let self else { return }
@@ -285,7 +296,8 @@ final class AttachmentImageCache {
         while loadedBytes > Self.budgetBytes {
             let oldest = entries.compactMap { entry -> (UInt64, Key, Int)? in
                 guard entry.key != key,
-                      case .loaded(_, _, let bytes, let used) = entry.value else { return nil }
+                    case .loaded(_, _, let bytes, let used) = entry.value
+                else { return nil }
                 return (used, entry.key, bytes)
             }.min { $0.0 < $1.0 }
             guard let oldest else { break }
@@ -301,7 +313,8 @@ final class AttachmentImageCache {
     /// `ReadAttachmentChunk` loop: 45KB base64 chunks until `done` (bounded,
     /// with a stuck-offset guard).
     private static func readImage(relay: DeviceRelayClient, path: String)
-        async -> (name: String, image: UIImage, bytes: Int)? {
+        async -> (name: String, image: UIImage, bytes: Int)?
+    {
         struct Chunk: Decodable {
             var name: String
             var mimeType: String
@@ -314,10 +327,12 @@ final class AttachmentImageCache {
         var offset: UInt64 = 0
         var done = false
         for _ in 0..<maxReadChunks {
-            guard let chunk: Chunk = try? await relay.call(
-                method: "ReadAttachmentChunk",
-                params: ["path": path, "offset": offset],
-                timeoutSeconds: 20) else { return nil }
+            guard
+                let chunk: Chunk = try? await relay.call(
+                    method: "ReadAttachmentChunk",
+                    params: ["path": path, "offset": offset],
+                    timeoutSeconds: 20)
+            else { return nil }
             name = chunk.name
             b64 += chunk.data
             done = chunk.done
@@ -342,8 +357,10 @@ struct AttachmentStripView: View {
     @State private var preview: AttachmentPreview?
 
     var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 56, maximum: 56), spacing: 8)],
-                  alignment: .leading, spacing: 8) {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 56, maximum: 56), spacing: 8)],
+            alignment: .leading, spacing: 8
+        ) {
             ForEach(attachments) { att in
                 Button {
                     preview = AttachmentPreview(name: att.name, image: att.image)
@@ -353,8 +370,9 @@ struct AttachmentStripView: View {
                         .aspectRatio(contentMode: .fill)
                         .frame(width: 56, height: 56)
                         .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .overlay(RoundedRectangle(cornerRadius: 10)
-                            .strokeBorder(whiteAlpha(0.11), lineWidth: 1))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(whiteAlpha(0.11), lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 .overlay(alignment: .topTrailing) {

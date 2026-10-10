@@ -1,3 +1,6 @@
+// Scroll-phase tracker that tells transcript auto-scroll when the user's
+// touch, deceleration and bounce have fully settled.
+
 import SwiftUI
 
 /// Automatic positioning must yield from the first touch (tracking), through

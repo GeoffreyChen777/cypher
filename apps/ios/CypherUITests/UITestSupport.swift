@@ -24,6 +24,7 @@ extension XCUIElement {
     }
 }
 
+@MainActor
 extension XCTestCase {
     /// Attaches a screenshot of `app`, kept even when the test passes.
     func capture(_ app: XCUIApplication, _ name: String) {

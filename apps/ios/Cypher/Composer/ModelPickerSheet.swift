@@ -166,8 +166,10 @@ struct ModelPickerSheet: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 36)
-            .background(viewed ? AnyShapeStyle(Theme.text) : AnyShapeStyle(whiteAlpha(0.06)),
-                        in: Capsule())
+            .background(
+                viewed ? AnyShapeStyle(Theme.text) : AnyShapeStyle(whiteAlpha(0.06)),
+                in: Capsule()
+            )
             .overlay(Capsule().strokeBorder(whiteAlpha(viewed ? 0 : 0.08), lineWidth: 1))
             .contentShape(Capsule())
         }
@@ -199,8 +201,9 @@ struct ModelPickerSheet: View {
             }
             .background(SheetStyle.cardFill, in: RoundedRectangle(cornerRadius: SheetStyle.cardRadius))
             .clipShape(RoundedRectangle(cornerRadius: SheetStyle.cardRadius))
-            .overlay(RoundedRectangle(cornerRadius: SheetStyle.cardRadius)
-                .strokeBorder(whiteAlpha(0.06), lineWidth: 1))
+            .overlay(
+                RoundedRectangle(cornerRadius: SheetStyle.cardRadius)
+                    .strokeBorder(whiteAlpha(0.06), lineWidth: 1))
         }
     }
 
@@ -336,9 +339,11 @@ struct PickRow: View {
         Button(action: action) {
             HStack(spacing: 10) {
                 if let icon {
-                    LineIconView(icon, size: 15,
-                                 color: selected ? Theme.bg : Theme.textMuted)
-                        .frame(width: 20)
+                    LineIconView(
+                        icon, size: 15,
+                        color: selected ? Theme.bg : Theme.textMuted
+                    )
+                    .frame(width: 20)
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
@@ -365,8 +370,10 @@ struct PickRow: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 11)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? AnyShapeStyle(Theme.text) : AnyShapeStyle(whiteAlpha(0.03)),
-                        in: RoundedRectangle(cornerRadius: 12))
+            .background(
+                selected ? AnyShapeStyle(Theme.text) : AnyShapeStyle(whiteAlpha(0.03)),
+                in: RoundedRectangle(cornerRadius: 12)
+            )
             .contentShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(SheetRowButtonStyle())

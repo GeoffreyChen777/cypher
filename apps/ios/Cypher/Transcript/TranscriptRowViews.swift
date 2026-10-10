@@ -36,22 +36,26 @@ struct UserBubble: View {
                     UserAttachmentsStrip(deviceId: deviceId, attachments: parsed.attachments)
                 }
                 if !parsed.text.isEmpty {
-                    SelectableTranscriptText(attributed: TranscriptTextStyle.inline(
-                        Mentions.inlineRuns(parsed.text)), hugsContent: true)
-                        .environment(\.commentDrafts, pending ? nil : commentDrafts)
-                        .padding(.horizontal, 16)
-                        // Optical centering for the native text line box: move
-                        // the text up 1pt while preserving the bubble's height.
-                        .padding(.top, 9)
-                        .padding(.bottom, 11)
-                        .background(Theme.userBubble.opacity(isSteer ? 0.55 : 1),
-                                    in: RoundedRectangle(cornerRadius: Theme.bubbleRadius))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: Theme.bubbleRadius)
-                                .strokeBorder(isSteer ? Theme.border : .clear, lineWidth: 1)
-                                .allowsHitTesting(false)
-                        }
-                        .frame(maxWidth: TranscriptView.maxContentWidth * 0.8, alignment: .trailing)
+                    SelectableTranscriptText(
+                        attributed: TranscriptTextStyle.inline(
+                            Mentions.inlineRuns(parsed.text)), hugsContent: true
+                    )
+                    .environment(\.commentDrafts, pending ? nil : commentDrafts)
+                    .padding(.horizontal, 16)
+                    // Optical centering for the native text line box: move
+                    // the text up 1pt while preserving the bubble's height.
+                    .padding(.top, 9)
+                    .padding(.bottom, 11)
+                    .background(
+                        Theme.userBubble.opacity(isSteer ? 0.55 : 1),
+                        in: RoundedRectangle(cornerRadius: Theme.bubbleRadius)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: Theme.bubbleRadius)
+                            .strokeBorder(isSteer ? Theme.border : .clear, lineWidth: 1)
+                            .allowsHitTesting(false)
+                    }
+                    .frame(maxWidth: TranscriptView.maxContentWidth * 0.8, alignment: .trailing)
                 }
             }
         }
@@ -403,8 +407,9 @@ struct StatusGlyph: Shape {
         let scale = min(rect.width, rect.height) / 16
         let dx = rect.minX + (rect.width - 16 * scale) / 2
         let dy = rect.minY + (rect.height - 16 * scale) / 2
-        return path.applying(CGAffineTransform(scaleX: scale, y: scale)
-            .concatenating(CGAffineTransform(translationX: dx, y: dy)))
+        return path.applying(
+            CGAffineTransform(scaleX: scale, y: scale)
+                .concatenating(CGAffineTransform(translationX: dx, y: dy)))
     }
 }
 

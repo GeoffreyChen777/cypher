@@ -16,7 +16,7 @@ import Observation
 
 @MainActor
 @Observable
-final class WorkspaceStore {
+final class WorkspaceStore: WorkspaceData {
     private(set) var devices: [DeviceRow] = []
     private(set) var spaces: [Space] = []
     private(set) var chats: [Chat] = []
@@ -42,8 +42,10 @@ final class WorkspaceStore {
     /// viewport's periodic activity refresh. That beat already flows every 15s
     /// and bills 20:1, so the refresh rides free; sent over HTTP it cost a full
     /// billable request every time.
-    init(config: AppConfig, initialDocument: RegistryDoc? = nil,
-         pendingActivity: @escaping @MainActor @Sendable () -> ActivityReport? = { nil }) {
+    init(
+        config: AppConfig, initialDocument: RegistryDoc? = nil,
+        pendingActivity: @escaping @MainActor @Sendable () -> ActivityReport? = { nil }
+    ) {
         self.config = config
         self.doc = initialDocument ?? RegistryDoc(deviceId: config.deviceId)
         self.pendingActivity = pendingActivity
@@ -60,7 +62,8 @@ final class WorkspaceStore {
         // server's full state (the engines already seeded everything).
         let blobURL = DocDisk.registryURL(orgId: config.orgId, userId: config.userId)
         if let data = try? Data(contentsOf: blobURL),
-           let loaded = try? RegistryDoc.from(data: data, deviceId: config.deviceId) {
+            let loaded = try? RegistryDoc.from(data: data, deviceId: config.deviceId)
+        {
             doc = loaded
         }
         project()
@@ -83,15 +86,16 @@ final class WorkspaceStore {
             event: { [weak self] event in self?.handle(event) },
             pendingActivity: { [pendingActivity] in pendingActivity() }
         )
-        let client = RegistryClient(device: config.deviceId,
-                                    urlProvider: { [config] in await config.registrySocketURL() },
-                                    rowsRequest: { [config] since in
-                                        await config.registryRowsRequest(since: since)
-                                    },
-                                    pushRequest: { [config] in
-                                        await config.registryPushRequest()
-                                    },
-                                    delegate: delegate)
+        let client = RegistryClient(
+            device: config.deviceId,
+            urlProvider: { [config] in await config.registrySocketURL() },
+            rowsRequest: { [config] since in
+                await config.registryRowsRequest(since: since)
+            },
+            pushRequest: { [config] in
+                await config.registryPushRequest()
+            },
+            delegate: delegate)
         self.client = client
         Task { await client.start() }
     }
@@ -188,258 +192,91 @@ final class WorkspaceStore {
         devices = doc.overlayRows(kind: "devices").map { row in
             let f = row.fields
             let id = f["id"]?.stringValue ?? row.id
-            return DeviceRow(id: id,
-                             name: f["name"]?.stringValue ?? id,
-                             platform: f["platform"]?.stringValue ?? "",
-                             lastSeenAt: f["lastSeenAt"]?.int64Value,
-                             createdAt: f["createdAt"]?.int64Value)
+            return DeviceRow(
+                id: id,
+                name: f["name"]?.stringValue ?? id,
+                platform: f["platform"]?.stringValue ?? "",
+                lastSeenAt: f["lastSeenAt"]?.int64Value,
+                createdAt: f["createdAt"]?.int64Value)
         }.sorted { $0.name < $1.name }
 
         spaces = doc.overlayRows(kind: "spaces").compactMap { row in
             let f = row.fields
             guard let deviceId = f["deviceId"]?.stringValue,
-                  let path = f["path"]?.stringValue else { return nil }
-            return Space(id: f["id"]?.stringValue ?? row.id, deviceId: deviceId, path: path,
-                         name: f["name"]?.stringValue,
-                         gitDetected: f["gitDetected"]?.boolValue ?? false,
-                         gitCheckedAt: f["gitCheckedAt"]?.int64Value,
-                         checkoutId: f["checkoutId"]?.stringValue,
-                         createdAt: f["createdAt"]?.int64Value ?? 0)
+                let path = f["path"]?.stringValue
+            else { return nil }
+            return Space(
+                id: f["id"]?.stringValue ?? row.id, deviceId: deviceId, path: path,
+                name: f["name"]?.stringValue,
+                gitDetected: f["gitDetected"]?.boolValue ?? false,
+                gitCheckedAt: f["gitCheckedAt"]?.int64Value,
+                checkoutId: f["checkoutId"]?.stringValue,
+                createdAt: f["createdAt"]?.int64Value ?? 0)
         }.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }  // creation order, id tiebreak
 
         chats = doc.overlayRows(kind: "chats").compactMap { row in
             let f = row.fields
             guard let deviceId = f["deviceId"]?.stringValue,
-                  !deleting.contains(f["id"]?.stringValue ?? row.id) else { return nil }
+                !deleting.contains(f["id"]?.stringValue ?? row.id)
+            else { return nil }
             let child = SubagentProjection.decode(f["child"], as: ChildChat.self)
             // Don't promote a malformed child relation into the root list.
             if let rawChild = f["child"], rawChild != .null, child == nil { return nil }
             var chatConfig: ChatConfig?
             if let c = f["config"]?.objectValue {
-                chatConfig = ChatConfig(harness: c["harness"]?.stringValue ?? "pi",
-                                        model: c["model"]?.stringValue,
-                                        reasoning: c["reasoning"]?.stringValue,
-                                        modelOptions: c["modelOptions"]?.objectValue ?? [:],
-                                        sandbox: c["sandbox"]?.stringValue)
+                chatConfig = ChatConfig(
+                    harness: c["harness"]?.stringValue ?? "pi",
+                    model: c["model"]?.stringValue,
+                    reasoning: c["reasoning"]?.stringValue,
+                    modelOptions: c["modelOptions"]?.objectValue ?? [:],
+                    sandbox: c["sandbox"]?.stringValue)
             }
-            return Chat(id: f["id"]?.stringValue ?? row.id, deviceId: deviceId,
-                        title: f["title"]?.stringValue,
-                        archived: f["archived"]?.boolValue ?? false,
-                        cwd: f["cwd"]?.stringValue,
-                        branch: f["branch"]?.stringValue,
-                        checkoutId: f["checkoutId"]?.stringValue,
-                        config: chatConfig,
-                        lastMessagePreview: f["lastMessagePreview"]?.stringValue,
-                        lastMessageAt: f["lastMessageAt"]?.int64Value,
-                        createdAt: f["createdAt"]?.int64Value ?? 0,
-                        spaceId: f["spaceId"]?.stringValue,
-                        lastSeenAt: f["lastSeenAt"]?.int64Value,
-                        child: child)
+            return Chat(
+                id: f["id"]?.stringValue ?? row.id, deviceId: deviceId,
+                title: f["title"]?.stringValue,
+                archived: f["archived"]?.boolValue ?? false,
+                cwd: f["cwd"]?.stringValue,
+                branch: f["branch"]?.stringValue,
+                checkoutId: f["checkoutId"]?.stringValue,
+                config: chatConfig,
+                lastMessagePreview: f["lastMessagePreview"]?.stringValue,
+                lastMessageAt: f["lastMessageAt"]?.int64Value,
+                createdAt: f["createdAt"]?.int64Value ?? 0,
+                spaceId: f["spaceId"]?.stringValue,
+                lastSeenAt: f["lastSeenAt"]?.int64Value,
+                child: child)
         }
 
         var rows: [String: SessionRow] = [:]
         for row in doc.overlayRows(kind: "sessions") {
             let f = row.fields
             guard let chatId = f["chatId"]?.stringValue,
-                  let deviceId = f["deviceId"]?.stringValue,
-                  let statusStr = f["status"]?.stringValue,
-                  let status = SessionStatus(rawValue: statusStr) else { continue }
-            rows[chatId] = SessionRow(chatId: chatId, deviceId: deviceId, status: status,
-                                      startedAt: f["startedAt"]?.int64Value,
-                                      updatedAt: f["updatedAt"]?.int64Value ?? 0,
-                                      subagents: SubagentProjection.snapshot(f["subagents"]),
-                                      contextUsage: ContextUsage(f["contextUsage"]))
+                let deviceId = f["deviceId"]?.stringValue,
+                let statusStr = f["status"]?.stringValue,
+                let status = SessionStatus(rawValue: statusStr)
+            else { continue }
+            rows[chatId] = SessionRow(
+                chatId: chatId, deviceId: deviceId, status: status,
+                startedAt: f["startedAt"]?.int64Value,
+                updatedAt: f["updatedAt"]?.int64Value ?? 0,
+                subagents: SubagentProjection.snapshot(f["subagents"]),
+                contextUsage: ContextUsage(f["contextUsage"]))
         }
         sessions = rows
     }
 
-    // MARK: Derived views
-
-    /// state.rs `overview_chats`: every non-archived chat of a live space,
-    /// attention-sorted.
-    var overviewChats: [Chat] {
-        let liveSpaceIds = Set(spaces.map(\.id))
-        let live = chats.filter { !$0.isChild && !$0.archived && $0.spaceId.map(liveSpaceIds.contains) == true }
-        return sortActive(live)
-    }
-
-    /// A space's sessions, in the sidebar's Sessions order (recency).
-    ///
-    /// NOT desktop's `chats_in_space`, which is creation order because there
-    /// the rows are TABS and activity must never reorder tabs. The phone has
-    /// no tabs — a space opens into the same list, with the same rows, as the
-    /// Sessions section — so it follows that list's ordering instead.
-    func chats(in spaceId: String) -> [Chat] {
-        sortActive(chats.filter { !$0.isChild && !$0.archived && $0.spaceId == spaceId })
-    }
-
-    /// Active sessions outside any live project (desktop "No project"
-    /// groups: project-less chats, or ones whose project was removed).
-    /// Quick chats are listed on their own.
-    var projectlessChats: [Chat] {
-        let liveSpaceIds = Set(spaces.map(\.id))
-        return sortActive(chats.filter {
-            !$0.isChild && !$0.archived && !$0.isScratch
-                && !($0.spaceId.map(liveSpaceIds.contains) ?? false)
-        })
-    }
-
-    /// Active quick chats, every device merged (state.rs merge_scratch_groups).
-    var quickChats: [Chat] {
-        sortActive(chats.filter { !$0.isChild && !$0.archived && $0.isScratch })
-    }
-
-    /// Archived chats under an optional space scope, recency order — feeds the
-    /// Archived shelf (shell/spaces.rs `render_archived_section`). Unlike
-    /// `overviewChats`, a live space is not required: an archived session of a
-    /// deleted space should still be reachable for unarchive.
-    func archivedChats(in spaceId: String? = nil) -> [Chat] {
-        sortActive(chats.filter { !$0.isChild && $0.archived && (spaceId == nil || $0.spaceId == spaceId) })
-    }
-
-    func indicator(for chat: Chat) -> ChatIndicator {
-        chatIndicator(chat: chat, live: effectiveStatus(sessions[chat.id], now: nowMs()))
-    }
-
-    /// Aggregate active sessions for the project's trailing status indicator.
-    func spaceIndicator(_ spaceId: String) -> ChatIndicator? {
-        ChatIndicator.projectSummary(chats(in: spaceId).map { indicator(for: $0) })
-    }
-
-    // MARK: Device relay (folder browsing / direct host RPCs)
+    // MARK: Device relay (folder browsing / direct host RPCs; the calls are in
+    // WorkspaceStore+DeviceRelay.swift)
 
     @ObservationIgnored private var relayClients: [String: DeviceRelayClient] = [:]
 
-    /// The host relay, for features that manage their own calls (side chats).
+    /// The host relay, one client per device. Used by the RPC wrappers and by
+    /// features that manage their own calls (side chats).
     func relayClient(for deviceId: String) -> DeviceRelayClient {
-        relay(for: deviceId)
-    }
-
-    /// ForkSession on the source chat's host (session_forks.rs). The host
-    /// builds the new Pi session and mints its row; idempotent per
-    /// `requestId`, which is also the new chat's id. The helper can take
-    /// ~30s, plus quiescing the source.
-    func forkSession(deviceId: String, requestId: String, sourceChatId: String,
-                     anchorMessageId: String) async throws -> ForkResponse {
-        try await relay(for: deviceId).call(method: "ForkSession", params: [
-            "requestId": requestId,
-            "sourceChatId": sourceChatId,
-            "anchorMessageId": anchorMessageId,
-        ], timeoutSeconds: 90)
-    }
-
-    private func relay(for deviceId: String) -> DeviceRelayClient {
         if let existing = relayClients[deviceId] { return existing }
         let client = DeviceRelayClient(deviceId: deviceId, config: config)
         relayClients[deviceId] = client
         return client
-    }
-
-    /// The last relay failure, for surfacing in UI/diagnostics.
-    private(set) var lastRelayError: String?
-
-    /// ListFolders on the target device (engine caps at 500 entries, hides
-    /// dotfiles, stamps isRepo). nil path = the device's home directory.
-    func listFolders(deviceId: String, path: String?) async -> FolderListing? {
-        do {
-            return try await listFoldersDetailed(deviceId: deviceId, path: path)
-        } catch {
-            lastRelayError = error.localizedDescription
-            return nil
-        }
-    }
-
-    func listFoldersDetailed(deviceId: String, path: String?) async throws -> FolderListing {
-        var params: [String: Any] = [:]
-        if let path { params["path"] = path }
-        return try await relay(for: deviceId).call(method: "ListFolders", params: params)
-    }
-
-    /// Only the read-only browser's fixed RPC set, on the chat's host device.
-    func workspaceBrowserCall<T: Decodable>(deviceId: String, method: String,
-                                            params: [String: Any]) async throws -> T {
-        guard ["ListWorkspaceFiles", "ReadWorkspaceFile", "GetCheckoutDiff"].contains(method) else {
-            throw RelayError.notConnected
-        }
-        return try await relay(for: deviceId).call(method: method, params: params, timeoutSeconds: 30)
-    }
-
-    /// ListRefs on the target device — branches with current/worktree markers
-    /// (default branch first, per the engine's ordering).
-    func listRefs(deviceId: String, repoPath: String) async -> [RepoRef]? {
-        try? await relay(for: deviceId).call(method: "ListRefs", params: ["repoPath": repoPath])
-    }
-
-    /// Only the target engine's installed/enabled Pi models may be offered.
-    /// Empty catalogs and transport errors are not replaced with static data.
-    func listPiModels(deviceId: String) async throws -> [ModelInfo] {
-        let wire: [PiHarnessDescriptor] = try await relay(for: deviceId)
-            .call(method: "ListHarnesses", params: [:])
-        guard wire.contains(where: \.available) else {
-            throw PiCatalogError.runtimeUnavailable
-        }
-        return try await listModels(deviceId: deviceId, harness: "pi")
-    }
-
-    /// Raw RPC also used by the isolated mock E2E rig. Production UI calls
-    /// listPiModels, which applies the installed/enabled Pi gate first.
-    func listModels(deviceId: String, harness: String) async throws -> [ModelInfo] {
-        struct WireModel: Decodable {
-            var id: String
-            var label: String
-            var description: String?
-            var reasoningLevels: [String]?
-        }
-        let wire: [WireModel] = try await relay(for: deviceId)
-            .call(method: "ListModels", params: ["harness": harness])
-        var seen = Set<String>()
-        return wire.filter { !$0.id.isEmpty && seen.insert($0.id).inserted }.map {
-            ModelInfo(id: $0.id, label: $0.label, description: $0.description,
-                      reasoningLevels: $0.reasoningLevels ?? [])
-        }
-    }
-
-    /// The harness's slash commands on the target device (Pi discovers
-    /// them by spawning itself — a cold call can take most of 10s, hence the
-    /// longer deadline). Forwardable, so the host answers directly.
-    func listCommands(deviceId: String, harness: String) async throws -> [SlashCommand] {
-        try await relay(for: deviceId)
-            .call(method: "ListCommands", params: ["harness": harness], timeoutSeconds: 20)
-    }
-
-    /// SearchFiles — `@` mention candidates in a chat's or space's checkout
-    /// (paths only, never contents). Forwardable, so the host answers.
-    func searchFiles(deviceId: String, params: [String: Any]) async throws -> [FileSearchMatch] {
-        try await relay(for: deviceId).call(method: "SearchFiles", params: params, timeoutSeconds: 15)
-    }
-
-    /// PiSessionModes — the Pi plugins' switches for one chat (Fast mode,
-    /// Scripts, orchestration, the goal), read from its Pi session file on
-    /// the host. Forwardable, so the host answers directly.
-    func piSessionModes(deviceId: String, chatId: String) async throws -> PiSessionModes {
-        try await relay(for: deviceId).call(method: "PiSessionModes", params: ["chatId": chatId])
-    }
-
-    /// SwitchRef — `git checkout` in the given folder on the target device.
-    /// Returns git's error message on failure (dirty tree, held ref, …).
-    func switchRef(deviceId: String, repoPath: String, refName: String) async -> String? {
-        struct Reply: Decodable { var branch: String? }
-        do {
-            let _: Reply = try await relay(for: deviceId)
-                .call(method: "SwitchRef", params: ["repoPath": repoPath, "refName": refName])
-            return nil
-        } catch {
-            return error.localizedDescription
-        }
-    }
-
-    /// CreateWorktree — a fresh isolated worktree off the base ref; returns
-    /// its path.
-    func createWorktree(deviceId: String, repoPath: String, branch: String) async -> String? {
-        struct Reply: Decodable { var path: String }
-        let reply: Reply? = try? await relay(for: deviceId)
-            .call(method: "CreateWorktree", params: ["repoPath": repoPath, "branch": branch])
-        return reply?.path
     }
 
     // MARK: Writes (viewer-device discipline → op batches)
@@ -448,8 +285,10 @@ final class WorkspaceStore {
     /// a full-row upsert. The host = the space's owning device picks it up
     /// via the registry.
     @discardableResult
-    func createChat(space: Space, config chatConfig: ChatConfig,
-                    branch: String? = nil, cwd: String? = nil) -> String {
+    func createChat(
+        space: Space, config chatConfig: ChatConfig,
+        branch: String? = nil, cwd: String? = nil
+    ) -> String {
         let chatId = UUID().uuidString.lowercased()
         var set: [String: JSONValue] = [
             "id": .string(chatId),
@@ -493,15 +332,17 @@ final class WorkspaceStore {
             "path": path,
             "gitDetected": gitDetected,
         ]
-        let viaHost: OkReply? = try? await relay(for: deviceId).call(method: "Mutate", params: params)
+        let viaHost: OkReply? = try? await relayClient(for: deviceId).call(method: "Mutate", params: params)
         if viaHost == nil {
-            doc.write(kind: "spaces", id: spaceId, op: .upsert, set: [
-                "id": .string(spaceId),
-                "deviceId": .string(deviceId),
-                "path": .string(path),
-                "gitDetected": .bool(gitDetected),
-                "createdAt": .int(nowMs()),
-            ])
+            doc.write(
+                kind: "spaces", id: spaceId, op: .upsert,
+                set: [
+                    "id": .string(spaceId),
+                    "deviceId": .string(deviceId),
+                    "path": .string(path),
+                    "gitDetected": .bool(gitDetected),
+                    "createdAt": .int(nowMs()),
+                ])
         }
         afterLocalWrite()
         return spaceId
@@ -546,7 +387,7 @@ final class WorkspaceStore {
         deleting.insert(chat.id)
         project()
         defer { deleting.remove(chat.id) }
-        let host = relay(for: chat.deviceId)
+        let host = relayClient(for: chat.deviceId)
         var hostReached = false
         if hostOnline {
             let reply: IgnoredReply? = try? await host.call(
@@ -569,22 +410,32 @@ final class WorkspaceStore {
                 method: "DeleteScratchDir", params: ["chatId": chat.id, "path": cwd], timeoutSeconds: 15)
             return nil
         } catch {
-            return "The session was deleted, but its quick-chat folder couldn't be removed: \(error.localizedDescription)"
+            return
+                "The session was deleted, but its quick-chat folder couldn't be removed: \(error.localizedDescription)"
         }
     }
 
-    /// Quick chat step 1 (composer.rs first send): the host makes this
-    /// chat's `…/cypher-scratch/<chatId>` folder and returns its path.
-    func createScratchDir(deviceId: String, chatId: String) async throws -> String {
+    /// Quick chat (composer.rs first send): the host makes the chat's
+    /// scratch folder, then the row is minted there without a project.
+    func createQuickChat(deviceId: String, config chatConfig: ChatConfig) async throws -> String {
+        let chatId = UUID().uuidString.lowercased()
+        let cwd = try await createScratchDir(deviceId: deviceId, chatId: chatId)
+        createQuickChat(chatId: chatId, deviceId: deviceId, cwd: cwd, config: chatConfig)
+        return chatId
+    }
+
+    /// Quick chat step 1: the host makes this chat's
+    /// `…/cypher-scratch/<chatId>` folder and returns its path.
+    private func createScratchDir(deviceId: String, chatId: String) async throws -> String {
         struct Reply: Decodable { var path: String }
-        let reply: Reply = try await relay(for: deviceId)
+        let reply: Reply = try await relayClient(for: deviceId)
             .call(method: "CreateScratchDir", params: ["chatId": chatId], timeoutSeconds: 20)
         return reply.path
     }
 
     /// Quick chat step 2: `createChat`'s full-row upsert without a project,
     /// under the id the scratch folder was made for.
-    func createQuickChat(chatId: String, deviceId: String, cwd: String, config chatConfig: ChatConfig) {
+    private func createQuickChat(chatId: String, deviceId: String, cwd: String, config chatConfig: ChatConfig) {
         var set: [String: JSONValue] = [
             "id": .string(chatId),
             "deviceId": .string(deviceId),

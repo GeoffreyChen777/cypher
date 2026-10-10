@@ -55,12 +55,14 @@ struct ModelChip: View {
     let action: () -> Void
 
     var body: some View {
-        ComposerChip(label: model?.label ?? fallbackLabel,
-                     detail: reasoning.map(HarnessCatalog.reasoningLabel),
-                     badgeHarness: model.flatMap {
-                         HarnessCatalog.providerBadgeHarness(HarnessCatalog.providerId(of: $0.id))
-                     },
-                     action: action)
-            .accessibilityIdentifier("model-chip")
+        ComposerChip(
+            label: model?.label ?? fallbackLabel,
+            detail: reasoning.map(HarnessCatalog.reasoningLabel),
+            badgeHarness: model.flatMap {
+                HarnessCatalog.providerBadgeHarness(HarnessCatalog.providerId(of: $0.id))
+            },
+            action: action
+        )
+        .accessibilityIdentifier("model-chip")
     }
 }

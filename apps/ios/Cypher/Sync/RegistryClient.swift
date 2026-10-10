@@ -1,6 +1,6 @@
 // Registry room client — a Swift port of crates/sync/src/registry.rs, the
-// text-frame sibling of RoomClient (which still carries the Loro session
-// docs). JSON text frames over one WebSocket to /registry/{orgId}/ws:
+// text-frame sibling of ChatRoomClient. JSON text frames over one WebSocket
+// to /registry/{orgId}/ws:
 // hello/cursor handshake, push/ack for pending op batches, merged-row
 // broadcasts, presence beats, probe/redial liveness, reconnect with backoff.
 //
@@ -36,17 +36,9 @@ enum RegistryEvent: Sendable {
 }
 
 actor RegistryClient {
-    // Constants mirrored from crates/sync/src/registry.rs.
-    static let pingIntervalNs: UInt64 = 15_000_000_000
+    // Constants mirrored from crates/sync/src/registry.rs; the socket
+    // timings shared with the chat client live in RoomSocketLifecycle.Timing.
     static let presenceIntervalNs: UInt64 = 15_000_000_000
-    static let silenceLeaseNs: UInt64 = 45_000_000_000
-    static let helloDeadlineNs: UInt64 = 15_000_000_000
-    static let probeDeadlineNs: UInt64 = 10_000_000_000
-    static let probeQuietNs: UInt64 = 900_000_000_000  // 15min quiet-room probe
-    static let livenessTickNs: UInt64 = 1_000_000_000
-    static let backoffBaseMs = 250
-    static let backoffCapMs = 30_000
-    static let httpPollNs: UInt64 = 20_000_000_000
     static let maxHttpPullBytes = 8 * 1024 * 1024
 
     /// MainActor-isolated bridge to the store's RegistryDoc.
@@ -70,23 +62,7 @@ actor RegistryClient {
     private let rowsRequest: @Sendable (UInt64?) async -> URLRequest?
     private let pushRequest: @Sendable () async -> URLRequest?
     private let delegate: Delegate
-
-    private var socket: URLSessionWebSocketTask?
-    private var receiveTask: Task<Void, Never>?
-    private var pingTask: Task<Void, Never>?
-    private var presenceTask: Task<Void, Never>?
-    private var livenessTask: Task<Void, Never>?
-    private var pullTask: Task<Void, Never>?
-    private var joined = false
-    private var closed = false
-    private var generation = 0
-    private var backoffMs = RegistryClient.backoffBaseMs
-    /// Transport clock — pongs count, so a healthy socket never trips it.
-    private var lastInbound = DispatchTime.now()
-    /// Protocol clock — only real frames count (pongs prove nothing).
-    private var lastProtocolRx = DispatchTime.now()
-    private var helloSentAt: DispatchTime?
-    private var probeSentAt: DispatchTime?
+    private let life: RoomSocketLifecycle<RegistryClient>
 
     private struct HTTPPull: Decodable {
         let seq: UInt64
@@ -106,42 +82,54 @@ actor RegistryClient {
         let seq: UInt64
     }
 
-    init(device: String,
-         urlProvider: @escaping @Sendable () async -> URL?,
-         rowsRequest: @escaping @Sendable (UInt64?) async -> URLRequest?,
-         pushRequest: @escaping @Sendable () async -> URLRequest?,
-         delegate: Delegate) {
+    init(
+        device: String,
+        urlProvider: @escaping @Sendable () async -> URL?,
+        rowsRequest: @escaping @Sendable (UInt64?) async -> URLRequest?,
+        pushRequest: @escaping @Sendable () async -> URLRequest?,
+        delegate: Delegate,
+        transport: any WebSocketTransport = URLSessionWebSocketTransport(),
+        clock: any RoomClock = SystemRoomClock()
+    ) {
         self.device = device
         self.urlProvider = urlProvider
         self.rowsRequest = rowsRequest
         self.pushRequest = pushRequest
         self.delegate = delegate
+        life = RoomSocketLifecycle(
+            transport: transport, clock: clock,
+            hooks: .init(
+                label: "registry",
+                wake: { client, wake, gen in await client.lifecycle(wake, gen: gen) },
+                probe: { client in await client.send(ProbeFrame()) },
+                disconnected: { client in await client.delegate.event(.disconnected) },
+                timers: [RegistryClient.presenceIntervalNs]))
     }
 
     // MARK: Lifecycle
 
     func start() {
-        closed = false
+        life.start(owner: self)
         connect()
-        pullTask?.cancel()
-        pullTask = Task { [weak self] in
-            await self?.pullSync()
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: RegistryClient.httpPollNs)
-                guard let self, !Task.isCancelled else { return }
-                if await self.shouldPoll() { await self.pullSync() }
-            }
-        }
     }
 
-    private func shouldPoll() -> Bool {
-        !closed && !joined
+    /// Routes the lifecycle's wake-ups: socket frames, failures and timers.
+    private func lifecycle(_ wake: RoomSocketWake, gen: Int) async {
+        switch wake {
+        case .message(let message): await handleInbound(message, gen: gen)
+        case .failed: await life.fail(gen: gen, owner: self)
+        case .ping: await life.pingTick(gen: gen, owner: self)
+        case .liveness: await life.livenessTick(gen: gen, owner: self)
+        case .reconnect: if gen == life.generation { connect() }
+        case .timer: await presenceTick(gen: gen)
+        case .poll: if life.shouldPoll { await pullSync() }
+        }
     }
 
     /// HTTPS fallback: POST pending LWW batches, then GET the server delta.
     /// The response uses the same JSON state semantics as the WebSocket hello.
     func pullSync() async {
-        guard !closed else { return }
+        guard !life.closed else { return }
         let batches = await delegate.takePushable()
         for batch in batches {
             guard var request = await pushRequest() else { break }
@@ -150,7 +138,8 @@ actor RegistryClient {
             }
             request.httpBody = bytes
             guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  let http = response as? HTTPURLResponse else {
+                let http = response as? HTTPURLResponse
+            else {
                 await delegate.resetPushable()
                 break
             }
@@ -165,78 +154,60 @@ actor RegistryClient {
             await delegate.acknowledge(ack.batch, ack.seq)
         }
         guard let request = await rowsRequest(await delegate.helloCursor()),
-              let (data, response) = try? await URLSession.shared.data(for: request),
-              data.count <= RegistryClient.maxHttpPullBytes,
-              (response as? HTTPURLResponse)?.statusCode == 200,
-              let frame = try? JSONDecoder().decode(HTTPPull.self, from: data) else { return }
-        await delegate.event(.state(seq: frame.seq, full: frame.full,
-                                    gcFloor: frame.gcFloor, rows: frame.rows,
-                                    presence: frame.presence))
+            let (data, response) = try? await URLSession.shared.data(for: request),
+            data.count <= RegistryClient.maxHttpPullBytes,
+            (response as? HTTPURLResponse)?.statusCode == 200,
+            let frame = try? JSONDecoder().decode(HTTPPull.self, from: data)
+        else { return }
+        await delegate.event(
+            .state(
+                seq: frame.seq, full: frame.full,
+                gcFloor: frame.gcFloor, rows: frame.rows,
+                presence: frame.presence))
     }
 
     func stop() {
-        closed = true
-        generation += 1
-        cancelTasks()
-        pullTask?.cancel()
-        pullTask = nil
-        socket?.cancel(with: .goingAway, reason: nil)
-        socket = nil
-        joined = false
+        life.stop()
     }
 
     /// Local writes were enqueued — push pending batches now.
     func nudge() async {
-        guard joined else { return }
+        guard life.joined else { return }
         await pushPending()
     }
 
-    /// Foreground hook (the registry twin of RoomClient.kick): suspension
+    /// Foreground hook (the registry twin of ChatRoomClient.kick): suspension
     /// kills the socket without running any failure path. A dead or unjoined
     /// session redials NOW on fresh backoff; a joined one gets an immediate
     /// deadline-checked probe (post-suspend sockets are half-open more often
     /// than not).
     func kick() async {
-        guard !closed else { return }
-        backoffMs = RegistryClient.backoffBaseMs
-        if socket == nil || !joined {
+        guard !life.closed else { return }
+        life.resetBackoff()
+        if life.socket == nil || !life.joined {
             connect()
             return
         }
-        guard probeSentAt == nil, helloSentAt == nil else { return }  // already policed
-        await sendProbe()
+        guard life.probeSentAt == nil, life.helloSentAt == nil else { return }  // already policed
+        await life.sendProbe(owner: self)
     }
 
     /// Reconnect immediately after the store detects a sequence gap. A probe
     /// only proves liveness; it cannot repair rows that were missed.
     func redial() {
-        guard !closed else { return }
-        scheduleReconnect(gen: generation)
-    }
-
-    private func cancelTasks() {
-        receiveTask?.cancel()
-        pingTask?.cancel()
-        presenceTask?.cancel()
-        livenessTask?.cancel()
+        guard !life.closed else { return }
+        life.scheduleReconnect(gen: life.generation, owner: self)
     }
 
     private func connect() {
-        guard !closed else { return }
-        generation += 1
-        let gen = generation
-        joined = false
-        helloSentAt = nil
-        probeSentAt = nil
-        lastProtocolRx = .now()
-
+        guard let gen = life.beginDial() else { return }
         Task {
             guard let url = await urlProvider() else {
                 // No URL = no token (refresh failed or signed out) — the most
                 // confusing silent failure: everything cached renders, nothing
                 // syncs. Say so and back off.
                 roomLog.error("registry: no socket URL (token unavailable); backing off")
-                await self.scheduleReconnect(gen: gen)
+                self.life.scheduleReconnect(gen: gen, owner: self)
                 return
             }
             await self.openSocket(url: url, gen: gen)
@@ -244,137 +215,27 @@ actor RegistryClient {
     }
 
     private func openSocket(url: URL, gen: Int) async {
-        guard gen == generation, !closed else { return }
-        let task = URLSession.shared.webSocketTask(with: url)
-        socket = task
-        task.resume()
-        lastInbound = .now()
-        lastProtocolRx = .now()
-
-        receiveTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                guard let sock = await self.currentSocket(gen: gen) else { return }
-                do {
-                    let message = try await sock.receive()
-                    await self.handleInbound(message, gen: gen)
-                } catch {
-                    await self.onSocketError(gen: gen)
-                    return
-                }
-            }
-        }
-
-        pingTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: RegistryClient.pingIntervalNs)
-                guard let self else { return }
-                await self.pingTick(gen: gen)
-            }
-        }
-
-        presenceTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: RegistryClient.presenceIntervalNs)
-                guard let self else { return }
-                await self.presenceTick(gen: gen)
-            }
-        }
-
-        livenessTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: RegistryClient.livenessTickNs)
-                guard let self else { return }
-                await self.livenessTick(gen: gen)
-            }
-        }
-
+        guard life.open(URLRequest(url: url), gen: gen, owner: self) else { return }
         // Hello with the persisted cursor (nil asks for full state). The
         // deadline is armed BEFORE the send — an unanswered hello must never
         // hang the session.
-        helloSentAt = .now()
+        life.armHello()
         let cursor = await delegate.helloCursor()
         await send(HelloFrame(cursor: cursor, device: device))
     }
 
-    private func currentSocket(gen: Int) -> URLSessionWebSocketTask? {
-        gen == generation ? socket : nil
-    }
-
-    private func onSocketError(gen: Int) async {
-        guard gen == generation, !closed else { return }
-        roomLog.warning("registry: session ended (joined=\(self.joined)); redialing in \(self.backoffMs)ms")
-        joined = false
-        await delegate.event(.disconnected)
-        scheduleReconnect(gen: gen)
-    }
-
-    private func scheduleReconnect(gen: Int) {
-        guard gen == generation, !closed else { return }
-        socket?.cancel(with: .abnormalClosure, reason: nil)
-        socket = nil
-        cancelTasks()
-        let delay = backoffMs
-        backoffMs = min(backoffMs * 2, RegistryClient.backoffCapMs)
-        Task {
-            try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
-            await self.connect()
-        }
-    }
-
     // MARK: Timers
 
-    private func pingTick(gen: Int) async {
-        guard gen == generation, let socket else { return }
-        let silence = DispatchTime.now().uptimeNanoseconds - lastInbound.uptimeNanoseconds
-        if silence > RegistryClient.silenceLeaseNs {
-            roomLog.warning("registry: socket silent past lease; treating as dead")
-            await onSocketError(gen: gen)
-            return
-        }
-        try? await socket.send(.string("ping"))
-    }
-
     private func presenceTick(gen: Int) async {
-        guard gen == generation, joined else { return }
+        guard gen == life.generation, life.joined else { return }
         await send(PresenceFrame(at: nowMs(), activity: await delegate.pendingActivity()))
-    }
-
-    /// Hello answers and probes run against hard deadlines; a long-quiet but
-    /// joined room gets a probe. Any protocol frame clears both deadlines.
-    private func livenessTick(gen: Int) async {
-        guard gen == generation, socket != nil, !closed else { return }
-        let now = DispatchTime.now().uptimeNanoseconds
-        if let sent = helloSentAt, now - sent.uptimeNanoseconds > RegistryClient.helloDeadlineNs {
-            roomLog.warning("registry: no state frame within deadline; room presumed wedged, redialing")
-            await onSocketError(gen: gen)
-            return
-        }
-        if let sent = probeSentAt, now - sent.uptimeNanoseconds > RegistryClient.probeDeadlineNs {
-            roomLog.warning("registry: probe unanswered past deadline; redialing")
-            await onSocketError(gen: gen)
-            return
-        }
-        if joined, probeSentAt == nil, helloSentAt == nil,
-           now - lastProtocolRx.uptimeNanoseconds > RegistryClient.probeQuietNs {
-            await sendProbe()
-            // Don't re-arm the quiet timer against the same silence.
-            lastProtocolRx = .now()
-        }
-    }
-
-    private func sendProbe() async {
-        // Armed BEFORE the send suspends — the actor is reentrant across the
-        // await, and the answer must find the deadline already set.
-        probeSentAt = .now()
-        await send(ProbeFrame())
     }
 
     // MARK: Inbound
 
     private func handleInbound(_ message: URLSessionWebSocketTask.Message, gen: Int) async {
-        guard gen == generation else { return }
-        lastInbound = .now()
+        guard gen == life.generation else { return }
+        life.noteInbound()
         guard case .string(let text) = message else { return }
         if text == "pong" { return }  // transport lease refreshed; proves nothing
         let frame: ServerFrame
@@ -384,20 +245,20 @@ actor RegistryClient {
             // Protocol breakdown — same as the Rust client: redial rather
             // than run blind against a server we can't parse.
             roomLog.error("registry: unparseable frame (\(String(describing: error), privacy: .public)); redialing")
-            await onSocketError(gen: gen)
+            await life.fail(gen: gen, owner: self)
             return
         }
-        lastProtocolRx = .now()
-        probeSentAt = nil
+        life.noteProtocolFrame()
 
         switch frame {
         case .state(let seq, let full, let gcFloor, let rows, let presence):
-            helloSentAt = nil
-            let wasJoined = joined
-            joined = true
-            backoffMs = RegistryClient.backoffBaseMs
-            await delegate.event(.state(seq: seq, full: full, gcFloor: gcFloor,
-                                        rows: rows, presence: presence))
+            life.helloAnswered()
+            let wasJoined = life.joined
+            life.didJoin()
+            await delegate.event(
+                .state(
+                    seq: seq, full: full, gcFloor: gcFloor,
+                    rows: rows, presence: presence))
             if !wasJoined {
                 roomLog.info("registry: joined (seq=\(seq), full=\(full), rows=\(rows.count))")
                 await delegate.event(.connected)
@@ -420,8 +281,8 @@ actor RegistryClient {
             break  // liveness proven; clocks already advanced above
 
         case .error(let code, let message):
-            // Rejections are server-attributed per device; surface loudly
-            // (2026-07-31: silent rejects looked exactly like a working app).
+            // Rejections are server-attributed per device; surface loudly —
+            // a silent reject looks exactly like a working app.
             roomLog.error("registry: server rejected a frame: \(code, privacy: .public): \(message, privacy: .public)")
         }
     }
@@ -436,13 +297,14 @@ actor RegistryClient {
     }
 
     private func send(_ frame: some Encodable) async {
-        guard let socket, let data = try? JSONEncoder().encode(frame),
-              let text = String(data: data, encoding: .utf8) else { return }
+        guard let socket = life.socket, let data = try? JSONEncoder().encode(frame),
+            let text = String(data: data, encoding: .utf8)
+        else { return }
         try? await socket.send(.string(text))
     }
 }
 
-// MARK: - Wire frames (JSON text; mirror apps/edge/src/registry-room.ts)
+// MARK: - Wire frames (JSON text; mirror apps/edge/src/registry/registry-room.ts)
 
 private struct HelloFrame: Encodable {
     var t = "hello"
@@ -498,8 +360,7 @@ struct ActivityReport: Encodable, Sendable, Equatable {
         try c.encode(platform, forKey: .platform)
         try c.encode(foreground, forKey: .foreground)
         try c.encode(interactionAgeMs, forKey: .interactionAgeMs)
-        if let chatId { try c.encode(chatId, forKey: .chatId) }
-        else { try c.encodeNil(forKey: .chatId) }
+        if let chatId { try c.encode(chatId, forKey: .chatId) } else { try c.encodeNil(forKey: .chatId) }
     }
 
     /// A transition — a different chat, or entering/leaving the foreground —
@@ -531,29 +392,36 @@ private enum ServerFrame: Decodable {
         let c = try decoder.container(keyedBy: Keys.self)
         switch try c.decode(String.self, forKey: .t) {
         case "state":
-            self = .state(seq: try c.decode(UInt64.self, forKey: .seq),
-                          full: try c.decode(Bool.self, forKey: .full),
-                          gcFloor: try c.decodeIfPresent(UInt64.self, forKey: .gcFloor) ?? 0,
-                          rows: try c.decode([RegistryRow].self, forKey: .rows),
-                          presence: try c.decodeIfPresent([String: Int64].self, forKey: .presence) ?? [:])
+            self = .state(
+                seq: try c.decode(UInt64.self, forKey: .seq),
+                full: try c.decode(Bool.self, forKey: .full),
+                gcFloor: try c.decodeIfPresent(UInt64.self, forKey: .gcFloor) ?? 0,
+                rows: try c.decode([RegistryRow].self, forKey: .rows),
+                presence: try c.decodeIfPresent([String: Int64].self, forKey: .presence) ?? [:])
         case "rows":
-            self = .rows(seq: try c.decode(UInt64.self, forKey: .seq),
-                         rows: try c.decode([RegistryRow].self, forKey: .rows))
+            self = .rows(
+                seq: try c.decode(UInt64.self, forKey: .seq),
+                rows: try c.decode([RegistryRow].self, forKey: .rows))
         case "ack":
-            self = .ack(batch: try c.decode(String.self, forKey: .batch),
-                        seq: try c.decode(UInt64.self, forKey: .seq),
-                        applied: try c.decodeIfPresent(UInt64.self, forKey: .applied) ?? 0)
+            self = .ack(
+                batch: try c.decode(String.self, forKey: .batch),
+                seq: try c.decode(UInt64.self, forKey: .seq),
+                applied: try c.decodeIfPresent(UInt64.self, forKey: .applied) ?? 0)
         case "presence":
-            self = .presence(device: try c.decode(String.self, forKey: .device),
-                             at: try c.decode(Int64.self, forKey: .at))
+            self = .presence(
+                device: try c.decode(String.self, forKey: .device),
+                at: try c.decode(Int64.self, forKey: .at))
         case "probe-ok":  // the tag has a hyphen — bit the Rust side too
             self = .probeOk
         case "error":
-            self = .error(code: try c.decodeIfPresent(String.self, forKey: .code) ?? "unknown",
-                          message: try c.decodeIfPresent(String.self, forKey: .message) ?? "")
+            self = .error(
+                code: try c.decodeIfPresent(String.self, forKey: .code) ?? "unknown",
+                message: try c.decodeIfPresent(String.self, forKey: .message) ?? "")
         case let tag:
-            throw DecodingError.dataCorrupted(.init(codingPath: [Keys.t],
-                                                    debugDescription: "unknown frame: \(tag)"))
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: [Keys.t],
+                    debugDescription: "unknown frame: \(tag)"))
         }
     }
 }

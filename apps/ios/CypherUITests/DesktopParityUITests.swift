@@ -1,6 +1,7 @@
 import XCTest
 
 /// Real taps through the desktop-parity features, on the offline demo.
+@MainActor
 final class DesktopParityUITests: XCTestCase {
     private func launch(_ args: [String]) -> XCUIApplication {
         .launchDemo(args)
@@ -51,7 +52,8 @@ final class DesktopParityUITests: XCTestCase {
     func testContextArcShowsUsageAndALongPressOffersCompact() {
         let app = launch(["-route", "chat:chat-tabs"])
         // The collapsed pill carries the reading: no need to open the composer.
-        let send = app.buttons.matching(NSPredicate(format: "label == 'Up Arrow' OR identifier == 'arrow.up'")).firstMatch
+        let send = app.buttons.matching(NSPredicate(format: "label == 'Up Arrow' OR identifier == 'arrow.up'"))
+            .firstMatch
         XCTAssertTrue(send.waitForExistence(timeout: 10))
         XCTAssertEqual(send.value as? String, "81% context used · 162k / 200k")
         capture(app, "context-arc-collapsed")
@@ -73,8 +75,9 @@ final class DesktopParityUITests: XCTestCase {
         XCTAssertTrue(card.waitForHittable(timeout: 10))
         XCTAssertTrue(card.label.contains("1 needs input"), "the card reads its activity: \(card.label)")
         card.tap()
-        XCTAssertTrue(text(app, containing: "Tool group header colors").waitForExistence(timeout: 5),
-                      "the project's sessions open")
+        XCTAssertTrue(
+            text(app, containing: "Tool group header colors").waitForExistence(timeout: 5),
+            "the project's sessions open")
     }
 
     func testTheStatusRowSitsOnCapsulesOverTheTranscript() {
@@ -139,8 +142,9 @@ final class DesktopParityUITests: XCTestCase {
         input.tap()
         input.typeText("What's using port 8787?")
         app.buttons.matching(NSPredicate(format: "label == 'Up Arrow' OR identifier == 'arrow.up'")).firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["Quick chat @ MacBook Pro"].waitForExistence(timeout: 10),
-                      "sending opens the new session")
+        XCTAssertTrue(
+            app.staticTexts["Quick chat @ MacBook Pro"].waitForExistence(timeout: 10),
+            "sending opens the new session")
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.staticTexts["Quick chats"].waitForExistence(timeout: 5))
     }
@@ -166,7 +170,8 @@ final class DesktopParityUITests: XCTestCase {
         XCTAssertTrue(promote.waitForEnabled(timeout: 10))
         promote.tap()
         XCTAssertTrue(app.navigationBars["Side Chat"].waitForNonExistence(timeout: 5))
-        XCTAssertTrue(text(app, containing: "Why this order?").waitForHittable(timeout: 10),
-                      "the promoted chat opens, carrying the side chat's conversation")
+        XCTAssertTrue(
+            text(app, containing: "Why this order?").waitForHittable(timeout: 10),
+            "the promoted chat opens, carrying the side chat's conversation")
     }
 }

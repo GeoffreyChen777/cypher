@@ -1,5 +1,6 @@
 import XCTest
 
+@MainActor
 final class QuestionPanelUITests: XCTestCase {
     func testContextIsNotDuplicatedAndSelectionRequiresConfirmation() {
         let app = XCUIApplication()

@@ -303,42 +303,40 @@ Run these commands from the repository root.
 
 ## Architecture
 
+Source folders are features or layers; tests in `CypherTests/` mirror them.
+The project uses synchronized groups, so adding or moving a file needs no
+`project.pbxproj` edit.
+
 ```
-Sync/
-  ChatFrames.swift      chat2 binary frame codec (type byte, u32le header
-                        length, JSON header, payload)
-  LoroValueJSON.swift   Loro value ↔ JSON bridging for doc projections
-  RegistryClient.swift  registry snapshot/ops relay, cursor and reconnect
-  ChatRoomClient.swift  chat2 snapshot/row backfill, push/ack and reconnect
-  DeviceRelayClient.swift  explicit target-device RPC over Edge
-  WorkspaceStore.swift  devices/projects/chats/sessions registry mirror,
-                        presence and optimistic viewer writes; the phone
-                        publishes presence, not an engine-device row
-  SessionStore.swift    session doc mirror: entries/parts (continuations
-                        joined), command ledger appends (rule 1), host nudge
-Markdown/
-  MarkdownModel.swift   block model + incremental tail re-parser (re-parse
-                        from the 2nd-to-last top-level block; link-defs force
-                        full parses) — parser.rs port
-  Highlight.swift       line tokenizer with carry state, paint-only
-  MarkdownBlockView.swift  desktop metrics: body 14/22, headings 19/27…14/22,
-                        code 12.5/18 (analytic line rows), violet inline code,
-                        accent blockquotes, hairline tables
-Transcript/
-  TranscriptRows.swift  rows_for_entry port: block-granularity rows, stable
-                        ids ({msg}#{part}.{block}, {msg}#g{n}), fingerprint
-                        versions, consecutive-tool grouping
-  TranscriptView.swift  lazy stack + stick-to-bottom (pin breaks only on user
-                        scroll, 70pt re-engage band, 320pt jump button)
-  TranscriptRowViews.swift  user bubble, prose, tool-group folds, error/input
-                        chips
-  Veil.swift            paint-only streaming fade (EMA-tracked duration,
-                        1−(1−p)^1.6 curve)
-Composer/               glass pill, Send→Steer→Stop morph, QuestionPanel
-                        (paged, numbered options, 220ms auto-advance)
-Theme/                  theme.rs port: oklch→sRGB converter, exact palette,
-                        Geist/Geist Mono, motion timings + flavour words
+Cypher/
+  App/            entry point (CypherApp), AppModel and its data/session/
+                  sign-in extensions, AppConfig
+  Development/    demo dataset and its WorkspaceData conformance, launch and
+                  bench rigs, Dev-bundle profile and interop probe
+  Auth/           WorkOS/dev auth client, PKCE helpers, sign-in screen
+  Notifications/  push registration and settings, payload models, banners
+  Home/           project list, project sessions, archived shelf, row actions
+  Session/        session screen, new-session flow, side chats, subagents,
+                  comments, connection notices
+  Workspace/      Files / Changes browser over the host's workspace RPCs
+  Composer/       glass composer shell and draft, native text input, slash
+                  and @ menus, model picker, question panel, attachments
+  Transcript/     rows_for_entry port, transcript view, scroll state, veil,
+                  turn scrubber, tool chips
+  Markdown/       incremental parser, highlighter, block views
+  Theme/          theme.rs port: palette, fonts, motion, icons, appearance
+  Shared/         sheet chrome, loaders, boot splash
+  Models/         wire and registry entity types
+  Sync/           room clients and their shared socket lifecycle, chat2 and
+                  device-relay codecs, registry/session stores, WorkspaceData,
+                  doc persistence, stream-preview codec and projection
+  Resources/      DiffRenderer.bundle (built from ../DiffRenderer)
 ```
+
+`Sync/ChatFrames.swift`, `Sync/StreamPreview.swift` and
+`Sync/PreviewProjection.swift` are also compiled standalone by CI against the
+shared vectors (`scripts/tests/stream-preview-vectors.swift`); keep them free
+of app-only dependencies and at these paths.
 
 ### Parity notes (desktop ⇄ mobile translations)
 
@@ -372,3 +370,23 @@ the desktop sources cited in each file header.
   host writes all transcript entries and command outcomes.
 - After queuing a command it POSTs `/device/{host}/nudge` so a cold host
   opens the doc and drains — delivery stays durable in the doc regardless.
+
+## Conventions
+
+- One primary type per file; extension splits are named `Type+Aspect.swift`.
+- Every app source file starts with a `//` comment saying what it is for; a
+  port cites the desktop source it mirrors (`crates/ui/src/…`).
+- Folders follow features (Home, Session, Workspace, Notifications, Auth,
+  Composer, Transcript, Markdown) or layers (Sync, Models, Theme, Shared);
+  rigs that only run in demo or development builds live in `Development/`.
+- Stores are `@MainActor @Observable final class`; network transports are
+  `actor`s; members are `private` unless something else needs them.
+- Strict concurrency checking is `complete` in every configuration; fix
+  diagnostics rather than suppress them, and justify any `@unchecked
+  Sendable` or `nonisolated(unsafe)` in a comment.
+- Sync never fails silently: log failures to `roomLog` instead of dropping
+  them with a bare `try?`.
+- Tests are named for behaviour; shared helpers live only in
+  `TestSupport*.swift`; repository fixtures are found with
+  `TestSupport.repoRoot()`, never by counting parent folders.
+- Formatting is `swift-format` with `apps/ios/.swift-format`.

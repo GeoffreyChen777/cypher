@@ -45,15 +45,17 @@ struct TranscriptFeed {
         }
         for append in frame["append"] as? [[String: Any]] ?? [] {
             guard let entryId = append["entry"] as? String, let partId = append["part"] as? String,
-                  let text = append["text"] as? String,
-                  let len = (append["len"] as? NSNumber)?.intValue else {
+                let text = append["text"] as? String,
+                let len = (append["len"] as? NSNumber)?.intValue
+            else {
                 throw Desync(reason: "malformed append")
             }
             guard let ix = entries.firstIndex(where: { Self.id(of: $0) == entryId }) else {
                 throw Desync(reason: "missing append entry \(entryId)")
             }
             var parts = entries[ix]["parts"] as? [[String: Any]] ?? []
-            guard let p = parts.firstIndex(where: { $0["kind"] as? String == "text" && $0["id"] as? String == partId }) else {
+            guard let p = parts.firstIndex(where: { $0["kind"] as? String == "text" && $0["id"] as? String == partId })
+            else {
                 throw Desync(reason: "missing append part \(partId)")
             }
             let tail = (parts[p]["text"] as? String ?? "") + text

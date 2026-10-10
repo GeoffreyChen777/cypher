@@ -17,9 +17,9 @@
 import Foundation
 import os
 
-/// Sync must never fail silently (2026-07-31: a send that never left the
-/// device was indistinguishable from a working one — `try?` all the way
-/// down). Visible in Console.app / `log stream` under this subsystem.
+/// Sync must never fail silently: a send that never left the device is
+/// otherwise indistinguishable from a working one. Visible in Console.app /
+/// `log stream` under this subsystem.
 let roomLog = Logger(subsystem: "ai.mvp-lab.cypher.ios", category: "sync")
 
 enum ChatRoomEvent: Sendable {
@@ -31,22 +31,14 @@ enum ChatRoomEvent: Sendable {
 }
 
 actor ChatRoomClient {
-    // Constants mirrored from crates/sync/src/chat_client.rs.
-    static let pingIntervalNs: UInt64 = 15_000_000_000
-    static let silenceLeaseNs: UInt64 = 45_000_000_000
-    static let helloDeadlineNs: UInt64 = 15_000_000_000
+    // Constants mirrored from crates/sync/src/chat_client.rs; the socket
+    // timings shared with the registry client live in
+    // RoomSocketLifecycle.Timing.
     /// Checkpoint fetch + row backfill must complete within this deadline —
     /// post-strip docs are KB-scale, so this is generous even at 1.2 Mbps.
     static let backfillDeadlineNs: UInt64 = 120_000_000_000
-    static let probeDeadlineNs: UInt64 = 10_000_000_000
-    static let probeQuietNs: UInt64 = 900_000_000_000  // 15min quiet-room probe
-    static let livenessTickNs: UInt64 = 1_000_000_000
-    static let backoffBaseMs = 250
-    static let backoffCapMs = 30_000
     /// Re-push cadence after a `quota` rejection (server window is 60s).
     static let quotaRetryNs: UInt64 = 5_000_000_000
-    /// Polling interval while the WebSocket is unavailable.
-    static let httpPollNs: UInt64 = 20_000_000_000
     /// Client-side push cap: the DO's per-row cap (1 MiB) minus frame-header
     /// headroom — the runtime closes WS messages at 1 MiB BEFORE the DO runs,
     /// so an over-cap payload would die with no error frame to retire it.
@@ -84,18 +76,10 @@ actor ChatRoomClient {
     private let pushRequest: @Sendable (String) async -> URLRequest?
     private let delegate: Delegate
     private let previewEnabled: Bool
+    private let life: RoomSocketLifecycle<ChatRoomClient>
 
-    private var socket: URLSessionWebSocketTask?
-    private var receiveTask: Task<Void, Never>?
-    private var pingTask: Task<Void, Never>?
-    private var livenessTask: Task<Void, Never>?
     private var quotaTask: Task<Void, Never>?
-    private var pullTask: Task<Void, Never>?
     private var pending: [PendingPush] = []
-    private var joined = false
-    private var closed = false
-    private var generation = 0
-    private var backoffMs = ChatRoomClient.backoffBaseMs
     /// First backfill of THIS client instance must NOT exclude own rows: the
     /// pending queue doesn't survive restarts, and a restored device's doc
     /// may be missing its own post-backup writes — they exist only on the
@@ -108,21 +92,20 @@ actor ChatRoomClient {
     /// A live row/ack jumped over the honest cursor; repair from that cursor.
     private var gapRepair = false
     private var gapRepairs = 0
-    /// Transport clock — pongs count, so a healthy socket never trips it.
-    private var lastInbound = DispatchTime.now()
-    /// Protocol clock — only real frames count (pongs prove nothing).
-    private var lastProtocolRx = DispatchTime.now()
-    private var helloSentAt: DispatchTime?
-    private var backfillStartedAt: DispatchTime?
-    private var probeSentAt: DispatchTime?
+    /// Set while the catch-up after the hello answer is in flight.
+    private var backfillStartedAt: UInt64?
 
-    init(chatId: String,
-         device: String,
-         urlProvider: @escaping @Sendable () async -> URL?,
-         checkpointRequest: @escaping @Sendable () async -> URLRequest?,
-         rowsRequest: @escaping @Sendable (UInt64) async -> URLRequest?,
-         pushRequest: @escaping @Sendable (String) async -> URLRequest?,
-         delegate: Delegate, previewEnabled: Bool = false) {
+    init(
+        chatId: String,
+        device: String,
+        urlProvider: @escaping @Sendable () async -> URL?,
+        checkpointRequest: @escaping @Sendable () async -> URLRequest?,
+        rowsRequest: @escaping @Sendable (UInt64) async -> URLRequest?,
+        pushRequest: @escaping @Sendable (String) async -> URLRequest?,
+        delegate: Delegate, previewEnabled: Bool = false,
+        transport: any WebSocketTransport = URLSessionWebSocketTransport(),
+        clock: any RoomClock = SystemRoomClock()
+    ) {
         self.chatId = chatId
         self.device = device
         self.urlProvider = urlProvider
@@ -131,23 +114,32 @@ actor ChatRoomClient {
         self.pushRequest = pushRequest
         self.delegate = delegate
         self.previewEnabled = previewEnabled
+        life = RoomSocketLifecycle(
+            transport: transport, clock: clock,
+            hooks: .init(
+                label: "chat2 \(chatId)",
+                wake: { client, wake, gen in await client.lifecycle(wake, gen: gen) },
+                probe: { client in await client.send(ChatWire.encode(ChatFrameType.probe, header: [:])) },
+                disconnected: { client in await client.delegate.event(.disconnected) }))
     }
 
     // MARK: Lifecycle
 
     func start() {
-        closed = false
+        life.start(owner: self)
         connect()
-        pullTask?.cancel()
-        pullTask = Task { [weak self] in
-            await self?.pullSync()
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: ChatRoomClient.httpPollNs)
-                guard let self, !Task.isCancelled else { return }
-                if await self.shouldPoll() {
-                    await self.pullSync()
-                }
-            }
+    }
+
+    /// Routes the lifecycle's wake-ups: socket frames, failures and timers.
+    private func lifecycle(_ wake: RoomSocketWake, gen: Int) async {
+        switch wake {
+        case .message(let message): await handleInbound(message, gen: gen)
+        case .failed: await onSocketError(gen: gen)
+        case .ping: await life.pingTick(gen: gen, owner: self)
+        case .liveness: await livenessTick(gen: gen)
+        case .reconnect: if gen == life.generation { connect() }
+        case .timer: break
+        case .poll: if life.shouldPoll { await pullSync() }
         }
     }
 
@@ -155,15 +147,17 @@ actor ChatRoomClient {
     /// idempotently by batch id, then the framed pull is applied through the
     /// same state/row/checkpoint rules as the WebSocket path.
     func pullSync() async {
-        guard !closed else { return }
+        guard !life.closed else { return }
         for push in pending {
             guard var request = await pushRequest(push.batchId) else { break }
             request.httpBody = push.bytes
             guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  let http = response as? HTTPURLResponse else { break }
+                let http = response as? HTTPURLResponse
+            else { break }
             if http.statusCode == 200,
-               let ack = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let seq = (ack["seq"] as? NSNumber)?.uint64Value {
+                let ack = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let seq = (ack["seq"] as? NSNumber)?.uint64Value
+            {
                 pending.removeAll { $0.batchId == push.batchId }
                 // A Chat2 ACK is not permission to skip an interleaved row.
                 let cursor = await delegate.cursor()
@@ -173,7 +167,8 @@ actor ChatRoomClient {
             } else if (400...499).contains(http.statusCode) {
                 // Retire only a parsed permanent edge verdict. An arbitrary
                 // proxy/captive-portal response must not discard the update.
-                let code = (try? JSONSerialization.jsonObject(with: data))
+                let code =
+                    (try? JSONSerialization.jsonObject(with: data))
                     .flatMap { $0 as? [String: Any] }?["error"] as? String
                 if ["bad_push", "too_large", "empty"].contains(code) {
                     pending.removeAll { $0.batchId == push.batchId }
@@ -186,8 +181,9 @@ actor ChatRoomClient {
         }
         let after = await delegate.cursor()
         guard let request = await rowsRequest(after),
-              let (body, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+            let (body, response) = try? await URLSession.shared.data(for: request),
+            (response as? HTTPURLResponse)?.statusCode == 200
+        else { return }
         var frames: [ChatWireFrame] = []
         var offset = 0
         while offset + 4 <= body.count {
@@ -204,21 +200,24 @@ actor ChatRoomClient {
         }
         guard offset == body.count else { return }
         guard let stateFrame = frames.first,
-              stateFrame.kind == ChatFrameType.state,
-              let state = ChatStateHeader(stateFrame.header) else { return }
+            stateFrame.kind == ChatFrameType.state,
+            let state = ChatStateHeader(stateFrame.header)
+        else { return }
         let contained: Bool
         if state.checkpointSize == 0 {
             contained = true
         } else {
             contained = await delegate.containsFrontier(stateFrame.payload)
         }
-        let plan = chatPlanCatchUp(cursor: after, state: state,
-                                   frontierContained: contained)
+        let plan = chatPlanCatchUp(
+            cursor: after, state: state,
+            frontierContained: contained)
         let plannedAfter: UInt64
         switch plan {
         case .checkpointThenRows(let checkpointAfter):
             guard let bytes = await fetchCheckpoint(),
-                  await delegate.applyCheckpoint(bytes, state.checkpointSeq) else { return }
+                await delegate.applyCheckpoint(bytes, state.checkpointSeq)
+            else { return }
             plannedAfter = checkpointAfter
         case .rowsOnly(let cursor):
             plannedAfter = cursor
@@ -226,15 +225,11 @@ actor ChatRoomClient {
         if plannedAfter != after {
             await delegate.setCursor(plannedAfter)
         }
-        guard !closed else { return }
+        guard !life.closed else { return }
         for frame in frames.dropFirst()
         where frame.kind == ChatFrameType.row || frame.kind == ChatFrameType.rowsDone {
             await applyPullFrame(frame)
         }
-    }
-
-    private func shouldPoll() -> Bool {
-        !closed && !joined
     }
 
     private func applyPullFrame(_ frame: ChatWireFrame) async {
@@ -260,14 +255,7 @@ actor ChatRoomClient {
     }
 
     func stop() {
-        closed = true
-        generation += 1
-        cancelTasks()
-        pullTask?.cancel()
-        pullTask = nil
-        socket?.cancel(with: .goingAway, reason: nil)
-        socket = nil
-        joined = false
+        life.stop()
     }
 
     /// Local batches the server hasn't acked yet. The queue is in-memory
@@ -285,11 +273,12 @@ actor ChatRoomClient {
     /// an upstream bug).
     func enqueue(update: Data) {
         guard update.count <= ChatRoomClient.maxPushBytes else {
-            roomLog.error("chat2 \(self.chatId, privacy: .public): update \(update.count)B exceeds the row cap; not queued")
+            roomLog.error(
+                "chat2 \(self.chatId, privacy: .public): update \(update.count)B exceeds the row cap; not queued")
             return
         }
         pending.append(PendingPush(batchId: UUID().uuidString.lowercased(), bytes: update))
-        if joined {
+        if life.joined {
             Task { await self.pushPending() }
         }
     }
@@ -300,45 +289,32 @@ actor ChatRoomClient {
     /// deadline-checked probe (post-suspend sockets are half-open more often
     /// than not).
     func kick() async {
-        guard !closed else { return }
-        backoffMs = ChatRoomClient.backoffBaseMs
-        if socket == nil {
+        guard !life.closed else { return }
+        life.resetBackoff()
+        if life.socket == nil {
             connect()
             return
         }
-        if !joined {
+        if !life.joined {
             // A handshake/catch-up is already in flight on this socket — its
             // own deadlines police it (hello 15s, backfill 120s). Redialing
             // here abandoned a healthy catch-up and refetched the checkpoint
             // (observed on launch: foregrounded() fires during the first
             // join). A zombie socket with NO handshake pending is redialed.
-            if helloSentAt == nil, backfillStartedAt == nil {
+            if life.helloSentAt == nil, backfillStartedAt == nil {
                 connect()
             }
             return
         }
-        guard probeSentAt == nil else { return }
-        await sendProbe()
-    }
-
-    private func cancelTasks() {
-        receiveTask?.cancel()
-        pingTask?.cancel()
-        livenessTask?.cancel()
-        quotaTask?.cancel()
+        guard life.probeSentAt == nil else { return }
+        await life.sendProbe(owner: self)
     }
 
     private func connect() {
-        guard !closed else { return }
-        generation += 1
-        let gen = generation
-        joined = false
-        helloSentAt = nil
+        guard let gen = life.beginDial() else { return }
         backfillStartedAt = nil
-        probeSentAt = nil
         gapRepair = false
         gapRepairs = 0
-        lastProtocolRx = .now()
         for ix in pending.indices {
             pending[ix].inFlight = false
         }
@@ -350,7 +326,7 @@ actor ChatRoomClient {
                 // confusing silent failure: everything cached renders,
                 // nothing syncs. Say so and back off.
                 roomLog.error("chat2 \(self.chatId, privacy: .public): no socket URL (token unavailable); backing off")
-                await self.scheduleReconnect(gen: gen)
+                self.life.scheduleReconnect(gen: gen, owner: self)
                 return
             }
             await self.openSocket(url: url, gen: gen)
@@ -358,140 +334,49 @@ actor ChatRoomClient {
     }
 
     private func openSocket(url: URL, gen: Int) async {
-        guard gen == generation, !closed else { return }
         var request = URLRequest(url: url)
-        if previewEnabled { request.setValue(StreamPreviewWire.capability, forHTTPHeaderField: "x-cypher-preview-capability") }
-        let task = URLSession.shared.webSocketTask(with: request)
-        socket = task
-        task.resume()
-        lastInbound = .now()
-        lastProtocolRx = .now()
-
-        receiveTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                guard let sock = await self.currentSocket(gen: gen) else { return }
-                do {
-                    let message = try await sock.receive()
-                    await self.handleInbound(message, gen: gen)
-                } catch {
-                    await self.onSocketError(gen: gen)
-                    return
-                }
-            }
+        if previewEnabled {
+            request.setValue(StreamPreviewWire.capability, forHTTPHeaderField: "x-cypher-preview-capability")
         }
-
-        pingTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: ChatRoomClient.pingIntervalNs)
-                guard let self else { return }
-                await self.pingTick(gen: gen)
-            }
-        }
-
-        livenessTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: ChatRoomClient.livenessTickNs)
-                guard let self else { return }
-                await self.livenessTick(gen: gen)
-            }
-        }
-
+        guard life.open(request, gen: gen, owner: self) else { return }
         // Hello with the persisted cursor. The deadline is armed BEFORE the
         // send — an unanswered hello must never hang the session.
-        helloSentAt = .now()
+        life.armHello()
         let cursor = await delegate.cursor()
-        await send(ChatWire.encode(ChatFrameType.hello,
-                                   header: ["cursor": cursor, "device": device]))
-    }
-
-    private func currentSocket(gen: Int) -> URLSessionWebSocketTask? {
-        gen == generation ? socket : nil
+        await send(
+            ChatWire.encode(
+                ChatFrameType.hello,
+                header: ["cursor": cursor, "device": device]))
     }
 
     private func onSocketError(gen: Int) async {
-        if previewEnabled, gen == generation { _ = await delegate.preview(nil) }
-        guard gen == generation, !closed else { return }
-        roomLog.warning("chat2 \(self.chatId, privacy: .public): session ended (joined=\(self.joined)); redialing in \(self.backoffMs)ms")
-        joined = false
-        await delegate.event(.disconnected)
-        scheduleReconnect(gen: gen)
-    }
-
-    private func scheduleReconnect(gen: Int) {
-        guard gen == generation, !closed else { return }
-        socket?.cancel(with: .abnormalClosure, reason: nil)
-        socket = nil
-        cancelTasks()
-        let delay = backoffMs
-        backoffMs = min(backoffMs * 2, ChatRoomClient.backoffCapMs)
-        Task {
-            try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
-            await self.connect()
-        }
+        if previewEnabled, gen == life.generation { _ = await delegate.preview(nil) }
+        await life.fail(gen: gen, owner: self)
     }
 
     // MARK: Timers
-
-    private func pingTick(gen: Int) async {
-        guard gen == generation, let socket else { return }
-        let silence = DispatchTime.now().uptimeNanoseconds - lastInbound.uptimeNanoseconds
-        if silence > ChatRoomClient.silenceLeaseNs {
-            roomLog.warning("chat2 \(self.chatId, privacy: .public): socket silent past lease; treating as dead")
-            await onSocketError(gen: gen)
-            return
-        }
-        try? await socket.send(.string("ping"))
-    }
 
     /// Hello answers, the catch-up, and probes run against hard deadlines; a
     /// long-quiet joined room gets a probe. Any protocol frame clears the
     /// probe deadline; catch-up progress (rows landing) feeds the protocol
     /// clock, so a draining backfill is never killed mid-stream.
     private func livenessTick(gen: Int) async {
-        guard gen == generation, socket != nil, !closed else { return }
+        guard gen == life.generation, life.socket != nil, !life.closed else { return }
         if previewEnabled, let frame = await delegate.previewRetry() { await send(frame) }
-        let now = DispatchTime.now().uptimeNanoseconds
-        if let sent = helloSentAt, now - sent.uptimeNanoseconds > ChatRoomClient.helloDeadlineNs {
-            roomLog.warning("chat2 \(self.chatId, privacy: .public): no state frame within deadline; room presumed wedged, redialing")
-            await onSocketError(gen: gen)
-            return
-        }
-        if let started = backfillStartedAt,
-           now - started.uptimeNanoseconds > ChatRoomClient.backfillDeadlineNs {
-            roomLog.warning("chat2 \(self.chatId, privacy: .public): backfill did not complete within deadline; redialing")
-            await onSocketError(gen: gen)
-            return
-        }
-        if let sent = probeSentAt, now - sent.uptimeNanoseconds > ChatRoomClient.probeDeadlineNs {
-            roomLog.warning("chat2 \(self.chatId, privacy: .public): probe unanswered past deadline; redialing")
-            await onSocketError(gen: gen)
-            return
-        }
-        if joined, probeSentAt == nil,
-           now - lastProtocolRx.uptimeNanoseconds > ChatRoomClient.probeQuietNs {
-            await sendProbe()
-            // Don't re-arm the quiet timer against the same silence.
-            lastProtocolRx = .now()
+        await life.livenessTick(gen: gen, owner: self) { now in
+            guard let started = backfillStartedAt, now - started > ChatRoomClient.backfillDeadlineNs else { return nil }
+            return "backfill did not complete within deadline; redialing"
         }
     }
-
-    private func sendProbe() async {
-        // Armed BEFORE the send suspends — the actor is reentrant across the
-        // await, and the answer must find the deadline already set.
-        probeSentAt = .now()
-        await send(ChatWire.encode(ChatFrameType.probe, header: [:]))
-    }
-
     // MARK: Inbound
 
     private func handleInbound(_ message: URLSessionWebSocketTask.Message, gen: Int) async {
-        guard gen == generation else { return }
-        lastInbound = .now()
+        guard gen == life.generation else { return }
+        life.noteInbound()
         guard case .data(let data) = message else { return }  // "pong" text
         if previewEnabled, let first = data.first, (0x20...0x26).contains(first) {
             for reply in await delegate.preview(data) { await send(reply) }
-            return // Preview must not satisfy the durable progress/probe deadline.
+            return  // Preview must not satisfy the durable progress/probe deadline.
         }
         guard let frame = ChatWire.decode(data) else {
             // Protocol breakdown — redial rather than run blind against a
@@ -501,11 +386,11 @@ actor ChatRoomClient {
             return
         }
         if previewEnabled, frame.kind == ChatFrameType.error, let code = frame.header["code"] as? String,
-           code.hasPrefix("preview_") || code.hasPrefix("bad_preview_") {
-            return // A late receipt/Resume error cannot revoke a newer grant or satisfy a durable probe.
+            code.hasPrefix("preview_") || code.hasPrefix("bad_preview_")
+        {
+            return  // A late receipt/Resume error cannot revoke a newer grant or satisfy a durable probe.
         }
-        lastProtocolRx = .now()
-        probeSentAt = nil
+        life.noteProtocolFrame()
 
         switch frame.kind {
         case ChatFrameType.state:
@@ -519,7 +404,8 @@ actor ChatRoomClient {
             let cursor = await delegate.cursor()
             if seq > cursor + 1 {
                 gapRepair = true
-                roomLog.warning("chat2 \(self.chatId, privacy: .public): row gap (seq=\(seq), cursor=\(cursor)); holding cursor")
+                roomLog.warning(
+                    "chat2 \(self.chatId, privacy: .public): row gap (seq=\(seq), cursor=\(cursor)); holding cursor")
                 await delegate.applyRow(frame.payload, cursor)
             } else {
                 await delegate.applyRow(frame.payload, seq)
@@ -531,8 +417,7 @@ actor ChatRoomClient {
             backfillStartedAt = nil
             let wasResumed = resumed
             resumed = true
-            joined = true
-            backoffMs = ChatRoomClient.backoffBaseMs
+            life.didJoin()
             roomLog.info("chat2 \(self.chatId, privacy: .public): joined (converged, resumed=\(wasResumed))")
             await delegate.event(.connected)
             // Anything pending (offline writes, reconnect re-pushes) goes
@@ -542,12 +427,14 @@ actor ChatRoomClient {
 
         case ChatFrameType.ack:
             guard let batchId = frame.header["batchId"] as? String,
-                  let seq = (frame.header["seq"] as? NSNumber)?.uint64Value else { return }
+                let seq = (frame.header["seq"] as? NSNumber)?.uint64Value
+            else { return }
             pending.removeAll { $0.batchId == batchId }
             let cursor = await delegate.cursor()
             if seq > cursor + 1 {
                 gapRepair = true
-                roomLog.warning("chat2 \(self.chatId, privacy: .public): ack gap (seq=\(seq), cursor=\(cursor)); holding cursor")
+                roomLog.warning(
+                    "chat2 \(self.chatId, privacy: .public): ack gap (seq=\(seq), cursor=\(cursor)); holding cursor")
             } else {
                 await delegate.advanceCursor(seq)
             }
@@ -578,16 +465,18 @@ actor ChatRoomClient {
             await onSocketError(gen: gen)
             return
         }
-        guard helloSentAt != nil else { return }  // late duplicate — ignore
-        helloSentAt = nil
-        backfillStartedAt = .now()
+        guard life.helloSentAt != nil else { return }  // late duplicate — ignore
+        life.helloAnswered()
+        backfillStartedAt = life.clock.now()
 
         let cursor = await delegate.cursor()
         if cursor > state.headSeq {
             // Server behind our cursor = the room was reset/wiped. A viewer
             // owes no re-seed (that is the host's checkpoint duty) — treat
             // the cursor as fresh and reload from what the room has.
-            roomLog.warning("chat2 \(self.chatId, privacy: .public): server lost state (headSeq=\(state.headSeq) < cursor=\(cursor)); treating as fresh")
+            roomLog.warning(
+                "chat2 \(self.chatId, privacy: .public): server lost state (headSeq=\(state.headSeq) < cursor=\(cursor)); treating as fresh"
+            )
         }
         // Once per client, clamp a possibly dishonest persisted cursor to the
         // checkpoint (or zero when no checkpoint exists) so parked rows are
@@ -610,9 +499,11 @@ actor ChatRoomClient {
         case .rowsOnly(let a):
             after = a
         case .checkpointThenRows(let a):
-            roomLog.info("chat2 \(self.chatId, privacy: .public): fetching checkpoint (seq=\(state.checkpointSeq), \(state.checkpointSize)B)")
-            guard let bytes = await fetchCheckpoint(), gen == generation, !closed else {
-                if gen == generation, !closed {
+            roomLog.info(
+                "chat2 \(self.chatId, privacy: .public): fetching checkpoint (seq=\(state.checkpointSeq), \(state.checkpointSize)B)"
+            )
+            guard let bytes = await fetchCheckpoint(), gen == life.generation, !life.closed else {
+                if gen == life.generation, !life.closed {
                     roomLog.warning("chat2 \(self.chatId, privacy: .public): checkpoint fetch failed; redialing")
                     await onSocketError(gen: gen)
                 }
@@ -628,15 +519,17 @@ actor ChatRoomClient {
         // A contained checkpoint can move the plan upward; amnesty/reset can
         // move it downward. Persist the plan's cursor before requesting rows.
         await delegate.setCursor(after)
-        await send(ChatWire.encode(ChatFrameType.rowsReq,
-                                   header: ["after": after, "excludeOwn": resumed]))
+        await send(
+            ChatWire.encode(
+                ChatFrameType.rowsReq,
+                header: ["after": after, "excludeOwn": resumed]))
     }
 
     /// Request rows from the last honest cursor after a row/ack gap. The
     /// repair budget is per socket session; exhaustion forces a reconnect and
     /// therefore a fresh full catch-up.
     private func maybeRepairGap(gen: Int) async {
-        guard gapRepair, gen == generation, socket != nil else { return }
+        guard gapRepair, gen == life.generation, life.socket != nil else { return }
         gapRepair = false
         gapRepairs += 1
         guard gapRepairs <= 3 else {
@@ -645,16 +538,22 @@ actor ChatRoomClient {
             return
         }
         let after = await delegate.cursor()
-        roomLog.info("chat2 \(self.chatId, privacy: .public): backfilling over a row gap (after=\(after), attempt \(self.gapRepairs))")
-        await send(ChatWire.encode(ChatFrameType.rowsReq,
-                                   header: ["after": after, "excludeOwn": false]))
+        roomLog.info(
+            "chat2 \(self.chatId, privacy: .public): backfilling over a row gap (after=\(after), attempt \(self.gapRepairs))"
+        )
+        await send(
+            ChatWire.encode(
+                ChatFrameType.rowsReq,
+                header: ["after": after, "excludeOwn": false]))
     }
 
     private func handleErrorFrame(_ header: [String: Any], gen: Int) async {
         let code = header["code"] as? String ?? "?"
         let message = header["message"] as? String ?? ""
         let batchId = header["batchId"] as? String ?? ""
-        roomLog.error("chat2 \(self.chatId, privacy: .public): server rejected a frame: \(code, privacy: .public): \(message, privacy: .public)")
+        roomLog.error(
+            "chat2 \(self.chatId, privacy: .public): server rejected a frame: \(code, privacy: .public): \(message, privacy: .public)"
+        )
         switch code {
         case "too_large", "empty", "bad_push":
             // Permanent verdicts on a specific batch: retire it, or it
@@ -672,11 +571,14 @@ actor ChatRoomClient {
                 pending[ix].inFlight = false
             }
             quotaTask?.cancel()
-            quotaTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: ChatRoomClient.quotaRetryNs)
+            let clock = life.clock
+            let retry = Task { [weak self] in
+                await clock.sleep(nanoseconds: ChatRoomClient.quotaRetryNs)
                 guard !Task.isCancelled, let self else { return }
                 await self.pushHead(gen: gen)
             }
+            quotaTask = retry
+            life.adopt(retry)
         case "hello_first":
             // Session state desynced from the server — start over.
             await onSocketError(gen: gen)
@@ -688,27 +590,31 @@ actor ChatRoomClient {
     // MARK: Outbound
 
     private func pushPending() async {
-        guard joined else { return }
+        guard life.joined else { return }
         for ix in pending.indices where !pending[ix].inFlight {
             pending[ix].inFlight = true
             let push = pending[ix]
-            await send(ChatWire.encode(ChatFrameType.push,
-                                       header: ["batchId": push.batchId],
-                                       payload: push.bytes))
+            await send(
+                ChatWire.encode(
+                    ChatFrameType.push,
+                    header: ["batchId": push.batchId],
+                    payload: push.bytes))
         }
     }
 
     /// Send only the queue's head batch — the quota-probe path.
     private func pushHead(gen: Int) async {
-        guard gen == generation, joined, let head = pending.first else { return }
+        guard gen == life.generation, life.joined, let head = pending.first else { return }
         pending[0].inFlight = true
-        await send(ChatWire.encode(ChatFrameType.push,
-                                   header: ["batchId": head.batchId],
-                                   payload: head.bytes))
+        await send(
+            ChatWire.encode(
+                ChatFrameType.push,
+                header: ["batchId": head.batchId],
+                payload: head.bytes))
     }
 
     private func send(_ frame: Data) async {
-        guard let socket else { return }
+        guard let socket = life.socket else { return }
         try? await socket.send(.data(frame))
     }
 
@@ -727,7 +633,8 @@ actor ChatRoomClient {
                 request.setValue("bytes=\(got.count)-", forHTTPHeaderField: "Range")
             }
             guard let (stream, response) = try? await URLSession.shared.bytes(for: request),
-                  let http = response as? HTTPURLResponse else { continue }
+                let http = response as? HTTPURLResponse
+            else { continue }
             let seq = http.value(forHTTPHeaderField: "x-chat2-checkpoint-seq")
             if let seq {
                 if let prev = seenSeq, seq != prev {
@@ -752,7 +659,8 @@ actor ChatRoomClient {
                 return got
             } catch {
                 // Mid-body drop: keep the bytes, resume via Range.
-                roomLog.warning("chat2 \(self.chatId, privacy: .public): checkpoint stream dropped at \(got.count)B; resuming")
+                roomLog.warning(
+                    "chat2 \(self.chatId, privacy: .public): checkpoint stream dropped at \(got.count)B; resuming")
             }
         }
         return nil

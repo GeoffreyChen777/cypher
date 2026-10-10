@@ -80,26 +80,28 @@ final class AppModel {
         DocDisk.prune(keep: 80)
         let args = ProcessInfo.processInfo.arguments
         #if CYPHER_DEVELOPMENT
-        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return }
-        // A separate bundle owns preferences, document cache and Keychain.
-        // Ignore production saved state and legacy credential launch arguments.
-        if !args.contains("-demo") {
-            if let token = ProcessInfo.processInfo.environment["CYPHER_DEV_ACCESS_TOKEN"],
-               DevelopmentProfile.validToken(token) {
-                Keychain.save(token, key: "developmentToken", thisDeviceOnly: true)
+            if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return }
+            // A separate bundle owns preferences, document cache and Keychain.
+            // Ignore production saved state and legacy credential launch arguments.
+            if !args.contains("-demo") {
+                if let token = ProcessInfo.processInfo.environment["CYPHER_DEV_ACCESS_TOKEN"],
+                    DevelopmentProfile.validToken(token)
+                {
+                    Keychain.save(token, key: "developmentToken", thisDeviceOnly: true)
+                }
+                if connectDevelopment(secret: Keychain.load(key: "developmentToken")) {
+                    if args.contains("-dev-interop") { Task { await DevelopmentInterop.run(model: self) } }
+                }
+                return
             }
-            if connectDevelopment(secret: Keychain.load(key: "developmentToken")) {
-                if args.contains("-dev-interop") { Task { await DevelopmentInterop.run(model: self) } }
-            }
-            return
-        }
         #endif
         // Hard cutover: both prior production edge URLs (the old mvp-lab
         // default and the interim workers.dev default) are migrated to the
         // new canonical endpoint. Only the exact old production values
         // migrate; custom/self-hosted URLs are preserved.
         if edgeURLString == "https://cypher-edge.mvp-lab.ai"
-            || edgeURLString == "https://cypher-edge.geoffreychen777.workers.dev" {
+            || edgeURLString == "https://cypher-edge.geoffreychen777.workers.dev"
+        {
             edgeURLString = "https://edge.letscypher.app"
         }
         // Debug-rig config overrides (cfprefsd caching defeats external
@@ -128,13 +130,16 @@ final class AppModel {
         let mode = AppConfig.Mode(rawValue: authModeRaw) ?? .workos
         switch mode {
         case .dev:
-            connect(url: url, mode: .dev, userId: storedUserId, orgId: storedOrgId,
-                    tokens: nil, devBearer: devBearer(userId: storedUserId, orgId: storedOrgId))
+            connect(
+                url: url, mode: .dev, userId: storedUserId, orgId: storedOrgId,
+                tokens: nil, devBearer: devBearer(userId: storedUserId, orgId: storedOrgId))
         case .workos:
             guard let access = Keychain.load(key: "accessToken"),
-                  let refresh = Keychain.load(key: "refreshToken") else { return }
-            connect(url: url, mode: .workos, userId: storedUserId, orgId: storedOrgId,
-                    tokens: AuthTokens(accessToken: access, refreshToken: refresh), devBearer: nil)
+                let refresh = Keychain.load(key: "refreshToken")
+            else { return }
+            connect(
+                url: url, mode: .workos, userId: storedUserId, orgId: storedOrgId,
+                tokens: AuthTokens(accessToken: access, refreshToken: refresh), devBearer: nil)
         }
     }
 }
