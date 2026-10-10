@@ -62,7 +62,7 @@ pub use registry::{
 pub use repos::{Repos, worktree_branch_from_title};
 pub use run_journal::RunJournal;
 pub use session_forks::SessionForks;
-pub use sessions::{SessionsEngine, SteerOutcome};
+pub use sessions::{QuiesceWindows, SessionsEngine, SteerOutcome};
 pub use side_chats::bounded_transcript_context;
 pub use spaces::SpacesSync;
 pub use terminals::Terminals;

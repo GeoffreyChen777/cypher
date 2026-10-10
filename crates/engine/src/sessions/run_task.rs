@@ -315,31 +315,13 @@ pub(super) async fn drive_run(
     // segment finalized Complete, status Idle, child and mailbox warm. A
     // false trip (the agent was quietly waiting on something invisible)
     // costs a status dip: the parked-resume path below re-arms Working the
-    // moment output flows again, and nothing is lost. Default 5min: long
-    // silent thinking with no reasoning events must not drop the spinner.
-    // `CYPHER_TURN_QUIESCE_MS` overrides the window; 0 disables.
-    let quiesce_after: Option<std::time::Duration> =
-        match cypher_env::var("TURN_QUIESCE_MS").and_then(|v| v.parse::<u64>().ok()) {
-            Some(0) => None,
-            Some(ms) => Some(std::time::Duration::from_millis(ms)),
-            None => Some(std::time::Duration::from_secs(300)),
-        };
+    // moment output flows again, and nothing is lost. SELF-CONTINUED turns
+    // (see [`QuiesceWindows::self_turn`]) use a much shorter window.
+    let QuiesceWindows {
+        turn: quiesce_after,
+        self_turn: self_quiesce_after,
+    } = inner.quiesce_windows();
     let mut last_stream_activity = tokio::time::Instant::now();
-    // SELF-CONTINUED turns get a much SHORTER quiesce window. A turn the
-    // agent starts on its own (background-task wake) never receives a
-    // turn-end Done: no prompt is outstanding to settle. The watchdog is that
-    // turn shape's ONLY settle path, so the normal window read as minutes of
-    // stuck-Working after every background notification. The in-flight
-    // fold gate below still protects running tools; reasoning heartbeats
-    // push the window during real thinking. `CYPHER_SELF_TURN_QUIESCE_MS`
-    // overrides; 0 falls back to the normal window. An explicit
-    // `CYPHER_TURN_QUIESCE_MS=0` still disables the watchdog entirely.
-    let self_quiesce_after: Option<std::time::Duration> =
-        match cypher_env::var("SELF_TURN_QUIESCE_MS").and_then(|v| v.parse::<u64>().ok()) {
-            Some(0) => None,
-            Some(ms) => Some(std::time::Duration::from_millis(ms)),
-            None => Some(std::time::Duration::from_secs(20)),
-        };
     let mut self_continued_turn = false;
     // The last translation frame folded, so the keepalive repeats that keep a
     // slow translation's stream alive are not each journaled in full.

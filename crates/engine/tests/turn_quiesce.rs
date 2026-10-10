@@ -1,46 +1,26 @@
-//! Turn-quiesce watchdog + parked self-continuation, mocked against the
-//! 2026-08-12 stuck-Working incident workflow (chat 15c8be78, Claude via
-//! claude-agent-acp — but the failure shape is harness-agnostic):
-//!
-//! 1. A turn completes (Done) → the session parks Idle.
-//! 2. The agent re-invokes ITSELF on a background-task notification and
-//!    streams real output with no prompt behind it. The old parked gate
-//!    dropped that output on the floor ("Build finished successfully…"
-//!    existed in the agent's session data, was absent from zeron's doc).
-//! 3. A steer ("what about now") becomes the next turn — the agent answers,
-//!    and the turn-end reply is LOST upstream. No Done ever arrives; the
-//!    session read Working forever (the live heartbeat defeats the 45s
-//!    staleness gate by design, and there is no per-turn timeout).
-//!
-//! The fixes under test: parked sessions RESUME on self-continued output
-//! (fold it, show Working), and the quiesce watchdog settles any turn whose
-//! stream goes silent after completed output with nothing in flight —
-//! without ending the run, so a false trip costs a status dip, not content.
+//! Turn-quiesce watchdog and parked self-continuation (2026-08-12 and
+//! 2026-08-13 stuck-Working incidents): a parked session resumes on
+//! self-continued output, a turn whose Done is lost settles once the stream
+//! goes silent with nothing in flight, and a self-started turn — which never
+//! gets a Done — settles on the shorter self-turn window.
 
 mod common;
 
-use std::sync::Once;
 use std::time::Duration;
 
 use cypher_doc::{MessagePart, MessageRole, MessageStatus};
-use cypher_engine::{EngineCore, SteerOutcome};
+use cypher_engine::{EngineCore, QuiesceWindows, SteerOutcome};
 use cypher_proto::{AgentEvent, DoneStatus, HarnessId, SessionStatus, ToolCall};
 
 use common::{FeedRig, entries, run_request, status, text, wait_for};
 
 const CHAT: &str = "chat-quiesce";
-/// Watchdog window for every test in this file (the process-global env knob
-/// is set once, before any engine assembles).
+/// Watchdog window for the prompt-turn tests.
 const QUIESCE_MS: u64 = 300;
-
-fn init_quiesce_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: called before any engine (and thus any reader of the var)
-        // exists in this test process; all tests share the one value.
-        unsafe { std::env::set_var("CYPHER_TURN_QUIESCE_MS", QUIESCE_MS.to_string()) };
-    });
-}
+/// The self-turn tests: a normal window far beyond the test horizon, so a
+/// fast park can only have come through the short self-continued window.
+const LONG_QUIESCE_MS: u64 = 600_000;
+const SELF_QUIESCE_MS: u64 = 400;
 
 fn done(status: DoneStatus) -> AgentEvent {
     common::done_with(status, Some("hs-q"))
@@ -51,10 +31,33 @@ fn session_started() -> AgentEvent {
 }
 
 /// The feed models turn boundaries, self-continuation, and a LOST turn-end
-/// exactly; accepted steers confirm with a `Steered` boundary.
+/// exactly; accepted steers confirm with a `Steered` boundary. The default
+/// 20s self-turn window is longer than `QUIESCE_MS`, so the normal one governs.
 fn assemble(main_prompt: &str) -> FeedRig {
-    init_quiesce_env();
-    common::feed_rig(main_prompt, true)
+    assemble_with(
+        main_prompt,
+        QuiesceWindows {
+            turn: Some(Duration::from_millis(QUIESCE_MS)),
+            self_turn: Some(Duration::from_secs(20)),
+        },
+    )
+}
+
+/// The self-turn rig: only the short self-continued window can park in time.
+fn assemble_self_turn(main_prompt: &str) -> FeedRig {
+    assemble_with(
+        main_prompt,
+        QuiesceWindows {
+            turn: Some(Duration::from_millis(LONG_QUIESCE_MS)),
+            self_turn: Some(Duration::from_millis(SELF_QUIESCE_MS)),
+        },
+    )
+}
+
+fn assemble_with(main_prompt: &str, windows: QuiesceWindows) -> FeedRig {
+    let rig = common::feed_rig(main_prompt, true);
+    rig.core.sessions.set_quiesce_windows(windows);
+    rig
 }
 
 fn assistant_texts(core: &EngineCore) -> Vec<(String, Option<MessageStatus>)> {
@@ -320,6 +323,112 @@ async fn stale_tool_echo_stays_parked() {
         Some(SessionStatus::Idle),
         "a stale tool echo must not resume a parked session"
     );
+
+    rig.core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn self_continued_turn_parks_on_the_short_window() {
+    let rig = assemble_self_turn("watch the build");
+    rig.core
+        .sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request("watch the build"), None)
+        .await
+        .expect("dispatch");
+
+    // Turn 1 completes normally → parked Idle.
+    rig.feed.send(session_started()).unwrap();
+    rig.feed.send(text("I will watch the build.")).unwrap();
+    rig.feed.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
+        "park after Done",
+    )
+    .await;
+
+    // Background wake: self-continued output past the resume gate.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    rig.feed
+        .send(text("The build is green. Released."))
+        .unwrap();
+    wait_for(
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
+        "self-continued output resumes Working",
+    )
+    .await;
+
+    // The short window parks it well inside the 10s wait_for horizon — the
+    // normal window (10 min here) could not have.
+    wait_for(
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
+        "short quiesce parks the self-continued turn",
+    )
+    .await;
+
+    rig.core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn steered_turn_keeps_the_normal_window() {
+    let rig = assemble_self_turn("watch the build again");
+    rig.core
+        .sessions
+        .dispatch(
+            CHAT,
+            HarnessId::Mock,
+            run_request("watch the build again"),
+            None,
+        )
+        .await
+        .expect("dispatch");
+
+    rig.feed.send(session_started()).unwrap();
+    rig.feed.send(text("Watching.")).unwrap();
+    rig.feed.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
+        "park after Done",
+    )
+    .await;
+
+    // Background wake resumes the session (short window armed)…
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    rig.feed.send(text("Build done.")).unwrap();
+    wait_for(
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
+        "self-continued output resumes Working",
+    )
+    .await;
+
+    // …then a real steer takes the turn over: the short window must stand
+    // down. The steered turn's reply streams and goes quiet — with the
+    // normal window at 10 minutes, the session must STAY Working well past
+    // the short window (its Done is genuinely coming).
+    rig.core
+        .sessions
+        .steer(CHAT, "and then?", None)
+        .await
+        .expect("steer accepted");
+    wait_for(
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
+        "steered turn is Working",
+    )
+    .await;
+    rig.feed.send(text("Answering the steer.")).unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        status(&rig.core, CHAT),
+        Some(SessionStatus::Working),
+        "a steered (prompt-owned) turn must not park on the short window"
+    );
+
+    // Clean turn end.
+    rig.feed.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
+        "steered turn parks at its Done",
+    )
+    .await;
 
     rig.core.sessions.shutdown().await;
 }
