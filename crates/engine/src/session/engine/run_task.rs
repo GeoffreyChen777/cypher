@@ -273,6 +273,17 @@ struct RunLoop<'r> {
     quiesce: QuiesceWindows,
     last_stream_activity: tokio::time::Instant,
     self_continued_turn: bool,
+    /// Parked by the WATCHDOG with a prompt-owned turn's Done still
+    /// outstanding. The watchdog cannot tell a lost Done from a provider
+    /// that is simply slow (a long high-reasoning step), so this park is
+    /// provisional: any later sign of life reopens that same turn on the
+    /// normal window ([`Self::parked_gate`]), and a run that ends before the
+    /// turn ever settles journals it interrupted ([`Self::finish`]).
+    quiesced_turn: bool,
+    /// The journal holds events of a turn it has not closed with a Done yet.
+    /// A run must never end that way: subagent parents wait on the child's
+    /// terminal event, and boot recovery reads an open journal as a crash.
+    journal_open: bool,
     /// The last translation frame folded, so the keepalive repeats that keep
     /// a slow translation's stream alive are not each journaled in full.
     last_translation: Option<String>,
@@ -412,6 +423,8 @@ impl<'r> RunLoop<'r> {
             quiesce,
             last_stream_activity: tokio::time::Instant::now(),
             self_continued_turn: false,
+            quiesced_turn: false,
+            journal_open: false,
             last_translation: None,
             retry_request: Some(retry_request),
             resume_state: Some(resume_state),
@@ -527,16 +540,20 @@ impl<'r> RunLoop<'r> {
         self.seg.dirty = false;
     }
 
-    /// The watchdog's deadline: the turn window (or the shorter self-turn
-    /// window) after the last stream activity.
-    fn quiesce_deadline(&self) -> tokio::time::Instant {
-        let mut window = self.quiesce.turn.unwrap_or_default();
-        if self.self_continued_turn
-            && let Some(short) = self.quiesce.self_turn
-        {
-            window = window.min(short);
+    /// The silence window the watchdog applies now: the turn window, or the
+    /// shorter self-turn window for a self-continued turn.
+    fn quiesce_window(&self) -> std::time::Duration {
+        let window = self.quiesce.turn.unwrap_or_default();
+        match self.quiesce.self_turn {
+            Some(short) if self.self_continued_turn => window.min(short),
+            _ => window,
         }
-        self.last_stream_activity + window
+    }
+
+    /// The watchdog's deadline: [`Self::quiesce_window`] after the last
+    /// stream activity.
+    fn quiesce_deadline(&self) -> tokio::time::Instant {
+        self.last_stream_activity + self.quiesce_window()
     }
 
     /// The watchdog is armed only when the fold says nothing is in flight: an
@@ -566,12 +583,20 @@ impl<'r> RunLoop<'r> {
 
     fn on_quiesce(&mut self) {
         let (inner, chat_id) = (self.scope.inner, self.scope.chat_id);
+        // The window actually applied and the silence actually measured: the
+        // configured turn window alone misreported a self-turn park as a
+        // full-window one.
         tracing::warn!(
             chat = %chat_id,
-            quiet_ms = self.quiesce.turn.unwrap_or_default().as_millis() as u64,
+            window_ms = self.quiesce_window().as_millis() as u64,
+            silent_ms = self.last_stream_activity.elapsed().as_millis() as u64,
+            self_continued = self.self_continued_turn,
             "turn quiesced: stream silent after completed output with no \
              turn-end; parking (suspected missing harness Done)"
         );
+        // A prompt-owned turn still owes its Done; a self-continued one
+        // never gets one, so for it this park is the settle.
+        let outstanding = !self.self_continued_turn;
         if self.seg.streamed() {
             if let Err(err) = self.seg.finish(MessageStatus::Complete) {
                 tracing::warn!(chat = %chat_id, error = %err, "quiesce segment finish failed");
@@ -582,6 +607,7 @@ impl<'r> RunLoop<'r> {
             }
         }
         self.park();
+        self.quiesced_turn = outstanding;
     }
 
     /// Process one event: projections, filters, the startup retry, steer
@@ -614,6 +640,7 @@ impl<'r> RunLoop<'r> {
         self.record(&event);
 
         inner.publish(chat_id, &event);
+        self.journal_open = !matches!(event, AgentEvent::Done { .. });
 
         // A mid-run SessionStarted re-emission (background re-invocations)
         // must not wipe the segment being written.
@@ -728,6 +755,7 @@ impl<'r> RunLoop<'r> {
     fn on_steered(&mut self, event: &AgentEvent, next_assistant_message_id: Option<String>) {
         let (inner, chat_id) = (self.scope.inner, self.scope.chat_id);
         inner.publish(chat_id, event);
+        self.journal_open = true;
         // A steer boundary means a real prompt owns the turn again — its
         // Done will come; the short self-continued window stands down.
         self.self_continued_turn = false;
@@ -798,9 +826,25 @@ impl<'r> RunLoop<'r> {
         self.seg.reset(new_id());
         self.idle_since = Some(tokio::time::Instant::now());
         self.self_continued_turn = false;
+        self.quiesced_turn = false;
         self.scope
             .inner
             .set_status(self.scope.chat_id, SessionStatus::Idle, false);
+    }
+
+    /// Reopen a parked session for the event at hand: a fresh entry (the
+    /// park cleared the fold; this event is the new segment's first part)
+    /// and Working. `self_continued` picks the watchdog window the turn runs
+    /// on from here.
+    fn reopen(&mut self, self_continued: bool) {
+        self.idle_since = None;
+        self.quiesced_turn = false;
+        self.self_continued_turn = self_continued;
+        self.seg.entry_id = new_id();
+        self.seg.started = now_ms();
+        self.scope
+            .inner
+            .set_status(self.scope.chat_id, SessionStatus::Working, true);
     }
 
     /// PARKED: a steer boundary, a terminal Done, or SELF-CONTINUED OUTPUT
@@ -823,10 +867,33 @@ impl<'r> RunLoop<'r> {
     /// flush lands within milliseconds of its Done, while a self-continued turn
     /// starts a whole new agent round trip (seconds at minimum). Inside the gate
     /// everything non-boundary stays inert.
+    ///
+    /// A QUIESCED turn is different: no Done ever closed it, so nothing that
+    /// follows can be its tail. Any sign of life — output, a reasoning
+    /// heartbeat, a question — means the harness was slow, not lost (a long
+    /// high-reasoning step), and reopens that same prompt-owned turn on the
+    /// normal window. Gating it instead re-parked the turn on every quiet
+    /// step (as "self-continued", on the short window) and auto-declined its
+    /// questions.
     fn parked_gate(&mut self, event: &AgentEvent) -> Gate {
         const RESUME_GATE: std::time::Duration = std::time::Duration::from_secs(1);
         let (inner, chat_id) = (self.scope.inner, self.scope.chat_id);
         if self.idle_since.is_none() {
+            return Gate::Pass;
+        }
+        if self.quiesced_turn
+            && !matches!(
+                event,
+                AgentEvent::Done { .. }
+                    | AgentEvent::Steered { .. }
+                    | AgentEvent::InputResolved { .. }
+            )
+        {
+            tracing::info!(
+                chat = %chat_id,
+                "quiesced turn resumed: the harness is still working on it"
+            );
+            self.reopen(false);
             return Gate::Pass;
         }
         let self_continued = self
@@ -845,13 +912,7 @@ impl<'r> RunLoop<'r> {
                 chat = %chat_id,
                 "parked session resumed by self-continued agent output"
             );
-            self.idle_since = None;
-            self.self_continued_turn = true;
-            // The park cleared the fold; rotate to a fresh entry and
-            // fall through — this event is the new segment's first part.
-            self.seg.entry_id = new_id();
-            self.seg.started = now_ms();
-            inner.set_status(chat_id, SessionStatus::Working, true);
+            self.reopen(true);
             return Gate::Pass;
         }
         match event {
@@ -981,6 +1042,33 @@ impl<'r> RunLoop<'r> {
     /// End-of-run bookkeeping once the loop has settled on `final_status`.
     fn finish(self, final_status: SessionStatus) {
         let (inner, chat_id, run_id) = (self.scope.inner, self.scope.chat_id, self.scope.run_id);
+        // The journal ends on its turn's terminal event. A run can still end
+        // with a turn open — the watchdog parked it provisionally, and the
+        // reaper, a child death or the stream's end retired the run before
+        // the harness settled it. Settle it here, where it is truly over: a
+        // subagent parent waiting on WatchAgentEvents gets its terminal
+        // event, and boot recovery does not read the turn as a crash
+        // mid-stream. The watchdog's own park publishes nothing — it may be
+        // wrong, and a premature Done would settle a waiting parent early.
+        if self.journal_open {
+            let (status, error) = if self.quiesced_turn {
+                (
+                    DoneStatus::Interrupted,
+                    Some("The agent stopped responding before finishing its turn".to_owned()),
+                )
+            } else {
+                (DoneStatus::Completed, None)
+            };
+            inner.publish(
+                chat_id,
+                &AgentEvent::Done {
+                    status,
+                    result: None,
+                    error,
+                    session_id: None,
+                },
+            );
+        }
         // Claim any accepted-but-unconfirmed steers BEFORE the handle goes away:
         // a routed send that raced this exit either finds its entry gone (we own
         // it — re-dispatched below) or reclaims it and starts a fresh run itself.

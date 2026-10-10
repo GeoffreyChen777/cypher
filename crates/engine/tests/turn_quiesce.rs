@@ -2,17 +2,22 @@
 //! 2026-08-13 stuck-Working incidents): a parked session resumes on
 //! self-continued output, a turn whose Done is lost settles once the stream
 //! goes silent with nothing in flight, and a self-started turn — which never
-//! gets a Done — settles on the shorter self-turn window.
+//! gets a Done — settles on the shorter self-turn window. A turn the watchdog
+//! parks with its Done still outstanding is provisional (2026-10-09
+//! re-park loop): any sign of life reopens it on the normal window, its
+//! questions still reach the user, and a run that ends before it settles
+//! journals it interrupted.
 
 mod common;
 
 use std::time::Duration;
 
 use cypher_doc::{MessagePart, MessageRole, MessageStatus};
-use cypher_engine::{EngineCore, QuiesceWindows, SteerOutcome};
-use cypher_proto::{AgentEvent, DoneStatus, HarnessId, SessionStatus, ToolCall};
+use cypher_engine::{EngineCore, QuiesceWindows, RunJournal, SteerOutcome};
+use cypher_proto::{AgentEvent, DoneStatus, HarnessId, SessionStatus, ToolCall, UserInputQuestion};
+use tokio::sync::mpsc;
 
-use common::{FeedRig, entries, run_request, status, text, wait_for};
+use common::{FeedRig, TestHarness, entries, run_request, status, text, wait_for};
 
 const CHAT: &str = "chat-quiesce";
 /// Watchdog window for the prompt-turn tests.
@@ -431,4 +436,222 @@ async fn steered_turn_keeps_the_normal_window() {
     .await;
 
     rig.core.sessions.shutdown().await;
+}
+
+/// The quiesced-turn rig: a short self-turn window under a longer turn one,
+/// so a reopened turn that wrongly ran on the self-turn window would park
+/// well before the assertion that it is still Working.
+fn assemble_quiesced(main_prompt: &str) -> FeedRig {
+    assemble_with(main_prompt, quiesced_windows())
+}
+
+const QUIESCED_TURN_MS: u64 = 800;
+const QUIESCED_SELF_MS: u64 = 150;
+
+fn quiesced_windows() -> QuiesceWindows {
+    QuiesceWindows {
+        turn: Some(Duration::from_millis(QUIESCED_TURN_MS)),
+        self_turn: Some(Duration::from_millis(QUIESCED_SELF_MS)),
+    }
+}
+
+fn journal(dir: &std::path::Path) -> RunJournal {
+    RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap()
+}
+
+/// Dispatch, stream one answer, and let the watchdog park the turn whose
+/// Done has not come (a provider still thinking looks exactly like this).
+async fn quiesce_first_turn(rig: &FeedRig, prompt: &str) {
+    rig.core
+        .sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request(prompt), None)
+        .await
+        .expect("dispatch");
+    rig.feed.send(session_started()).unwrap();
+    rig.feed.send(text("Reading the code.")).unwrap();
+    wait_for(
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
+        "run starts Working",
+    )
+    .await;
+    wait_for(
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
+        "watchdog parks the silent turn",
+    )
+    .await;
+}
+
+/// The re-park loop: output after a watchdog park is the SAME prompt-owned
+/// turn coming back (its Done never came), not a self-started one. It must
+/// run on the normal window — on the short self-turn window every quiet
+/// reasoning step re-parked it.
+#[tokio::test]
+async fn quiesced_turn_resumes_on_the_normal_window() {
+    let rig = assemble_quiesced("refactor the scheduler");
+    quiesce_first_turn(&rig, "refactor the scheduler").await;
+
+    rig.feed.send(text("Here is the plan.")).unwrap();
+    wait_for(
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
+        "output reopens the quiesced turn",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(QUIESCED_SELF_MS * 3)).await;
+    assert_eq!(
+        status(&rig.core, CHAT),
+        Some(SessionStatus::Working),
+        "a reopened prompt turn must not park on the self-turn window"
+    );
+
+    // Its real Done lands and closes the journal.
+    rig.feed.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
+        "the turn's own Done settles it",
+    )
+    .await;
+    assert!(matches!(
+        journal(rig.dir.path()).last_event(CHAT).unwrap(),
+        Some((
+            _,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        ))
+    ));
+
+    rig.core.sessions.shutdown().await;
+}
+
+/// A reasoning heartbeat (an empty delta: redacted thinking, or the pi
+/// harness's liveness probe) is proof the quiesced turn is alive: the
+/// session reads Working again instead of Idle while the agent works.
+#[tokio::test]
+async fn heartbeat_reopens_a_quiesced_turn() {
+    let rig = assemble_quiesced("think hard");
+    quiesce_first_turn(&rig, "think hard").await;
+
+    rig.feed
+        .send(AgentEvent::ReasoningDelta {
+            text: String::new(),
+        })
+        .unwrap();
+    wait_for(
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
+        "a heartbeat reopens the quiesced turn",
+    )
+    .await;
+
+    rig.feed.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
+        "the turn's own Done settles it",
+    )
+    .await;
+
+    rig.core.sessions.shutdown().await;
+}
+
+/// A run that ends while its turn is still provisionally parked (the reaper,
+/// a child death, the stream closing) closes the journal with a terminal
+/// Done — never a dangling one that subagent parents wait on forever and
+/// boot recovery reads as a crash mid-stream.
+#[tokio::test]
+async fn run_end_closes_a_quiesced_turn_in_the_journal() {
+    let rig = assemble_quiesced("migrate the database");
+    quiesce_first_turn(&rig, "migrate the database").await;
+
+    let FeedRig { core, feed, dir } = rig;
+    drop(feed); // the harness stream ends while the turn is parked
+    let journal = journal(dir.path());
+    wait_for(
+        || {
+            matches!(
+                journal.last_event(CHAT).unwrap(),
+                Some((
+                    _,
+                    AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        error: Some(_),
+                        ..
+                    }
+                ))
+            )
+        },
+        "the run's end journals the open turn interrupted",
+    )
+    .await;
+    assert!(journal.stale_sessions().unwrap().is_empty());
+
+    core.sessions.shutdown().await;
+}
+
+/// A question asked after a watchdog park belongs to the outstanding turn:
+/// it must reach the user (AwaitingInput), not be auto-declined as post-turn
+/// noise.
+#[tokio::test]
+async fn question_on_a_quiesced_turn_reaches_the_user() {
+    const PROMPT: &str = "pick a migration strategy";
+    let (feed_tx, feed_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    let (ask_tx, ask_rx) = mpsc::unbounded_channel::<()>();
+    let (answer_tx, mut answer_rx) = mpsc::unbounded_channel::<usize>();
+    let slots = std::sync::Mutex::new(Some((feed_rx, ask_rx)));
+    let harness = TestHarness::new(HarnessId::Mock, "Ask", move |request, controls| {
+        if request.prompt != PROMPT {
+            return common::script(vec![done(DoneStatus::Completed)]);
+        }
+        let (feed_rx, mut ask_rx) = slots.lock().unwrap().take().expect("one main run");
+        let answer_tx = answer_tx.clone();
+        tokio::spawn(async move {
+            if ask_rx.recv().await.is_none() {
+                return;
+            }
+            let answer = (controls.request_input)(vec![UserInputQuestion {
+                id: "q1".into(),
+                header: "Strategy".into(),
+                question: "Online or offline migration?".into(),
+                options: vec!["Online".into(), "Offline".into()],
+                multi_select: false,
+            }]);
+            if let Ok(labels) = answer.await {
+                let _ = answer_tx.send(labels.len());
+            }
+        });
+        Ok(common::channel_stream(feed_rx))
+    })
+    .steering();
+    let common::Rig { core, dir: _dir } = common::rig(harness);
+    core.sessions.set_quiesce_windows(quiesced_windows());
+    core.sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request(PROMPT), None)
+        .await
+        .expect("dispatch");
+    feed_tx.send(session_started()).unwrap();
+    feed_tx.send(text("Comparing the options.")).unwrap();
+    wait_for(
+        || status(&core, CHAT) == Some(SessionStatus::Working),
+        "run starts Working",
+    )
+    .await;
+    wait_for(
+        || status(&core, CHAT) == Some(SessionStatus::Idle),
+        "watchdog parks the silent turn",
+    )
+    .await;
+
+    ask_tx.send(()).unwrap();
+    wait_for(
+        || status(&core, CHAT) == Some(SessionStatus::AwaitingInput),
+        "the question reopens the turn and waits on the user",
+    )
+    .await;
+    // Not auto-declined: no (empty) answer came back to the harness.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        answer_rx.try_recv().is_err(),
+        "a quiesced turn's question must not be auto-declined"
+    );
+
+    core.sessions.shutdown().await;
 }

@@ -195,14 +195,18 @@ struct Inner {
 pub struct QuiesceWindows {
     /// Silence after completed output that parks a turn; `None` disables the
     /// watchdog. Default 5min: long silent thinking with no reasoning events
-    /// must not drop the spinner.
+    /// must not drop the spinner. A harness that can tell "still working"
+    /// from "lost" says so itself: the pi harness probes a silent pi and
+    /// heartbeats while it streams, so this is the backstop for a wedged
+    /// harness, not the judge of a slow provider.
     pub turn: Option<std::time::Duration>,
     /// The shorter window for a SELF-CONTINUED turn. A turn the agent starts
-    /// on its own (background-task wake) never receives a turn-end Done: no
-    /// prompt is outstanding to settle. The watchdog is that turn shape's
-    /// ONLY settle path, so the normal window read as minutes of
-    /// stuck-Working after every background notification. The in-flight fold
-    /// gate still protects running tools; reasoning heartbeats push the
+    /// on its own (background-task wake) has no prompt outstanding, so a
+    /// harness that does not close it itself never sends its Done; for those
+    /// the watchdog is the only settle path, and the normal window read as
+    /// minutes of stuck-Working after every background notification (the pi
+    /// harness closes its own self-started runs with a Done). The in-flight
+    /// fold gate still protects running tools; reasoning heartbeats push the
     /// window during real thinking. `None` falls back to `turn`. Default 20s.
     pub self_turn: Option<std::time::Duration>,
 }
