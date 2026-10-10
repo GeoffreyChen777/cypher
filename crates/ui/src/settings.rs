@@ -12,7 +12,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-pub mod accounts;
 pub mod appearance;
 pub mod archived;
 pub mod commands;

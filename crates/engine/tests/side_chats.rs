@@ -596,7 +596,7 @@ async fn failed_dispatch_keeps_first_send_context_for_retry() {
             "messageId": "s1",
             "request": {
                 "prompt": "retry me",
-                "harness": "claude-code",
+                "harness": "mock",
                 "cwd": "/tmp/repo",
                 "sandbox": "workspace-write",
             },
@@ -605,7 +605,7 @@ async fn failed_dispatch_keeps_first_send_context_for_retry() {
     .await
     .expect_err("unregistered harness rejects the dispatch");
     assert!(
-        err.to_string().contains("ClaudeCode") || err.to_string().contains("not found"),
+        err.to_string().contains("Mock") || err.to_string().contains("not found"),
         "clear dispatch error: {err}"
     );
     assert_eq!(

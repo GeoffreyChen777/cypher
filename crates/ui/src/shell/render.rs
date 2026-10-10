@@ -326,7 +326,6 @@ impl Shell {
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Providers => icons::KEY_MINIMALISTIC,
             SettingsSection::Titles => icons::TUNING,
-            SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Commands => icons::COMMAND,
             SettingsSection::Mcp => icons::GLOBAL,
             SettingsSection::Subagents => icons::CHECKLIST,

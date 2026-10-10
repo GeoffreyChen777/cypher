@@ -7,7 +7,7 @@
 //!   attribution: "Solar Icons by 480 Design".
 //! - The terminal tab glyphs (`terminal`, `plus`, `close`) are ports of the
 //!   hand-drawn inline SVGs in zeron's `terminal-panel.tsx`.
-//! - The harness brand marks (`claude-mark`, `openai-mark`, `cursor-mark`) are
+//! - The harness brand marks (`claude-mark`, `openai-mark`) are
 //!   ports of zeron's `icons.tsx`. gpui tints SVGs with the text color, so the
 //!   Claude mark's brand orange is applied at the call site ([`claude_brand`]).
 //! - `github-mark` is the `mark-github` glyph from GitHub's Octicons (MIT).
@@ -62,7 +62,6 @@ icon_assets![
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
     (MONITOR, "monitor"),
     (LAPTOP, "laptop"),
-    (SORT_VERTICAL, "sort-vertical"),
     (FOLDER_WITH_FILES, "folder-with-files"),
     (FOLDER, "folder"),
     // Hand-drawn git-branch glyph in the Solar Linear style (like the
@@ -116,7 +115,6 @@ icon_assets![
     (ARCHIVE_UP_MINIMALISTIC, "archive-up-minimalistic"),
     (REFRESH, "refresh"),
     (RESTART, "restart"),
-    (ADD_CIRCLE, "add-circle"),
     (TUNING, "tuning"),
     (PAPERCLIP, "paperclip"),
     (PEN, "pen"),
@@ -184,9 +182,6 @@ icon_assets![
     // Harness brand marks (icons.tsx).
     (CLAUDE_MARK, "claude-mark"),
     (OPENAI_MARK, "openai-mark"),
-    (CURSOR_MARK, "cursor-mark"),
-    (GROK_MARK, "grok-mark"),
-    (HERMES_MARK, "hermes-mark"),
     (PI_MARK, "pi-mark"),
 ];
 

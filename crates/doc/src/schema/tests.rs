@@ -481,7 +481,7 @@ fn segment_writer_persists_progress_and_clears_on_resolve() {
 }
 
 /// The ToolResult resolution path goes through `update_part_fields` —
-/// the stripped output summary, sidecar refs, and diff stats must survive
+/// the stripped output summary, a sidecar ref, and diff stats must survive
 /// the doc round trip (regression: output/diff were silently dropped
 /// there while `to_doc_part` carried them).
 #[test]
@@ -513,7 +513,10 @@ fn segment_writer_round_trips_stripped_tool_fields() {
             }),
         },
     );
-    crate::parts::apply_sidecar_refs("chat-2", &mut folded);
+    // Docs from earlier builds carry a diff sidecar ref; it must round-trip.
+    if let MessagePart::Tool { diff_ref, .. } = &mut folded[0] {
+        *diff_ref = Some("chat-2/t1.diff".into());
+    }
     writer.sync(&folded).unwrap();
     writer.finish(&folded, MessageStatus::Complete).unwrap();
 
@@ -529,8 +532,7 @@ fn segment_writer_round_trips_stripped_tool_fields() {
             ..
         } => {
             // The bounded output summary is retained for the expandable
-            // chip body. Full-output sidecar refs remain absent while
-            // sidecar storage is disabled; diff stats still get their ref.
+            // chip body; the fold writes no full-output ref.
             assert_eq!(output.as_deref(), Some("total 0\nmore lines"));
             assert_eq!(output_ref.as_deref(), None);
             assert_eq!(*output_bytes, None);

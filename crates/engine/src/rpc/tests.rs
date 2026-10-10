@@ -1,23 +1,7 @@
 use super::*;
 
-/// The UI's Switch/Forget calls send `{id, accountId, harness}` (+ optional
-/// `targetDeviceId`); the extra fields must be tolerated, `accountId` wins.
 #[test]
-fn agent_account_params_accept_ui_shape() {
-    let p: AgentAccountParams = parse_params(serde_json::json!({
-        "id": "acct-1",
-        "accountId": "acct-1",
-        "harness": "claude-code",
-        "targetDeviceId": "dev-2",
-    }))
-    .expect("ui param shape");
-    assert_eq!(p.account_id, "acct-1");
-    assert_eq!(p.harness, HarnessId::ClaudeCode);
-}
-
-#[test]
-fn local_device_is_not_forwardable() {
-    assert!(!forwardable(methods::LOCAL_DEVICE));
+fn engine_identity_is_not_forwardable() {
     assert!(!forwardable(methods::ENGINE_INFO));
     assert!(!forwardable(methods::ENGINE_READY));
     assert!(forwardable(methods::QUEUE_COMMAND));

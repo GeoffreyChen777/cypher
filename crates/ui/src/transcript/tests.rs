@@ -2224,7 +2224,7 @@ fn pi_chat(child: bool, non_pi: bool) -> Chat {
         title: Some("My chat".into()),
         config: Some(cypher_proto::ChatConfig {
             harness: if non_pi {
-                HarnessId::ClaudeCode
+                HarnessId::Mock
             } else {
                 HarnessId::Pi
             },

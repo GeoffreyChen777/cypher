@@ -56,8 +56,8 @@ fn registry() -> Arc<HarnessRegistry> {
         Duration::from_millis(60),
     ));
     registry.register(scripted_harness(
-        HarnessId::Cursor,
-        "From cursor",
+        HarnessId::Pi,
+        "From pi",
         Duration::from_millis(10),
     ));
     Arc::new(registry)
@@ -371,7 +371,7 @@ async fn claimed_chat_row_records_the_run_harness() {
     let core = assemble(dir.path(), "dev-a");
 
     let request = RunRequest {
-        harness: Some(HarnessId::Cursor),
+        harness: Some(HarnessId::Pi),
         ..run_request("go do it")
     };
     queue_run_with(&core, "chat-glyph", "cmd-glyph-1", "m-1", request);
@@ -382,7 +382,7 @@ async fn claimed_chat_row_records_the_run_harness() {
                 .ok()
                 .flatten()
                 .and_then(|c| c.config)
-                .is_some_and(|c| c.harness == HarnessId::Cursor)
+                .is_some_and(|c| c.harness == HarnessId::Pi)
         },
         "claimed row carries the dispatched harness",
     )
@@ -439,7 +439,7 @@ async fn chat_config_selects_the_run_harness() {
             Some("space-cfg"),
             None,
             Some(ChatConfig {
-                harness: HarnessId::Cursor,
+                harness: HarnessId::Pi,
                 model: None,
                 reasoning: None,
                 model_options: Default::default(),
@@ -450,13 +450,13 @@ async fn chat_config_selects_the_run_harness() {
         .expect("create configured chat");
     queue_run(&a, "chat-cfg", "cmd-cfg-1", "m-1");
 
-    // The configured harness (Cursor, "From cursor") ran — not the default Mock.
+    // The configured harness (Pi, "From pi") ran — not the default Mock.
     let handle = a.doc_host.open("chat-cfg").expect("open chat");
     wait_for(
         || {
             handle.doc().read_entries().unwrap_or_default().iter().any(|e| {
                 e.parts.iter().any(
-                    |p| matches!(p, cypher_doc::MessagePart::Text { text, .. } if text == "From cursor"),
+                    |p| matches!(p, cypher_doc::MessagePart::Text { text, .. } if text == "From pi"),
                 )
             })
         },

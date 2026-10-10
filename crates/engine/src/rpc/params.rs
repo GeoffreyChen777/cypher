@@ -164,39 +164,6 @@ pub(super) struct ResizeTerminalParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ListAgentAccountsParams {
-    #[serde(default)]
-    pub(super) force_usage: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct AgentAccountParams {
-    pub(super) harness: HarnessId,
-    pub(super) account_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct StartAgentLoginParams {
-    pub(super) harness: HarnessId,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct LoginIdParams {
-    pub(super) login_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct CompleteAgentLoginParams {
-    pub(super) login_id: String,
-    pub(super) code: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(super) struct UploadChunkParams {
     pub(super) upload_id: String,
     /// Base64 payload chunk.

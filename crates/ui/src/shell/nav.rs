@@ -269,16 +269,6 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
-            SettingsSection::Agents => {
-                if self.accounts_page.is_none() {
-                    let state = self.state.clone();
-                    self.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
-                }
-                match &self.accounts_page {
-                    Some(page) => page.clone().into_any_element(),
-                    None => Empty.into_any_element(),
-                }
-            }
             SettingsSection::Commands => {
                 if self.commands_page.is_none() {
                     let state = self.state.clone();

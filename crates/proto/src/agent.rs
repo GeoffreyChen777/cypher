@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HarnessId {
+    // Retired harnesses: decode-only so legacy chats still load and sync;
+    // the engine refuses to run them.
     ClaudeCode,
     Codex,
     Cursor,
-    /// xAI's Grok Build agent, driven over ACP (`grok agent stdio`).
     Grok,
-    /// Nous Research's Hermes Agent, driven over ACP (`hermes acp`).
     Hermes,
     /// The pi coding agent (pi.dev), driven over its native RPC protocol
     /// (`pi --mode rpc` — see `crates/harness/src/pi/`).

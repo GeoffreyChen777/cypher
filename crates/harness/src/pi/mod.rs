@@ -12,16 +12,15 @@
 //!
 //! Event mapping (see the table in `docs/research/pi-rpc.md`): text/thinking
 //! deltas, tool calls + capped results, extension errors, and the steer /
-//! abort commands. Segment semantics mirror the ACP harness:
+//! abort commands. Segment semantics:
 //! - each assistant `message_end` emits `AssistantMessageCompleted` (a
-//!   journal boundary; the doc fold treats it as a no-op, exactly like the
-//!   ACP turn boundary markers);
+//!   journal boundary; the doc fold treats it as a no-op);
 //! - a mailbox message arriving mid-turn rides RPC `prompt` with
 //!   `streamingBehavior:"steer"`, and pi's response says what it did
 //!   (`disposition`, pi ≥ 0.99): `queued` — delivered after the current
 //!   assistant message's tool calls, and the NEXT assistant `message_start`
 //!   emits `Steered { prev, next }` BEFORE the steered content streams (the
-//!   point the ACP harness emits it; the engine splits the doc entry there);
+//!   engine splits the doc entry there);
 //!   `handled` — an extension consumed it, and its boundary still fires at
 //!   the next assistant message or before the turn's Done (the engine retires
 //!   one routed message per boundary); `started` — pi had settled first, so
@@ -79,11 +78,10 @@ use cypher_proto::{
     UserInputQuestion,
 };
 
-use crate::acp::normalize::{OUTPUT_CAP, cap_text, parse_commands};
 use crate::pi::client::{Incoming, PiClient};
 use crate::{
-    Harness, HarnessError, RunControls, RunHostContext, Signal, crash_message, send_signal,
-    shutdown_child,
+    Harness, HarnessError, OUTPUT_CAP, RunControls, RunHostContext, Signal, cap_text,
+    crash_message, parse_commands, send_signal, shutdown_child,
 };
 
 /// Env vars the subagents extension keys on (mirrors

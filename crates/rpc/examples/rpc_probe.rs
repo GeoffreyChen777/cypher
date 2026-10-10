@@ -1,7 +1,7 @@
 //! Ad-hoc RPC probe: call or subscribe against a running engine's IPC socket.
 //!
 //! Usage:
-//!   cargo run -p cypher-rpc --example rpc_probe -- /tmp/engine-data LocalDevice '{}'
+//!   cargo run -p cypher-rpc --example rpc_probe -- /tmp/engine-data EngineInfo '{}'
 //!   cargo run -p cypher-rpc --example rpc_probe -- /tmp/engine-data WatchSessions '{}' --stream 3
 
 use cypher_rpc::connect_local;

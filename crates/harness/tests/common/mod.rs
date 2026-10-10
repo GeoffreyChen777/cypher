@@ -3,7 +3,6 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
-use std::sync::Once;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -92,14 +91,4 @@ pub fn dones(events: &[AgentEvent]) -> Vec<(DoneStatus, Option<String>)> {
             _ => None,
         })
         .collect()
-}
-
-/// Set `CYPHER_ACP_QUIET_SETTLE_MS` once for this test process. The knob is
-/// process-global, so every test in the binary shares the one value.
-pub fn init_quiet_settle(ms: u64) {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: set before any harness runs in this test process.
-        unsafe { std::env::set_var("CYPHER_ACP_QUIET_SETTLE_MS", ms.to_string()) };
-    });
 }

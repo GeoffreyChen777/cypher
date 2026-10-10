@@ -311,8 +311,8 @@ pub struct AppState {
     /// a project window keeps its own copy.
     pending_sends: Rc<RefCell<HashMap<String, PendingSend>>>,
     upload_progress: Option<UploadProgress>,
-    /// This engine's device id (best-effort `LocalDevice` probe; `None` until
-    /// the engine serves it — views degrade gracefully).
+    /// This engine's device id (from `EngineInfo` at attach; `None` until an
+    /// engine is attached).
     pub local_device_id: Option<String>,
     /// Latest `UpdateStatus` frame — drives the sidebar update strip.
     pub update: Option<cypher_update::UpdateStatus>,

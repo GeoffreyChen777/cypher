@@ -16,7 +16,6 @@ cypher-proto.workspace = true
 similar.workspace = true
 cypher-doc.workspace = true
 cypher-engine.workspace = true
-cypher-harness.workspace = true
 cypher-rpc.workspace = true
 cypher-update.workspace = true
 cypher-syntax.workspace = true
@@ -48,5 +47,6 @@ sha2.workspace = true
 objc = "0.2"
 
 [dev-dependencies]
+cypher-harness.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

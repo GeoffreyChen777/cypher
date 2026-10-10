@@ -9,7 +9,6 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use cypher_harness::AcpHarness;
 use cypher_harness::pi::PiHarness;
 
 fn write_executable(path: &Path, body: &str) {
@@ -22,9 +21,7 @@ async fn cli_on_login_shell_path_only_is_resolved() {
     let dir = tempfile::tempdir().unwrap();
     let shell_bin = dir.path().join("shell-bin");
     std::fs::create_dir(&shell_bin).unwrap();
-    write_executable(&shell_bin.join("codex-acp"), "#!/bin/sh\nexit 0\n");
-    write_executable(&shell_bin.join("claude-agent-acp"), "#!/bin/sh\nexit 0\n");
-    write_executable(&shell_bin.join("hermes"), "#!/bin/sh\nexit 0\n");
+    write_executable(&shell_bin.join("helper-cli"), "#!/bin/sh\nexit 0\n");
     write_executable(&shell_bin.join("pi"), "#!/bin/sh\nexit 0\n");
 
     // A $SHELL whose init shapes PATH — the shape resolution must survive.
@@ -48,9 +45,6 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         std::env::set_var("SHELL", &fake_shell);
         std::env::set_var("HOME", dir.path());
         std::env::set_var("PATH", "/usr/bin:/bin");
-        std::env::remove_var("CODEX_ACP_EXECUTABLE");
-        std::env::remove_var("CLAUDE_ACP_EXECUTABLE");
-        std::env::remove_var("HERMES_EXECUTABLE");
         std::env::remove_var("PI_EXECUTABLE");
         std::env::remove_var("CYPHER_NO_LOGIN_SHELL");
     }
@@ -62,22 +56,12 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         "snapshot should carry the shell-shaped PATH, got: {snapshot}"
     );
 
-    // Both adapter binaries are only reachable through the snapshot; the
-    // launch program (not the npx fallback) must be the shell-PATH binary,
-    // proving resolution consulted the login-shell snapshot.
-    let codex = AcpHarness::codex()
-        .launch_program()
-        .expect("codex-acp resolves via login-shell PATH");
-    assert_eq!(codex, shell_bin.join("codex-acp"), "{codex:?}");
-    let claude = AcpHarness::claude()
-        .launch_program()
-        .expect("claude-agent-acp resolves via login-shell PATH");
-    assert_eq!(claude, shell_bin.join("claude-agent-acp"), "{claude:?}");
-    let hermes = AcpHarness::hermes()
-        .launch_program()
-        .expect("hermes resolves via login-shell PATH");
-    assert_eq!(hermes, shell_bin.join("hermes"), "{hermes:?}");
-    // The native pi harness resolves the pi CLI itself (no pi-acp adapter).
+    // The CLI is only reachable through the snapshot, proving resolution
+    // consulted the login-shell PATH.
+    let helper = cypher_harness::resolve_cli("helper-cli")
+        .expect("helper-cli resolves via login-shell PATH");
+    assert_eq!(helper, shell_bin.join("helper-cli"), "{helper:?}");
+    // The native pi harness resolves the pi CLI itself.
     let pi = PiHarness::new(dir.path().join("agent-sessions"))
         .launch_program()
         .expect("pi resolves via login-shell PATH");

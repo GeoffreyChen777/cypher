@@ -47,9 +47,9 @@ pub(super) fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
 
 /// The effective prompt as `harness` may receive it. A quote selected from a
 /// displayed translation carries alignment input holding that translation;
-/// only Pi runs the extension that resolves and removes it, so every other
-/// agent gets it stripped here and reads the original passage the quote
-/// already holds.
+/// only Pi runs the extension that resolves and removes it, so any other
+/// harness (the mock) gets it stripped here and reads the original passage
+/// the quote already holds.
 pub(crate) fn agent_prompt_for(harness: HarnessId, agent_prompt: Option<String>) -> Option<String> {
     match harness {
         HarnessId::Pi => agent_prompt,
@@ -803,14 +803,9 @@ pub(super) async fn drive_run(
         // background re-invocations) must not wipe the segment being written.
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
+            // Full tool output stays in the host's local run journal; the doc
+            // keeps the fold's bounded summary and diff stats.
             fold_event_into_parts(&mut folded, &event);
-            // R2 sidecar is parked: the fold's bounded output summary and
-            // diff stats are the doc-resident record used by the transcript.
-            // Full output survives only in the host's local run journal.
-            // To add a full-output affordance later, reintroduce
-            // `cypher_doc::sidecar_payload(&event)` →
-            // `apply_sidecar_refs` → `doc_host.upload_tool_sidecar`; all
-            // supporting code remains in place and tested.
         }
 
         if let AgentEvent::Done { status, .. } = &event {
@@ -1009,13 +1004,11 @@ mod agent_prompt_tests {
             agent_prompt_for(HarnessId::Pi, Some(prompt.clone())).as_deref(),
             Some(prompt.as_str())
         );
-        for harness in [HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Mock] {
-            let sent = agent_prompt_for(harness, Some(prompt.clone())).unwrap();
-            assert!(
-                !sent.contains("译文") && sent.contains("Original passage."),
-                "{sent}"
-            );
-        }
-        assert_eq!(agent_prompt_for(HarnessId::Codex, None), None);
+        let sent = agent_prompt_for(HarnessId::Mock, Some(prompt.clone())).unwrap();
+        assert!(
+            !sent.contains("译文") && sent.contains("Original passage."),
+            "{sent}"
+        );
+        assert_eq!(agent_prompt_for(HarnessId::Mock, None), None);
     }
 }

@@ -71,7 +71,7 @@ fi
 # ---- command loop -----------------------------------------------------------
 # Preamble commands (discovery + run setup) are answered inline; a `prompt`
 # dispatches its scenario, which runs to completion and exits (EOF then ends
-# the harness's stream cleanly, like the ACP fixture).
+# the harness's stream cleanly).
 while read -r line; do
   [ -z "$line" ] && continue
   case "$line" in

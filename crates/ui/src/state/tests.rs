@@ -6,17 +6,13 @@ use cypher_engine::{EngineCore, default_registry};
 use cypher_proto::view::{group_chats, project_label};
 use cypher_proto::{SessionStatus, UserProfile};
 
+/// An engine that predates `EngineInfo`: it serves no identity method.
 struct LegacyIdentityRpc;
 
 #[async_trait]
 impl RpcService for LegacyIdentityRpc {
     async fn handle(&self, method: &str, _params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        match method {
-            methods::LOCAL_DEVICE => {
-                RpcReply::value(&serde_json::json!({ "deviceId": "legacy-device" }))
-            }
-            other => Err(RpcError::UnknownMethod(other.into())),
-        }
+        Err(RpcError::UnknownMethod(method.into()))
     }
 }
 
@@ -579,24 +575,6 @@ fn device(id: &str, name: &str) -> Device {
         created_at: None,
         version: None,
     }
-}
-
-#[test]
-fn local_workspace_hides_the_unknown_device_sentinel() {
-    let mut state = AppState::new();
-    state.workspace_scope = Some(WorkspaceScope::Local);
-    state.local_device_id = Some("local".into());
-
-    state.apply_devices(vec![
-        device("local", "unknown-device"),
-        device("remote", "unknown-device"),
-    ]);
-
-    assert_eq!(state.device_name("local"), Some("Local"));
-    assert_eq!(state.device_name("remote"), Some("unknown-device"));
-
-    state.apply_devices(vec![device("local", "José's MacBook Pro")]);
-    assert_eq!(state.device_name("local"), Some("José's MacBook Pro"));
 }
 
 #[test]
@@ -1563,7 +1541,7 @@ fn session_context_forwards_config_and_seen_to_main(cx: &mut gpui::TestAppContex
     assert!(!ctx.read_with(cx, |c, _| c.chats[0].unseen()));
 
     let config = cypher_proto::ChatConfig {
-        harness: HarnessId::ClaudeCode,
+        harness: HarnessId::Pi,
         model: Some("claude-fable-5".into()),
         reasoning: None,
         model_options: serde_json::Map::new(),
@@ -1703,7 +1681,7 @@ fn apply_chat_config_stamps_the_row() {
     let mut state = AppState::new();
     state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
     let config = cypher_proto::ChatConfig {
-        harness: HarnessId::ClaudeCode,
+        harness: HarnessId::Pi,
         model: Some("claude-fable-5".into()),
         reasoning: Some(cypher_proto::ReasoningLevel::XHigh),
         model_options: serde_json::Map::new(),
@@ -1727,7 +1705,7 @@ fn apply_chat_config_stamps_the_row() {
     state.apply_chat_config(
         "missing",
         cypher_proto::ChatConfig {
-            harness: HarnessId::ClaudeCode,
+            harness: HarnessId::Pi,
             model: None,
             reasoning: None,
             model_options: serde_json::Map::new(),
@@ -1750,7 +1728,7 @@ fn side_chat_synthetic_row_inherits_parent_context() {
     parent.checkout_id = Some("co-1".into());
     parent.space_id = Some("s1".into());
     parent.config = Some(cypher_proto::ChatConfig {
-        harness: HarnessId::ClaudeCode,
+        harness: HarnessId::Pi,
         model: Some("claude-fable-5".into()),
         reasoning: Some(cypher_proto::ReasoningLevel::High),
         model_options: serde_json::Map::new(),

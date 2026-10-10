@@ -21,10 +21,7 @@ impl Pickers {
             state.indicator_for(chat_id, chrono::Utc::now()),
             crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
         );
-        let compactable = matches!(
-            self.effective_harness(cx),
-            Some(HarnessId::ClaudeCode | HarnessId::Codex | HarnessId::Pi)
-        );
+        let compactable = matches!(self.effective_harness(cx), Some(HarnessId::Pi));
         Some(crate::context_ring::RingReading {
             usage,
             compactable,
@@ -1502,8 +1499,7 @@ impl Render for Pickers {
         // effective summary ("High · 1M · Fast", "Agent · Balance") so the
         // run's traits read without opening; it brightens only when something
         // departs from its default. No chip at all when the model has neither
-        // a ladder nor options (e.g. Hermes today) — a dead trigger reads as
-        // broken.
+        // a ladder nor options — a dead trigger reads as broken.
         let model_chip = self.trigger_chip(
             PickerKind::HarnessModel,
             model_label,

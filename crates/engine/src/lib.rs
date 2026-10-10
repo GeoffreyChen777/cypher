@@ -1,8 +1,8 @@
 //! cypher-engine — the headless backend: sessions engine, doc host + command executor,
 //! run journal + crash recovery, and the IPC RPC server.
 //!
-//! Spec: ARCHITECTURE.md §5. Also hosts terminals, repos/diffs, uploads, auth, agent
-//! accounts, and the device-room relay.
+//! Spec: ARCHITECTURE.md §5. Also hosts terminals, repos/diffs, uploads, auth, and
+//! the device-room relay.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,7 +13,6 @@ use cypher_rpc::{RpcError, RpcReply, RpcService, methods};
 
 use cypher_sync::DocsStore;
 
-pub mod agent_accounts;
 pub mod auth;
 pub mod chat2_host;
 mod device_identity;
@@ -47,7 +46,6 @@ pub mod viewport_activity;
 mod workspace_files;
 pub mod workspace_host;
 
-pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
 pub use diff_sync::{
     CheckoutDiffSync, capture_commit_diff, capture_diff, capture_diff_against, capture_turn_diff,
@@ -78,8 +76,6 @@ use titles::TitleGenerator;
 use workspace_host::WorkspaceHostConfig;
 
 use device_identity::{load_or_create_device_id, local_device_name};
-
-pub(crate) const LEGACY_UNKNOWN_DEVICE_NAME: &str = "unknown-device";
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -179,9 +175,8 @@ pub struct EngineCore {
     pub diff_sync: CheckoutDiffSync,
     pub spaces_sync: SpacesSync,
     pub uploads: Uploads,
-    pub agent_accounts: AgentAccounts,
     pub title_settings: title_settings::TitleSettingsStore,
-    /// This device's GitHub sign-in (device-scoped, like agent accounts).
+    /// This device's GitHub sign-in (device-scoped).
     pub github: github::Github,
     mcp_logins: Arc<mcp::login::Logins>,
     provider_logins: Arc<pi_providers::Logins>,
@@ -353,7 +348,6 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
-        let agent_accounts = AgentAccounts::new(AgentAccountsConfig::detect(data_dir));
         let title_settings = title_settings::TitleSettingsStore::new(data_dir);
         let github = github::Github::new(github::GithubConfig::detect(), data_dir);
         sessions.set_titles(
@@ -377,7 +371,6 @@ impl EngineCore {
             diff_sync,
             spaces_sync,
             uploads,
-            agent_accounts,
             title_settings,
             github,
             mcp_logins: Arc::new(Default::default()),
@@ -542,7 +535,6 @@ impl EngineCore {
             self.terminals.clone(),
             self.diff_sync.clone(),
             self.uploads.clone(),
-            self.agent_accounts.clone(),
             self.side_chats.clone(),
             self.session_forks.clone(),
             self.workspace_scope,
@@ -593,7 +585,6 @@ impl EngineCore {
         self.side_chats.shutdown().await;
         self.sessions.shutdown().await;
         self.terminals.shutdown();
-        self.agent_accounts.shutdown();
         // Cancel + await every worker that can reach Edge before flushing: a
         // replaced synced runtime must not keep polling releases or draining
         // the attachment outbox under the old identity after Local boots.
@@ -1024,10 +1015,6 @@ impl Engine {
         pi_runtime.enable_cleanup();
         core.set_pi_runtime(pi_runtime);
         tracing::info!(device_id = %core.device_id, "engine core assembled");
-        // Managed ACP adapters install in the background at boot (agents
-        // whose CLI is present but whose adapter isn't yet), so a first chat
-        // never waits on — or dies inside — an npm run.
-        cypher_harness::acp::prewarm_managed_adapters();
         // First `/` in the composer waits on a short-lived `pi --mode rpc`
         // that loads every extension. Kick that probe off at boot so the
         // popup is a cache hit.

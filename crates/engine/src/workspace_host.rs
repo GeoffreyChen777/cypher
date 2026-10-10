@@ -2029,10 +2029,7 @@ fn announce_device(doc: &mut RegistryDoc, config: &WorkspaceHostConfig) -> Resul
 
 fn device_name_on_boot(existing_name: Option<&str>, detected_name: &str) -> String {
     existing_name
-        .filter(|name| {
-            let name = name.trim();
-            !name.is_empty() && name != crate::LEGACY_UNKNOWN_DEVICE_NAME
-        })
+        .filter(|name| !name.trim().is_empty())
         .unwrap_or(detected_name)
         .to_string()
 }

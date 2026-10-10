@@ -35,7 +35,6 @@ use crate::loaders;
 use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
 use crate::popover::{self, Loadable};
 use crate::rail;
-use crate::settings::accounts::AccountsPage;
 use crate::settings::appearance::AppearancePage;
 use crate::settings::archived::ArchivedPage;
 use crate::settings::commands::{CommandsEvent, CommandsPage};
@@ -294,8 +293,6 @@ pub enum SettingsSection {
     Harnesses,
     Providers,
     Titles,
-    /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
-    Agents,
     Commands,
     Mcp,
     /// The `agents/*.md` profiles a chat can spawn as children.
@@ -350,7 +347,6 @@ impl SettingsSection {
             SettingsSection::Harnesses => "Agents",
             SettingsSection::Providers => "Providers",
             SettingsSection::Titles => "Automatic titles",
-            SettingsSection::Agents => "Accounts",
             SettingsSection::Commands => "Commands",
             SettingsSection::Mcp => "MCP",
             SettingsSection::Subagents => "Subagents",
@@ -1032,7 +1028,6 @@ pub struct Shell {
     appearance_page: Option<Entity<AppearancePage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
-    accounts_page: Option<Entity<AccountsPage>>,
     providers_page: Option<Entity<ProvidersPage>>,
     titles_page: Option<Entity<crate::settings::titles::TitlesPage>>,
     settings_target: Entity<DeviceTarget>,
@@ -1430,7 +1425,6 @@ impl Shell {
         {
             Some("settings") => Route::Settings(SettingsSection::Harnesses),
             Some("settings/devices") => Route::Settings(SettingsSection::Devices),
-            Some("settings/agents") => Route::Settings(SettingsSection::Agents),
             Some("settings/providers") => Route::Settings(SettingsSection::Providers),
             Some("settings/titles") => Route::Settings(SettingsSection::Titles),
             Some("settings/harnesses") => Route::Settings(SettingsSection::Harnesses),
@@ -1497,7 +1491,6 @@ impl Shell {
             appearance_page: None,
             notifications_page: None,
             shortcuts_page: None,
-            accounts_page: None,
             providers_page: None,
             titles_page: None,
             settings_target,

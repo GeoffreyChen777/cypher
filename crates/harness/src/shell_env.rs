@@ -7,7 +7,7 @@
 //! lists in the resolvers cover the common managers, but the only fix that
 //! works for *any* setup is asking the user's actual shell: spawn it once as
 //! an interactive login shell, have it print its environment between markers,
-//! and keep the PATH it reports. If `codex`/`claude` runs in their terminal,
+//! and keep the PATH it reports. If `pi`/`claude` runs in their terminal,
 //! it resolves here too.
 //!
 //! The snapshot is captured once per process (cached, including a negative

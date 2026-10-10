@@ -53,11 +53,12 @@ fn merged_sessions_prefer_own_live_status_over_durable_status() {
 }
 
 #[test]
-fn boot_repairs_the_legacy_unknown_device_sentinel() {
+fn boot_replaces_a_blank_device_name() {
     assert_eq!(
-        device_name_on_boot(Some("unknown-device"), "MacBook Pro"),
+        device_name_on_boot(Some("  "), "MacBook Pro"),
         "MacBook Pro"
     );
+    assert_eq!(device_name_on_boot(None, "MacBook Pro"), "MacBook Pro");
 }
 
 #[test]

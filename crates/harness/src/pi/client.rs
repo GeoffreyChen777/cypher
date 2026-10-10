@@ -4,7 +4,7 @@
 //! docs are explicit that Node `readline`, which also splits on U+2028/U+2029,
 //! is NOT protocol-compliant). This reader splits on the `\n` byte only and
 //! strips an optional trailing `\r` (CRLF tolerance) — never on any Unicode
-//! separator. It is NOT JSON-RPC 2.0 (the `jsonrpc.rs` client is not used).
+//! separator. It is NOT JSON-RPC 2.0.
 //!
 //! Inbound lines are three kinds, discriminated by `type`:
 //! - `"response"` — command result, resolved against the pending map by id
@@ -12,8 +12,7 @@
 //! - `"extension_ui_request"` — extension UI dialog / fire-and-forget;
 //! - anything else — an agent event (streamed in stdout order).
 //!
-//! Writes to a dead child's stdin (EPIPE) are tolerated and logged, matching
-//! the ACP client.
+//! Writes to a dead child's stdin (EPIPE) are tolerated and logged.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};

@@ -1552,8 +1552,8 @@ fn nav_push_dedups_the_current_route() {
     nav.push(chat("a"));
     nav.push(chat("a"));
     assert_eq!(nav.len(), 1, "re-selecting the current route never stacks");
-    nav.push(NavEntry::Settings(SettingsSection::Agents));
-    nav.push(NavEntry::Settings(SettingsSection::Agents));
+    nav.push(NavEntry::Settings(SettingsSection::Providers));
+    nav.push(NavEntry::Settings(SettingsSection::Providers));
     assert_eq!(nav.len(), 2);
 }
 
