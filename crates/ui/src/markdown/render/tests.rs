@@ -130,10 +130,7 @@ fn fenced_code_drag_selects_across_blank_lines_and_reports_exact_quote(
                 .child(render_code_block(
                     Some("rust"),
                     self.code,
-                    0,
-                    0,
-                    &opts,
-                    &theme,
+                    BlockCtx::top(0, &opts, &theme),
                     None,
                 ))
         }
@@ -462,12 +459,12 @@ fn code_color_change_rebuilds_cached_code_runs() {
     let mut theme = Theme::dark();
     theme.text_style_revision = 1;
     theme.code_block_text = Some(gpui::rgb(0xffccaa).into());
-    let _ = render_code_block(None, "plain", 0, 0, &opts, &theme, None);
+    let _ = render_code_block(None, "plain", BlockCtx::top(0, &opts, &theme), None);
     let key = (opts.row_key.clone(), 0, 0);
     let before = cache.borrow().code[&key].clone();
     theme.text_style_revision = 2;
     theme.code_block_text = Some(gpui::rgb(0xaaccff).into());
-    let _ = render_code_block(None, "plain", 0, 0, &opts, &theme, None);
+    let _ = render_code_block(None, "plain", BlockCtx::top(0, &opts, &theme), None);
     let after = cache.borrow().code[&key].clone();
     assert!(!Rc::ptr_eq(&before, &after));
     assert_eq!(before.flat.runs[0].color, gpui::rgb(0xffccaa).into());

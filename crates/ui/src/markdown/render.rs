@@ -196,6 +196,34 @@ impl RenderCache {
 /// Per-line highlight tokens for a code block, or `None` while pending.
 pub type CodeHighlight<'a> = Option<&'a [Vec<HighlightSpan>]>;
 
+/// What every block renderer shares: the enclosing top-level block index
+/// (cache invalidation scope), the per-element discriminator, and the row's
+/// options and theme.
+#[derive(Clone, Copy)]
+pub struct BlockCtx<'a> {
+    pub top_ix: usize,
+    pub ix: usize,
+    pub opts: &'a RenderOptions,
+    pub theme: &'a Theme,
+}
+
+impl<'a> BlockCtx<'a> {
+    /// A top-level block: its own index is both scope and discriminator.
+    pub fn top(ix: usize, opts: &'a RenderOptions, theme: &'a Theme) -> Self {
+        Self {
+            top_ix: ix,
+            ix,
+            opts,
+            theme,
+        }
+    }
+
+    /// The same scope, a nested element's discriminator.
+    fn nested(self, ix: usize) -> Self {
+        Self { ix, ..self }
+    }
+}
+
 /// Render a whole tree stacked with the md block gap. `highlight` resolves
 /// tokens for a top-level block index (code blocks only).
 pub fn render_tree(
@@ -213,10 +241,7 @@ pub fn render_tree(
             let document = highlight(ix);
             render_block(
                 &top.block,
-                ix,
-                ix,
-                opts,
-                theme,
+                BlockCtx::top(ix, opts, theme),
                 window,
                 document
                     .as_deref()
@@ -226,63 +251,52 @@ pub fn render_tree(
         .into_any_element()
 }
 
-/// Render one block (top-level or nested). `top_ix` is the enclosing top-level
-/// block index (cache invalidation scope); `ix` the per-element discriminator.
-#[allow(clippy::too_many_arguments)]
+/// Render one block (top-level or nested) at `ctx`.
 pub fn render_block(
     block: &Block,
-    top_ix: usize,
-    ix: usize,
-    opts: &RenderOptions,
-    theme: &Theme,
+    ctx: BlockCtx,
     window: &Window,
     highlight: CodeHighlight,
 ) -> AnyElement {
+    let (ix, theme) = (ctx.ix, ctx.theme);
     match block {
         Block::Paragraph { runs } => text_element(
             runs,
             theme.markdown.body_size,
             theme.markdown.body_line_height,
             false,
-            top_ix,
-            ix,
-            opts,
-            theme,
+            ctx,
         ),
         Block::Heading { level, runs } => {
             let (size, line) = heading_metrics(*level);
             let size = size * theme.markdown.body_size / MD_TEXT_SIZE;
             let line = line * theme.markdown.body_line_height / MD_LINE_HEIGHT;
-            text_element(runs, size, line, true, top_ix, ix, opts, theme)
+            text_element(runs, size, line, true, ctx)
         }
-        Block::CodeBlock { language, code } => render_code_block(
-            language.as_deref(),
-            code,
-            top_ix,
-            ix,
-            opts,
-            theme,
-            highlight,
-        ),
-        Block::BlockQuote { children } => div()
-            // Accent-tinted quote: indigo rail + a whisper of the same hue
-            // behind it (the inline-code treatment, dialed down).
-            .border_l_2()
-            .border_color(theme.accent.opacity(0.6))
-            .bg(theme.accent.opacity(0.05))
-            .rounded_tr(px(6.0))
-            .rounded_br(px(6.0))
-            .pl(px(12.0))
-            .pr(px(10.0))
-            .py(px(6.0))
-            .flex()
-            .flex_col()
-            .gap(px(theme.markdown.block_gap * (8.0 / MD_BLOCK_GAP)))
-            .text_color(theme.text_muted)
-            .children(children.iter().enumerate().map(|(ci, child)| {
-                render_block(child, top_ix, ix * 100 + ci, opts, theme, window, None)
-            }))
-            .into_any_element(),
+        Block::CodeBlock { language, code } => {
+            render_code_block(language.as_deref(), code, ctx, highlight)
+        }
+        Block::BlockQuote { children } => {
+            div()
+                // Accent-tinted quote: indigo rail + a whisper of the same hue
+                // behind it (the inline-code treatment, dialed down).
+                .border_l_2()
+                .border_color(theme.accent.opacity(0.6))
+                .bg(theme.accent.opacity(0.05))
+                .rounded_tr(px(6.0))
+                .rounded_br(px(6.0))
+                .pl(px(12.0))
+                .pr(px(10.0))
+                .py(px(6.0))
+                .flex()
+                .flex_col()
+                .gap(px(theme.markdown.block_gap * (8.0 / MD_BLOCK_GAP)))
+                .text_color(theme.text_muted)
+                .children(children.iter().enumerate().map(|(ci, child)| {
+                    render_block(child, ctx.nested(ix * 100 + ci), window, None)
+                }))
+                .into_any_element()
+        }
         Block::List {
             ordered_start,
             items,
@@ -330,10 +344,7 @@ pub fn render_block(
                         .children(item.iter().enumerate().map(|(ci, child)| {
                             render_block(
                                 child,
-                                top_ix,
-                                ix * 100 + item_ix * 10 + ci,
-                                opts,
-                                theme,
+                                ctx.nested(ix * 100 + item_ix * 10 + ci),
                                 window,
                                 None,
                             )
@@ -345,7 +356,7 @@ pub fn render_block(
             header,
             rows,
             align,
-        } => render_table(header, rows, align, top_ix, ix, opts, theme, window),
+        } => render_table(header, rows, align, ctx, window),
         Block::Rule => div()
             .h(px(1.0))
             .w_full()
@@ -410,17 +421,19 @@ fn table_cell_ix(ix: usize, r: usize, c: usize) -> usize {
 /// the same algorithm as the web's. When even the floors no longer fit, the
 /// rows overflow the viewport and the table scrolls horizontally instead of
 /// crushing every column into per-character wrapping.
-#[allow(clippy::too_many_arguments)]
 fn render_table(
     header: &[Vec<InlineRun>],
     rows: &[Vec<Vec<InlineRun>>],
     align: &[TableAlign],
-    top_ix: usize,
-    ix: usize,
-    opts: &RenderOptions,
-    theme: &Theme,
+    ctx: BlockCtx,
     window: &Window,
 ) -> AnyElement {
+    let BlockCtx {
+        top_ix,
+        ix,
+        opts,
+        theme,
+    } = ctx;
     // Header row first, mirroring the source's `rows` shape (rows may be ragged).
     let all: Vec<&[Vec<InlineRun>]> = std::iter::once(header)
         .filter(|h| !h.is_empty())
@@ -1283,17 +1296,19 @@ fn range_rects_with_positions(
     rects
 }
 
-#[allow(clippy::too_many_arguments)]
 fn text_element(
     runs: &[InlineRun],
     size: f32,
     line_height: f32,
     bold_default: bool,
-    top_ix: usize,
-    ix: usize,
-    opts: &RenderOptions,
-    theme: &Theme,
+    ctx: BlockCtx,
 ) -> AnyElement {
+    let BlockCtx {
+        top_ix,
+        ix,
+        opts,
+        theme,
+    } = ctx;
     let weight = if bold_default {
         FontWeight::SEMIBOLD
     } else {
@@ -1348,16 +1363,18 @@ fn flatten_code(code: &str, highlight: CodeHighlight, theme: &Theme) -> FlatText
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_code_block(
     language: Option<&str>,
     code: &str,
-    top_ix: usize,
-    ix: usize,
-    opts: &RenderOptions,
-    theme: &Theme,
+    ctx: BlockCtx,
     highlight: CodeHighlight,
 ) -> AnyElement {
+    let BlockCtx {
+        top_ix,
+        ix,
+        opts,
+        theme,
+    } = ctx;
     let code_theme = code_block_theme(theme);
     let chrome_color = theme.code_block_text.unwrap_or(theme.text_muted);
     // Whole-fence text + runs through the cross-frame cache (validity: code

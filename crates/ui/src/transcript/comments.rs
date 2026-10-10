@@ -285,10 +285,7 @@ impl Transcript {
         };
         let el = markdown::render::render_block(
             &top.block,
-            block_ix,
-            block_ix,
-            &opts,
-            theme,
+            markdown::render::BlockCtx::top(block_ix, &opts, theme),
             window,
             highlight
                 .get(&block_ix)
