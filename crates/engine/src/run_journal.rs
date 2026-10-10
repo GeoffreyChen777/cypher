@@ -161,7 +161,8 @@ impl RunJournal {
         Ok(all.into_iter().filter(|(seq, _)| *seq > from).collect())
     }
 
-    /// The last event in a chat's journal, if any (ignores a torn tail line).
+    /// Test seam: the last event in a chat's journal, if any (ignores a torn
+    /// tail line).
     pub fn last_event(&self, chat_id: &str) -> Result<Option<(u64, AgentEvent)>, JournalError> {
         let path = self.path_for(chat_id);
         if !path.exists() {

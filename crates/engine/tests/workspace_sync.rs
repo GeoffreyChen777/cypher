@@ -476,7 +476,7 @@ async fn chat_config_selects_the_run_harness() {
 #[tokio::test]
 #[ignore = "requires a live edge: set CYPHER_EDGE_WS (e.g. ws://127.0.0.1:8787)"]
 async fn two_engines_converge_through_a_real_workspace_room() {
-    use cypher_engine::doc_host::EdgeConfig;
+    use cypher_engine::EdgeConfig;
 
     let base = cypher_env::var("EDGE_WS")
         .expect("set CYPHER_EDGE_WS to the edge origin, e.g. ws://127.0.0.1:8787");

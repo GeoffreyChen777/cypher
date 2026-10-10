@@ -122,7 +122,7 @@ impl EdgeConfig {
         self
     }
 
-    /// Fixed bearer — dev mode and tests, where tokens never expire.
+    /// Test seam: a fixed bearer that never expires.
     pub fn with_static_token(url: impl Into<String>, token: impl Into<String>) -> Self {
         Self::new(url, Arc::new(cypher_rpc::StaticToken(token.into())))
     }
@@ -600,7 +600,7 @@ impl DocHost {
         lock(&self.inner.sessions).take();
     }
 
-    /// Test-only retirement sentinel: reports true once the doc-host graph
+    /// Test seam: a retirement sentinel that reports true once the doc-host graph
     /// has actually been freed.
     #[doc(hidden)]
     pub fn retirement_probe(&self) -> Box<dyn Fn() -> bool + Send + Sync> {
