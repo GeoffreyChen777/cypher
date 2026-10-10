@@ -1171,6 +1171,17 @@ struct ShellMotion {
     active: std::cell::Cell<bool>,
 }
 
+/// What the titlebar tracks: fullscreen (the traffic-light inset) and a
+/// window drag armed from its strip.
+struct TitlebarState {
+    /// Last observed `window.is_fullscreen()` (`None` before first paint) —
+    /// flips key the traffic-light inset tween.
+    fullscreen: Option<bool>,
+    /// Armed by mouse-down on a titlebar strip; the next mouse-move hands the
+    /// drag to the compositor (zed's platform-titlebar pattern).
+    should_move: bool,
+}
+
 pub struct Shell {
     /// The window's main state: lists (sidebar, spaces, sessions) in
     /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
@@ -1241,12 +1252,8 @@ pub struct Shell {
     notification_activity: crate::shell::notification_activity::DesktopActivity,
     /// Manually driven tweens and this frame's motion bookkeeping.
     motion: ShellMotion,
-    /// Last observed `window.is_fullscreen()` (`None` before first paint) —
-    /// flips key the traffic-light inset tween.
-    fullscreen: Option<bool>,
-    /// Armed by mouse-down on a titlebar strip; the next mouse-move hands the
-    /// drag to the compositor (zed's platform-titlebar pattern).
-    titlebar_should_move: bool,
+    /// Fullscreen tracking and the titlebar's window drag.
+    titlebar: TitlebarState,
     splash: SplashPhase,
     splash_task: Option<Task<()>>,
     save_task: Option<Task<()>>,
@@ -1542,8 +1549,10 @@ impl Shell {
                 reduced_motion: false,
                 active: std::cell::Cell::new(false),
             },
-            fullscreen: None,
-            titlebar_should_move: false,
+            titlebar: TitlebarState {
+                fullscreen: None,
+                should_move: false,
+            },
             splash: SplashPhase::Visible,
             splash_task: None,
             save_task: None,

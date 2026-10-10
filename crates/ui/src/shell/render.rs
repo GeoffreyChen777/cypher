@@ -49,7 +49,7 @@ impl Shell {
         if !cfg!(target_os = "macos") {
             return None;
         }
-        let fullscreen = self.fullscreen.unwrap_or(false);
+        let fullscreen = self.titlebar.fullscreen.unwrap_or(false);
         // The tween runs in cluster-start coordinates; the spacer is that
         // minus the container's own padding.
         let start = self.eval_tween(
@@ -70,7 +70,7 @@ impl Shell {
     /// Where unified-titlebar content (tabs / the settings label) starts: past
     /// the traffic lights + control cluster, riding the fullscreen inset tween.
     pub(super) fn title_bar_content_start(&self) -> f32 {
-        let fullscreen = self.fullscreen.unwrap_or(false);
+        let fullscreen = self.titlebar.fullscreen.unwrap_or(false);
         let is_macos = cfg!(target_os = "macos");
         let cluster = self.eval_tween(
             self.motion.titlebar_tween,
@@ -125,14 +125,14 @@ impl Shell {
     ) -> gpui::Stateful<gpui::Div> {
         el.id(id)
             .window_control_area(WindowControlArea::Drag)
-            .on_mouse_down_out(cx.listener(|this, _, _, _| this.titlebar_should_move = false))
+            .on_mouse_down_out(cx.listener(|this, _, _, _| this.titlebar.should_move = false))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.titlebar_should_move = false),
+                cx.listener(|this, _, _, _| this.titlebar.should_move = false),
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.titlebar_should_move = true),
+                cx.listener(|this, _, _, _| this.titlebar.should_move = true),
             )
             // Hand the drag to the compositor only while the button is
             // actually held (`pressed_button` guard): on macOS
@@ -145,9 +145,9 @@ impl Shell {
             // between the two clicks of a double-click.
             .on_mouse_move(
                 cx.listener(|this, event: &gpui::MouseMoveEvent, window, _| {
-                    if this.titlebar_should_move && event.pressed_button == Some(MouseButton::Left)
+                    if this.titlebar.should_move && event.pressed_button == Some(MouseButton::Left)
                     {
-                        this.titlebar_should_move = false;
+                        this.titlebar.should_move = false;
                         window.start_window_move();
                     }
                 }),
@@ -1348,14 +1348,14 @@ impl Shell {
         // cluster with a 200ms ease-out tween. A fullscreen transition
         // resizes the window, which re-renders us, so polling here is exact.
         let fullscreen = window.is_fullscreen();
-        if self.fullscreen != Some(fullscreen) {
-            if self.fullscreen.is_some() && cfg!(target_os = "macos") {
+        if self.titlebar.fullscreen != Some(fullscreen) {
+            if self.titlebar.fullscreen.is_some() && cfg!(target_os = "macos") {
                 self.motion.titlebar_tween = Some(WidthTween::new(
                     titlebar_cluster_start(!fullscreen),
                     titlebar_cluster_start(fullscreen),
                 ));
             }
-            self.fullscreen = Some(fullscreen);
+            self.titlebar.fullscreen = Some(fullscreen);
         }
         // Manual tween drive bookkeeping for this pass (see [`WidthTween`]).
         self.motion.reduced_motion = motion::reduced_motion(cx);
