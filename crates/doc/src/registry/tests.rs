@@ -1,7 +1,7 @@
 //! RegistryDoc unit tests. The merge cases mirror
 //! `edge/src/registry-core.test.ts` — shared vectors; change both together.
-//! The typed-API cases mirror `workspace.rs`'s tests so the drop-in claim is
-//! tested, not asserted.
+//! The typed-API cases cover the reads and writes the engine's workspace host
+//! makes through RegistryDoc.
 
 use super::core::encode_hlc;
 use super::*;
