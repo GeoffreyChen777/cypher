@@ -3,18 +3,20 @@
 use super::*;
 
 impl Pickers {
-    // Chip builder: every argument is one visual slot of the chip.
-    #[allow(clippy::too_many_arguments)]
+    /// A picker's trigger chip, one visual slot per [`TriggerChip`] field.
     fn trigger_chip(
         &self,
-        kind: PickerKind,
-        label: SharedString,
-        set: bool,
-        chip_icon: Option<(&'static str, Option<gpui::Hsla>)>,
-        suffix: Option<(SharedString, Option<gpui::Hsla>)>,
+        chip: TriggerChip,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
+        let TriggerChip {
+            kind,
+            label,
+            set,
+            icon: chip_icon,
+            suffix,
+        } = chip;
         let id: &'static str = match kind {
             PickerKind::Branch => "picker-branch",
             PickerKind::Checkout => "picker-checkout",
@@ -1294,6 +1296,17 @@ impl Pickers {
     }
 }
 
+/// A trigger chip's slots: which picker it opens, its label, whether a
+/// value is set (brighter text), a leading icon with optional tint, and a
+/// trailing suffix with optional tint.
+struct TriggerChip {
+    kind: PickerKind,
+    label: SharedString,
+    set: bool,
+    icon: Option<(&'static str, Option<gpui::Hsla>)>,
+    suffix: Option<(SharedString, Option<gpui::Hsla>)>,
+}
+
 /// The model popover's height (t3 max-h-86.5).
 const MODEL_POPOVER_HEIGHT: f32 = 346.0;
 
@@ -1530,11 +1543,13 @@ impl Render for Pickers {
         // departs from its default. No chip at all when the model has neither
         // a ladder nor options — a dead trigger reads as broken.
         let model_chip = self.trigger_chip(
-            PickerKind::HarnessModel,
-            model_label,
-            true,
-            Some(harness_icon),
-            None,
+            TriggerChip {
+                kind: PickerKind::HarnessModel,
+                label: model_label,
+                set: true,
+                icon: Some(harness_icon),
+                suffix: None,
+            },
             &theme,
             cx,
         );
@@ -1544,11 +1559,13 @@ impl Render for Pickers {
                 .is_some_and(|m| !m.options.is_empty());
         let traits_chip = has_traits.then(|| {
             self.trigger_chip(
-                PickerKind::Traits,
-                traits_label,
-                traits_active,
-                None,
-                None,
+                TriggerChip {
+                    kind: PickerKind::Traits,
+                    label: traits_label,
+                    set: traits_active,
+                    icon: None,
+                    suffix: None,
+                },
                 &theme,
                 cx,
             )
