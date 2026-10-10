@@ -874,177 +874,7 @@ impl Composer {
                 );
             }
         } else {
-            // Sessions first, then files, under ONE keyboard active index.
-            // The scroll container owns the height cap; headers and rows are
-            // its direct children so `scroll_to_item` can follow the keyboard
-            // (see [`mention_scroll_child`]).
-            let mut list = div()
-                .id("mention-menu-scroll")
-                .max_h(px(312.0))
-                .flex()
-                .flex_col()
-                .overflow_y_scroll()
-                .track_scroll(&self.mention_scroll);
-            if n_sessions > 0 {
-                list = list.child(
-                    div()
-                        .px(px(10.0))
-                        .pt(px(6.0))
-                        .pb(px(2.0))
-                        .text_size(px(10.0))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from("Sessions")),
-                );
-                for (ix, session) in sessions.iter().enumerate() {
-                    let selected = self.mention.active == Some(ix);
-                    let subtitle = self.session_row_subtitle(session, cx);
-                    let tooltip_label = session_tooltip_label(&session.title);
-                    list = list.child(
-                        crate::kit::popover::menu_row(
-                            theme,
-                            selected,
-                            format!("session-mention-result-{ix}"),
-                        )
-                        .id(("session-mention-result", ix))
-                        .tooltip(move |_, cx| {
-                            cx.new(|_| ChipTooltip {
-                                label: tooltip_label.clone(),
-                                activation: ix as u64,
-                            })
-                            .into()
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.mention.active = Some(ix);
-                            this.accept_mention(cx);
-                        }))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .flex_1()
-                                .min_w_0()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    crate::kit::icons::icon(crate::kit::icons::CHAT_ROUND_LINE)
-                                        .size(px(14.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .overflow_hidden()
-                                        .truncate()
-                                        .text_size(px(12.5))
-                                        .text_color(theme.text)
-                                        .child(SharedString::from(session.title.clone())),
-                                )
-                                .when(!subtitle.is_empty(), |el| {
-                                    el.child(
-                                        div()
-                                            .flex_none()
-                                            .max_w(px(190.0))
-                                            .overflow_hidden()
-                                            .truncate()
-                                            .text_size(px(11.0))
-                                            .text_color(theme.text_faint)
-                                            .child(SharedString::from(subtitle)),
-                                    )
-                                }),
-                        ),
-                    );
-                }
-            }
-            if n_files > 0
-                || (n_sessions > 0 && (self.mention.loading || self.mention.error.is_some()))
-            {
-                if n_sessions > 0 {
-                    list = list.child(
-                        div()
-                            .px(px(10.0))
-                            .pt(px(6.0))
-                            .pb(px(2.0))
-                            .text_size(px(10.0))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from("Files")),
-                    );
-                }
-                if n_files > 0 {
-                    for (ix, result) in files.iter().enumerate() {
-                        let selected = self.mention.active == Some(n_sessions + ix);
-                        let path = result.path.clone();
-                        let tooltip_path: SharedString = path.clone().into();
-                        list = list.child(
-                            crate::kit::popover::menu_row(
-                                theme,
-                                selected,
-                                format!("file-mention-result-{ix}"),
-                            )
-                            .id(("file-mention-result", ix))
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| ChipTooltip {
-                                    label: tooltip_path.clone(),
-                                    activation: ix as u64,
-                                })
-                                .into()
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.mention.active = Some(n_sessions + ix);
-                                this.accept_mention(cx);
-                            }))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .child(
-                                        crate::kit::icons::icon(if result.is_dir {
-                                            crate::kit::icons::FOLDER
-                                        } else {
-                                            crate::kit::icons::DOCUMENT
-                                        })
-                                        .size(px(14.0))
-                                        .text_color(theme.text_muted),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex_1()
-                                            .overflow_hidden()
-                                            .truncate()
-                                            .text_size(px(12.5))
-                                            .text_color(theme.text)
-                                            .child(path),
-                                    ),
-                            ),
-                        );
-                    }
-                } else if let Some(error) = self.mention.error.clone() {
-                    // Sessions stay visible; the failed file search is a note
-                    // under the Files header instead of hiding them.
-                    list = list.child(
-                        div()
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .text_size(px(11.5))
-                            .text_color(theme.danger_muted)
-                            .child(error),
-                    );
-                } else {
-                    list = list.child(crate::kit::popover::skeleton_rows(
-                        "file-mention-loading",
-                        theme,
-                        2,
-                        cx.entity_id(),
-                        cx,
-                    ));
-                }
-            }
-            card = card.child(list);
+            card = card.child(self.render_mention_list(theme, cx));
         }
         let anchor = self
             .input
@@ -1059,6 +889,130 @@ impl Composer {
             card.into_any_element(),
             None,
         ))
+    }
+
+    /// Sessions first, then files, under ONE keyboard active index. The
+    /// scroll container owns the height cap; headers and rows are its
+    /// direct children so `scroll_to_item` can follow the keyboard (see
+    /// [`mention_scroll_child`]).
+    fn render_mention_list(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let sessions = &self.mention.sessions;
+        let files = &self.mention.files;
+        let n_sessions = sessions.len();
+        let n_files = files.len();
+        let mut list = div()
+            .id("mention-menu-scroll")
+            .max_h(px(312.0))
+            .flex()
+            .flex_col()
+            .overflow_y_scroll()
+            .track_scroll(&self.mention_scroll);
+        if n_sessions > 0 {
+            list = list.child(mention_section_header("Sessions", theme));
+            for (ix, session) in sessions.iter().enumerate() {
+                list = list.child(self.session_mention_row(ix, session, theme, cx));
+            }
+        }
+        if n_files > 0 || (n_sessions > 0 && (self.mention.loading || self.mention.error.is_some()))
+        {
+            if n_sessions > 0 {
+                list = list.child(mention_section_header("Files", theme));
+            }
+            if n_files > 0 {
+                for (ix, result) in files.iter().enumerate() {
+                    let selected = self.mention.active == Some(n_sessions + ix);
+                    list = list.child(file_mention_row(
+                        ix, n_sessions, result, selected, theme, cx,
+                    ));
+                }
+            } else if let Some(error) = self.mention.error.clone() {
+                // Sessions stay visible; the failed file search is a note
+                // under the Files header instead of hiding them.
+                list = list.child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .text_size(px(11.5))
+                        .text_color(theme.danger_muted)
+                        .child(error),
+                );
+            } else {
+                list = list.child(crate::kit::popover::skeleton_rows(
+                    "file-mention-loading",
+                    theme,
+                    2,
+                    cx.entity_id(),
+                    cx,
+                ));
+            }
+        }
+        list
+    }
+
+    /// One `@session` result: title and its project · device · state line.
+    fn session_mention_row(
+        &self,
+        ix: usize,
+        session: &MentionSession,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let selected = self.mention.active == Some(ix);
+        let subtitle = self.session_row_subtitle(session, cx);
+        let tooltip_label = session_tooltip_label(&session.title);
+        crate::kit::popover::menu_row(theme, selected, format!("session-mention-result-{ix}"))
+            .id(("session-mention-result", ix))
+            .tooltip(move |_, cx| {
+                cx.new(|_| ChipTooltip {
+                    label: tooltip_label.clone(),
+                    activation: ix as u64,
+                })
+                .into()
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.mention.active = Some(ix);
+                this.accept_mention(cx);
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        crate::kit::icons::icon(crate::kit::icons::CHAT_ROUND_LINE)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .text_color(theme.text)
+                            .child(SharedString::from(session.title.clone())),
+                    )
+                    .when(!subtitle.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .max_w(px(190.0))
+                                .overflow_hidden()
+                                .truncate()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from(subtitle)),
+                        )
+                    }),
+            )
     }
 
     /// Where this composer's `#` lookups run, or `None` when there is no
@@ -1518,4 +1472,69 @@ impl Composer {
             .children(self.render_issue_popup(theme, cx))
             .children(self.render_slash_popup(theme, cx))
     }
+}
+
+/// A result group's heading ("Sessions", "Files").
+fn mention_section_header(label: &'static str, theme: &Theme) -> gpui::Div {
+    div()
+        .px(px(10.0))
+        .pt(px(6.0))
+        .pb(px(2.0))
+        .text_size(px(10.0))
+        .text_color(theme.text_faint)
+        .child(SharedString::from(label))
+}
+
+/// One file (or folder) result, by path.
+fn file_mention_row(
+    ix: usize,
+    n_sessions: usize,
+    result: &FileSearchMatch,
+    selected: bool,
+    theme: &Theme,
+    cx: &mut Context<Composer>,
+) -> gpui::Stateful<gpui::Div> {
+    let path = result.path.clone();
+    let tooltip_path: SharedString = path.clone().into();
+    crate::kit::popover::menu_row(theme, selected, format!("file-mention-result-{ix}"))
+        .id(("file-mention-result", ix))
+        .tooltip(move |_, cx| {
+            cx.new(|_| ChipTooltip {
+                label: tooltip_path.clone(),
+                activation: ix as u64,
+            })
+            .into()
+        })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.mention.active = Some(n_sessions + ix);
+            this.accept_mention(cx);
+        }))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    crate::kit::icons::icon(if result.is_dir {
+                        crate::kit::icons::FOLDER
+                    } else {
+                        crate::kit::icons::DOCUMENT
+                    })
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .text_color(theme.text)
+                        .child(path),
+                ),
+        )
 }
