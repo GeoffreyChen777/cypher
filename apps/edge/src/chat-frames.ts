@@ -12,7 +12,9 @@
  * with cross-language test vectors (registry precedent).
  */
 
-import { textDecoder, textEncoder } from "./blobs";
+// Import-free so scripts/chat2-crosscheck.mjs can load this file directly.
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 /** Frame type bytes. Client→server and server→client share one space. */
 export const FRAME = {
