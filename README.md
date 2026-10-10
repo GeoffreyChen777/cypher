@@ -1,84 +1,125 @@
-# Cypher
+<p align="center">
+  <img src="packaging/cypher.png" alt="Cypher app icon" width="128" height="128">
+</p>
 
-Control your Pi coding agent locally by default, with optional multi-device sync.
-Chats from the retired Claude Code, Codex, Cursor, Grok and Hermes harnesses stay
-readable but cannot continue; start a new Pi chat instead.
+<h1 align="center">Cypher</h1>
 
-![Cypher driving an agent session with a live branch diff sidebar](apps/landing/public/assets/app-screenshot.jpg)
+<p align="center">
+  Control coding agents from any device. Execution stays on your machines.
+</p>
 
-Every device runs a small engine that stores sessions on that device. The engine
-remains local-only unless you explicitly connect an account.
+<p align="center">
+  <a href="https://letscypher.app">Website</a> ·
+  <a href="#install">Install</a> ·
+  <a href="docs/README.md">Documentation</a>
+</p>
 
-## Set up a Linux device
+<p align="center">
+  <img src="docs/assets/preview.jpg" alt="The Cypher desktop app: projects and sessions in the sidebar, an agent's folded work run and answer, and the session's Git diff">
+</p>
+
+Cypher runs the [Pi](https://github.com/earendil-works/pi) coding agent on your own
+machines and lets you drive it from any of them. Every Mac or Linux server runs a small
+engine that hosts its agents, terminals and repositories; the desktop app and the iPhone
+app connect to those engines. Sessions stay on the device that runs them unless you turn
+on sync.
+
+## Features
+
+- **Pi, built in.** A pinned Pi runtime with curated plugins, isolated from any Pi you
+  installed yourself. Pick a model and thinking level, steer a run while it works, use
+  slash commands, run subagents as child chats, and add MCP servers.
+- **A workspace for many sessions.** Sessions open as tabs you can split, drag and zoom.
+  Each has its own Git diff (unified or side by side), file browser, side chats and
+  terminal.
+- **Local first.** Without an account, everything stays on the device. Signing in never
+  uploads your existing local sessions.
+- **Every device.** Start an agent on a VPS, then follow or steer it from your laptop or
+  phone; it keeps working after you close the lid.
+- **One-click fleet updates.** Settings → Devices updates every online device, and Linux
+  services update themselves when idle.
+- **Yours to tune.** Themes, chat fonts, colors and spacing, and per-pane color overrides.
+
+## Install
+
+### macOS
+
+Download the app from [letscypher.app](https://letscypher.app) (Apple Silicon). On first
+launch it offers to download the Pi runtime. Then connect a model in Settings →
+Providers: a ChatGPT subscription, Claude through an installed Claude Code CLI, or any
+OpenAI-compatible gateway with an API key.
+
+### Linux (headless)
 
 ```bash
 curl -fsSL https://edge.letscypher.app/install.sh | sh
 ```
 
-The installer opens one setup wizard: connect your account, install Pi Runtime,
-start a **systemd user service**, and verify the device connection. Choose
-local-only mode to skip account connection. Official Linux binaries support
-glibc-based x86_64 and aarch64 systems with glibc 2.31 or newer. This is a
-headless engine, not a terminal chat UI or Linux desktop application.
-
-Day-to-day:
+The setup wizard installs the Pi runtime, starts a systemd user service and, if you
+want, connects the device to your account. Supported: x86_64 and aarch64 with glibc 2.31
+or newer. This is a headless engine that you drive from the desktop or iPhone app; it has
+no terminal chat UI.
 
 ```bash
-cypher             # setup on first use; concise status afterwards
+cypher             # setup on first use, status afterwards
 cypher setup       # continue or repair setup
-cypher status      # concise device status
-cypher logs        # recent engine logs; --follow streams them
-cypher update      # newest release + Pi Runtime; restarts the service
+cypher status      # device status (--verbose adds account, data and IPC details)
+cypher logs        # recent engine logs (--follow streams them)
+cypher update      # newest release and Pi runtime, then restart the service
 ```
 
-Linux services apply releases **automatically** in an idle window. SSH and
-non-interactive installs, updates, Pi configuration, data directories and
-installation integrity: [Linux setup](docs/features/linux-setup.md).
+Non-interactive installs, SSH, data directories and repair:
+[Linux setup](docs/features/linux-setup.md).
 
-Any desktop can also update the whole fleet: Settings → Devices checks every
-online device for a newer release and offers **Update** per device or **Update
-all**. Each device applies its own release and restarts itself (a Linux service
-restarts; a Mac swaps its app bundle and relaunches). A device with active runs
-or open terminals refuses until idle, or until you choose **Update anyway**.
-iOS updates through TestFlight and is not part of this.
+### iPhone
 
-## Optional multi-device sync
+The iPhone app is a remote control for your Macs and Linux devices: it browses your
+projects, reads and continues sessions, and shows each session's files and changes. It
+runs no agent and needs no provider credentials. It is distributed through TestFlight
+and needs a synced account.
 
-On Linux, run the setup wizard when you want to connect to desktop. It handles
-safe service coordination around sign-in:
+## Sync across devices
+
+Sync is optional. On the desktop, open the account menu at the bottom of the sidebar and
+choose **Enable sync**; on Linux, run `cypher setup`. Sign-in happens in the browser and
+takes effect after a restart.
+
+With sync on, chats and the workspace index sync through Cypher's Cloudflare edge.
+Agents, terminals and repositories stay on the machines that run them; other devices
+reach a session's files and diffs through the edge's device relay. Signing in does not
+upload, move or import local sessions; they stay in the local profile and come back when
+you sign out:
 
 ```bash
-cypher setup
+cypher daemon stop && cypher logout && cypher daemon start
 ```
 
-You can then start an agent on one synced device and follow or drive it from another. An always-on machine such as a VPS can keep those agents working after you close your laptop.
+## Build from source
 
-Signing in does not upload, move, or import existing local sessions. Local sessions and their attachments remain under the local profile and reappear when you return to local-only mode:
+The pinned Rust toolchain installs itself through `rustup` (`rust-toolchain.toml`).
+Releases ship the desktop app for macOS and the headless engine for Linux.
 
 ```bash
-cypher daemon stop
-cypher logout
-cypher daemon start
+cargo run -p cypher                                     # desktop app, engine in-process
+cargo build --release -p cypher --no-default-features   # headless engine (Linux)
+scripts/dev-demo.sh                                     # offline demo with seeded chats
+bash scripts/check.sh all                               # the checks CI runs
 ```
 
-`cypher login` and `cypher logout` refuse to modify credentials while an engine owns the data directory. The desktop app follows the same next-restart profile boundary.
+[Development](docs/development/README.md) covers the repository layout, conventions and
+the development app; [Architecture](docs/architecture.md) explains how the engine, apps
+and edge fit together.
 
-On macOS: use the desktop release, or build `cypher` from source and run `cypher daemon install` to install the launchd service.
+## Documentation
 
----
+- [Docs index](docs/README.md)
+- [Chat appearance](docs/features/chat-appearance.md),
+  [appearance colors](docs/features/appearance-colors.md) and
+  [Git diff layouts](docs/features/git-diff.md)
+- [MCP settings](docs/features/mcp-settings.md)
+- [CI and releases](docs/operations/ci-cd.md)
 
-Chat fonts, colors, spacing and wide-screen mode: [Chat appearance](docs/features/chat-appearance.md).
+## License
 
-Overall themes and Terminal, Git and Sidebar color overrides: [Appearance colors](docs/features/appearance-colors.md).
-
-Unified and side-by-side Git comparison: [Git diff layouts](docs/features/git-diff.md).
-
-## Developing
-
-[Development](docs/development/README.md) covers the repository layout, conventions
-and `scripts/check.sh`, the one command that runs CI's checks locally. How the
-product works: [Architecture](docs/architecture.md). CI, deployment prerequisites and
-release recovery: [CI/CD operations](docs/operations/ci-cd.md). All docs:
-[docs/README.md](docs/README.md).
-
-Licensed under the [MIT License](LICENSE).
+[MIT](LICENSE). Bundled third-party components are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
