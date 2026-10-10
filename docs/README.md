@@ -1,7 +1,7 @@
 # Documentation
 
-[README](../README.md) introduces the product and [ARCHITECTURE.md](../ARCHITECTURE.md)
-explains how it works. Everything else is grouped here by who reads it.
+[README](../README.md) introduces the product and [Architecture](architecture.md) explains
+how it works. Everything else is grouped here by who reads it.
 
 ## Features — using Cypher
 

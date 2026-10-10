@@ -47,7 +47,7 @@ Single binary `cypher`:
   permissions, peer-UID checks and the `cypher.rpc.v1` subprotocol.
 - `cypher headless` — engine only. A clean installation immediately serves its local profile over Unix IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
-See [Unix IPC](docs/design/unix-ipc.md) for endpoint ownership, service names, Pi bridge,
+See [Unix IPC](design/unix-ipc.md) for endpoint ownership, service names, Pi bridge,
 and separate UI/Engine data directories. TCP IPC and its environment setting
 have been removed; remote Edge transports are unchanged.
 
@@ -96,11 +96,11 @@ Two persistent kinds of data. When sync is enabled, session docs ride the chat2 
    (append-only per-device entries; host-only outcomes; dedupe/TTL/supersede evaluation).
    Continuation entries (`continuationOf`) are joined back into one message on read; tool parts
    are render-only (full inputs stay in the host's local run journal). Hosts publish neither a
-   tail nor a diff sidecar ([chat2 sync](docs/design/chat2-sync.md)). Streamed assistant text
+   tail nor a diff sidecar ([chat2 sync](design/chat2-sync.md)). Streamed assistant text
    commits every `STREAM_COMMIT_MS` (120 ms, `cypher-doc` constants).
 
 2. **Workspace registry** (per profile) — a table of last-writer-wins rows
-   ([Registry sync](docs/design/registry-sync.md)); the `registry1` snapshot stores spaces (id, deviceId, path, name?, gitDetected, checkoutId), the chats index (id, deviceId, title, archived, cwd, branch, checkoutId, spaceId, lastSeenAt, lastMessagePreview/At, config), devices, session-status rows, and checkout-diff summary pointers. A space is a device+folder pair in the active profile; the owning device's `SpacesSync` stamps git presence so branch pickers and the diff sidebar can gate without another RPC. Local scope keeps the registry entirely in its profile store. Synced and development scopes join `/registry/{orgId}/ws`, backed by the private per-user room `reg1/{orgId}/{userId}`; rows are never visible to every member of an organization.
+   ([Registry sync](design/registry-sync.md)); the `registry1` snapshot stores spaces (id, deviceId, path, name?, gitDetected, checkoutId), the chats index (id, deviceId, title, archived, cwd, branch, checkoutId, spaceId, lastSeenAt, lastMessagePreview/At, config), devices, session-status rows, and checkout-diff summary pointers. A space is a device+folder pair in the active profile; the owning device's `SpacesSync` stamps git presence so branch pickers and the diff sidebar can gate without another RPC. Local scope keeps the registry entirely in its profile store. Synced and development scopes join `/registry/{orgId}/ws`, backed by the private per-user room `reg1/{orgId}/{userId}`; rows are never visible to every member of an organization.
 
    Writer discipline: each device writes its own device and session-status rows, rows for chats it hosts, and git stamps for spaces it owns. Creates, renames, archives, and seen marks are LWW sets accepted from any device. `deleteSpace` tombstones the space and every chat/session row in it in one commit. Presence uses ephemeral room frames rather than durable heartbeat writes.
 
@@ -151,7 +151,7 @@ cypher/
 
 Wire codecs and merge logic that Rust, the TypeScript Edge and the Swift client each
 implement (chat2 frames, device-room frames, the registry merge core, preview frames) are
-listed in [protocol/README.md](protocol/README.md) with their shared test vectors.
+listed in [protocol/README.md](../protocol/README.md) with their shared test vectors.
 
 `crates/harness/src/pi/engine-client.mjs` is the one non-Rust source inside a crate: the
 harness embeds it with `include_str!` and hands it to Pi, so it lives beside its user rather
@@ -185,8 +185,8 @@ Modules follow the `foo.rs` + `foo/` layout; a folder groups one feature.
   `daemon.rs` (systemd/launchd service), `onboarding.rs` (terminal sign-in and organization
   choice), `dev_env.rs` (the development-Edge guard).
 
-The iOS app groups Swift by feature and layer ([apps/ios/README.md](apps/ios/README.md));
-the Edge by feature behind one route chain ([apps/edge/README.md](apps/edge/README.md)).
+The iOS app groups Swift by feature and layer ([apps/ios/README.md](../apps/ios/README.md));
+the Edge by feature behind one route chain ([apps/edge/README.md](../apps/edge/README.md)).
 
 ### Crates and layering
 
@@ -205,7 +205,7 @@ Each crate depends only on crates in lower layers, dev-dependencies included;
 
 The engine embeds everything below it; the desktop UI embeds the engine for in-process mode
 and speaks `cypher-rpc` to a separate daemon. Conventions and checks:
-[Development](docs/development/README.md).
+[Development](development/README.md).
 
 Engine async runtime: **tokio** throughout; the UI bridges via `gpui_tokio` (`Tokio::spawn`
 futures surfaced as gpui `Task`s). In-process mode runs the engine on an app-owned
@@ -244,7 +244,7 @@ sink method that touches the document.
   last stable block boundary), monochrome
   theme where **numbers drive layout, colors are paint**. Code blocks: monospace, no wrap ⇒
   height = lines × line-height (layout independent of highlight); syntax highlighting comes
-  from tree-sitter grammars in `cypher-syntax` ([Syntax highlighting](docs/design/syntax-highlighting.md)),
+  from tree-sitter grammars in `cypher-syntax` ([Syntax highlighting](design/syntax-highlighting.md)),
   colors applied as text runs (paint-only). Streaming **fade-in veil** on newly appended text via `with_animation`
   opacity (paint-layer, never affects layout). `prefers-reduced-motion` honored.
 - **Composer**: built on the crate's one text widget, `widgets::TextInput` (derived from Zed's
@@ -281,7 +281,7 @@ sink method that touches the document.
   presence); a warm-doc LRU (`WARM_DOC_CAP` = 12 docs plus a byte budget) over a SQLite snapshot
   store; nudge-driven cold open.
 - **Harness**: the `Harness` trait in `cypher-harness`. The production harness is Pi, driven
-  over its own RPC protocol ([Pi RPC harness](docs/design/pi-rpc.md)); the mock harness backs
+  over its own RPC protocol ([Pi RPC harness](design/pi-rpc.md)); the mock harness backs
   tests and demos.
 - **Repos/diffs**: the `git` subprocess (no libgit2); worktrees
   under `~/.cypher/worktrees`; fs watchers (`notify`) + 2min repair; diff capture (patch +
@@ -295,7 +295,7 @@ sink method that touches the document.
 
 ## 6. Edge (TypeScript, `apps/edge/`)
 
-Routes: chat2 rooms ([chat2 sync](docs/design/chat2-sync.md)), private per-user registry rooms
+Routes: chat2 rooms ([chat2 sync](design/chat2-sync.md)), private per-user registry rooms
 (`/registry/{orgId}/ws` → `reg1/{orgId}/{userId}`) with authenticated row sync and ephemeral
 device presence, device rooms (byte relay + nudges), R2 attachments and tool-output reads,
 `/auth/*` (WorkOS; the API key is a Worker secret), the installer and release downloads, and
@@ -304,4 +304,4 @@ auto-response ping/pong.
 
 Source is grouped by feature (`src/auth`, `chat`, `registry`, `device`, `notifications`)
 behind one ordered handler chain in `src/index.ts`; layout, conventions and the golden route
-test are in [apps/edge/README.md](apps/edge/README.md).
+test are in [apps/edge/README.md](../apps/edge/README.md).

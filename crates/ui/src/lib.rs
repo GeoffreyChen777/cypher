@@ -1,5 +1,5 @@
 //! cypher-ui — the gpui viewport. Shell, sidebar, conversation, composer, terminal,
-//! diff pane. Design: ARCHITECTURE.md §4. The only public surface is
+//! diff pane. Design: docs/architecture.md §4. The only public surface is
 //! [`run_app`] and its [`UiConfig`].
 
 mod appearance;

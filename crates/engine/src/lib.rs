@@ -1,7 +1,7 @@
 //! cypher-engine — the headless backend: sessions engine, doc host + command executor,
 //! run journal + crash recovery, and the IPC RPC server.
 //!
-//! Spec: ARCHITECTURE.md §5. Also hosts terminals, repos/diffs, uploads, auth, and
+//! Spec: docs/architecture.md §5. Also hosts terminals, repos/diffs, uploads, auth, and
 //! the device-room relay.
 //!
 //! The root re-exports are what an app needs to assemble, lock, authenticate

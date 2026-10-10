@@ -1,7 +1,7 @@
 # Development
 
 How the repository is laid out, the rules the code follows, and how to run the
-same checks CI runs. [ARCHITECTURE.md](../../ARCHITECTURE.md) explains how the
+same checks CI runs. [Architecture](../architecture.md) explains how the
 product works; this guide is about working on it.
 
 ## Repository map

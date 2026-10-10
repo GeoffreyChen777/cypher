@@ -7,7 +7,7 @@ Every workspace package sits in one layer of LAYERS below. A package may
 depend (normal, build, target-specific or dev dependency) only on workspace
 packages in strictly lower layers. Every workspace member must be listed, so
 a new crate cannot join the workspace without choosing its place. The table is
-mirrored in ARCHITECTURE.md ("Crates and layering"); change both together.
+mirrored in docs/architecture.md ("Crates and layering"); change both together.
 """
 import re
 import sys

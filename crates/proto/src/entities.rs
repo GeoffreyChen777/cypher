@@ -1,7 +1,7 @@
 //! Synced entity rows (workspace doc) and local projections.
 //!
 //! In zeron these were synced Postgres rows; in zeron they live in the per-org
-//! workspace Loro doc (see ARCHITECTURE.md §2.2) with the same field surface.
+//! workspace Loro doc (see docs/architecture.md §2.2) with the same field surface.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

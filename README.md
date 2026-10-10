@@ -77,7 +77,7 @@ Unified and side-by-side Git comparison: [Git diff layouts](docs/features/git-di
 
 [Development](docs/development/README.md) covers the repository layout, conventions
 and `scripts/check.sh`, the one command that runs CI's checks locally. How the
-product works: [ARCHITECTURE.md](ARCHITECTURE.md). CI, deployment prerequisites and
+product works: [Architecture](docs/architecture.md). CI, deployment prerequisites and
 release recovery: [CI/CD operations](docs/operations/ci-cd.md). All docs:
 [docs/README.md](docs/README.md).
 
