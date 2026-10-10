@@ -1,51 +1,84 @@
-// chat2 wire-frame conformance — pins the same layout vectors as
-// crates/sync/src/chat_frames.rs and apps/edge/src/chat/chat-frames.test.ts. The three
-// codecs must stay byte-compatible; change all suites together.
+// chat2 wire frames: the shared vectors in protocol/vectors/chat-frames-v1.json,
+// run by the Rust client and the TypeScript server codec too
+// (protocol/README.md), plus the typed state header and catch-up plan.
 
 import XCTest
 @testable import Cypher
 
+private func vectors() throws -> [String: Any] {
+    let url = try TestSupport.repoRoot().appendingPathComponent("protocol/vectors/chat-frames-v1.json")
+    return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+}
+
+private func cases(_ key: String) throws -> [[String: Any]] {
+    try XCTUnwrap(vectors()[key] as? [[String: Any]])
+}
+
+private func hex(_ value: Any?) -> Data {
+    let chars = Array(value as? String ?? "")
+    return Data(
+        stride(from: 0, to: chars.count, by: 2).map {
+            UInt8(String(chars[$0...($0 + 1)]), radix: 16)!
+        })
+}
+
+private func typeByte(_ value: Any?) -> UInt8 {
+    (value as! NSNumber).uint8Value
+}
+
 final class ChatFramesTests: XCTestCase {
-    func testPinsTheWireLayout() {
-        // Must match the Rust/TS vector: [type][headerLen u32 LE][header][payload].
-        let frame = ChatWire.encode(
-            ChatFrameType.push,
-            header: ["batchId": "b1"],
-            payload: Data([9, 8, 7]))
-        XCTAssertEqual(frame[0], ChatFrameType.push)
-        let header = Data(#"{"batchId":"b1"}"#.utf8)
-        XCTAssertEqual(
-            [UInt8](frame[1..<5]),
-            [UInt8(header.count), 0, 0, 0])
-        XCTAssertEqual(frame.subdata(in: 5..<(5 + header.count)), header)
-        XCTAssertEqual(frame.subdata(in: (5 + header.count)..<frame.count), Data([9, 8, 7]))
+    func testSharedFrameTypes() throws {
+        let v = try vectors()
+        let types: [String: UInt8] = [
+            "hello": ChatFrameType.hello, "state": ChatFrameType.state,
+            "rowsReq": ChatFrameType.rowsReq, "row": ChatFrameType.row,
+            "rowsDone": ChatFrameType.rowsDone, "push": ChatFrameType.push,
+            "ack": ChatFrameType.ack, "presence": ChatFrameType.presence,
+            "probe": ChatFrameType.probe, "probeOk": ChatFrameType.probeOk,
+            "error": ChatFrameType.error,
+        ]
+        let shared = try XCTUnwrap(v["types"] as? [String: NSNumber])
+        XCTAssertEqual(shared.mapValues(\.uint8Value), types)
+        XCTAssertEqual((v["maxHeaderBytes"] as? NSNumber)?.intValue, chatFrameMaxHeaderBytes)
     }
 
-    func testRoundTripsAndRejectsMalformed() {
-        let payload = Data(repeating: 1, count: 1000)
-        let frame = ChatWire.encode(ChatFrameType.row, header: ["seq": 7], payload: payload)
-        let decoded = ChatWire.decode(frame)
-        XCTAssertEqual(decoded?.kind, ChatFrameType.row)
-        XCTAssertEqual((decoded?.header["seq"] as? NSNumber)?.uint64Value, 7)
-        XCTAssertEqual(decoded?.payload, payload)
+    func testSharedEncodeAndDecodeVectors() throws {
+        for c in try cases("encode") {
+            let name = c["name"] as! String
+            let header = try XCTUnwrap(c["header"] as? [String: Any])
+            let frame = ChatWire.encode(typeByte(c["type"]), header: header, payload: hex(c["payload"]))
+            XCTAssertEqual(frame, hex(c["hex"]), "\(name): encode")
+            let decoded = try XCTUnwrap(ChatWire.decode(frame), name)
+            XCTAssertEqual(decoded.kind, typeByte(c["type"]), name)
+            XCTAssertEqual(decoded.header as NSDictionary, header as NSDictionary, name)
+            XCTAssertEqual(decoded.payload, hex(c["payload"]), name)
+        }
+    }
 
-        XCTAssertNil(ChatWire.decode(Data()))
-        XCTAssertNil(ChatWire.decode(Data([ChatFrameType.hello])))
-        // Header length past the buffer.
-        var truncated = ChatWire.encode(ChatFrameType.hello, header: [:])
-        truncated.replaceSubrange(1..<5, with: withUnsafeBytes(of: UInt32(9999).littleEndian) { Data($0) })
-        XCTAssertNil(ChatWire.decode(truncated))
-        // Non-object header (raw array JSON in the header slot).
-        var arr = Data([ChatFrameType.hello])
-        let arrJSON = Data("[1]".utf8)
-        arr.append(withUnsafeBytes(of: UInt32(arrJSON.count).littleEndian) { Data($0) })
-        arr.append(arrJSON)
-        XCTAssertNil(ChatWire.decode(arr))
-        // Oversized header.
-        let fat = ChatWire.encode(
-            ChatFrameType.hello,
-            header: ["pad": String(repeating: "x", count: chatFrameMaxHeaderBytes)])
-        XCTAssertNil(ChatWire.decode(fat))
+    func testSharedMalformedVectors() throws {
+        for c in try cases("malformed") {
+            XCTAssertNil(ChatWire.decode(hex(c["hex"])), c["name"] as! String)
+        }
+    }
+
+    /// Unlike the DO, the client decodes future frame types and skips them.
+    func testSharedUnknownTypeVectors() throws {
+        for c in try cases("unknownType") {
+            let name = c["name"] as! String
+            let decoded = try XCTUnwrap(ChatWire.decode(hex(c["hex"])), name)
+            XCTAssertEqual(decoded.kind, typeByte(c["type"]), name)
+            XCTAssertEqual(decoded.header as NSDictionary, c["header"] as! NSDictionary, name)
+            XCTAssertEqual(decoded.payload, hex(c["payload"]), name)
+        }
+    }
+
+    func testSharedHeaderSizeVectors() throws {
+        for c in try cases("headerSize") {
+            // `{"pad":""}` is 10 bytes; the pad fills the header to `bytes`.
+            let pad = String(repeating: "x", count: (c["bytes"] as! NSNumber).intValue - 10)
+            let frame = ChatWire.encode(ChatFrameType.hello, header: ["pad": pad])
+            XCTAssertEqual(ChatWire.decode(frame) != nil, c["valid"] as! Bool, c["name"] as! String)
+        }
     }
 
     func testStateHeaderParsesServerShape() {

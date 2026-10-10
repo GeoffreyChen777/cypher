@@ -1,20 +1,63 @@
 import { describe, expect, it } from "vitest";
-import { decodeFrame, encodeFrame, FRAME, MAX_HEADER_BYTES } from "./chat-frames";
-import { bytesOf } from "../../test/support/bytes";
+import vectorFile from "../../../../protocol/vectors/chat-frames-v1.json";
+import { decodeFrame, encodeFrame, FRAME, MAX_HEADER_BYTES, type FrameType } from "./chat-frames";
+import { bytesOf, fromHex, toHex } from "../../test/support/bytes";
 
-/** The chat2 wire codec is a cross-language contract (Rust + Swift clients
- * re-implement it); these vectors pin the layout, not just round-tripping. */
+/** The chat2 wire codec is a cross-language contract: the Rust and Swift
+ * clients run the same vectors (protocol/vectors/chat-frames-v1.json,
+ * protocol/README.md). */
 
-describe("chat2 frame codec", () => {
-  it("pins the wire layout: [type u8][headerLen u32 LE][header][payload]", () => {
-    const frame = encodeFrame(FRAME.push, { batchId: "b1" }, new Uint8Array([9, 8, 7]));
-    expect(frame[0]).toBe(FRAME.push);
-    const headerJson = JSON.stringify({ batchId: "b1" });
-    expect(new DataView(frame.buffer).getUint32(1, true)).toBe(headerJson.length);
-    expect(new TextDecoder().decode(frame.subarray(5, 5 + headerJson.length))).toBe(headerJson);
-    expect([...frame.subarray(5 + headerJson.length)]).toEqual([9, 8, 7]);
+interface FrameVector {
+  name: string;
+  type: number;
+  header: Record<string, unknown>;
+  payload: string;
+  hex: string;
+}
+
+interface Vectors {
+  maxHeaderBytes: number;
+  types: Record<string, number>;
+  encode: FrameVector[];
+  malformed: { name: string; hex: string }[];
+  unknownType: FrameVector[];
+  headerSize: { name: string; bytes: number; valid: boolean }[];
+}
+
+const vectors = vectorFile as Vectors;
+
+describe("chat2 frame codec: shared vectors", () => {
+  it("frame type bytes and the header limit", () => {
+    expect(FRAME).toStrictEqual(vectors.types);
+    expect(MAX_HEADER_BYTES).toBe(vectors.maxHeaderBytes);
   });
 
+  it.each(vectors.encode)("encodes and decodes: $name", (v) => {
+    const frame = encodeFrame(v.type as FrameType, v.header, fromHex(v.payload));
+    expect(toHex(frame)).toBe(v.hex);
+    const decoded = decodeFrame(frame);
+    expect(decoded?.type).toBe(v.type);
+    expect(decoded?.header).toStrictEqual(v.header);
+    expect(toHex(decoded?.payload ?? new Uint8Array())).toBe(v.payload);
+  });
+
+  it.each(vectors.malformed)("rejects malformed: $name", (v) => {
+    expect(decodeFrame(fromHex(v.hex))).toBeUndefined();
+  });
+
+  // The DO rejects frame types it does not know; the clients decode them.
+  it.each(vectors.unknownType)("rejects an unknown type: $name", (v) => {
+    expect(decodeFrame(fromHex(v.hex))).toBeUndefined();
+  });
+
+  it.each(vectors.headerSize)("header size limit: $name", (v) => {
+    // `{"pad":""}` is 10 bytes; the pad fills the header to `bytes`.
+    const frame = encodeFrame(FRAME.hello, { pad: "x".repeat(v.bytes - 10) });
+    expect(decodeFrame(frame) !== undefined).toBe(v.valid);
+  });
+});
+
+describe("chat2 frame codec", () => {
   it("round-trips every frame type, with and without payload", () => {
     for (const type of Object.values(FRAME)) {
       const payload = bytesOf(1000, type);
@@ -36,30 +79,5 @@ describe("chat2 frame codec", () => {
     const decoded = decodeFrame(shifted.subarray(8));
     expect(decoded?.header).toEqual({ seq: 1 });
     expect(decoded?.payload).toEqual(bytesOf(64, 3));
-  });
-
-  it("rejects malformed frames as undefined, never throws", () => {
-    expect(decodeFrame(new Uint8Array(0))).toBeUndefined();
-    expect(decodeFrame(new Uint8Array([FRAME.hello]))).toBeUndefined(); // truncated length
-    expect(decodeFrame(new Uint8Array([0x7f, 0, 0, 0, 0]))).toBeUndefined(); // unknown type
-    // Header length pointing past the buffer.
-    const truncated = encodeFrame(FRAME.hello, { cursor: 5 });
-    new DataView(truncated.buffer).setUint32(1, 9999, true);
-    expect(decodeFrame(truncated)).toBeUndefined();
-    // Junk JSON in the header span.
-    const junk = new Uint8Array([FRAME.hello, 2, 0, 0, 0, 0x7b, 0x7b]);
-    expect(decodeFrame(junk)).toBeUndefined();
-    // Valid JSON but not an object.
-    const arr = new TextEncoder().encode("[1]");
-    const arrFrame = new Uint8Array(5 + arr.length);
-    arrFrame[0] = FRAME.hello;
-    new DataView(arrFrame.buffer).setUint32(1, arr.length, true);
-    arrFrame.set(arr, 5);
-    expect(decodeFrame(arrFrame)).toBeUndefined();
-  });
-
-  it("rejects oversized headers (payloads are unbounded here; the DO caps frames)", () => {
-    const fat = encodeFrame(FRAME.hello, { pad: "x".repeat(MAX_HEADER_BYTES) });
-    expect(decodeFrame(fat)).toBeUndefined();
   });
 });

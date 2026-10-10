@@ -1,8 +1,9 @@
 //! chat2 wire frames — Rust twin of `apps/edge/src/chat/chat-frames.ts` (the DO's
 //! codec). Binary WS frames: `[type u8][headerLen u32 LE][header JSON][payload]`.
 //! Headers are tiny JSON; payloads are opaque bytes (Loro updates, checkpoint
-//! frontiers, presence ephemera). Cross-language contract — the layout tests
-//! here pin the same vectors as the TS suite; change both together.
+//! frontiers, presence ephemera). Cross-language contract: the TypeScript and
+//! Swift codecs run the same vectors (`protocol/vectors/chat-frames-v1.json`);
+//! change them together (`protocol/README.md`).
 
 use serde::{Deserialize, Serialize};
 
@@ -127,46 +128,90 @@ pub(crate) struct ProbeOkHeader {
 mod tests {
     use super::*;
 
-    #[test]
-    fn pins_the_wire_layout() {
-        // Must match the TS vector: [type][headerLen u32 LE][header][payload].
-        let frame = encode(
-            frame_type::PUSH,
-            &serde_json::json!({"batchId": "b1"}),
-            &[9, 8, 7],
-        );
-        assert_eq!(frame[0], frame_type::PUSH);
-        let header = br#"{"batchId":"b1"}"#;
-        assert_eq!(&frame[1..5], &(header.len() as u32).to_le_bytes());
-        assert_eq!(&frame[5..5 + header.len()], header);
-        assert_eq!(&frame[5 + header.len()..], &[9, 8, 7]);
+    use serde_json::Value;
+
+    fn vectors() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../protocol/vectors/chat-frames-v1.json"
+        ))
+        .unwrap()
+    }
+
+    fn hex(v: &Value) -> Vec<u8> {
+        let s = v.as_str().unwrap();
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn type_byte(v: &Value) -> u8 {
+        v.as_u64().unwrap() as u8
     }
 
     #[test]
-    fn round_trips_and_rejects_malformed() {
-        let payload = vec![1u8; 1000];
-        let frame = encode(frame_type::ROW, &serde_json::json!({"seq": 7}), &payload);
-        let decoded = decode(&frame).unwrap();
-        assert_eq!(decoded.kind, frame_type::ROW);
-        assert_eq!(decoded.header["seq"], 7);
-        assert_eq!(decoded.payload, payload);
+    fn shared_vectors_frame_types() {
+        let v = vectors();
+        let types = [
+            ("hello", frame_type::HELLO),
+            ("state", frame_type::STATE),
+            ("rowsReq", frame_type::ROWS_REQ),
+            ("row", frame_type::ROW),
+            ("rowsDone", frame_type::ROWS_DONE),
+            ("push", frame_type::PUSH),
+            ("ack", frame_type::ACK),
+            ("presence", frame_type::PRESENCE),
+            ("probe", frame_type::PROBE),
+            ("probeOk", frame_type::PROBE_OK),
+            ("error", frame_type::ERROR),
+        ];
+        assert_eq!(v["types"].as_object().unwrap().len(), types.len());
+        for (name, byte) in types {
+            assert_eq!(type_byte(&v["types"][name]), byte, "{name}");
+        }
+        assert_eq!(v["maxHeaderBytes"].as_u64(), Some(MAX_HEADER_BYTES as u64));
+    }
 
-        assert!(decode(&[]).is_none());
-        assert!(decode(&[frame_type::HELLO]).is_none());
-        // Header length past the buffer.
-        let mut truncated = encode(frame_type::HELLO, &serde_json::json!({}), &[]);
-        truncated[1..5].copy_from_slice(&9999u32.to_le_bytes());
-        assert!(decode(&truncated).is_none());
-        // Non-object header.
-        let arr = encode(frame_type::HELLO, &serde_json::json!([1]), &[]);
-        assert!(decode(&arr).is_none());
-        // Oversized header.
-        let fat = encode(
-            frame_type::HELLO,
-            &serde_json::json!({"pad": "x".repeat(MAX_HEADER_BYTES)}),
-            &[],
-        );
-        assert!(decode(&fat).is_none());
+    #[test]
+    fn shared_vectors_encode_and_decode() {
+        for c in vectors()["encode"].as_array().unwrap() {
+            let name = c["name"].as_str().unwrap();
+            let frame = encode(type_byte(&c["type"]), &c["header"], &hex(&c["payload"]));
+            assert_eq!(frame, hex(&c["hex"]), "{name}: encode");
+            let decoded = decode(&frame).expect(name);
+            assert_eq!(decoded.kind, type_byte(&c["type"]), "{name}");
+            assert_eq!(decoded.header, c["header"], "{name}");
+            assert_eq!(decoded.payload, hex(&c["payload"]), "{name}");
+        }
+    }
+
+    #[test]
+    fn shared_vectors_reject_malformed() {
+        for c in vectors()["malformed"].as_array().unwrap() {
+            assert!(decode(&hex(&c["hex"])).is_none(), "{}", c["name"]);
+        }
+    }
+
+    #[test]
+    fn shared_vectors_tolerate_unknown_types() {
+        // Unlike the DO, the client decodes future frame types and skips them.
+        for c in vectors()["unknownType"].as_array().unwrap() {
+            let decoded = decode(&hex(&c["hex"])).expect("client decodes");
+            assert_eq!(decoded.kind, type_byte(&c["type"]), "{}", c["name"]);
+            assert_eq!(decoded.header, c["header"], "{}", c["name"]);
+            assert_eq!(decoded.payload, hex(&c["payload"]), "{}", c["name"]);
+        }
+    }
+
+    #[test]
+    fn shared_vectors_header_size_limit() {
+        for c in vectors()["headerSize"].as_array().unwrap() {
+            // `{"pad":""}` is 10 bytes; the pad fills the header to `bytes`.
+            let pad = "x".repeat(c["bytes"].as_u64().unwrap() as usize - 10);
+            let frame = encode(frame_type::HELLO, &serde_json::json!({"pad": pad}), &[]);
+            let valid = c["valid"].as_bool().unwrap();
+            assert_eq!(decode(&frame).is_some(), valid, "{}", c["name"]);
+        }
     }
 
     #[test]

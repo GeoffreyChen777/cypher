@@ -13,3 +13,10 @@ export const sameBytes = (a: Uint8Array | undefined, b: Uint8Array): boolean => 
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
 };
+
+/** Lowercase hex, the byte encoding of the shared vectors in protocol/vectors. */
+export const fromHex = (hex: string): Uint8Array =>
+  new Uint8Array((hex.match(/../g) ?? []).map((byte) => parseInt(byte, 16)));
+
+export const toHex = (bytes: Uint8Array): string =>
+  [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
