@@ -436,6 +436,22 @@ async fn start_send_promote_flow() {
         "promoted chat appears in the public sessions list"
     );
 
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn promote_is_idempotent_and_survives_dispose() {
+    let rig = assemble();
+    seed_parent(&rig.core).await;
+    let side = start_side_chat(&rig.core).await;
+    rpc(
+        &rig.core,
+        methods::PROMOTE_SIDE_CHAT,
+        serde_json::json!({ "sideChatId": side }),
+    )
+    .await
+    .expect("PromoteSideChat ok");
+
     // Idempotent retry: a lost PromoteSideChat reply retried returns the same id.
     let retried = rpc(
         &rig.core,
