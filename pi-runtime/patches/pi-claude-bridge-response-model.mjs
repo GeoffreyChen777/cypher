@@ -16,7 +16,7 @@
 // Lifetime
 // --------
 // Until the bridge records it itself. Pinned to the bundled version: a version
-// bump must re-check the anchors (response-model.test.mjs checks the patched
+// bump must re-check the anchors (response-model.staged.test.mjs checks the patched
 // bridge still loads).
 //
 // Failure policy: hard. A missing anchor means the bridge changed shape;

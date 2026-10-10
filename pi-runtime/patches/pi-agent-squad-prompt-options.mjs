@@ -24,7 +24,7 @@
 // --------
 // Until pi-agent-squad appends through the prompt options itself. Pinned to
 // the bundled version: a version bump must re-check the anchors (and the
-// behaviour — pi-agent-squad-prompt-options.test.mjs loads both extensions).
+// behaviour — pi-agent-squad-prompt-options.staged.test.mjs loads both extensions).
 //
 // Failure policy: hard. A missing anchor means pi-agent-squad changed shape;
 // silently shipping an unpatched bundle would make `/orchestrate` a no-op on
