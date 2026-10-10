@@ -365,6 +365,7 @@ in `crates/harness/src/lib.rs`). `installed()` = a resolution hit. Discovery and
 the resolved `pi` with `--mode rpc --session-dir`.
 
 ## Citations
-pi RPC protocol doc (`docs/rpc.md` in the pi package), pi 0.84.1 source
+pi RPC protocol doc (`docs/rpc.md` in the pi package), pi 0.84.1 source (historical; the
+runtime now pins a newer Pi, see `pi-runtime/package.json`)
 (`rpc-mode.js` command/response/extension-UI handling, `agent-session.js`
 event emission order, `pi-agent-core` agent-loop tool/message ordering).
