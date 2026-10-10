@@ -1182,6 +1182,19 @@ struct TitlebarState {
     should_move: bool,
 }
 
+/// Keyboard focus fallback: keyboard shortcuts dispatch through the window
+/// focus chain, so with nothing focused they go dead.
+struct FocusFallback {
+    /// Focus fallback (registered on first paint — [`Shell::new`] has no
+    /// window): keyboard shortcuts dispatch through the window focus chain, so
+    /// with nothing focused they go dead. Initial focus lands on the composer
+    /// and focus lost with no successor routes back there.
+    sub: Option<Subscription>,
+    /// Keyboard landing spot when the focused tile has no composer (an empty
+    /// group): tracked on the root so window shortcuts keep dispatching.
+    root: gpui::FocusHandle,
+}
+
 pub struct Shell {
     /// The window's main state: lists (sidebar, spaces, sessions) in
     /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
@@ -1257,14 +1270,8 @@ pub struct Shell {
     splash: SplashPhase,
     splash_task: Option<Task<()>>,
     save_task: Option<Task<()>>,
-    /// Focus fallback (registered on first paint — [`Shell::new`] has no
-    /// window): keyboard shortcuts dispatch through the window focus chain, so
-    /// with nothing focused they go dead. Initial focus lands on the composer
-    /// and focus lost with no successor routes back there.
-    focus_sub: Option<Subscription>,
-    /// Keyboard landing spot when the focused tile has no composer (an empty
-    /// group): tracked on the root so window shortcuts keep dispatching.
-    root_focus: gpui::FocusHandle,
+    /// Where keyboard focus lands when nothing else holds it.
+    focus: FocusFallback,
     /// 1s heartbeat re-rendering the working indicator (elapsed + flavour word).
     _ticker: Task<()>,
     _state_observation: Subscription,
@@ -1556,8 +1563,10 @@ impl Shell {
             splash: SplashPhase::Visible,
             splash_task: None,
             save_task: None,
-            focus_sub: None,
-            root_focus: cx.focus_handle(),
+            focus: FocusFallback {
+                sub: None,
+                root: cx.focus_handle(),
+            },
             _ticker: ticker,
             _state_observation: observation,
             comment_popup,

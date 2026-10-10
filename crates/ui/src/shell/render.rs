@@ -1234,7 +1234,7 @@ impl Render for Shell {
                     cx.notify();
                 }
             }))
-            .track_focus(&self.root_focus);
+            .track_focus(&self.focus.root);
         let root = self.bind_shell_actions(root, cx);
 
         let render_gate = if restart_required {
@@ -1378,8 +1378,8 @@ impl Shell {
         // focused element unmounted), route it back there.
         // The landing spot is the FOCUSED tile's composer (the root when
         // that tile is empty, so window shortcuts keep dispatching).
-        if self.focus_sub.is_none() {
-            self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Shell, window, cx| {
+        if self.focus.sub.is_none() {
+            self.focus.sub = Some(cx.on_focus_lost(window, |this: &mut Shell, window, cx| {
                 match this.route {
                     Route::Chat if !this.showing_setup() => this.focus_landing(window, cx),
                     // No composer here — clear the stale handle so `focused()`

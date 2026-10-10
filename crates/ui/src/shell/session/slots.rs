@@ -49,7 +49,7 @@ impl Shell {
             .and_then(|sid| self.tiles.slots.get(&sid))
         {
             Some(slot) => window.focus(&slot.composer.focus_handle(cx), cx),
-            None => window.focus(&self.root_focus, cx),
+            None => window.focus(&self.focus.root, cx),
         }
     }
 
