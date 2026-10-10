@@ -456,6 +456,98 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let (
+            view,
+            AddSpaceInputs {
+                search,
+                focus,
+                devices,
+                device_presence,
+                rows,
+            },
+        ) = self.snapshot_add_space(window, cx)?;
+        let input_row = self.add_space_search_bar(&view, &search, cx);
+        let crumbs = self.add_space_crumbs(&view, cx);
+        let list = self.add_space_folder_list(&view, rows, cx);
+        let rail = self.add_space_device_rail(&view, devices, &device_presence, cx);
+        let theme = &view.theme;
+
+        // Body: folder column (crumbs + list) beside the devices rail.
+        // FIXED height — sparse folders, loading skeletons, and device
+        // switches must not resize the card (the list fills and scrolls).
+        let body = div()
+            .h(px(330.0))
+            .flex()
+            .flex_row()
+            .items_stretch()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(crumbs)
+                    .child(list),
+            )
+            .child(rail);
+
+        let footer = add_space_footer(&view);
+
+        let card =
+            div()
+                .id("add-space-palette")
+                .w(px(680.0))
+                .rounded(px(14.0))
+                .border_1()
+                .border_color(crate::kit::theme::hairline(0.10))
+                // The popover_card glass recipe: a translucent tint over the
+                // frosted backdrop blur (`popover::modal` wraps in `frosted`) —
+                // an opaque fill here killed the vibrancy every other float has.
+                .bg(if theme.is_glass() {
+                    theme.glass_overlay()
+                } else {
+                    theme.surface_overlay
+                })
+                .shadow_lg()
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .text_color(theme.text)
+                // On the keyboard dispatch path (see `AddSpaceFlow::focus`) — the
+                // pickers' proven structure for frame-level keys with a focused
+                // child input.
+                .track_focus(&focus)
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                    this.add_space_key(event, cx)
+                }))
+                // Clicking the scrim dismisses (user requirement) — same close
+                // path as Escape.
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.add_space = None;
+                    cx.notify();
+                }))
+                .child(input_row)
+                .child(body)
+                .child(footer)
+                .into_any_element();
+        // The glass-modal variant: lighter scrim + a frost radius matching
+        // this card's 14px rounding, so the palette reads like the popovers
+        // instead of a flat slab over a 60% dim (user request).
+        Some(popover::modal_glass(
+            "add-space-dialog",
+            viewport,
+            card,
+            14.0,
+        ))
+    }
+
+    /// Snapshot the flow for this frame (taking a pending focus request and
+    /// pushing the completion ghost into the search input on the way).
+    fn snapshot_add_space(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(AddSpaceView, AddSpaceInputs)> {
         let theme = Theme::of(cx).clone();
         {
             let flow = self.add_space.as_mut()?;
@@ -518,28 +610,56 @@ impl Shell {
             .map(|d| d.name.clone())
             .unwrap_or_else(|| "This device".to_string())
             .into();
+        // Header and footer sit a shade DEEPER than the body (the shared
+        // recessed-band tone) — the bands frame the folder list, which stays
+        // on the brighter tint.
+        let band = popover::band();
+        Some((
+            AddSpaceView {
+                theme,
+                hairline,
+                band,
+                device,
+                device_name,
+                error,
+                submit_busy,
+                active,
+                loading,
+                load_error,
+                listing,
+                home,
+                query_empty,
+                list_scroll,
+            },
+            AddSpaceInputs {
+                search,
+                focus,
+                devices,
+                device_presence,
+                rows,
+            },
+        ))
+    }
 
-        // A quiet mono key-cap chip ("⌘K" / "esc") for the search bar ends.
-        let key_chip = |theme: &Theme| {
-            div()
-                .h(px(22.0))
-                .px(px(6.0))
-                .rounded(px(5.0))
-                .flex_none()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(2.0))
-                .bg(crate::kit::theme::ink(0.05))
-                .text_size(px(11.0))
-                .mono(theme)
-                .text_color(theme.text_muted.opacity(0.7))
-        };
-
-        // ── search bar (the ⌘K bar): summon chip · input · "⌘ Enter" add ·
-        //    esc. The primary chip leads with the ⌘ glyph, then says "Enter"
-        //    in words (user request — the bare return arrow read as noise).
-        let submit_chip = popover::btn_primary(&theme, "")
+    /// The search bar (the ⌘K bar): summon chip · input · "⌘ Enter" add ·
+    /// esc. The primary chip leads with the ⌘ glyph, then says "Enter"
+    /// in words (user request — the bare return arrow read as noise).
+    fn add_space_search_bar(
+        &self,
+        view: &AddSpaceView,
+        search: &Entity<TextInput>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let AddSpaceView {
+            theme,
+            hairline,
+            band,
+            submit_busy,
+            listing,
+            ..
+        } = view;
+        let (hairline, band, submit_busy) = (*hairline, *band, *submit_busy);
+        let submit_chip = popover::btn_primary(theme, "")
             .id("add-space-submit")
             .h(px(22.0))
             .px(px(8.0))
@@ -564,11 +684,7 @@ impl Shell {
                 .child(SharedString::from("Enter"))
             })
             .when(submit_busy, |el| el.child(SharedString::from("Adding…")));
-        // Header and footer sit a shade DEEPER than the body (the shared
-        // recessed-band tone) — the bands frame the folder list, which stays
-        // on the brighter tint.
-        let band = popover::band();
-        let input_row = div()
+        div()
             .h(px(46.0))
             .flex_none()
             .pl(px(12.0))
@@ -581,7 +697,7 @@ impl Shell {
             .border_b_1()
             .border_color(hairline)
             .child(
-                key_chip(&theme)
+                key_chip(theme)
                     .child(
                         icon(icons::COMMAND)
                             .size(px(11.0))
@@ -598,7 +714,7 @@ impl Shell {
             )
             .child(submit_chip)
             .child(
-                key_chip(&theme)
+                key_chip(theme)
                     .id("add-space-esc")
                     .cursor_pointer()
                     .hover(|s| s.bg(crate::kit::theme::ink(0.09)))
@@ -607,14 +723,23 @@ impl Shell {
                         cx.notify();
                     }))
                     .child(SharedString::from("esc")),
-            );
+            )
+    }
 
-        // ── breadcrumbs ("MacBook Pro / Projects / cypher"): the quiet mono
-        //    path voice, `/` separators. The device crumb stands in for home —
-        //    everything up to the resolved home path folds into it; below
-        //    home the full path shows. Ancestors (device crumb included) are
-        //    clickable.
-        let crumbs: AnyElement = match &listing {
+    /// Breadcrumbs ("MacBook Pro / Projects / cypher"): the quiet mono
+    /// path voice, `/` separators. The device crumb stands in for home —
+    /// everything up to the resolved home path folds into it; below
+    /// home the full path shows. Ancestors (device crumb included) are
+    /// clickable.
+    fn add_space_crumbs(&self, view: &AddSpaceView, cx: &mut Context<Self>) -> AnyElement {
+        let AddSpaceView {
+            theme,
+            listing,
+            home,
+            device_name,
+            ..
+        } = view;
+        match listing {
             Some(listing) => {
                 let segments = breadcrumbs(&listing.path);
                 let last = segments.len().saturating_sub(1);
@@ -635,7 +760,7 @@ impl Shell {
                     .pt(px(10.0))
                     .pb(px(2.0))
                     .text_size(px(11.0))
-                    .mono(&theme)
+                    .mono(theme)
                     .child({
                         let crumb = div()
                             .id("add-space-crumb-device")
@@ -705,28 +830,47 @@ impl Shell {
                     .into_any_element()
             }
             None => div().pt(px(6.0)).into_any_element(),
-        };
+        }
+    }
 
-        // ── folder list ─────────────────────────────────────────────────────
+    /// The folder list: loading skeleton, load error with Retry, empty state,
+    /// or the browsed folder's rows.
+    fn add_space_folder_list(
+        &self,
+        view: &AddSpaceView,
+        rows: Vec<cypher_proto::FolderEntry>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let AddSpaceView {
+            theme,
+            device,
+            loading,
+            load_error,
+            listing,
+            query_empty,
+            active,
+            list_scroll,
+            ..
+        } = view;
         let base_path = listing.as_ref().map(|l| l.path.clone()).unwrap_or_default();
-        let list: AnyElement = if loading {
+        if *loading {
             div()
                 .px(px(8.0))
                 .py(px(6.0))
                 .child(popover::skeleton_rows(
                     "add-space-skeleton",
-                    &theme,
+                    theme,
                     6,
                     cx.entity_id(),
                     cx,
                 ))
                 .into_any_element()
-        } else if let Some(message) = load_error {
+        } else if let Some(message) = load_error.clone() {
             let device_line = device
                 .as_ref()
                 .map(|d| format!("{} didn't respond — is it online?", d.name))
                 .unwrap_or(message);
-            popover::error_row(&theme, &device_line)
+            popover::error_row(theme, &device_line)
                 .px(px(14.0))
                 .py(px(10.0))
                 .child(
@@ -753,7 +897,7 @@ impl Shell {
                 .py(px(16.0))
                 .text_size(px(12.5))
                 .text_color(theme.text_faint)
-                .child(SharedString::from(if query_empty {
+                .child(SharedString::from(if *query_empty {
                     "No folders here"
                 } else {
                     "No folders match"
@@ -773,7 +917,7 @@ impl Shell {
                         .id("add-space-folders")
                         .size_full()
                         .overflow_y_scroll()
-                        .track_scroll(&list_scroll)
+                        .track_scroll(list_scroll)
                         .px(px(8.0))
                         .flex()
                         .flex_col()
@@ -784,14 +928,14 @@ impl Shell {
                             let full = crate::pickers::child_path(&base_path, &entry.name);
                             let is_repo = entry.is_repo;
                             popover::menu_row_nav(
-                                &theme,
+                                theme,
                                 false,
-                                ix == active,
+                                ix == *active,
                                 format!("add-space-folder-{ix}"),
                             )
                             // The floating-card selection language: the wash
                             // plus the ring-only inset outline.
-                            .when(ix == active, |el| {
+                            .when(ix == *active, |el| {
                                 el.shadow(crate::kit::theme::card_selected_shadows())
                             })
                             .id(("add-space-folder", ix))
@@ -818,12 +962,28 @@ impl Shell {
                         })),
                 )
                 .into_any_element()
-        };
+        }
+    }
 
-        // ── devices rail (mock right column): platform glyph + name +
-        //    presence dot per row, an info line naming the browsed device.
-        //    Rows are the tab recipe (h-28 rounded-8 washes), vertical.
-        let rail = div()
+    /// The devices rail (mock right column): platform glyph + name +
+    /// presence dot per row, an info line naming the browsed device.
+    /// Rows are the tab recipe (h-28 rounded-8 washes), vertical.
+    fn add_space_device_rail(
+        &self,
+        view: &AddSpaceView,
+        devices: Vec<Device>,
+        device_presence: &[bool],
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let AddSpaceView {
+            theme,
+            hairline,
+            device,
+            device_name,
+            ..
+        } = view;
+        let hairline = *hairline;
+        div()
             .w(px(196.0))
             .flex_none()
             .border_l_1()
@@ -928,104 +1088,92 @@ impl Shell {
                     .child(div().min_w_0().child(SharedString::from(format!(
                         "Showing folders from {device_name} only"
                     )))),
-            );
-
-        // ── body: folder column (crumbs + list) beside the devices rail.
-        //    FIXED height — sparse folders, loading skeletons, and device
-        //    switches must not resize the card (the list fills and scrolls).
-        let body = div()
-            .h(px(330.0))
-            .flex()
-            .flex_row()
-            .items_stretch()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(crumbs)
-                    .child(list),
             )
-            .child(rail);
-
-        // ── footer: the shared key-cap legend voice (popover::key_hint).
-        let footer = div()
-            .flex_none()
-            .bg(band)
-            .border_t_1()
-            .border_color(hairline)
-            .px(px(12.0))
-            .py(px(8.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
-            .child(popover::key_hint_pair(
-                &theme,
-                icons::ARROW_UP,
-                icons::ARROW_DOWN,
-                "Navigate",
-            ))
-            .child(popover::key_hint(&theme, icons::ARROW_LEFT, "Up"))
-            .child(popover::key_hint(&theme, icons::ARROW_RIGHT, "Open"))
-            .child(popover::key_hint_text(&theme, "tab", "Complete"))
-            .when_some(error, |el, message| {
-                el.child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(11.0))
-                        .text_color(theme.danger)
-                        .child(message),
-                )
-            });
-
-        let card =
-            div()
-                .id("add-space-palette")
-                .w(px(680.0))
-                .rounded(px(14.0))
-                .border_1()
-                .border_color(crate::kit::theme::hairline(0.10))
-                // The popover_card glass recipe: a translucent tint over the
-                // frosted backdrop blur (`popover::modal` wraps in `frosted`) —
-                // an opaque fill here killed the vibrancy every other float has.
-                .bg(if theme.is_glass() {
-                    theme.glass_overlay()
-                } else {
-                    theme.surface_overlay
-                })
-                .shadow_lg()
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                .text_color(theme.text)
-                // On the keyboard dispatch path (see `AddSpaceFlow::focus`) — the
-                // pickers' proven structure for frame-level keys with a focused
-                // child input.
-                .track_focus(&focus)
-                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                    this.add_space_key(event, cx)
-                }))
-                // Clicking the scrim dismisses (user requirement) — same close
-                // path as Escape.
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.add_space = None;
-                    cx.notify();
-                }))
-                .child(input_row)
-                .child(body)
-                .child(footer)
-                .into_any_element();
-        // The glass-modal variant: lighter scrim + a frost radius matching
-        // this card's 14px rounding, so the palette reads like the popovers
-        // instead of a flat slab over a 60% dim (user request).
-        Some(popover::modal_glass(
-            "add-space-dialog",
-            viewport,
-            card,
-            14.0,
-        ))
     }
+}
+
+/// The add-space palette's per-frame snapshot, shared by its sections.
+struct AddSpaceView {
+    theme: Theme,
+    hairline: gpui::Hsla,
+    band: gpui::Hsla,
+    device: Option<Device>,
+    device_name: SharedString,
+    error: Option<SharedString>,
+    submit_busy: bool,
+    active: usize,
+    loading: bool,
+    load_error: Option<String>,
+    listing: Option<FolderListing>,
+    home: Option<String>,
+    query_empty: bool,
+    list_scroll: gpui::ScrollHandle,
+}
+
+/// What the palette's sections consume by value.
+struct AddSpaceInputs {
+    search: Entity<TextInput>,
+    focus: FocusHandle,
+    devices: Vec<Device>,
+    device_presence: Vec<bool>,
+    rows: Vec<cypher_proto::FolderEntry>,
+}
+
+/// A quiet mono key-cap chip ("⌘K" / "esc") for the search bar ends.
+fn key_chip(theme: &Theme) -> gpui::Div {
+    div()
+        .h(px(22.0))
+        .px(px(6.0))
+        .rounded(px(5.0))
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(2.0))
+        .bg(crate::kit::theme::ink(0.05))
+        .text_size(px(11.0))
+        .mono(theme)
+        .text_color(theme.text_muted.opacity(0.7))
+}
+
+/// The footer: the shared key-cap legend voice (popover::key_hint).
+fn add_space_footer(view: &AddSpaceView) -> gpui::Div {
+    let AddSpaceView {
+        theme,
+        hairline,
+        band,
+        error,
+        ..
+    } = view;
+    let (hairline, band) = (*hairline, *band);
+    div()
+        .flex_none()
+        .bg(band)
+        .border_t_1()
+        .border_color(hairline)
+        .px(px(12.0))
+        .py(px(8.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(12.0))
+        .child(popover::key_hint_pair(
+            theme,
+            icons::ARROW_UP,
+            icons::ARROW_DOWN,
+            "Navigate",
+        ))
+        .child(popover::key_hint(theme, icons::ARROW_LEFT, "Up"))
+        .child(popover::key_hint(theme, icons::ARROW_RIGHT, "Open"))
+        .child(popover::key_hint_text(theme, "tab", "Complete"))
+        .when_some(error.clone(), |el, message| {
+            el.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.0))
+                    .text_color(theme.danger)
+                    .child(message),
+            )
+        })
 }
