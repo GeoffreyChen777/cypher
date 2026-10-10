@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::Utc;
 use futures::StreamExt;
@@ -38,12 +38,14 @@ use cypher_proto::{
     UserInputAnswer, UserInputQuestion,
 };
 
+use crate::EngineError;
 use crate::host::doc_host::{ChatDocHandle, DocHost};
 use crate::registry::HarnessRegistry;
 use crate::session::journal::RunJournal;
-use crate::{EngineError, new_id, now_ms};
+use crate::util::{new_id, now_ms};
 
 mod run_task;
+use crate::util::lock;
 use run_task::*;
 
 /// One journaled event: the durable seq plus the event, as broadcast to subscribers.
@@ -256,10 +258,6 @@ const MAX_LOCAL_CHILD_CHANNELS: usize = 256;
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
 pub type TurnListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 #[derive(Clone)]
 pub struct SessionsEngine {

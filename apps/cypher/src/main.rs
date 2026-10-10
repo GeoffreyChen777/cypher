@@ -4,6 +4,7 @@
 
 mod auth_cli;
 mod daemon;
+mod onboarding;
 mod setup_cli;
 mod update_cli;
 
@@ -349,8 +350,13 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Headless) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
-                let engine = cypher_engine::Engine::new(engine_config_from_env()?);
-                engine.run().await
+                cypher_engine::Engine::run_headless(engine_config_from_env()?, |auth| async move {
+                    onboarding::terminal_sign_in(&auth)
+                        .await
+                        .map_err(|err| cypher_engine::EngineError::Other(err.to_string()))
+                })
+                .await?;
+                Ok(())
             })
         }
         Some(Command::Login) => {

@@ -101,7 +101,7 @@ pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!("cypher login needs an interactive terminal");
     }
-    cypher_engine::terminal_sign_in(&auth).await?;
+    crate::onboarding::terminal_sign_in(&auth).await?;
     match auth.state() {
         AuthState::SignedIn { user, org_id } => {
             println!(

@@ -82,7 +82,7 @@ pub(super) fn sync_status(rpc: &EngineRpc) -> Result<RpcReply, RpcError> {
         .collect();
     RpcReply::value(&serde_json::json!({
         "deviceId": rpc.doc_host.device_id(),
-        "nowMs": crate::now_ms(),
+        "nowMs": crate::util::now_ms(),
         "workspace": workspace.as_ref().map(room_json),
         "chats": chats,
     }))

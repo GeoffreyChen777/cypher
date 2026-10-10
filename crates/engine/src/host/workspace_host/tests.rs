@@ -260,8 +260,10 @@ async fn relay_probe_errors_do_not_mean_offline_and_alive_answers_back_off() {
     assert!(host.inner.relay_probe_candidates(now).is_empty());
 
     // Once that self-granted freshness lapses, the backoff still holds.
-    super::lock(&host.inner.presence_seen)
-        .insert("peer".into(), crate::now_ms() - super::PRESENCE_FRESH_MS);
+    super::lock(&host.inner.presence_seen).insert(
+        "peer".into(),
+        crate::util::now_ms() - super::PRESENCE_FRESH_MS,
+    );
     assert!(host.inner.relay_probe_candidates(now).is_empty());
     assert_eq!(
         host.inner
@@ -271,7 +273,7 @@ async fn relay_probe_errors_do_not_mean_offline_and_alive_answers_back_off() {
 
     // A genuine heartbeat is not the probe's own stamp, so it clears the
     // backoff at once and the device is verified normally again.
-    super::lock(&host.inner.presence_seen).insert("peer".into(), crate::now_ms() + 5);
+    super::lock(&host.inner.presence_seen).insert("peer".into(), crate::util::now_ms() + 5);
     assert!(host.inner.relay_probe_candidates(now).is_empty());
     assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
 }
@@ -283,7 +285,7 @@ async fn relay_probe_fresh_presence_wins_a_late_negative_and_deleted_peers_are_p
     add_probe_peer(&host);
     let now = tokio::time::Instant::now();
     host.inner.record_relay_probe("peer", Some(false), now);
-    super::lock(&host.inner.presence_seen).insert("peer".into(), crate::now_ms());
+    super::lock(&host.inner.presence_seen).insert("peer".into(), crate::util::now_ms());
     let mut devices = host.read_devices().unwrap();
     host.inner.overlay_presence(&mut devices);
     assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());

@@ -28,17 +28,19 @@
 //! live ([`EngineCore`] can be assembled from sync contexts).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use cypher_doc::{MessagePart, SessionMessageEntry};
 use cypher_proto::{RunRequest, SideChatCreated, SideChatPromoted, SideChatSource};
 use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::EngineError;
 use crate::host::doc_host::DocHost;
 use crate::host::workspace_host::WorkspaceHost;
 use crate::session::engine::SessionsEngine;
-use crate::{EngineError, new_id, now_ms};
+use crate::util::lock;
+use crate::util::{new_id, now_ms};
 use cypher_proto::agent_prompt::AgentQuote;
 
 /// Global cap on UNPROMOTED side chats per engine: beyond
@@ -105,10 +107,6 @@ struct SideChatsInner {
     /// success before the row exists.
     promote_mutex: Mutex<()>,
     shutdown: CancellationToken,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Side-chat manager (see the module docs).

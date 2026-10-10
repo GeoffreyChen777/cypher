@@ -8,6 +8,9 @@ use std::{
 
 use cypher_proto::TitleModelSettings;
 
+use crate::EngineError;
+use crate::util::lock;
+
 #[derive(Clone)]
 pub struct TitleSettingsStore {
     inner: Arc<Mutex<PathBuf>>,
@@ -20,44 +23,51 @@ impl TitleSettingsStore {
         }
     }
 
-    pub fn load(&self) -> anyhow::Result<TitleModelSettings> {
-        let path = self.inner.lock().unwrap();
+    pub fn load(&self) -> Result<TitleModelSettings, EngineError> {
+        let path = lock(&self.inner);
         match std::fs::read(&*path) {
             Ok(bytes) => {
-                let settings = serde_json::from_slice(&bytes)?;
+                let settings = serde_json::from_slice(&bytes).map_err(other)?;
                 validate(&settings)?;
                 Ok(settings)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok(TitleModelSettings::default())
             }
-            Err(error) => Err(error.into()),
+            Err(error) => Err(other(error)),
         }
     }
 
     /// Serialize writes and publish atomically. An unsuccessful save leaves the
     /// old preference in force; a title snapshots it once before its retries.
-    pub fn save(&self, settings: &TitleModelSettings) -> anyhow::Result<()> {
+    pub fn save(&self, settings: &TitleModelSettings) -> Result<(), EngineError> {
         validate(settings)?;
-        let path = self.inner.lock().unwrap();
-        std::fs::create_dir_all(path.parent().unwrap())?;
+        let path = lock(&self.inner);
+        std::fs::create_dir_all(path.parent().unwrap()).map_err(other)?;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(settings)?)?;
-        std::fs::rename(tmp, &*path)?;
+        std::fs::write(&tmp, serde_json::to_vec_pretty(settings).map_err(other)?).map_err(other)?;
+        std::fs::rename(tmp, &*path).map_err(other)?;
         Ok(())
     }
 }
 
-pub fn validate(settings: &TitleModelSettings) -> anyhow::Result<()> {
-    if let Some(model) = &settings.model {
-        anyhow::ensure!(
-            !model.is_empty()
-                && model.len() <= 512
-                && !model.chars().any(|c| c.is_whitespace() || c.is_control()),
-            "Choose a valid model from this device's catalog"
-        );
+pub fn validate(settings: &TitleModelSettings) -> Result<(), EngineError> {
+    if let Some(model) = &settings.model
+        && (model.is_empty()
+            || model.len() > 512
+            || model.chars().any(|c| c.is_whitespace() || c.is_control()))
+    {
+        return Err(EngineError::Other(
+            "Choose a valid model from this device's catalog".into(),
+        ));
     }
     Ok(())
+}
+
+/// These errors reach the Settings UI verbatim, so they carry the underlying
+/// message without the `io:` prefix [`EngineError::Io`] would add.
+fn other(err: impl std::fmt::Display) -> EngineError {
+    EngineError::Other(err.to_string())
 }
 
 #[cfg(test)]

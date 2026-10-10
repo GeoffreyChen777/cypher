@@ -16,6 +16,14 @@ use tokio_tungstenite::tungstenite::handshake::server::{
     Request as WsRequest, Response as WsResponse,
 };
 
+/// Headless onboarding hook for tests: these sessions never need a workspace
+/// picker, so reaching it is a failure.
+async fn no_onboarding(_auth: cypher_engine::Auth) -> Result<(), cypher_engine::EngineError> {
+    Err(cypher_engine::EngineError::Other(
+        "unexpected terminal onboarding".into(),
+    ))
+}
+
 fn config(
     data_dir: &std::path::Path,
     edge_url: String,
@@ -40,13 +48,10 @@ async fn duplicate_headless_start_cannot_touch_the_owned_auth_session() {
     let raw = r#"{"refreshToken":"private-fixture","user":{"id":"u","email":"u@example.com","avatarUrl":"http://unsafe.example/avatar"},"orgId":"org"}"#;
     std::fs::write(&path, raw).unwrap();
     let _lock = cypher_engine::InstanceLock::acquire(dir.path()).unwrap();
-    let engine = Engine::new(config(
-        dir.path(),
-        "http://127.0.0.1:1".into(),
-        Some("test"),
-        None,
-    ));
-    let error = engine.run().await.unwrap_err();
+    let config = config(dir.path(), "http://127.0.0.1:1".into(), Some("test"), None);
+    let error = Engine::run_headless(config, no_onboarding)
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("already running"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
 }
@@ -526,7 +531,7 @@ async fn headless_stop_rpc_drains_the_daemon_and_releases_ipc() {
         None,
     );
     engine_config.ipc_socket = port.clone();
-    let daemon = tokio::spawn(Engine::new(engine_config).run());
+    let daemon = tokio::spawn(Engine::run_headless(engine_config, no_onboarding));
 
     let client = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -569,7 +574,7 @@ async fn headless_sign_out_closes_joined_edge_rooms_and_stops_daemon() {
     let port = cypher_env::ipc_socket(dir.path()).unwrap();
     let mut engine_config = config(dir.path(), edge.url.clone(), Some("client_test"), None);
     engine_config.ipc_socket = port.clone();
-    let daemon = tokio::spawn(Engine::new(engine_config).run());
+    let daemon = tokio::spawn(Engine::run_headless(engine_config, no_onboarding));
 
     let client = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {

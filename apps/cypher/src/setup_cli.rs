@@ -487,7 +487,7 @@ async fn run_inner(
                 if !interactive {
                     bail!("Account setup is incomplete. Run `cypher setup` in a terminal.");
                 }
-                cypher_engine::terminal_sign_in_until(&auth, cancelled(cancel.clone())).await?;
+                crate::onboarding::terminal_sign_in_until(&auth, cancelled(cancel.clone())).await?;
             }
             println!("✓ Account connected");
         } else {

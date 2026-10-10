@@ -45,8 +45,7 @@ const MARKER_FILE: &str = "local-import.json";
 /// a racing update; cross-process exclusion is the data-dir `InstanceLock`'s job.
 fn marker_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    crate::util::lock(&LOCK)
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -216,7 +215,7 @@ impl LocalImporter {
         marker.imports.push(MarkerEntry {
             org_id: self.inner.org_id.clone(),
             user_id: self.inner.user_id.clone(),
-            imported_at_ms: crate::now_ms(),
+            imported_at_ms: crate::util::now_ms(),
             imported_chats: chats,
             imported_spaces: spaces,
         });

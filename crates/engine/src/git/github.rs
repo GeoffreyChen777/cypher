@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::util::lock;
 use cypher_proto::{
     GithubAccountStatus, GithubCredentialSource, GithubFallback, GithubIssueComment,
     GithubIssueKind, GithubIssueSearch, GithubIssueSnapshot, GithubIssueSummary, GithubLoginPoll,
@@ -508,7 +509,7 @@ impl Github {
             return Vec::new();
         }
         let key = cwd.map(Path::to_path_buf);
-        if let Some((at, cached)) = self.inner.local.lock().unwrap().get(&key)
+        if let Some((at, cached)) = lock(&self.inner.local).get(&key)
             && at.elapsed() < LOCAL_CREDENTIALS_TTL
         {
             return cached.clone();
@@ -525,11 +526,7 @@ impl Github {
                 found.push(Credential { source, token });
             }
         }
-        self.inner
-            .local
-            .lock()
-            .unwrap()
-            .insert(key, (Instant::now(), found.clone()));
+        lock(&self.inner.local).insert(key, (Instant::now(), found.clone()));
         found
     }
 
@@ -549,13 +546,13 @@ impl Github {
     }
 
     fn forget(&self, repo: &str) {
-        self.inner.repo_access.lock().unwrap().remove(repo);
-        self.inner.local.lock().unwrap().clear();
+        lock(&self.inner.repo_access).remove(repo);
+        lock(&self.inner.local).clear();
     }
 
     fn forget_all(&self) {
-        self.inner.repo_access.lock().unwrap().clear();
-        self.inner.local.lock().unwrap().clear();
+        lock(&self.inner.repo_access).clear();
+        lock(&self.inner.local).clear();
     }
 
     /// The first credential that can see `repo`.
@@ -564,11 +561,7 @@ impl Github {
         if candidates.is_empty() {
             return Err(GhError::Unavailable(GithubUnavailable::SignedOut));
         }
-        let cached = self
-            .inner
-            .repo_access
-            .lock()
-            .unwrap()
+        let cached = lock(&self.inner.repo_access)
             .get(repo)
             .filter(|(_, at)| at.elapsed() < REPO_ACCESS_TTL)
             .map(|(source, _)| *source);
@@ -583,10 +576,7 @@ impl Github {
                 .await
             {
                 Ok(_) => {
-                    self.inner
-                        .repo_access
-                        .lock()
-                        .unwrap()
+                    lock(&self.inner.repo_access)
                         .insert(repo.to_string(), (credential.source, Instant::now()));
                     return Ok(credential);
                 }
@@ -896,7 +886,7 @@ impl Github {
             self.clone()
                 .await_approval(login_id.clone(), client_id, code),
         );
-        let mut logins = self.inner.logins.lock().unwrap();
+        let mut logins = lock(&self.inner.logins);
         for entry in logins.values_mut() {
             if entry.state == GithubLoginState::Pending {
                 if let Some(task) = entry.task.take() {
@@ -920,7 +910,7 @@ impl Github {
     }
 
     fn finish_login(&self, login_id: &str, result: Result<String, String>) {
-        let mut logins = self.inner.logins.lock().unwrap();
+        let mut logins = lock(&self.inner.logins);
         if let Some(entry) = logins.get_mut(login_id)
             && entry.state == GithubLoginState::Pending
         {
@@ -999,7 +989,7 @@ impl Github {
     }
 
     pub fn poll_login(&self, login_id: &str) -> GithubLoginPoll {
-        match self.inner.logins.lock().unwrap().get(login_id) {
+        match lock(&self.inner.logins).get(login_id) {
             Some(entry) => GithubLoginPoll {
                 state: entry.state,
                 login: entry.login.clone(),
@@ -1014,7 +1004,7 @@ impl Github {
     }
 
     pub fn cancel_login(&self, login_id: &str) {
-        if let Some(mut entry) = self.inner.logins.lock().unwrap().remove(login_id)
+        if let Some(mut entry) = lock(&self.inner.logins).remove(login_id)
             && let Some(task) = entry.task.take()
         {
             task.abort();

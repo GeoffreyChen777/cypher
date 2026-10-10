@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -33,9 +33,11 @@ use cypher_doc::{
 use cypher_proto::{HarnessId, UserInputAnswer, UserInputQuestion};
 use cypher_sync::DocsStore;
 
+use crate::EngineError;
 use crate::host::workspace_host::WorkspaceHost;
 use crate::session::engine::{SessionsEngine, SteerOutcome};
-use crate::{EngineError, new_id, now_ms};
+use crate::util::lock;
+use crate::util::{new_id, now_ms};
 
 mod chat2_sync;
 mod commands;
@@ -208,10 +210,6 @@ struct DocHostInner {
     /// Shared client for sidecar blob fetches (30s timeout, uploads.rs
     /// discipline — diff_sync's untimed client hung on dead links).
     http: reqwest::Client,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn same_message_identity(left: &SessionCommandPayload, right: &SessionCommandPayload) -> bool {

@@ -13,8 +13,9 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{LazyLock, Mutex};
 
+use crate::util::lock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -104,11 +105,7 @@ fn scan_file(path: &Path) -> Scan {
     let Ok(len) = std::fs::metadata(path).map(|meta| meta.len()) else {
         return Scan::default();
     };
-    let cached = SCANS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(path)
-        .cloned();
+    let cached = lock(&SCANS).get(path).cloned();
     let prior = cached.filter(|scan| scan.len <= len).unwrap_or_default();
     if prior.len == len {
         return prior;
@@ -120,7 +117,7 @@ fn scan_file(path: &Path) -> Scan {
             return Scan::default();
         }
     };
-    let mut scans = SCANS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut scans = lock(&SCANS);
     if scans.len() >= MAX_CACHED_FILES && !scans.contains_key(path) {
         scans.clear();
     }

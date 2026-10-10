@@ -402,7 +402,7 @@ pub async fn authenticate(
         .await
         .map_err(|err| err.to_string())?;
     let paths = paths.clone();
-    crate::off_runtime(move || list(&paths)).await
+    crate::util::off_runtime(move || list(&paths)).await
 }
 
 #[cfg(test)]

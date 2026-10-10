@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
@@ -33,6 +33,7 @@ use cypher_proto::Space;
 
 use crate::git::repos::Repos;
 use crate::host::workspace_host::WorkspaceHost;
+use crate::util::lock;
 
 /// Trailing debounce after a filesystem event burst.
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -55,10 +56,6 @@ struct SpacesSyncInner {
     /// it once the whole graph drops).
     cancel: CancellationToken,
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[derive(Clone)]

@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -23,7 +23,9 @@ use tokio::sync::mpsc;
 use cypher_doc::TERMINAL_OUTPUT_BATCH_MS;
 use cypher_proto::{TerminalEvent, TerminalSession};
 
-use crate::{EngineError, new_id};
+use crate::EngineError;
+use crate::util::lock;
+use crate::util::new_id;
 
 const MAX_TERMINALS: usize = 32;
 const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -78,10 +80,6 @@ impl LiveTerminal {
 
 struct TerminalsInner {
     sessions: Mutex<HashMap<String, Arc<Mutex<LiveTerminal>>>>,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[derive(Clone)]

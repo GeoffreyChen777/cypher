@@ -38,7 +38,7 @@ pub(super) async fn set_pi_package_enabled(
 
 pub(super) async fn list_pi_subagents(rpc: &EngineRpc) -> Result<RpcReply, RpcError> {
     let paths = rpc.pi_runtime()?.paths().clone();
-    let agents = crate::off_runtime(move || crate::pi::subagents::list(&paths))
+    let agents = crate::util::off_runtime(move || crate::pi::subagents::list(&paths))
         .await
         .map_err(RpcError::Failed)?;
     RpcReply::value(&agents)
@@ -50,7 +50,7 @@ pub(super) async fn save_pi_subagent(rpc: &EngineRpc, params: Value) -> Result<R
     request.agent.validate().map_err(RpcError::BadParams)?;
     let paths = rpc.pi_runtime()?.paths().clone();
     let list_paths = paths.clone();
-    crate::off_runtime(move || {
+    crate::util::off_runtime(move || {
         crate::pi::subagents::save(&paths, &request.agent, request.original_name.as_deref())
     })
     .await
@@ -59,7 +59,7 @@ pub(super) async fn save_pi_subagent(rpc: &EngineRpc, params: Value) -> Result<R
     // The next child spawn has to read the new profile, and the
     // extension loads `agents/` once per process.
     rpc.reload_pi_runtime().await;
-    let agents = crate::off_runtime(move || crate::pi::subagents::list(&list_paths))
+    let agents = crate::util::off_runtime(move || crate::pi::subagents::list(&list_paths))
         .await
         .map_err(RpcError::Failed)?;
     RpcReply::value(&agents)
@@ -73,12 +73,12 @@ pub(super) async fn delete_pi_subagent(
     let request: DeletePiSubagentParams = parse_params(body)?;
     let paths = rpc.pi_runtime()?.paths().clone();
     let list_paths = paths.clone();
-    crate::off_runtime(move || crate::pi::subagents::delete(&paths, &request.name))
+    crate::util::off_runtime(move || crate::pi::subagents::delete(&paths, &request.name))
         .await
         .map_err(RpcError::Failed)?
         .map_err(RpcError::BadParams)?;
     rpc.reload_pi_runtime().await;
-    let agents = crate::off_runtime(move || crate::pi::subagents::list(&list_paths))
+    let agents = crate::util::off_runtime(move || crate::pi::subagents::list(&list_paths))
         .await
         .map_err(RpcError::Failed)?;
     RpcReply::value(&agents)
@@ -86,7 +86,7 @@ pub(super) async fn delete_pi_subagent(
 
 pub(super) async fn get_pi_translation_settings(rpc: &EngineRpc) -> Result<RpcReply, RpcError> {
     let paths = rpc.pi_runtime()?.paths().clone();
-    let settings = crate::off_runtime(move || crate::pi::translation::load(&paths))
+    let settings = crate::util::off_runtime(move || crate::pi::translation::load(&paths))
         .await
         .map_err(RpcError::Failed)?;
     RpcReply::value(&settings)
@@ -101,7 +101,7 @@ pub(super) async fn set_pi_translation_settings(
     settings.validate().map_err(RpcError::BadParams)?;
     let paths = rpc.pi_runtime()?.paths().clone();
     let previous_paths = paths.clone();
-    let previous = crate::off_runtime(move || crate::pi::translation::load(&previous_paths))
+    let previous = crate::util::off_runtime(move || crate::pi::translation::load(&previous_paths))
         .await
         .map_err(RpcError::Failed)?;
     // Language/display changes and deselection need no model
@@ -115,7 +115,7 @@ pub(super) async fn set_pi_translation_settings(
         )
         .await?;
     }
-    let saved = crate::off_runtime(move || crate::pi::translation::save(&paths, settings))
+    let saved = crate::util::off_runtime(move || crate::pi::translation::save(&paths, settings))
         .await
         .and_then(|result| result)
         .map_err(RpcError::Failed)?;
@@ -221,7 +221,7 @@ pub(super) async fn pi_session_modes(rpc: &EngineRpc, params: Value) -> Result<R
     let p: PiSessionModesParams = parse_params(params)?;
     let agent_dir = rpc.pi_runtime()?.paths().agent_dir.clone();
     let sessions = rpc.sessions.clone();
-    let modes = crate::off_runtime(move || {
+    let modes = crate::util::off_runtime(move || {
         let session = p
             .chat_id
             .as_deref()

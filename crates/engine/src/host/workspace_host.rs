@@ -17,7 +17,7 @@
 //! online never grows server state.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use chrono::{DateTime, Utc};
 use tokio::sync::watch;
@@ -29,8 +29,10 @@ use cypher_proto::{
 };
 use cypher_sync::{DocsStore, RegistryClient, RegistryTransport, RegistryTuning, SyncError};
 
+use crate::EngineError;
 use crate::host::doc_host::EdgeConfig;
-use crate::{EngineError, now_ms};
+use crate::util::lock;
+use crate::util::now_ms;
 
 /// Outcome of the idempotent [`WorkspaceHost::create_child_chat`] — lets the
 /// `StartSubagent` handler distinguish a NEW child (whose initial durable Run
@@ -369,10 +371,6 @@ struct WorkspaceHostInner {
 /// "This peer is alive" callback (device id) — see `WorkspaceHost::set_peer_alive_hook`.
 pub type PeerAliveHook = Arc<dyn Fn(&str) + Send + Sync>;
 pub type NotificationEventHook = Arc<dyn Fn(&Session) + Send + Sync>;
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 #[derive(Clone)]
 pub struct WorkspaceHost {
@@ -856,7 +854,7 @@ impl WorkspaceHost {
             icon: None,
             color: None,
             pinned: false,
-            id: crate::new_id(),
+            id: crate::util::new_id(),
             device_id: device_id.clone(),
             path: root.unwrap_or_else(|| path.to_string()),
             name: None,
@@ -1328,7 +1326,7 @@ impl WorkspaceHost {
                 return Ok(ChildChatOutcome::Existing(chat.id));
             }
         }
-        let chat_id = crate::new_id();
+        let chat_id = crate::util::new_id();
         let sandbox = parent
             .config
             .as_ref()

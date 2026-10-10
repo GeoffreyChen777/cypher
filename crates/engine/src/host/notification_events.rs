@@ -2,12 +2,13 @@
 //! updates still reach the registry/UI, but do not become duplicate HTTP events.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cypher_proto::{Session, SessionStatus, SubagentRunMode, SubagentRunStatus};
 use futures::future::BoxFuture;
 
+use crate::util::lock;
 use crate::{auth::Auth, host::workspace_host::NotificationEventHook};
 
 #[derive(PartialEq)]
@@ -87,12 +88,6 @@ impl Delivery {
                 .as_ref()
                 .is_some_and(|ignored| &ignored.signature == signature && now < ignored.retry_at)
     }
-}
-
-fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
-    value
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 type Report = Arc<dyn Fn(Session) -> BoxFuture<'static, Reply> + Send + Sync>;

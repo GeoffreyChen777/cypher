@@ -2,6 +2,7 @@
 //! credentials. A random attempt ID binds all subsequent requests; nothing is
 //! written to chat history, logs, or the workspace document.
 use super::*;
+use crate::util::lock;
 use cypher_harness::{CancellationToken, SlashUi};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -29,7 +30,7 @@ pub struct Logins(Arc<Mutex<Option<Attempt>>>);
 
 impl Drop for Logins {
     fn drop(&mut self) {
-        if let Some(attempt) = self.0.lock().unwrap().as_ref() {
+        if let Some(attempt) = lock(&self.0).as_ref() {
             attempt.cancel.cancel();
         }
     }
@@ -37,14 +38,12 @@ impl Drop for Logins {
 
 impl Logins {
     pub fn cancel_all(&self) {
-        if let Some(a) = self.0.lock().unwrap().as_ref() {
+        if let Some(a) = lock(&self.0).as_ref() {
             a.cancel.cancel();
         }
     }
     pub fn active(&self) -> bool {
-        self.0
-            .lock()
-            .unwrap()
+        lock(&self.0)
             .as_ref()
             .is_some_and(|a| !terminal(&a.status.phase))
     }
@@ -68,7 +67,7 @@ impl Logins {
         {
             return Err("Select an enabled OAuth MCP server.".into());
         }
-        let mut guard = self.0.lock().unwrap();
+        let mut guard = lock(&self.0);
         if guard.as_ref().is_some_and(|a| !terminal(&a.status.phase)) {
             return Err("An MCP sign-in is already active on this device. Cancel it or wait for it to expire.".into());
         }
@@ -109,7 +108,7 @@ impl Logins {
                     _ = &mut deadline, if !expired => { expired = true; cancel.cancel(); }
                     request = incoming.recv(), if input_open => {
                         let Some((dialog, payload)) = request else { input_open = false; continue; };
-                        let mut guard = shared.lock().unwrap();
+                        let mut guard = lock(&shared);
                         let Some(a) = guard.as_mut().filter(|a| a.status.attempt_id == id) else { cancel.cancel(); continue; };
                         // Pi announces the link in a notify, then opens the
                         // input dialog that takes a pasted callback.
@@ -133,7 +132,7 @@ impl Logins {
             let signed_in = result.is_ok()
                 && !cancel.is_cancelled()
                 && status_of(&dir, &name) == McpAuthStatus::SignedIn;
-            let mut guard = shared.lock().unwrap();
+            let mut guard = lock(&shared);
             if let Some(a) = guard.as_mut().filter(|a| a.status.attempt_id == id) {
                 a.dialog = None;
                 a.authorization_url = None;
@@ -156,12 +155,12 @@ impl Logins {
     }
 
     pub fn status(&self, id: &str) -> Result<LoginStatus, String> {
-        let guard = self.0.lock().unwrap();
+        let guard = lock(&self.0);
         Ok(attempt(&guard, id)?.status.clone())
     }
 
     pub fn respond(&self, id: &str, callback: &str) -> Result<LoginStatus, String> {
-        let mut guard = self.0.lock().unwrap();
+        let mut guard = lock(&self.0);
         let a = guard
             .as_mut()
             .filter(|a| a.status.attempt_id == id)
@@ -185,7 +184,7 @@ impl Logins {
     }
 
     pub fn cancel(&self, id: &str) -> Result<LoginStatus, String> {
-        let guard = self.0.lock().unwrap();
+        let guard = lock(&self.0);
         let a = attempt(&guard, id)?;
         a.cancel.cancel();
         Ok(a.status.clone())

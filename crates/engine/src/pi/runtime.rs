@@ -22,7 +22,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -33,6 +33,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::sync::watch;
 
 use crate::pi::packages::{PiPackageUpdate, PiUpdateStatus};
+use crate::util::lock;
 
 const INITIAL_CHECK_DELAY: Duration = Duration::from_secs(20);
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -184,10 +185,6 @@ pub struct PiRuntimeManager {
     inner: Arc<Inner>,
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 impl PiRuntimeManager {
     pub fn spawn(edge_url: String, data_dir: &Path) -> Self {
         let paths = PiRuntimePaths::for_data_dir(data_dir);
@@ -290,7 +287,7 @@ impl PiRuntimeManager {
             // `current` until activation, and must not be swept before then.
             let _operation = manager.inner.operation.lock().await;
             let paths = manager.inner.paths.clone();
-            let _ = crate::off_runtime(move || prune_runtime_dir(&paths)).await;
+            let _ = crate::util::off_runtime(move || prune_runtime_dir(&paths)).await;
         });
     }
 
@@ -447,7 +444,7 @@ impl PiRuntimeManager {
                 let agent_dir = self.inner.paths.agent_dir.clone();
                 let (archive, stage, destination) =
                     (archive.clone(), stage.clone(), destination.clone());
-                crate::off_runtime(move || {
+                crate::util::off_runtime(move || {
                     verify_sha256(&archive, &sha256)?;
                     validate_archive_paths(&archive)?;
                     let unpacked = stage.join("unpacked");
@@ -487,13 +484,13 @@ impl PiRuntimeManager {
             }
             .await;
             let stage_cleanup = stage.clone();
-            let _ = crate::off_runtime(move || std::fs::remove_dir_all(stage_cleanup)).await;
+            let _ = crate::util::off_runtime(move || std::fs::remove_dir_all(stage_cleanup)).await;
             install_result?;
         }
 
         let paths = self.inner.paths.clone();
         let cleanup = self.inner.cleanup.load(Ordering::SeqCst);
-        crate::off_runtime(move || {
+        crate::util::off_runtime(move || {
             initialize_agent(&paths, &destination)?;
             // The outgoing bundle may still back live children, even when a
             // CLI activated it behind this engine's back.

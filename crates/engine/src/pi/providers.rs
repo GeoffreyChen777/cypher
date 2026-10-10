@@ -11,6 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use crate::pi::runtime::PiRuntimePaths;
+use crate::util::lock;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -191,7 +192,7 @@ pub struct Logins(Arc<Mutex<Option<LoginAttempt>>>);
 
 impl Drop for Logins {
     fn drop(&mut self) {
-        if let Some(attempt) = self.0.lock().unwrap().as_ref() {
+        if let Some(attempt) = lock(&self.0).as_ref() {
             attempt.cancel.cancel();
         }
     }
@@ -203,15 +204,13 @@ fn login_terminal(phase: &str) -> bool {
 
 impl Logins {
     pub fn cancel_all(&self) {
-        if let Some(attempt) = self.0.lock().unwrap().as_ref() {
+        if let Some(attempt) = lock(&self.0).as_ref() {
             attempt.cancel.cancel();
         }
     }
 
     pub fn active(&self) -> bool {
-        self.0
-            .lock()
-            .unwrap()
+        lock(&self.0)
             .as_ref()
             .is_some_and(|attempt| !login_terminal(&attempt.status.phase))
     }
@@ -225,7 +224,7 @@ impl Logins {
                 "Install or update Pi Runtime in Settings → Agents to manage providers.".into(),
             );
         }
-        let mut guard = self.0.lock().unwrap();
+        let mut guard = lock(&self.0);
         if guard
             .as_ref()
             .is_some_and(|attempt| !login_terminal(&attempt.status.phase))
@@ -318,14 +317,14 @@ impl Logins {
                     line = lines.next_line() => {
                         let Ok(Some(line)) = line else { break; };
                         apply_helper_line(&shared, &id, &line);
-                        if shared.lock().unwrap().as_ref().is_some_and(|a| a.status.attempt_id == id && login_terminal(&a.status.phase)) {
+                        if lock(&shared).as_ref().is_some_and(|a| a.status.attempt_id == id && login_terminal(&a.status.phase)) {
                             let _ = child.start_kill();
                             break;
                         }
                     }
                 }
             }
-            let mut guard = shared.lock().unwrap();
+            let mut guard = lock(&shared);
             if let Some(attempt) = guard.as_mut().filter(|a| a.status.attempt_id == id)
                 && !login_terminal(&attempt.status.phase)
             {
@@ -348,12 +347,12 @@ impl Logins {
     }
 
     pub fn status(&self, id: &str) -> Result<LoginStatus, String> {
-        let guard = self.0.lock().unwrap();
+        let guard = lock(&self.0);
         Ok(login_attempt(&guard, id)?.status.clone())
     }
 
     pub fn respond(&self, id: &str, callback: &str) -> Result<LoginStatus, String> {
-        let mut guard = self.0.lock().unwrap();
+        let mut guard = lock(&self.0);
         let attempt = guard
             .as_mut()
             .filter(|attempt| attempt.status.attempt_id == id)
@@ -381,7 +380,7 @@ impl Logins {
     }
 
     pub fn cancel(&self, id: &str) -> Result<LoginStatus, String> {
-        let guard = self.0.lock().unwrap();
+        let guard = lock(&self.0);
         let attempt = login_attempt(&guard, id)?;
         attempt.cancel.cancel();
         Ok(attempt.status.clone())
@@ -399,12 +398,7 @@ fn login_attempt<'a>(
 }
 
 fn fail(shared: &Arc<Mutex<Option<LoginAttempt>>>, id: &str, error: &str) {
-    if let Some(attempt) = shared
-        .lock()
-        .unwrap()
-        .as_mut()
-        .filter(|a| a.status.attempt_id == id)
-    {
+    if let Some(attempt) = lock(shared).as_mut().filter(|a| a.status.attempt_id == id) {
         attempt.status.phase = "failed".into();
         attempt.status.error = Some(error.into());
     }
@@ -414,7 +408,7 @@ fn apply_helper_line(shared: &Arc<Mutex<Option<LoginAttempt>>>, id: &str, line: 
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
         return;
     };
-    let mut guard = shared.lock().unwrap();
+    let mut guard = lock(shared);
     let Some(attempt) = guard.as_mut().filter(|a| a.status.attempt_id == id) else {
         return;
     };
