@@ -1,5 +1,6 @@
 //! Rendering: rows, chips, bubbles and the `Render` impl.
 
+use super::comments::ToolGroupRow;
 use super::*;
 
 impl Transcript {
@@ -432,7 +433,17 @@ impl Transcript {
                 auto_open,
                 nested,
                 skip,
-            } => self.render_tool_group(&row.id, tools, *auto_open, *nested, *skip, theme, cx),
+            } => self.render_tool_group(
+                &row.id,
+                ToolGroupRow {
+                    tools,
+                    auto_open: *auto_open,
+                    nested: *nested,
+                    skip: *skip,
+                },
+                theme,
+                cx,
+            ),
             RowKind::RunOverflow {
                 run,
                 tools,
