@@ -60,7 +60,7 @@ describe("notification outbox on real Durable Object SQLite", () => {
         clock.mockReturnValue(finishedAt + 11_000);
         await service.flush();
         expect(sent).toHaveLength(1);
-        expect(sent[0].message.kind).toBe(status === "done" ? "completed" : "failed");
+        expect(sent[0]?.message.kind).toBe(status === "done" ? "completed" : "failed");
       } finally { clock.mockRestore(); }
     });
   });

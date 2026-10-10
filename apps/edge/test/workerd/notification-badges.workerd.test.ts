@@ -151,7 +151,7 @@ describe("durable unread-conversation badges", () => {
         const chat = f.rows.get("chats/one")!;
         chat.fields = { ...chat.fields, lastSeenAt: start + 5_000 };
         // A legacy row without eventAt falls back to the latest message.
-        const legacy = [...state.storage.sql.exec("SELECT value FROM notify_unread WHERE chat_id='two'")][0];
+        const legacy = state.storage.sql.exec("SELECT value FROM notify_unread WHERE chat_id='two'").one();
         const { eventAt: _, ...old } = JSON.parse(legacy.value as string);
         state.storage.sql.exec("UPDATE notify_unread SET value=? WHERE chat_id='two'", JSON.stringify(old));
         const two = f.rows.get("chats/two")!;
@@ -250,7 +250,7 @@ describe("durable unread-conversation badges", () => {
       await f.enqueue("one");
       f.config.NOTIFICATIONS_ENABLED = "false";
       await f.flush();
-      expect([...state.storage.sql.exec("SELECT value FROM notify_kv WHERE key='badgeJob'")][0].value).toBe("null");
+      expect(state.storage.sql.exec("SELECT value FROM notify_kv WHERE key='badgeJob'").one().value).toBe("null");
       expect(f.calls).toHaveLength(0);
     });
   });

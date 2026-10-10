@@ -23,7 +23,7 @@ describe("notification route boundaries", () => {
     expect((await call("bob@org")).status).toBe(200);
     expect(names).toEqual(["reg1/org/alice", "reg1/org/bob"]);
     expect(requests.map(r => r.headers.get(AUTH_USER_HEADER))).toEqual(["alice", "bob"]);
-    expect(new URL(requests[0].url).pathname).toBe("/notifications/settings");
+    expect(requests[0]?.url).toBe("https://edge.test/notifications/settings");
   });
   it("the unauthenticated capability can only request revocation, never registration or sending", async () => {
     const requests: Request[] = [];
@@ -38,8 +38,9 @@ describe("notification route boundaries", () => {
     expect(requests).toHaveLength(0);
     expect((await post({ bindingId: "a".repeat(64), scope: "b".repeat(64),
       lease: crypto.randomUUID(), epoch: 2, path: "/send", token: "forged" })).status).toBe(200);
-    expect(new URL(requests[0].url).pathname).toBe("/unregister");
-    const forwarded = await requests[0].json() as object;
+    const [revoke] = requests;
+    expect(revoke?.url).toBe("https://push/unregister");
+    const forwarded = await revoke?.json() as object;
     expect(Object.keys(forwarded).sort()).toEqual(["epoch", "lease", "scope"]);
   });
 });

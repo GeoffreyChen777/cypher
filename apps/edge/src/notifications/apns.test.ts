@@ -51,15 +51,16 @@ describe("APNs transport", () => {
     const env = await configured();
     expect(await sendAPNs(env, "0".repeat(64), "production", message())).toBe("sent");
     expect(await sendAPNs(env, "0".repeat(64), "development", message())).toBe("sent");
-    expect(new URL(requests[0].url).hostname).toBe("api.push.apple.com");
-    expect(new URL(requests[1].url).hostname).toBe("api.sandbox.push.apple.com");
-    const headers = new Headers(requests[0].options.headers);
+    const [production, sandbox] = requests;
+    expect(production?.url).toMatch(/^https:\/\/api\.push\.apple\.com\//);
+    expect(sandbox?.url).toMatch(/^https:\/\/api\.sandbox\.push\.apple\.com\//);
+    const headers = new Headers(production?.options.headers);
     expect(headers.get("apns-topic")).toBe(APNS_TOPIC);
     expect(headers.get("authorization")?.startsWith("bearer ")).toBe(true);
-    const body = JSON.parse(requests[0].options.body as string);
+    const body = JSON.parse(production?.options.body as string);
     expect(body.aps.alert).toEqual({ title: "Task completed", body: "Open Cypher to view the session." });
     expect(Object.keys(body.cypher).sort()).toEqual(["chatId", "eventId", "kind", "projectId", "scope", "version"]);
-    expect(headers.get("authorization") === new Headers(requests[1].options.headers).get("authorization")).toBe(true);
+    expect(headers.get("authorization") === new Headers(sandbox?.options.headers).get("authorization")).toBe(true);
   });
   it("invalidates bad device tokens and retries transient/provider failures", async () => {
     const env = await configured();
@@ -83,13 +84,13 @@ describe("APNs transport", () => {
       id: crypto.randomUUID(), scope: "a".repeat(64), kind: "badge", expires: Date.now() + 60_000,
       badgeCount: 0, badgeRevision: 8
     });
-    const alert = JSON.parse(requests[0].body as string), badge = JSON.parse(requests[1].body as string);
+    const alert = JSON.parse(requests[0]?.body as string), badge = JSON.parse(requests[1]?.body as string);
     expect(alert.aps.badge).toBe(3);
     expect(badge.aps).toEqual({ badge: 0 });
     expect(badge.cypher).toMatchObject({ kind: "badge", badgeCount: 0, badgeRevision: 8 });
     expect(badge.cypher.chatId).toBeUndefined();
-    expect(new Headers(requests[1].headers).get("apns-push-type")).toBe("alert");
-    expect(new Headers(requests[1].headers).get("apns-priority")).toBe("5");
+    expect(new Headers(requests[1]?.headers).get("apns-push-type")).toBe("alert");
+    expect(new Headers(requests[1]?.headers).get("apns-priority")).toBe("5");
   });
   it("rejects malformed badge counts before contacting Apple", async () => {
     const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
