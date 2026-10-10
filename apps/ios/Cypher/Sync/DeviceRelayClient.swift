@@ -7,7 +7,8 @@
 //
 // Frame codec (binary WS messages): uleb128(headerLen) ‖ headerJSON ‖ payload.
 // Header key order MUST be {"s","k","to","from"} (byte parity with both
-// implementations); clients never set `to`/`from` — the DO stamps `from`.
+// implementations; shared vectors in protocol/vectors/device-frames-v1.json,
+// protocol/README.md); clients never set `to`/`from` — the DO stamps `from`.
 // RPC payloads are ndjson ControlRpc frames: {id, method, params} out,
 // {id, ok|err|item|done} back. Relay control frames (kind " relay" — leading
 // space is part of the constant) signal host_offline/host_closed.

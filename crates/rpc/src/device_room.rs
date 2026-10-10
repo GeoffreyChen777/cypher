@@ -3,8 +3,10 @@
 //! full RPC surface through the relay), and the **client link** (dialing another device's
 //! relay and speaking ordinary [`RpcClient`] RPC over it).
 //!
-//! Frame encoding (must stay byte-identical to `apps/edge/src/device/device-frame.ts`):
-//! `uleb128(header_len) ‖ UTF-8 JSON header ‖ payload`, header `{s, k, to?, from?}`.
+//! Frame encoding (must stay byte-identical to `apps/edge/src/device/device-frame.ts`
+//! and the Swift client; all three run `protocol/vectors/device-frames-v1.json`, see
+//! `protocol/README.md`): `uleb128(header_len) ‖ UTF-8 JSON header ‖ payload`, header
+//! `{s, k, to?, from?}`.
 //! - client → DO: the DO stamps `from = connId` and forwards to the host socket;
 //! - host → DO: must carry `to = connId`; the DO strips routing keys and delivers;
 //! - relay control frames use kind [`RELAY_KIND`] with payload `{"error": code}` —
