@@ -1148,29 +1148,7 @@ impl Render for Shell {
         if !self.is_project_window() {
             crate::shell::dev_capture::start_once(window.window_handle(), cx);
         }
-        let foreground = window.is_window_active();
-        let selected = matches!(self.route, Route::Chat)
-            .then(|| self.state.read(cx).selected_chat.clone())
-            .flatten();
-        if let Some(activity) =
-            self.notification_activity
-                .sample(foreground, selected, std::time::Instant::now())
-        {
-            self.state.update(cx, |state, cx| {
-                state.report_notification_activity(activity, cx)
-            });
-        }
-        let weak = cx.entity().downgrade();
-        let scroll_activity = crate::shell::notification_activity::scroll_observer(move |cx| {
-            let _ = weak.update(cx, |shell, cx| {
-                if shell
-                    .notification_activity
-                    .interact(std::time::Instant::now())
-                {
-                    cx.notify();
-                }
-            });
-        });
+        let scroll_activity = self.sample_notification_activity(window, cx);
         // A sidebar chat selection can leave settings without close_settings.
         // Do not retain a hidden credential field in the cached page entity.
         if self.route != Route::Settings(SettingsSection::Providers)
@@ -1196,6 +1174,146 @@ impl Render for Shell {
             .clone()
             .unwrap_or_else(|| self.state.read(cx).gate());
 
+        self.track_fullscreen(window, cx);
+        self.route_focus(&gate, restart_required, window, cx);
+
+        let root = div()
+            .id("shell-root")
+            .relative()
+            .flex()
+            .flex_row()
+            .size_full()
+            .bg(frost)
+            .text_color(text)
+            .font_family(font)
+            .text_size(px(14.0))
+            .child(scroll_activity)
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                if this
+                    .notification_activity
+                    .interact(std::time::Instant::now())
+                {
+                    cx.notify();
+                }
+            }))
+            .capture_key_down(cx.listener(|this, _, _, cx| {
+                if this
+                    .notification_activity
+                    .interact(std::time::Instant::now())
+                {
+                    cx.notify();
+                }
+            }))
+            .track_focus(&self.root_focus);
+        let root = self.bind_shell_actions(root, cx);
+
+        let render_gate = if restart_required {
+            GatePhase::Loading
+        } else {
+            gate.clone()
+        };
+        let root = match &render_gate {
+            GatePhase::Ready => {
+                self.on_ready_frame(window, cx);
+                root.child(self.render_ready_page(window, cx))
+            }
+            GatePhase::Loading => root, // splash overlay covers boot
+            GatePhase::OrgGate => {
+                let card = self.render_org_gate(cx);
+                root.child(card)
+            }
+            phase @ (GatePhase::Failed(_) | GatePhase::SignIn) => {
+                let card = self.render_gate_card(phase, cx);
+                root.child(card)
+            }
+        };
+        let root = if restart_required {
+            let restart = self.render_signed_out_restart(cx);
+            root.child(restart)
+        } else {
+            root
+        };
+
+        // A manually-driven tween is mid-flight: keep frames coming (the same
+        // scheduling `with_animation` would have requested). Hover color fades
+        // ride the same clock; their once-per-frame tick lives here (this is
+        // the window's root render — it runs exactly once per frame).
+        if self.motion_active.get() | motion::hover_fades_active() {
+            window.request_animation_frame();
+        }
+
+        // Boot splash overlay: visible → crossfades out on Ready → removed.
+        let root = match self.splash {
+            SplashPhase::Visible => {
+                let theme = Theme::of(cx).clone();
+                root.child(loaders::splash_overlay(&theme, false))
+            }
+            SplashPhase::FadingOut => {
+                let theme = Theme::of(cx).clone();
+                root.child(loaders::splash_overlay(&theme, true))
+            }
+            SplashPhase::Gone => root,
+        };
+
+        // Caption controls are shell-level chrome, not Ready-page content:
+        // keep them above the splash and every auth/org/error gate as well as
+        // the full application. Gate pages also need a native drag surface
+        // because they do not render the unified tabs/settings titlebar.
+        let root = if (!restart_required && matches!(gate, GatePhase::Ready))
+            || !cfg!(target_os = "windows")
+        {
+            root
+        } else {
+            root.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(Theme::TITLEBAR_HEIGHT))
+                    .window_control_area(WindowControlArea::Drag),
+            )
+        };
+        root.children(self.render_windows_caption_controls(window, cx))
+    }
+}
+
+impl Shell {
+    /// Feed this frame's foreground/selection into the notification activity
+    /// sampler; returns the scroll observer that marks interaction.
+    fn sample_notification_activity(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let foreground = window.is_window_active();
+        let selected = matches!(self.route, Route::Chat)
+            .then(|| self.state.read(cx).selected_chat.clone())
+            .flatten();
+        if let Some(activity) =
+            self.notification_activity
+                .sample(foreground, selected, std::time::Instant::now())
+        {
+            self.state.update(cx, |state, cx| {
+                state.report_notification_activity(activity, cx)
+            });
+        }
+        let weak = cx.entity().downgrade();
+        crate::shell::notification_activity::scroll_observer(move |cx| {
+            let _ = weak.update(cx, |shell, cx| {
+                if shell
+                    .notification_activity
+                    .interact(std::time::Instant::now())
+                {
+                    cx.notify();
+                }
+            });
+        })
+    }
+
+    /// Track fullscreen (the titlebar cluster tween) and reset this pass's
+    /// manual tween bookkeeping.
+    fn track_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Fullscreen hides the macOS traffic lights — reflow the control
         // cluster with a 200ms ease-out tween. A fullscreen transition
         // resizes the window, which re-renders us, so polling here is exact.
@@ -1212,7 +1330,18 @@ impl Render for Shell {
         // Manual tween drive bookkeeping for this pass (see [`WidthTween`]).
         self.reduced_motion = motion::reduced_motion(cx);
         self.motion_active.set(false);
+    }
 
+    /// Keep keyboard focus somewhere that dispatches: the focused tile's
+    /// composer on Chat, a blur elsewhere, and never a find field that is no
+    /// longer rendered.
+    fn route_focus(
+        &mut self,
+        gate: &GatePhase,
+        restart_required: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Keyboard shortcuts (mod-s/b/j) dispatch through the window focus
         // chain — with nothing focused they go dead. Land initial focus on the
         // composer, and whenever focus is lost with no successor (e.g. the
@@ -1260,36 +1389,15 @@ impl Render for Shell {
                 Route::Chat | Route::Settings(_) => window.blur(),
             }
         }
+    }
 
-        let root = div()
-            .id("shell-root")
-            .relative()
-            .flex()
-            .flex_row()
-            .size_full()
-            .bg(frost)
-            .text_color(text)
-            .font_family(font)
-            .text_size(px(14.0))
-            .child(scroll_activity)
-            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                if this
-                    .notification_activity
-                    .interact(std::time::Instant::now())
-                {
-                    cx.notify();
-                }
-            }))
-            .capture_key_down(cx.listener(|this, _, _, cx| {
-                if this
-                    .notification_activity
-                    .interact(std::time::Instant::now())
-                {
-                    cx.notify();
-                }
-            }))
-            .track_focus(&self.root_focus)
-            .on_drag_move(cx.listener(Self::on_sidebar_drag))
+    /// The root's drag handlers, window actions and the surface-copy key.
+    fn bind_shell_actions(
+        &self,
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_drag_move(cx.listener(Self::on_sidebar_drag))
             .on_drag_move(cx.listener(Self::on_dock_drag))
             .on_drag_move(cx.listener(Self::on_terminal_drag))
             .on_drag_move(cx.listener(Self::on_split_drag))
@@ -1430,180 +1538,124 @@ impl Render for Shell {
                 {
                     cx.stop_propagation();
                 }
-            });
+            })
+    }
 
-        let render_gate = if restart_required {
-            GatePhase::Loading
-        } else {
-            gate.clone()
-        };
-        let root = match &render_gate {
-            GatePhase::Ready => {
-                // Focus is a sync signal: on the rising edge of window
-                // activation, nudge every open room to verify liveness, so a
-                // broadcast-deaf socket (accepted writes, pongs, nothing
-                // delivered) heals within seconds of the user looking at the
-                // app rather than waiting out the background probe cadence.
-                let window_active = window.is_window_active();
-                if window_active && !self.was_window_active {
-                    self.state.update(cx, |s, cx| s.probe_sync(cx));
-                    // Platforms release independently, so the build you want
-                    // may have shipped while you were away. The engine rate
-                    // limits this, so the rising edge is safe to forward every
-                    // time; it wakes the checker and never blocks on the
-                    // network.
-                    if let Some(engine) = self.state.read(cx).engine().cloned() {
-                        cx.background_spawn(async move {
-                            let _ = engine
-                                .client()
-                                .call(methods::UPDATE_ON_ACTIVATION, serde_json::json!({}))
-                                .await;
-                        })
-                        .detach();
-                    }
-                }
-                self.was_window_active = window_active;
-                // A run finishing while you're LOOKING at the session must not
-                // badge "completed" until you leave and return — mark it seen
-                // live while the window is active (idempotent guard inside;
-                // one extra frame settles it).
-                // Every VISIBLE tile's session counts.
-                if window_active {
-                    let unseen_visible: Vec<String> = {
-                        let s = self.state.read(cx);
-                        self.workspace
-                            .visible_tabs()
-                            .into_iter()
-                            .filter_map(|tab| tab.chat_id())
-                            .filter(|id| s.chats.iter().any(|c| c.id == *id && c.unseen()))
-                            .map(str::to_string)
-                            .collect()
-                    };
-                    for chat_id in unseen_visible {
-                        self.state
-                            .update(cx, |s, cx| s.mark_chat_seen(&chat_id, cx));
-                    }
-                }
-                // Capture knob: `CYPHER_OPEN_DIALOG=model` pops the combined
-                // harness/model menu (needs `window`, so it fires here rather
-                // than in `on_state_changed`).
-                if self.debug_dialog.as_deref() == Some("model")
-                    && let Some(composer) = self
-                        .focused_slot()
-                        .and_then(|sid| self.slots.get(&sid))
-                        .map(|slot| slot.composer.clone())
-                {
-                    self.debug_dialog = None;
-                    composer.update(cx, |c, cx| c.debug_open_model_menu(window, cx));
-                }
-                let sidebar = self.render_sidebar(cx);
-                let sidebar_handle = self.resize_handle(
-                    "sidebar-resize",
-                    || SidebarResize,
-                    |shell, _| shell.settings.sidebar_width = SIDEBAR_DEFAULT,
-                    cx,
-                );
-                // Chat: the workspace of session tiles; Settings: the section
-                // outlet. The per-session state stays intact for the return
-                // trip.
-                let main = match self.route {
-                    Route::Chat => self.render_workspace(window, cx),
-                    Route::Settings(section) => self.render_settings_main(section, cx),
-                };
-                let overlays = self.render_overlays(window.viewport_size(), window, cx);
-                // The whole app page is one keyed `animate-in` entrance (zeron
-                // App.tsx `<div key={phase} className="animate-in h-full">`):
-                // arriving from the splash or any gate fades the page in; the
-                // splash-out crossfades over it on boot.
-                // The sidebar resize handle FLOATS over the sidebar/workspace
-                // seam (zero layout width) so the sidebar's right gutter stays
-                // exactly as wide as its left one — a 5px flex child here read
-                // as lopsided spacing.
-                let sidebar_seam = div()
-                    .w(px(0.0))
-                    .h_full()
-                    .flex_none()
-                    .relative()
-                    .child(sidebar_handle.absolute().top_0().bottom_0().left(px(-2.0)));
-                let title_bar = self.render_title_bar(cx);
-                // Two columns: sidebar | workspace (or settings). The content
-                // row spans the FULL window height — the titlebar overlays it
-                // (glass, no fill); the sidebar pads itself down, and the
-                // top-row tiles' headers sit in the titlebar band.
-                let page = div()
-                    .size_full()
-                    .relative()
-                    .child(
-                        div()
-                            .size_full()
-                            .flex()
-                            .flex_row()
-                            .child(sidebar)
-                            .child(sidebar_seam)
-                            .child(main),
-                    )
-                    .child(div().absolute().top_0().left_0().right_0().child(title_bar))
-                    .child(self.render_titlebar_cluster(cx))
-                    .children(overlays);
-                root.child(motion::fade_in("phase-app", page))
+    /// Per-frame bookkeeping while the app is Ready: sync liveness and update
+    /// checks on window activation, seen-marking visible sessions, and the
+    /// capture knob that opens the model menu.
+    fn on_ready_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Focus is a sync signal: on the rising edge of window
+        // activation, nudge every open room to verify liveness, so a
+        // broadcast-deaf socket (accepted writes, pongs, nothing
+        // delivered) heals within seconds of the user looking at the
+        // app rather than waiting out the background probe cadence.
+        let window_active = window.is_window_active();
+        if window_active && !self.was_window_active {
+            self.state.update(cx, |s, cx| s.probe_sync(cx));
+            // Platforms release independently, so the build you want
+            // may have shipped while you were away. The engine rate
+            // limits this, so the rising edge is safe to forward every
+            // time; it wakes the checker and never blocks on the
+            // network.
+            if let Some(engine) = self.state.read(cx).engine().cloned() {
+                cx.background_spawn(async move {
+                    let _ = engine
+                        .client()
+                        .call(methods::UPDATE_ON_ACTIVATION, serde_json::json!({}))
+                        .await;
+                })
+                .detach();
             }
-            GatePhase::Loading => root, // splash overlay covers boot
-            GatePhase::OrgGate => {
-                let card = self.render_org_gate(cx);
-                root.child(card)
-            }
-            phase @ (GatePhase::Failed(_) | GatePhase::SignIn) => {
-                let card = self.render_gate_card(phase, cx);
-                root.child(card)
-            }
-        };
-        let root = if restart_required {
-            let restart = self.render_signed_out_restart(cx);
-            root.child(restart)
-        } else {
-            root
-        };
-
-        // A manually-driven tween is mid-flight: keep frames coming (the same
-        // scheduling `with_animation` would have requested). Hover color fades
-        // ride the same clock; their once-per-frame tick lives here (this is
-        // the window's root render — it runs exactly once per frame).
-        if self.motion_active.get() | motion::hover_fades_active() {
-            window.request_animation_frame();
         }
-
-        // Boot splash overlay: visible → crossfades out on Ready → removed.
-        let root = match self.splash {
-            SplashPhase::Visible => {
-                let theme = Theme::of(cx).clone();
-                root.child(loaders::splash_overlay(&theme, false))
+        self.was_window_active = window_active;
+        // A run finishing while you're LOOKING at the session must not
+        // badge "completed" until you leave and return — mark it seen
+        // live while the window is active (idempotent guard inside;
+        // one extra frame settles it).
+        // Every VISIBLE tile's session counts.
+        if window_active {
+            let unseen_visible: Vec<String> = {
+                let s = self.state.read(cx);
+                self.workspace
+                    .visible_tabs()
+                    .into_iter()
+                    .filter_map(|tab| tab.chat_id())
+                    .filter(|id| s.chats.iter().any(|c| c.id == *id && c.unseen()))
+                    .map(str::to_string)
+                    .collect()
+            };
+            for chat_id in unseen_visible {
+                self.state
+                    .update(cx, |s, cx| s.mark_chat_seen(&chat_id, cx));
             }
-            SplashPhase::FadingOut => {
-                let theme = Theme::of(cx).clone();
-                root.child(loaders::splash_overlay(&theme, true))
-            }
-            SplashPhase::Gone => root,
-        };
-
-        // Caption controls are shell-level chrome, not Ready-page content:
-        // keep them above the splash and every auth/org/error gate as well as
-        // the full application. Gate pages also need a native drag surface
-        // because they do not render the unified tabs/settings titlebar.
-        let root = if (!restart_required && matches!(gate, GatePhase::Ready))
-            || !cfg!(target_os = "windows")
+        }
+        // Capture knob: `CYPHER_OPEN_DIALOG=model` pops the combined
+        // harness/model menu (needs `window`, so it fires here rather
+        // than in `on_state_changed`).
+        if self.debug_dialog.as_deref() == Some("model")
+            && let Some(composer) = self
+                .focused_slot()
+                .and_then(|sid| self.slots.get(&sid))
+                .map(|slot| slot.composer.clone())
         {
-            root
-        } else {
-            root.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .right_0()
-                    .h(px(Theme::TITLEBAR_HEIGHT))
-                    .window_control_area(WindowControlArea::Drag),
-            )
+            self.debug_dialog = None;
+            composer.update(cx, |c, cx| c.debug_open_model_menu(window, cx));
+        }
+    }
+
+    /// The Ready page: sidebar | workspace (or settings), the titlebar over
+    /// it, and the overlays, as one keyed entrance.
+    fn render_ready_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let sidebar = self.render_sidebar(cx);
+        let sidebar_handle = self.resize_handle(
+            "sidebar-resize",
+            || SidebarResize,
+            |shell, _| shell.settings.sidebar_width = SIDEBAR_DEFAULT,
+            cx,
+        );
+        // Chat: the workspace of session tiles; Settings: the section
+        // outlet. The per-session state stays intact for the return
+        // trip.
+        let main = match self.route {
+            Route::Chat => self.render_workspace(window, cx),
+            Route::Settings(section) => self.render_settings_main(section, cx),
         };
-        root.children(self.render_windows_caption_controls(window, cx))
+        let overlays = self.render_overlays(window.viewport_size(), window, cx);
+        // The whole app page is one keyed `animate-in` entrance (zeron
+        // App.tsx `<div key={phase} className="animate-in h-full">`):
+        // arriving from the splash or any gate fades the page in; the
+        // splash-out crossfades over it on boot.
+        // The sidebar resize handle FLOATS over the sidebar/workspace
+        // seam (zero layout width) so the sidebar's right gutter stays
+        // exactly as wide as its left one — a 5px flex child here read
+        // as lopsided spacing.
+        let sidebar_seam = div()
+            .w(px(0.0))
+            .h_full()
+            .flex_none()
+            .relative()
+            .child(sidebar_handle.absolute().top_0().bottom_0().left(px(-2.0)));
+        let title_bar = self.render_title_bar(cx);
+        // Two columns: sidebar | workspace (or settings). The content
+        // row spans the FULL window height — the titlebar overlays it
+        // (glass, no fill); the sidebar pads itself down, and the
+        // top-row tiles' headers sit in the titlebar band.
+        let page = div()
+            .size_full()
+            .relative()
+            .child(
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_row()
+                    .child(sidebar)
+                    .child(sidebar_seam)
+                    .child(main),
+            )
+            .child(div().absolute().top_0().left_0().right_0().child(title_bar))
+            .child(self.render_titlebar_cluster(cx))
+            .children(overlays);
+        motion::fade_in("phase-app", page).into_any_element()
     }
 }
