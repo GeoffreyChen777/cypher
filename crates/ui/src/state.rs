@@ -23,7 +23,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use gpui::{App, AppContext, Context, Entity, Subscription, Task, WeakEntity};
 use gpui_tokio::Tokio;
@@ -33,12 +32,10 @@ use cypher_doc::{
     SessionCommandEntry, SessionCommandPayload, SessionCommandStatus, SessionMessageEntry,
     TranscriptDesync, TranscriptFrame,
 };
-use cypher_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use cypher_proto::{
-    AuthState, Chat, ChatIndicator, Device, EngineInfo, HarnessId, Session, SideChatStatus, Space,
-    WorkspaceScope,
+    AuthState, Chat, ChatIndicator, Device, Session, SideChatStatus, Space, WorkspaceScope,
 };
-use cypher_rpc::{RpcClient, RpcError, RpcReply, RpcService, memory_client, methods};
+use cypher_rpc::{RpcService, methods};
 
 use crate::prefs::SidebarSort;
 mod engine;

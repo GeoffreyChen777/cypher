@@ -1,6 +1,6 @@
 //! Row model — the diff flattened to line granularity (pure).
 
-use super::*;
+use super::{FileDiff, file_notices};
 
 /// One virtualized list row. The diff is flattened so each visible LINE is
 /// its own row (Zed's editor draws exactly the visible line range the same

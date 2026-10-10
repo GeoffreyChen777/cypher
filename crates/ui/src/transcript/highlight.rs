@@ -1,6 +1,15 @@
 //! Highlight store (background, time-sliced, paint-only).
 
-use super::*;
+use std::collections::HashMap;
+use std::sync::{Arc, Weak};
+use std::time::Instant;
+
+use cypher_syntax::LanguageId as Lang;
+use gpui::{Context, SharedString, Task};
+
+use crate::kit::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
+
+use super::Transcript;
 
 pub(super) struct HighlightEntry {
     key: DocumentHighlightKey,

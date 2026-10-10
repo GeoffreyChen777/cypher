@@ -23,7 +23,6 @@
 //!   the watch checksum says the tree moved.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +32,7 @@ use gpui::{
     ListState, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
 
-use cypher_proto::{Chat, CheckoutDiff, GitHistoryCommit};
+use cypher_proto::{CheckoutDiff, GitHistoryCommit};
 use cypher_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
@@ -43,7 +42,6 @@ use crate::kit::popover::{self, Popup};
 use crate::kit::theme::{MonoStyled, Theme};
 use crate::markdown;
 use crate::state::{AppState, EngineHandle};
-use cypher_syntax::LanguageId as Lang;
 
 pub mod layout;
 mod patch;

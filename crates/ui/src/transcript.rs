@@ -29,7 +29,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -44,7 +44,6 @@ use cypher_proto::view::Indicator;
 use cypher_proto::{AnsweredModel, Chat, HarnessId, ToolCall};
 
 use crate::kit::motion::{self, AnimationExt as _, RESIZE};
-use crate::kit::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::kit::theme::{MonoStyled, Theme};
 use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
 use crate::markdown::veil::RowVeil;
@@ -53,7 +52,6 @@ use crate::markdown::{
     render::{RenderCache, RenderOptions},
 };
 use crate::state::AppState;
-use cypher_syntax::LanguageId as Lang;
 mod spring;
 pub use spring::*;
 mod rows;

@@ -1,6 +1,12 @@
 //! Diff resolution against the selected chat, and the pane states (pure).
 
-use super::*;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+use cypher_proto::{Chat, CheckoutDiff};
+use cypher_syntax::LanguageId as Lang;
+
+use super::{DiffHighlights, FileDiff, FileStatus, LineKind, SourceSide};
 
 /// The diff shown for a chat: `checkout_id` match first, then device+cwd,
 /// then cwd alone.

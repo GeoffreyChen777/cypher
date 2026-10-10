@@ -1,5 +1,7 @@
 use super::*;
 use chrono::Utc;
+use cypher_proto::Chat;
+use cypher_syntax::LanguageId as Lang;
 
 const PATCH: &str = "\
 diff --git a/src/main.rs b/src/main.rs

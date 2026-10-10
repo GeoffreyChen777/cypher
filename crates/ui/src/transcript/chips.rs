@@ -1,6 +1,12 @@
 //! Tool summaries / chips and the working-indicator flavour (pure).
 
-use super::*;
+use cypher_proto::ToolCall;
+use gpui::SharedString;
+
+use super::{
+    CHIP_GAP, CHIP_HEIGHT, CHIPS_TOP_PAD, DETAIL_SEPARATOR, OUTPUT_BODY_PAD, OUTPUT_LINE_HEIGHT,
+    Row, RowKind, ToolDetail, ToolItem, fnv1a, tool_detail,
+};
 
 /// The ToolGroup summary line — "Ran 3 commands · edited 2 files".
 ///

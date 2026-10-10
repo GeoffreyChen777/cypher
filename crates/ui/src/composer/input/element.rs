@@ -1,6 +1,17 @@
 //! The custom element: measured auto-grow layout + shaped-line painting.
 
-use super::*;
+use std::rc::Rc;
+
+use gpui::{
+    AnyTooltip, App, BorderStyle, Bounds, DispatchPhase, ElementInputHandler, GlobalElementId,
+    IntoElement, LayoutId, MouseMoveEvent, PaintQuad, Pixels, Point, SharedString, Style, TextRun,
+    Window, fill, point, px, quad, relative, size,
+};
+
+use super::{
+    ComposerInputEvent, ComposerTextElement, MENTION_TOOLTIP_HEIGHT, MentionHit, MentionKind,
+    MentionTooltipTarget,
+};
 
 pub(super) struct ComposerTextPrepaint {
     cursor: Option<PaintQuad>,

@@ -15,14 +15,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, AnyTooltip, App, BackgroundExecutor, BorderStyle, Bounds, ClipboardEntry,
-    ClipboardItem, Context, CursorStyle, DispatchPhase, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
-    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PaintQuad, PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent, SharedString,
-    Style, StyledImage as _, Subscription, Task, TextRun, TextStyle, UTF16Selection,
-    UnderlineStyle, Window, WrappedLine, actions, div, fill, img, point, prelude::*, px, quad,
-    relative, size,
+    AnyElement, App, BackgroundExecutor, Bounds, ClipboardEntry, ClipboardItem, Context,
+    CursorStyle, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, KeyBinding,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent, SharedString,
+    StyledImage as _, Subscription, Task, TextRun, TextStyle, UTF16Selection, UnderlineStyle,
+    Window, WrappedLine, actions, div, img, point, prelude::*, px, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
