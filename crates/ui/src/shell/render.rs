@@ -1220,6 +1220,7 @@ impl Render for Shell {
             .child(scroll_activity)
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
                 if this
+                    .attention
                     .notification_activity
                     .interact(std::time::Instant::now())
                 {
@@ -1228,6 +1229,7 @@ impl Render for Shell {
             }))
             .capture_key_down(cx.listener(|this, _, _, cx| {
                 if this
+                    .attention
                     .notification_activity
                     .interact(std::time::Instant::now())
                 {
@@ -1320,10 +1322,11 @@ impl Shell {
         let selected = matches!(self.route, Route::Chat)
             .then(|| self.state.read(cx).selected_chat.clone())
             .flatten();
-        if let Some(activity) =
-            self.notification_activity
-                .sample(foreground, selected, std::time::Instant::now())
-        {
+        if let Some(activity) = self.attention.notification_activity.sample(
+            foreground,
+            selected,
+            std::time::Instant::now(),
+        ) {
             self.state.update(cx, |state, cx| {
                 state.report_notification_activity(activity, cx)
             });
@@ -1332,6 +1335,7 @@ impl Shell {
         crate::shell::notification_activity::scroll_observer(move |cx| {
             let _ = weak.update(cx, |shell, cx| {
                 if shell
+                    .attention
                     .notification_activity
                     .interact(std::time::Instant::now())
                 {
@@ -1584,7 +1588,7 @@ impl Shell {
         // delivered) heals within seconds of the user looking at the
         // app rather than waiting out the background probe cadence.
         let window_active = window.is_window_active();
-        if window_active && !self.was_window_active {
+        if window_active && !self.attention.was_window_active {
             self.state.update(cx, |s, cx| s.probe_sync(cx));
             // Platforms release independently, so the build you want
             // may have shipped while you were away. The engine rate
@@ -1601,7 +1605,7 @@ impl Shell {
                 .detach();
             }
         }
-        self.was_window_active = window_active;
+        self.attention.was_window_active = window_active;
         // A run finishing while you're LOOKING at the session must not
         // badge "completed" until you leave and return — mark it seen
         // live while the window is active (idempotent guard inside;

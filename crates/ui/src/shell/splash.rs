@@ -16,8 +16,8 @@ impl Shell {
         } else {
             0
         };
-        if self.dock_badge != Some(count) {
-            self.dock_badge = Some(count);
+        if self.attention.dock_badge != Some(count) {
+            self.attention.dock_badge = Some(count);
             tracing::debug!(count, "dock badge");
             crate::shell::notify::set_badge(count);
         }
@@ -196,7 +196,7 @@ impl Shell {
         // Cypher; the sidebar dot carries the rest.
         let app_focused = cx.active_window().is_some();
         for (chat_id, status, send_pending, title, in_scope) in sessions {
-            let prev = self.sound_prev.insert(chat_id, status);
+            let prev = self.attention.sound_prev.insert(chat_id, status);
             if in_scope
                 && let Some(prev) = prev
                 && let Some(sound) = crate::kit::sound::sound_for_transition(prev, status)

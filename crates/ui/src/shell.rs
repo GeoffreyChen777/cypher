@@ -1205,6 +1205,21 @@ struct CommentUi {
     _events: Subscription,
 }
 
+/// What drives the user's attention outside the window: session chimes,
+/// the Dock badge, and the desktop activity the engine is told about.
+struct Attention {
+    /// Last seen session status per chat — the chime trigger compares against
+    /// it (a row's FIRST appearance never chimes, so boot stays silent).
+    sound_prev: std::collections::HashMap<String, cypher_proto::SessionStatus>,
+    /// The count last written to the Dock badge (`None` = never written), so
+    /// frequent state notifies only touch AppKit when the number changes.
+    dock_badge: Option<usize>,
+    /// Last observed `window.is_window_active()` — rising edge fires a
+    /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
+    was_window_active: bool,
+    notification_activity: crate::shell::notification_activity::DesktopActivity,
+}
+
 pub struct Shell {
     /// The window's main state: lists (sidebar, spaces, sessions) in
     /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
@@ -1249,12 +1264,8 @@ pub struct Shell {
     sidebar: SidebarUi,
     /// `settings.last_space_id` applied once after the first spaces frame.
     space_boot_applied: bool,
-    /// Last seen session status per chat — the chime trigger compares against
-    /// it (a row's FIRST appearance never chimes, so boot stays silent).
-    sound_prev: std::collections::HashMap<String, cypher_proto::SessionStatus>,
-    /// The count last written to the Dock badge (`None` = never written), so
-    /// frequent state notifies only touch AppKit when the number changes.
-    dock_badge: Option<usize>,
+    /// Chimes, the Dock badge and desktop activity.
+    attention: Attention,
     /// Session Fork idempotence: `(sourceChatId, anchorMessageId) → requestId`
     /// (the client-minted target chat id). The SAME id is reused across RPC
     /// errors / lost replies so a retry returns the already-created chat;
@@ -1269,10 +1280,6 @@ pub struct Shell {
     boot: EngineBootConfig,
     data_dir: PathBuf,
     settings: UiSettings,
-    /// Last observed `window.is_window_active()` — rising edge fires a
-    /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
-    was_window_active: bool,
-    notification_activity: crate::shell::notification_activity::DesktopActivity,
     /// Manually driven tweens and this frame's motion bookkeeping.
     motion: ShellMotion,
     /// Fullscreen tracking and the titlebar's window drag.
@@ -1537,8 +1544,12 @@ impl Shell {
                 collapsed: std::collections::HashSet::new(),
             },
             space_boot_applied: false,
-            sound_prev: std::collections::HashMap::new(),
-            dock_badge: None,
+            attention: Attention {
+                sound_prev: std::collections::HashMap::new(),
+                dock_badge: None,
+                was_window_active: false,
+                notification_activity: Default::default(),
+            },
             fork_request_ids: std::collections::HashMap::new(),
             sync: SyncUi {
                 org: None,
@@ -1554,8 +1565,6 @@ impl Shell {
             boot,
             data_dir,
             settings,
-            was_window_active: false,
-            notification_activity: Default::default(),
             motion: ShellMotion {
                 sidebar_tween: None,
                 titlebar_tween: None,
@@ -1666,6 +1675,7 @@ impl Shell {
                     };
                     if live
                         || shell
+                            .attention
                             .notification_activity
                             .heartbeat_due(std::time::Instant::now())
                     {
