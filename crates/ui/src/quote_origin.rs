@@ -31,7 +31,7 @@ use crate::markdown::parser::{self, Block, BlockTree, parse_full};
 use crate::markdown::selection::{Span, row_of_key};
 
 /// What append mode puts between an answer and its translation
-/// (`renderTranslation` in `dist/pi-runtime/extensions/cypher-translation.ts`).
+/// (`renderTranslation` in `pi-runtime/extensions/cypher-translation.ts`).
 const APPEND_SEPARATOR: &str = "\n\n---\n\n";
 
 /// The translation half of an append-mode rendering: `display` is the

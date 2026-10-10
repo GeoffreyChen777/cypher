@@ -32,7 +32,7 @@ cd "$ROOT"
 # Reject stale/copied artwork before building or signing an app. Near-opaque
 # pixels make macOS 26 inset the artwork on a second, gray icon backplate.
 xcrun swift "$ROOT/scripts/macos-icon.swift" check \
-  "$ROOT/dist/cypher.png" "$ROOT/dist/macos/icon-1024.png"
+  "$ROOT/packaging/cypher.png" "$ROOT/packaging/macos/icon-1024.png"
 
 # Shared by the release bundle and the fast icon regression/preview path.
 # Use an owned temporary directory, not the existing signed app or iconset.
@@ -43,13 +43,13 @@ package_icon() (
   iconset="$scratch/cypher.iconset"
   mkdir -p "$iconset"
   for size in 16 32 128 256 512; do
-    sips -z "$size" "$size" "$ROOT/dist/macos/icon-1024.png" \
+    sips -z "$size" "$size" "$ROOT/packaging/macos/icon-1024.png" \
       --out "$iconset/icon_${size}x${size}.png" >/dev/null
     retina=$((size * 2))
     if [[ "$retina" -eq 1024 ]]; then
-      cp "$ROOT/dist/macos/icon-1024.png" "$iconset/icon_${size}x${size}@2x.png"
+      cp "$ROOT/packaging/macos/icon-1024.png" "$iconset/icon_${size}x${size}@2x.png"
     else
-      sips -z "$retina" "$retina" "$ROOT/dist/macos/icon-1024.png" \
+      sips -z "$retina" "$retina" "$ROOT/packaging/macos/icon-1024.png" \
         --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
     fi
   done
@@ -72,7 +72,7 @@ python3 scripts/ci/check-production-profile.py "$ROOT/target/release/cypher"
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$ROOT/target/release/cypher" "$APP/Contents/MacOS/cypher"
-sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
+sed "s/__VERSION__/$VERSION/" "$ROOT/packaging/macos/Info.plist" >"$APP/Contents/Info.plist"
 
 # Generate every standard/Retina size from the alpha-normalized macOS variant.
 # Do not copy the shared PNG here: preserve its artwork, but normalize its
@@ -126,8 +126,8 @@ python3 -c 'import dmgbuild' 2>/dev/null ||
 # Pair the 1x/2x background renders into a hidpi tiff so the artwork stays
 # crisp on retina displays.
 BG_TIFF="$OUT_DIR/dmg-background.tiff"
-tiffutil -cathidpicheck "$ROOT/dist/macos/dmg-background.png" \
-  "$ROOT/dist/macos/dmg-background@2x.png" -out "$BG_TIFF" >/dev/null 2>&1
+tiffutil -cathidpicheck "$ROOT/packaging/macos/dmg-background.png" \
+  "$ROOT/packaging/macos/dmg-background@2x.png" -out "$BG_TIFF" >/dev/null 2>&1
 
 APP="$APP" DMG="$DMG" BG_TIFF="$BG_TIFF" python3 - <<'PY'
 import os

@@ -77,7 +77,7 @@ else
   # Monitor mode gives the background job its own process group on both macOS
   # and Linux, without depending on the Linux-only `setsid` utility.
   set -m
-  bash -c "cd '$ROOT/edge' && exec npx wrangler dev --port '$EDGE_PORT' --var AUTH_MODE:dev" \
+  bash -c "cd '$ROOT/apps/edge' && exec npx wrangler dev --port '$EDGE_PORT' --var AUTH_MODE:dev" \
     >"$LOG_DIR/edge.log" 2>&1 &
   EDGE_PID=$!
   set +m

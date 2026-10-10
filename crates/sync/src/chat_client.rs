@@ -1,4 +1,4 @@
-//! ChatClient — WebSocket transport for chat2 rooms (docs/chat2-sync.md C1):
+//! ChatClient — WebSocket transport for chat2 rooms (docs/design/chat2-sync.md C1):
 //! hello/state handshake with client-side checkpoint precision, cursor-based
 //! row backfill, push/ack with a pending-unacked queue, inbound presence
 //! relay, probe/redial liveness, and reconnect with exponential backoff.
@@ -7,7 +7,7 @@
 //! [`ChatDocSink`] the engine implements over its `ChatDocHandle` (import +
 //! persist doc AND cursor in one transaction — the C2 rule). Wire frames are
 //! the binary chat2 codec ([`crate::chat_frames`]), byte-compatible with
-//! `edge/src/chat-frames.ts`.
+//! `apps/edge/src/chat-frames.ts`.
 //!
 //! Liveness discipline matches `registry.rs`: transport pings prove nothing
 //! about the DO; room health is judged only by protocol frames with probe

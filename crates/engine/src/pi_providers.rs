@@ -47,7 +47,7 @@ pub struct SaveProvider {
 /// Serialize local read-modify-write requests across RPC connections.
 static OPERATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-const HELPER_SOURCE: &str = include_str!("../../../dist/pi-runtime/provider-service.mjs");
+const HELPER_SOURCE: &str = include_str!("../../../pi-runtime/provider-service.mjs");
 
 fn helper_path(paths: &PiRuntimePaths) -> Result<std::path::PathBuf, String> {
     let bundled = paths.current.join("provider-service.mjs");

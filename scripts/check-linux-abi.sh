@@ -32,7 +32,8 @@ if ! command -v "$READELF" >/dev/null 2>&1; then
   exit 2
 fi
 
-# Must be a readable Linux ELF: readelf -h fails on scripts/data/foreign ELFs.
+# Must be a readable Linux ELF: readelf -h fails on scripts, data files and
+# foreign ELFs.
 if ! "$READELF" -h "$BIN" >/dev/null 2>&1; then
   echo "error: $BIN is not an ELF file readable by readelf" >&2
   exit 2

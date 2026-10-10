@@ -3,7 +3,7 @@
 //! (the sidebar update strip + macOS bundle swap).
 //!
 //! Release layout (see `.github/workflows/{linux,macos}.yml` and
-//! `edge/src/install.sh`): artifacts live in the `cypher-releases` R2 bucket,
+//! `apps/edge/src/install.sh`): artifacts live in the `cypher-releases` R2 bucket,
 //! served pre-auth at `{edge}/releases/*`. Platforms publish independently, so
 //! each has its own channel: `{platform}/manifest.json` carries that platform's
 //! version, build, per-artifact sha256 and the role→file-name mapping used to
@@ -19,6 +19,8 @@
 //! - **MacApp** (running out of a `Cypher.app` bundle): download the app
 //!   tarball, swap the bundle directory, relaunch. Driven by the UI.
 //! - **Unmanaged** (source builds, hand-copied binaries): report only.
+
+#![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

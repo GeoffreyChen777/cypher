@@ -10,6 +10,8 @@
 //! - [`DocsStore`]: snapshot persistence (the doc IS the outbox — commands + user entries
 //!   flush immediately) and the processed-command ledger with mark-BEFORE-execute semantics.
 
+#![forbid(unsafe_code)]
+
 pub mod chat_client;
 pub mod chat_frames;
 pub mod dial;

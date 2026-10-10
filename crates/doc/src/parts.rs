@@ -23,7 +23,7 @@ pub const CODEMODE_SCRIPT_MAX_CHARS: usize = 8_000;
 /// Char cap for a Pi `tool_search` query kept in the doc.
 pub(crate) const TOOL_SEARCH_QUERY_MAX_CHARS: usize = 500;
 
-/// The doc-resident form of a tool output (docs/chat2-sync.md A1). There is no
+/// The doc-resident form of a tool output (docs/design/chat2-sync.md A1). There is no
 /// sidecar, so this IS the whole record in the doc — the full text survives
 /// only in the host's local run journal:
 ///
@@ -135,11 +135,6 @@ pub enum MessageStatus {
 }
 
 /// One rendered part of an assistant message.
-// `Tool` is much wider than the other variants, but this type is constructed
-// and matched in ~200 places and is the doc's persisted shape. Boxing that one
-// variant would ripple through every fold, render and test for a stack-size
-// win that never showed up in a profile.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum MessagePart {

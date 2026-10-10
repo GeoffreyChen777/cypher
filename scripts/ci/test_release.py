@@ -30,7 +30,7 @@ class Fixture(unittest.TestCase):
         self.dist.mkdir()
         self.out = self.root / "plan"
         self.v = "1.2.3"
-        self.spec = release.ROOT / "dist/pi-runtime/package.json"
+        self.spec = release.ROOT / "pi-runtime/package.json"
         definition = json.loads(self.spec.with_name("release.json").read_text())
         self.rv = definition["version"]
         self.minimum = definition["minimumCypherVersion"]
@@ -909,7 +909,7 @@ class Policies(unittest.TestCase):
         self.assertNotIn("GITHUB_TOKEN", workflow)
 
     def test_manual_runtime_tag_context_is_never_a_publish(self):
-        rv = json.loads((release.ROOT / "dist/pi-runtime/release.json").read_text())["version"]
+        rv = json.loads((release.ROOT / "pi-runtime/release.json").read_text())["version"]
         with tempfile.TemporaryDirectory() as root:
             output = Path(root) / "outputs"
             env = {k: v for k, v in os.environ.items() if not k.startswith(("GITHUB_", "CLOUDFLARE_"))}

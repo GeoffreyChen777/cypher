@@ -1,15 +1,11 @@
 //! HostRelay + ClientLink end-to-end over an in-memory fake device room.
 //!
-//! The fake implements the `DeviceRoom` DO's relay semantics (edge/src/device-room.ts):
+//! The fake implements the `DeviceRoom` DO's relay semantics (apps/edge/src/device-room.ts):
 //! route client frames to the single host socket with `from` stamped; route host frames
 //! by `to` (bounce `client_gone` when the target left); host supersede (a new host join
 //! closes the predecessor); `client_closed` on client disconnect; `host_closed` broadcast
 //! on host disconnect; `host_offline` bounce when a client sends with no host; nudge
 //! frames delivered to the host.
-
-// tungstenite's `accept_hdr_async` callback signature fixes the Err type as a full
-// `Response` — its size is not ours to shrink.
-#![allow(clippy::result_large_err)]
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};

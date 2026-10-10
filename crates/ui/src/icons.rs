@@ -26,7 +26,7 @@ macro_rules! icon_assets {
         $(pub const $const_name: &str = concat!("icons/", $path, ".svg");)+
 
         /// The official Cypher app icon — raster brand artwork (served from the
-        /// master `dist/cypher.png`), not a glyph.
+        /// master `packaging/cypher.png`), not a glyph.
         pub const CYPHER_APP_ICON: &str = "images/cypher-app-icon.png";
 
         /// Serves the embedded glyph icons (SVG) and the app icon (PNG) to
@@ -40,7 +40,7 @@ macro_rules! icon_assets {
                         include_bytes!(concat!("../assets/icons/", $path, ".svg")).as_slice(),
                     )),)+
                     CYPHER_APP_ICON => Some(Cow::Borrowed(
-                        include_bytes!("../../../dist/cypher.png").as_slice(),
+                        include_bytes!("../../../packaging/cypher.png").as_slice(),
                     )),
                     _ => None,
                 })

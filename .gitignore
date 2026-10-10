@@ -12,9 +12,17 @@ __pycache__/
 node_modules
 .wrangler
 build/
-edge/dist/
+apps/edge/dist/
 
 # Xcode per-user workspace state and local distribution products.
 **/xcuserdata/
 *.xcarchive/
 *.ipa
+DerivedData/
+
+# Local tool and editor state.
+.venv/
+venv/
+.idea/
+.vscode/
+*.log

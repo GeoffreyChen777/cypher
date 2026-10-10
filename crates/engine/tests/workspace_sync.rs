@@ -468,7 +468,7 @@ async fn chat_config_selects_the_run_harness() {
 }
 
 /// Live-edge variant: the same convergence through a real workspace room. Requires
-/// the TS edge (`wrangler dev` in `edge/` with AUTH_MODE=dev):
+/// the TS edge (`wrangler dev` in `apps/edge/` with AUTH_MODE=dev):
 ///
 /// ```sh
 /// CYPHER_EDGE_WS=ws://127.0.0.1:8787 cargo test -p cypher-engine -- --ignored

@@ -1,0 +1,40 @@
+export interface Env {
+  DEVICE_ROOMS: DurableObjectNamespace;
+  /** Per-user workspace registries (`reg1/{orgId}/{userId}`) — the row-table
+   * replacement for the Loro workspace doc (docs/design/registry-sync.md). */
+  REGISTRY_ROOMS: DurableObjectNamespace;
+  /** chat2 session rooms (`chat2/{chatId}`) — dumb authenticated log relays
+   * (docs/design/chat2-sync.md). */
+  CHAT_ROOMS: DurableObjectNamespace;
+  BLOBS: R2Bucket;
+  /** Release artifacts (headless tarballs, dmgs, latest.txt) served at
+   * /releases/* for the curl-install flow. */
+  RELEASES: R2Bucket;
+  WORKOS_CLIENT_ID: string;
+  /** "workos" (JWT) or "dev" (local tests only). */
+  AUTH_MODE: string;
+  /** Optional overrides for the WorkOS trust anchor. */
+  WORKOS_ISSUER?: string;
+  WORKOS_JWKS_URL?: string;
+  /** WorkOS secret API key (wrangler secret) — powers the absorbed /auth/*
+   * routes (code exchange, refresh, orgs). Unset ⇒ those routes answer 501. */
+  WORKOS_API_KEY?: string;
+  PUSH_DEVICES?: DurableObjectNamespace;
+  APNS_SENDER?: Fetcher;
+  NOTIFICATIONS_ENABLED?: string;
+  APNS_TEAM_ID?: string;
+  APNS_KEY_ID?: string;
+  /** APNs provider key, NOT the App Store Connect upload key. Worker secret. */
+  APNS_PRIVATE_KEY?: string;
+}
+
+/** Header the Worker stamps on requests it forwards into DOs after verifying
+ * the caller's JWT. DOs trust it blindly — they are only reachable through
+ * the Worker (design §2: "DO never sees an unauthenticated frame"). */
+export const AUTH_USER_HEADER = "x-cypher-auth-user";
+
+export const json = (value: unknown, status = 200): Response =>
+  new Response(JSON.stringify(value), {
+    status,
+    headers: { "content-type": "application/json" }
+  });

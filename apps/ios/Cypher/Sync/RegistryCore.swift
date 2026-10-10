@@ -1,7 +1,7 @@
 // Registry merge core + client-side doc — the Swift mirror of
-// edge/src/registry-core.ts (pure op/row semantics) and
+// apps/edge/src/registry-core.ts (pure op/row semantics) and
 // crates/doc/src/registry.rs (RegistryDoc: authoritative rows + pending
-// overlay). See docs/registry-sync.md.
+// overlay). See docs/design/registry-sync.md.
 //
 // The registry stores CURRENT STATE ONLY: a row is a bag of fields, each
 // field carries the HLC of its last write, and a write applies iff its clock
@@ -137,7 +137,7 @@ struct HlcClock: Codable, Hashable, Sendable {
     }
 }
 
-// MARK: - Rows and ops (wire-compatible with edge/src/registry-core.ts)
+// MARK: - Rows and ops (wire-compatible with apps/edge/src/registry-core.ts)
 
 struct RegistryRow: Hashable, Codable, Sendable {
     var kind: String
@@ -186,7 +186,7 @@ struct RegistryApplyResult {
 /// Apply one op to a row (absent = nil). Pure; returns the (possibly new) row
 /// and whether anything changed. Callers stamp `row.seq` on change.
 ///
-/// Rules (docs/registry-sync.md):
+/// Rules (docs/design/registry-sync.md):
 /// - field write applies iff clock > stored clock for that field;
 /// - `update` never creates or revives a row ("never invent rows");
 /// - `upsert` creates, and revives a tombstone iff newer than `delHlc`;

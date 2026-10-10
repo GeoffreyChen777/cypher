@@ -64,7 +64,7 @@ fn post_impl(title: &str, body: &str) {
 }
 
 /// The identity banners are attributed to — the packaged app's bundle id
-/// (`dist/macos/Info.plist`), which the center resolves to its name + icon.
+/// (`packaging/macos/Info.plist`), which the center resolves to its name + icon.
 #[cfg(target_os = "macos")]
 const MACOS_BUNDLE_ID: &std::ffi::CStr = c"ai.mvp-lab.cypher";
 

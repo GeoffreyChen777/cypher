@@ -12,7 +12,7 @@
 import AuthenticationServices
 import SwiftUI
 
-/// Production cloud endpoints — mirrors edge/wrangler.jsonc.
+/// Production cloud endpoints — mirrors apps/edge/wrangler.jsonc.
 enum Endpoints {
     static let edgeURL = URL(string: "https://edge.letscypher.app")!
     static let workosClientId = "client_01M0JTKFKB6QZWHZDGYW7AN8QH"

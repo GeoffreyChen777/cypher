@@ -64,7 +64,7 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup show active-toolchain
-      - run: bash scripts/test-check-linux-abi.sh
+      - run: bash scripts/tests/test-check-linux-abi.sh
       - name: package headless application
         env:
           CYPHER_RELEASE_BUILD: ${{ needs.preflight.outputs.build }}
@@ -72,7 +72,7 @@ jobs:
       - name: isolated CLI and installer regressions
         run: |
           cargo test --locked --no-default-features -p cypher -p cypher-update --bins --lib
-          python3 scripts/test-linux-cli.py --binary target/release/cypher
+          python3 scripts/tests/test-linux-cli.py --binary target/release/cypher
       - name: smoke extracted artifact and recheck ABI
         env:
           VERSION: ${{ needs.preflight.outputs.version }}

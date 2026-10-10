@@ -3,7 +3,7 @@
 //! Chat's first send (engine).
 //!
 //! Layout contract — `splitEnvelope` in
-//! `dist/pi-runtime/extensions/cypher-translation.ts` parses it, so that
+//! `pi-runtime/extensions/cypher-translation.ts` parses it, so that
 //! translation touches only the user's own words and never the reference
 //! material around them:
 //!

@@ -25,7 +25,7 @@ Codex, Cursor, Grok and Hermes harnesses stay readable but cannot continue.
 ## 1. Topology (unchanged shape, new materials)
 
 ```
-gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══ engine B ─ RPC ─ gpui UI
+gpui UI ─ in-proc/Unix IPC RPC ─ engine A ══ DeviceRoom DO relay ══ engine B ─ RPC ─ gpui UI
                     │       optional edge Worker: auth, rooms, R2        │
                     └── optional chat2 sync ──  ChatRoom DO (per chat) ──┘
                                           └─ Workspace registry room ────┘
@@ -33,7 +33,7 @@ gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══
 
 - **Engine = backend** (was `@cypher/backend`): runs agents, owns auth, terminals, repos/worktrees,
   diff sync, doc hosting. Pure Rust daemon, fully functional headless.
-- **UI = viewport** (was Electron): gpui app rendering engine state. Talks the same typed RPC whether the engine is in-process or a separate daemon. Organized around **spaces** — (device, folder) pairs, local or synced according to the active profile. A window is two columns: the **sidebar** (the data — project cards with their sessions, sorted by activity, name, device or date) and a tiled **session workspace** (`docs/workspace-layout.md`): a tree of splits whose leaves are tile groups of session tabs. Each tab is a session with its own chat, a right dock (Git, Files, side chats) and a bottom terminal dock, all bound to that session. The workspace is a **device-local viewport** onto the list: closing a tab is local-only — archiving is an explicit sidebar action — and a sidebar click opens (or focuses) the session in the focused tile, ⌘-click in a split, drag anywhere. The layout persists per window (`ui-settings.json` `workspace`, `projectWorkspaces` for project windows) and dock sizes per session (`sessionDocks`, fractions of the session area). Every visible tile renders from its own **session context** — a secondary `AppState` pinned to that session — while the window's main `AppState` runs **lists-only** (list watches and the sidebar; its selection follows the focused tile). The new-session canvas carries a space picker (defaulting to the last selected space); new sessions are minted onto the picked space's device via relay-forwardable RPCs.
+- **UI = viewport** (was Electron): gpui app rendering engine state. Talks the same typed RPC whether the engine is in-process or a separate daemon. Organized around **spaces** — (device, folder) pairs, local or synced according to the active profile. A window is two columns: the **sidebar** (the data — project cards with their sessions, sorted by activity, name, device or date) and a tiled **session workspace** (`docs/design/workspace-layout.md`): a tree of splits whose leaves are tile groups of session tabs. Each tab is a session with its own chat, a right dock (Git, Files, side chats) and a bottom terminal dock, all bound to that session. The workspace is a **device-local viewport** onto the list: closing a tab is local-only — archiving is an explicit sidebar action — and a sidebar click opens (or focuses) the session in the focused tile, ⌘-click in a split, drag anywhere. The layout persists per window (`ui-settings.json` `workspace`, `projectWorkspaces` for project windows) and dock sizes per session (`sessionDocks`, fractions of the session area). Every visible tile renders from its own **session context** — a secondary `AppState` pinned to that session — while the window's main `AppState` runs **lists-only** (list watches and the sidebar; its selection follows the focused tile). The new-session canvas carries a space picker (defaulting to the last selected space); new sessions are minted onto the picked space's device via relay-forwardable RPCs.
 - **Edge (TypeScript, ported from zeron `apps/edge`)**: Worker + ChatRoom DO (per chat, the
   chat2 row protocol) + RegistryRoom DO (per user) + DeviceRoom DO (per device) + R2
   attachments + WorkOS JWKS auth. The retired SessionRoom class stays bound as a 410 stub so
@@ -52,7 +52,7 @@ Single binary `cypher`:
   permissions, peer-UID checks and the `cypher.rpc.v1` subprotocol.
 - `cypher headless` — engine only. A clean installation immediately serves its local profile over Unix IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
-See [Unix IPC](docs/unix-ipc.md) for endpoint ownership, service names, Pi bridge,
+See [Unix IPC](docs/design/unix-ipc.md) for endpoint ownership, service names, Pi bridge,
 and separate UI/Engine data directories. TCP IPC and its environment setting
 have been removed; remote Edge transports are unchanged.
 
@@ -106,9 +106,10 @@ Two persistent doc kinds. When sync is enabled, session docs ride the chat2 row 
    `packages/session-doc` (same container names/shapes): `meta` map, `messages` list (parts as list-of-maps with **LoroText bodies** — the
    measured 1.03× oplog shape; never LWW value rewrites), `commands` list with ledger rules 1–3
    (append-only per-device entries; host-only outcomes; dedupe/TTL/supersede evaluation).
-   Continuation splitting at 256KB, render-only tool parts (full inputs stay in the host's local
-   run journal), tail/diff sidecars. Constants carried over (`STREAM_COMMIT_MS=120`,
-   `DO_FLUSH_MS=5s`, compaction at 8MB, retain 30d, tail 64).
+   Continuation entries (`continuationOf`) are joined back into one message on read; tool parts
+   are render-only (full inputs stay in the host's local run journal). Hosts publish neither a
+   tail nor a diff sidecar ([chat2 sync](docs/design/chat2-sync.md)). Streamed assistant text
+   commits every `STREAM_COMMIT_MS` (120 ms, `cypher-doc` constants).
 
 2. **Workspace registry doc** (per profile) — the `registry1` snapshot stores spaces (id, deviceId, path, name?, gitDetected, checkoutId), the chats index (id, deviceId, title, archived, cwd, branch, checkoutId, spaceId, lastSeenAt, lastMessagePreview/At, config), devices, session-status rows, and checkout-diff summary pointers. A space is a device+folder pair in the active profile; the owning device's `SpacesSync` stamps git presence so branch pickers and the diff sidebar can gate without another RPC. Local scope keeps the registry entirely in its profile store. Synced and development scopes join `/registry/{orgId}/ws`, backed by the private per-user room `reg1/{orgId}/{userId}`; rows are never visible to every member of an organization.
 
@@ -119,8 +120,8 @@ Two persistent doc kinds. When sync is enabled, session docs ride the chat2 row 
 3. **Mirror layer** (`cypher-doc` crate) — Rust equivalent of loro-mirror: typed structs for the
    schema, **incremental** application of `doc.subscribe` diffs into cached state (no full
    re-hydration per change — this is also what fixes zeron's known O(transcript) re-projection
-   inefficiency, remaining-work item 1a), and a diff-reconcile write path (evaluate `lorosurgeon`
-   0.2.x as a dep; our schema is small enough to hand-roll if it doesn't fit). The UI renders
+   inefficiency, remaining-work item 1a), and a hand-rolled diff-reconcile write path (the
+   schema is small enough that no mirror library is used). The UI renders
    mirror state directly with per-entry change notifications — the "endgame" the TS
    implementation documented but never reached.
 
@@ -130,47 +131,58 @@ executed by the chat's **host** device (executor gated on chat ownership; mark-p
 execute; steer with no live run dispatches as the next turn). Offline sends queue in the doc.
 This is zeron's proven design, kept verbatim.
 
-## 3. Cargo workspace
+## 3. Repository and crates
 
 ```
 cypher/
-  Cargo.toml                 # workspace
+  Cargo.toml  rust-toolchain.toml  rustfmt.toml  .editorconfig
   crates/
-    proto/        cypher-proto    # wire types: AgentEvent, ToolCall, RunRequest, Model,
-                                 # entities, RPC envelopes (serde; ndjson framing);
-                                 # `view` = the pure derivations both frontends share
-                                 # (sort orders, staleness gating, grouping, boot gate)
-    doc/          cypher-doc      # session-doc + workspace-registry schemas, mirror layer,
-                                 # parts fold, continuations, command ledger, sidecars
-    sync/         cypher-sync     # edge room clients (registry rows, chat2 row protocol
-                                 # over WS/HTTPS pull-push), ephemeral presence,
-                                 # DocsStore (SQLite snapshots + processed-command ledger)
-    harness/      cypher-harness  # Harness trait; Pi over its native RPC, mock;
-                                 # steering mailbox, requestInput,
-                                 # models/reasoning/options catalogs
-    engine/       cypher-engine   # sessions engine (pub/sub, run journal, recovery, stall
-                                 # watchdog), doc host + command executor, repos/worktrees,
-                                 # checkout-diff sync, terminals (portable-pty), uploads,
-                                 # auth (WorkOS via edge),
-                                 # device-room host/peers, identity
-    rpc/          cypher-rpc      # UiRpc/ControlRpc: typed req/resp/stream over WS (tokio-
-                                 # tungstenite) + in-memory transport; device-room virtual
-                                 # sockets ({s,k,to,from} frames)
-    ui/           cypher-ui       # gpui app: shell, sidebar, conversation, composer,
-                                 # terminal view, diff pane, settings, animation kit
-    env/          cypher-env      # environment/profile resolution, data directories,
-                                 # IPC socket paths
-    syntax/       cypher-syntax   # syntax-highlighting contracts (tree-sitter)
+    env/          cypher-env      # every CYPHER_* variable, data directories, IPC socket paths
+    proto/        cypher-proto    # wire types (AgentEvent, entities, RPC envelopes) + `view`,
+                                  # the pure derivations both frontends share
+    syntax/       cypher-syntax   # tree-sitter syntax highlighting
+    doc/          cypher-doc      # session-doc + workspace-registry schemas, mirror layer, parts fold
     update/       cypher-update   # release checking + self-update (engine, CLI, UI)
+    sync/         cypher-sync     # Edge room clients (chat2, registry), presence, SQLite DocsStore
+    harness/      cypher-harness  # Harness trait; Pi over its native RPC; mock harness
+    rpc/          cypher-rpc      # typed RPC protocol, Unix IPC transport, device-room relay
+    engine/       cypher-engine   # sessions, doc host, repos/worktrees, terminals, auth, RPC service
+    ui/           cypher-ui       # gpui desktop app
   apps/
-    cypher/                       # the binary (headed default, `headless` subcommand)
+    cypher/                       # the binary (headed default, `headless` subcommand, CLI)
+    edge/                         # TypeScript Worker + Durable Objects
     ios/                          # SwiftUI iPhone client (apps/ios/README.md)
     landing/                      # letscypher.app landing page (static Worker assets)
     www-redirect/                 # www → apex redirect Worker
-  edge/                          # TypeScript Worker + DOs (ported from cypher/apps/edge,
-                                 # + auth-exchange routes absorbed from apps/server)
-  docs/                          # reference docs, research decisions, release notes
+  pi-runtime/                     # curated Pi runtime bundle: extensions, patches, release.json
+  packaging/                      # app icon, macOS Info.plist template, dmg art
+  scripts/                        # dev-*, package-*, check.sh; ci/, tests/, ops/
+  docs/                           # design, features, development, operations (docs/README.md)
+  .github/workflows/              # CI, deploy and per-platform release workflows
 ```
+
+`crates/harness/src/pi/engine-client.mjs` is the one non-Rust source inside a crate: the
+harness embeds it with `include_str!` and hands it to Pi, so it lives beside its user rather
+than in `pi-runtime/`.
+
+### Crates and layering
+
+Each crate depends only on crates in lower layers, dev-dependencies included;
+`scripts/ci/check-crate-layers.py` holds this table and fails CI when a manifest breaks it.
+
+| Layer | Crates |
+| --- | --- |
+| foundation | `cypher-env`, `cypher-proto`, `cypher-syntax` |
+| model and transport | `cypher-doc`, `cypher-update`, `cypher-net` (planned: the WebSocket dial and wake transport) |
+| clients | `cypher-sync`, `cypher-harness` |
+| relay | `cypher-rpc` |
+| engine | `cypher-engine` |
+| desktop UI | `cypher-ui` |
+| application | `cypher` |
+
+The engine embeds everything below it; the desktop UI embeds the engine for in-process mode
+and speaks `cypher-rpc` to a separate daemon. Conventions and checks:
+[Development](docs/development/README.md).
 
 Engine async runtime: **tokio** throughout; the UI bridges via `gpui_tokio` (`Tokio::spawn`
 futures surfaced as gpui `Task`s). In-process mode runs the engine on an app-owned
@@ -184,17 +196,17 @@ Loro hook rule: a Loro subscription (`subscribe_local_update`, `subscribe_root`)
 forwards data to a channel or a watch — it takes no engine lock and does no I/O. Loro runs
 hooks synchronously inside commit/export on the calling thread and parks every other
 thread committing to the same doc until the hook returns, so a lock inside a hook turns
-contention into a cross-thread stall and re-entry into a self-deadlock (the 2026-09-18
-headless hang: ACK → export → hook → client lock already held). The matching client-side
+contention into a cross-thread stall and re-entry into a self-deadlock (ACK → export → hook
+→ client lock already held). The matching client-side
 contract is on `ChatDocSink`: the chat2 client never holds its state lock while calling a
 sink method that touches the document.
 
-## 4. UI plan (gpui) — parity + smoothness
+## 4. UI (gpui)
 
 - **Deps**: `gpui` + `gpui_platform` pinned to one Zed rev (Apache-2.0). **We do not use Zed's
   GPL crates** (`markdown`, `ui`, `theme`, `editor`) — markdown, components, and theme are ours.
 - **Transcript**: gpui `list()` + `ListState::new(n, ListAlignment::Bottom, overdraw)` (sum-tree
-  offsets, follow-tail). On top of it, port the mugen behaviors that gpui doesn't give us:
+  offsets, follow-tail). On top of it, the mugen behaviors gpui doesn't provide:
   - stick-to-bottom **spring** with feed-forward tracking of streaming growth; interrupt from
     *user input* (wheel-up / drag), re-engage within a 70px band; own-send re-engages + smooth
     scrolls;
@@ -208,12 +220,12 @@ sink method that touches the document.
   coalescing (Zed's proven pattern), block-level incremental re-parse of the streaming tail
   (incremark's O(delta) idea: only re-parse from the last stable block boundary), monochrome
   theme where **numbers drive layout, colors are paint**. Code blocks: monospace, no wrap ⇒
-  height = lines × line-height (layout independent of highlight); syntax highlighting via
-  `synoptic`/`syntect`-class tokenizer run time-sliced in the background, colors applied as text
-  runs (paint-only). Streaming **fade-in veil** on newly appended text via `with_animation`
+  height = lines × line-height (layout independent of highlight); syntax highlighting comes
+  from tree-sitter grammars in `cypher-syntax` ([Syntax highlighting](docs/design/syntax-highlighting.md)),
+  colors applied as text runs (paint-only). Streaming **fade-in veil** on newly appended text via `with_animation`
   opacity (paint-layer, never affects layout). `prefers-reduced-motion` honored.
-- **Composer**: hand-rolled gpui text input (start from Zed's `examples/input.rs`: IME, selection,
-  clipboard, key actions), compact↔expanded auto-flip by measured text width, auto-grow 76–260px,
+- **Composer**: hand-rolled gpui text input (derived from Zed's `examples/input.rs`: IME,
+  selection, clipboard, key actions), compact↔expanded auto-flip by measured text width, auto-grow 76–260px,
   Enter/Shift+Enter, Send→Steer→Stop morph, drafts + attachments per chat, drag-drop/paste
   images, QuestionPanel (paged, 1-9 keys, 220ms auto-advance) replacing the composer while input
   is requested. Pickers (harness/model, traits, repo w/ folder browser, branch w/ worktree
@@ -233,34 +245,35 @@ sink method that touches the document.
 - **Theme**: always-dark monochrome, oklch-derived neutral scale precomputed to Hsla, hairline
   borders, Geist/Geist Mono bundled fonts.
 
-## 5. Engine plan
+## 5. Engine
 
-Direct ports of zeron behaviors:
+Ports of zeron behaviors:
 - **Sessions engine**: per-session broadcast hub; on-disk run journal (resumable `seq` replay,
-  crash auto-resume); persistent steerable sessions (steering mailbox at step/turn boundary; idle
-  reaper; 10min stall watchdog); recovery stamps `aborted`.
+  crash auto-resume); persistent steerable sessions (steering mailbox at step/turn boundary;
+  30-minute idle reaper). There is deliberately no stall timeout: a live harness keeps the
+  session fresh with a heartbeat, and a turn-quiesce watchdog parks a turn whose end never
+  arrives; recovery stamps `aborted`.
 - **Doc host**: per-chat handle (join room, VV backfill, write user entries + stream assistant
-  segments at 120ms commits, drain commands host-only with processed-ledger idempotence, publish
-  diff sidecar, presence); warm-open recent chats (14d/cap 30); nudge-driven cold open; SQLite
-  snapshot store.
+  segments at 120ms commits, drain commands host-only with processed-ledger idempotence,
+  presence); a warm-doc LRU (`WARM_DOC_CAP` = 12 docs plus a byte budget) over a SQLite snapshot
+  store; nudge-driven cold open.
 - **Harness**: trait mirroring zeron's `HarnessShape`. The production harness is Pi, driven
   over its own RPC protocol (`docs/research/pi-rpc.md`); the mock harness backs tests and
   demos.
-- **Repos/diffs**: git2 or `git` subprocess (subprocess — matches zeron, avoids libgit2 edge
-  cases); worktrees under `~/.cypher/worktrees`; fs watchers (`notify`) + 2min repair; diff
-  capture (patch + numstat + untracked, 3MiB cap, sha256) → workspace registry summary + DO diff
-  sidecar.
+- **Repos/diffs**: the `git` subprocess (matches zeron, avoids libgit2 edge cases); worktrees
+  under `~/.cypher/worktrees`; fs watchers (`notify`) + 2min repair; diff capture (patch +
+  numstat + untracked, 3MiB cap, sha256) → workspace registry summary.
 - **Auth**: WorkOS through edge routes (`/auth/exchange`, `/auth/refresh`, orgs); loopback
   callback server headed, paste-code headless; dev mode (no key ⇒ bearer = configured user id).
 
-## 6. Edge plan (TypeScript, `edge/`)
+## 6. Edge (TypeScript, `apps/edge/`)
 
-Ported from `cypher/apps/edge` (device room byte relay + nudges + sidecar slots, R2
-attachments, JWKS auth). Its Loro-aware session room was later replaced by the chat2 ChatRoom
-log relay (`docs/chat2-sync.md`). Additions:
+Ported from zeron's `apps/edge` (device room byte relay + nudges, R2 attachments, JWKS auth).
+Its Loro-aware session room was replaced by the chat2 ChatRoom log relay
+([chat2 sync](docs/design/chat2-sync.md)). On top of the port:
 1. Private per-user registry rooms (`/registry/{orgId}/ws` → `reg1/{orgId}/{userId}`) with authenticated row sync and ephemeral device presence.
 2. `/auth/*` routes absorbed from `apps/server` (WorkOS API key in Worker secret).
-3. Drop `/seed` migration path and legacy sync anything (fresh app).
+3. No `/seed` migration path or legacy sync (fresh app).
 Hibernation hygiene: no idle timers (flush timer only while dirty), auto-response ping/pong —
 per `docs/research/durable-objects-language.md`.
 

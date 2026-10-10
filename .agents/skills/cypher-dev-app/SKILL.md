@@ -8,6 +8,8 @@ description: Start, rebuild, restart and verify the local Cypher desktop develop
 Use this skill to start, restart or smoke-test the local desktop dev app from
 this repository. It follows `AGENTS.md`: after each verified feature, rebuild
 and restart the dev UI, keep the running engine, then verify and report.
+Repository layout, checks and conventions: `docs/development/README.md`;
+the development Edge: `docs/development/local-edge.md`.
 
 ## Scope and ground rules
 
@@ -49,12 +51,12 @@ until CYPHER_DATA_DIR=~/.cypher-development/local-engine target/debug/cypher sta
 nohup scripts/dev-app.sh local > ~/.cypher-development/local-ui.log 2>&1 &
 ```
 
-`dev` mode syncs through a development Edge: run `cd edge && npm run dev`
+`dev` mode syncs through a development Edge: run `cd apps/edge && npm run dev`
 (a local `wrangler dev` on port 27640, bearer `dev-user@dev-org`), then
 `scripts/dev-engine.sh dev` and `scripts/dev-app.sh dev`. The engine sources
 the private env file at `CYPHER_DEV_ENV_FILE` (default
 `~/Documents/cypher-development.env`); `CYPHER_DEV_EDGE_URL` names a staging
-Edge instead. See `docs/local-edge.md`.
+Edge instead. See `docs/development/local-edge.md`.
 iOS: `scripts/dev-ios.sh` (see `apps/ios/README.md`).
 
 ## Rebuild and restart the UI
@@ -102,7 +104,7 @@ engine.
   the intended `CYPHER_DATA_DIR`. Socket paths derive from the UID and the
   canonical engine data directory; `CYPHER_IPC_PORT` has been removed. For a
   second instance use `CYPHER_DEV_INSTANCE`, never another port, and never
-  unlink a socket you did not create. See `docs/unix-ipc.md`.
+  unlink a socket you did not create. See `docs/design/unix-ipc.md`.
 - `dev-app.sh` exits with "start dev-engine.sh first": the engine for that
   mode/instance is not listening; check its log.
 - `dev-engine.sh dev` exits with "Missing …cypher-development.env": set

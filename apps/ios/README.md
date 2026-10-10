@@ -153,7 +153,7 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   same snapshot only when expanded. The target is this chat's host/checkout, never the phone or another
   device. Files requires the updated engine RPCs; old hosts show an upgrade
   notice. No editing, staging, commits or terminal fallback. See
-  [workspace browser](../../docs/ios-workspace-browser.md) for limits and
+  [workspace browser](../../docs/features/ios-workspace-browser.md) for limits and
   validation boundaries.
 - **Device isolation:** changing the folder browser's device invalidates old
   requests/results. Creation is locked to the device that supplied the listing.
@@ -206,7 +206,7 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   that is still animating, including an interactive back swipe, before the
   navigation path changes. Real-device APNs delivery is a separate
   rollout/acceptance step. See
-  [`docs/notifications.md`](../../docs/notifications.md) for rollout boundaries.
+  [`docs/design/notifications.md`](../../docs/design/notifications.md) for rollout boundaries.
 
 ### Validation boundary
 
@@ -223,7 +223,7 @@ provider setup, offline recovery, existing sessions and archived sessions.
 ## Build & run
 
 For TestFlight/App Store preparation, signing and publication boundaries, see
-[`docs/ios-release.md`](../../docs/ios-release.md).
+[`docs/operations/ios-release.md`](../../docs/operations/ios-release.md).
 
 Requires Xcode 26+ (iOS 26 SDK — Liquid Glass APIs).
 
@@ -270,9 +270,9 @@ own background color. It does not change macOS or in-app image assets.
 
 ```sh
 xcrun swift scripts/ios-icon.swift test
-xcrun swift scripts/ios-icon.swift generate dist/cypher.png \
+xcrun swift scripts/ios-icon.swift generate packaging/cypher.png \
   apps/ios/Cypher/Assets.xcassets/AppIcon.appiconset/AppIcon1024.png
-xcrun swift scripts/ios-icon.swift check dist/cypher.png \
+xcrun swift scripts/ios-icon.swift check packaging/cypher.png \
   apps/ios/Cypher/Assets.xcassets/AppIcon.appiconset/AppIcon1024.png
 ```
 
@@ -286,7 +286,7 @@ Run these commands from the repository root.
 - **Dev**: against an `AUTH_MODE=dev` edge (e.g. `wrangler dev`), enter a user
   id + org id; the bearer is `userId@orgId`. The `CypherDev` bundle
   (`scripts/dev-ios.sh`) connects to a local `wrangler dev` on
-  `127.0.0.1:27640` by itself (see `docs/local-edge.md`).
+  `127.0.0.1:27640` by itself (see `docs/development/local-edge.md`).
 - **Demo mode**: fully offline dataset with a scripted streaming reply —
   explore the UI with no infrastructure. Development builds also take
   `-mock-providers` (`scripts/dev-ios.sh -mock-providers`) to append mock

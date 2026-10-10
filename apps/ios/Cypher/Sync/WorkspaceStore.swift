@@ -459,7 +459,7 @@ final class WorkspaceStore {
             "spaceId": .string(space.id),
             "createdAt": .int(nowMs()),
             // iOS builds through 0.2.0 (24) dial a chat's room only once its
-            // row says roomGen 2 (docs/chat2-sync.md M2).
+            // row says roomGen 2 (docs/design/chat2-sync.md M2).
             "roomGen": .int(2),
         ]
         if let branch {

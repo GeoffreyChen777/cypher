@@ -1,0 +1,20 @@
+# Observed conventions across the repository; see docs/development/README.md.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{rs,swift,py}]
+indent_style = space
+indent_size = 4
+
+[*.{ts,mjs,js,json,jsonc,yml,yaml,css,html,sh}]
+indent_style = space
+indent_size = 2
+
+# Markdown uses trailing double spaces for hard line breaks.
+[*.md]
+trim_trailing_whitespace = false

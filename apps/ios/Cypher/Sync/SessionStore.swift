@@ -1,6 +1,6 @@
 // Session doc mirror — transcript entries + the durable command queue for one
 // chat (crates/doc/src/schema.rs), synced over the chat2 log relay
-// (docs/chat2-sync.md; s2 is dead on mobile). A viewer device never writes
+// (docs/design/chat2-sync.md; s2 is dead on mobile). A viewer device never writes
 // message entries; it appends command ledger entries (rule 1) and lets the
 // host drain them. Optimistic echo: pending sends render locally under their
 // client-minted message id until the host writes the real entry with the

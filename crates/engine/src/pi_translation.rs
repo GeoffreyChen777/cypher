@@ -141,7 +141,7 @@ pub struct PiLanguageDetection {
 /// 639-3 code the extension compares against.
 ///
 /// This list IS the contract with `LANGUAGE_OPTIONS` in the settings card and
-/// `LANGUAGE_ALIASES` in `dist/pi-runtime/extensions/cypher-translation.ts`.
+/// `LANGUAGE_ALIASES` in `pi-runtime/extensions/cypher-translation.ts`.
 /// Gating compares a detected code against the code a configured language name
 /// maps to, so the three lists have to name the same languages: a detector
 /// asked to judge a language it was not built with does not answer "unknown",

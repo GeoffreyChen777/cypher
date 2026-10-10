@@ -122,7 +122,7 @@ pub struct UiSettings {
     /// Sidebar sort direction flipped from the sort's natural one (newest
     /// first for activity/date, A→Z for name/device).
     pub sidebar_sort_reversed: bool,
-    /// The main window's workspace layout (docs/workspace-layout.md,
+    /// The main window's workspace layout (docs/design/workspace-layout.md,
     /// decision 1). Deserialization repairs it; the shell prunes tabs of
     /// chats that no longer exist once the first chats frame lands.
     /// These three load leniently ([`lenient`], [`lenient_map`]): an
@@ -285,7 +285,7 @@ pub enum ShortcutId {
     NewSession,
     NextSession,
     PrevSession,
-    // Workspace layout (docs/workspace-layout.md).
+    // Workspace layout (docs/design/workspace-layout.md).
     SplitRight,
     SplitDown,
     FocusLeft,

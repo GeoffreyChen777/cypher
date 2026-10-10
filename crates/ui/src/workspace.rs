@@ -1,4 +1,4 @@
-//! Workspace layout model (docs/workspace-layout.md): a tree of splits whose
+//! Workspace layout model (docs/design/workspace-layout.md): a tree of splits whose
 //! leaves are tile groups of session tabs.
 //!
 //! Pure data — no gpui types. The shell renders from it and routes every

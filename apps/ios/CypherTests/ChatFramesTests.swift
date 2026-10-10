@@ -1,5 +1,5 @@
 // chat2 wire-frame conformance — pins the same layout vectors as
-// crates/sync/src/chat_frames.rs and edge/src/chat-frames.test.ts. The three
+// crates/sync/src/chat_frames.rs and apps/edge/src/chat-frames.test.ts. The three
 // codecs must stay byte-compatible; change all suites together.
 
 import XCTest

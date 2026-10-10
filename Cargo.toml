@@ -20,6 +20,21 @@ edition = "2024"
 license = "MIT"
 publish = false
 
+# Every package opts in with `[lints] workspace = true`. CI runs clippy with
+# `-D warnings`, so a warn-level lint here fails the build too.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "warn"
+# Wide enum variants and large `Err` types are deliberate here: the big
+# variants are persisted or wire shapes matched in many places, and the large
+# errors are tungstenite's own types or protocol replies returned verbatim.
+large_enum_variant = "allow"
+result_large_err = "allow"
+
 [workspace.dependencies]
 cypher-env = { path = "crates/env" }
 cypher-proto = { path = "crates/proto" }
