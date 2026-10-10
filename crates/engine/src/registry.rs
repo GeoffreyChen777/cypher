@@ -154,8 +154,20 @@ impl HarnessRegistry {
     }
 
     /// The enabled set in effect (the default set until the user edits it).
+    /// Ids no longer registered (a retired harness in an old prefs file) are
+    /// ignored; a set left empty by that falls back to the default set.
     pub fn enabled_set(&self) -> Vec<HarnessId> {
-        self.prefs().enabled.clone().unwrap_or_else(default_enabled)
+        let set: Vec<HarnessId> = self.prefs().enabled.clone().unwrap_or_else(default_enabled);
+        let slots = self.slots();
+        let set: Vec<HarnessId> = set
+            .into_iter()
+            .filter(|id| slots.contains_key(id))
+            .collect();
+        if set.is_empty() {
+            default_enabled()
+        } else {
+            set
+        }
     }
 
     /// Whether this device's CLI probe passes for `id` (no spawn, no resolve).
@@ -669,6 +681,40 @@ mod tests {
         let reloaded = HarnessRegistry::new();
         reloaded.load_prefs(dir.path());
         assert_eq!(reloaded.enabled_set(), vec![HarnessId::Pi]);
+    }
+
+    /// A prefs file naming a retired harness: the stale id neither counts
+    /// toward the last-enabled guard nor leaves the catalog with nothing on.
+    #[test]
+    fn retired_ids_in_prefs_do_not_count_as_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{"enabled":["pi","claude-code"]}"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        test_slot(&registry, HarnessId::Mock, true);
+        test_slot(&registry, HarnessId::Pi, true);
+        assert_eq!(registry.enabled_set(), vec![HarnessId::Pi]);
+        assert!(registry.set_enabled(HarnessId::Pi, false).is_err());
+        assert!(
+            registry
+                .descriptors()
+                .iter()
+                .any(|d| d.id == HarnessId::Pi && d.enabled == Some(true))
+        );
+
+        // Only retired ids left: the default set applies.
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{"enabled":["claude-code"]}"#,
+        )
+        .unwrap();
+        registry.load_prefs(dir.path());
+        assert_eq!(registry.enabled_set(), vec![HarnessId::Pi]);
+        assert!(registry.set_enabled(HarnessId::Pi, false).is_err());
     }
 
     /// A missing CLI can't be enabled (the settings gate).
