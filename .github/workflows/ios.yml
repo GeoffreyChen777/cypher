@@ -52,41 +52,8 @@ jobs:
           persist-credentials: false
       - name: select the newest installed Xcode at or above the floor
         run: |
-          set -euo pipefail
-          # The runner image retires and RENAMES Xcodes without notice: an
-          # exact `/Applications/Xcode_26.app` pin failed this job outright
-          # ("missing DEVELOPER_DIR path") the day the image moved on. Pin a
-          # floor instead and take the newest install that clears it, so a
-          # point release is picked up automatically while an image carrying
-          # only an older SDK fails loudly rather than archiving against it.
-          # Betas are skipped: App Store Connect rejects their builds, and the
-          # xcode-27 image installs them beside the release under plain-named
-          # aliases too (Xcode_27.2.app -> Xcode_27.2_beta.app), so judge the
-          # resolved install, not the name.
-          floor=27
-          best_version=""
-          best_dir=""
-          for app in /Applications/Xcode*.app; do
-            resolved="$(cd -P "$app" 2>/dev/null && pwd)" || continue
-            case "$resolved" in *[Bb]eta*) continue ;; esac
-            dir="$resolved/Contents/Developer"
-            [ -d "$dir" ] || continue
-            version="$(DEVELOPER_DIR="$dir" xcodebuild -version 2>/dev/null | awk 'NR==1 {print $2}')"
-            [ -n "$version" ] || continue
-            newest="$(printf '%s\n%s\n' "${best_version:-0}" "$version" | sort -V | tail -1)"
-            if [ "$newest" = "$version" ]; then
-              best_version="$version"
-              best_dir="$dir"
-            fi
-          done
-          if [ -z "$best_dir" ] || [ "${best_version%%.*}" -lt "$floor" ]; then
-            echo "NOT PUBLISHED: need Xcode $floor or newer to archive for the App Store; installed:"
-            ls -d /Applications/Xcode*.app 2>/dev/null || echo "  (none)"
-            exit 1
-          fi
-          echo "Xcode $best_version ($best_dir)"
-          DEVELOPER_DIR="$best_dir" xcodebuild -version
-          echo "DEVELOPER_DIR=$best_dir" >>"$GITHUB_ENV"
+          bash scripts/ci/select-xcode.sh 27 \
+            || { echo "NOT PUBLISHED: need Xcode 27 or newer to archive for the App Store"; exit 1; }
       - name: require distribution signing material
         run: |
           test -n "$IOS_DIST_CERT_P12" \

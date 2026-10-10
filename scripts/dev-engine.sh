@@ -23,7 +23,11 @@ if [[ "$mode" == dev ]]; then
   dev_edge_override="${CYPHER_DEV_EDGE_URL:-}"
   env_file="${CYPHER_DEV_ENV_FILE:-$HOME/Documents/cypher-development.env}"
   [[ -f "$env_file" ]] || { echo "Missing $env_file (set CYPHER_DEV_ENV_FILE to the private development env file)" >&2; exit 1; }
-  set -a; source "$env_file"; set +a
+  set -a
+  # The private env file lives outside the repository.
+  # shellcheck source=/dev/null
+  source "$env_file"
+  set +a
   if [[ -n "$dev_edge_override" ]]; then
     export CYPHER_DEV_EDGE_URL="$dev_edge_override"
   elif [[ "${CYPHER_DEV_EDGE_URL:-}" == *cypher-edge-development* ]]; then

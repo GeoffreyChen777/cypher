@@ -18,7 +18,11 @@ xcrun simctl install "$sim" "$out/Build/Products/Development-iphonesimulator/Cyp
 # needs no secret. CYPHER_DEV_EDGE_URL names a staging Edge instead; a value
 # from the caller wins over the private file, as in dev-engine.sh.
 dev_edge_override="${CYPHER_DEV_EDGE_URL:-}"
-set -a; source "$env_file"; set +a
+set -a
+# The private env file lives outside the repository.
+# shellcheck source=/dev/null
+source "$env_file"
+set +a
 unset CYPHER_DEV_PREVIEW_PUBLISH_TOKEN SIMCTL_CHILD_CYPHER_DEV_PREVIEW_PUBLISH_TOKEN
 if [[ -n "$dev_edge_override" ]]; then
   CYPHER_DEV_EDGE_URL="$dev_edge_override"

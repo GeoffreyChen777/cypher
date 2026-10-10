@@ -29,7 +29,6 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "unsupported Pi Runtime platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
-PI_VERSION="$(node -p "require(process.argv[1]).dependencies['@earendil-works/pi-coding-agent']" "$SPEC/package.json")"
 RELEASE="$SPEC/release.json"
 RUNTIME_VERSION="${PI_RUNTIME_VERSION:-$(node -p "require(process.argv[1]).version" "$RELEASE")}"
 [[ "$RUNTIME_VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]] || {

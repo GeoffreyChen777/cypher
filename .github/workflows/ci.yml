@@ -14,6 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Each step runs one stage of scripts/check.sh, the same entry point used
+  # locally; see docs/development/README.md.
   workflow-and-release-tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -24,10 +26,8 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 24.19.0
-      - run: bash scripts/ci/actionlint.sh
-      - run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
-      - run: python3 scripts/ci/check-production-profile.py
-      - run: python3 scripts/tests/test-linux-cli.py
+      - run: bash scripts/check.sh workflows
+      - run: bash scripts/check.sh scripts
       - name: installer regressions on release container Python 3.8
         run: |
           docker run --rm -v "$PWD:/repo:ro" -w /repo public.ecr.aws/docker/library/ubuntu:20.04 bash -ec '
@@ -36,15 +36,7 @@ jobs:
             apt-get install -y -qq python3 curl ca-certificates
             python3 scripts/tests/test-linux-cli.py
           '
-      - run: node --test scripts/tests/test-landing.mjs
-      - run: node --test pi-runtime/provider-service.test.mjs
-      - run: node --test pi-runtime/patches/pi-agent-squad-cypher-host/cypher-host.test.mjs
-      # The extension suites import their .ts sources directly (Node type
-      # stripping) and need no staged runtime.
-      - run: node --test pi-runtime/extensions/cypher-translation.test.mjs pi-runtime/extensions/cypher-fast-mode.test.mjs pi-runtime/extensions/cypher-codemode.test.mjs
-      - run: bash scripts/tests/test-check-linux-abi.sh
-      - run: bash -n scripts/*.sh scripts/*/*.sh
-      - run: sh -n apps/edge/src/install.sh
+      - run: bash scripts/check.sh runtime
 
   edge:
     runs-on: ubuntu-24.04
@@ -58,54 +50,33 @@ jobs:
           node-version: 24.19.0
           cache: npm
           cache-dependency-path: apps/edge/package-lock.json
-      - run: npm ci --prefix edge
-      - run: npm --prefix edge run typecheck
-      - run: npm --prefix edge test
+      - run: npm ci --prefix apps/edge
+      - run: bash scripts/check.sh edge
 
   linux-backend:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24.19.0
       - run: sudo apt-get update -qq && sudo apt-get install -y cmake pkg-config systemd
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - run: cargo fmt --all --check
-      - run: cargo test --locked --no-default-features -p cypher -p cypher-env -p cypher-harness -p cypher-engine -p cypher-update -p cypher-rpc
-      # The registry transport suites need the in-process server, so they run
-      # nowhere else: without the feature their targets don't even build, and
-      # they were silently skipped while the transport they cover was changed.
-      - run: cargo test --locked -p cypher-sync --features mock-server --test registry_client --test registry_transport
-      - run: cargo clippy --locked -p cypher-update --all-targets -- -D warnings
-      - run: cargo test --locked --no-default-features -p cypher --features development --test development_profile
-      - run: cargo test --locked -p cypher-engine --features development --lib development_auth_tests
-      - run: cargo build --locked --no-default-features -p cypher
-      - run: python3 scripts/ci/check-production-profile.py "$PWD/target/debug/cypher"
-      - run: python3 scripts/tests/test-linux-cli.py --binary target/debug/cypher
+      - run: bash scripts/check.sh fmt
+      - run: bash scripts/check.sh lint
+      - run: bash scripts/check.sh rust
 
   macos-workspace:
     runs-on: macos-15
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - name: validate macOS icon alpha and artwork
-        run: bash scripts/tests/test-macos-icon.sh
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - run: cargo check --workspace --locked
-      - name: Preview protocol Rust and native Swift shared vectors
-        run: |
-          cargo test --locked -p cypher-sync --lib preview
-          out=$(mktemp -d)
-          trap 'rm -rf "$out"' EXIT
-          xcrun swiftc apps/ios/Cypher/Sync/ChatFrames.swift apps/ios/Cypher/Sync/StreamPreview.swift apps/ios/Cypher/Sync/PreviewProjection.swift scripts/tests/stream-preview-vectors.swift -o "$out/preview-vectors"
-          "$out/preview-vectors" crates/sync/tests/fixtures/stream-preview-v1.json crates/sync/tests/fixtures/preview-reducer-v1.json
-      - name: Runtime and MCP settings UI regressions
-        run: >-
-          cargo test --locked -p cypher-ui --lib --
-          settings::setup::tests runtime_ mcp_ state::tests notification_activity::tests
-          unix_engine_directory_does_not_redirect_client_preferences
+      - run: bash scripts/check.sh macos

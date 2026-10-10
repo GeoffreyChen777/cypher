@@ -1,0 +1,43 @@
+name: ios-tests
+
+# The iOS unit tests take a macOS runner for several minutes, so they run only
+# when something they build or read changes: the app and its tests, the shared
+# preview vectors under crates/sync/tests/fixtures, and the scripts below.
+on:
+  pull_request:
+    paths:
+      - "apps/ios/**"
+      - "crates/sync/tests/fixtures/**"
+      - "scripts/check.sh"
+      - "scripts/ci/ios-unit-tests.sh"
+      - "scripts/ci/select-xcode.sh"
+      - ".github/workflows/ios-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/ios/**"
+      - "crates/sync/tests/fixtures/**"
+      - "scripts/check.sh"
+      - "scripts/ci/ios-unit-tests.sh"
+      - "scripts/ci/select-xcode.sh"
+      - ".github/workflows/ios-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    # Same runner and Xcode floor as the archive job in ios.yml.
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - run: bash scripts/ci/select-xcode.sh 27
+      - run: bash scripts/check.sh ios
