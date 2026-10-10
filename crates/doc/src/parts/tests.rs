@@ -273,7 +273,7 @@ fn sanitize_other_unknown_still_clears_input() {
     );
 }
 
-// ── A1 strip (docs/chat2-sync.md) ───────────────────────────────────────
+// ── A1 strip (docs/design/chat2-sync.md) ───────────────────────────────────────
 
 #[test]
 fn summarize_keeps_five_lines_without_a_character_cap() {

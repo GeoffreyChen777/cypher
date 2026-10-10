@@ -1,4 +1,4 @@
-//! Session slots (docs/workspace-layout.md): the per-session UI behind one
+//! Session slots (docs/design/workspace-layout.md): the per-session UI behind one
 //! workspace tab — chat (transcript + status strip + composer), the bottom
 //! terminal dock, and the right dock's surfaces ([`super::dock`]).
 //!
@@ -12,7 +12,7 @@
 //! watches).
 //!
 //! Dock sizes are fractions of the slot's session area, remembered per
-//! session in `UiSettings.session_docks` (docs/workspace-layout.md,
+//! session in `UiSettings.session_docks` (docs/design/workspace-layout.md,
 //! decision 7).
 
 use std::cell::Cell;

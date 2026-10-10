@@ -272,7 +272,7 @@ pub struct ChatDocHandle {
     /// handle then serves the normal chat (snapshot persisted, chat2 joined,
     /// maintenance runs) so a live run keeps streaming through the transition.
     ephemeral: AtomicBool,
-    /// chat2 relay client (docs/chat2-sync.md C3) — populated once the
+    /// chat2 relay client (docs/design/chat2-sync.md C3) — populated once the
     /// registry names roomGen 2 for this chat and the join resolves.
     chat2: Mutex<Option<cypher_sync::ChatClient>>,
     /// Local commits made before the relay connects (the dial can take up

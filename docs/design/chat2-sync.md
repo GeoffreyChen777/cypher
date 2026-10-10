@@ -1,7 +1,7 @@
 # chat2: dumb-relay session sync + thin docs
 
 Status: CURRENT — in production since cypher 0.1.4 (ChatRoom DO, `apps/edge/src/chat-room.ts`). Origin: 2026-08-09 investigation (whale-doc dissection + t3code comparison).
-Prior art: `docs/registry-sync.md` (the same argument, applied to the workspace index).
+Prior art: `docs/design/registry-sync.md` (the same argument, applied to the workspace index).
 
 ## Why
 
@@ -128,7 +128,7 @@ root).
   concurrent ops must never land behind a shallow root).
 - Sidecars: hosts publish neither a tail nor a diff sidecar. Nothing read the tail once
   iOS spoke chat2 natively, and it had grown to 18% of the Durable Object bill; the
-  route remains for a future instant-open reader (`docs/local-edge.md`). Remote
+  route remains for a future instant-open reader (`docs/development/local-edge.md`). Remote
   clients read working-tree diffs through the device relay.
 - Non-host owner devices may checkpoint as fallback if floor lag exceeds a high-water
   mark (any device holds the full doc; ~20 lines, ships later if ever needed — hosts

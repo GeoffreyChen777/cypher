@@ -33,7 +33,7 @@ gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══
 
 - **Engine = backend** (was `@cypher/backend`): runs agents, owns auth, terminals, repos/worktrees,
   diff sync, doc hosting. Pure Rust daemon, fully functional headless.
-- **UI = viewport** (was Electron): gpui app rendering engine state. Talks the same typed RPC whether the engine is in-process or a separate daemon. Organized around **spaces** — (device, folder) pairs, local or synced according to the active profile. A window is two columns: the **sidebar** (the data — project cards with their sessions, sorted by activity, name, device or date) and a tiled **session workspace** (`docs/workspace-layout.md`): a tree of splits whose leaves are tile groups of session tabs. Each tab is a session with its own chat, a right dock (Git, Files, side chats) and a bottom terminal dock, all bound to that session. The workspace is a **device-local viewport** onto the list: closing a tab is local-only — archiving is an explicit sidebar action — and a sidebar click opens (or focuses) the session in the focused tile, ⌘-click in a split, drag anywhere. The layout persists per window (`ui-settings.json` `workspace`, `projectWorkspaces` for project windows) and dock sizes per session (`sessionDocks`, fractions of the session area). Every visible tile renders from its own **session context** — a secondary `AppState` pinned to that session — while the window's main `AppState` runs **lists-only** (list watches and the sidebar; its selection follows the focused tile). The new-session canvas carries a space picker (defaulting to the last selected space); new sessions are minted onto the picked space's device via relay-forwardable RPCs.
+- **UI = viewport** (was Electron): gpui app rendering engine state. Talks the same typed RPC whether the engine is in-process or a separate daemon. Organized around **spaces** — (device, folder) pairs, local or synced according to the active profile. A window is two columns: the **sidebar** (the data — project cards with their sessions, sorted by activity, name, device or date) and a tiled **session workspace** (`docs/design/workspace-layout.md`): a tree of splits whose leaves are tile groups of session tabs. Each tab is a session with its own chat, a right dock (Git, Files, side chats) and a bottom terminal dock, all bound to that session. The workspace is a **device-local viewport** onto the list: closing a tab is local-only — archiving is an explicit sidebar action — and a sidebar click opens (or focuses) the session in the focused tile, ⌘-click in a split, drag anywhere. The layout persists per window (`ui-settings.json` `workspace`, `projectWorkspaces` for project windows) and dock sizes per session (`sessionDocks`, fractions of the session area). Every visible tile renders from its own **session context** — a secondary `AppState` pinned to that session — while the window's main `AppState` runs **lists-only** (list watches and the sidebar; its selection follows the focused tile). The new-session canvas carries a space picker (defaulting to the last selected space); new sessions are minted onto the picked space's device via relay-forwardable RPCs.
 - **Edge (TypeScript, ported from zeron `apps/edge`)**: Worker + ChatRoom DO (per chat, the
   chat2 row protocol) + RegistryRoom DO (per user) + DeviceRoom DO (per device) + R2
   attachments + WorkOS JWKS auth. The retired SessionRoom class stays bound as a 410 stub so
@@ -52,7 +52,7 @@ Single binary `cypher`:
   permissions, peer-UID checks and the `cypher.rpc.v1` subprotocol.
 - `cypher headless` — engine only. A clean installation immediately serves its local profile over Unix IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
-See [Unix IPC](docs/unix-ipc.md) for endpoint ownership, service names, Pi bridge,
+See [Unix IPC](docs/design/unix-ipc.md) for endpoint ownership, service names, Pi bridge,
 and separate UI/Engine data directories. TCP IPC and its environment setting
 have been removed; remote Edge transports are unchanged.
 
@@ -257,7 +257,7 @@ Direct ports of zeron behaviors:
 
 Ported from `cypher/apps/edge` (device room byte relay + nudges + sidecar slots, R2
 attachments, JWKS auth). Its Loro-aware session room was later replaced by the chat2 ChatRoom
-log relay (`docs/chat2-sync.md`). Additions:
+log relay (`docs/design/chat2-sync.md`). Additions:
 1. Private per-user registry rooms (`/registry/{orgId}/ws` → `reg1/{orgId}/{userId}`) with authenticated row sync and ephemeral device presence.
 2. `/auth/*` routes absorbed from `apps/server` (WorkOS API key in Worker secret).
 3. Drop `/seed` migration path and legacy sync anything (fresh app).

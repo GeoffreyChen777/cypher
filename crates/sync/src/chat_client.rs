@@ -1,4 +1,4 @@
-//! ChatClient — WebSocket transport for chat2 rooms (docs/chat2-sync.md C1):
+//! ChatClient — WebSocket transport for chat2 rooms (docs/design/chat2-sync.md C1):
 //! hello/state handshake with client-side checkpoint precision, cursor-based
 //! row backfill, push/ack with a pending-unacked queue, inbound presence
 //! relay, probe/redial liveness, and reconnect with exponential backoff.

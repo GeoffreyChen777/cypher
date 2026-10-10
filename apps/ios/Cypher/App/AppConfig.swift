@@ -168,7 +168,7 @@ final class AppConfig: @unchecked Sendable {
         return components.url!
     }
 
-    /// The workspace registry room (docs/registry-sync.md) — the row-table
+    /// The workspace registry room (docs/design/registry-sync.md) — the row-table
     /// replacement for the old ws Loro workspace doc.
     func registrySocketURL() async -> URL? {
         guard let token = await currentToken() else { return nil }
@@ -178,7 +178,7 @@ final class AppConfig: @unchecked Sendable {
         return url
     }
 
-    /// The chat2 log-relay room (docs/chat2-sync.md B) — replaces the s2
+    /// The chat2 log-relay room (docs/design/chat2-sync.md B) — replaces the s2
     /// session rooms, which mobile no longer dials at all. `device` rides the
     /// URL so the DO can attribute sockets and honor excludeOwn backfills.
     func chat2SocketURL(chatId: String) async -> URL? {

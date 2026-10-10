@@ -12,7 +12,7 @@ enum DevelopmentProfile {
         #endif
     }
     #if CYPHER_DEVELOPMENT
-    /// `cd edge && npm run dev`. The simulator shares the Mac's loopback.
+    /// `cd apps/edge && npm run dev`. The simulator shares the Mac's loopback.
     static let defaultEdge = URL(string: "http://127.0.0.1:27640")!
     static let edge = resolveEdge(ProcessInfo.processInfo.environment["CYPHER_DEV_EDGE_URL"])
     static let user = "dev-user"

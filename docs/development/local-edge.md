@@ -8,7 +8,7 @@ measurement: no guard, no quota, no cost, and exact per-invocation telemetry.
 ## Running an Edge locally
 
 ```sh
-cd edge && npm run dev            # wrangler dev on 127.0.0.1:27640, AUTH_MODE=dev
+cd apps/edge && npm run dev            # wrangler dev on 127.0.0.1:27640, AUTH_MODE=dev
 ```
 
 `AUTH_MODE=dev` accepts `bearer == userId`, and only a `user@org` bearer carries
@@ -88,7 +88,7 @@ that decide the Durable Object bill and are invisible to a SQL-level probe.
 `scripts/ops/edge-billing-local.mjs` turns those spans into a billing summary:
 
 ```sh
-cd edge && npm run dev &                                   # leave running
+cd apps/edge && npm run dev &                                   # leave running
 MARK=$(node scripts/ops/edge-billing-local.mjs --mark)         # scope the run
 # ...drive traffic: scripts/e2e-smoke.sh, a dev engine, curl, anything...
 node scripts/ops/edge-billing-local.mjs --since "$MARK"
@@ -204,6 +204,6 @@ already promoted, and housekeeping must not fail it.
   optimizations pinned against real workerd + real Durable Object SQLite.
 - `scripts/e2e-smoke.sh` — two headless engines and a local Edge, proving the
   cross-device command path end to end with the mock harness.
-- [`docs/plans/MIGRATION.md`](plans/MIGRATION.md) §12.3 / §12.3b — the incident-hardened behaviours and the
+- [`docs/plans/MIGRATION.md`](../plans/MIGRATION.md) §12.3 / §12.3b — the incident-hardened behaviours and the
   in-memory rebuild rule that **no** optimization may break, whichever backend
   it targets.

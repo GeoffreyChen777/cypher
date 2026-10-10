@@ -358,7 +358,7 @@ impl ColorPreset {
         let dark = appearance.is_dark();
         let (background, text, accent, bubble) = match (self, dark) {
             (Self::Default, _) => return ChatColors::default(),
-            // Official palette tokens; links and mapping details in docs/appearance-colors.md.
+            // Official palette tokens; links and mapping details in docs/features/appearance-colors.md.
             // Catppuccin Mocha / Latte: Base, Text, Mauve, Surface0 / Mantle.
             (Self::Catppuccin, true) => ("#1E1E2E", "#CDD6F4", "#CBA6F7", "#313244"),
             (Self::Catppuccin, false) => ("#EFF1F5", "#4C4F69", "#8839EF", "#E6E9EF"),

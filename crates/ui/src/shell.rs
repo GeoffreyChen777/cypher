@@ -1,5 +1,5 @@
 //! The app shell (zeron `__root.tsx`): the sidebar column + the workspace of
-//! session tiles (docs/workspace-layout.md), plus the boot splash and the
+//! session tiles (docs/design/workspace-layout.md), plus the boot splash and the
 //! connection gate.
 //!
 //! Layout: collapsible drag-resizable sidebar (208–400px, default 256) with a
@@ -945,7 +945,7 @@ pub struct Shell {
     /// session (sidebar highlight, nav history, cycle order, space
     /// implication). Each tile renders from its own session context.
     state: Entity<AppState>,
-    /// The tiled session layout (docs/workspace-layout.md).
+    /// The tiled session layout (docs/design/workspace-layout.md).
     workspace: crate::workspace::Workspace,
     /// One slot per open workspace tab (created on open, dropped on close —
     /// dropping the context kills its watches).

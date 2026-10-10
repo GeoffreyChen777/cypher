@@ -1,5 +1,5 @@
 /**
- * chat2 log storage (docs/chat2-sync.md workstream B) — the dumb-relay data
+ * chat2 log storage (docs/design/chat2-sync.md workstream B) — the dumb-relay data
  * model, pure over a DO's SqlStorage + BlobStore so the workerd test tier
  * exercises it against real SQLite (the ~2MB value-cap runtime).
  *

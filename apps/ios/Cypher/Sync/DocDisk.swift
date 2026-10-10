@@ -23,7 +23,7 @@ enum DocDisk {
         directory.appendingPathComponent("registry1_\(orgId)_\(userId).json")
     }
 
-    // MARK: chat2 lineage snapshots (docs/chat2-sync.md C2)
+    // MARK: chat2 lineage snapshots (docs/design/chat2-sync.md C2)
 
     /// `c2_<id>.loro` = 8-byte magic + UInt64 LE room cursor + snapshot,
     /// written atomically in ONE file so doc content and cursor can never

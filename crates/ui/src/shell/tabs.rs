@@ -1,6 +1,6 @@
 //! Session navigation and routing. The activity sidebar IS the session
 //! list; a click opens (or focuses) the session as a tab in the workspace
-//! (docs/workspace-layout.md): the focused tile, or — ⌘-click — a new split
+//! (docs/design/workspace-layout.md): the focused tile, or — ⌘-click — a new split
 //! to its right. The main state's selection follows the focused tile
 //! (`Shell::sync_follow`). The layout persists as `UiSettings.workspace`
 //! (and `project_workspaces` per project window), restored at boot landing.

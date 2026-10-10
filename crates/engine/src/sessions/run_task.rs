@@ -29,7 +29,7 @@ pub(super) fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 // Output summaries, diff stats, and sidecar refs are
                 // deliberately kept: unlike raw tool inputs they are the
                 // transcript's record of what happened, and the strip already
-                // bounded them (docs/chat2-sync.md A1). The transient
+                // bounded them (docs/design/chat2-sync.md A1). The transient
                 // progress tail rides through too — the fold clears it on
                 // resolve, so it never survives a settled chip.
                 output: output.clone(),

@@ -1,4 +1,4 @@
-// Inactive P1 codec, not authorization. See docs/ephemeral-stream-v1.md.
+// Inactive P1 codec, not authorization. See docs/design/ephemeral-stream-v1.md.
 // Deliberately not registered in ChatRoomClient.
 import Foundation
 import CoreFoundation

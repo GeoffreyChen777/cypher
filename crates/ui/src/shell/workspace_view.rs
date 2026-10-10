@@ -1,4 +1,4 @@
-//! The workspace column (docs/workspace-layout.md): the tree of splits whose
+//! The workspace column (docs/design/workspace-layout.md): the tree of splits whose
 //! leaves are tile cards. Each tile has a session tab bar and shows its
 //! active tab's session area ([`super::session`]); split gaps carry drag
 //! handles; the titlebar cluster's Layout popover applies presets. Session

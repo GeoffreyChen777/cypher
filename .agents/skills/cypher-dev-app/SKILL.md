@@ -54,7 +54,7 @@ nohup scripts/dev-app.sh local > ~/.cypher-development/local-ui.log 2>&1 &
 `scripts/dev-engine.sh dev` and `scripts/dev-app.sh dev`. The engine sources
 the private env file at `CYPHER_DEV_ENV_FILE` (default
 `~/Documents/cypher-development.env`); `CYPHER_DEV_EDGE_URL` names a staging
-Edge instead. See `docs/local-edge.md`.
+Edge instead. See `docs/development/local-edge.md`.
 iOS: `scripts/dev-ios.sh` (see `apps/ios/README.md`).
 
 ## Rebuild and restart the UI
@@ -102,7 +102,7 @@ engine.
   the intended `CYPHER_DATA_DIR`. Socket paths derive from the UID and the
   canonical engine data directory; `CYPHER_IPC_PORT` has been removed. For a
   second instance use `CYPHER_DEV_INSTANCE`, never another port, and never
-  unlink a socket you did not create. See `docs/unix-ipc.md`.
+  unlink a socket you did not create. See `docs/design/unix-ipc.md`.
 - `dev-app.sh` exits with "start dev-engine.sh first": the engine for that
   mode/instance is not listening; check its log.
 - `dev-engine.sh dev` exits with "Missing …cypher-development.env": set

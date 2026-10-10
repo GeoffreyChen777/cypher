@@ -70,7 +70,7 @@ Limits:
 
 The renderer is bundled offline with a nonpersistent WKWebView, one worker,
 virtualized rows and a restricted native bridge. No CDN/HTTP server is involved.
-See [renderer implementation](../apps/ios/DiffRenderer/README.md) for pinned
+See [renderer implementation](../../apps/ios/DiffRenderer/README.md) for pinned
 dependencies, resource rebuild steps, security and performance budgets.
 
 All endpoints use the existing authenticated device relay. File content crosses

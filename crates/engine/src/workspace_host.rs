@@ -1,4 +1,4 @@
-//! WorkspaceHost — owns the per-user workspace **registry** (docs/
+//! WorkspaceHost — owns the per-user workspace **registry** (docs/design/
 //! registry-sync.md): local snapshot persistence, edge room sync
 //! (`/registry/{orgId}/ws` → room `reg1/{orgId}/{userId}`, offline-tolerant —
 //! spaces/sessions are private to their owner, never org-visible), the device

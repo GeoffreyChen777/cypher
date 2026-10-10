@@ -126,7 +126,7 @@ is UI-only; CLI commands use `CYPHER_DATA_DIR`.
 Local Engine IPC now uses private Unix sockets, not a shared fixed port.
 Different OS users and different data directories get distinct endpoints;
 non-default data directories also get distinct user-service names. See
-[Unix IPC](unix-ipc.md). Old `CYPHER_IPC_PORT` settings must be removed.
+[Unix IPC](../design/unix-ipc.md). Old `CYPHER_IPC_PORT` settings must be removed.
 
 - A setup coordinator lock prevents concurrent wizards. The engine's existing
   data lock protects authentication and offline Runtime writes.

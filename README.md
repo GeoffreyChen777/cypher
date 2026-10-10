@@ -33,7 +33,7 @@ cypher update      # newest release + Pi Runtime; restarts the service
 
 Linux services apply releases **automatically** in an idle window. SSH and
 non-interactive installs, updates, Pi configuration, data directories and
-installation integrity: [Linux setup](docs/linux-setup.md).
+installation integrity: [Linux setup](docs/features/linux-setup.md).
 
 Any desktop can also update the whole fleet: Settings → Devices checks every
 online device for a newer release and offers **Update** per device or **Update
@@ -69,12 +69,12 @@ On macOS: use the desktop release, or build `cypher` from source and run `cypher
 
 Developing or curious how it works? See [ARCHITECTURE.md](ARCHITECTURE.md).
 
-CI, deployment prerequisites and release recovery: [CI/CD operations](docs/ci-cd.md).
+CI, deployment prerequisites and release recovery: [CI/CD operations](docs/operations/ci-cd.md).
 
-Chat fonts, colors, spacing and wide-screen mode: [Chat appearance](docs/chat-appearance.md).
+Chat fonts, colors, spacing and wide-screen mode: [Chat appearance](docs/features/chat-appearance.md).
 
-Overall themes and Terminal, Git and Sidebar color overrides: [Appearance colors](docs/appearance-colors.md).
+Overall themes and Terminal, Git and Sidebar color overrides: [Appearance colors](docs/features/appearance-colors.md).
 
-Unified and side-by-side Git comparison: [Git diff layouts](docs/git-diff.md).
+Unified and side-by-side Git comparison: [Git diff layouts](docs/features/git-diff.md).
 
 Licensed under the [MIT License](LICENSE).

@@ -1,5 +1,5 @@
 //! RegistryClient — WebSocket transport for the workspace registry
-//! (docs/registry-sync.md): hello/cursor handshake, push/ack for pending op
+//! (docs/design/registry-sync.md): hello/cursor handshake, push/ack for pending op
 //! batches, merged-row broadcasts, presence beats, probe/redial liveness, and
 //! reconnect with exponential backoff.
 //!

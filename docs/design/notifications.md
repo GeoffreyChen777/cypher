@@ -207,7 +207,7 @@ desktop activity sampling, iOS registration/permission boundaries, in-app
 suppression, cold-start scope checks, and auth-refresh invalidation.
 
 ```sh
-cd edge
+cd apps/edge
 npm run typecheck
 npm run test:unit
 npm run test:workerd

@@ -15,7 +15,7 @@ import {
 } from "../../src/chat-log";
 import { bytesOf, sameBytes } from "../../src/testing/bytes";
 
-/** chat2 log model (docs/chat2-sync.md B) against real DO SQLite — the same
+/** chat2 log model (docs/design/chat2-sync.md B) against real DO SQLite — the same
  * runtime whose ~2MB value cap sank s2's unchunked whale rows. chat2 rows are
  * capped at 1MB by design, so the platform cap must never be reachable. */
 

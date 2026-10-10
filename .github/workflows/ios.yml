@@ -7,7 +7,7 @@ name: ios
 # so it needs no production lock and no `contents: write`.
 #
 # Upload is where this workflow stops. Tester groups, public links and App Store
-# review submission remain separate, explicit actions (docs/ios-release.md,
+# review submission remain separate, explicit actions (docs/operations/ios-release.md,
 # "Publication boundary"); export compliance is declared in Info.plist. Like every other release
 # workflow, workflow_dispatch is ALWAYS build/validate-only.
 on:

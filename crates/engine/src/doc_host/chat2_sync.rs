@@ -40,7 +40,7 @@ impl DocHost {
         });
     }
 
-    /// chat2 relay join (docs/chat2-sync.md C3): deadline on every dial,
+    /// chat2 relay join (docs/design/chat2-sync.md C3): deadline on every dial,
     /// capped jittered backoff, wake redial. With pull-first transport the
     /// client is returned local-first while HTTPS/WS convergence continues;
     /// `server_known` remains the gate for any server-truth recovery action.
@@ -258,7 +258,7 @@ impl DocHost {
         });
     }
 
-    /// chat2 host duties on the doc-quiesce tick (docs/chat2-sync.md C3):
+    /// chat2 host duties on the doc-quiesce tick (docs/design/chat2-sync.md C3):
     /// threshold checkpoint -- when the room's row log passes 512KB or 200
     /// rows, post a full checkpoint so cold readers load one compact blob
     /// instead of replaying the log (the alert-shaped growth bound).

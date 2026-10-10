@@ -1,5 +1,5 @@
 /**
- * chat2 wire frames (docs/chat2-sync.md workstream B).
+ * chat2 wire frames (docs/design/chat2-sync.md workstream B).
  *
  * Binary WS frames: `[type u8][headerLen u32 LE][header JSON utf8][payload]`.
  * Headers are tiny JSON (ids, seqs); payloads are opaque byte blobs (Loro

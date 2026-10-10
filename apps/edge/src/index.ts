@@ -165,7 +165,7 @@ export default {
     const auth = await authenticate(env, request);
     if (!auth) return json({ error: "unauthenticated" }, 401);
 
-    // ── chat2 rooms (docs/chat2-sync.md B): dumb log relays, one per chat.
+    // ── chat2 rooms (docs/design/chat2-sync.md B): dumb log relays, one per chat.
     //    Claim-on-first-join ownership enforced in the DO (chat ids are
     //    client-minted). The DO handles /ws, /checkpoint (GET Range-resumable
     //    + POST floor-guarded), host-published /tail + /diff sidecars,
@@ -201,7 +201,7 @@ export default {
       return json({ error: "not found" }, 404);
     }
 
-    // ── registry rooms (docs/registry-sync.md): the row-table replacement for
+    // ── registry rooms (docs/design/registry-sync.md): the row-table replacement for
     //    the Loro workspace doc. The caller's WorkOS org claim (`org_id`)
     //    must match the URL, room derived from the caller's OWN user id, DO
     //    trusts the stamped header. `reg1` = first registry generation. ─────
@@ -278,7 +278,7 @@ export default {
       }
     }
 
-    // ── R2 tool-output sidecar (docs/chat2-sync.md A2): read-only. Older
+    // ── R2 tool-output sidecar (docs/design/chat2-sync.md A2): read-only. Older
     //    chats reference full tool outputs and diffs stored here under
     //    `{chatId}/{partId}[.diff]`; clients no longer upload any. Per-user
     //    prefix = owner auth. ─────────────────────────────────────────────

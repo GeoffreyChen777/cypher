@@ -1,7 +1,7 @@
 {
   // Cypher edge: per-chat log-relay DOs, per-user registry DOs, per-device
   // relay DOs, R2 blobs, and the absorbed WorkOS auth routes.
-  // Design: ARCHITECTURE.md §6, docs/chat2-sync.md, docs/registry-sync.md.
+  // Design: ARCHITECTURE.md §6, docs/design/chat2-sync.md, docs/design/registry-sync.md.
   // NOTE: Durable Object storage is bound to the worker's script name, so the
   // worker identity (`cypher-edge`) must never be renamed without a data
   // migration — that would orphan every session/registry/chat room.
@@ -43,13 +43,13 @@
       "new_sqlite_classes": ["SessionRoom", "DeviceRoom"]
     },
     {
-      // Workspace registry (docs/registry-sync.md) — the row-table sidebar
+      // Workspace registry (docs/design/registry-sync.md) — the row-table sidebar
       // sync that replaces the Loro workspace doc rooms.
       "tag": "v2",
       "new_sqlite_classes": ["RegistryRoom"]
     },
     {
-      // chat2 session rooms (docs/chat2-sync.md) — dumb log relays that
+      // chat2 session rooms (docs/design/chat2-sync.md) — dumb log relays that
       // replaced the retired SessionRoom s2 rooms.
       "tag": "v3",
       "new_sqlite_classes": ["ChatRoom"]

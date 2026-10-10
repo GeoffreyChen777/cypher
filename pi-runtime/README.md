@@ -136,7 +136,7 @@ Use the HTTP or stdio form, or import JSON. Entries are added to that device's
 preserved. OAuth sign-in runs Pi's `/mcp login` and stores tokens in
 `agent/mcp-auth.json`. The importer rejects duplicate names and malformed
 existing files rather than overwriting them. See
-[MCP settings](../docs/mcp-settings.md).
+[MCP settings](../docs/features/mcp-settings.md).
 
 ## Updating the bundle
 
@@ -162,5 +162,5 @@ that manifest after startup and every six hours. Existing installations update
 in staging, verify SHA-256 and `pi --version`, then switch `current`; older
 version directories remain available for rollback.
 
-See [CI/CD operations](../docs/ci-cd.md) for release ordering, compatibility
+See [CI/CD operations](../docs/operations/ci-cd.md) for release ordering, compatibility
 gates, checksums and failed-publication retries.
