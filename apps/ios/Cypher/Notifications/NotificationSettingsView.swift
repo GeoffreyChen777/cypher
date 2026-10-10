@@ -7,11 +7,13 @@ struct NotificationSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     private var controller: NotificationController { model.notifications }
     private func setting<T>(_ keyPath: WritableKeyPath<NotificationPreferences, T>) -> Binding<T> {
-        Binding(get: { controller.settings[keyPath: keyPath] }, set: { value in
-            var next = controller.settings
-            next[keyPath: keyPath] = value
-            Task { await controller.updateSettings(next) }
-        })
+        Binding(
+            get: { controller.settings[keyPath: keyPath] },
+            set: { value in
+                var next = controller.settings
+                next[keyPath: keyPath] = value
+                Task { await controller.updateSettings(next) }
+            })
     }
     var body: some View {
         NavigationStack {
@@ -19,25 +21,37 @@ struct NotificationSettingsView: View {
                 Section {
                     LabeledContent("iOS permission", value: controller.permission)
                     if controller.permission == "Allowed" {
-                        LabeledContent("App icon badge", value: controller.badgesAllowed
-                                       ? (controller.badgeCount == 0 ? "No unread sessions" : "\(controller.badgeCount) unread")
-                                       : "Off in iOS Settings")
+                        LabeledContent(
+                            "App icon badge",
+                            value: controller.badgesAllowed
+                                ? (controller.badgeCount == 0
+                                    ? "No unread sessions" : "\(controller.badgeCount) unread")
+                                : "Off in iOS Settings")
                         if !controller.badgesAllowed {
-                            Text("Alerts are allowed but Badges are off, so the unread count can't appear on the app icon. Turn on Badges under Settings › Notifications › Cypher.")
-                                .font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
+                            Text(
+                                "Alerts are allowed but Badges are off, so the unread count can't appear on the app icon. Turn on Badges under Settings › Notifications › Cypher."
+                            )
+                            .font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
                         }
                     }
                     if controller.permission == "Disabled in iOS Settings" {
                         Button("Open iOS Settings") {
-                            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
                         }
                     } else {
-                        Button(controller.registered ? "Update notification permissions" : "Enable notifications on this iPhone") {
+                        Button(
+                            controller.registered
+                                ? "Update notification permissions" : "Enable notifications on this iPhone"
+                        ) {
                             Task { await controller.enable() }
                         }
                         .disabled(!controller.available || controller.busy)
                         Button("Open iOS Settings") {
-                            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
                         }
                     }
                     if let error = controller.error {
@@ -52,19 +66,25 @@ struct NotificationSettingsView: View {
                     Toggle("Task completed", isOn: setting(\.completed))
                     Toggle("Subagent results", isOn: setting(\.subagents))
                 } footer: {
-                    Text("Only the last device used for this session receives its notification. Alerts wait 10 seconds so a new session action can supersede them. Subagent results remain off by default.")
+                    Text(
+                        "Only the last device used for this session receives its notification. Alerts wait 10 seconds so a new session action can supersede them. Subagent results remain off by default."
+                    )
                 }
                 .disabled(!controller.available || controller.busy)
                 Section("Muted projects") {
                     ForEach(model.spaces) { project in
-                        Toggle(isOn: Binding(get: {
-                            controller.settings.mutedProjects.contains(project.id)
-                        }, set: { muted in
-                            var next = controller.settings
-                            next.mutedProjects.removeAll { $0 == project.id }
-                            if muted { next.mutedProjects.append(project.id) }
-                            Task { await controller.updateSettings(next) }
-                        })) {
+                        Toggle(
+                            isOn: Binding(
+                                get: {
+                                    controller.settings.mutedProjects.contains(project.id)
+                                },
+                                set: { muted in
+                                    var next = controller.settings
+                                    next.mutedProjects.removeAll { $0 == project.id }
+                                    if muted { next.mutedProjects.append(project.id) }
+                                    Task { await controller.updateSettings(next) }
+                                })
+                        ) {
                             VStack(alignment: .leading) {
                                 Text(project.displayName)
                                 Text(model.deviceName(project.deviceId)).font(.caption).foregroundStyle(.secondary)
@@ -74,10 +94,14 @@ struct NotificationSettingsView: View {
                 }
                 .disabled(!controller.available || controller.busy)
                 Section {
-                    Text("The app icon badge counts sessions with unread important events in this account. Opening a session clears its count; opening Home does not clear everything. Enable Badges in iOS Settings if the number is hidden.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                    Text("Notification preferences apply to this account's workspace. Lock-screen alerts do not include chat text, task details, or project names.")
-                        .font(.footnote).foregroundStyle(.secondary)
+                    Text(
+                        "The app icon badge counts sessions with unread important events in this account. Opening a session clears its count; opening Home does not clear everything. Enable Badges in iOS Settings if the number is hidden."
+                    )
+                    .font(.footnote).foregroundStyle(.secondary)
+                    Text(
+                        "Notification preferences apply to this account's workspace. Lock-screen alerts do not include chat text, task details, or project names."
+                    )
+                    .font(.footnote).foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("Notifications")

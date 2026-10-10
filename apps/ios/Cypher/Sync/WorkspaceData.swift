@@ -76,10 +76,11 @@ extension WorkspaceData {
     /// Quick chats are listed on their own.
     var projectlessChats: [Chat] {
         let liveSpaceIds = Set(spaces.map(\.id))
-        return sortActive(chats.filter {
-            !$0.isChild && !$0.archived && !$0.isScratch
-                && !($0.spaceId.map(liveSpaceIds.contains) ?? false)
-        })
+        return sortActive(
+            chats.filter {
+                !$0.isChild && !$0.archived && !$0.isScratch
+                    && !($0.spaceId.map(liveSpaceIds.contains) ?? false)
+            })
     }
 
     /// Active quick chats, every device merged (state.rs merge_scratch_groups).

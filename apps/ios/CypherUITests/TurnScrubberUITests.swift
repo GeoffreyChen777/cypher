@@ -18,9 +18,10 @@ final class TurnScrubberUITests: XCTestCase {
 
     private func drag(_ scrubber: XCUIElement, from: CGFloat, to: CGFloat, hold: TimeInterval = 0) {
         scrubber.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: from))
-            .press(forDuration: 0.05,
-                   thenDragTo: scrubber.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: to)),
-                   withVelocity: .slow, thenHoldForDuration: hold)
+            .press(
+                forDuration: 0.05,
+                thenDragTo: scrubber.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: to)),
+                withVelocity: .slow, thenHoldForDuration: hold)
     }
 
     func testOpensOnTheLatestRound() {
@@ -40,7 +41,8 @@ final class TurnScrubberUITests: XCTestCase {
 
     func testDragToTopLandsOnTheFirstPrompt() {
         let (app, scrubber) = launch(turns: 12)
-        drag(scrubber, from: 0.85, to: 0.02, hold: Double(ProcessInfo.processInfo.environment["SCRUB_HOLD"] ?? "0") ?? 0)
+        drag(
+            scrubber, from: 0.85, to: 0.02, hold: Double(ProcessInfo.processInfo.environment["SCRUB_HOLD"] ?? "0") ?? 0)
         XCTAssertTrue(turn(app, "Turn 0:").waitForHittable(timeout: 3), "The first prompt must be in view")
         XCTAssertEqual(scrubber.value as? String, "Round 1 of 12")
     }

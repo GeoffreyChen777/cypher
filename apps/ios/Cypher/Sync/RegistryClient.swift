@@ -82,24 +82,28 @@ actor RegistryClient {
         let seq: UInt64
     }
 
-    init(device: String,
-         urlProvider: @escaping @Sendable () async -> URL?,
-         rowsRequest: @escaping @Sendable (UInt64?) async -> URLRequest?,
-         pushRequest: @escaping @Sendable () async -> URLRequest?,
-         delegate: Delegate,
-         transport: any WebSocketTransport = URLSessionWebSocketTransport(),
-         clock: any RoomClock = SystemRoomClock()) {
+    init(
+        device: String,
+        urlProvider: @escaping @Sendable () async -> URL?,
+        rowsRequest: @escaping @Sendable (UInt64?) async -> URLRequest?,
+        pushRequest: @escaping @Sendable () async -> URLRequest?,
+        delegate: Delegate,
+        transport: any WebSocketTransport = URLSessionWebSocketTransport(),
+        clock: any RoomClock = SystemRoomClock()
+    ) {
         self.device = device
         self.urlProvider = urlProvider
         self.rowsRequest = rowsRequest
         self.pushRequest = pushRequest
         self.delegate = delegate
-        life = RoomSocketLifecycle(transport: transport, clock: clock, hooks: .init(
-            label: "registry",
-            wake: { client, wake, gen in await client.lifecycle(wake, gen: gen) },
-            probe: { client in await client.send(ProbeFrame()) },
-            disconnected: { client in await client.delegate.event(.disconnected) },
-            timers: [RegistryClient.presenceIntervalNs]))
+        life = RoomSocketLifecycle(
+            transport: transport, clock: clock,
+            hooks: .init(
+                label: "registry",
+                wake: { client, wake, gen in await client.lifecycle(wake, gen: gen) },
+                probe: { client in await client.send(ProbeFrame()) },
+                disconnected: { client in await client.delegate.event(.disconnected) },
+                timers: [RegistryClient.presenceIntervalNs]))
     }
 
     // MARK: Lifecycle
@@ -134,7 +138,8 @@ actor RegistryClient {
             }
             request.httpBody = bytes
             guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  let http = response as? HTTPURLResponse else {
+                let http = response as? HTTPURLResponse
+            else {
                 await delegate.resetPushable()
                 break
             }
@@ -149,13 +154,16 @@ actor RegistryClient {
             await delegate.acknowledge(ack.batch, ack.seq)
         }
         guard let request = await rowsRequest(await delegate.helloCursor()),
-              let (data, response) = try? await URLSession.shared.data(for: request),
-              data.count <= RegistryClient.maxHttpPullBytes,
-              (response as? HTTPURLResponse)?.statusCode == 200,
-              let frame = try? JSONDecoder().decode(HTTPPull.self, from: data) else { return }
-        await delegate.event(.state(seq: frame.seq, full: frame.full,
-                                    gcFloor: frame.gcFloor, rows: frame.rows,
-                                    presence: frame.presence))
+            let (data, response) = try? await URLSession.shared.data(for: request),
+            data.count <= RegistryClient.maxHttpPullBytes,
+            (response as? HTTPURLResponse)?.statusCode == 200,
+            let frame = try? JSONDecoder().decode(HTTPPull.self, from: data)
+        else { return }
+        await delegate.event(
+            .state(
+                seq: frame.seq, full: frame.full,
+                gcFloor: frame.gcFloor, rows: frame.rows,
+                presence: frame.presence))
     }
 
     func stop() {
@@ -247,8 +255,10 @@ actor RegistryClient {
             life.helloAnswered()
             let wasJoined = life.joined
             life.didJoin()
-            await delegate.event(.state(seq: seq, full: full, gcFloor: gcFloor,
-                                        rows: rows, presence: presence))
+            await delegate.event(
+                .state(
+                    seq: seq, full: full, gcFloor: gcFloor,
+                    rows: rows, presence: presence))
             if !wasJoined {
                 roomLog.info("registry: joined (seq=\(seq), full=\(full), rows=\(rows.count))")
                 await delegate.event(.connected)
@@ -288,7 +298,8 @@ actor RegistryClient {
 
     private func send(_ frame: some Encodable) async {
         guard let socket = life.socket, let data = try? JSONEncoder().encode(frame),
-              let text = String(data: data, encoding: .utf8) else { return }
+            let text = String(data: data, encoding: .utf8)
+        else { return }
         try? await socket.send(.string(text))
     }
 }
@@ -349,8 +360,7 @@ struct ActivityReport: Encodable, Sendable, Equatable {
         try c.encode(platform, forKey: .platform)
         try c.encode(foreground, forKey: .foreground)
         try c.encode(interactionAgeMs, forKey: .interactionAgeMs)
-        if let chatId { try c.encode(chatId, forKey: .chatId) }
-        else { try c.encodeNil(forKey: .chatId) }
+        if let chatId { try c.encode(chatId, forKey: .chatId) } else { try c.encodeNil(forKey: .chatId) }
     }
 
     /// A transition — a different chat, or entering/leaving the foreground —
@@ -382,29 +392,36 @@ private enum ServerFrame: Decodable {
         let c = try decoder.container(keyedBy: Keys.self)
         switch try c.decode(String.self, forKey: .t) {
         case "state":
-            self = .state(seq: try c.decode(UInt64.self, forKey: .seq),
-                          full: try c.decode(Bool.self, forKey: .full),
-                          gcFloor: try c.decodeIfPresent(UInt64.self, forKey: .gcFloor) ?? 0,
-                          rows: try c.decode([RegistryRow].self, forKey: .rows),
-                          presence: try c.decodeIfPresent([String: Int64].self, forKey: .presence) ?? [:])
+            self = .state(
+                seq: try c.decode(UInt64.self, forKey: .seq),
+                full: try c.decode(Bool.self, forKey: .full),
+                gcFloor: try c.decodeIfPresent(UInt64.self, forKey: .gcFloor) ?? 0,
+                rows: try c.decode([RegistryRow].self, forKey: .rows),
+                presence: try c.decodeIfPresent([String: Int64].self, forKey: .presence) ?? [:])
         case "rows":
-            self = .rows(seq: try c.decode(UInt64.self, forKey: .seq),
-                         rows: try c.decode([RegistryRow].self, forKey: .rows))
+            self = .rows(
+                seq: try c.decode(UInt64.self, forKey: .seq),
+                rows: try c.decode([RegistryRow].self, forKey: .rows))
         case "ack":
-            self = .ack(batch: try c.decode(String.self, forKey: .batch),
-                        seq: try c.decode(UInt64.self, forKey: .seq),
-                        applied: try c.decodeIfPresent(UInt64.self, forKey: .applied) ?? 0)
+            self = .ack(
+                batch: try c.decode(String.self, forKey: .batch),
+                seq: try c.decode(UInt64.self, forKey: .seq),
+                applied: try c.decodeIfPresent(UInt64.self, forKey: .applied) ?? 0)
         case "presence":
-            self = .presence(device: try c.decode(String.self, forKey: .device),
-                             at: try c.decode(Int64.self, forKey: .at))
+            self = .presence(
+                device: try c.decode(String.self, forKey: .device),
+                at: try c.decode(Int64.self, forKey: .at))
         case "probe-ok":  // the tag has a hyphen — bit the Rust side too
             self = .probeOk
         case "error":
-            self = .error(code: try c.decodeIfPresent(String.self, forKey: .code) ?? "unknown",
-                          message: try c.decodeIfPresent(String.self, forKey: .message) ?? "")
+            self = .error(
+                code: try c.decodeIfPresent(String.self, forKey: .code) ?? "unknown",
+                message: try c.decodeIfPresent(String.self, forKey: .message) ?? "")
         case let tag:
-            throw DecodingError.dataCorrupted(.init(codingPath: [Keys.t],
-                                                    debugDescription: "unknown frame: \(tag)"))
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: [Keys.t],
+                    debugDescription: "unknown frame: \(tag)"))
         }
     }
 }

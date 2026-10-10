@@ -117,8 +117,9 @@ struct ContextUsage: Hashable {
     /// the row.
     init?(_ value: JSONValue?) {
         guard let object = value?.objectValue,
-              let used = object["used"]?.int64Value,
-              let size = object["size"]?.int64Value else { return nil }
+            let used = object["used"]?.int64Value,
+            let size = object["size"]?.int64Value
+        else { return nil }
         self.used = used
         self.size = size
     }
@@ -184,7 +185,8 @@ func chatIndicator(chat: Chat, live: SessionStatus?) -> ChatIndicator {
 /// dots carry urgency instead, so the order never moves on its own.
 func sortActive(_ chats: [Chat]) -> [Chat] {
     chats.sorted { a, b in
-        let ta = a.lastMessageAt ?? a.createdAt, tb = b.lastMessageAt ?? b.createdAt
+        let ta = a.lastMessageAt ?? a.createdAt
+        let tb = b.lastMessageAt ?? b.createdAt
         if ta != tb { return ta > tb }
         return a.id < b.id
     }
@@ -245,7 +247,7 @@ enum MessagePart: Hashable, Identifiable {
     var id: String {
         switch self {
         case .text(let id, _, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _),
-             .reasoning(let id, _):
+            .reasoning(let id, _):
             return id
         }
     }
@@ -326,18 +328,23 @@ enum ForkResponse: Decodable, Equatable {
     case unavailable(message: String)
 
     private enum Keys: String, CodingKey { case kind, chat, composerText, message }
-    private struct Row: Decodable { var id: String; var title: String? }
+    private struct Row: Decodable {
+        var id: String
+        var title: String?
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
         switch try c.decode(String.self, forKey: .kind) {
         case "created":
             let row = try c.decode(Row.self, forKey: .chat)
-            self = .created(chatId: row.id, title: row.title,
-                            composerText: try c.decodeIfPresent(String.self, forKey: .composerText))
+            self = .created(
+                chatId: row.id, title: row.title,
+                composerText: try c.decodeIfPresent(String.self, forKey: .composerText))
         default:
-            self = .unavailable(message: try c.decodeIfPresent(String.self, forKey: .message)
-                                ?? "This session can't be forked here.")
+            self = .unavailable(
+                message: try c.decodeIfPresent(String.self, forKey: .message)
+                    ?? "This session can't be forked here.")
         }
     }
 }

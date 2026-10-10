@@ -19,16 +19,24 @@ private final class NotificationFixture {
     var leases: [String: String] = [:]
     init() {
         controller.readRegistration = { [weak self] in self?.storage }
-        controller.writeRegistration = { [weak self] text in self?.storage = text; return self != nil }
+        controller.writeRegistration = { [weak self] text in
+            self?.storage = text
+            return self != nil
+        }
         controller.authorization = { [weak self] in self?.permission ?? .notDetermined }
-        controller.requestPermission = { [weak self] in self?.permission = .authorized; return true }
+        controller.requestPermission = { [weak self] in
+            self?.permission = .authorized
+            return true
+        }
         controller.registerWithOS = { [weak self] in self?.controller.receivedToken(Data(repeating: 7, count: 32)) }
         controller.clearDelivered = {}
         controller.setBadge = { [weak self] count in self?.appliedBadges.append(count) }
         controller.badgeAuthorization = { [weak self] in self?.badgesOn ?? true }
         controller.perform = { [weak self] request in
             guard let self, let url = request.url else { throw RelayError.notConnected }
-            let scope = String(repeating: request.value(forHTTPHeaderField: "Authorization")?.contains("alice") == true ? "a" : "b", count: 64)
+            let scope = String(
+                repeating: request.value(forHTTPHeaderField: "Authorization")?.contains("alice") == true ? "a" : "b",
+                count: 64)
             var body: [String: Any] = ["ok": true]
             if url.path.hasSuffix("/settings") {
                 if request.httpMethod == "PUT", let data = request.httpBody {
@@ -48,22 +56,28 @@ private final class NotificationFixture {
             } else if url.path.hasSuffix("/activity"), let data = request.httpBody {
                 let activity = try JSONSerialization.jsonObject(with: data) as! [String: Any]
                 activities.append(activity)
-                body = ["ok": true, "scope": scope,
-                        "readEventIds": activity["foreground"] as? Bool == true && activity["chatId"] as? String == "chat"
-                            ? readEventIds : []]
+                body = [
+                    "ok": true, "scope": scope,
+                    "readEventIds": activity["foreground"] as? Bool == true && activity["chatId"] as? String == "chat"
+                        ? readEventIds : [],
+                ]
             }
             if url.path.hasSuffix("/settings") || url.path.hasSuffix("/activity") {
                 body["badgeCount"] = badgeCount
                 body["badgeRevision"] = badgeRevision
                 body["scope"] = scope
             }
-            return (try JSONSerialization.data(withJSONObject: body),
-                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            return (
+                try JSONSerialization.data(withJSONObject: body),
+                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
         }
     }
     func bind(_ user: String = "alice") {
-        controller.bind(AppConfig(edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
-            userId: user, orgId: "org", deviceId: "phone", deviceName: "Test", devBearer: "\(user)@org"))
+        controller.bind(
+            AppConfig(
+                edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
+                userId: user, orgId: "org", deviceId: "phone", deviceName: "Test", devBearer: "\(user)@org"))
     }
 }
 
@@ -78,8 +92,9 @@ final class NotificationControllerTests: XCTestCase {
         throw RelayError.timeout
     }
     private func payload(_ character: Character = "a") -> PushPayload {
-        PushPayload(eventId: UUID().uuidString, scope: String(repeating: String(character), count: 64),
-                    chatId: "chat", projectId: "project", kind: "completed")
+        PushPayload(
+            eventId: UUID().uuidString, scope: String(repeating: String(character), count: 64),
+            chatId: "chat", projectId: "project", kind: "completed")
     }
 
     func testRegistrationRequiresConsentAndRevalidationIsIdempotent() async throws {
@@ -183,8 +198,9 @@ final class NotificationControllerTests: XCTestCase {
         XCTAssertEqual(reports.count, 2)
         XCTAssertEqual(reports.first?["chatId"] as? String, "chat")
         XCTAssertTrue(reports.last?["chatId"] is NSNull)
-        XCTAssertLessThan(try XCTUnwrap(reports.first?["sequence"] as? Int),
-                          try XCTUnwrap(reports.last?["sequence"] as? Int))
+        XCTAssertLessThan(
+            try XCTUnwrap(reports.first?["sequence"] as? Int),
+            try XCTUnwrap(reports.last?["sequence"] as? Int))
     }
 
     func testReadReceiptFromOldAccountCannotSilenceTheNewAccount() async throws {
@@ -197,13 +213,16 @@ final class NotificationControllerTests: XCTestCase {
         var release: CheckedContinuation<Void, Never>?
         f.controller.perform = { request in
             if request.url?.path.hasSuffix("/activity") == true,
-               let data = request.httpBody,
-               let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               body["chatId"] as? String == "chat" {
+                let data = request.httpBody,
+                let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                body["chatId"] as? String == "chat"
+            {
                 await withCheckedContinuation { release = $0 }
-                return (try JSONSerialization.data(withJSONObject: [
-                    "scope": String(repeating: "b", count: 64), "readEventIds": [event.eventId]
-                ]), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+                return (
+                    try JSONSerialization.data(withJSONObject: [
+                        "scope": String(repeating: "b", count: 64), "readEventIds": [event.eventId],
+                    ]), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                )
             }
             return try await oldPerform(request)
         }
@@ -236,13 +255,15 @@ final class NotificationControllerTests: XCTestCase {
 
     func testAuthoritativeBadgeDoesNotClearOnHomeAndUpdatesOnReadAndLogout() async throws {
         let f = NotificationFixture()
-        f.badgeCount = 3; f.badgeRevision = 4
+        f.badgeCount = 3
+        f.badgeRevision = 4
         f.bind()
         try await wait { f.appliedBadges.last == 3 }
         f.controller.viewing(nil)
         await Task.yield()
         XCTAssertEqual(f.controller.badgeCount, 3)
-        f.badgeCount = 2; f.badgeRevision = 5
+        f.badgeCount = 2
+        f.badgeRevision = 5
         f.controller.viewing("chat")
         try await wait { f.appliedBadges.last == 2 }
         f.controller.disconnect()
@@ -261,7 +282,8 @@ final class NotificationControllerTests: XCTestCase {
         XCTAssertEqual(f.controller.badgeCount, 2, "Retries do not increment")
         f.controller.receiveBadge(NotificationBadge(scope: scope, badgeCount: 0, badgeRevision: 11))
         f.controller.receiveBadge(NotificationBadge(scope: scope, badgeCount: 3, badgeRevision: 9))
-        f.controller.receiveBadge(NotificationBadge(scope: String(repeating: "b", count: 64), badgeCount: 8, badgeRevision: 50))
+        f.controller.receiveBadge(
+            NotificationBadge(scope: String(repeating: "b", count: 64), badgeCount: 8, badgeRevision: 50))
         try await wait { f.appliedBadges.last == 0 }
         XCTAssertEqual(f.controller.badgeCount, 0)
     }
@@ -287,7 +309,8 @@ final class NotificationControllerTests: XCTestCase {
             if count == 7 { await withCheckedContinuation { release = $0 } }
             f?.appliedBadges.append(count)
         }
-        f.controller.receiveBadge(NotificationBadge(scope: String(repeating: "a", count: 64), badgeCount: 7, badgeRevision: 10))
+        f.controller.receiveBadge(
+            NotificationBadge(scope: String(repeating: "a", count: 64), badgeCount: 7, badgeRevision: 10))
         try await wait { release != nil }
         f.controller.disconnect()
         release?.resume()

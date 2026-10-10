@@ -26,18 +26,22 @@ enum TestSupport {
 func buildRows(_ entries: [MessageEntry], pending: [PendingSend] = []) -> [TranscriptRow] {
     var parsers: [String: IncrementalMarkdownParser] = [:]
     var completed: [String: CompletedParse] = [:]
-    return TranscriptRowBuilder.rows(entries: entries, pendingSends: pending,
-                                     parsers: &parsers, completed: &completed)
+    return TranscriptRowBuilder.rows(
+        entries: entries, pendingSends: pending,
+        parsers: &parsers, completed: &completed)
 }
 
 extension MessageEntry {
     /// A transcript entry for tests: complete, from device "d", created at 1
     /// unless stated.
-    static func fixture(_ id: String = "m", role: MessageRole = .assistant, parts: [MessagePart],
-                        createdAt: Int64 = 1, deviceId: String = "d",
-                        status: MessageStatus? = .complete, isSteer: Bool = false) -> MessageEntry {
-        MessageEntry(id: id, role: role, parts: parts, createdAt: createdAt, deviceId: deviceId,
-                     status: status, isSteer: isSteer)
+    static func fixture(
+        _ id: String = "m", role: MessageRole = .assistant, parts: [MessagePart],
+        createdAt: Int64 = 1, deviceId: String = "d",
+        status: MessageStatus? = .complete, isSteer: Bool = false
+    ) -> MessageEntry {
+        MessageEntry(
+            id: id, role: role, parts: parts, createdAt: createdAt, deviceId: deviceId,
+            status: status, isSteer: isSteer)
     }
 }
 

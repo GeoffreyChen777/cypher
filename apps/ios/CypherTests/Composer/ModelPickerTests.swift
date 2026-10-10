@@ -13,11 +13,13 @@ final class ModelPickerTests: XCTestCase {
         let fourLevels = model("a/x", ["low", "medium", "high", "xhigh"])
         XCTAssertEqual(ModelPickerSheet.level(keeping: "low", on: fourLevels), "low")
         let threeLevels = model("a/y", ["low", "medium", "high"])
-        XCTAssertEqual(ModelPickerSheet.level(keeping: "xhigh", on: threeLevels), "high",
-                       "a level the model doesn't take falls back to its default")
+        XCTAssertEqual(
+            ModelPickerSheet.level(keeping: "xhigh", on: threeLevels), "high",
+            "a level the model doesn't take falls back to its default")
         XCTAssertEqual(ModelPickerSheet.level(keeping: nil, on: fourLevels), "xhigh")
-        XCTAssertNil(ModelPickerSheet.level(keeping: "high", on: model("a/z", [])),
-                     "a model without levels runs without one")
+        XCTAssertNil(
+            ModelPickerSheet.level(keeping: "high", on: model("a/z", [])),
+            "a model without levels runs without one")
     }
 
     func testEveryLevelHasAHint() {

@@ -15,8 +15,10 @@ final class RemoteCommandCatalog {
     private(set) var error: String?
     private var generation = UUID()
 
-    func load(deviceId: String, force: Bool = false,
-              fetch: (String) async throws -> [SlashCommand]) async {
+    func load(
+        deviceId: String, force: Bool = false,
+        fetch: (String) async throws -> [SlashCommand]
+    ) async {
         if !force, self.deviceId == deviceId, loading || (error == nil && !commands.isEmpty) { return }
         let ticket = UUID()
         generation = ticket

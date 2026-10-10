@@ -85,8 +85,10 @@ struct DeviceTabs: View {
             }
             .padding(.horizontal, 14)
             .frame(minHeight: 36)
-            .background(selected ? Theme.text : Theme.groupedRow,
-                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(
+                selected ? Theme.text : Theme.groupedRow,
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -303,7 +305,8 @@ struct ChatRow: View {
     private var location: String {
         // The folder is named after the chat id — the device says it all.
         if chat.isScratch { return model.deviceName(chat.deviceId) }
-        let space = model.space(for: chat)?.displayName
+        let space =
+            model.space(for: chat)?.displayName
             ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
             ?? "?"
         return "\(space) @ \(model.deviceName(chat.deviceId))"
@@ -405,7 +408,10 @@ struct NavigationProbeView: UIViewRepresentable {
             guard let probe, probe.controller == nil else { return }
             var responder: UIResponder? = next
             while let current = responder {
-                if let nav = current as? UINavigationController { probe.controller = nav; return }
+                if let nav = current as? UINavigationController {
+                    probe.controller = nav
+                    return
+                }
                 if let controller = current as? UIViewController, let nav = controller.navigationController {
                     probe.controller = nav
                     return

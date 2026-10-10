@@ -32,7 +32,6 @@ struct SessionView: View {
     @State private var sideChat: SideChatStore?
     @State private var promotedSideChat: String?
 
-
     private var chat: Chat? { model.chat(id: chatId) }
     @Environment(\.scenePhase) private var scenePhase
     /// On screen, frontmost and holding activity newer than the synced seen
@@ -78,7 +77,9 @@ struct SessionView: View {
         Group {
             if let chat, let store = model.sessionStore(for: chat) {
                 content(chat: chat, store: store)
-                    .onGeometryChange(for: CGSize.self) { $0.size } action: {
+                    .onGeometryChange(for: CGSize.self) {
+                        $0.size
+                    } action: {
                         viewWidth = $0.width
                         viewHeight = $0.height
                     }
@@ -125,8 +126,9 @@ struct SessionView: View {
             }
             // Keep the title bounded without creating a leading
             // bar-button container or changing native Back behavior.
-            .frame(width: max(140, viewWidth - Self.headerChromeInset),
-                   alignment: .leading)
+            .frame(
+                width: max(140, viewWidth - Self.headerChromeInset),
+                alignment: .leading)
         }
         // Bare text on the bar, not a glass capsule.
         .sharedBackgroundVisibility(.hidden)
@@ -158,8 +160,9 @@ struct SessionView: View {
             .accessibilityIdentifier("workspace-browser")
         }
         if let relation = chat.child,
-           let parent = model.chat(id: relation.parentChatId),
-           parent.id != chat.id, parent.deviceId == chat.deviceId {
+            let parent = model.chat(id: relation.parentChatId),
+            parent.id != chat.id, parent.deviceId == chat.deviceId
+        {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     path = SessionNavigation.opening(parent.id, in: path)
@@ -185,22 +188,26 @@ struct SessionView: View {
                     model.launchSheet = nil
                     commentDrafts.begin(quote: "The transcript stays glued to the bottom until you scroll up.")
                     if showList, let source = commentDrafts.editor {
-                        _ = commentDrafts.save(source: source, quote: source.text,
-                                              comment: "Explain what happens when the keyboard opens.")
+                        _ = commentDrafts.save(
+                            source: source, quote: source.text,
+                            comment: "Explain what happens when the keyboard opens.")
                         commentDrafts.showList()
                     }
                 }
             }
             .sessionActionPrompts(actions) { _ in leave() }
             .environment(\.transcriptSelectionActions, chat.map(selectionActions))
-            .sheet(item: $sideChat, onDismiss: {
-                // Navigate once the sheet is gone: a path change during its
-                // dismissal can be dropped.
-                if let chatId = promotedSideChat {
-                    promotedSideChat = nil
-                    path = SessionNavigation.opening(chatId, in: path)
+            .sheet(
+                item: $sideChat,
+                onDismiss: {
+                    // Navigate once the sheet is gone: a path change during its
+                    // dismissal can be dropped.
+                    if let chatId = promotedSideChat {
+                        promotedSideChat = nil
+                        path = SessionNavigation.opening(chatId, in: path)
+                    }
                 }
-            }) { store in
+            ) { store in
                 SideChatSheet(store: store) { chatId in
                     promotedSideChat = chatId
                 }
@@ -265,7 +272,8 @@ struct SessionView: View {
     private var subtitle: String? {
         guard let chat else { return nil }
         if chat.isScratch { return "Quick chat @ \(model.deviceName(chat.deviceId))" }
-        let space = model.space(for: chat)?.displayName
+        let space =
+            model.space(for: chat)?.displayName
             ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
             ?? "?"
         return "\(space) @ \(model.deviceName(chat.deviceId))"
@@ -291,7 +299,8 @@ struct SessionView: View {
                 // TranscriptView's reveal).
                 ZStack {
                     if store.entries.isEmpty, store.pendingSends.isEmpty,
-                       chat.lastMessageAt != nil {
+                        chat.lastMessageAt != nil
+                    {
                         TranscriptSkeleton()
                             .background(Theme.bg)
                     }
@@ -308,7 +317,8 @@ struct SessionView: View {
                 // feed — that near-bottom feed was left parked behind the
                 // keyboard. Same 70pt band as the re-engage rule.
                 if !scroll.userScrolling,
-                   scroll.distanceFromBottom <= TranscriptView.stickThreshold {
+                    scroll.distanceFromBottom <= TranscriptView.stickThreshold
+                {
                     scroll.pinned = true
                 }
                 scroll.keyboardTransitioning = true
@@ -330,8 +340,10 @@ struct SessionView: View {
                         statusStrip(chat: chat, store: store, status: status)
                             .allowsHitTesting(false)
                             .lineLimit(1)
-                        SubagentsAccessory(parent: chat, store: store,
-                                           maxWidth: max(130, viewWidth * 0.5)) { childId in
+                        SubagentsAccessory(
+                            parent: chat, store: store,
+                            maxWidth: max(130, viewWidth * 0.5)
+                        ) { childId in
                             path = SessionNavigation.opening(childId, in: path)
                         }
                         .padding(.trailing, 16)
@@ -348,14 +360,18 @@ struct SessionView: View {
                     }
                     Group {
                         if let request = store.openInputRequest, chat.config?.harness == "pi" {
-                            QuestionPanel(requestId: request.requestId, questions: request.questions,
-                                          maximumHeight: min(560, max(180, viewHeight * 0.72)),
-                                          canRespond: canControl(chat), stop: {
+                            QuestionPanel(
+                                requestId: request.requestId, questions: request.questions,
+                                maximumHeight: min(560, max(180, viewHeight * 0.72)),
+                                canRespond: canControl(chat),
+                                stop: {
+                                    guard canControl(chat) else { return }
+                                    controlError = store.sendInterrupt() ? nil : "Couldn't queue Stop. Please retry."
+                                }
+                            ) { requestId, answers in
                                 guard canControl(chat) else { return }
-                                controlError = store.sendInterrupt() ? nil : "Couldn't queue Stop. Please retry."
-                            }) { requestId, answers in
-                                guard canControl(chat) else { return }
-                                controlError = store.respondInput(requestId: requestId, answers: answers)
+                                controlError =
+                                    store.respondInput(requestId: requestId, answers: answers)
                                     ? nil : "Couldn't queue your answer. Please retry."
                             }
                             .id(request.requestId)
@@ -363,10 +379,12 @@ struct SessionView: View {
                             // The `/` menu gets what's left above the composer
                             // and its status row (~175pt), so it never runs
                             // under the navigation bar with the keyboard up.
-                            ComposerView(store: store, chat: chat, runLive: status == .working,
-                                         catalog: catalog, connectionRetry: connectionRetry,
-                                         slashMenuMaxHeight: min(SlashMenuView.defaultMaxHeight,
-                                                                 max(160, viewHeight - 175)))
+                            ComposerView(
+                                store: store, chat: chat, runLive: status == .working,
+                                catalog: catalog, connectionRetry: connectionRetry,
+                                slashMenuMaxHeight: min(
+                                    SlashMenuView.defaultMaxHeight,
+                                    max(160, viewHeight - 175)))
                         }
                     }
                     .padding(.bottom, 8)
@@ -375,7 +393,9 @@ struct SessionView: View {
                 // transcript's bottom pad should meet while pinned. Global
                 // frames stay honest when the keyboard's inset math doesn't
                 // (see TranscriptView.correctPin).
-                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { [scroll] new in
+                .onGeometryChange(for: CGFloat.self) {
+                    $0.frame(in: .global).minY
+                } action: { [scroll] new in
                     scroll.insetTopGlobalY = new
                     scroll.insetTopChangedAt = Date().timeIntervalSinceReferenceDate
                 }
@@ -404,8 +424,8 @@ struct SessionView: View {
     /// shows "Run failed"; the strip always reserves its height so the
     /// composer never shifts.
     private func statusStrip(chat: Chat, store: SessionStore, status: SessionStatus?) -> some View {
-        let transportReady = model.demo != nil ||
-            (model.connected && model.deviceOnline(chat.deviceId) && store.connected)
+        let transportReady =
+            model.demo != nil || (model.connected && model.deviceOnline(chat.deviceId) && store.connected)
         let connection = SessionConnectionPhase.resolve(
             transportReady: transportReady,
             needsCatalog: chat.config?.harness == "pi" && store.openInputRequest == nil,
@@ -423,25 +443,25 @@ struct SessionView: View {
                         model.foregrounded()
                     }
                 } else {
-                switch status {
-                case .working:
-                    WorkingSpinner()
-                    let startedAt = sessionStartedAt(chat: chat)
-                    let elapsed = (nowMs() - startedAt) / 1000
-                    Text("\(Motion.flavourWord(seed: Motion.flavourSeed(chat.id), elapsedSecs: elapsed))…")
-                        .font(Theme.sans(12))
-                        .foregroundStyle(Theme.textMuted)
-                    Text(Motion.formatElapsed(elapsed))
-                        .font(Theme.sans(11))
-                        .foregroundStyle(Theme.textFaint)
-                        .monospacedDigit()
-                case .errored:
-                    Text("Run failed")
-                        .font(Theme.sans(11))
-                        .foregroundStyle(Theme.danger)
-                default:
-                    EmptyView()
-                }
+                    switch status {
+                    case .working:
+                        WorkingSpinner()
+                        let startedAt = sessionStartedAt(chat: chat)
+                        let elapsed = (nowMs() - startedAt) / 1000
+                        Text("\(Motion.flavourWord(seed: Motion.flavourSeed(chat.id), elapsedSecs: elapsed))…")
+                            .font(Theme.sans(12))
+                            .foregroundStyle(Theme.textMuted)
+                        Text(Motion.formatElapsed(elapsed))
+                            .font(Theme.sans(11))
+                            .foregroundStyle(Theme.textFaint)
+                            .monospacedDigit()
+                    case .errored:
+                        Text("Run failed")
+                            .font(Theme.sans(11))
+                            .foregroundStyle(Theme.danger)
+                    default:
+                        EmptyView()
+                    }
                 }
             }
             .modifier(StatusCapsule(active: showing))
@@ -469,9 +489,11 @@ struct StatusCapsule: ViewModifier {
             content
                 .padding(.horizontal, 10)
                 .frame(height: 28)
-                .glassEffect(interactive ? .regular.tint(Theme.surface.opacity(0.72)).interactive()
-                                         : .regular.tint(Theme.surface.opacity(0.72)),
-                             in: Capsule())
+                .glassEffect(
+                    interactive
+                        ? .regular.tint(Theme.surface.opacity(0.72)).interactive()
+                        : .regular.tint(Theme.surface.opacity(0.72)),
+                    in: Capsule())
         } else {
             content
                 .frame(height: 28)

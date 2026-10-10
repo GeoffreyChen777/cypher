@@ -21,7 +21,8 @@ extension AppModel {
     func subagents(for parent: Chat, store: SessionStore, now: Int64) -> [SubagentPanelEntry] {
         let session = sessionRows[parent.id]
         let snapshot = session?.deviceId == parent.deviceId ? session?.subagents ?? [] : []
-        return SubagentProjection.aggregate(parent: parent, transcript: store.entries,
+        return SubagentProjection.aggregate(
+            parent: parent, transcript: store.entries,
             snapshot: snapshot, chats: allChats, sessions: sessionRows, now: now)
     }
 
@@ -171,10 +172,13 @@ extension AppModel {
         var references: [SessionReference] = []
         for id in ids {
             guard let chat = chat(id: id) else {
-                throw SessionReferenceError("A referenced session no longer exists — remove the @session reference and try again.")
+                throw SessionReferenceError(
+                    "A referenced session no longer exists — remove the @session reference and try again.")
             }
-            references.append(SessionReference(title: Mentions.sessionTitle(chat),
-                                               context: try await referenceContext(chat)))
+            references.append(
+                SessionReference(
+                    title: Mentions.sessionTitle(chat),
+                    context: try await referenceContext(chat)))
         }
         return references
     }
@@ -208,7 +212,8 @@ extension AppModel {
                 }
             }
             if store.entries.isEmpty, !store.connected {
-                throw SessionReferenceError("This phone has no synced copy of “\(Mentions.sessionTitle(chat))” yet — try again once it loads.")
+                throw SessionReferenceError(
+                    "This phone has no synced copy of “\(Mentions.sessionTitle(chat))” yet — try again once it loads.")
             }
         }
         return SessionReferences.boundedContext(await store.referenceEntries()) ?? ""
@@ -238,8 +243,10 @@ extension AppModel {
     }
 
     @discardableResult
-    func createChat(space: Space, config chatConfig: ChatConfig,
-                    branch: String? = nil, cwd: String? = nil) -> String? {
+    func createChat(
+        space: Space, config chatConfig: ChatConfig,
+        branch: String? = nil, cwd: String? = nil
+    ) -> String? {
         data?.createChat(space: space, config: chatConfig, branch: branch, cwd: cwd)
     }
 
@@ -303,7 +310,8 @@ extension AppModel {
         monitor.pathUpdateHandler = { [weak self] path in
             // Interface set is part of the key: a satisfied→satisfied hop
             // (wifi→cellular) silently kills established sockets too.
-            let key = path.status == .satisfied
+            let key =
+                path.status == .satisfied
                 ? "up:" + path.availableInterfaces.map(\.name).sorted().joined(separator: ",")
                 : "down"
             Task { @MainActor [weak self] in

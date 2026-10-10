@@ -20,7 +20,8 @@ struct WorkspaceSourceView: View {
         self.path = path
         self.partial = partial
         preview = WorkspaceTextPreview(text)
-        let lines = preview.text.split(separator: "\n", omittingEmptySubsequences: false).count
+        let lines =
+            preview.text.split(separator: "\n", omittingEmptySubsequences: false).count
             - (preview.text.hasSuffix("\n") ? 1 : 0)
         oversized = preview.truncated || lines > 10_000
     }
@@ -33,21 +34,27 @@ struct WorkspaceSourceView: View {
                 notice("Preview truncated — showing loaded text", icon: "exclamationmark.triangle", warning: true)
             }
             if preview.text.isEmpty {
-                ContentUnavailableView("Empty file", systemImage: "doc.text",
+                ContentUnavailableView(
+                    "Empty file", systemImage: "doc.text",
                     description: Text("This file has no text."))
             } else if fallback {
-                notice(oversized ? "Large file · Plain text preview"
-                       : plain ? "Plain text preview"
-                       : "Highlighting unavailable · Plain text preview", icon: "doc.plaintext")
+                notice(
+                    oversized
+                        ? "Large file · Plain text preview"
+                        : plain
+                            ? "Plain text preview"
+                            : "Highlighting unavailable · Plain text preview", icon: "doc.plaintext")
                 WorkspaceCodeView(text: preview.text, readerStyle: true)
             } else {
                 ZStack {
-                    WorkspaceDiffWebView(path: path, patch: "", split: false, dark: colorScheme == .dark,
-                        source: .init(text: preview.text, wrap: wrap)) { value in
-                            status = value
-                            if value == .rendered { hasRendered = true }
-                        }
-                        .id(revision)
+                    WorkspaceDiffWebView(
+                        path: path, patch: "", split: false, dark: colorScheme == .dark,
+                        source: .init(text: preview.text, wrap: wrap)
+                    ) { value in
+                        status = value
+                        if value == .rendered { hasRendered = true }
+                    }
+                    .id(revision)
                     if !hasRendered && status == .loading {
                         ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
                             .background(Theme.bg)
@@ -70,7 +77,10 @@ struct WorkspaceSourceView: View {
                     if !oversized && !preview.text.isEmpty {
                         if fallback {
                             Button("Syntax highlighting", systemImage: "chevron.left.forwardslash.chevron.right") {
-                                plain = false; status = .loading; hasRendered = false; revision += 1
+                                plain = false
+                                status = .loading
+                                hasRendered = false
+                                revision += 1
                             }
                         } else {
                             Button("Plain text preview", systemImage: "doc.plaintext") { plain = true }

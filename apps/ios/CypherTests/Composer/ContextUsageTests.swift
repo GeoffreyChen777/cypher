@@ -20,8 +20,9 @@ final class ContextUsageTests: XCTestCase {
     }
 
     func testContextUsageDecodesLeniently() {
-        XCTAssertEqual(ContextUsage(.object(["used": .int(10), "size": .double(20)])),
-                       ContextUsage(used: 10, size: 20))
+        XCTAssertEqual(
+            ContextUsage(.object(["used": .int(10), "size": .double(20)])),
+            ContextUsage(used: 10, size: 20))
         XCTAssertNil(ContextUsage(.object(["used": .string("x"), "size": .int(20)])))
         XCTAssertNil(ContextUsage(nil))
         XCTAssertNil(ContextUsage(.null))

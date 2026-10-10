@@ -21,8 +21,9 @@ final class RegistryClientLifecycleTests: XCTestCase {
             urlProvider: { URL(string: "wss://edge.test/registry/org/ws") },
             rowsRequest: { _ in nil },
             pushRequest: { nil },
-            delegate: .init(helloCursor: { nil }, takePushable: { [] }, resetPushable: {},
-                            acknowledge: { _, _ in }, event: { log.append($0) }),
+            delegate: .init(
+                helloCursor: { nil }, takePushable: { [] }, resetPushable: {},
+                acknowledge: { _, _ in }, event: { log.append($0) }),
             transport: transport, clock: clock)
     }
 

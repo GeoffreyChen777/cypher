@@ -17,9 +17,11 @@ final class ChatRoomClientLifecycleTests: XCTestCase {
     private var client: ChatRoomClient!
 
     private static let ms: UInt64 = 1_000_000
-    private static let state = ChatWire.encode(ChatFrameType.state, header: [
-        "headSeq": 0, "seqFloor": 0, "checkpointSeq": 0, "checkpointSize": 0, "rowCount": 0, "rowBytes": 0,
-    ])
+    private static let state = ChatWire.encode(
+        ChatFrameType.state,
+        header: [
+            "headSeq": 0, "seqFloor": 0, "checkpointSeq": 0, "checkpointSize": 0, "rowCount": 0, "rowBytes": 0,
+        ])
     private static let rowsDone = ChatWire.encode(ChatFrameType.rowsDone, header: [:])
 
     override func setUp() async throws {

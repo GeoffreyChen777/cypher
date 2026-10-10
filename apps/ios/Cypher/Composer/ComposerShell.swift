@@ -169,8 +169,11 @@ struct ComposerShell<Chips: View>: View {
         // A tall expanded card sits over transcript rows; tint its glass so
         // the text underneath can't read through the editor and control row
         // (the collapsed pill stays plain glass).
-        .glassEffect(expanded ? .regular.tint(Theme.surface.opacity(0.72)).interactive()
-                              : .regular.interactive(), in: surfaceShape)
+        .glassEffect(
+            expanded
+                ? .regular.tint(Theme.surface.opacity(0.72)).interactive()
+                : .regular.interactive(), in: surfaceShape
+        )
         .overlay(surfaceShape.strokeBorder(whiteAlpha(0.05), lineWidth: 1))
         // The whole glass surface focuses the editor, not just the TextField's
         // own text box: the collapsed pill is mostly padding, and a tap that
@@ -180,39 +183,46 @@ struct ComposerShell<Chips: View>: View {
         // Masked to .subviews while focused so cursor-placement taps inside
         // the editor stay fully native.
         .contentShape(surfaceShape)
-        .gesture(TapGesture().onEnded { focus.isFocused = true },
-                 including: editing ? .subviews : .all)
+        .gesture(
+            TapGesture().onEnded { focus.isFocused = true },
+            including: editing ? .subviews : .all)
     }
 
     private var chipEdgeMask: some View {
         let fade: CGFloat = 22
         return HStack(spacing: 0) {
-            LinearGradient(colors: [.black.opacity(chipOverflow.leading ? 0 : 1), .black],
-                           startPoint: .leading, endPoint: .trailing)
-                .frame(width: fade)
+            LinearGradient(
+                colors: [.black.opacity(chipOverflow.leading ? 0 : 1), .black],
+                startPoint: .leading, endPoint: .trailing
+            )
+            .frame(width: fade)
             Rectangle().fill(.black)
-            LinearGradient(colors: [.black, .black.opacity(chipOverflow.trailing ? 0 : 1)],
-                           startPoint: .leading, endPoint: .trailing)
-                .frame(width: fade)
+            LinearGradient(
+                colors: [.black, .black.opacity(chipOverflow.trailing ? 0 : 1)],
+                startPoint: .leading, endPoint: .trailing
+            )
+            .frame(width: fade)
         }
     }
 
     private var input: some View {
-        ComposerTextInput(text: $draft, focus: focus, editorID: editorID, enabled: !busy,
-                          placeholder: placeholder, caretToEnd: caretRequest, mentions: mentions)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .topLeading) {
-                if draft.isEmpty {
-                    Text(placeholder)
-                        .font(Theme.sans(16))
-                        .foregroundStyle(Theme.textFaint)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                }
+        ComposerTextInput(
+            text: $draft, focus: focus, editorID: editorID, enabled: !busy,
+            placeholder: placeholder, caretToEnd: caretRequest, mentions: mentions
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .topLeading) {
+            if draft.isEmpty {
+                Text(placeholder)
+                    .font(Theme.sans(16))
+                    .foregroundStyle(Theme.textFaint)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
             }
-            // A live Steer does not transition the session's running state.
-            // Explicitly retire the native editor's cached text on success.
-            .id(editorRevision)
+        }
+        // A live Steer does not transition the session's running state.
+        // Explicitly retire the native editor's cached text on success.
+        .id(editorRevision)
     }
 
     private var attachButton: some View {
@@ -233,8 +243,9 @@ struct ComposerShell<Chips: View>: View {
 
     /// Attachments count as content: an image-only send is a send, never a stop.
     private var hasContent: Bool {
-        CommentPrompt.hasSendContent(text: draft, attachmentCount: attachments.count,
-                                     commentCount: hasComments ? 1 : 0)
+        CommentPrompt.hasSendContent(
+            text: draft, attachmentCount: attachments.count,
+            commentCount: hasComments ? 1 : 0)
     }
 
     /// The send button with the context arc round it, and its long press
@@ -276,8 +287,10 @@ struct ComposerShell<Chips: View>: View {
                 }
             }
             .frame(width: 40, height: 40)
-            .background(buttonActive ? AnyShapeStyle(Theme.text) : AnyShapeStyle(whiteAlpha(0.10)),
-                        in: Circle())
+            .background(
+                buttonActive ? AnyShapeStyle(Theme.text) : AnyShapeStyle(whiteAlpha(0.10)),
+                in: Circle()
+            )
             .contentShape(Circle())
         }
         .buttonStyle(.plain)

@@ -22,8 +22,11 @@ final class TranscriptWindowUITests: XCTestCase {
         // The reveal used to give up with the view parked near the top. The
         // last turn's closing paragraph is the transcript's final row.
         let last = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@",
-                                  "Landed the pass-119", "Landed the pass-119"))
+            .matching(
+                NSPredicate(
+                    format: "label CONTAINS %@ OR value CONTAINS %@",
+                    "Landed the pass-119", "Landed the pass-119")
+            )
             .firstMatch
         XCTAssertTrue(last.waitForHittable(timeout: 10), "A long transcript must open at its latest reply")
         XCTAssertFalse(app.buttons["transcript-show-earlier"].isHittable)
@@ -37,9 +40,10 @@ final class TranscriptWindowUITests: XCTestCase {
         var swipes = 0
         while !(button.exists && button.isHittable), swipes < 60 {
             transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
-                .press(forDuration: 0.01,
-                       thenDragTo: transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)),
-                       withVelocity: .fast, thenHoldForDuration: 0)
+                .press(
+                    forDuration: 0.01,
+                    thenDragTo: transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)),
+                    withVelocity: .fast, thenHoldForDuration: 0)
             swipes += 1
         }
         XCTAssertTrue(button.isHittable, "Scrolling up must reach the window's top")

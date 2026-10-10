@@ -34,12 +34,15 @@ final class ScriptChipTests: XCTestCase {
     }
 
     func testScriptChipsNameTheToolsTheScriptCalls() {
-        let call = script("const [a, b] = await Promise.all([\n  tools.read({ path: 'x' }),\n  tools.bash({ command: 'ls' }),\n]);\nawait tools.read({ path: 'y' });")
+        let call = script(
+            "const [a, b] = await Promise.all([\n  tools.read({ path: 'x' }),\n  tools.bash({ command: 'ls' }),\n]);\nawait tools.read({ path: 'y' });"
+        )
         XCTAssertEqual(call.chipLabel, "Script")
         XCTAssertEqual(call.chipDetail, "read, bash")
         // Bracket access, and MCP tools by their tool name.
-        XCTAssertEqual(script("await tools[\"my-tool\"]({});\nawait tools.mcp__mvp_lab_discord__search({ q: 1 });").chipDetail,
-                       "my-tool, search")
+        XCTAssertEqual(
+            script("await tools[\"my-tool\"]({});\nawait tools.mcp__mvp_lab_discord__search({ q: 1 });").chipDetail,
+            "my-tool, search")
         // Lookalikes are not the `tools` global.
         XCTAssertEqual(RenderToolCall.scriptTools("ALL_TOOLS.map(t => t.name); myTools.x(); a.tools.y(); tools."), [])
         // No tool calls: the first line of code that is not the options header.
@@ -63,11 +66,15 @@ final class ScriptChipTests: XCTestCase {
 
     func testGroupSummariesCountScriptsWithCommands() {
         let read = RenderToolCall(tag: "readFile", fields: ["path": "a"])
-        XCTAssertEqual(toolGroupSummary([item("s", script("")), item("r", read)]),
-                       "Ran 1 script · read 1 file")
-        XCTAssertEqual(toolGroupSummary([item("s", script("")), item("a", exec("ls")),
-                                         item("b", exec("ls"), failed: true), item("r", read)]),
-                       "Ran 2 commands and 1 script · read 1 file · 1 failed")
+        XCTAssertEqual(
+            toolGroupSummary([item("s", script("")), item("r", read)]),
+            "Ran 1 script · read 1 file")
+        XCTAssertEqual(
+            toolGroupSummary([
+                item("s", script("")), item("a", exec("ls")),
+                item("b", exec("ls"), failed: true), item("r", read),
+            ]),
+            "Ran 2 commands and 1 script · read 1 file · 1 failed")
         let search = RenderToolCall(tag: "unknown", fields: ["name": "tool_search"])
         XCTAssertEqual(toolGroupSummary([item("q", search)]), "1 search")
     }
@@ -104,8 +111,9 @@ final class ScriptChipTests: XCTestCase {
     }
 
     func testScriptBodyIsTheCodeItself() throws {
-        let body = try XCTUnwrap(RenderToolCall.scriptBody(
-            "\n\nconst a = await tools.read({ path: \"x\" });\nreturn a.length;\n\n"))
+        let body = try XCTUnwrap(
+            RenderToolCall.scriptBody(
+                "\n\nconst a = await tools.read({ path: \"x\" });\nreturn a.length;\n\n"))
         XCTAssertEqual(body.code, "const a = await tools.read({ path: \"x\" });\nreturn a.length;")
         XCTAssertEqual(body.truncatedBy, 0)
         // Scripts get 80 lines before the counted tail.
@@ -133,17 +141,22 @@ final class ScriptChipTests: XCTestCase {
 
     func testTheDocsScriptAndQueryReachTheChip() throws {
         func part(_ id: String, _ name: String, _ input: [String: Any]) -> [String: Any] {
-            ["kind": "tool", "id": id, "isError": false,
-             "call": ["kind": "unknown", "name": name, "input": input]]
+            [
+                "kind": "tool", "id": id, "isError": false,
+                "call": ["kind": "unknown", "name": name, "input": input],
+            ]
         }
-        let entry = try XCTUnwrap(SessionStore.entryFrom(LoroValue.fromJSON([
-            "id": "m", "role": "assistant", "createdAt": 1, "deviceId": "d",
-            "parts": [
-                part("s1", "codemode", ["code": "return await tools.read({ path: 'a' });"]),
-                part("q", "tool_search", ["query": "discord"]),
-                part("o", "other", ["code": "not kept"]),
-            ],
-        ] as [String: Any])))
+        let entry = try XCTUnwrap(
+            SessionStore.entryFrom(
+                LoroValue.fromJSON(
+                    [
+                        "id": "m", "role": "assistant", "createdAt": 1, "deviceId": "d",
+                        "parts": [
+                            part("s1", "codemode", ["code": "return await tools.read({ path: 'a' });"]),
+                            part("q", "tool_search", ["query": "discord"]),
+                            part("o", "other", ["code": "not kept"]),
+                        ],
+                    ] as [String: Any])))
         let calls = entry.parts.compactMap { part -> RenderToolCall? in
             if case .tool(_, let call, _, _) = part { return call }
             return nil

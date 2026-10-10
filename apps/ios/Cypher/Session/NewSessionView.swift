@@ -93,8 +93,10 @@ struct NewSessionView: View {
     // ("unable to type-check this expression in reasonable time").
     var body: some View {
         withSheets
-            .photosPicker(isPresented: $showPhotoPicker, selection: $pickerItems,
-                          maxSelectionCount: 8, matching: .images)
+            .photosPicker(
+                isPresented: $showPhotoPicker, selection: $pickerItems,
+                maxSelectionCount: 8, matching: .images
+            )
             .onChange(of: pickerItems) { _, items in
                 guard !items.isEmpty else { return }
                 stage(items)
@@ -136,8 +138,10 @@ struct NewSessionView: View {
             if let targetDeviceId, !model.deviceOnline(targetDeviceId), model.demo == nil {
                 offlineNotice(deviceId: targetDeviceId)
             }
-            PiCatalogNotice(catalog: catalog,
-                            deviceName: model.deviceName(targetDeviceId ?? "")) {
+            PiCatalogNotice(
+                catalog: catalog,
+                deviceName: model.deviceName(targetDeviceId ?? "")
+            ) {
                 catalogRevision += 1
             }
 
@@ -165,7 +169,11 @@ struct NewSessionView: View {
                 .padding(.bottom, 8)
         }
         .background(Theme.bg.ignoresSafeArea())
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewWidth = $0 }
+        .onGeometryChange(for: CGFloat.self) {
+            $0.size.width
+        } action: {
+            viewWidth = $0
+        }
         .navigationTitle(quickDeviceId == nil ? "New session" : "Quick chat")  // feeds the back menu
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
@@ -211,8 +219,10 @@ struct NewSessionView: View {
                 }
             }
             .sheet(isPresented: $showCheckoutPicker) {
-                CheckoutPickerSheet(kind: checkoutKind,
-                                    selectedRefHasWorktree: selectedRefRow?.worktreePath != nil) { kind in
+                CheckoutPickerSheet(
+                    kind: checkoutKind,
+                    selectedRefHasWorktree: selectedRefRow?.worktreePath != nil
+                ) { kind in
                     pickCheckout(kind)
                 }
             }
@@ -232,8 +242,10 @@ struct NewSessionView: View {
                 await catalog.load(deviceId: targetDeviceId, fetch: model.listPiModels)
             }
             .sheet(isPresented: $showPicker) {
-                ModelPickerSheet(models: models, modelId: selectedModel?.id ?? "", reasoning: reasoning,
-                                 loading: catalog.loading, onRefresh: { catalogRevision += 1 }) { id, level in
+                ModelPickerSheet(
+                    models: models, modelId: selectedModel?.id ?? "", reasoning: reasoning,
+                    loading: catalog.loading, onRefresh: { catalogRevision += 1 }
+                ) { id, level in
                     rememberModel(id)
                     storedReasoning = level ?? ""
                 }
@@ -260,7 +272,8 @@ struct NewSessionView: View {
                     search: mentionSearch, query: mentionToken.query,
                     subtitle: model.mentionSubtitle,
                     onPickSession: pickSession,
-                    onPickFile: { mentionEditor.accept(link: Mentions.fileLink(path: $0.path, isDir: $0.isDir)) })
+                    onPickFile: { mentionEditor.accept(link: Mentions.fileLink(path: $0.path, isDir: $0.isDir)) }
+                )
                 .padding(.horizontal, 16)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
@@ -285,11 +298,14 @@ struct NewSessionView: View {
                 }
             }
         }
-        .task(id: mentionToken.map { "\(spaceId)/\(quickDeviceId ?? "")/\(mentionScope.files?.path ?? "")/\($0.query)" }) {
+        .task(
+            id: mentionToken.map { "\(spaceId)/\(quickDeviceId ?? "")/\(mentionScope.files?.path ?? "")/\($0.query)" }
+        ) {
             guard let mentionToken else { return }
             let scope = mentionScope
-            await mentionSearch.run(query: mentionToken.query, scope: scope, chats: model.allChats,
-                                    fetch: model.searchFiles)
+            await mentionSearch.run(
+                query: mentionToken.query, scope: scope, chats: model.allChats,
+                fetch: model.searchFiles)
         }
         .motionAnimation(Motion.fadeQuick, value: mentionToken != nil)
     }
@@ -308,9 +324,11 @@ struct NewSessionView: View {
             return MentionScope(currentChat: nil, project: nil, device: quickDeviceId, files: nil)
         }
         let worktree = checkoutKind == .local ? selectedRefRow?.worktreePath : nil
-        return MentionScope(currentChat: nil, project: space.id, device: space.deviceId,
-                            files: MentionScope.Files(deviceId: space.deviceId, spaceId: space.id,
-                                                      path: worktree))
+        return MentionScope(
+            currentChat: nil, project: space.id, device: space.deviceId,
+            files: MentionScope.Files(
+                deviceId: space.deviceId, spaceId: space.id,
+                path: worktree))
     }
 
     private func pickSession(_ session: MentionSession) {
@@ -351,16 +369,19 @@ struct NewSessionView: View {
             var failed = 0
             for item in items {
                 guard let data = try? await item.loadTransferable(type: Data.self),
-                      let staged = StagedAttachment.stage(data: data) else {
+                    let staged = StagedAttachment.stage(data: data)
+                else {
                     failed += 1
                     continue
                 }
                 attachments.append(staged)
             }
             pickerItems = []
-            attachError = failed > 0
-                ? (failed == 1 ? "One image couldn't be attached (unsupported or over 24 MB)."
-                               : "\(failed) images couldn't be attached (unsupported or over 24 MB).")
+            attachError =
+                failed > 0
+                ? (failed == 1
+                    ? "One image couldn't be attached (unsupported or over 24 MB)."
+                    : "\(failed) images couldn't be attached (unsupported or over 24 MB).")
                 : nil
         }
     }
@@ -434,7 +455,8 @@ struct NewSessionView: View {
     /// picked drops the pick — the current branch takes over.
     private func pickCheckout(_ kind: CheckoutKind) {
         if kind == .local, checkoutKind == .newWorktree,
-           let row = selectedRefRow, row.worktreePath == nil, !row.current {
+            let row = selectedRefRow, row.worktreePath == nil, !row.current
+        {
             selectedRef = refs.first(where: \.current)?.name
         }
         checkoutKind = kind
@@ -474,8 +496,9 @@ struct NewSessionView: View {
         guard let space, canSend, let selectedModel else { return }
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         busy = true
-        let config = ChatConfig(harness: harness, model: selectedModel.id,
-                                reasoning: reasoning, sandbox: "workspace-write")
+        let config = ChatConfig(
+            harness: harness, model: selectedModel.id,
+            reasoning: reasoning, sandbox: "workspace-write")
         Task { @MainActor in
             defer { busy = false }
             guard let sessions = await loadReferences(prompt) else { return }
@@ -488,7 +511,8 @@ struct NewSessionView: View {
                     return
                 }
                 guard let worktreePath = await model.createWorktree(space: space, base: base) else {
-                    attachError = "Couldn't create the worktree on \(model.deviceName(space.deviceId)). Your draft has been kept."
+                    attachError =
+                        "Couldn't create the worktree on \(model.deviceName(space.deviceId)). Your draft has been kept."
                     return
                 }
                 cwd = worktreePath
@@ -502,8 +526,11 @@ struct NewSessionView: View {
                 attachError = "The project device is no longer available. Your draft has been kept."
                 return
             }
-            guard let chatId = model.createChat(space: space, config: config,
-                                                branch: branch, cwd: cwd) else {
+            guard
+                let chatId = model.createChat(
+                    space: space, config: config,
+                    branch: branch, cwd: cwd)
+            else {
                 attachError = "Couldn't create the session. Check your connection and retry."
                 busy = false
                 return
@@ -519,8 +546,9 @@ struct NewSessionView: View {
         guard canSend, let selectedModel else { return }
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         busy = true
-        let config = ChatConfig(harness: harness, model: selectedModel.id,
-                                reasoning: reasoning, sandbox: "workspace-write")
+        let config = ChatConfig(
+            harness: harness, model: selectedModel.id,
+            reasoning: reasoning, sandbox: "workspace-write")
         Task { @MainActor in
             defer { busy = false }
             guard let sessions = await loadReferences(prompt) else { return }
@@ -528,7 +556,8 @@ struct NewSessionView: View {
                 let chatId = try await model.createQuickChat(deviceId: deviceId, config: config)
                 await startSession(chatId: chatId, prompt: prompt, sessions: sessions)
             } catch {
-                attachError = "Couldn't create the quick chat's folder on \(model.deviceName(deviceId)) — \(error.localizedDescription). Your draft has been kept."
+                attachError =
+                    "Couldn't create the quick chat's folder on \(model.deviceName(deviceId)) — \(error.localizedDescription). Your draft has been kept."
             }
         }
     }
@@ -537,7 +566,8 @@ struct NewSessionView: View {
     /// swap the canvas for the live session.
     private func startSession(chatId: String, prompt: String, sessions: [SessionReference]) async {
         guard let chat = model.chat(id: chatId),
-              let store = model.sessionStore(for: chat) else {
+            let store = model.sessionStore(for: chat)
+        else {
             attachError = "Couldn't create the session. Check your connection and retry."
             busy = false
             return
@@ -548,8 +578,9 @@ struct NewSessionView: View {
         for att in attachments {
             do {
                 let path = try await store.uploadAttachment(name: att.name, data: att.data)
-                AttachmentImageCache.shared.seed(deviceId: chat.deviceId, path: path,
-                                                 name: att.name, data: att.data)
+                AttachmentImageCache.shared.seed(
+                    deviceId: chat.deviceId, path: path,
+                    name: att.name, data: att.data)
                 paths.append(path)
             } catch {
                 attachError = "Attachment upload failed — \(error.localizedDescription)"
@@ -561,7 +592,8 @@ struct NewSessionView: View {
         // Without comments the envelope can't fail to build.
         let agentPrompt = try? SessionReferences.agentPrompt(sessions: sessions, comments: [], visible: content)
         guard targetReady,
-              store.sendRun(prompt: content, chat: chat, attachments: paths, agentPrompt: agentPrompt) else {
+            store.sendRun(prompt: content, chat: chat, attachments: paths, agentPrompt: agentPrompt)
+        else {
             attachError = "Couldn't queue the message. Your draft has been kept."
             return
         }

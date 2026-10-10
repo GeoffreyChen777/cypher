@@ -35,8 +35,10 @@ enum ChatWire {
     static func encode(_ kind: UInt8, header: [String: Any], payload: Data = Data()) -> Data {
         // JSONSerialization never fails on the [String: JSON-primitive] maps
         // this file builds; sortedKeys keeps output stable for the tests.
-        let headerData = (try? JSONSerialization.data(withJSONObject: header,
-                                                      options: [.sortedKeys])) ?? Data("{}".utf8)
+        let headerData =
+            (try? JSONSerialization.data(
+                withJSONObject: header,
+                options: [.sortedKeys])) ?? Data("{}".utf8)
         var out = Data(capacity: 5 + headerData.count + payload.count)
         out.append(kind)
         var len = UInt32(headerData.count).littleEndian
@@ -52,14 +54,17 @@ enum ChatWire {
         guard data.count >= 5 else { return nil }
         let bytes = [UInt8](data.prefix(5))
         let kind = bytes[0]
-        let headerLen = Int(UInt32(bytes[1]) | UInt32(bytes[2]) << 8
-                            | UInt32(bytes[3]) << 16 | UInt32(bytes[4]) << 24)
+        let headerLen = Int(
+            UInt32(bytes[1]) | UInt32(bytes[2]) << 8
+                | UInt32(bytes[3]) << 16 | UInt32(bytes[4]) << 24)
         guard headerLen <= chatFrameMaxHeaderBytes, 5 + headerLen <= data.count else { return nil }
         let headerData = data.subdata(in: 5..<(5 + headerLen))
         guard let obj = try? JSONSerialization.jsonObject(with: headerData),
-              let header = obj as? [String: Any] else { return nil }
-        return ChatWireFrame(kind: kind, header: header,
-                             payload: data.subdata(in: (5 + headerLen)..<data.count))
+            let header = obj as? [String: Any]
+        else { return nil }
+        return ChatWireFrame(
+            kind: kind, header: header,
+            payload: data.subdata(in: (5 + headerLen)..<data.count))
     }
 }
 
@@ -102,8 +107,10 @@ enum ChatCatchUpPlan: Equatable {
 /// - checkpoint presence is the SIZE, not the seq (a freshly seeded room's
 ///   checkpoint legitimately covers seq 0);
 /// - a contained frontier skips rows the checkpoint already covers.
-func chatPlanCatchUp(cursor: UInt64, state: ChatStateHeader,
-                     frontierContained: Bool) -> ChatCatchUpPlan {
+func chatPlanCatchUp(
+    cursor: UInt64, state: ChatStateHeader,
+    frontierContained: Bool
+) -> ChatCatchUpPlan {
     let cursor = cursor > state.headSeq ? 0 : cursor
     if state.checkpointSize == 0 {
         return .rowsOnly(after: cursor)

@@ -6,50 +6,64 @@ final class SubagentsTests: XCTestCase {
     private let now: Int64 = 100_000
 
     private func parent(_ id: String = "parent") -> Chat {
-        Chat(id: id, deviceId: "host", title: nil, archived: false, cwd: "/project",
-             branch: "main", checkoutId: nil,
-             config: ChatConfig(harness: "pi", model: "provider/model", reasoning: nil, sandbox: nil),
-             lastMessagePreview: nil, lastMessageAt: nil, createdAt: 1, spaceId: "project", lastSeenAt: nil)
+        Chat(
+            id: id, deviceId: "host", title: nil, archived: false, cwd: "/project",
+            branch: "main", checkoutId: nil,
+            config: ChatConfig(harness: "pi", model: "provider/model", reasoning: nil, sandbox: nil),
+            lastMessagePreview: nil, lastMessageAt: nil, createdAt: 1, spaceId: "project", lastSeenAt: nil)
     }
 
     private func child(_ id: String = "child") -> Chat {
         var chat = parent(id)
-        chat.child = ChildChat(parentChatId: "parent", parentRunId: "run", agent: "planner",
-                              task: "Plan", mode: .async, toolCallId: "tool")
+        chat.child = ChildChat(
+            parentChatId: "parent", parentRunId: "run", agent: "planner",
+            task: "Plan", mode: .async, toolCallId: "tool")
         return chat
     }
 
-    private func makeRun(status: SubagentRunStatus = .running, mode: SubagentMode = .async,
-                     updated: Int64 = 100_000) -> SubagentRun {
-        SubagentRun(runId: "run", toolCallId: "tool", agent: "planner", model: "provider/model",
-                    task: "Plan", mode: mode, status: status, progress: "Progress",
-                    startedAt: 10, updatedAt: updated, childChatId: "child")
+    private func makeRun(
+        status: SubagentRunStatus = .running, mode: SubagentMode = .async,
+        updated: Int64 = 100_000
+    ) -> SubagentRun {
+        SubagentRun(
+            runId: "run", toolCallId: "tool", agent: "planner", model: "provider/model",
+            task: "Plan", mode: mode, status: status, progress: "Progress",
+            startedAt: 10, updatedAt: updated, childChatId: "child")
     }
 
-    private func message(async: Bool, resolved: Bool, error: Bool = false,
-                         status: MessageStatus = .complete) -> MessageEntry {
+    private func message(
+        async: Bool, resolved: Bool, error: Bool = false,
+        status: MessageStatus = .complete
+    ) -> MessageEntry {
         var call = RenderToolCall(tag: "unknown", fields: ["name": "subagent"])
         call.subagent = SubagentCallMetadata(agent: "planner", task: "Plan", isAsync: async)
-        return MessageEntry(id: "message", role: .assistant,
+        return MessageEntry(
+            id: "message", role: .assistant,
             parts: [.tool(id: "tool", call: call, isError: error, resolved: resolved)],
             createdAt: 20, deviceId: "host", status: status)
     }
 
-    private func aggregate(_ messages: [MessageEntry] = [], runs: [SubagentRun] = [],
-                           children: [Chat] = [], sessions: [String: SessionRow] = [:]) -> [SubagentPanelEntry] {
-        SubagentProjection.aggregate(parent: parent(), transcript: messages, snapshot: runs,
+    private func aggregate(
+        _ messages: [MessageEntry] = [], runs: [SubagentRun] = [],
+        children: [Chat] = [], sessions: [String: SessionRow] = [:]
+    ) -> [SubagentPanelEntry] {
+        SubagentProjection.aggregate(
+            parent: parent(), transcript: messages, snapshot: runs,
             chats: children, sessions: sessions, now: now)
     }
 
     func testWireSnapshotMatchesRustCamelCaseAndSkipsMalformedRuns() throws {
-        let value = try JSONDecoder().decode(JSONValue.self, from: Data("""
-        [
-          {"runId":"run","toolCallId":"tool","agent":"planner","model":"provider/model","task":"Plan",
-           "mode":"async","status":"running","progress":"ok","startedAt":10,"updatedAt":100000,"childChatId":"child"},
-          {"runId":"broken","mode":"future"},
-          {"runId":"run","agent":"duplicate","task":"","mode":"sync","status":"done","startedAt":1,"updatedAt":1}
-        ]
-        """.utf8))
+        let value = try JSONDecoder().decode(
+            JSONValue.self,
+            from: Data(
+                """
+                [
+                  {"runId":"run","toolCallId":"tool","agent":"planner","model":"provider/model","task":"Plan",
+                   "mode":"async","status":"running","progress":"ok","startedAt":10,"updatedAt":100000,"childChatId":"child"},
+                  {"runId":"broken","mode":"future"},
+                  {"runId":"run","agent":"duplicate","task":"","mode":"sync","status":"done","startedAt":1,"updatedAt":1}
+                ]
+                """.utf8))
         let runs = SubagentProjection.snapshot(value)
         XCTAssertEqual(runs.count, 1)
         XCTAssertEqual(runs.first?.childChatId, "child")
@@ -58,10 +72,13 @@ final class SubagentsTests: XCTestCase {
     }
 
     func testChildWireIgnoresProfileWithoutRequiringIt() throws {
-        let value = try JSONDecoder().decode(JSONValue.self, from: Data("""
-        {"parentChatId":"parent","parentRunId":"run","agent":"planner","task":"Plan","mode":"async",
-         "toolCallId":"tool","profile":{"systemPrompt":"not part of the inspector"}}
-        """.utf8))
+        let value = try JSONDecoder().decode(
+            JSONValue.self,
+            from: Data(
+                """
+                {"parentChatId":"parent","parentRunId":"run","agent":"planner","task":"Plan","mode":"async",
+                 "toolCallId":"tool","profile":{"systemPrompt":"not part of the inspector"}}
+                """.utf8))
         let relation = SubagentProjection.decode(value, as: ChildChat.self)
         XCTAssertEqual(relation, child().child)
         XCTAssertTrue(child().isChild)
@@ -108,8 +125,11 @@ final class SubagentsTests: XCTestCase {
     }
 
     func testDurableChildSurvivesEmptySnapshotAndLinksDocByToolId() {
-        let sessions = ["child": SessionRow(chatId: "child", deviceId: "host",
-            status: .idle, startedAt: nil, updatedAt: now)]
+        let sessions = [
+            "child": SessionRow(
+                chatId: "child", deviceId: "host",
+                status: .idle, startedAt: nil, updatedAt: now)
+        ]
         let entries = aggregate([message(async: false, resolved: true)], children: [child()], sessions: sessions)
         XCTAssertEqual(entries.count, 1)
         XCTAssertEqual(entries[0].childChatId, "child")
@@ -121,9 +141,13 @@ final class SubagentsTests: XCTestCase {
     func testChildSessionOwnStatusOverridesParentAndAwaitingInputIsLive() {
         for status in [SessionStatus.working, .awaitingInput, .errored, .idle] {
             let expected: SubagentPanelStatus = status == .errored ? .error : status == .idle ? .done : .running
-            let entries = aggregate(runs: [makeRun(status: .done)], children: [child()], sessions: [
-                "child": SessionRow(chatId: "child", deviceId: "host", status: status,
-                                    startedAt: nil, updatedAt: now)])
+            let entries = aggregate(
+                runs: [makeRun(status: .done)], children: [child()],
+                sessions: [
+                    "child": SessionRow(
+                        chatId: "child", deviceId: "host", status: status,
+                        startedAt: nil, updatedAt: now)
+                ])
             XCTAssertEqual(entries.first?.status, expected)
         }
         XCTAssertEqual(aggregate(children: [child()]).first?.status, .starting)
@@ -178,8 +202,9 @@ final class SubagentsTests: XCTestCase {
         // when `.chat` was already on screen. Notification open may only
         // pop-to-existing or append that one chat.
         XCTAssertEqual(SessionNavigation.openingNotification("chat", in: []), [.chat("chat")])
-        XCTAssertEqual(SessionNavigation.openingNotification("chat", in: [.chat("chat")]),
-                       [.chat("chat")])
+        XCTAssertEqual(
+            SessionNavigation.openingNotification("chat", in: [.chat("chat")]),
+            [.chat("chat")])
         XCTAssertEqual(
             SessionNavigation.openingNotification("chat", in: [.space("project"), .chat("chat")]),
             [.space("project"), .chat("chat")]
@@ -197,23 +222,40 @@ final class SubagentsTests: XCTestCase {
     @MainActor
     func testWorkspaceProjectsChildrenAndSnapshotsWithoutPollutingRootLists() throws {
         let doc = RegistryDoc(deviceId: "ios-test")
-        doc.write(kind: "spaces", id: "project", op: .upsert, set: [
-            "deviceId": .string("host"), "path": .string("/project")])
-        doc.write(kind: "chats", id: "parent", op: .upsert, set: [
-            "deviceId": .string("host"), "spaceId": .string("project")])
+        doc.write(
+            kind: "spaces", id: "project", op: .upsert,
+            set: [
+                "deviceId": .string("host"), "path": .string("/project"),
+            ])
+        doc.write(
+            kind: "chats", id: "parent", op: .upsert,
+            set: [
+                "deviceId": .string("host"), "spaceId": .string("project"),
+            ])
         let relation: JSONValue = .object([
             "parentChatId": .string("parent"), "parentRunId": .string("run"),
             "agent": .string("planner"), "task": .string("Plan"), "mode": .string("async"),
-            "toolCallId": .string("tool"), "profile": .object(["systemPrompt": .string("keep")])])
-        doc.write(kind: "chats", id: "child", op: .upsert, set: [
-            "deviceId": .string("host"), "spaceId": .string("project"), "child": relation])
-        doc.write(kind: "chats", id: "broken", op: .upsert, set: [
-            "deviceId": .string("host"), "spaceId": .string("project"), "child": .object([:])])
+            "toolCallId": .string("tool"), "profile": .object(["systemPrompt": .string("keep")]),
+        ])
+        doc.write(
+            kind: "chats", id: "child", op: .upsert,
+            set: [
+                "deviceId": .string("host"), "spaceId": .string("project"), "child": relation,
+            ])
+        doc.write(
+            kind: "chats", id: "broken", op: .upsert,
+            set: [
+                "deviceId": .string("host"), "spaceId": .string("project"), "child": .object([:]),
+            ])
         let runs = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode([makeRun()]))
-        doc.write(kind: "sessions", id: "parent", op: .upsert, set: [
-            "chatId": .string("parent"), "deviceId": .string("host"),
-            "status": .string("working"), "updatedAt": .int(now), "subagents": runs])
-        let config = AppConfig(edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
+        doc.write(
+            kind: "sessions", id: "parent", op: .upsert,
+            set: [
+                "chatId": .string("parent"), "deviceId": .string("host"),
+                "status": .string("working"), "updatedAt": .int(now), "subagents": runs,
+            ])
+        let config = AppConfig(
+            edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
             userId: "test", orgId: "test", deviceId: "ios-test", deviceName: "Test")
         // Never start the store: no network, no disk, no Runtime/LLM.
         let store = WorkspaceStore(config: config, initialDocument: doc)
@@ -224,10 +266,13 @@ final class SubagentsTests: XCTestCase {
         XCTAssertEqual(store.sessions["parent"]?.subagents.first?.runId, "run")
         store.setArchived(chatId: "child", archived: true)
         XCTAssertTrue(store.archivedChats(in: "project").isEmpty)
-        store.setChatConfig(chatId: "child", config: ChatConfig(
-            harness: "pi", model: "provider/new", reasoning: "high", sandbox: nil))
-        XCTAssertEqual(doc.overlayRow(kind: "chats", id: "child")?.fields["child"], relation,
-                       "Editing run config must never rewrite the persisted child profile")
+        store.setChatConfig(
+            chatId: "child",
+            config: ChatConfig(
+                harness: "pi", model: "provider/new", reasoning: "high", sandbox: nil))
+        XCTAssertEqual(
+            doc.overlayRow(kind: "chats", id: "child")?.fields["child"], relation,
+            "Editing run config must never rewrite the persisted child profile")
     }
 
     func testRealDocDecoderRetainsOnlySubagentDisplayMetadata() throws {
@@ -236,11 +281,17 @@ final class SubagentsTests: XCTestCase {
         try message.insert(key: "id", v: "m")
         try message.insert(key: "role", v: "assistant")
         try message.insert(key: "status", v: "streaming")
-        try message.insert(key: "parts", v: LoroValue.fromJSON([[
-            "id": "tool", "kind": "tool", "progress": "Checking…",
-            "call": ["kind": "unknown", "name": "subagent",
-                     "input": ["agent": "planner", "task": "Plan", "async": true, "privateField": "not displayed"]]
-        ]]))
+        try message.insert(
+            key: "parts",
+            v: LoroValue.fromJSON([
+                [
+                    "id": "tool", "kind": "tool", "progress": "Checking…",
+                    "call": [
+                        "kind": "unknown", "name": "subagent",
+                        "input": ["agent": "planner", "task": "Plan", "async": true, "privateField": "not displayed"],
+                    ],
+                ]
+            ]))
         doc.commit()
         let entries = try XCTUnwrap(SessionStore.decodeEntries(from: doc))
         guard case .tool(_, let call, _, _) = entries[0].parts[0] else { return XCTFail("tool missing") }

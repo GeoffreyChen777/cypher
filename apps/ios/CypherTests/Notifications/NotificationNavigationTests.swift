@@ -34,7 +34,8 @@ final class NotificationNavigationTests: XCTestCase {
         driver.path = [.space("space-cypher"), .chat("chat-veil")]
         let hosted = try HostedWindow(ReproStack(driver: driver, model: model))
         defer { hosted.close() }
-        let window = hosted.window, hostVC = hosted.host
+        let window = hosted.window
+        let hostVC = hosted.host
         try await settle("chat pushed") {
             (navigationController(in: hostVC)?.viewControllers.count ?? 0) == 3
                 && navigationController(in: hostVC)?.transitionCoordinator == nil
@@ -74,11 +75,13 @@ final class NotificationNavigationTests: XCTestCase {
                 && view.bounds.height < 60 && view.convert(view.bounds, to: window).minY >= editorFrame.minY
         }
         let chipsFrame = chips.first.map { $0.convert($0.bounds, to: window) }
-        XCTAssertLessThanOrEqual(editorFrame.height, ceil(lineHeight * 7) + 1,
-                                 "the editor must cap at seven lines and scroll inside")
+        XCTAssertLessThanOrEqual(
+            editorFrame.height, ceil(lineHeight * 7) + 1,
+            "the editor must cap at seven lines and scroll inside")
         if let chipsFrame {
-            XCTAssertLessThanOrEqual(editorFrame.maxY, chipsFrame.minY + 0.5,
-                                     "the draft must not draw over the model chips")
+            XCTAssertLessThanOrEqual(
+                editorFrame.maxY, chipsFrame.minY + 0.5,
+                "the draft must not draw over the model chips")
         } else {
             XCTFail("chips rail not found")
         }
@@ -106,12 +109,16 @@ final class NotificationNavigationTests: XCTestCase {
             } else if url.path.hasSuffix("/register") {
                 body = ["scope": scope, "bindingId": String(repeating: "c", count: 64), "lease": "l"]
             }
-            return (try JSONSerialization.data(withJSONObject: body),
-                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            return (
+                try JSONSerialization.data(withJSONObject: body),
+                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
         }
-        controller.bind(AppConfig(edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
-                                  userId: "u", orgId: "org", deviceId: "phone", deviceName: "Test",
-                                  devBearer: "u@org"))
+        controller.bind(
+            AppConfig(
+                edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
+                userId: "u", orgId: "org", deviceId: "phone", deviceName: "Test",
+                devBearer: "u@org"))
         defer { controller.disconnect() }
         try await settle("scope bound") { controller.scope == scope }
 
@@ -123,8 +130,9 @@ final class NotificationNavigationTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(300))
 
         func tap(_ chat: String, project: String = "space-cypher", kind: String = "completed") {
-            let payload = PushPayload(eventId: UUID().uuidString, scope: scope, chatId: chat,
-                                      projectId: project, kind: kind)
+            let payload = PushPayload(
+                eventId: UUID().uuidString, scope: scope, chatId: chat,
+                projectId: project, kind: kind)
             // The delegate's exact sequence: deliver the tap, then refresh.
             controller.receive(payload, tapped: true)
             Task { await controller.refresh() }
@@ -205,16 +213,21 @@ extension NotificationNavigationTests {
             } else if url.path.hasSuffix("/register") {
                 body = ["scope": scope, "bindingId": String(repeating: "c", count: 64), "lease": "l"]
             }
-            return (try JSONSerialization.data(withJSONObject: body),
-                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            return (
+                try JSONSerialization.data(withJSONObject: body),
+                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
         }
         // The delegate sees the tap before any controller/config exists.
-        let payload = PushPayload(eventId: UUID().uuidString, scope: scope, chatId: "chat-veil",
-                                  projectId: "space-cypher", kind: "completed")
+        let payload = PushPayload(
+            eventId: UUID().uuidString, scope: scope, chatId: "chat-veil",
+            projectId: "space-cypher", kind: "completed")
         controller.receive(payload, tapped: true)
-        controller.bind(AppConfig(edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
-                                  userId: "u", orgId: "org", deviceId: "phone", deviceName: "Test",
-                                  devBearer: "u@org"))
+        controller.bind(
+            AppConfig(
+                edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
+                userId: "u", orgId: "org", deviceId: "phone", deviceName: "Test",
+                devBearer: "u@org"))
         defer { controller.disconnect() }
         for _ in 0..<100 where controller.pendingNavigation == nil {
             try await Task.sleep(for: .milliseconds(10))

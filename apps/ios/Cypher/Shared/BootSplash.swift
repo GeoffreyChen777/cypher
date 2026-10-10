@@ -13,13 +13,13 @@ import SwiftUI
 enum BootSplash {
     /// crates/ui/assets/loading-wordmark.txt, verbatim.
     static let wordmark: [String] = #"""
-                            _
-      ___   _   _   _ __   | |__     ___   _ __
-     / __| | | | | | '_ \  | '_ \   / _ \ | '__|
-    | (__  | |_| | | |_) | | | | | |  __/ | |
-     \___|  \__, | | .__/  |_| |_|  \___| |_|
-            |___/  |_|
-    """#.components(separatedBy: "\n")
+                                _
+          ___   _   _   _ __   | |__     ___   _ __
+         / __| | | | | | '_ \  | '_ \   / _ \ | '__|
+        | (__  | |_| | | |_) | | | | | |  __/ | |
+         \___|  \__, | | .__/  |_| |_|  \___| |_|
+                |___/  |_|
+        """#.components(separatedBy: "\n")
 
     static let columns = wordmark.map(\.count).max() ?? 0
 
@@ -58,7 +58,8 @@ enum BootSplash {
 
     static func glyph(row: Int, col: Int, char: Character, at t: Double) -> Glyph {
         if char == " " { return .blank }
-        let appear = Double(col) / Double(max(columns - 1, 1)) * sweep
+        let appear =
+            Double(col) / Double(max(columns - 1, 1)) * sweep
             + unit(row, col, salt: 1) * frontJitter
         let lock = appear + scramble + unit(row, col, salt: 2) * scrambleJitter
         if t < appear { return .blank }
@@ -72,7 +73,8 @@ enum BootSplash {
 
     /// Deterministic 0..<1 per (row, col, salt) — splitmix64's finalizer.
     static func unit(_ row: Int, _ col: Int, salt: UInt64) -> Double {
-        var x = (UInt64(row) &* 0x9E37_79B9_7F4A_7C15)
+        var x =
+            (UInt64(row) &* 0x9E37_79B9_7F4A_7C15)
             ^ (UInt64(col) &* 0xBF58_476D_1CE4_E5B9)
             ^ (salt &* 0x94D0_49BB_1331_11EB)
         x ^= x >> 31
@@ -85,8 +87,10 @@ enum BootSplash {
 
     /// Test and screenshot rigs drive specific screens from the first frame;
     /// `-splash` forces it on for them.
-    static func enabled(arguments: [String] = ProcessInfo.processInfo.arguments,
-                        environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+    static func enabled(
+        arguments: [String] = ProcessInfo.processInfo.arguments,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
         if arguments.contains("-splash") { return true }
         if environment["XCTestConfigurationFilePath"] != nil { return false }
         return !arguments.contains("-demo")
@@ -96,8 +100,10 @@ enum BootSplash {
     /// workspace has either its on-device cache (hydrated synchronously —
     /// local-first) or a live room. A first launch after sign-in has neither
     /// until the hello lands.
-    static func contentReady(restored: Bool, phase: AppModel.Phase, demo: Bool,
-                             connected: Bool, hasRows: Bool) -> Bool {
+    static func contentReady(
+        restored: Bool, phase: AppModel.Phase, demo: Bool,
+        connected: Bool, hasRows: Bool
+    ) -> Bool {
         guard restored else { return false }
         switch phase {
         case .signedOut, .pickingOrg: return true

@@ -20,8 +20,9 @@ struct SheetCard<Content: View>: View {
             content
         }
         .background(SheetStyle.cardFill, in: RoundedRectangle(cornerRadius: SheetStyle.cardRadius))
-        .overlay(RoundedRectangle(cornerRadius: SheetStyle.cardRadius)
-            .strokeBorder(whiteAlpha(0.06), lineWidth: 1))
+        .overlay(
+            RoundedRectangle(cornerRadius: SheetStyle.cardRadius)
+                .strokeBorder(whiteAlpha(0.06), lineWidth: 1))
     }
 }
 
@@ -73,8 +74,9 @@ struct SheetPrimaryButton: View {
                 .foregroundStyle(enabled ? Theme.bg : Theme.textFaint)
                 .frame(maxWidth: .infinity)
                 .frame(height: 50)
-                .background(enabled ? AnyShapeStyle(Theme.text) : AnyShapeStyle(whiteAlpha(0.08)),
-                            in: Capsule())
+                .background(
+                    enabled ? AnyShapeStyle(Theme.text) : AnyShapeStyle(whiteAlpha(0.08)),
+                    in: Capsule())
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -88,8 +90,10 @@ struct PressWashButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .background(configuration.isPressed ? Theme.elementHover : Color.clear,
-                        in: RoundedRectangle(cornerRadius: cornerRadius))
+            .background(
+                configuration.isPressed ? Theme.elementHover : Color.clear,
+                in: RoundedRectangle(cornerRadius: cornerRadius)
+            )
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }

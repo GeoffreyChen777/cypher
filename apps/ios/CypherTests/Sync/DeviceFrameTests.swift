@@ -11,8 +11,9 @@ final class DeviceFrameTests: XCTestCase {
 
     func testRoundTripsHeaderAndPayload() throws {
         let payload = Data([1, 2, 3, 250, 255])
-        let frame = DeviceRelayClient.encodeFrame(header: #"{"s":"term-42","k":"term","to":"conn-9"}"#,
-                                                  payload: payload)
+        let frame = DeviceRelayClient.encodeFrame(
+            header: #"{"s":"term-42","k":"term","to":"conn-9"}"#,
+            payload: payload)
         let (header, out) = try XCTUnwrap(DeviceRelayClient.decodeFrame(frame))
         XCTAssertEqual(header.s, "term-42")
         XCTAssertEqual(header.k, "term")

@@ -17,10 +17,12 @@ extension DemoDataset: WorkspaceData {
     @discardableResult
     func createChat(space: Space, config: ChatConfig, branch: String? = nil, cwd: String? = nil) -> String {
         let id = "chat-\(UUID().uuidString.lowercased().prefix(8))"
-        chats.append(Chat(id: id, deviceId: space.deviceId, title: nil, archived: false,
-                          cwd: cwd ?? space.path, branch: branch, checkoutId: nil,
-                          config: config, lastMessagePreview: nil, lastMessageAt: nil,
-                          createdAt: nowMs(), spaceId: space.id, lastSeenAt: nowMs()))
+        chats.append(
+            Chat(
+                id: id, deviceId: space.deviceId, title: nil, archived: false,
+                cwd: cwd ?? space.path, branch: branch, checkoutId: nil,
+                config: config, lastMessagePreview: nil, lastMessageAt: nil,
+                createdAt: nowMs(), spaceId: space.id, lastSeenAt: nowMs()))
         return id
     }
 
@@ -29,19 +31,23 @@ extension DemoDataset: WorkspaceData {
             return existing.id
         }
         let id = "space-\(UUID().uuidString.lowercased().prefix(8))"
-        spaces.append(Space(id: id, deviceId: deviceId, path: path, name: nil,
-                            gitDetected: gitDetected, gitCheckedAt: nil, checkoutId: nil,
-                            createdAt: nowMs()))
+        spaces.append(
+            Space(
+                id: id, deviceId: deviceId, path: path, name: nil,
+                gitDetected: gitDetected, gitCheckedAt: nil, checkoutId: nil,
+                createdAt: nowMs()))
         return id
     }
 
     func createQuickChat(deviceId: String, config: ChatConfig) async throws -> String {
         let chatId = UUID().uuidString.lowercased()
         try? await Task.sleep(nanoseconds: 200_000_000)
-        chats.append(Chat(id: chatId, deviceId: deviceId, title: nil, archived: false,
-                          cwd: "/tmp/cypher-scratch/\(chatId)", branch: nil, checkoutId: nil,
-                          config: config, lastMessagePreview: nil, lastMessageAt: nil,
-                          createdAt: nowMs(), spaceId: nil, lastSeenAt: nowMs()))
+        chats.append(
+            Chat(
+                id: chatId, deviceId: deviceId, title: nil, archived: false,
+                cwd: "/tmp/cypher-scratch/\(chatId)", branch: nil, checkoutId: nil,
+                config: config, lastMessagePreview: nil, lastMessageAt: nil,
+                createdAt: nowMs(), spaceId: nil, lastSeenAt: nowMs()))
         return chatId
     }
 
@@ -98,8 +104,9 @@ extension DemoDataset: WorkspaceData {
     // MARK: Host calls
 
     func sideChat(parent: Chat, quote: String, anchorEntryId: String?, config: AppConfig?) -> SideChatStore? {
-        SideChatStore(parent: parent, quote: quote, anchorEntryId: anchorEntryId,
-                      relay: nil, config: Self.dummyConfig, demo: self)
+        SideChatStore(
+            parent: parent, quote: quote, anchorEntryId: anchorEntryId,
+            relay: nil, config: Self.dummyConfig, demo: self)
     }
 
     func listFolders(deviceId: String, path: String?) async -> FolderListing? {

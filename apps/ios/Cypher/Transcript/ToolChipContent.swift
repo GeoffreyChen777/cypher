@@ -125,7 +125,8 @@ extension RenderToolCall {
                 while stop < bytes.count, ident(bytes[stop]) { stop += 1 }
                 name = String(decoding: bytes[(end + 1)..<stop], as: UTF8.self)
             } else if bytes[end] == UInt8(ascii: "["), end + 1 < bytes.count, quotes.contains(bytes[end + 1]),
-                      let close = bytes[(end + 2)...].firstIndex(of: bytes[end + 1]) {
+                let close = bytes[(end + 2)...].firstIndex(of: bytes[end + 1])
+            {
                 name = String(decoding: bytes[(end + 2)..<close], as: UTF8.self)
             }
             guard !name.isEmpty else { continue }

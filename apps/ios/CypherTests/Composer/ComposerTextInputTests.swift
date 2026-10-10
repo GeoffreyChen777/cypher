@@ -6,7 +6,9 @@ import SwiftUI
 final class ComposerTextInputTests: XCTestCase {
     func testOnlyTheCurrentEditorCanChangeFocus() {
         let focus = ComposerFocus()
-        let old = UUID(), current = UUID(), search = UUID()
+        let old = UUID()
+        let current = UUID()
+        let search = UUID()
         focus.attach(old)
         focus.changed(true, from: old)
         XCTAssertTrue(focus.isFocused)
@@ -22,7 +24,8 @@ final class ComposerTextInputTests: XCTestCase {
     }
 
     func testDelegateFocusDoesNotDependOnAccessibilityOrTextLength() {
-        let draft = ComposerDraft(), focus = ComposerFocus()
+        let draft = ComposerDraft()
+        let focus = ComposerFocus()
         let coordinator = ComposerTextInput.Coordinator(text: draft.binding, focus: focus)
         coordinator.attach()
         let view = UITextView()
@@ -35,7 +38,8 @@ final class ComposerTextInputTests: XCTestCase {
     }
 
     func testRetiredDelegateCannotRestoreSentTextOrBlurNewInput() {
-        let draft = ComposerDraft(), focus = ComposerFocus()
+        let draft = ComposerDraft()
+        let focus = ComposerFocus()
         let old = ComposerTextInput.Coordinator(text: draft.binding, focus: focus)
         old.attach()
         let view = UITextView()

@@ -20,8 +20,9 @@ final class BootSplashTests: XCTestCase {
         }
         for row in BootSplash.wordmark.indices {
             for (col, char) in BootSplash.wordmark[row].enumerated() where char != " " {
-                XCTAssertEqual(BootSplash.glyph(row: row, col: col, char: char, at: BootSplash.decodeDuration),
-                               .locked(flash: 0), "row \(row) col \(col) not settled")
+                XCTAssertEqual(
+                    BootSplash.glyph(row: row, col: col, char: char, at: BootSplash.decodeDuration),
+                    .locked(flash: 0), "row \(row) col \(col) not settled")
             }
         }
     }
@@ -49,10 +50,13 @@ final class BootSplashTests: XCTestCase {
     }
 
     func testWaitsForRealContent() {
-        func ready(restored: Bool = true, _ phase: AppModel.Phase,
-                   demo: Bool = false, connected: Bool = false, hasRows: Bool = false) -> Bool {
-            BootSplash.contentReady(restored: restored, phase: phase, demo: demo,
-                                    connected: connected, hasRows: hasRows)
+        func ready(
+            restored: Bool = true, _ phase: AppModel.Phase,
+            demo: Bool = false, connected: Bool = false, hasRows: Bool = false
+        ) -> Bool {
+            BootSplash.contentReady(
+                restored: restored, phase: phase, demo: demo,
+                connected: connected, hasRows: hasRows)
         }
         XCTAssertFalse(ready(restored: false, .signedOut), "initial phase isn't a decision")
         XCTAssertTrue(ready(.signedOut))

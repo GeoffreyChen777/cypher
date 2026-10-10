@@ -4,23 +4,27 @@ import XCTest
 final class ReleasePackagingTests: XCTestCase {
     func testRequiredReasonManifestIsInAppBundle() throws {
         let url = try XCTUnwrap(Bundle.main.url(forResource: "PrivacyInfo", withExtension: "xcprivacy"))
-        let plist = try XCTUnwrap(PropertyListSerialization.propertyList(
-            from: Data(contentsOf: url), format: nil) as? [String: Any])
+        let plist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(
+                from: Data(contentsOf: url), format: nil) as? [String: Any])
         let entries = try XCTUnwrap(plist["NSPrivacyAccessedAPITypes"] as? [[String: Any]])
-        let reasons = Dictionary(uniqueKeysWithValues: entries.compactMap { entry -> (String, [String])? in
-            guard let category = entry["NSPrivacyAccessedAPIType"] as? String,
-                  let codes = entry["NSPrivacyAccessedAPITypeReasons"] as? [String] else { return nil }
-            return (category, codes)
-        })
+        let reasons = Dictionary(
+            uniqueKeysWithValues: entries.compactMap { entry -> (String, [String])? in
+                guard let category = entry["NSPrivacyAccessedAPIType"] as? String,
+                    let codes = entry["NSPrivacyAccessedAPITypeReasons"] as? [String]
+                else { return nil }
+                return (category, codes)
+            })
         XCTAssertEqual(reasons["NSPrivacyAccessedAPICategoryUserDefaults"], ["CA92.1"])
         XCTAssertEqual(reasons["NSPrivacyAccessedAPICategoryFileTimestamp"], ["C617.1"])
     }
 
     func testDistributionOptionsNeverUploadOrRewriteVersionImplicitly() throws {
         let root = try TestSupport.iosRoot()
-        let plist = try XCTUnwrap(PropertyListSerialization.propertyList(
-            from: Data(contentsOf: root.appendingPathComponent("ExportOptions-TestFlight.plist")),
-            format: nil) as? [String: Any])
+        let plist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(
+                from: Data(contentsOf: root.appendingPathComponent("ExportOptions-TestFlight.plist")),
+                format: nil) as? [String: Any])
         XCTAssertEqual(plist["method"] as? String, "app-store-connect")
         XCTAssertEqual(plist["destination"] as? String, "export")
         XCTAssertEqual(plist["manageAppVersionAndBuildNumber"] as? Bool, false)

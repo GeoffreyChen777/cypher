@@ -11,9 +11,11 @@ enum SessionConnectionPhase: Equatable {
 
     static let noticeDelay: TimeInterval = 15
 
-    static func resolve(transportReady: Bool, needsCatalog: Bool, catalogMatches: Bool,
-                        catalogLoading: Bool, catalogError: PiCatalogError?,
-                        modelAvailable: Bool) -> Self {
+    static func resolve(
+        transportReady: Bool, needsCatalog: Bool, catalogMatches: Bool,
+        catalogLoading: Bool, catalogError: PiCatalogError?,
+        modelAvailable: Bool
+    ) -> Self {
         guard transportReady else { return .connecting }
         guard needsCatalog else { return .ready }
         guard catalogMatches, !catalogLoading else { return .connecting }
@@ -35,7 +37,8 @@ enum SessionConnectionPhase: Equatable {
     var detail: String {
         switch self {
         case .catalogFailure(let error): error.message
-        case .connecting: "The connection is taking longer than expected. Automatic reconnection continues; you can also retry."
+        case .connecting:
+            "The connection is taking longer than expected. Automatic reconnection continues; you can also retry."
         case .missingModel: "Choose an available model below. Your previous selection hasn't been changed."
         case .ready: ""
         }

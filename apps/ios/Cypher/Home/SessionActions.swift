@@ -45,8 +45,10 @@ extension View {
 
     /// Presents `actions`' rename and delete prompts. `onDeleted` runs once
     /// the delete is confirmed (e.g. to leave the deleted session's screen).
-    func sessionActionPrompts(_ actions: SessionActions,
-                              onDeleted: @escaping (Chat) -> Void = { _ in }) -> some View {
+    func sessionActionPrompts(
+        _ actions: SessionActions,
+        onDeleted: @escaping (Chat) -> Void = { _ in }
+    ) -> some View {
         modifier(SessionActionPrompts(actions: actions, onDeleted: onDeleted))
             .environment(actions)
     }
@@ -130,8 +132,10 @@ private struct SessionActionPrompts: ViewModifier {
             }
             .background {
                 Color.clear
-                    .alert("Delete session?", isPresented: $actions.deletePresented,
-                           presenting: actions.deleting) { chat in
+                    .alert(
+                        "Delete session?", isPresented: $actions.deletePresented,
+                        presenting: actions.deleting
+                    ) { chat in
                         Button("Cancel", role: .cancel) {}
                         Button("Delete", role: .destructive) {
                             UINotificationFeedbackGenerator().notificationOccurred(.warning)
@@ -144,10 +148,13 @@ private struct SessionActionPrompts: ViewModifier {
                         Text("“\(chat.displayTitle)” will be permanently deleted. This can’t be undone.")
                     }
             }
-            .alert("Session deleted", isPresented: Binding(
-                get: { actions.notice != nil },
-                set: { if !$0 { actions.notice = nil } }
-            )) {
+            .alert(
+                "Session deleted",
+                isPresented: Binding(
+                    get: { actions.notice != nil },
+                    set: { if !$0 { actions.notice = nil } }
+                )
+            ) {
                 Button("OK") { actions.notice = nil }
             } message: {
                 Text(actions.notice ?? "")

@@ -55,14 +55,16 @@ final class ScriptChipUITests: XCTestCase {
 
             let script = app.buttons["script-chip"]
             XCTAssertTrue(script.waitForHittable(timeout: 5))
-            XCTAssertTrue(text(app, containing: "read, search_cloudflare_documentation").exists,
-                          "the chip names the tools the script calls")
+            XCTAssertTrue(
+                text(app, containing: "read, search_cloudflare_documentation").exists,
+                "the chip names the tools the script calls")
             XCTAssertTrue(text(app, containing: "edge/wrangler.jsonc").exists, "the script's calls are listed")
             XCTAssertFalse(text(app, containing: "const config").exists, "the code starts folded")
 
             script.tap()
-            XCTAssertTrue(text(app, containing: "const config").waitForExistence(timeout: 5),
-                          "the chip opens onto the script")
+            XCTAssertTrue(
+                text(app, containing: "const config").waitForExistence(timeout: 5),
+                "the chip opens onto the script")
             Thread.sleep(forTimeInterval: 0.5)
             capture(app, "\(appearance)-script-open")
 

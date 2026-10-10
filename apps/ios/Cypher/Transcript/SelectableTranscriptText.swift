@@ -30,14 +30,20 @@ extension EnvironmentValues {
 
 @MainActor
 enum TranscriptTextStyle {
-    static func inline(_ runs: [InlineRun], size: CGFloat = MD.textSize,
-                       weight: UIFont.Weight = .regular, lineHeight: CGFloat = MD.lineHeight) -> NSAttributedString {
+    static func inline(
+        _ runs: [InlineRun], size: CGFloat = MD.textSize,
+        weight: UIFont.Weight = .regular, lineHeight: CGFloat = MD.lineHeight
+    ) -> NSAttributedString {
         let result = NSMutableAttributedString(string: "")
         for run in runs {
-            var font = run.style.code ? Theme.monoUI(size - 1.5)
+            var font =
+                run.style.code
+                ? Theme.monoUI(size - 1.5)
                 : Theme.sansUI(size, weight: run.style.bold ? .semibold : weight)
             if run.style.italic,
-               let descriptor = font.fontDescriptor.withSymbolicTraits(font.fontDescriptor.symbolicTraits.union(.traitItalic)) {
+                let descriptor = font.fontDescriptor.withSymbolicTraits(
+                    font.fontDescriptor.symbolicTraits.union(.traitItalic))
+            {
                 font = UIFont(descriptor: descriptor, size: font.pointSize)
             }
             var attributes: [NSAttributedString.Key: Any] = [
@@ -77,7 +83,8 @@ enum TranscriptTextStyle {
     static func applyVeil(_ veil: RowVeil, to result: NSMutableAttributedString) {
         let characters = Array(result.string)
         for segment in veil.segments(totalLength: characters.count) where segment.alpha < 1 {
-            let lower = max(0, segment.range.lowerBound), upper = min(characters.count, segment.range.upperBound)
+            let lower = max(0, segment.range.lowerBound)
+            let upper = min(characters.count, segment.range.upperBound)
             guard lower < upper else { continue }
             let start = String(characters[..<lower]).utf16.count
             let length = String(characters[lower..<upper]).utf16.count
@@ -126,18 +133,22 @@ enum TranscriptTextStyle {
         return result
     }
 
-    private static func appendProse(_ block: MDBlock, to result: NSMutableAttributedString,
-                                    indent: CGFloat, spacingBefore: CGFloat, marker: String? = nil,
-                                    markerColor: UIColor? = nil) {
+    private static func appendProse(
+        _ block: MDBlock, to result: NSMutableAttributedString,
+        indent: CGFloat, spacingBefore: CGFloat, marker: String? = nil,
+        markerColor: UIColor? = nil
+    ) {
         switch block {
         case .paragraph(let runs):
-            appendParagraph(inline(runs), lineHeight: MD.lineHeight, to: result, indent: indent,
-                            spacingBefore: spacingBefore, marker: marker, markerColor: markerColor)
+            appendParagraph(
+                inline(runs), lineHeight: MD.lineHeight, to: result, indent: indent,
+                spacingBefore: spacingBefore, marker: marker, markerColor: markerColor)
         case .heading(let level, let runs):
             let m = MD.headingMetrics(level)
-            appendParagraph(inline(runs, size: m.size, weight: .semibold, lineHeight: m.line),
-                            lineHeight: m.line, to: result, indent: indent,
-                            spacingBefore: spacingBefore, marker: marker, markerColor: markerColor)
+            appendParagraph(
+                inline(runs, size: m.size, weight: .semibold, lineHeight: m.line),
+                lineHeight: m.line, to: result, indent: indent,
+                spacingBefore: spacingBefore, marker: marker, markerColor: markerColor)
         case .list(let start, let items):
             for (index, item) in items.enumerated() {
                 let gap = index == 0 ? spacingBefore : listItemGap
@@ -151,19 +162,22 @@ enum TranscriptTextStyle {
                     color = UIColor(Theme.accent.opacity(0.85))
                 }
                 guard let first = item.children.first else {
-                    appendParagraph(NSAttributedString(), lineHeight: MD.lineHeight, to: result, indent: indent,
-                                    spacingBefore: gap, marker: itemMarker, markerColor: color)
+                    appendParagraph(
+                        NSAttributedString(), lineHeight: MD.lineHeight, to: result, indent: indent,
+                        spacingBefore: gap, marker: itemMarker, markerColor: color)
                     continue
                 }
                 // The marker rides the item's first line of text; an item that
                 // opens with a nested list gets a line of its own for it.
                 if case .list = first {
-                    appendParagraph(NSAttributedString(), lineHeight: MD.lineHeight, to: result, indent: indent,
-                                    spacingBefore: gap, marker: itemMarker, markerColor: color)
+                    appendParagraph(
+                        NSAttributedString(), lineHeight: MD.lineHeight, to: result, indent: indent,
+                        spacingBefore: gap, marker: itemMarker, markerColor: color)
                     appendProse(first, to: result, indent: indent + listIndent, spacingBefore: listItemGap)
                 } else {
-                    appendProse(first, to: result, indent: indent, spacingBefore: gap,
-                                marker: itemMarker, markerColor: color)
+                    appendProse(
+                        first, to: result, indent: indent, spacingBefore: gap,
+                        marker: itemMarker, markerColor: color)
                 }
                 for child in item.children.dropFirst() {
                     appendProse(child, to: result, indent: indent + listIndent, spacingBefore: listItemGap)
@@ -179,9 +193,11 @@ enum TranscriptTextStyle {
     /// empty. With a `marker` the paragraph is a list item's first: the
     /// marker at `indent`, the text from the list's text edge, and wrapped
     /// lines hanging there too.
-    private static func appendParagraph(_ text: NSAttributedString, lineHeight: CGFloat,
-                                        to result: NSMutableAttributedString, indent: CGFloat,
-                                        spacingBefore: CGFloat, marker: String?, markerColor: UIColor?) {
+    private static func appendParagraph(
+        _ text: NSAttributedString, lineHeight: CGFloat,
+        to result: NSMutableAttributedString, indent: CGFloat,
+        spacingBefore: CGFloat, marker: String?, markerColor: UIColor?
+    ) {
         let style = NSMutableParagraphStyle()
         style.minimumLineHeight = lineHeight
         style.maximumLineHeight = lineHeight
@@ -198,34 +214,44 @@ enum TranscriptTextStyle {
         }
         let start = result.length
         if let marker {
-            result.append(NSAttributedString(string: "\(marker)\t", attributes: [
-                .font: Theme.sansUI(MD.textSize, weight: .regular),
-                .foregroundColor: markerColor ?? UIColor(Theme.accent.opacity(0.85)),
-            ]))
+            result.append(
+                NSAttributedString(
+                    string: "\(marker)\t",
+                    attributes: [
+                        .font: Theme.sansUI(MD.textSize, weight: .regular),
+                        .foregroundColor: markerColor ?? UIColor(Theme.accent.opacity(0.85)),
+                    ]))
         }
         result.append(text)
-        result.addAttribute(.paragraphStyle, value: style,
-                            range: NSRange(location: start, length: result.length - start))
+        result.addAttribute(
+            .paragraphStyle, value: style,
+            range: NSRange(location: start, length: result.length - start))
     }
 
-    static func code(_ source: String, spans: [[TokenSpan]],
-                     size: CGFloat = MD.codeTextSize) -> NSAttributedString {
+    static func code(
+        _ source: String, spans: [[TokenSpan]],
+        size: CGFloat = MD.codeTextSize
+    ) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
         paragraph.minimumLineHeight = MD.codeLineHeight
         paragraph.maximumLineHeight = MD.codeLineHeight
-        let result = NSMutableAttributedString(string: source, attributes: [
-            .font: Theme.monoUI(size),
-            .foregroundColor: UIColor(Theme.text.opacity(0.9)),
-            .paragraphStyle: paragraph,
-        ])
+        let result = NSMutableAttributedString(
+            string: source,
+            attributes: [
+                .font: Theme.monoUI(size),
+                .foregroundColor: UIColor(Theme.text.opacity(0.9)),
+                .paragraphStyle: paragraph,
+            ])
         var offset = 0
         for (index, line) in source.components(separatedBy: "\n").enumerated() {
             let characters = Array(line)
             for span in index < spans.count ? spans[index] : [] {
-                let lower = span.range.lowerBound, upper = min(span.range.upperBound, characters.count)
+                let lower = span.range.lowerBound
+                let upper = min(span.range.upperBound, characters.count)
                 guard lower >= 0, lower < upper else { continue }
-                let range = NSRange(location: offset + String(characters[..<lower]).utf16.count,
-                                    length: String(characters[lower..<upper]).utf16.count)
+                let range = NSRange(
+                    location: offset + String(characters[..<lower]).utf16.count,
+                    length: String(characters[lower..<upper]).utf16.count)
                 let color: Color
                 switch span.cls {
                 case .keyword: color = Theme.tokenKeyword
@@ -249,9 +275,11 @@ final class TranscriptTextLayoutManager: NSLayoutManager {
             storage.enumerateAttribute(.cypherInlineCode, in: characters) { value, range, _ in
                 guard let color = value as? UIColor else { return }
                 let glyphs = self.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
-                self.enumerateEnclosingRects(forGlyphRange: glyphs,
+                self.enumerateEnclosingRects(
+                    forGlyphRange: glyphs,
                     withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
-                    in: container) { rect, _ in
+                    in: container
+                ) { rect, _ in
                     // The native text view's glyph bounds place this wash
                     // slightly above the visible ink; nudge it down.
                     let rect = rect.offsetBy(dx: origin.x, dy: origin.y + 2.5)
@@ -299,13 +327,17 @@ struct SelectableTranscriptText: UIViewRepresentable {
         view.backgroundColor = .clear
         view.textContainerInset = .zero
         view.dataDetectorTypes = []
-        view.linkTextAttributes = [.foregroundColor: UIColor(Theme.text),
-                                   .underlineStyle: NSUnderlineStyle.single.rawValue]
+        view.linkTextAttributes = [
+            .foregroundColor: UIColor(Theme.text),
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ]
         view.tintColor = UIColor(Theme.accent)
         // Repaint custom inline-code backgrounds as well as glyphs on a live
         // appearance change. Do not replace text or clear an active selection.
-        view.registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: TranscriptUITextView, _: UITraitCollection) in
-            view.layoutManager.invalidateDisplay(forCharacterRange: NSRange(location: 0, length: view.textStorage.length))
+        view.registerForTraitChanges([UITraitUserInterfaceStyle.self]) {
+            (view: TranscriptUITextView, _: UITraitCollection) in
+            view.layoutManager.invalidateDisplay(
+                forCharacterRange: NSRange(location: 0, length: view.textStorage.length))
             view.setNeedsDisplay()
         }
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -329,9 +361,13 @@ struct SelectableTranscriptText: UIViewRepresentable {
         // An active selection freezes only this text block, not the session.
         // Measure what is actually displayed so its handles never drift.
         let displayed = uiView.attributedText ?? attributed
-        let natural = ceil(displayed.boundingRect(with: CGSize(width: 1_000_000, height: 1_000_000),
-                                                  options: [.usesLineFragmentOrigin, .usesFontLeading],
-                                                  context: nil).width) + 1
+        let natural =
+            ceil(
+                displayed.boundingRect(
+                    with: CGSize(width: 1_000_000, height: 1_000_000),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                ).width) + 1
         let offered = proposal.width.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? natural
         let width = max(1, wraps ? (hugsContent ? min(offered, natural) : offered) : natural)
         let measured = uiView.sizeThatFits(CGSize(width: width, height: CGFloat.greatestFiniteMagnitude))
@@ -356,7 +392,8 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
 
     func applyLatest(to view: UITextView) {
         guard !applying, view.selectedRange.length == 0, let latest,
-              !(view.attributedText?.isEqual(to: latest) ?? false) else { return }
+            !(view.attributedText?.isEqual(to: latest) ?? false)
+        else { return }
         applying = true
         view.attributedText = latest
         view.selectedRange = NSRange(location: 0, length: 0)
@@ -398,15 +435,18 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
         guard let entry, let sideChat = actions?.sideChat else { return nil }
         let quote = CommentPrompt.selectedText(textView.text ?? "", range: range)
         guard !CommentPrompt.normalize(quote).isEmpty else { return nil }
-        return UIAction(title: "Side Chat", image: UIImage(systemName: "bubble.left.and.bubble.right")) { [weak textView] _ in
+        return UIAction(title: "Side Chat", image: UIImage(systemName: "bubble.left.and.bubble.right")) {
+            [weak textView] _ in
             textView?.selectedRange = NSRange(location: 0, length: 0)
             textView?.resignFirstResponder()
             sideChat(entry, quote)
         }
     }
 
-    func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,
-                  suggestedActions: [UIMenuElement]) -> UIMenu? {
+    func textView(
+        _ textView: UITextView, editMenuForTextIn range: NSRange,
+        suggestedActions: [UIMenuElement]
+    ) -> UIMenu? {
         let ours: [UIMenuElement] = [
             commentAction(in: textView, range: range),
             sideChatAction(in: textView, range: range),
@@ -425,7 +465,8 @@ enum TranscriptKeyboardDismissal {
         responder = nil
         UIApplication.shared.sendAction(#selector(UIResponder.cypherCaptureResponder), to: nil, from: nil, for: nil)
         if let view = responder as? TranscriptUITextView, let window = view.window,
-           view.bounds.contains(view.convert(point, from: window)) {
+            view.bounds.contains(view.convert(point, from: window))
+        {
             responder = nil
             return
         }

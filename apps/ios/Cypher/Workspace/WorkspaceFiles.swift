@@ -54,9 +54,10 @@ struct WorkspaceChanges: Decodable {
     /// Index the snapshot once for the continuous changes document.
     func patches() -> [String: String] {
         func candidates(_ entry: WorkspaceChange) -> Set<String> {
-            Set(Self.gitNames("a/" + (entry.oldPath ?? entry.path)).flatMap { old in
-                Self.gitNames("b/" + entry.path).map { "diff --git \(old) \($0)" }
-            })
+            Set(
+                Self.gitNames("a/" + (entry.oldPath ?? entry.path)).flatMap { old in
+                    Self.gitNames("b/" + entry.path).map { "diff --git \(old) \($0)" }
+                })
         }
         var owners: [String: Set<String>] = [:]
         for file in files {
@@ -121,8 +122,10 @@ struct WorkspaceDiffEntry: Equatable {
     let deletions: Int
     let binary: Bool
     var arguments: [String: Any] {
-        ["path": path, "patch": patch ?? "", "additions": additions,
-         "deletions": deletions, "binary": binary]
+        [
+            "path": path, "patch": patch ?? "", "additions": additions,
+            "deletions": deletions, "binary": binary,
+        ]
     }
 }
 
@@ -137,9 +140,12 @@ struct WorkspaceDiffSources: Decodable {
     func validated(checksum: String) throws -> Self {
         guard !stale, diffChecksum == checksum else { throw WorkspaceDiffContextError.stale }
         guard !binary, !truncated,
-              (oldText?.utf8.count ?? 0) + (newText?.utf8.count ?? 0) <= 512 * 1024,
-              [oldText, newText].compactMap({ $0 }).allSatisfy({ $0.split(separator: "\n", omittingEmptySubsequences: false).count <= 10_000 }),
-              oldText != nil || newText != nil else { throw WorkspaceDiffContextError.unavailable }
+            (oldText?.utf8.count ?? 0) + (newText?.utf8.count ?? 0) <= 512 * 1024,
+            [oldText, newText].compactMap({ $0 }).allSatisfy({
+                $0.split(separator: "\n", omittingEmptySubsequences: false).count <= 10_000
+            }),
+            oldText != nil || newText != nil
+        else { throw WorkspaceDiffContextError.unavailable }
         return self
     }
 }

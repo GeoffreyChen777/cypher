@@ -35,7 +35,8 @@ struct QuestionPresentation {
             prompt = body
             context = nil
         }
-        header = title.isEmpty || title == raw || title == prompt || title.contains("\n")
+        header =
+            title.isEmpty || title == raw || title == prompt || title.contains("\n")
             ? "Your input" : title
         selection = selected
         isOptionalComment = title == "Optional comment" && selected != nil
@@ -74,7 +75,8 @@ struct QuestionAnswerDraft {
     func answers(for questions: [UserInputQuestion]) -> [UserInputAnswer] {
         questions.map { question in
             let text = text(for: question)
-            let labels = text.isEmpty
+            let labels =
+                text.isEmpty
                 ? question.options.filter { picked[question.id, default: []].contains($0) }
                 : [text]
             return UserInputAnswer(questionId: question.id, labels: labels)

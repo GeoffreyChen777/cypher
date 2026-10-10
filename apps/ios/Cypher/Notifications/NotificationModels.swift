@@ -9,14 +9,14 @@ struct NotificationBadge: Decodable, Equatable {
     let badgeRevision: Int
 
     var valid: Bool {
-        scope.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil &&
-            badgeCount >= 0 && badgeCount <= Int(Int32.max) &&
-            badgeRevision >= 0 && badgeRevision <= 9_007_199_254_740_991
+        scope.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil && badgeCount >= 0
+            && badgeCount <= Int(Int32.max) && badgeRevision >= 0 && badgeRevision <= 9_007_199_254_740_991
     }
     static func parse(_ userInfo: [AnyHashable: Any]) -> NotificationBadge? {
         guard let fields = userInfo["cypher"] as? [String: Any], fields["version"] as? Int == 1,
-              let data = try? JSONSerialization.data(withJSONObject: fields),
-              let badge = try? JSONDecoder().decode(Self.self, from: data), badge.valid else { return nil }
+            let data = try? JSONSerialization.data(withJSONObject: fields),
+            let badge = try? JSONDecoder().decode(Self.self, from: data), badge.valid
+        else { return nil }
         return badge
     }
 }
@@ -68,12 +68,13 @@ struct PushPayload: Identifiable, Equatable, Sendable {
     }
     static func parse(_ userInfo: [AnyHashable: Any]) -> PushPayload? {
         guard let data = userInfo["cypher"] as? [String: Any],
-              data["version"] as? Int == 1,
-              let scope = data["scope"] as? String, scope.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
-              let event = data["eventId"] as? String, UUID(uuidString: event) != nil,
-              let chat = data["chatId"] as? String, validID(chat),
-              let project = data["projectId"] as? String, validID(project),
-              let kind = data["kind"] as? String, ["completed", "failed", "input"].contains(kind) else { return nil }
+            data["version"] as? Int == 1,
+            let scope = data["scope"] as? String, scope.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+            let event = data["eventId"] as? String, UUID(uuidString: event) != nil,
+            let chat = data["chatId"] as? String, validID(chat),
+            let project = data["projectId"] as? String, validID(project),
+            let kind = data["kind"] as? String, ["completed", "failed", "input"].contains(kind)
+        else { return nil }
         return PushPayload(eventId: event, scope: scope, chatId: chat, projectId: project, kind: kind)
     }
     private static func validID(_ id: String) -> Bool {

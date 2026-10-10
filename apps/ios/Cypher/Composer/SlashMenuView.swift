@@ -29,8 +29,10 @@ struct SlashMenuView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .glassEffect(.regular.tint(Theme.surface.opacity(0.72)),
-                     in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .glassEffect(
+            .regular.tint(Theme.surface.opacity(0.72)),
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+        )
         .accessibilityIdentifier("slash-menu")
     }
 
@@ -160,8 +162,12 @@ struct SlashMenuView: View {
             // value aligned either way.
             if inEffect {
                 StatusGlyph(data: "M3.5 8.5l3 3 6-7")
-                    .stroke(Theme.success, style: StrokeStyle(lineWidth: 1.6 * 13 / 16,
-                                                              lineCap: .round, lineJoin: .round))
+                    .stroke(
+                        Theme.success,
+                        style: StrokeStyle(
+                            lineWidth: 1.6 * 13 / 16,
+                            lineCap: .round, lineJoin: .round)
+                    )
                     .frame(width: 13, height: 13)
             }
         } trailing: {

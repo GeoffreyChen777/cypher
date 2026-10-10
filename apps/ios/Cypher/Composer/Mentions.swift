@@ -106,8 +106,9 @@ enum Mentions {
         while at < raw.count {
             if raw[at] == UInt8(ascii: "%") {
                 guard at + 2 < raw.count,
-                      let hex = String(bytes: raw[at + 1...at + 2], encoding: .utf8),
-                      let byte = UInt8(hex, radix: 16) else { return nil }
+                    let hex = String(bytes: raw[at + 1...at + 2], encoding: .utf8),
+                    let byte = UInt8(hex, radix: 16)
+                else { return nil }
                 bytes.append(byte)
                 at += 3
             } else {
@@ -145,7 +146,8 @@ enum Mentions {
     static func fileLink(path: String, isDir: Bool) -> String {
         var path = path
         while path.hasSuffix("/") { path.removeLast() }
-        let basename = path.split(separator: "/", omittingEmptySubsequences: false).last
+        let basename =
+            path.split(separator: "/", omittingEmptySubsequences: false).last
             .map(String.init).flatMap { $0.isEmpty ? nil : $0 } ?? path
         return "[\(escapeLabel(basename))](\(fileScheme)\(percentEncode(path + (isDir ? "/" : ""))))"
     }
@@ -168,8 +170,11 @@ enum Mentions {
         guard parts.count == 2 else { return false }
         return parts.allSatisfy { part in
             !part.isEmpty && part != "." && part != ".." && !part.hasPrefix("-")
-                && part.unicodeScalars.allSatisfy { $0.isASCII && ($0.properties.isAlphabetic
-                    || ("0"..."9").contains($0) || "-_.".unicodeScalars.contains($0)) }
+                && part.unicodeScalars.allSatisfy {
+                    $0.isASCII
+                        && ($0.properties.isAlphabetic
+                            || ("0"..."9").contains($0) || "-_.".unicodeScalars.contains($0))
+                }
         }
     }
 
@@ -180,8 +185,10 @@ enum Mentions {
     /// composer.rs `mention_links`: every strict mention link in `text`, in
     /// document order. Hostile or non-canonical Markdown never becomes one.
     static func links(in text: String) -> [MentionLink] {
-        guard text.contains(fileScheme) || text.contains(sessionScheme)
-                || text.contains(issueScheme) || text.contains(prScheme) else { return [] }
+        guard
+            text.contains(fileScheme) || text.contains(sessionScheme)
+                || text.contains(issueScheme) || text.contains(prScheme)
+        else { return [] }
         let scalars = text.unicodeScalars
         let utf16 = text.utf16
         var links: [MentionLink] = []
@@ -211,7 +218,8 @@ enum Mentions {
                 // Hardened labels: control characters and absurd lengths in
                 // a pasted link never become a chip.
                 if label.unicodeScalars.count > maxSessionLabelChars
-                    || label.unicodeScalars.contains(where: { isControl($0) || $0 == "\n" || $0 == "\r" }) {
+                    || label.unicodeScalars.contains(where: { isControl($0) || $0 == "\n" || $0 == "\r" })
+                {
                     continue
                 }
             }
@@ -248,25 +256,29 @@ enum Mentions {
             let path = isDir ? String(decoded.dropLast()) : decoded
             let basename = path.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? ""
             guard pathIsSafe(path), percentEncode(decoded) == encoded,
-                  escapeLabel(basename) == rawLabel else { return nil }
+                escapeLabel(basename) == rawLabel
+            else { return nil }
             return .file(path: path, isDir: isDir)
         }
         if target.hasPrefix(sessionScheme) {
             let encoded = String(target.dropFirst(sessionScheme.count))
             guard let chatId = percentDecode(encoded), !chatId.isEmpty,
-                  chatId.unicodeScalars.count <= maxSessionIdChars,
-                  !chatId.unicodeScalars.contains(where: { isControl($0) || $0.properties.isWhitespace }),
-                  percentEncode(chatId) == encoded else { return nil }
+                chatId.unicodeScalars.count <= maxSessionIdChars,
+                !chatId.unicodeScalars.contains(where: { isControl($0) || $0.properties.isWhitespace }),
+                percentEncode(chatId) == encoded
+            else { return nil }
             return .session(chatId: chatId)
         }
-        let issue: (String, Bool)? = target.hasPrefix(issueScheme)
+        let issue: (String, Bool)? =
+            target.hasPrefix(issueScheme)
             ? (String(target.dropFirst(issueScheme.count)), false)
             : target.hasPrefix(prScheme) ? (String(target.dropFirst(prScheme.count)), true) : nil
         if let (rest, pull) = issue, let slash = rest.lastIndex(of: "/") {
             let repo = String(rest[..<slash])
             let numberText = String(rest[rest.index(after: slash)...])
             guard let number = UInt64(numberText), number > 0, String(number) == numberText,
-                  validRepo(repo), rawLabel == "#\(number)" || rawLabel.hasPrefix("#\(number) ") else { return nil }
+                validRepo(repo), rawLabel == "#\(number)" || rawLabel.hasPrefix("#\(number) ")
+            else { return nil }
             return .issue(repo: repo, number: number, pull: pull)
         }
         return nil
@@ -307,7 +319,8 @@ enum Mentions {
                 let suffix = Array(parts.suffix(count))
                 // Unique among the other files: no OTHER path ends in it.
                 let clashes = files.filter { other in
-                    Array(other.split(separator: "/", omittingEmptySubsequences: false).map(String.init).suffix(count)) == suffix
+                    Array(other.split(separator: "/", omittingEmptySubsequences: false).map(String.init).suffix(count))
+                        == suffix
                 }.count
                 if clashes <= 1 { return suffix.joined(separator: "/") }
             }
@@ -331,9 +344,11 @@ enum Mentions {
             display += before
             displayLength += before.utf16.count
             let text = chipText(label: label, kind: link.kind)
-            chips.append(MentionProjection.Chip(link: link,
-                                                display: NSRange(location: displayLength, length: text.utf16.count),
-                                                text: text))
+            chips.append(
+                MentionProjection.Chip(
+                    link: link,
+                    display: NSRange(location: displayLength, length: text.utf16.count),
+                    text: text))
             display += text
             displayLength += text.utf16.count
             rawAt = link.range.location + link.range.length
@@ -352,8 +367,10 @@ enum Mentions {
         var at = 0
         for chip in projection.chips {
             if chip.display.location > at {
-                runs.append(InlineRun(text: display.substring(with: NSRange(location: at, length: chip.display.location - at)),
-                                      style: .plain))
+                runs.append(
+                    InlineRun(
+                        text: display.substring(with: NSRange(location: at, length: chip.display.location - at)),
+                        style: .plain))
             }
             runs.append(InlineRun(text: chip.text, style: InlineStyle(code: true)))
             at = chip.display.location + chip.display.length
@@ -379,7 +396,8 @@ enum Mentions {
         guard caret >= 0, caret <= utf16.count else { return nil }
         let caretIx = utf16.index(utf16.startIndex, offsetBy: caret)
         guard caretIx.samePosition(in: scalars) != nil else { return nil }
-        let tokenStart = scalars[..<caretIx].lastIndex(where: { $0.properties.isWhitespace })
+        let tokenStart =
+            scalars[..<caretIx].lastIndex(where: { $0.properties.isWhitespace })
             .map { scalars.index(after: $0) } ?? scalars.startIndex
         guard let at = scalars[tokenStart..<caretIx].lastIndex(of: "@") else { return nil }
         if at != scalars.startIndex {
@@ -388,15 +406,18 @@ enum Mentions {
         }
         let end = scalars[caretIx...].firstIndex(where: { $0.properties.isWhitespace }) ?? scalars.endIndex
         let query = String(scalars[scalars.index(after: at)..<caretIx])
-        return MentionToken(range: NSRange(location: utf16.distance(from: utf16.startIndex, to: at),
-                                           length: utf16.distance(from: at, to: end)),
-                            query: query)
+        return MentionToken(
+            range: NSRange(
+                location: utf16.distance(from: utf16.startIndex, to: at),
+                length: utf16.distance(from: at, to: end)),
+            query: query)
     }
 
     /// composer.rs `session_display_title`: the synced title, else the
     /// preview, else a placeholder — capped for chips and rows.
     static func sessionTitle(_ chat: Chat) -> String {
-        let title = chat.title.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        let title =
+            chat.title.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
             ?? chat.lastMessagePreview.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
             ?? "Untitled session"
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -410,8 +431,10 @@ enum Mentions {
     /// device, never children or the current chat; archived ones only once
     /// something is typed. Unarchived first, then nearest (this project,
     /// this device, elsewhere), then most recent, then title, then id.
-    static func sessionCandidates(_ chats: [Chat], query: String, currentChat: String?,
-                                  project: String?, device: String?) -> [MentionSession] {
+    static func sessionCandidates(
+        _ chats: [Chat], query: String, currentChat: String?,
+        project: String?, device: String?
+    ) -> [MentionSession] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         func proximity(_ chat: Chat) -> Int {
             if chat.spaceId == project { return 0 }
@@ -426,17 +449,21 @@ enum Mentions {
             return (chat, title)
         }
         return candidates.sorted { lhs, rhs in
-            let (a, titleA) = lhs, (b, titleB) = rhs
+            let (a, titleA) = lhs
+            let (b, titleB) = rhs
             if a.archived != b.archived { return !a.archived }
             if proximity(a) != proximity(b) { return proximity(a) < proximity(b) }
-            if a.lastMessageAt != b.lastMessageAt { return (a.lastMessageAt ?? Int64.min) > (b.lastMessageAt ?? Int64.min) }
+            if a.lastMessageAt != b.lastMessageAt {
+                return (a.lastMessageAt ?? Int64.min) > (b.lastMessageAt ?? Int64.min)
+            }
             if titleA.lowercased() != titleB.lowercased() { return titleA.lowercased() < titleB.lowercased() }
             return a.id < b.id
         }
         .prefix(maxSessionCandidates)
         .map { chat, title in
-            MentionSession(chatId: chat.id, deviceId: chat.deviceId, title: title,
-                           archived: chat.archived, project: chat.spaceId)
+            MentionSession(
+                chatId: chat.id, deviceId: chat.deviceId, title: title,
+                archived: chat.archived, project: chat.spaceId)
         }
     }
 

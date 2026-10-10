@@ -4,16 +4,19 @@ import XCTest
 final class PiCatalogTests: XCTestCase {
     func testOnlyPiIsOffered() throws {
         XCTAssertEqual(HarnessCatalog.harnesses.map(\.id), ["pi"])
-        let descriptors = try JSONDecoder().decode([PiHarnessDescriptor].self, from: Data("""
-        [
-          {"id":"claude-code","installed":true,"enabled":true},
-          {"id":"codex","installed":true,"enabled":true},
-          {"id":"pi","installed":false,"enabled":true},
-          {"id":"pi","installed":true,"enabled":false},
-          {"id":"pi"},
-          {"id":"pi","installed":true}
-        ]
-        """.utf8))
+        let descriptors = try JSONDecoder().decode(
+            [PiHarnessDescriptor].self,
+            from: Data(
+                """
+                [
+                  {"id":"claude-code","installed":true,"enabled":true},
+                  {"id":"codex","installed":true,"enabled":true},
+                  {"id":"pi","installed":false,"enabled":true},
+                  {"id":"pi","installed":true,"enabled":false},
+                  {"id":"pi"},
+                  {"id":"pi","installed":true}
+                ]
+                """.utf8))
         XCTAssertEqual(descriptors.map(\.available), [false, false, false, false, false, true])
     }
 

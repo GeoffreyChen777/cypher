@@ -8,19 +8,26 @@ final class RegistryDocPersistenceTests: XCTestCase {
     func testPersistenceBlobRoundTrips() throws {
         let doc = RegistryDoc(deviceId: "ios-test")
         // Authoritative state from the server…
-        doc.applyState(seq: 42, full: true, gcFloor: 7, rows: [
-            RegistryRow(kind: "chats", id: "chat-1", seq: 40, deleted: false, delHlc: nil,
-                        fields: ["title": .string("hello"), "archived": .bool(false),
-                                 "createdAt": .int(1_754_000_000_000)],
-                        clocks: ["title": encodeHlc(ms: 1000, counter: 0, device: "dev-a")]),
-            RegistryRow(kind: "spaces", id: "sp-1", seq: 41, deleted: true,
-                        delHlc: encodeHlc(ms: 2000, counter: 0, device: "dev-b"),
-                        fields: [:], clocks: [:]),
-        ])
+        doc.applyState(
+            seq: 42, full: true, gcFloor: 7,
+            rows: [
+                RegistryRow(
+                    kind: "chats", id: "chat-1", seq: 40, deleted: false, delHlc: nil,
+                    fields: [
+                        "title": .string("hello"), "archived": .bool(false),
+                        "createdAt": .int(1_754_000_000_000),
+                    ],
+                    clocks: ["title": encodeHlc(ms: 1000, counter: 0, device: "dev-a")]),
+                RegistryRow(
+                    kind: "spaces", id: "sp-1", seq: 41, deleted: true,
+                    delHlc: encodeHlc(ms: 2000, counter: 0, device: "dev-b"),
+                    fields: [:], clocks: [:]),
+            ])
         // …plus a local pending write (null field delete included — the blob
         // must carry null through, not drop the key).
-        doc.write(kind: "chats", id: "chat-1", op: .update,
-                  set: ["title": .string("renamed"), "branch": .null])
+        doc.write(
+            kind: "chats", id: "chat-1", op: .update,
+            set: ["title": .string("renamed"), "branch": .null])
 
         let data = try doc.toData()
         let loaded = try RegistryDoc.from(data: data, deviceId: "ios-test")
@@ -28,18 +35,21 @@ final class RegistryDocPersistenceTests: XCTestCase {
         XCTAssertEqual(loaded.cursor, 42)
         XCTAssertEqual(loaded.gcFloor, 7)
         XCTAssertEqual(loaded.authoritative, doc.authoritative)
-        XCTAssertEqual(loaded.pending, doc.pending.map {
-            var batch = $0
-            batch.inFlight = false  // in-flight is connection state, never persisted
-            return batch
-        })
+        XCTAssertEqual(
+            loaded.pending,
+            doc.pending.map {
+                var batch = $0
+                batch.inFlight = false  // in-flight is connection state, never persisted
+                return batch
+            })
         XCTAssertEqual(loaded.pending.first?.ops.first?.set?["branch"], .null)
         // The clock survives: the next HLC after reload still beats every
         // persisted one, even if the wall clock regressed to zero.
         XCTAssertEqual(loaded.clock, doc.clock)
         // The overlay reads identically after reload.
-        XCTAssertEqual(loaded.overlayRow(kind: "chats", id: "chat-1")?.fields["title"],
-                       .string("renamed"))
+        XCTAssertEqual(
+            loaded.overlayRow(kind: "chats", id: "chat-1")?.fields["title"],
+            .string("renamed"))
         XCTAssertNil(loaded.overlayRow(kind: "spaces", id: "sp-1"))
         // A replica with state never sends a null hello cursor.
         XCTAssertEqual(loaded.helloCursor, 42)

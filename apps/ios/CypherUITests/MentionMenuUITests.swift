@@ -34,8 +34,9 @@ final class MentionMenuUITests: XCTestCase {
         let session = element(app, "mention-session-chat-picker")
         XCTAssertTrue(session.waitForHittable(timeout: 5))
         session.tap()
-        XCTAssertEqual(input.value as? String,
-                       "Compare \u{a0}@composer.rs\u{a0} with \u{a0}@Model\u{a0}picker\u{a0}catalog\u{a0}sync\u{a0} ")
+        XCTAssertEqual(
+            input.value as? String,
+            "Compare \u{a0}@composer.rs\u{a0} with \u{a0}@Model\u{a0}picker\u{a0}catalog\u{a0}sync\u{a0} ")
         capture(app, "mention-chips")
 
         // Backspace past the trailing space takes the whole chip.
@@ -45,7 +46,8 @@ final class MentionMenuUITests: XCTestCase {
         XCTAssertTrue(session.waitForHittable(timeout: 5))
         session.tap()
 
-        let send = app.buttons.matching(NSPredicate(format: "label == 'Up Arrow' OR identifier == 'arrow.up'")).firstMatch
+        let send = app.buttons.matching(NSPredicate(format: "label == 'Up Arrow' OR identifier == 'arrow.up'"))
+            .firstMatch
         XCTAssertTrue(send.waitForHittable(timeout: 5))
         send.tap()
         let bubble = app.descendants(matching: .any)

@@ -4,14 +4,17 @@ import XCTest
 @MainActor
 final class WorkspaceFilesTests: XCTestCase {
     private func snapshot(_ patch: String, files: [WorkspaceChange]) -> WorkspaceChanges {
-        WorkspaceChanges(checkoutId: "checkout", deviceId: "host", cwd: "/repo", patch: patch,
-                         files: files, additions: 1, deletions: 1, truncated: false,
-                         checksum: "sha", updatedAt: "snapshot")
+        WorkspaceChanges(
+            checkoutId: "checkout", deviceId: "host", cwd: "/repo", patch: patch,
+            files: files, additions: 1, deletions: 1, truncated: false,
+            checksum: "sha", updatedAt: "snapshot")
     }
 
     func testPathsNeverEscapeTheCheckoutOrEnterGitMetadata() {
-        for path in ["/etc/passwd", "../x", "src/../../x", "src/./x", "src//x",
-                     ".git/config", "src/.git/config", ".GIT/config", "src/.Git/config", "a\0b"] {
+        for path in [
+            "/etc/passwd", "../x", "src/../../x", "src/./x", "src//x",
+            ".git/config", "src/.git/config", ".GIT/config", "src/.Git/config", "a\0b",
+        ] {
             XCTAssertFalse(WorkspaceFilePath.valid(path), path)
         }
         XCTAssertTrue(WorkspaceFilePath.valid(""))
@@ -24,7 +27,8 @@ final class WorkspaceFilesTests: XCTestCase {
     func testPerFileDiffUsesCompletePathsAndKeepsSnapshotBoundaries() {
         let a = WorkspaceChange(path: "a/file.swift", status: "M", additions: 1, deletions: 1, binary: false)
         let b = WorkspaceChange(path: "b/file.swift", status: "M", additions: 1, deletions: 0, binary: false)
-        let patch = "diff --git a/a/file.swift b/a/file.swift\n--- a/a/file.swift\n+++ b/a/file.swift\n-old\n+new\ndiff --git a/b/file.swift b/b/file.swift\n+other\n"
+        let patch =
+            "diff --git a/a/file.swift b/a/file.swift\n--- a/a/file.swift\n+++ b/a/file.swift\n-old\n+new\ndiff --git a/b/file.swift b/b/file.swift\n+other\n"
         let diff = snapshot(patch, files: [a, b])
         XCTAssertTrue(diff.patch(for: a)?.contains("+new") == true)
         XCTAssertFalse(diff.patch(for: a)?.contains("+other") == true)
@@ -33,8 +37,10 @@ final class WorkspaceFilesTests: XCTestCase {
     }
 
     func testRenamesSpacesAndGitEscapedNamesAreMatchedWithoutGuessing() {
-        let rename = WorkspaceChange(path: "new name", oldPath: "old name", status: "R", additions: 0, deletions: 0, binary: false)
-        let patch = "diff --git a/old name b/new name\nsimilarity index 100%\nrename from old name\nrename to new name\n"
+        let rename = WorkspaceChange(
+            path: "new name", oldPath: "old name", status: "R", additions: 0, deletions: 0, binary: false)
+        let patch =
+            "diff --git a/old name b/new name\nsimilarity index 100%\nrename from old name\nrename to new name\n"
         XCTAssertNotNil(snapshot(patch, files: [rename]).patch(for: rename))
         let weird = WorkspaceChange(path: "a\t中", status: "M", additions: 1, deletions: 0, binary: false)
         let quoted = "diff --git \"a/a\\t\\344\\270\\255\" \"b/a\\t\\344\\270\\255\"\n+change\n"
@@ -61,15 +67,21 @@ final class WorkspaceFilesTests: XCTestCase {
     }
 
     func testWireRepliesDecodeTextBinaryAndPartialDirectories() throws {
-        let text = try JSONDecoder().decode(WorkspaceFileContent.self, from: Data(
-            #"{"text":"hello","bytes":1000000,"binary":false,"truncated":true}"#.utf8))
+        let text = try JSONDecoder().decode(
+            WorkspaceFileContent.self,
+            from: Data(
+                #"{"text":"hello","bytes":1000000,"binary":false,"truncated":true}"#.utf8))
         XCTAssertEqual(text.text, "hello")
         XCTAssertTrue(text.truncated)
-        let binary = try JSONDecoder().decode(WorkspaceFileContent.self, from: Data(
-            #"{"text":null,"bytes":9,"binary":true,"truncated":false}"#.utf8))
+        let binary = try JSONDecoder().decode(
+            WorkspaceFileContent.self,
+            from: Data(
+                #"{"text":null,"bytes":9,"binary":true,"truncated":false}"#.utf8))
         XCTAssertNil(binary.text)
-        let directory = try JSONDecoder().decode(WorkspaceDirectory.self, from: Data(
-            #"{"entries":[{"name":"src","isDir":true}],"truncated":true}"#.utf8))
+        let directory = try JSONDecoder().decode(
+            WorkspaceDirectory.self,
+            from: Data(
+                #"{"entries":[{"name":"src","isDir":true}],"truncated":true}"#.utf8))
         XCTAssertTrue(directory.entries[0].isDir)
         XCTAssertTrue(directory.truncated)
     }
@@ -103,22 +115,27 @@ final class WorkspaceFilesTests: XCTestCase {
     }
 
     func testOldEngineShowsUpgradeAndOtherErrorsKeepTheirMeaning() {
-        XCTAssertTrue(WorkspaceBrowserSession.errorMessage(RelayError.rpc("unknown method: ReadWorkspaceFile")).contains("Update"))
+        XCTAssertTrue(
+            WorkspaceBrowserSession.errorMessage(RelayError.rpc("unknown method: ReadWorkspaceFile")).contains("Update")
+        )
         XCTAssertEqual(WorkspaceBrowserSession.errorMessage(RelayError.rpc("permission denied")), "permission denied")
         XCTAssertEqual(WorkspaceBrowserSession.errorMessage(RelayError.rpc("unknown file")), "unknown file")
     }
 
     func testFullContextRejectsStaleBinaryAndPartialSources() throws {
-        let valid = WorkspaceDiffSources(diffChecksum: "sha", oldText: "old", newText: "new",
+        let valid = WorkspaceDiffSources(
+            diffChecksum: "sha", oldText: "old", newText: "new",
             binary: false, truncated: false, stale: false)
         XCTAssertEqual(try valid.validated(checksum: "sha").newText, "new")
         XCTAssertThrowsError(try valid.validated(checksum: "different"))
         for (binary, truncated, stale) in [(true, false, false), (false, true, false), (false, false, true)] {
-            let invalid = WorkspaceDiffSources(diffChecksum: "sha", oldText: "old", newText: "new",
+            let invalid = WorkspaceDiffSources(
+                diffChecksum: "sha", oldText: "old", newText: "new",
                 binary: binary, truncated: truncated, stale: stale)
             XCTAssertThrowsError(try invalid.validated(checksum: "sha"))
         }
-        let huge = WorkspaceDiffSources(diffChecksum: "sha",
+        let huge = WorkspaceDiffSources(
+            diffChecksum: "sha",
             oldText: String(repeating: "x", count: 512 * 1024), newText: "new",
             binary: false, truncated: false, stale: false)
         XCTAssertThrowsError(try huge.validated(checksum: "sha"))

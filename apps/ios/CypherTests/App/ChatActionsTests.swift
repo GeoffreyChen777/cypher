@@ -27,9 +27,10 @@ final class ChatActionsTests: XCTestCase {
 
     func testQuickChatIsIdentifiedByItsScratchFolder() {
         func chat(_ id: String, cwd: String?, spaceId: String? = nil) -> Chat {
-            Chat(id: id, deviceId: "d", title: nil, archived: false, cwd: cwd, branch: nil,
-                 checkoutId: nil, config: nil, lastMessagePreview: nil, lastMessageAt: nil,
-                 createdAt: 0, spaceId: spaceId, lastSeenAt: nil)
+            Chat(
+                id: id, deviceId: "d", title: nil, archived: false, cwd: cwd, branch: nil,
+                checkoutId: nil, config: nil, lastMessagePreview: nil, lastMessageAt: nil,
+                createdAt: 0, spaceId: spaceId, lastSeenAt: nil)
         }
         XCTAssertTrue(chat("abc-1", cwd: "/tmp/cypher-scratch/abc-1").isScratch)
         XCTAssertTrue(chat("abc-1", cwd: "/var/folders/x/T/cypher-scratch/abc-1/").isScratch)
@@ -56,15 +57,19 @@ final class ChatActionsTests: XCTestCase {
     }
 
     func testForkResponseDecodes() throws {
-        let created = #"{"kind":"created","chat":{"id":"f1","title":"T — Fork","deviceId":"d"},"mode":"editUser","composerText":"redo"}"#
-        XCTAssertEqual(try JSONDecoder().decode(ForkResponse.self, from: Data(created.utf8)),
-                       .created(chatId: "f1", title: "T — Fork", composerText: "redo"))
+        let created =
+            #"{"kind":"created","chat":{"id":"f1","title":"T — Fork","deviceId":"d"},"mode":"editUser","composerText":"redo"}"#
+        XCTAssertEqual(
+            try JSONDecoder().decode(ForkResponse.self, from: Data(created.utf8)),
+            .created(chatId: "f1", title: "T — Fork", composerText: "redo"))
         let plain = #"{"kind":"created","chat":{"id":"f2"},"mode":"continueAfterAssistant"}"#
-        XCTAssertEqual(try JSONDecoder().decode(ForkResponse.self, from: Data(plain.utf8)),
-                       .created(chatId: "f2", title: nil, composerText: nil))
+        XCTAssertEqual(
+            try JSONDecoder().decode(ForkResponse.self, from: Data(plain.utf8)),
+            .created(chatId: "f2", title: nil, composerText: nil))
         let refused = #"{"kind":"unavailable","reason":"liveSession","message":"Wait for the run to finish."}"#
-        XCTAssertEqual(try JSONDecoder().decode(ForkResponse.self, from: Data(refused.utf8)),
-                       .unavailable(message: "Wait for the run to finish."))
+        XCTAssertEqual(
+            try JSONDecoder().decode(ForkResponse.self, from: Data(refused.utf8)),
+            .unavailable(message: "Wait for the run to finish."))
     }
 
     func testForkBeforeAPromptHandsItBackAndAfterAReplyKeepsIt() async throws {

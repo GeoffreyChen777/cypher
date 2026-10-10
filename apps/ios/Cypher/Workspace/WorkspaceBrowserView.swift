@@ -34,13 +34,15 @@ struct WorkspaceBrowserView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button { dismiss() } label: {
+                    Button {
+                        dismiss()
+                    } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 18, weight: .regular))
                             .frame(width: 22, height: 22)
                     }
-                        .accessibilityLabel("Close")
-                        .accessibilityIdentifier("workspace-close")
+                    .accessibilityLabel("Close")
+                    .accessibilityIdentifier("workspace-close")
                 }
             }
         }
@@ -139,10 +141,14 @@ private struct WorkspaceChangesView: View {
                 if entries.isEmpty {
                     ContentUnavailableView("No changes", systemImage: "checkmark")
                 } else {
-                    WorkspaceDiffView(path: "Changes", patch: snapshot.patch, partial: snapshot.truncated,
-                        entries: entries, loadSources: snapshot.truncated ? nil : { path in
-                            try await session.diffSources(snapshot: snapshot, path: path)
-                        })
+                    WorkspaceDiffView(
+                        path: "Changes", patch: snapshot.patch, partial: snapshot.truncated,
+                        entries: entries,
+                        loadSources: snapshot.truncated
+                            ? nil
+                            : { path in
+                                try await session.diffSources(snapshot: snapshot, path: path)
+                            })
                 }
             } else {
                 WorkspaceLoadState(error: error, title: "Changes unavailable") { revision += 1 }
@@ -170,7 +176,8 @@ private struct WorkspaceChangesView: View {
                     var seen = Set<String>()
                     return result.files.compactMap { file -> WorkspaceDiffEntry? in
                         guard seen.insert(file.path).inserted else { return nil }
-                        return WorkspaceDiffEntry(path: file.path, patch: patches[file.path],
+                        return WorkspaceDiffEntry(
+                            path: file.path, patch: patches[file.path],
                             additions: file.additions, deletions: file.deletions, binary: file.binary)
                     }
                 }.value
@@ -198,7 +205,8 @@ private struct WorkspaceFileView: View {
                 if let text = content.text, !content.binary {
                     WorkspaceSourceView(path: path, text: text, partial: content.truncated)
                 } else {
-                    ContentUnavailableView("No text preview", systemImage: "doc",
+                    ContentUnavailableView(
+                        "No text preview", systemImage: "doc",
                         description: Text("This is a binary or non-UTF-8 file (\(content.bytes) bytes)."))
                 }
             } else {
@@ -261,7 +269,9 @@ struct WorkspaceTextPreview {
             var bytes = Data(source.utf8.prefix(Self.limit))
             while String(data: bytes, encoding: .utf8) == nil { bytes.removeLast() }
             text = String(decoding: bytes, as: UTF8.self)
-        } else { text = source }
+        } else {
+            text = source
+        }
     }
 }
 
@@ -320,20 +330,27 @@ struct WorkspaceCodeView: UIViewRepresentable {
     }
     func updateUIView(_ view: UITextView, context: Context) {
         let coordinator = context.coordinator
-        guard coordinator.text != text || coordinator.scheme != colorScheme || coordinator.readerStyle != readerStyle else { return }
+        guard coordinator.text != text || coordinator.scheme != colorScheme || coordinator.readerStyle != readerStyle
+        else { return }
         coordinator.text = text
         coordinator.scheme = colorScheme
         coordinator.readerStyle = readerStyle
         view.backgroundColor = UIColor(Theme.bg)
         view.tintColor = UIColor(Theme.accent)
-        view.textContainerInset = UIEdgeInsets(top: 12, left: readerStyle ? 16 : 8, bottom: 24, right: readerStyle ? 16 : 8)
+        view.textContainerInset = UIEdgeInsets(
+            top: 12, left: readerStyle ? 16 : 8, bottom: 24, right: readerStyle ? 16 : 8)
         view.textContainer.lineFragmentPadding = readerStyle ? 0 : 5
         let paragraph = NSMutableParagraphStyle()
-        if readerStyle { paragraph.minimumLineHeight = 20; paragraph.maximumLineHeight = 20 }
-        let value = NSMutableAttributedString(string: text, attributes: [
-            .font: readerStyle ? UIFont.monospacedSystemFont(ofSize: 12, weight: .regular) : Theme.monoUI(12),
-            .foregroundColor: UIColor(Theme.text), .paragraphStyle: paragraph,
-        ])
+        if readerStyle {
+            paragraph.minimumLineHeight = 20
+            paragraph.maximumLineHeight = 20
+        }
+        let value = NSMutableAttributedString(
+            string: text,
+            attributes: [
+                .font: readerStyle ? UIFont.monospacedSystemFont(ofSize: 12, weight: .regular) : Theme.monoUI(12),
+                .foregroundColor: UIColor(Theme.text), .paragraphStyle: paragraph,
+            ])
         let selection = view.selectedRange
         view.attributedText = value
         if NSMaxRange(selection) <= value.length { view.selectedRange = selection }

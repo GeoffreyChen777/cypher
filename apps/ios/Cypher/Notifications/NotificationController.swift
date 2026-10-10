@@ -58,7 +58,9 @@ final class NotificationController {
         try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
     }
     @ObservationIgnored var registerWithOS: () -> Void = { UIApplication.shared.registerForRemoteNotifications() }
-    @ObservationIgnored var clearDelivered: () -> Void = { UNUserNotificationCenter.current().removeAllDeliveredNotifications() }
+    @ObservationIgnored var clearDelivered: () -> Void = {
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+    }
     @ObservationIgnored var setBadge: (Int) async -> Void = { count in
         try? await UNUserNotificationCenter.current().setBadgeCount(count)
     }
@@ -68,13 +70,15 @@ final class NotificationController {
         guard !loaded else { return }
         loaded = true
         if let raw = readRegistration(),
-           let state = try? JSONDecoder().decode(PushRegistrationState.self, from: Data(raw.utf8)) {
+            let state = try? JSONDecoder().decode(PushRegistrationState.self, from: Data(raw.utf8))
+        {
             saved = state
         }
     }
     @discardableResult private func persist() -> Bool {
         guard let data = try? JSONEncoder().encode(saved),
-              let text = String(data: data, encoding: .utf8) else { return false }
+            let text = String(data: data, encoding: .utf8)
+        else { return false }
         let ok = writeRegistration(text)
         if !ok { error = "Couldn't save the notification registration securely." }
         return ok
@@ -99,7 +103,7 @@ final class NotificationController {
         self.config = config
         activityClientId = saved.installationId
         scope = saved.binding?.scope
-        registered = false // permission + server lease are revalidated below
+        registered = false  // permission + server lease are revalidated below
         available = false
         settings = NotificationPreferences()
         seenEvents = []
@@ -165,7 +169,9 @@ final class NotificationController {
         currentChat = chatId
         reportActivity()
     }
-    private func request(_ config: AppConfig, action: String, method: String = "GET", body: Data? = nil) async throws -> Data {
+    private func request(_ config: AppConfig, action: String, method: String = "GET", body: Data? = nil) async throws
+        -> Data
+    {
         guard self.config === config, !Task.isCancelled else { throw RelayError.notConnected }
         guard let token = await config.currentToken() else { throw RelayError.notConnected }
         guard self.config === config, !Task.isCancelled else { throw RelayError.notConnected }
@@ -177,7 +183,8 @@ final class NotificationController {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let (data, response) = try await perform(req)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-              data.count < 32_768 else { throw RelayError.notConnected }
+            data.count < 32_768
+        else { throw RelayError.notConnected }
         return data
     }
     func refresh() async {
@@ -186,8 +193,11 @@ final class NotificationController {
         settingsRevision += 1
         let revision = settingsRevision
         struct Reply: Decodable {
-            let available: Bool; let scope: String; let settings: NotificationPreferences
-            var badgeCount: Int?; var badgeRevision: Int?
+            let available: Bool
+            let scope: String
+            let settings: NotificationPreferences
+            var badgeCount: Int?
+            var badgeRevision: Int?
         }
         do {
             let reply = try JSONDecoder().decode(Reply.self, from: await request(config, action: "settings"))
@@ -212,8 +222,7 @@ final class NotificationController {
                 persist()
                 drainRevocations()
             }
-            if available &&
-                [.authorized, .provisional, .ephemeral].contains(status) {
+            if available && [.authorized, .provisional, .ephemeral].contains(status) {
                 registerWithOS()
                 await registerToken()
             }
@@ -242,7 +251,10 @@ final class NotificationController {
             let badges = await badgeAuthorization()
             guard ticket == generation else { return }
             badgesAllowed = badges
-            if granted { registerWithOS(); await registerToken() }
+            if granted {
+                registerWithOS()
+                await registerToken()
+            }
         } catch { if ticket == generation { self.error = "Couldn't request notification permission." } }
     }
     func updateSettings(_ next: NotificationPreferences) async {
@@ -266,7 +278,10 @@ final class NotificationController {
     func receivedToken(_ data: Data) {
         load()
         let token = data.map { String(format: "%02x", $0) }.joined()
-        guard (16...128).contains(data.count) else { error = "Unexpected APNs registration response."; return }
+        guard (16...128).contains(data.count) else {
+            error = "Unexpected APNs registration response."
+            return
+        }
         if saved.token != token {
             saved.retire()
             registered = false
@@ -281,8 +296,10 @@ final class NotificationController {
     private func registerToken() async {
         guard available, !registering, let config, let token = saved.token else { return }
         guard let environment = Bundle.main.object(forInfoDictionaryKey: "CypherAPNSEnvironment") as? String,
-              ["development", "production"].contains(environment) else {
-            error = "The build has no valid APNs environment."; return
+            ["development", "production"].contains(environment)
+        else {
+            error = "The build has no valid APNs environment."
+            return
         }
         let ticket = generation
         registering = true
@@ -295,14 +312,20 @@ final class NotificationController {
         let existing = saved.binding?.account == account(config) ? saved.binding : nil
         let epoch = existing?.epoch ?? saved.nextEpoch()
         guard persist() else { return }
-        struct Reply: Decodable { let scope: String; let bindingId: String; let lease: String }
+        struct Reply: Decodable {
+            let scope: String
+            let bindingId: String
+            let lease: String
+        }
         do {
             let body = try JSONSerialization.data(withJSONObject: [
-                "token": token, "environment": environment, "installationId": saved.installationId, "epoch": epoch
+                "token": token, "environment": environment, "installationId": saved.installationId, "epoch": epoch,
             ])
-            let reply = try JSONDecoder().decode(Reply.self, from: await request(config, action: "register", method: "POST", body: body))
-            let binding = PushBinding(account: account(config), baseURL: config.edgeURL,
-                                      scope: reply.scope, bindingId: reply.bindingId, lease: reply.lease, epoch: epoch)
+            let reply = try JSONDecoder().decode(
+                Reply.self, from: await request(config, action: "register", method: "POST", body: body))
+            let binding = PushBinding(
+                account: account(config), baseURL: config.edgeURL,
+                scope: reply.scope, bindingId: reply.bindingId, lease: reply.lease, epoch: epoch)
             guard ticket == generation, saved.token == token else {
                 saved.epoch = max(saved.epoch, epoch)
                 let revokeEpoch = saved.nextEpoch()
@@ -320,7 +343,11 @@ final class NotificationController {
                 registered = false
                 // Revalidation failure can mean a server-invalidated lease.
                 // Next retry uses a newer epoch; don't busy-loop registration.
-                if existing != nil { saved.retire(); persist(); drainRevocations() }
+                if existing != nil {
+                    saved.retire()
+                    persist()
+                    drainRevocations()
+                }
                 self.error = "Couldn't register this device for notifications. Retry when connected."
             }
         }
@@ -338,7 +365,7 @@ final class NotificationController {
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     req.httpBody = try JSONSerialization.data(withJSONObject: [
                         "scope": revoke.binding.scope, "bindingId": revoke.binding.bindingId,
-                        "lease": revoke.binding.lease, "epoch": revoke.epoch
+                        "lease": revoke.binding.lease, "epoch": revoke.epoch,
                     ])
                     // No expired account token is refreshed after logout.
                     let (_, response) = try await perform(req)
@@ -368,9 +395,10 @@ final class NotificationController {
         let sequence = max(saved.activitySequence ?? 0, Int(nowMs())) + 1
         saved.activitySequence = sequence
         guard persist() else { return }
-        let report = ActivityReport(clientId: activityClientId, sequence: sequence,
-                                    foreground: foreground, interactionAgeMs: 0,
-                                    chatId: currentChat)
+        let report = ActivityReport(
+            clientId: activityClientId, sequence: sequence,
+            foreground: foreground, interactionAgeMs: 0,
+            chatId: currentChat)
         // A refresh of the same state rides the presence beat this room is
         // already sending every 15s, where inbound messages bill 20:1. Only a
         // transition spends an HTTP request, because only a transition needs
@@ -383,13 +411,16 @@ final class NotificationController {
             // Old servers omit this additive response; ordinary activity
             // reporting remains compatible during a rolling upgrade.
             struct Reply: Decodable {
-                var scope: String?; var readEventIds: [String]?
-                var badgeCount: Int?; var badgeRevision: Int?
+                var scope: String?
+                var readEventIds: [String]?
+                var badgeCount: Int?
+                var badgeRevision: Int?
             }
             guard let response = try? await request(config, action: "activity", method: "POST", body: data),
-                  ticket == generation, self.config === config,
-                  let reply = try? JSONDecoder().decode(Reply.self, from: response),
-                  let responseScope = reply.scope, responseScope == scope else { return }
+                ticket == generation, self.config === config,
+                let reply = try? JSONDecoder().decode(Reply.self, from: response),
+                let responseScope = reply.scope, responseScope == scope
+            else { return }
             if let count = reply.badgeCount, let revision = reply.badgeRevision {
                 receiveBadge(NotificationBadge(scope: responseScope, badgeCount: count, badgeRevision: revision))
             }
@@ -411,7 +442,9 @@ final class NotificationController {
         applySystemBadge()
     }
     private func applySystemBadge() {
-        let ticket = generation, count = badgeCount, previous = badgeTask
+        let ticket = generation
+        let count = badgeCount
+        let previous = badgeTask
         // Serialize OS writes too: a delayed old-account setBadgeCount must
         // finish before logout's zero or the next account's count is applied.
         badgeTask = Task {
@@ -421,11 +454,18 @@ final class NotificationController {
         }
     }
     func receive(_ payload: PushPayload, tapped: Bool) {
-        if tapped && (config == nil || scope == nil) { deferredTap = payload; return }
+        if tapped && (config == nil || scope == nil) {
+            deferredTap = payload
+            return
+        }
         guard config != nil, payload.scope == scope else { return }
-        if tapped { pendingNavigation = payload; return }
+        if tapped {
+            pendingNavigation = payload
+            return
+        }
         guard foreground, settings.permits(payload),
-              seenEvents.insert(payload.eventId).inserted else { return }
+            seenEvents.insert(payload.eventId).inserted
+        else { return }
         if seenEvents.count > 512 { seenEvents = [payload.eventId] }
         guard currentChat != payload.chatId else { return }
         banner = payload

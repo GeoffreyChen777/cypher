@@ -15,8 +15,9 @@ final class ProseSelectionUITests: XCTestCase {
         for _ in 0..<6 where !prose.isHittable { transcript.swipeDown(velocity: .slow) }
         XCTAssertTrue(prose.waitForHittable(timeout: 5))
         let value = prose.value as? String ?? ""
-        XCTAssertTrue(value.contains("Veil port plan") && value.contains("Chunk spans keep"),
-                      "the heading, paragraph and list share one text: \(value.prefix(120))")
+        XCTAssertTrue(
+            value.contains("Veil port plan") && value.contains("Chunk spans keep"),
+            "the heading, paragraph and list share one text: \(value.prefix(120))")
 
         // From "desktop" in the paragraph's first line down into the first
         // list item, past "Chunk spans": heading 27pt, the 12pt gap, four
@@ -32,8 +33,11 @@ final class ProseSelectionUITests: XCTestCase {
         let comment = app.menuItems["Comment"].exists ? app.menuItems["Comment"] : app.buttons["Comment"]
         XCTAssertTrue(comment.waitForExistence(timeout: 5), "the selection's menu offers Comment")
         comment.tap()
-        let quote = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@",
-                                                         "desktop", "Chunk spans")).firstMatch
+        let quote = app.staticTexts.matching(
+            NSPredicate(
+                format: "label CONTAINS %@ AND label CONTAINS %@",
+                "desktop", "Chunk spans")
+        ).firstMatch
         XCTAssertTrue(quote.waitForExistence(timeout: 5), "the quote runs from the paragraph into the list")
         capture(app, "prose-selection-quote")
     }

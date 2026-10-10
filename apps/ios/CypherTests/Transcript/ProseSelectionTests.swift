@@ -26,23 +26,23 @@ final class ProseSelectionTests: XCTestCase {
 
     func testProseBlocksShareARowAndCodeQuotesBreakIt() {
         let reply = """
-        # Plan
+            # Plan
 
-        First paragraph.
+            First paragraph.
 
-        - one
-        - two
+            - one
+            - two
 
-        ```swift
-        let x = 1
-        ```
+            ```swift
+            let x = 1
+            ```
 
-        After the code.
+            After the code.
 
-        > A quote.
+            > A quote.
 
-        Last paragraph.
-        """
+            Last paragraph.
+            """
         let rows = rows(reply)
         XCTAssertEqual(kinds(rows), ["prose3", "code", "prose1", "quote", "prose1"])
         // Named by their first block, so a run keeps its id as blocks join it.
@@ -58,33 +58,38 @@ final class ProseSelectionTests: XCTestCase {
     }
 
     func testListsWithCodeKeepTheirOwnView() {
-        let list = MDBlock.list(orderedStart: nil, items: [
-            MDListItem(checked: nil, children: [.paragraph([InlineRun(text: "a", style: .plain)])]),
-            MDListItem(checked: nil, children: [.codeBlock(language: nil, code: "x")]),
-        ])
+        let list = MDBlock.list(
+            orderedStart: nil,
+            items: [
+                MDListItem(checked: nil, children: [.paragraph([InlineRun(text: "a", style: .plain)])]),
+                MDListItem(checked: nil, children: [.codeBlock(language: nil, code: "x")]),
+            ])
         XCTAssertFalse(TranscriptTextStyle.isProse(list))
         XCTAssertFalse(TranscriptTextStyle.isProse(.rule))
         XCTAssertFalse(TranscriptTextStyle.isProse(.table(header: [], rows: [], align: [])))
     }
 
     func testProseReadsAsOneTextWithMarkersAndHangingIndents() throws {
-        let blocks = MarkdownParser.parse("""
-        ## Steps
+        let blocks = MarkdownParser.parse(
+            """
+            ## Steps
 
-        Do this:
+            Do this:
 
-        1. First
-        2. Second
-           - nested
-        - [x] done
-        """).map(\.block)
+            1. First
+            2. Second
+               - nested
+            - [x] done
+            """
+        ).map(\.block)
         let text = TranscriptTextStyle.prose(blocks)
         XCTAssertEqual(text.string, "Steps\nDo this:\n1.\tFirst\n2.\tSecond\n\u{2022}\tnested\n\u{2611}\tdone")
 
         func style(at needle: String) throws -> NSParagraphStyle {
             let location = (text.string as NSString).range(of: needle).location
             XCTAssertNotEqual(location, NSNotFound, needle)
-            return try XCTUnwrap(text.attribute(.paragraphStyle, at: location, effectiveRange: nil) as? NSParagraphStyle)
+            return try XCTUnwrap(
+                text.attribute(.paragraphStyle, at: location, effectiveRange: nil) as? NSParagraphStyle)
         }
         // The first paragraph sits at the top; the next block keeps the gap.
         XCTAssertEqual(try style(at: "Steps").paragraphSpacingBefore, 0)
@@ -107,8 +112,9 @@ final class ProseSelectionTests: XCTestCase {
         let view = UITextView()
         view.attributedText = TranscriptTextStyle.prose(blocks)
         view.selectedRange = NSRange(location: 0, length: view.attributedText.length)
-        XCTAssertEqual(CommentPrompt.selectedText(view.text, range: view.selectedRange),
-                       "First.\nSecond with code.\n\u{2022}\titem")
+        XCTAssertEqual(
+            CommentPrompt.selectedText(view.text, range: view.selectedRange),
+            "First.\nSecond with code.\n\u{2022}\titem")
     }
 
     func testTranscriptRowsCarryTheirEntrysRole() {

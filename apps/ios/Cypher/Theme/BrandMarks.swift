@@ -29,11 +29,14 @@ enum BrandMark {
     var pathData: String {
         switch self {
         case .claude:
-            return "m50.228 170.321 50.357-28.257.843-2.463-.843-1.361h-2.462l-8.426-.518-28.775-.778-24.952-1.037-24.175-1.296-6.092-1.297L0 125.796l.583-3.759 5.12-3.434 7.324.648 16.202 1.101 24.304 1.685 17.629 1.037 26.118 2.722h4.148l.583-1.685-1.426-1.037-1.101-1.037-25.147-17.045-27.22-18.017-14.258-10.37-7.713-5.25-3.888-4.925-1.685-10.758 7-7.713 9.397.649 2.398.648 9.527 7.323 20.35 15.75L94.817 91.9l3.889 3.24 1.555-1.102.195-.777-1.75-2.917-14.453-26.118-15.425-26.572-6.87-11.018-1.814-6.61c-.648-2.723-1.102-4.991-1.102-7.778l7.972-10.823L71.42 0 82.05 1.426l4.472 3.888 6.61 15.101 10.694 23.786 16.591 32.34 4.861 9.592 2.592 8.879.973 2.722h1.685v-1.556l1.36-18.211 2.528-22.36 2.463-28.776.843-8.1 4.018-9.722 7.971-5.25 6.222 2.981 5.12 7.324-.713 4.73-3.046 19.768-5.962 30.98-3.889 20.739h2.268l2.593-2.593 10.499-13.934 17.628-22.036 7.778-8.749 9.073-9.657 5.833-4.601h11.018l8.1 12.055-3.628 12.443-11.342 14.388-9.398 12.184-13.48 18.147-8.426 14.518.778 1.166 2.01-.194 30.46-6.481 16.462-2.982 19.637-3.37 8.88 4.148.971 4.213-3.5 8.62-20.998 5.184-24.628 4.926-36.682 8.685-.454.324.519.648 16.526 1.555 7.065.389h17.304l32.21 2.398 8.426 5.574 5.055 6.805-.843 5.184-12.962 6.611-17.498-4.148-40.83-9.721-14-3.5h-1.944v1.167l11.666 11.406 21.387 19.314 26.767 24.887 1.36 6.157-3.434 4.86-3.63-.518-23.526-17.693-9.073-7.972-20.545-17.304h-1.36v1.814l4.73 6.935 25.017 37.59 1.296 11.536-1.814 3.76-6.481 2.268-7.13-1.297-14.647-20.544-15.1-23.138-12.185-20.739-1.49.843-7.194 77.448-3.37 3.953-7.778 2.981-6.48-4.925-3.436-7.972 3.435-15.749 4.148-20.544 3.37-16.333 3.046-20.285 1.815-6.74-.13-.454-1.49.194-15.295 20.999-23.267 31.433-18.406 19.702-4.407 1.75-7.648-3.954.713-7.064 4.277-6.286 25.47-32.405 15.36-20.092 9.917-11.6-.065-1.686h-.583L44.07 198.125l-12.055 1.555-5.185-4.86.648-7.972 2.463-2.593 20.35-13.999-.064.065Z"
+            return
+                "m50.228 170.321 50.357-28.257.843-2.463-.843-1.361h-2.462l-8.426-.518-28.775-.778-24.952-1.037-24.175-1.296-6.092-1.297L0 125.796l.583-3.759 5.12-3.434 7.324.648 16.202 1.101 24.304 1.685 17.629 1.037 26.118 2.722h4.148l.583-1.685-1.426-1.037-1.101-1.037-25.147-17.045-27.22-18.017-14.258-10.37-7.713-5.25-3.888-4.925-1.685-10.758 7-7.713 9.397.649 2.398.648 9.527 7.323 20.35 15.75L94.817 91.9l3.889 3.24 1.555-1.102.195-.777-1.75-2.917-14.453-26.118-15.425-26.572-6.87-11.018-1.814-6.61c-.648-2.723-1.102-4.991-1.102-7.778l7.972-10.823L71.42 0 82.05 1.426l4.472 3.888 6.61 15.101 10.694 23.786 16.591 32.34 4.861 9.592 2.592 8.879.973 2.722h1.685v-1.556l1.36-18.211 2.528-22.36 2.463-28.776.843-8.1 4.018-9.722 7.971-5.25 6.222 2.981 5.12 7.324-.713 4.73-3.046 19.768-5.962 30.98-3.889 20.739h2.268l2.593-2.593 10.499-13.934 17.628-22.036 7.778-8.749 9.073-9.657 5.833-4.601h11.018l8.1 12.055-3.628 12.443-11.342 14.388-9.398 12.184-13.48 18.147-8.426 14.518.778 1.166 2.01-.194 30.46-6.481 16.462-2.982 19.637-3.37 8.88 4.148.971 4.213-3.5 8.62-20.998 5.184-24.628 4.926-36.682 8.685-.454.324.519.648 16.526 1.555 7.065.389h17.304l32.21 2.398 8.426 5.574 5.055 6.805-.843 5.184-12.962 6.611-17.498-4.148-40.83-9.721-14-3.5h-1.944v1.167l11.666 11.406 21.387 19.314 26.767 24.887 1.36 6.157-3.434 4.86-3.63-.518-23.526-17.693-9.073-7.972-20.545-17.304h-1.36v1.814l4.73 6.935 25.017 37.59 1.296 11.536-1.814 3.76-6.481 2.268-7.13-1.297-14.647-20.544-15.1-23.138-12.185-20.739-1.49.843-7.194 77.448-3.37 3.953-7.778 2.981-6.48-4.925-3.436-7.972 3.435-15.749 4.148-20.544 3.37-16.333 3.046-20.285 1.815-6.74-.13-.454-1.49.194-15.295 20.999-23.267 31.433-18.406 19.702-4.407 1.75-7.648-3.954.713-7.064 4.277-6.286 25.47-32.405 15.36-20.092 9.917-11.6-.065-1.686h-.583L44.07 198.125l-12.055 1.555-5.185-4.86.648-7.972 2.463-2.593 20.35-13.999-.064.065Z"
         case .openai:
-            return "M239.184 106.203a64.716 64.716 0 0 0-5.576-53.103C219.452 28.459 191 15.784 163.213 21.74A65.586 65.586 0 0 0 52.096 45.22a64.716 64.716 0 0 0-43.23 31.36c-14.31 24.602-11.061 55.634 8.033 76.74a64.665 64.665 0 0 0 5.525 53.102c14.174 24.65 42.644 37.324 70.446 31.36a64.72 64.72 0 0 0 48.754 21.744c28.481.025 53.714-18.361 62.414-45.481a64.767 64.767 0 0 0 43.229-31.36c14.137-24.558 10.875-55.423-8.083-76.483Zm-97.56 136.338a48.397 48.397 0 0 1-31.105-11.255l1.535-.87 51.67-29.825a8.595 8.595 0 0 0 4.247-7.367v-72.85l21.845 12.636c.218.111.37.32.409.563v60.367c-.056 26.818-21.783 48.545-48.601 48.601Zm-104.466-44.61a48.345 48.345 0 0 1-5.781-32.589l1.534.921 51.722 29.826a8.339 8.339 0 0 0 8.441 0l63.181-36.425v25.221a.87.87 0 0 1-.358.665l-52.335 30.184c-23.257 13.398-52.97 5.431-66.404-17.803ZM23.549 85.38a48.499 48.499 0 0 1 25.58-21.333v61.39a8.288 8.288 0 0 0 4.195 7.316l62.874 36.272-21.845 12.636a.819.819 0 0 1-.767 0L41.353 151.53c-23.211-13.454-31.171-43.144-17.804-66.405v.256Zm179.466 41.695-63.08-36.63L161.73 77.86a.819.819 0 0 1 .768 0l52.233 30.184a48.6 48.6 0 0 1-7.316 87.635v-61.391a8.544 8.544 0 0 0-4.4-7.213Zm21.742-32.69-1.535-.922-51.619-30.081a8.39 8.39 0 0 0-8.492 0L99.98 99.808V74.587a.716.716 0 0 1 .307-.665l52.233-30.133a48.652 48.652 0 0 1 72.236 50.391v.205ZM88.061 139.097l-21.845-12.585a.87.87 0 0 1-.41-.614V65.685a48.652 48.652 0 0 1 79.757-37.346l-1.535.87-51.67 29.825a8.595 8.595 0 0 0-4.246 7.367l-.051 72.697Zm11.868-25.58 28.138-16.217 28.188 16.218v32.434l-28.086 16.218-28.188-16.218-.052-32.434Z"
+            return
+                "M239.184 106.203a64.716 64.716 0 0 0-5.576-53.103C219.452 28.459 191 15.784 163.213 21.74A65.586 65.586 0 0 0 52.096 45.22a64.716 64.716 0 0 0-43.23 31.36c-14.31 24.602-11.061 55.634 8.033 76.74a64.665 64.665 0 0 0 5.525 53.102c14.174 24.65 42.644 37.324 70.446 31.36a64.72 64.72 0 0 0 48.754 21.744c28.481.025 53.714-18.361 62.414-45.481a64.767 64.767 0 0 0 43.229-31.36c14.137-24.558 10.875-55.423-8.083-76.483Zm-97.56 136.338a48.397 48.397 0 0 1-31.105-11.255l1.535-.87 51.67-29.825a8.595 8.595 0 0 0 4.247-7.367v-72.85l21.845 12.636c.218.111.37.32.409.563v60.367c-.056 26.818-21.783 48.545-48.601 48.601Zm-104.466-44.61a48.345 48.345 0 0 1-5.781-32.589l1.534.921 51.722 29.826a8.339 8.339 0 0 0 8.441 0l63.181-36.425v25.221a.87.87 0 0 1-.358.665l-52.335 30.184c-23.257 13.398-52.97 5.431-66.404-17.803ZM23.549 85.38a48.499 48.499 0 0 1 25.58-21.333v61.39a8.288 8.288 0 0 0 4.195 7.316l62.874 36.272-21.845 12.636a.819.819 0 0 1-.767 0L41.353 151.53c-23.211-13.454-31.171-43.144-17.804-66.405v.256Zm179.466 41.695-63.08-36.63L161.73 77.86a.819.819 0 0 1 .768 0l52.233 30.184a48.6 48.6 0 0 1-7.316 87.635v-61.391a8.544 8.544 0 0 0-4.4-7.213Zm21.742-32.69-1.535-.922-51.619-30.081a8.39 8.39 0 0 0-8.492 0L99.98 99.808V74.587a.716.716 0 0 1 .307-.665l52.233-30.133a48.652 48.652 0 0 1 72.236 50.391v.205ZM88.061 139.097l-21.845-12.585a.87.87 0 0 1-.41-.614V65.685a48.652 48.652 0 0 1 79.757-37.346l-1.535.87-51.67 29.825a8.595 8.595 0 0 0-4.246 7.367l-.051 72.697Zm11.868-25.58 28.138-16.217 28.188 16.218v32.434l-28.086 16.218-28.188-16.218-.052-32.434Z"
         case .pi:
-            return "M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65ZM517.36 400H634.72V634.72H517.36Z"
+            return
+                "M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65ZM517.36 400H634.72V634.72H517.36Z"
         }
     }
 
@@ -75,8 +78,9 @@ struct BrandMarkShape: Shape {
         let scale = min(rect.width / box.width, rect.height / box.height)
         let dx = rect.minX + (rect.width - box.width * scale) / 2
         let dy = rect.minY + (rect.height - box.height * scale) / 2
-        return base.applying(CGAffineTransform(scaleX: scale, y: scale)
-            .concatenating(CGAffineTransform(translationX: dx, y: dy)))
+        return base.applying(
+            CGAffineTransform(scaleX: scale, y: scale)
+                .concatenating(CGAffineTransform(translationX: dx, y: dy)))
     }
 }
 
@@ -116,44 +120,55 @@ enum SVGPathParser {
                 path.move(to: current)
                 // Subsequent pairs are implicit linetos.
                 command = relative ? "l" : "L"
-                lastCubicControl = nil; lastQuadControl = nil
+                lastCubicControl = nil
+                lastQuadControl = nil
             case .line:
                 guard let x = scanner.number(), let y = scanner.number() else { return path }
                 current = pt(x, y)
                 path.addLine(to: current)
-                lastCubicControl = nil; lastQuadControl = nil
+                lastCubicControl = nil
+                lastQuadControl = nil
             case .horizontal:
                 guard let x = scanner.number() else { return path }
                 current = CGPoint(x: relative ? current.x + x : x, y: current.y)
                 path.addLine(to: current)
-                lastCubicControl = nil; lastQuadControl = nil
+                lastCubicControl = nil
+                lastQuadControl = nil
             case .vertical:
                 guard let y = scanner.number() else { return path }
                 current = CGPoint(x: current.x, y: relative ? current.y + y : y)
                 path.addLine(to: current)
-                lastCubicControl = nil; lastQuadControl = nil
+                lastCubicControl = nil
+                lastQuadControl = nil
             case .cubic:
                 guard let x1 = scanner.number(), let y1 = scanner.number(),
-                      let x2 = scanner.number(), let y2 = scanner.number(),
-                      let x = scanner.number(), let y = scanner.number() else { return path }
-                let c1 = pt(x1, y1), c2 = pt(x2, y2), end = pt(x, y)
+                    let x2 = scanner.number(), let y2 = scanner.number(),
+                    let x = scanner.number(), let y = scanner.number()
+                else { return path }
+                let c1 = pt(x1, y1)
+                let c2 = pt(x2, y2)
+                let end = pt(x, y)
                 path.addCurve(to: end, control1: c1, control2: c2)
                 lastCubicControl = c2
                 current = end
                 lastQuadControl = nil
             case .smoothCubic:
                 guard let x2 = scanner.number(), let y2 = scanner.number(),
-                      let x = scanner.number(), let y = scanner.number() else { return path }
+                    let x = scanner.number(), let y = scanner.number()
+                else { return path }
                 let c1 = lastCubicControl.map { CGPoint(x: 2 * current.x - $0.x, y: 2 * current.y - $0.y) } ?? current
-                let c2 = pt(x2, y2), end = pt(x, y)
+                let c2 = pt(x2, y2)
+                let end = pt(x, y)
                 path.addCurve(to: end, control1: c1, control2: c2)
                 lastCubicControl = c2
                 current = end
                 lastQuadControl = nil
             case .quad:
                 guard let x1 = scanner.number(), let y1 = scanner.number(),
-                      let x = scanner.number(), let y = scanner.number() else { return path }
-                let c = pt(x1, y1), end = pt(x, y)
+                    let x = scanner.number(), let y = scanner.number()
+                else { return path }
+                let c = pt(x1, y1)
+                let end = pt(x, y)
                 path.addQuadCurve(to: end, control: c)
                 lastQuadControl = c
                 current = end
@@ -168,18 +183,22 @@ enum SVGPathParser {
                 lastCubicControl = nil
             case .arc:
                 guard let rx = scanner.number(), let ry = scanner.number(),
-                      let rot = scanner.number(), let largeArc = scanner.flag(),
-                      let sweep = scanner.flag(),
-                      let x = scanner.number(), let y = scanner.number() else { return path }
+                    let rot = scanner.number(), let largeArc = scanner.flag(),
+                    let sweep = scanner.flag(),
+                    let x = scanner.number(), let y = scanner.number()
+                else { return path }
                 let end = pt(x, y)
-                addArc(&path, from: current, to: end, rx: rx, ry: ry,
-                       rotationDeg: rot, largeArc: largeArc, sweep: sweep)
+                addArc(
+                    &path, from: current, to: end, rx: rx, ry: ry,
+                    rotationDeg: rot, largeArc: largeArc, sweep: sweep)
                 current = end
-                lastCubicControl = nil; lastQuadControl = nil
+                lastCubicControl = nil
+                lastQuadControl = nil
             case .close:
                 path.closeSubpath()
                 current = start
-                lastCubicControl = nil; lastQuadControl = nil
+                lastCubicControl = nil
+                lastQuadControl = nil
             }
         }
         return path
@@ -205,22 +224,27 @@ enum SVGPathParser {
     }
 
     /// Endpoint→center arc conversion (SVG 1.1 F.6), emitted as cubic segments.
-    private static func addArc(_ path: inout Path, from p0: CGPoint, to p1: CGPoint,
-                               rx rxIn: CGFloat, ry ryIn: CGFloat,
-                               rotationDeg: CGFloat, largeArc: Bool, sweep: Bool) {
-        var rx = abs(rxIn), ry = abs(ryIn)
+    private static func addArc(
+        _ path: inout Path, from p0: CGPoint, to p1: CGPoint,
+        rx rxIn: CGFloat, ry ryIn: CGFloat,
+        rotationDeg: CGFloat, largeArc: Bool, sweep: Bool
+    ) {
+        var rx = abs(rxIn)
+        var ry = abs(ryIn)
         if rx == 0 || ry == 0 || p0 == p1 {
             path.addLine(to: p1)
             return
         }
         let phi = rotationDeg * .pi / 180
-        let dx2 = (p0.x - p1.x) / 2, dy2 = (p0.y - p1.y) / 2
+        let dx2 = (p0.x - p1.x) / 2
+        let dy2 = (p0.y - p1.y) / 2
         let x1p = cos(phi) * dx2 + sin(phi) * dy2
         let y1p = -sin(phi) * dx2 + cos(phi) * dy2
         let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry)
         if lambda > 1 {
             let s = sqrt(lambda)
-            rx *= s; ry *= s
+            rx *= s
+            ry *= s
         }
         let sign: CGFloat = largeArc != sweep ? 1 : -1
         let num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p
@@ -250,17 +274,21 @@ enum SVGPathParser {
         var theta = theta1
         var from = p0
         for _ in 0..<segments {
-            let cosT = cos(theta), sinT = sin(theta)
+            let cosT = cos(theta)
+            let sinT = sin(theta)
             let theta2 = theta + segDelta
-            let cosT2 = cos(theta2), sinT2 = sin(theta2)
+            let cosT2 = cos(theta2)
+            let sinT2 = sin(theta2)
 
             func point(_ c: CGFloat, _ s: CGFloat) -> CGPoint {
-                CGPoint(x: cx + rx * (cos(phi) * c) - ry * (sin(phi) * s),
-                        y: cy + rx * (sin(phi) * c) + ry * (cos(phi) * s))
+                CGPoint(
+                    x: cx + rx * (cos(phi) * c) - ry * (sin(phi) * s),
+                    y: cy + rx * (sin(phi) * c) + ry * (cos(phi) * s))
             }
             func deriv(_ c: CGFloat, _ s: CGFloat) -> CGPoint {
-                CGPoint(x: -rx * cos(phi) * s - ry * sin(phi) * c,
-                        y: -rx * sin(phi) * s + ry * cos(phi) * c)
+                CGPoint(
+                    x: -rx * cos(phi) * s - ry * sin(phi) * c,
+                    y: -rx * sin(phi) * s + ry * cos(phi) * c)
             }
             let to = point(cosT2, sinT2)
             let d1 = deriv(cosT, sinT)
@@ -315,21 +343,26 @@ enum SVGPathParser {
             guard index < chars.count else { return nil }
             var s = ""
             if chars[index] == "-" || chars[index] == "+" {
-                s.append(chars[index]); index += 1
+                s.append(chars[index])
+                index += 1
             }
             var seenDot = false
             while index < chars.count {
                 let c = chars[index]
                 if c.isNumber {
-                    s.append(c); index += 1
+                    s.append(c)
+                    index += 1
                 } else if c == "." {
                     if seenDot { break }  // "1.5.5" = two numbers
                     seenDot = true
-                    s.append(c); index += 1
+                    s.append(c)
+                    index += 1
                 } else if c == "e" || c == "E" {
-                    s.append(c); index += 1
+                    s.append(c)
+                    index += 1
                     if index < chars.count, chars[index] == "-" || chars[index] == "+" {
-                        s.append(chars[index]); index += 1
+                        s.append(chars[index])
+                        index += 1
                     }
                 } else {
                     break

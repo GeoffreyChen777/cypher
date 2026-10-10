@@ -101,7 +101,9 @@ final class RoomSocketLifecycle<Owner: Actor> {
     func start(owner: Owner) {
         closed = false
         pollTask?.cancel()
-        let hooks = hooks, clock = clock, interval = timing.httpPollNs
+        let hooks = hooks
+        let clock = clock
+        let interval = timing.httpPollNs
         pollTask = Task { [weak owner] in
             guard let first = owner else { return }
             await hooks.wake(first, .poll, 0)
@@ -149,18 +151,19 @@ final class RoomSocketLifecycle<Owner: Actor> {
         lastInbound = clock.now()
         lastProtocolRx = clock.now()
         let hooks = hooks
-        tasks.append(Task { [weak owner] in
-            while !Task.isCancelled {
-                guard let owner else { return }
-                do {
-                    let message = try await socket.receive()
-                    await hooks.wake(owner, .message(message), gen)
-                } catch {
-                    await hooks.wake(owner, .failed, gen)
-                    return
+        tasks.append(
+            Task { [weak owner] in
+                while !Task.isCancelled {
+                    guard let owner else { return }
+                    do {
+                        let message = try await socket.receive()
+                        await hooks.wake(owner, .message(message), gen)
+                    } catch {
+                        await hooks.wake(owner, .failed, gen)
+                        return
+                    }
                 }
-            }
-        })
+            })
         tasks.append(repeating(every: timing.pingIntervalNs, .ping, gen: gen, owner: owner))
         tasks.append(repeating(every: timing.livenessTickNs, .liveness, gen: gen, owner: owner))
         for (index, interval) in hooks.timers.enumerated() {
@@ -169,9 +172,12 @@ final class RoomSocketLifecycle<Owner: Actor> {
         return true
     }
 
-    private func repeating(every interval: UInt64, _ wake: RoomSocketWake, gen: Int,
-                           owner: Owner) -> Task<Void, Never> {
-        let hooks = hooks, clock = clock
+    private func repeating(
+        every interval: UInt64, _ wake: RoomSocketWake, gen: Int,
+        owner: Owner
+    ) -> Task<Void, Never> {
+        let hooks = hooks
+        let clock = clock
         return Task { [weak owner] in
             while !Task.isCancelled {
                 await clock.sleep(nanoseconds: interval)
@@ -232,7 +238,9 @@ final class RoomSocketLifecycle<Owner: Actor> {
     /// error.
     nonisolated(nonsending) func fail(gen: Int, owner: Owner) async {
         guard gen == generation, !closed, socket != nil else { return }
-        roomLog.warning("\(self.hooks.label, privacy: .public): session ended (joined=\(self.joined)); redialing in \(self.backoffMs)ms")
+        roomLog.warning(
+            "\(self.hooks.label, privacy: .public): session ended (joined=\(self.joined)); redialing in \(self.backoffMs)ms"
+        )
         joined = false
         await hooks.disconnected(owner)
         scheduleReconnect(gen: gen, owner: owner)
@@ -247,7 +255,8 @@ final class RoomSocketLifecycle<Owner: Actor> {
         cancelTasks()
         let delay = backoffMs
         backoffMs = min(backoffMs * 2, timing.backoffCapMs)
-        let hooks = hooks, clock = clock
+        let hooks = hooks
+        let clock = clock
         Task {
             await clock.sleep(nanoseconds: UInt64(delay) * 1_000_000)
             await hooks.wake(owner, .reconnect, gen)
@@ -270,8 +279,10 @@ final class RoomSocketLifecycle<Owner: Actor> {
     /// The hello answer and probes run against hard deadlines, and a
     /// long-quiet joined room gets a probe. `extraDeadline` (the chat
     /// backfill) is checked between the two and describes a miss.
-    nonisolated(nonsending) func livenessTick(gen: Int, owner: Owner,
-                                              extraDeadline: (UInt64) -> String? = { _ in nil }) async {
+    nonisolated(nonsending) func livenessTick(
+        gen: Int, owner: Owner,
+        extraDeadline: (UInt64) -> String? = { _ in nil }
+    ) async {
         guard gen == generation, socket != nil, !closed else { return }
         let now = clock.now()
         var missed: String?

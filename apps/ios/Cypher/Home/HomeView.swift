@@ -39,8 +39,11 @@ struct HomeView: View {
             routedList
                 .onChange(of: path) { _, route in
                     lastPathChangeAt = Date().timeIntervalSinceReferenceDate
-                    if case .chat(let id) = route.last { model.notifications.viewing(id) }
-                    else { model.notifications.viewing(nil) }
+                    if case .chat(let id) = route.last {
+                        model.notifications.viewing(id)
+                    } else {
+                        model.notifications.viewing(nil)
+                    }
                 }
                 // Notification taps navigate from `onChange`, NOT a `.task` on
                 // this root: `.task` is cancelled while a pushed session covers
@@ -57,13 +60,18 @@ struct HomeView: View {
                 }
                 .alert("Notification", isPresented: showsNavigationError) {
                     Button("OK") { model.notifications.navigationError = nil }
-                } message: { Text(model.notifications.navigationError ?? "") }
+                } message: {
+                    Text(model.notifications.navigationError ?? "")
+                }
                 .task(id: preloadKey) {
                     model.preloadSessions()
                 }
                 .onAppear {
-                    if case .chat(let id) = path.last { model.notifications.viewing(id) }
-                    else { model.notifications.viewing(nil) }
+                    if case .chat(let id) = path.last {
+                        model.notifications.viewing(id)
+                    } else {
+                        model.notifications.viewing(nil)
+                    }
                     if let route = model.launchRoute {
                         model.launchRoute = nil
                         // Push the whole stack atomically — appending from a child's
@@ -94,7 +102,8 @@ struct HomeView: View {
             // cell masks its content to the section's corner radius,
             // which clipped the first tab.
             if !groups.isEmpty {
-                Section {} header: {
+                Section {
+                } header: {
                     DeviceTabs(deviceIds: groups.map(\.id), selection: $deviceFilter)
                         .listRowInsets(EdgeInsets())
                         // Out past the section margin to the screen edge.
@@ -304,7 +313,9 @@ struct HomeView: View {
         ContentUnavailableView {
             Label("No Projects", systemImage: "folder.badge.plus")
         } description: {
-            Text("Connect Cypher on a Mac or Linux device, then add a project folder. This phone is a remote control — no Runtime is needed here.")
+            Text(
+                "Connect Cypher on a Mac or Linux device, then add a project folder. This phone is a remote control — no Runtime is needed here."
+            )
         } actions: {
             Button("Add Project") { showNewSpace = true }
                 .buttonStyle(.glass)

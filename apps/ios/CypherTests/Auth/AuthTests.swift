@@ -31,10 +31,11 @@ private final class RecordingTransport: @unchecked Sendable {
     @Sendable
     func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         requests.append(request)
-        let http = HTTPURLResponse(url: request.url!,
-                                   statusCode: status,
-                                   httpVersion: "HTTP/1.1",
-                                   headerFields: ["content-type": "application/json"])!
+        let http = HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["content-type": "application/json"])!
         return (body, http)
     }
 }
@@ -44,13 +45,15 @@ private func tokensJSON(access: String = "new-access", refresh: String = "new-re
 }
 
 private func userTokensJSON() -> Data {
-    Data(#"{"user":{"id":"u1","email":"a@b.c","firstName":"A","lastName":"B"},"accessToken":"at","refreshToken":"rt"}"#.utf8)
+    Data(
+        #"{"user":{"id":"u1","email":"a@b.c","firstName":"A","lastName":"B"},"accessToken":"at","refreshToken":"rt"}"#
+            .utf8)
 }
 
-private extension PKCE {
+extension PKCE {
     /// Well-formed per the edge's `PKCE_VERIFIER_RE`
     /// (`^[A-Za-z0-9\-._~]{43,128}$`).
-    static func isValidVerifier(_ verifier: String) -> Bool {
+    fileprivate static func isValidVerifier(_ verifier: String) -> Bool {
         (43...128).contains(verifier.count)
             && verifier.allSatisfy { c in
                 c.isASCII && (c.isLetter || c.isNumber || "-._~".contains(c))
@@ -58,8 +61,8 @@ private extension PKCE {
     }
 }
 
-private extension AuthError {
-    var isTransient: Bool { !isPermanent }
+extension AuthError {
+    fileprivate var isTransient: Bool { !isPermanent }
 }
 
 final class AuthPkceTests: XCTestCase {
@@ -127,8 +130,9 @@ final class AuthExchangeTests: XCTestCase {
         client.perform = transport.perform
 
         _ = try await client.refresh(refreshToken: "rt", organizationId: "org_1")
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(
-            with: try XCTUnwrap(transport.requests.first?.httpBody)) as? [String: String])
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: try XCTUnwrap(transport.requests.first?.httpBody)) as? [String: String])
         XCTAssertEqual(json["refreshToken"], "rt")
         XCTAssertEqual(json["organizationId"], "org_1")
     }
@@ -146,8 +150,9 @@ final class AuthExchangeTests: XCTestCase {
         let request = try XCTUnwrap(transport.requests.first)
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer bearer-xyz")
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(
-            with: try XCTUnwrap(request.httpBody)) as? [String: String])
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: try XCTUnwrap(request.httpBody)) as? [String: String])
         XCTAssertEqual(json["name"], "My Workspace")
     }
 
@@ -203,7 +208,8 @@ final class AuthExchangeTests: XCTestCase {
         do {
             let transport = RecordingTransport()
             transport.status = 401
-            transport.body = Data(#"{"error":"refresh token expired or revoked","code":"invalid_grant","retryable":false}"#.utf8)
+            transport.body = Data(
+                #"{"error":"refresh token expired or revoked","code":"invalid_grant","retryable":false}"#.utf8)
             var client = AuthClient(baseURL: URL(string: "https://edge.test")!)
             client.perform = transport.perform
             _ = try await client.refresh(refreshToken: "rt")
@@ -265,13 +271,16 @@ final class AuthOrgRoutingTests: XCTestCase {
 final class AuthRefreshSingleFlightTests: XCTestCase {
     /// Build an AppConfig in workos mode whose tokens are already expired and
     /// whose AuthClient transport is a recording stub returning `tokensJSON`.
-    private func makeConfig(refreshCount: RecordingTransport,
-                            tokens: AuthTokens) -> AppConfig {
-        let config = AppConfig(edgeURL: URL(string: "https://edge.test")!,
-                               mode: .workos,
-                               userId: "u1", orgId: "org_1",
-                               deviceId: "dev-1", deviceName: "Test",
-                               tokens: tokens)
+    private func makeConfig(
+        refreshCount: RecordingTransport,
+        tokens: AuthTokens
+    ) -> AppConfig {
+        let config = AppConfig(
+            edgeURL: URL(string: "https://edge.test")!,
+            mode: .workos,
+            userId: "u1", orgId: "org_1",
+            deviceId: "dev-1", deviceName: "Test",
+            tokens: tokens)
         var client = AuthClient(baseURL: config.edgeURL)
         client.perform = refreshCount.perform
         config.makeClient = { _ in client }

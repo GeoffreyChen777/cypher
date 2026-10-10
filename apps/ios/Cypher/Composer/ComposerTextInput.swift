@@ -67,9 +67,11 @@ final class ComposerLayoutManager: NSLayoutManager {
             storage.enumerateAttribute(.cypherInlineCode, in: characters) { value, range, _ in
                 guard let color = value as? UIColor else { return }
                 let glyphs = self.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
-                self.enumerateEnclosingRects(forGlyphRange: glyphs,
+                self.enumerateEnclosingRects(
+                    forGlyphRange: glyphs,
                     withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
-                    in: container) { rect, _ in
+                    in: container
+                ) { rect, _ in
                     let rect = rect.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: 0, dy: 1)
                     color.setFill()
                     UIBezierPath(roundedRect: rect, cornerRadius: MD.inlineCodeRadius).fill()
@@ -208,7 +210,8 @@ struct ComposerTextInput: UIViewRepresentable {
         /// The chips in `storage`, in order.
         private func chips(in storage: NSAttributedString) -> [(range: NSRange, raw: String)] {
             var found: [(NSRange, String)] = []
-            storage.enumerateAttribute(.cypherMention, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            storage.enumerateAttribute(.cypherMention, in: NSRange(location: 0, length: storage.length)) {
+                value, range, _ in
                 if let chip = value as? MentionChipValue { found.append((range, chip.raw)) }
             }
             return found
@@ -256,7 +259,8 @@ struct ComposerTextInput: UIViewRepresentable {
         private func displayOffset(forRaw offset: Int, in raw: String) -> Int {
             var shift = 0
             for chip in Mentions.project(raw).chips {
-                let start = chip.link.range.location, end = start + chip.link.range.length
+                let start = chip.link.range.location
+                let end = start + chip.link.range.length
                 if offset <= start { break }
                 if offset < end { return chip.display.location + chip.display.length }
                 shift += chip.display.length - chip.link.range.length
@@ -266,8 +270,10 @@ struct ComposerTextInput: UIViewRepresentable {
 
         /// Replace `range` (already widened to whole chips) with plain text,
         /// re-render, park the caret after it and publish.
-        private func replace(_ view: UITextView, range: NSRange, with replacement: String,
-                             caretAfter extra: Int = 0) {
+        private func replace(
+            _ view: UITextView, range: NSRange, with replacement: String,
+            caretAfter extra: Int = 0
+        ) {
             let storage = view.textStorage
             let prefix = raw(of: storage, upTo: range.location)
             // Tell the keyboard the text moved under it: without this a
@@ -275,14 +281,18 @@ struct ComposerTextInput: UIViewRepresentable {
             // next delete.
             view.inputDelegate?.selectionWillChange(view)
             view.inputDelegate?.textWillChange(view)
-            storage.replaceCharacters(in: range, with: NSAttributedString(string: replacement,
-                                                                          attributes: Self.baseAttributes))
+            storage.replaceCharacters(
+                in: range,
+                with: NSAttributedString(
+                    string: replacement,
+                    attributes: Self.baseAttributes))
             let raw = raw(of: storage)
             render(raw, in: view)
             let caretRaw = (prefix + replacement).utf16.count + extra
             adjustingSelection = true
-            view.selectedRange = NSRange(location: min(displayOffset(forRaw: caretRaw, in: raw), view.textStorage.length),
-                                         length: 0)
+            view.selectedRange = NSRange(
+                location: min(displayOffset(forRaw: caretRaw, in: raw), view.textStorage.length),
+                length: 0)
             adjustingSelection = false
             view.inputDelegate?.textDidChange(view)
             view.inputDelegate?.selectionDidChange(view)
@@ -294,8 +304,9 @@ struct ComposerTextInput: UIViewRepresentable {
         /// caret parks past it.
         func splice(_ view: UITextView, token: MentionToken, link: String) {
             guard view.markedTextRange == nil,
-                  token.range.location + token.range.length <= view.textStorage.length,
-                  Mentions.token(in: masked(view), caret: view.selectedRange.location) == token else { return }
+                token.range.location + token.range.length <= view.textStorage.length,
+                Mentions.token(in: masked(view), caret: view.selectedRange.location) == token
+            else { return }
             let source = view.textStorage.string as NSString
             let end = token.range.location + token.range.length
             let next = end < source.length ? source.substring(with: NSRange(location: end, length: 1)) : ""
@@ -311,7 +322,8 @@ struct ComposerTextInput: UIViewRepresentable {
             let storage = view.textStorage
             var order: [ObjectIdentifier] = []
             var groups: [ObjectIdentifier: (chip: MentionChipValue, ranges: [NSRange])] = [:]
-            storage.enumerateAttribute(.cypherMention, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            storage.enumerateAttribute(.cypherMention, in: NSRange(location: 0, length: storage.length)) {
+                value, range, _ in
                 guard let chip = value as? MentionChipValue else { return }
                 let key = ObjectIdentifier(chip)
                 if groups[key] == nil { order.append(key) }
@@ -344,8 +356,9 @@ struct ComposerTextInput: UIViewRepresentable {
             guard !chips.isEmpty else { return storage.string }
             let masked = NSMutableString(string: storage.string)
             for chip in chips.reversed() {
-                masked.replaceCharacters(in: chip.range,
-                                         with: String(repeating: "\u{FFFC}", count: chip.range.length))
+                masked.replaceCharacters(
+                    in: chip.range,
+                    with: String(repeating: "\u{FFFC}", count: chip.range.length))
             }
             return masked as String
         }
@@ -385,8 +398,10 @@ struct ComposerTextInput: UIViewRepresentable {
 
         /// A chip edits as one unit: an edit touching one widens to the
         /// whole chip, and typing never lands inside one.
-        func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
-                      replacementText replacement: String) -> Bool {
+        func textView(
+            _ textView: UITextView, shouldChangeTextIn range: NSRange,
+            replacementText replacement: String
+        ) -> Bool {
             guard textView.markedTextRange == nil else { return true }
             let touched = chips(in: textView.textStorage).filter { chip in
                 let end = chip.range.location + chip.range.length
@@ -415,7 +430,8 @@ struct ComposerTextInput: UIViewRepresentable {
                     let end = chip.range.location + chip.range.length
                     if selection.length == 0, chip.range.location < selection.location, selection.location < end {
                         adjustingSelection = true
-                        let nearer = selection.location - chip.range.location < end - selection.location
+                        let nearer =
+                            selection.location - chip.range.location < end - selection.location
                             ? chip.range.location : end
                         textView.selectedRange = NSRange(location: nearer, length: 0)
                         adjustingSelection = false
@@ -444,10 +460,10 @@ struct ComposerTextInput: UIViewRepresentable {
             // never let an old scheduled request steal focus back after blur.
             DispatchQueue.main.async { [weak self, weak view] in
                 guard let self, let view, self.active, self.focus.owns(self.id),
-                      self.request == ticket, view.window != nil,
-                      (self.focus.isFocused && view.isEditable) == wanted else { return }
-                if wanted { view.becomeFirstResponder() }
-                else { view.resignFirstResponder() }
+                    self.request == ticket, view.window != nil,
+                    (self.focus.isFocused && view.isEditable) == wanted
+                else { return }
+                if wanted { view.becomeFirstResponder() } else { view.resignFirstResponder() }
             }
         }
     }

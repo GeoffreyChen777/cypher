@@ -20,19 +20,29 @@ final class PushDelegateIsolationTests: XCTestCase {
         private let lock = NSLock()
         private var stored: Bool?
         var value: Bool? {
-            get { lock.lock(); defer { lock.unlock() }; return stored }
-            set { lock.lock(); stored = newValue; lock.unlock() }
+            get {
+                lock.lock()
+                defer { lock.unlock() }
+                return stored
+            }
+            set {
+                lock.lock()
+                stored = newValue
+                lock.unlock()
+            }
         }
     }
 
-    private typealias DidReceive = @convention(c) (
-        AnyObject, Selector, UNUserNotificationCenter, UNNotificationResponse,
-        @escaping @convention(block) () -> Void
-    ) -> Void
-    private typealias WillPresent = @convention(c) (
-        AnyObject, Selector, UNUserNotificationCenter, UNNotification,
-        @escaping @convention(block) (UNNotificationPresentationOptions) -> Void
-    ) -> Void
+    private typealias DidReceive =
+        @convention(c) (
+            AnyObject, Selector, UNUserNotificationCenter, UNNotificationResponse,
+            @escaping @convention(block) () -> Void
+        ) -> Void
+    private typealias WillPresent =
+        @convention(c) (
+            AnyObject, Selector, UNUserNotificationCenter, UNNotification,
+            @escaping @convention(block) (UNNotificationPresentationOptions) -> Void
+        ) -> Void
 
     // Never mutated; `[AnyHashable: Any]` just isn't Sendable.
     nonisolated(unsafe) private static let validPayload: [AnyHashable: Any] = [
@@ -49,12 +59,14 @@ final class PushDelegateIsolationTests: XCTestCase {
     @MainActor
     private func tapCompletesOnMainThread(userInfo: [AnyHashable: Any]) async throws {
         let delegate = PushAppDelegate()
-        let response = try XCTUnwrap(NotificationStub.response(userInfo: userInfo),
-                                     "Could not build a UNNotificationResponse stub")
+        let response = try XCTUnwrap(
+            NotificationStub.response(userInfo: userInfo),
+            "Could not build a UNNotificationResponse stub")
         let selector = NSSelectorFromString(
             "userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:")
-        XCTAssertTrue(delegate.responds(to: selector),
-                      "PushAppDelegate no longer exports the ObjC tap entry point")
+        XCTAssertTrue(
+            delegate.responds(to: selector),
+            "PushAppDelegate no longer exports the ObjC tap entry point")
 
         let call = unsafeBitCast(delegate.method(for: selector), to: DidReceive.self)
         let onMain = Box()
@@ -67,8 +79,9 @@ final class PushDelegateIsolationTests: XCTestCase {
             }
         }
         await fulfillment(of: [finished], timeout: 5)
-        XCTAssertEqual(onMain.value, true,
-                       "UIKit asserts the tap completion handler runs on the main thread")
+        XCTAssertEqual(
+            onMain.value, true,
+            "UIKit asserts the tap completion handler runs on the main thread")
     }
 
     @MainActor
@@ -86,12 +99,14 @@ final class PushDelegateIsolationTests: XCTestCase {
     @MainActor
     func testForegroundPresentationCompletesOnTheMainThread() async throws {
         let delegate = PushAppDelegate()
-        let notification = try XCTUnwrap(NotificationStub.notification(userInfo: Self.validPayload),
-                                         "Could not build a UNNotification stub")
+        let notification = try XCTUnwrap(
+            NotificationStub.notification(userInfo: Self.validPayload),
+            "Could not build a UNNotification stub")
         let selector = NSSelectorFromString(
             "userNotificationCenter:willPresentNotification:withCompletionHandler:")
-        XCTAssertTrue(delegate.responds(to: selector),
-                      "PushAppDelegate no longer exports the ObjC willPresent entry point")
+        XCTAssertTrue(
+            delegate.responds(to: selector),
+            "PushAppDelegate no longer exports the ObjC willPresent entry point")
 
         let call = unsafeBitCast(delegate.method(for: selector), to: WillPresent.self)
         let onMain = Box()
@@ -103,8 +118,9 @@ final class PushDelegateIsolationTests: XCTestCase {
             }
         }
         await fulfillment(of: [finished], timeout: 5)
-        XCTAssertEqual(onMain.value, true,
-                       "UIKit asserts the presentation completion handler runs on the main thread")
+        XCTAssertEqual(
+            onMain.value, true,
+            "UIKit asserts the presentation completion handler runs on the main thread")
     }
 }
 
@@ -120,11 +136,12 @@ private enum NotificationStub {
 
     static func response(userInfo: [AnyHashable: Any]) -> UNNotificationResponse? {
         guard let notification = notification(userInfo: userInfo) else { return nil }
-        return UNNotificationResponse(coder: StubCoder([
-            "notification": notification,
-            "actionIdentifier": UNNotificationDefaultActionIdentifier,
-            "sourceIdentifier": "",
-        ]))
+        return UNNotificationResponse(
+            coder: StubCoder([
+                "notification": notification,
+                "actionIdentifier": UNNotificationDefaultActionIdentifier,
+                "sourceIdentifier": "",
+            ]))
     }
 }
 

@@ -5,8 +5,10 @@ final class WorkspaceBrowserUITests: XCTestCase {
     func testChangesPresentationStates() {
         let app = XCUIApplication()
         for appearance in ["light", "dark"] {
-            app.launchArguments = ["-demo", "-route", "chat:chat-tabs", "-sheet", "changes",
-                                   "-appAppearance", appearance]
+            app.launchArguments = [
+                "-demo", "-route", "chat:chat-tabs", "-sheet", "changes",
+                "-appAppearance", appearance,
+            ]
             app.launch()
             let diff = app.webViews["workspace-diff-web"]
             let file = diff.buttons["Sources/Example.swift"]
@@ -58,7 +60,9 @@ final class WorkspaceBrowserUITests: XCTestCase {
         source.tap()
         let code = app.webViews["workspace-source-web"]
         XCTAssertTrue(code.waitForExistence(timeout: 5))
-        XCTAssertTrue(code.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Foundation")).firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            code.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Foundation")).firstMatch
+                .waitForExistence(timeout: 10))
         code.tap()
         XCTAssertFalse(app.keyboards.firstMatch.exists, "The file reader must never become an editor")
         app.navigationBars["Example.swift"].buttons.element(boundBy: 0).tap()
@@ -67,7 +71,9 @@ final class WorkspaceBrowserUITests: XCTestCase {
         XCTAssertTrue(readme.waitForExistence(timeout: 5))
         readme.tap()
         XCTAssertTrue(code.waitForExistence(timeout: 5))
-        XCTAssertTrue(code.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Read-only file browsing")).firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            code.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Read-only file browsing")).firstMatch
+                .waitForExistence(timeout: 10))
         XCTAssertFalse(app.keyboards.firstMatch.exists)
         app.navigationBars["README.md"].buttons.element(boundBy: 0).tap()
         app.buttons["workspace-close"].tap()
@@ -95,8 +101,10 @@ final class WorkspaceBrowserUITests: XCTestCase {
     func testSourceReaderPresentationAndSelection() {
         let app = XCUIApplication()
         for appearance in ["light", "dark"] {
-            app.launchArguments = ["-demo", "-route", "chat:chat-tabs", "-sheet", "files",
-                                   "-appAppearance", appearance]
+            app.launchArguments = [
+                "-demo", "-route", "chat:chat-tabs", "-sheet", "files",
+                "-appAppearance", appearance,
+            ]
             app.launch()
             let folder = app.buttons["workspace-item-Sources"]
             XCTAssertTrue(folder.waitForExistence(timeout: 10))
@@ -125,7 +133,8 @@ final class WorkspaceBrowserUITests: XCTestCase {
                 XCTAssertTrue(paste.waitForExistence(timeout: 5))
                 if paste.exists { paste.tap() }
                 if app.buttons["Allow Paste"].exists { app.buttons["Allow Paste"].tap() }
-                XCTAssertEqual(filter.value as? String, "Foundation", "Copy must exclude line numbers and unselected code")
+                XCTAssertEqual(
+                    filter.value as? String, "Foundation", "Copy must exclude line numbers and unselected code")
                 filter.buttons["Clear text"].tap()
                 if app.buttons["Cancel"].exists { app.buttons["Cancel"].tap() }
                 app.buttons["workspace-item-Sources/ReaderExample.swift"].tap()

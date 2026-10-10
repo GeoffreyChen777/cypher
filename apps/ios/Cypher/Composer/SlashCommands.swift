@@ -161,8 +161,9 @@ enum SlashMenu {
     static func level(in draft: String, commands: [SlashCommand]) -> SlashLevel? {
         if let query = query(in: draft) { return .commands(query: query) }
         guard let token = choiceToken(in: draft),
-              commands.contains(where: { $0.name == token.command }),
-              !choiceRows(command: token.command, query: token.query).isEmpty else { return nil }
+            commands.contains(where: { $0.name == token.command }),
+            !choiceRows(command: token.command, query: token.query).isEmpty
+        else { return nil }
         return .choices(command: token.command, query: token.query)
     }
 
@@ -178,7 +179,8 @@ enum SlashMenu {
         case _ where name.hasPrefix("subagent-"): return (.subagents, false)
         case _ where name.hasPrefix("skill:"): return (.skills, false)
         case "provider", "login", "logout", "web-search-model", "mcp": return (.settingsShortcuts, true)
-        case _ where name.hasPrefix("mcp-") || name.hasPrefix("pi-mcp") || name.hasPrefix("newapi-")
+        case _
+        where name.hasPrefix("mcp-") || name.hasPrefix("pi-mcp") || name.hasPrefix("newapi-")
             || name.hasPrefix("llama"):
             return (.settingsShortcuts, true)
         case _ where name.hasSuffix("-config"): return (.other, true)
@@ -238,7 +240,8 @@ enum SlashMenu {
         let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
         let ranked = commands.enumerated().compactMap { ix, command -> (rank: Int, ix: Int, command: SlashCommand)? in
             guard !placement(command.name).advanced,
-                  !needle.isEmpty || shownByDefault.contains(command.name) else { return nil }
+                !needle.isEmpty || shownByDefault.contains(command.name)
+            else { return nil }
             let name = command.name.lowercased()
             if needle.isEmpty { return (1, ix, command) }
             if name.hasPrefix(needle) { return (0, ix, command) }
@@ -290,8 +293,9 @@ enum SlashMenu {
             return SlashBadge(label: goalStatus(goal.status), tone: goal.status == "active" ? .on : .neutral)
         case "compact":
             guard let usage = facts.context, usage.size > 0 else { return nil }
-            return SlashBadge(label: "\(Int((usage.fraction * 100).rounded()))% used",
-                              tone: usage.fraction >= contextWarning ? .warning : .neutral)
+            return SlashBadge(
+                label: "\(Int((usage.fraction * 100).rounded()))% used",
+                tone: usage.fraction >= contextWarning ? .warning : .neutral)
         case "subagent-status":
             guard facts.runningSubagents > 0 else { return nil }
             return SlashBadge(label: "\(facts.runningSubagents) running", tone: .on)

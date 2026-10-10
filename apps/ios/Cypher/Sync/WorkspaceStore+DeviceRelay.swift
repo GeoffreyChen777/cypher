@@ -9,18 +9,21 @@ extension WorkspaceStore {
     /// `requestId`, which is also the new chat's id. The helper can take
     /// ~30s, plus quiescing the source.
     func fork(_ chat: Chat, anchor: MessageEntry, requestId: String) async throws -> ForkResponse {
-        try await relayClient(for: chat.deviceId).call(method: "ForkSession", params: [
-            "requestId": requestId,
-            "sourceChatId": chat.id,
-            "anchorMessageId": anchor.id,
-        ], timeoutSeconds: 90)
+        try await relayClient(for: chat.deviceId).call(
+            method: "ForkSession",
+            params: [
+                "requestId": requestId,
+                "sourceChatId": chat.id,
+                "anchorMessageId": anchor.id,
+            ], timeoutSeconds: 90)
     }
 
     /// A side chat talks to the parent's host directly.
     func sideChat(parent: Chat, quote: String, anchorEntryId: String?, config: AppConfig?) -> SideChatStore? {
         guard let config else { return nil }
-        return SideChatStore(parent: parent, quote: quote, anchorEntryId: anchorEntryId,
-                             relay: relayClient(for: parent.deviceId), config: config)
+        return SideChatStore(
+            parent: parent, quote: quote, anchorEntryId: anchorEntryId,
+            relay: relayClient(for: parent.deviceId), config: config)
     }
 
     /// ListFolders on the target device (engine caps at 500 entries, hides
@@ -36,8 +39,10 @@ extension WorkspaceStore {
     }
 
     /// Only the read-only browser's fixed RPC set, on the chat's host device.
-    func workspaceBrowserCall<T: Decodable & Sendable>(deviceId: String, method: String,
-                                            params: [String: Any]) async throws -> T {
+    func workspaceBrowserCall<T: Decodable & Sendable>(
+        deviceId: String, method: String,
+        params: [String: Any]
+    ) async throws -> T {
         guard ["ListWorkspaceFiles", "ReadWorkspaceFile", "GetCheckoutDiff"].contains(method) else {
             throw RelayError.notConnected
         }
@@ -53,13 +58,13 @@ extension WorkspaceStore {
     /// The phone never resolves a local Runtime or substitutes a model list.
     func piModels(deviceId: String) async throws -> [ModelInfo] {
         #if CYPHER_DEVELOPMENT
-        // `-mock-providers` (dev-ios.sh argument): the engine's catalog plus
-        // mock providers, or the mocks alone when the engine is unreachable.
-        if ProcessInfo.processInfo.arguments.contains("-mock-providers") {
-            let real = (try? await listPiModels(deviceId: deviceId)) ?? []
-            let mocked = HarnessCatalog.mockProviderModels.filter { mock in !real.contains { $0.id == mock.id } }
-            return real + mocked
-        }
+            // `-mock-providers` (dev-ios.sh argument): the engine's catalog plus
+            // mock providers, or the mocks alone when the engine is unreachable.
+            if ProcessInfo.processInfo.arguments.contains("-mock-providers") {
+                let real = (try? await listPiModels(deviceId: deviceId)) ?? []
+                let mocked = HarnessCatalog.mockProviderModels.filter { mock in !real.contains { $0.id == mock.id } }
+                return real + mocked
+            }
         #endif
         guard deviceOnline(deviceId) else { throw PiCatalogError.unavailable }
         return try await listPiModels(deviceId: deviceId)
@@ -89,8 +94,9 @@ extension WorkspaceStore {
             .call(method: "ListModels", params: ["harness": harness])
         var seen = Set<String>()
         return wire.filter { !$0.id.isEmpty && seen.insert($0.id).inserted }.map {
-            ModelInfo(id: $0.id, label: $0.label, description: $0.description,
-                      reasoningLevels: $0.reasoningLevels ?? [])
+            ModelInfo(
+                id: $0.id, label: $0.label, description: $0.description,
+                reasoningLevels: $0.reasoningLevels ?? [])
         }
     }
 
@@ -109,7 +115,8 @@ extension WorkspaceStore {
         guard deviceOnline(scope.deviceId) else { throw RelayError.hostOffline }
         var params = scope.params
         params["query"] = query
-        return try await relayClient(for: scope.deviceId).call(method: "SearchFiles", params: params, timeoutSeconds: 15)
+        return try await relayClient(for: scope.deviceId).call(
+            method: "SearchFiles", params: params, timeoutSeconds: 15)
     }
 
     /// PiSessionModes — the Pi plugins' switches for one chat (Fast mode,

@@ -3,8 +3,8 @@
 
 import SwiftUI
 
-private extension SubagentPanelStatus {
-    var color: Color {
+extension SubagentPanelStatus {
+    fileprivate var color: Color {
         switch self {
         case .running: return Theme.accent
         case .starting: return Theme.textFaint
@@ -13,7 +13,7 @@ private extension SubagentPanelStatus {
         case .error: return Theme.danger
         }
     }
-    var symbol: String {
+    fileprivate var symbol: String {
         switch self {
         case .running: return "circle.fill"
         case .starting: return "circle.dotted"
@@ -39,12 +39,16 @@ struct SubagentsAccessory: View {
             let entries = model.subagents(for: parent, store: store, now: nowMs())
             let counts = SubagentProjection.counts(entries)
             if counts.total > 0 {
-                Button { showDetails = true } label: {
+                Button {
+                    showDetails = true
+                } label: {
                     HStack(spacing: 5) {
                         if counts.running > 0 {
                             MiniSpinner()
                         } else {
-                            let status: SubagentPanelStatus = counts.starting > 0 ? .starting
+                            let status: SubagentPanelStatus =
+                                counts.starting > 0
+                                ? .starting
                                 : counts.stale > 0 ? .stale : counts.failed > 0 ? .error : .done
                             Image(systemName: status.symbol).foregroundStyle(status.color)
                         }
@@ -67,15 +71,19 @@ struct SubagentsAccessory: View {
                 .accessibilityHint("Show progress and open child sessions")
             }
         }
-        .sheet(isPresented: $showDetails, onDismiss: {
-            defer { pendingChild = nil }
-            // Recheck after sheet dismissal: a stale/foreign snapshot id is
-            // never sufficient to navigate to an arbitrary workspace chat.
-            if let entry = pendingChild, let currentParent = model.chat(id: parent.id),
-               let child = SubagentProjection.navigableChild(entry, parent: currentParent, chats: model.allChats) {
-                openChild(child.id)
+        .sheet(
+            isPresented: $showDetails,
+            onDismiss: {
+                defer { pendingChild = nil }
+                // Recheck after sheet dismissal: a stale/foreign snapshot id is
+                // never sufficient to navigate to an arbitrary workspace chat.
+                if let entry = pendingChild, let currentParent = model.chat(id: parent.id),
+                    let child = SubagentProjection.navigableChild(entry, parent: currentParent, chats: model.allChats)
+                {
+                    openChild(child.id)
+                }
             }
-        }) {
+        ) {
             SubagentsSheet(parentId: parent.id, store: store) { entry in
                 pendingChild = entry
                 showDetails = false
@@ -112,8 +120,10 @@ struct SubagentsSheet: View {
                         } else {
                             Text(counts.summary)
                                 .font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
-                            Text("Finished \(counts.done + counts.failed) of \(counts.total) · \(counts.done) succeeded")
-                                .font(Theme.sans(11)).foregroundStyle(Theme.textFaint)
+                            Text(
+                                "Finished \(counts.done + counts.failed) of \(counts.total) · \(counts.done) succeeded"
+                            )
+                            .font(Theme.sans(11)).foregroundStyle(Theme.textFaint)
                             if let parent, !model.deviceOnline(parent.deviceId), model.demo == nil {
                                 Text("Device offline · showing last synced activity")
                                     .font(Theme.sans(12)).foregroundStyle(Theme.warning)
@@ -122,8 +132,10 @@ struct SubagentsSheet: View {
                                 let child = parent.flatMap {
                                     SubagentProjection.navigableChild(entry, parent: $0, chats: model.allChats)
                                 }
-                                SubagentDetailRow(entry: entry, canOpen: child != nil,
-                                    awaitingInput: child.flatMap { model.sessionRows[$0.id]?.status } == .awaitingInput) {
+                                SubagentDetailRow(
+                                    entry: entry, canOpen: child != nil,
+                                    awaitingInput: child.flatMap { model.sessionRows[$0.id]?.status } == .awaitingInput
+                                ) {
                                     openChild(entry)
                                 }
                             }
@@ -204,10 +216,12 @@ private struct SubagentDetailRow: View {
                     .font(Theme.sans(11)).foregroundStyle(Theme.warning)
             }
             if !canOpen {
-                Text(entry.childChatId == nil
-                     ? "This run has no linked Cypher session."
-                     : "Child session not synced or no longer available.")
-                    .font(Theme.sans(11)).foregroundStyle(Theme.textFaint)
+                Text(
+                    entry.childChatId == nil
+                        ? "This run has no linked Cypher session."
+                        : "Child session not synced or no longer available."
+                )
+                .font(Theme.sans(11)).foregroundStyle(Theme.textFaint)
             }
         }
         .padding(12)

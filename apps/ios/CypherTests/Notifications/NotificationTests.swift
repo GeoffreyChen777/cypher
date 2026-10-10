@@ -3,8 +3,12 @@ import XCTest
 
 final class NotificationTests: XCTestCase {
     private var info: [AnyHashable: Any] {
-        ["cypher": ["version": 1, "scope": String(repeating: "a", count: 64),
-                    "eventId": UUID().uuidString, "chatId": "chat", "projectId": "project", "kind": "completed"]]
+        [
+            "cypher": [
+                "version": 1, "scope": String(repeating: "a", count: 64),
+                "eventId": UUID().uuidString, "chatId": "chat", "projectId": "project", "kind": "completed",
+            ]
+        ]
     }
     func testStrictPayloadParsingNeverAcceptsURLsOrForeignShapes() throws {
         XCTAssertNotNil(PushPayload.parse(info))
@@ -33,7 +37,8 @@ final class NotificationTests: XCTestCase {
     func testLeaseEpochsAndOfflineRevocationsSurviveSerialization() throws {
         var state = PushRegistrationState()
         let first = state.nextEpoch()
-        state.binding = PushBinding(account: "account-a", baseURL: URL(string: "https://edge.test")!,
+        state.binding = PushBinding(
+            account: "account-a", baseURL: URL(string: "https://edge.test")!,
             scope: String(repeating: "a", count: 64), bindingId: String(repeating: "b", count: 64),
             lease: UUID().uuidString, epoch: first)
         state.retire()
@@ -49,23 +54,26 @@ final class NotificationTests: XCTestCase {
     }
     func testAPNsEnvironmentMatchesBuildConfiguration() {
         #if DEBUG || CYPHER_DEVELOPMENT
-        XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "CypherAPNSEnvironment") as? String, "development")
+            XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "CypherAPNSEnvironment") as? String, "development")
         #else
-        XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "CypherAPNSEnvironment") as? String, "production")
+            XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "CypherAPNSEnvironment") as? String, "production")
         #endif
     }
     func testInvalidatedAuthConfigCannotRefreshOrClearANewAccount() async {
-        let config = AppConfig(edgeURL: URL(string: "https://edge.test")!, mode: .workos,
+        let config = AppConfig(
+            edgeURL: URL(string: "https://edge.test")!, mode: .workos,
             userId: "old", orgId: "org", deviceId: "phone", deviceName: "Test",
             tokens: AuthTokens(accessToken: "old-access", refreshToken: "old-refresh"))
         config.invalidate()
         let previous = Keychain.load(key: "accessToken")
         let previousRefresh = Keychain.load(key: "refreshToken")
         defer {
-            if let previous { Keychain.save(previous, key: "accessToken") }
-            else { Keychain.delete(key: "accessToken") }
-            if let previousRefresh { Keychain.save(previousRefresh, key: "refreshToken") }
-            else { Keychain.delete(key: "refreshToken") }
+            if let previous { Keychain.save(previous, key: "accessToken") } else { Keychain.delete(key: "accessToken") }
+            if let previousRefresh {
+                Keychain.save(previousRefresh, key: "refreshToken")
+            } else {
+                Keychain.delete(key: "refreshToken")
+            }
         }
         let saveStatus = Keychain.save("new-account", key: "accessToken")
         XCTAssertEqual(saveStatus, 0, "Keychain fixture setup must succeed before testing invalidation")
@@ -76,7 +84,8 @@ final class NotificationTests: XCTestCase {
 
     func testLateRefreshCannotRestoreSignedOutCredentials() async {
         let gate = NotificationRefreshProbe()
-        let config = AppConfig(edgeURL: URL(string: "https://edge.test")!, mode: .workos,
+        let config = AppConfig(
+            edgeURL: URL(string: "https://edge.test")!, mode: .workos,
             userId: "old", orgId: "org", deviceId: "phone", deviceName: "Test",
             tokens: AuthTokens(accessToken: "a.eyJleHAiOjF9.b", refreshToken: "expired"))
         var client = AuthClient(baseURL: config.edgeURL)
@@ -88,10 +97,12 @@ final class NotificationTests: XCTestCase {
         let previous = Keychain.load(key: "accessToken")
         let previousRefresh = Keychain.load(key: "refreshToken")
         defer {
-            if let previous { Keychain.save(previous, key: "accessToken") }
-            else { Keychain.delete(key: "accessToken") }
-            if let previousRefresh { Keychain.save(previousRefresh, key: "refreshToken") }
-            else { Keychain.delete(key: "refreshToken") }
+            if let previous { Keychain.save(previous, key: "accessToken") } else { Keychain.delete(key: "accessToken") }
+            if let previousRefresh {
+                Keychain.save(previousRefresh, key: "refreshToken")
+            } else {
+                Keychain.delete(key: "refreshToken")
+            }
         }
         let saveStatus = Keychain.save("new-account", key: "accessToken")
         XCTAssertEqual(saveStatus, 0, "Keychain fixture setup must succeed before testing late refresh")
@@ -110,10 +121,13 @@ private actor NotificationRefreshProbe {
         return await withCheckedContinuation { continuation = $0 }
     }
     func finish() {
-        continuation?.resume(returning: (
-            Data(#"{"accessToken":"late-old-access","refreshToken":"late-old-refresh"}"#.utf8),
-            HTTPURLResponse(url: URL(string: "https://edge.test/auth/refresh")!,
-                            statusCode: 200, httpVersion: nil, headerFields: nil)!))
+        continuation?.resume(
+            returning: (
+                Data(#"{"accessToken":"late-old-access","refreshToken":"late-old-refresh"}"#.utf8),
+                HTTPURLResponse(
+                    url: URL(string: "https://edge.test/auth/refresh")!,
+                    statusCode: 200, httpVersion: nil, headerFields: nil)!
+            ))
         continuation = nil
     }
 }
@@ -121,20 +135,25 @@ private actor NotificationRefreshProbe {
 final class NotificationBadgeTests: XCTestCase {
     func testBadgeOnlyAndAlertPayloadsCarryTheSameSnapshot() {
         for kind in ["badge", "completed"] {
-            let fields: [String: Any] = ["version": 1, "scope": String(repeating: "a", count: 64),
-                "kind": kind, "badgeCount": 3, "badgeRevision": 12]
-            XCTAssertEqual(NotificationBadge.parse(["cypher": fields]),
-                           NotificationBadge(scope: String(repeating: "a", count: 64), badgeCount: 3, badgeRevision: 12))
+            let fields: [String: Any] = [
+                "version": 1, "scope": String(repeating: "a", count: 64),
+                "kind": kind, "badgeCount": 3, "badgeRevision": 12,
+            ]
+            XCTAssertEqual(
+                NotificationBadge.parse(["cypher": fields]),
+                NotificationBadge(scope: String(repeating: "a", count: 64), badgeCount: 3, badgeRevision: 12))
         }
     }
 
     func testZeroClearsAndMalformedOrLegacyPayloadsAreIgnored() {
-        let fields: [String: Any] = ["version": 1, "scope": String(repeating: "a", count: 64),
-                                   "badgeCount": 0, "badgeRevision": 1]
+        let fields: [String: Any] = [
+            "version": 1, "scope": String(repeating: "a", count: 64),
+            "badgeCount": 0, "badgeRevision": 1,
+        ]
         XCTAssertEqual(NotificationBadge.parse(["cypher": fields])?.badgeCount, 0)
         for (key, value): (String, Any) in [
             ("badgeCount", -1), ("badgeCount", 1.5), ("badgeCount", true),
-            ("badgeRevision", -1), ("scope", "bad"), ("version", 2)
+            ("badgeRevision", -1), ("scope", "bad"), ("version", 2),
         ] {
             var bad = fields
             bad[key] = value

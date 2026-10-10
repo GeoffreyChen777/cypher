@@ -2,11 +2,14 @@ import XCTest
 @testable import Cypher
 
 final class QuestionPanelTests: XCTestCase {
-    private func question(_ prompt: String = "Which source?", header: String? = nil,
-                          options: [String] = ["Remote", "Local"],
-                          multi: Bool = false) -> UserInputQuestion {
-        UserInputQuestion(id: "q1", header: header ?? prompt, question: prompt,
-                          options: options, multiSelect: multi)
+    private func question(
+        _ prompt: String = "Which source?", header: String? = nil,
+        options: [String] = ["Remote", "Local"],
+        multi: Bool = false
+    ) -> UserInputQuestion {
+        UserInputQuestion(
+            id: "q1", header: header ?? prompt, question: prompt,
+            options: options, multiSelect: multi)
     }
 
     func testDuplicateDialogTitleAndContextArePresentedOnce() {
@@ -35,9 +38,10 @@ final class QuestionPanelTests: XCTestCase {
     }
 
     func testOptionalCommentSeparatesTheSelectionFromContext() {
-        let presentation = QuestionPresentation(question(
-            "Choose?\n\nContext:\nOriginal details.\n\nSelected options:\n- Remote\n- Local",
-            header: "Optional comment", options: []))
+        let presentation = QuestionPresentation(
+            question(
+                "Choose?\n\nContext:\nOriginal details.\n\nSelected options:\n- Remote\n- Local",
+                header: "Optional comment", options: []))
         XCTAssertEqual(presentation.header, "Optional comment")
         XCTAssertEqual(presentation.prompt, "Choose?")
         XCTAssertEqual(presentation.context, "Original details.")
@@ -102,7 +106,8 @@ final class QuestionPanelTests: XCTestCase {
     func testTranscriptChipDoesNotRepeatContextAndResolutionChangesVersion() throws {
         let q = question("Choose?\n\nContext:\nLong private background")
         func row(resolved: Bool) throws -> TranscriptRow {
-            let entry = MessageEntry.fixture("entry",
+            let entry = MessageEntry.fixture(
+                "entry",
                 parts: [.input(id: "input", requestId: "request", questions: [q], resolved: resolved)],
                 createdAt: 0, deviceId: "device")
             return try XCTUnwrap(buildRows([entry]).first)

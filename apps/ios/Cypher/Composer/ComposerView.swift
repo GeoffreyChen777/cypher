@@ -75,7 +75,8 @@ struct ComposerView: View {
     /// attachments and pending comments stay where they are.
     private func compact() {
         guard compactAvailability == .ready else { return }
-        uploadError = store.sendRun(prompt: "/compact", chat: chat)
+        uploadError =
+            store.sendRun(prompt: "/compact", chat: chat)
             ? nil : "Couldn't queue Compact. Please retry."
     }
 
@@ -96,8 +97,9 @@ struct ComposerView: View {
     }
 
     private var mentionScope: MentionScope {
-        MentionScope(currentChat: chat.id, project: chat.spaceId, device: chat.deviceId,
-                     files: MentionScope.Files(deviceId: chat.deviceId, chatId: chat.id))
+        MentionScope(
+            currentChat: chat.id, project: chat.spaceId, device: chat.deviceId,
+            files: MentionScope.Files(deviceId: chat.deviceId, chatId: chat.id))
     }
 
     /// A picked session: up to three distinct ones per message.
@@ -115,9 +117,10 @@ struct ComposerView: View {
     /// transport only).
     private var slashFacts: SlashFacts {
         guard !sideChat else { return SlashFacts() }
-        return SlashFacts(modes: modes.chatId == chat.id ? modes.modes : nil,
-                          context: sessionRow?.contextUsage,
-                          runningSubagents: sessionRow?.subagents.filter { $0.status == .running }.count ?? 0)
+        return SlashFacts(
+            modes: modes.chatId == chat.id ? modes.modes : nil,
+            context: sessionRow?.contextUsage,
+            runningSubagents: sessionRow?.subagents.filter { $0.status == .running }.count ?? 0)
     }
 
     private var currentReasoning: String? {
@@ -153,7 +156,8 @@ struct ComposerView: View {
                     onPickCommand: { draftState.replace(with: SlashMenu.accept($0)) },
                     onPickChoice: { draftState.replace(with: SlashMenu.accept($0, in: text)) },
                     onRetry: { Task { await loadCommands(force: true) } },
-                    maxHeight: slashMenuMaxHeight)
+                    maxHeight: slashMenuMaxHeight
+                )
                 .padding(.horizontal, 16)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             } else if let mentionToken {
@@ -162,7 +166,8 @@ struct ComposerView: View {
                     subtitle: model.mentionSubtitle,
                     onPickSession: pickSession,
                     onPickFile: { mentionEditor.accept(link: Mentions.fileLink(path: $0.path, isDir: $0.isDir)) },
-                    maxHeight: slashMenuMaxHeight)
+                    maxHeight: slashMenuMaxHeight
+                )
                 .padding(.horizontal, 16)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
@@ -184,23 +189,29 @@ struct ComposerView: View {
                 onAttach: { showPicker = true },
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
                 autoFocus: model.launchFocusComposer,
-                contextGauge: sideChat ? nil : sessionRow?.contextUsage.map {
-                    ContextGauge(usage: $0, availability: compactAvailability, onCompact: compact)
-                },
+                contextGauge: sideChat
+                    ? nil
+                    : sessionRow?.contextUsage.map {
+                        ContextGauge(usage: $0, availability: compactAvailability, onCompact: compact)
+                    },
                 mentions: sideChat ? nil : mentionEditor
             ) {
                 if !sideChat {
-                    ModelChip(model: currentModel,
-                              fallbackLabel: chat.config?.model ?? "Select model",
-                              reasoning: currentReasoning) {
+                    ModelChip(
+                        model: currentModel,
+                        fallbackLabel: chat.config?.model ?? "Select model",
+                        reasoning: currentReasoning
+                    ) {
                         showModelPicker = true
                     }
                     .disabled(harness != "pi" || !canControl)
                 }
             }
         }
-        .photosPicker(isPresented: $showPicker, selection: $pickerItems,
-                      maxSelectionCount: 8, matching: .images)
+        .photosPicker(
+            isPresented: $showPicker, selection: $pickerItems,
+            maxSelectionCount: 8, matching: .images
+        )
         .onChange(of: pickerItems) { _, items in
             guard !items.isEmpty else { return }
             stage(items)
@@ -217,7 +228,10 @@ struct ComposerView: View {
                 onSelect: { writeConfig(model: $0, reasoning: $1) }
             )
         }
-        .task(id: "\(chat.id)/\(chat.deviceId)/\(harness)/\(canControl)/\(scenePhase)/\(catalogRevision)/\(connectionRetry)") {
+        .task(
+            id:
+                "\(chat.id)/\(chat.deviceId)/\(harness)/\(canControl)/\(scenePhase)/\(catalogRevision)/\(connectionRetry)"
+        ) {
             guard harness == "pi" else { return }
             // Prefetch, so the first `/` opens a filled menu.
             async let commandList: Void = canControl ? loadCommands() : ()
@@ -234,8 +248,9 @@ struct ComposerView: View {
         .task(id: mentionToken.map { "\(chat.id)/\($0.query)" }) {
             guard let mentionToken else { return }
             let scope = mentionScope
-            await mentionSearch.run(query: mentionToken.query, scope: scope, chats: model.allChats,
-                                    fetch: model.searchFiles)
+            await mentionSearch.run(
+                query: mentionToken.query, scope: scope, chats: model.allChats,
+                fetch: model.searchFiles)
         }
         .motionAnimation(Motion.fadeQuick, value: slashLevel != nil)
         .motionAnimation(Motion.fadeQuick, value: mentionToken != nil)
@@ -258,8 +273,11 @@ struct ComposerView: View {
     /// picks it up on the next run dispatch). Copies preserve modelOptions.
     private func writeConfig(model newModel: String?, reasoning newReasoning: String?) {
         guard canControl, let selected = models.first(where: { $0.id == newModel }) else { return }
-        var config = chat.config ?? ChatConfig(harness: harness, model: nil,
-                                               reasoning: nil, sandbox: "workspace-write")
+        var config =
+            chat.config
+            ?? ChatConfig(
+                harness: harness, model: nil,
+                reasoning: nil, sandbox: "workspace-write")
         config.model = newModel
         config.reasoning = newReasoning.flatMap { selected.reasoningLevels.contains($0) ? $0 : nil }
         model.setChatConfig(chatId: chat.id, config: config)
@@ -272,7 +290,8 @@ struct ComposerView: View {
             var failed = 0
             for item in items {
                 guard let data = try? await item.loadTransferable(type: Data.self),
-                      let staged = StagedAttachment.stage(data: data) else {
+                    let staged = StagedAttachment.stage(data: data)
+                else {
                     failed += 1
                     continue
                 }
@@ -280,7 +299,8 @@ struct ComposerView: View {
             }
             pickerItems = []
             if failed > 0 {
-                uploadError = failed == 1
+                uploadError =
+                    failed == 1
                     ? "One image couldn't be attached (unsupported or over 24 MB)."
                     : "\(failed) images couldn't be attached (unsupported or over 24 MB)."
             } else {
@@ -295,8 +315,11 @@ struct ComposerView: View {
         let staged = attachments
         let batch = commentDrafts?.snapshot()
         let hasComments = !(batch?.comments.isEmpty ?? true)
-        guard CommentPrompt.hasSendContent(text: prompt, attachmentCount: staged.count,
-                                           commentCount: batch?.comments.count ?? 0) else { return }
+        guard
+            CommentPrompt.hasSendContent(
+                text: prompt, attachmentCount: staged.count,
+                commentCount: batch?.comments.count ?? 0)
+        else { return }
         guard !CommentPrompt.blocksSlash(prompt, hasComments: hasComments) else {
             uploadError = "Comments accompany a normal message, not a slash command. Send or remove the comments first."
             return
@@ -309,8 +332,10 @@ struct ComposerView: View {
                 uploadError = "Session references accompany a normal message, not a slash command."
                 return
             }
-            if let error = SessionReferences.validationError(refs: refIds, currentChat: chat.id,
-                                                             chats: model.allChats) {
+            if let error = SessionReferences.validationError(
+                refs: refIds, currentChat: chat.id,
+                chats: model.allChats)
+            {
                 uploadError = error
                 return
             }
@@ -344,12 +369,15 @@ struct ComposerView: View {
                     let path = try await store.uploadAttachment(name: att.name, data: att.data)
                     // Seed the cache so our own bubble renders from local
                     // bytes instead of a round-trip.
-                    AttachmentImageCache.shared.seed(deviceId: chat.deviceId, path: path,
-                                                     name: att.name, data: att.data)
+                    AttachmentImageCache.shared.seed(
+                        deviceId: chat.deviceId, path: path,
+                        name: att.name, data: att.data)
                     paths.append(path)
                 }
-                if deliver(content: withAttachments(text: prompt, paths: paths), paths: paths,
-                           comments: batch, sessions: sessions) {
+                if deliver(
+                    content: withAttachments(text: prompt, paths: paths), paths: paths,
+                    comments: batch, sessions: sessions)
+                {
                     attachments = []
                     clearDraft()
                 }
@@ -359,8 +387,10 @@ struct ComposerView: View {
         }
     }
 
-    private func deliver(content: String, paths: [String], comments batch: CommentBatch?,
-                         sessions: [SessionReference] = []) -> Bool {
+    private func deliver(
+        content: String, paths: [String], comments batch: CommentBatch?,
+        sessions: [SessionReference] = []
+    ) -> Bool {
         if let batch, commentDrafts?.generation != batch.generation {
             uploadError = "The session changed. The message wasn't sent."
             return false
@@ -371,17 +401,20 @@ struct ComposerView: View {
         }
         let agentPrompt: String?
         do {
-            agentPrompt = try SessionReferences.agentPrompt(sessions: sessions, comments: batch?.comments ?? [],
-                                                            visible: content)
+            agentPrompt = try SessionReferences.agentPrompt(
+                sessions: sessions, comments: batch?.comments ?? [],
+                visible: content)
         } catch {
             uploadError = "Couldn't prepare the comments. Your draft has been kept."
             return false
         }
-        let queued = runLive
+        let queued =
+            runLive
             ? store.sendSteer(prompt: content, agentPrompt: agentPrompt)
             : store.sendRun(prompt: content, chat: chat, attachments: paths, agentPrompt: agentPrompt)
-        if !queued { uploadError = "Couldn't queue the message. Your draft has been kept." }
-        else {
+        if !queued {
+            uploadError = "Couldn't queue the message. Your draft has been kept."
+        } else {
             uploadError = nil
             if let batch { commentDrafts?.consume(batch) }
         }

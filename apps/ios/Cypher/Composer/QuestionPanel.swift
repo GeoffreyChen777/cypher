@@ -31,7 +31,9 @@ struct QuestionPanel: View {
                         .padding(.horizontal, 16)
                         .padding(.bottom, 12)
                         .fixedSize(horizontal: false, vertical: true)
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                        .onGeometryChange(for: CGFloat.self) {
+                            $0.size.height
+                        } action: {
                             contentHeight = $0
                         }
                 }
@@ -85,8 +87,10 @@ struct QuestionPanel: View {
         .padding(.trailing, 12)
     }
 
-    private func content(_ question: UserInputQuestion,
-                         presentation: QuestionPresentation) -> some View {
+    private func content(
+        _ question: UserInputQuestion,
+        presentation: QuestionPresentation
+    ) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(presentation.prompt)
                 .font(Theme.sans(16, weight: .medium))
@@ -118,14 +122,18 @@ struct QuestionPanel: View {
                     .accessibilityIdentifier("question-context-toggle")
                     .accessibilityValue(expandedContext.contains(question.id) ? "Expanded" : "Collapsed")
                     if expandedContext.contains(question.id) {
-                        Text((try? AttributedString(markdown: context, options: .init(
-                            interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(context))
-                            .font(Theme.sans(12))
-                            .foregroundStyle(Theme.textMuted)
-                            .lineSpacing(3)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
-                            .accessibilityIdentifier("question-context")
+                        Text(
+                            (try? AttributedString(
+                                markdown: context,
+                                options: .init(
+                                    interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(context)
+                        )
+                        .font(Theme.sans(12))
+                        .foregroundStyle(Theme.textMuted)
+                        .lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("question-context")
                     }
                 }
                 .padding(.horizontal, 12)
@@ -157,19 +165,24 @@ struct QuestionPanel: View {
             }
 
             if question.options.isEmpty || customAnswers.contains(question.id) {
-                TextField(presentation.isOptionalComment ? "Add a comment (optional)" : "Your answer",
-                          text: Binding(get: { draft.typed[question.id] ?? "" },
-                                        set: { draft.typed[question.id] = $0 }),
-                          axis: .vertical)
-                    .font(Theme.sans(13))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(2...5)
-                    .padding(12)
-                    .background(Theme.elementHover, in: RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12)
-                        .strokeBorder(answerFocused ? Theme.borderStrong : Theme.border, lineWidth: 1))
-                    .focused($answerFocused)
-                    .accessibilityIdentifier("question-answer")
+                TextField(
+                    presentation.isOptionalComment ? "Add a comment (optional)" : "Your answer",
+                    text: Binding(
+                        get: { draft.typed[question.id] ?? "" },
+                        set: { draft.typed[question.id] = $0 }),
+                    axis: .vertical
+                )
+                .font(Theme.sans(13))
+                .foregroundStyle(Theme.text)
+                .lineLimit(2...5)
+                .padding(12)
+                .background(Theme.elementHover, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(answerFocused ? Theme.borderStrong : Theme.border, lineWidth: 1)
+                )
+                .focused($answerFocused)
+                .accessibilityIdentifier("question-answer")
             } else if !question.options.contains(QuestionPresentation.customAnswerOption) {
                 // The dialog's custom-response sentinel is already an option;
                 // don't show a second, competing freeform control beside it.
@@ -198,11 +211,14 @@ struct QuestionPanel: View {
             draft.select(option, for: question)
         } label: {
             HStack(alignment: .center, spacing: 10) {
-                Image(systemName: selected ? (question.multiSelect == true ? "checkmark.square.fill" : "checkmark.circle.fill")
-                      : (question.multiSelect == true ? "square" : "circle"))
-                    .font(.system(size: 17, weight: .regular))
-                    .foregroundStyle(selected ? Theme.text : Theme.textFaint.opacity(0.6))
-                    .frame(width: 20)
+                Image(
+                    systemName: selected
+                        ? (question.multiSelect == true ? "checkmark.square.fill" : "checkmark.circle.fill")
+                        : (question.multiSelect == true ? "square" : "circle")
+                )
+                .font(.system(size: 17, weight: .regular))
+                .foregroundStyle(selected ? Theme.text : Theme.textFaint.opacity(0.6))
+                .frame(width: 20)
                 Text(isCustom ? "Write a custom answer" : option)
                     .font(Theme.sans(13, weight: selected ? .medium : .regular))
                     .foregroundStyle(Theme.text)
@@ -214,8 +230,10 @@ struct QuestionPanel: View {
             .padding(.vertical, 11)
             .frame(minHeight: 44)
             .background(selected ? Theme.elementActive : Theme.elementHover, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(selected ? Theme.borderStrong : .clear, lineWidth: 1))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(selected ? Theme.borderStrong : .clear, lineWidth: 1)
+            )
             .contentShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
@@ -223,8 +241,10 @@ struct QuestionPanel: View {
         .accessibilityIdentifier("question-option-\(index)")
     }
 
-    private func footer(_ question: UserInputQuestion,
-                        presentation: QuestionPresentation) -> some View {
+    private func footer(
+        _ question: UserInputQuestion,
+        presentation: QuestionPresentation
+    ) -> some View {
         let answered = draft.hasAnswer(for: question)
         let canContinue = answered || presentation.isOptionalComment
         return HStack(spacing: 12) {
@@ -237,13 +257,19 @@ struct QuestionPanel: View {
                 .foregroundStyle(Theme.textMuted)
                 .frame(minHeight: 44)
             } else {
-                Text(!canRespond ? "Reconnect to answer"
-                     : presentation.isOptionalComment ? "Comment is optional" : "Confirm to send")
-                    .font(Theme.sans(11))
-                    .foregroundStyle(Theme.textFaint)
+                Text(
+                    !canRespond
+                        ? "Reconnect to answer"
+                        : presentation.isOptionalComment ? "Comment is optional" : "Confirm to send"
+                )
+                .font(Theme.sans(11))
+                .foregroundStyle(Theme.textFaint)
             }
             Spacer(minLength: 0)
-            Button(page < questions.count - 1 ? "Next" : (presentation.isOptionalComment && !answered ? "Skip" : "Send answer")) {
+            Button(
+                page < questions.count - 1
+                    ? "Next" : (presentation.isOptionalComment && !answered ? "Skip" : "Send answer")
+            ) {
                 guard canContinue, canRespond else { return }
                 answerFocused = false
                 if page < questions.count - 1 {

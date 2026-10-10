@@ -61,10 +61,12 @@ final class NavigationChromeTests: XCTestCase {
             withAnimation { driver.path.append(destination) }
             try await settle { nav.viewControllers.count == 3 && nav.transitionCoordinator == nil }
             let item = try XCTUnwrap(nav.navigationBar.topItem)
-            XCTAssertEqual(item.leftBarButtonItems?.count ?? 0, 0,
-                           "A static session title must not be a wide leading bar button")
-            XCTAssertTrue(item.leadingItemGroups.flatMap(\.barButtonItems).isEmpty,
-                          "iOS 26 toolbar groups must not contain the static session title")
+            XCTAssertEqual(
+                item.leftBarButtonItems?.count ?? 0, 0,
+                "A static session title must not be a wide leading bar button")
+            XCTAssertTrue(
+                item.leadingItemGroups.flatMap(\.barButtonItems).isEmpty,
+                "iOS 26 toolbar groups must not contain the static session title")
             XCTAssertNotNil(item.titleView, "Use the native title-view slot")
             XCTAssertFalse(item.hidesBackButton, "Keep native Back rather than a replacement button")
             XCTAssertNotNil(nav.interactivePopGestureRecognizer)

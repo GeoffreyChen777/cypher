@@ -3,8 +3,9 @@ import XCTest
 
 final class TurnScrubberTests: XCTestCase {
     private func row(_ id: String, _ kind: RowKind) -> TranscriptRow {
-        TranscriptRow(id: id, version: 0, turnStart: true, kind: kind, entryId: id,
-                      timestamp: nil, partKey: nil)
+        TranscriptRow(
+            id: id, version: 0, turnStart: true, kind: kind, entryId: id,
+            timestamp: nil, partKey: nil)
     }
 
     func testRoundsStartAtPromptsAndSteersStayInside() {

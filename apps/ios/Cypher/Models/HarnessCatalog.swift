@@ -109,41 +109,55 @@ enum HarnessCatalog {
     /// "mock"; runs on these ids fail on the engine, which is the point of
     /// keeping them out of production builds.
     static let mockProviderModels: [ModelInfo] = [
-        ModelInfo(id: "claude-bridge/claude-opus-5", label: "Claude Opus 5 (mock)",
-                  description: "claude-bridge · 1M context", reasoningLevels: ["low", "medium", "high"]),
-        ModelInfo(id: "claude-bridge/claude-sonnet-5", label: "Claude Sonnet 5 (mock)",
-                  description: "claude-bridge · 1M context", reasoningLevels: ["low", "medium", "high"]),
-        ModelInfo(id: "claude-bridge/claude-haiku-4-5", label: "Claude Haiku 4.5 (mock)",
-                  description: "claude-bridge · 200k context", reasoningLevels: []),
-        ModelInfo(id: "openai-codex/gpt-5.5", label: "GPT-5.5 (mock)",
-                  description: "openai-codex · 400k context", reasoningLevels: ["low", "medium", "high", "xhigh"]),
-        ModelInfo(id: "openai-codex/gpt-5.4-mini", label: "GPT-5.4 mini (mock)",
-                  description: "openai-codex · 400k context", reasoningLevels: ["low", "medium", "high"]),
-        ModelInfo(id: "mock-gateway/deepseek-v4", label: "DeepSeek V4 (mock)",
-                  description: "mock-gateway · 128k context", reasoningLevels: []),
-        ModelInfo(id: "mock-gateway/kimi-k3", label: "Kimi K3 (mock)",
-                  description: "mock-gateway · 256k context", reasoningLevels: ["low", "high"]),
-        ModelInfo(id: "mock-gateway/glm-5.2", label: "GLM-5.2 (mock)",
-                  description: "mock-gateway · 128k context", reasoningLevels: []),
+        ModelInfo(
+            id: "claude-bridge/claude-opus-5", label: "Claude Opus 5 (mock)",
+            description: "claude-bridge · 1M context", reasoningLevels: ["low", "medium", "high"]),
+        ModelInfo(
+            id: "claude-bridge/claude-sonnet-5", label: "Claude Sonnet 5 (mock)",
+            description: "claude-bridge · 1M context", reasoningLevels: ["low", "medium", "high"]),
+        ModelInfo(
+            id: "claude-bridge/claude-haiku-4-5", label: "Claude Haiku 4.5 (mock)",
+            description: "claude-bridge · 200k context", reasoningLevels: []),
+        ModelInfo(
+            id: "openai-codex/gpt-5.5", label: "GPT-5.5 (mock)",
+            description: "openai-codex · 400k context", reasoningLevels: ["low", "medium", "high", "xhigh"]),
+        ModelInfo(
+            id: "openai-codex/gpt-5.4-mini", label: "GPT-5.4 mini (mock)",
+            description: "openai-codex · 400k context", reasoningLevels: ["low", "medium", "high"]),
+        ModelInfo(
+            id: "mock-gateway/deepseek-v4", label: "DeepSeek V4 (mock)",
+            description: "mock-gateway · 128k context", reasoningLevels: []),
+        ModelInfo(
+            id: "mock-gateway/kimi-k3", label: "Kimi K3 (mock)",
+            description: "mock-gateway · 256k context", reasoningLevels: ["low", "high"]),
+        ModelInfo(
+            id: "mock-gateway/glm-5.2", label: "GLM-5.2 (mock)",
+            description: "mock-gateway · 128k context", reasoningLevels: []),
     ]
 
     /// Used only in explicitly offline demo mode, never a network fallback.
     /// Several providers, and one model without thinking levels, so the
     /// picker shows its rail, brand marks and every thinking state offline.
     static let demoModels = [
-        ModelInfo(id: "demo/pi", label: "Pi demo model",
-                  description: "Offline demonstration", reasoningLevels: ["low", "medium", "high"]),
-        ModelInfo(id: "anthropic/claude-opus-5-5", label: "Claude Opus 5.5",
-                  description: "anthropic · 1M context",
-                  reasoningLevels: ["minimal", "low", "medium", "high", "xhigh"]),
-        ModelInfo(id: "anthropic/claude-sonnet-5", label: "Claude Sonnet 5",
-                  description: "anthropic · 1M context", reasoningLevels: ["low", "medium", "high"]),
-        ModelInfo(id: "anthropic/claude-haiku-4-5", label: "Claude Haiku 4.5",
-                  description: "anthropic · 200k context", reasoningLevels: []),
-        ModelInfo(id: "openai-codex/gpt-6.1-sol", label: "GPT-6.1 Sol",
-                  description: "openai-codex · 400k context", reasoningLevels: ["low", "medium", "high", "xhigh"]),
-        ModelInfo(id: "openai-codex/gpt-6-luna", label: "GPT-6 Luna",
-                  description: "openai-codex · 400k context", reasoningLevels: ["low", "medium", "high"]),
+        ModelInfo(
+            id: "demo/pi", label: "Pi demo model",
+            description: "Offline demonstration", reasoningLevels: ["low", "medium", "high"]),
+        ModelInfo(
+            id: "anthropic/claude-opus-5-5", label: "Claude Opus 5.5",
+            description: "anthropic · 1M context",
+            reasoningLevels: ["minimal", "low", "medium", "high", "xhigh"]),
+        ModelInfo(
+            id: "anthropic/claude-sonnet-5", label: "Claude Sonnet 5",
+            description: "anthropic · 1M context", reasoningLevels: ["low", "medium", "high"]),
+        ModelInfo(
+            id: "anthropic/claude-haiku-4-5", label: "Claude Haiku 4.5",
+            description: "anthropic · 200k context", reasoningLevels: []),
+        ModelInfo(
+            id: "openai-codex/gpt-6.1-sol", label: "GPT-6.1 Sol",
+            description: "openai-codex · 400k context", reasoningLevels: ["low", "medium", "high", "xhigh"]),
+        ModelInfo(
+            id: "openai-codex/gpt-6-luna", label: "GPT-6 Luna",
+            description: "openai-codex · 400k context", reasoningLevels: ["low", "medium", "high"]),
     ]
 }
 
@@ -155,9 +169,11 @@ enum PiCatalogError: Error, Equatable {
         case .unavailable:
             return "Couldn't load Pi from this device. Check its connection and retry."
         case .runtimeUnavailable:
-            return "Pi isn't ready on this device. Open desktop Settings → Agents, select this device, and install or enable Pi Runtime."
+            return
+                "Pi isn't ready on this device. Open desktop Settings → Agents, select this device, and install or enable Pi Runtime."
         case .noModels:
-            return "No Pi models are available. Open desktop Settings → Providers for this device to configure a provider, then retry."
+            return
+                "No Pi models are available. Open desktop Settings → Providers for this device to configure a provider, then retry."
         }
     }
 }

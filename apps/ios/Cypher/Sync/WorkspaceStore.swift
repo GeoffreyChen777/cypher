@@ -42,8 +42,10 @@ final class WorkspaceStore: WorkspaceData {
     /// viewport's periodic activity refresh. That beat already flows every 15s
     /// and bills 20:1, so the refresh rides free; sent over HTTP it cost a full
     /// billable request every time.
-    init(config: AppConfig, initialDocument: RegistryDoc? = nil,
-         pendingActivity: @escaping @MainActor @Sendable () -> ActivityReport? = { nil }) {
+    init(
+        config: AppConfig, initialDocument: RegistryDoc? = nil,
+        pendingActivity: @escaping @MainActor @Sendable () -> ActivityReport? = { nil }
+    ) {
         self.config = config
         self.doc = initialDocument ?? RegistryDoc(deviceId: config.deviceId)
         self.pendingActivity = pendingActivity
@@ -60,7 +62,8 @@ final class WorkspaceStore: WorkspaceData {
         // server's full state (the engines already seeded everything).
         let blobURL = DocDisk.registryURL(orgId: config.orgId, userId: config.userId)
         if let data = try? Data(contentsOf: blobURL),
-           let loaded = try? RegistryDoc.from(data: data, deviceId: config.deviceId) {
+            let loaded = try? RegistryDoc.from(data: data, deviceId: config.deviceId)
+        {
             doc = loaded
         }
         project()
@@ -83,15 +86,16 @@ final class WorkspaceStore: WorkspaceData {
             event: { [weak self] event in self?.handle(event) },
             pendingActivity: { [pendingActivity] in pendingActivity() }
         )
-        let client = RegistryClient(device: config.deviceId,
-                                    urlProvider: { [config] in await config.registrySocketURL() },
-                                    rowsRequest: { [config] since in
-                                        await config.registryRowsRequest(since: since)
-                                    },
-                                    pushRequest: { [config] in
-                                        await config.registryPushRequest()
-                                    },
-                                    delegate: delegate)
+        let client = RegistryClient(
+            device: config.deviceId,
+            urlProvider: { [config] in await config.registrySocketURL() },
+            rowsRequest: { [config] since in
+                await config.registryRowsRequest(since: since)
+            },
+            pushRequest: { [config] in
+                await config.registryPushRequest()
+            },
+            delegate: delegate)
         self.client = client
         Task { await client.start() }
     }
@@ -188,67 +192,75 @@ final class WorkspaceStore: WorkspaceData {
         devices = doc.overlayRows(kind: "devices").map { row in
             let f = row.fields
             let id = f["id"]?.stringValue ?? row.id
-            return DeviceRow(id: id,
-                             name: f["name"]?.stringValue ?? id,
-                             platform: f["platform"]?.stringValue ?? "",
-                             lastSeenAt: f["lastSeenAt"]?.int64Value,
-                             createdAt: f["createdAt"]?.int64Value)
+            return DeviceRow(
+                id: id,
+                name: f["name"]?.stringValue ?? id,
+                platform: f["platform"]?.stringValue ?? "",
+                lastSeenAt: f["lastSeenAt"]?.int64Value,
+                createdAt: f["createdAt"]?.int64Value)
         }.sorted { $0.name < $1.name }
 
         spaces = doc.overlayRows(kind: "spaces").compactMap { row in
             let f = row.fields
             guard let deviceId = f["deviceId"]?.stringValue,
-                  let path = f["path"]?.stringValue else { return nil }
-            return Space(id: f["id"]?.stringValue ?? row.id, deviceId: deviceId, path: path,
-                         name: f["name"]?.stringValue,
-                         gitDetected: f["gitDetected"]?.boolValue ?? false,
-                         gitCheckedAt: f["gitCheckedAt"]?.int64Value,
-                         checkoutId: f["checkoutId"]?.stringValue,
-                         createdAt: f["createdAt"]?.int64Value ?? 0)
+                let path = f["path"]?.stringValue
+            else { return nil }
+            return Space(
+                id: f["id"]?.stringValue ?? row.id, deviceId: deviceId, path: path,
+                name: f["name"]?.stringValue,
+                gitDetected: f["gitDetected"]?.boolValue ?? false,
+                gitCheckedAt: f["gitCheckedAt"]?.int64Value,
+                checkoutId: f["checkoutId"]?.stringValue,
+                createdAt: f["createdAt"]?.int64Value ?? 0)
         }.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }  // creation order, id tiebreak
 
         chats = doc.overlayRows(kind: "chats").compactMap { row in
             let f = row.fields
             guard let deviceId = f["deviceId"]?.stringValue,
-                  !deleting.contains(f["id"]?.stringValue ?? row.id) else { return nil }
+                !deleting.contains(f["id"]?.stringValue ?? row.id)
+            else { return nil }
             let child = SubagentProjection.decode(f["child"], as: ChildChat.self)
             // Don't promote a malformed child relation into the root list.
             if let rawChild = f["child"], rawChild != .null, child == nil { return nil }
             var chatConfig: ChatConfig?
             if let c = f["config"]?.objectValue {
-                chatConfig = ChatConfig(harness: c["harness"]?.stringValue ?? "pi",
-                                        model: c["model"]?.stringValue,
-                                        reasoning: c["reasoning"]?.stringValue,
-                                        modelOptions: c["modelOptions"]?.objectValue ?? [:],
-                                        sandbox: c["sandbox"]?.stringValue)
+                chatConfig = ChatConfig(
+                    harness: c["harness"]?.stringValue ?? "pi",
+                    model: c["model"]?.stringValue,
+                    reasoning: c["reasoning"]?.stringValue,
+                    modelOptions: c["modelOptions"]?.objectValue ?? [:],
+                    sandbox: c["sandbox"]?.stringValue)
             }
-            return Chat(id: f["id"]?.stringValue ?? row.id, deviceId: deviceId,
-                        title: f["title"]?.stringValue,
-                        archived: f["archived"]?.boolValue ?? false,
-                        cwd: f["cwd"]?.stringValue,
-                        branch: f["branch"]?.stringValue,
-                        checkoutId: f["checkoutId"]?.stringValue,
-                        config: chatConfig,
-                        lastMessagePreview: f["lastMessagePreview"]?.stringValue,
-                        lastMessageAt: f["lastMessageAt"]?.int64Value,
-                        createdAt: f["createdAt"]?.int64Value ?? 0,
-                        spaceId: f["spaceId"]?.stringValue,
-                        lastSeenAt: f["lastSeenAt"]?.int64Value,
-                        child: child)
+            return Chat(
+                id: f["id"]?.stringValue ?? row.id, deviceId: deviceId,
+                title: f["title"]?.stringValue,
+                archived: f["archived"]?.boolValue ?? false,
+                cwd: f["cwd"]?.stringValue,
+                branch: f["branch"]?.stringValue,
+                checkoutId: f["checkoutId"]?.stringValue,
+                config: chatConfig,
+                lastMessagePreview: f["lastMessagePreview"]?.stringValue,
+                lastMessageAt: f["lastMessageAt"]?.int64Value,
+                createdAt: f["createdAt"]?.int64Value ?? 0,
+                spaceId: f["spaceId"]?.stringValue,
+                lastSeenAt: f["lastSeenAt"]?.int64Value,
+                child: child)
         }
 
         var rows: [String: SessionRow] = [:]
         for row in doc.overlayRows(kind: "sessions") {
             let f = row.fields
             guard let chatId = f["chatId"]?.stringValue,
-                  let deviceId = f["deviceId"]?.stringValue,
-                  let statusStr = f["status"]?.stringValue,
-                  let status = SessionStatus(rawValue: statusStr) else { continue }
-            rows[chatId] = SessionRow(chatId: chatId, deviceId: deviceId, status: status,
-                                      startedAt: f["startedAt"]?.int64Value,
-                                      updatedAt: f["updatedAt"]?.int64Value ?? 0,
-                                      subagents: SubagentProjection.snapshot(f["subagents"]),
-                                      contextUsage: ContextUsage(f["contextUsage"]))
+                let deviceId = f["deviceId"]?.stringValue,
+                let statusStr = f["status"]?.stringValue,
+                let status = SessionStatus(rawValue: statusStr)
+            else { continue }
+            rows[chatId] = SessionRow(
+                chatId: chatId, deviceId: deviceId, status: status,
+                startedAt: f["startedAt"]?.int64Value,
+                updatedAt: f["updatedAt"]?.int64Value ?? 0,
+                subagents: SubagentProjection.snapshot(f["subagents"]),
+                contextUsage: ContextUsage(f["contextUsage"]))
         }
         sessions = rows
     }
@@ -273,8 +285,10 @@ final class WorkspaceStore: WorkspaceData {
     /// a full-row upsert. The host = the space's owning device picks it up
     /// via the registry.
     @discardableResult
-    func createChat(space: Space, config chatConfig: ChatConfig,
-                    branch: String? = nil, cwd: String? = nil) -> String {
+    func createChat(
+        space: Space, config chatConfig: ChatConfig,
+        branch: String? = nil, cwd: String? = nil
+    ) -> String {
         let chatId = UUID().uuidString.lowercased()
         var set: [String: JSONValue] = [
             "id": .string(chatId),
@@ -320,13 +334,15 @@ final class WorkspaceStore: WorkspaceData {
         ]
         let viaHost: OkReply? = try? await relayClient(for: deviceId).call(method: "Mutate", params: params)
         if viaHost == nil {
-            doc.write(kind: "spaces", id: spaceId, op: .upsert, set: [
-                "id": .string(spaceId),
-                "deviceId": .string(deviceId),
-                "path": .string(path),
-                "gitDetected": .bool(gitDetected),
-                "createdAt": .int(nowMs()),
-            ])
+            doc.write(
+                kind: "spaces", id: spaceId, op: .upsert,
+                set: [
+                    "id": .string(spaceId),
+                    "deviceId": .string(deviceId),
+                    "path": .string(path),
+                    "gitDetected": .bool(gitDetected),
+                    "createdAt": .int(nowMs()),
+                ])
         }
         afterLocalWrite()
         return spaceId
@@ -394,7 +410,8 @@ final class WorkspaceStore: WorkspaceData {
                 method: "DeleteScratchDir", params: ["chatId": chat.id, "path": cwd], timeoutSeconds: 15)
             return nil
         } catch {
-            return "The session was deleted, but its quick-chat folder couldn't be removed: \(error.localizedDescription)"
+            return
+                "The session was deleted, but its quick-chat folder couldn't be removed: \(error.localizedDescription)"
         }
     }
 

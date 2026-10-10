@@ -119,20 +119,26 @@ struct SideChatSheet: View {
                             .padding(.leading, 26)
                         }
                         if let request = store.session.openInputRequest {
-                            QuestionPanel(requestId: request.requestId, questions: request.questions,
-                                          maximumHeight: 420, canRespond: true, stop: {
-                                _ = store.session.sendInterrupt()
-                            }) { requestId, answers in
+                            QuestionPanel(
+                                requestId: request.requestId, questions: request.questions,
+                                maximumHeight: 420, canRespond: true,
+                                stop: {
+                                    _ = store.session.sendInterrupt()
+                                }
+                            ) { requestId, answers in
                                 _ = store.session.respondInput(requestId: requestId, answers: answers)
                             }
                             .id(request.requestId)
                         } else {
-                            ComposerView(store: store.session, chat: chat, runLive: store.status == .working,
-                                         catalog: catalog, sideChat: true)
+                            ComposerView(
+                                store: store.session, chat: chat, runLive: store.status == .working,
+                                catalog: catalog, sideChat: true)
                         }
                     }
                     .padding(.bottom, 8)
-                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { [scroll] new in
+                    .onGeometryChange(for: CGFloat.self) {
+                        $0.frame(in: .global).minY
+                    } action: { [scroll] new in
                         scroll.insetTopGlobalY = new
                         scroll.insetTopChangedAt = Date().timeIntervalSinceReferenceDate
                     }

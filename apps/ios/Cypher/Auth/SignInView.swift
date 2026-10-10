@@ -49,7 +49,7 @@ struct SignInView: View {
     @State private var verificationCode = ""
     @State private var authSession = AuthSessionCoordinator()
     #if CYPHER_DEVELOPMENT
-    @State private var developmentToken = ""
+        @State private var developmentToken = ""
     #endif
 
     var body: some View {
@@ -79,44 +79,44 @@ struct SignInView: View {
 
                 VStack(spacing: 12) {
                     #if CYPHER_DEVELOPMENT
-                    Text("Cypher Dev — isolated test workspace")
-                    if DevelopmentProfile.isLoopback(DevelopmentProfile.edge) {
-                        Button("Connect to local Dev Edge") {
-                            model.connectDevelopment(secret: nil)
-                        }
-                    } else {
-                        SecureField("Development token", text: $developmentToken)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        Button("Connect to Dev Edge") {
-                            model.connectDevelopment(secret: developmentToken)
-                            developmentToken = ""
-                        }.disabled(!DevelopmentProfile.validToken(developmentToken))
-                    }
-                    #else
-                    if let verification {
-                        verificationForm(verification)
-                    } else {
-                        Button {
-                            signIn()
-                        } label: {
-                            Group {
-                                if busy {
-                                    ProgressView()
-                                        .tint(Theme.bg)
-                                } else {
-                                    Text("Log in to Cypher")
-                                        .font(Theme.sans(15, weight: .semibold))
-                                        .foregroundStyle(Theme.bg)
-                                }
+                        Text("Cypher Dev — isolated test workspace")
+                        if DevelopmentProfile.isLoopback(DevelopmentProfile.edge) {
+                            Button("Connect to local Dev Edge") {
+                                model.connectDevelopment(secret: nil)
                             }
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 50)
-                            .background(Theme.text, in: RoundedRectangle(cornerRadius: 16))
+                        } else {
+                            SecureField("Development token", text: $developmentToken)
+                                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            Button("Connect to Dev Edge") {
+                                model.connectDevelopment(secret: developmentToken)
+                                developmentToken = ""
+                            }.disabled(!DevelopmentProfile.validToken(developmentToken))
                         }
-                        .buttonStyle(.plain)
-                        .disabled(busy)
-                        .opacity(busy ? 0.6 : 1)
-                    }
+                    #else
+                        if let verification {
+                            verificationForm(verification)
+                        } else {
+                            Button {
+                                signIn()
+                            } label: {
+                                Group {
+                                    if busy {
+                                        ProgressView()
+                                            .tint(Theme.bg)
+                                    } else {
+                                        Text("Log in to Cypher")
+                                            .font(Theme.sans(15, weight: .semibold))
+                                            .foregroundStyle(Theme.bg)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 50)
+                                .background(Theme.text, in: RoundedRectangle(cornerRadius: 16))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(busy)
+                            .opacity(busy ? 0.6 : 1)
+                        }
                     #endif
 
                     if let error {
@@ -175,8 +175,10 @@ struct SignInView: View {
         let state = UUID().uuidString
         let verifier = PKCE.newVerifier()
         let challenge = PKCE.s256Challenge(for: verifier)
-        authSession.start(url: Endpoints.authorizeURL(state: state, codeChallenge: challenge),
-                          callbackScheme: Endpoints.callbackScheme) { result in
+        authSession.start(
+            url: Endpoints.authorizeURL(state: state, codeChallenge: challenge),
+            callbackScheme: Endpoints.callbackScheme
+        ) { result in
             Task { @MainActor in
                 switch result {
                 case .cancelled:
@@ -185,7 +187,8 @@ struct SignInView: View {
                     busy = false
                     error = message
                 case .success(let callbackURL):
-                    let params = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?
+                    let params =
+                        URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?
                         .queryItems ?? []
                     let code = params.first { $0.name == "code" }?.value
                     let cbState = params.first { $0.name == "state" }?.value
@@ -203,8 +206,9 @@ struct SignInView: View {
                         return
                     }
                     do {
-                        try await model.signIn(edgeURL: Endpoints.edgeURL, code: code,
-                                               codeVerifier: verifier)
+                        try await model.signIn(
+                            edgeURL: Endpoints.edgeURL, code: code,
+                            codeVerifier: verifier)
                     } catch let AuthError.emailVerificationRequired(pendingAuthenticationToken, email) {
                         verification = PendingEmailVerification(
                             pendingAuthenticationToken: pendingAuthenticationToken,
@@ -264,12 +268,15 @@ final class AuthSessionCoordinator: NSObject, ASWebAuthenticationPresentationCon
     private var session: ASWebAuthenticationSession?
 
     func start(url: URL, callbackScheme: String, completion: @escaping (Outcome) -> Void) {
-        let session = ASWebAuthenticationSession(url: url,
-                                                 callbackURLScheme: callbackScheme) { callbackURL, error in
+        let session = ASWebAuthenticationSession(
+            url: url,
+            callbackURLScheme: callbackScheme
+        ) { callbackURL, error in
             if let callbackURL {
                 completion(.success(callbackURL))
             } else if let error = error as? ASWebAuthenticationSessionError,
-                      error.code == .canceledLogin {
+                error.code == .canceledLogin
+            {
                 completion(.cancelled)
             } else {
                 completion(.failure(error?.localizedDescription ?? "Sign-in failed"))

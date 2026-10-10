@@ -75,9 +75,11 @@ struct SubagentCounts {
     var failed = 0
     var total: Int { running + starting + stale + done + failed }
     var summary: String {
-        [(running, "running"), (starting, "starting"), (stale, "status unavailable"),
-         (done, "done"), (failed, "failed")]
-            .filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }.joined(separator: " · ")
+        [
+            (running, "running"), (starting, "starting"), (stale, "status unavailable"),
+            (done, "done"), (failed, "failed"),
+        ]
+        .filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }.joined(separator: " · ")
     }
     var compact: String {
         if running > 0 { return "\(running) running" + (failed > 0 ? " · \(failed) failed" : "") }
@@ -101,7 +103,8 @@ enum SubagentProjection {
         var seen = Set<String>()
         return values.prefix(32).compactMap {
             guard var run = decode($0, as: SubagentRun.self),
-                  !run.runId.isEmpty, !run.agent.isEmpty, seen.insert(run.runId).inserted else { return nil }
+                !run.runId.isEmpty, !run.agent.isEmpty, seen.insert(run.runId).inserted
+            else { return nil }
             run.agent = String(run.agent.prefix(120))
             run.task = String(run.task.prefix(500))
             run.model = run.model.map { String($0.prefix(256)) }
@@ -163,28 +166,33 @@ enum SubagentProjection {
         }
     }
 
-    static func aggregate(parent: Chat, transcript: [MessageEntry], snapshot: [SubagentRun],
-                          chats: [Chat], sessions: [String: SessionRow], now: Int64) -> [SubagentPanelEntry] {
+    static func aggregate(
+        parent: Chat, transcript: [MessageEntry], snapshot: [SubagentRun],
+        chats: [Chat], sessions: [String: SessionRow], now: Int64
+    ) -> [SubagentPanelEntry] {
         var out: [SubagentPanelEntry] = []
         var byTool: [String: Int] = [:]
         for message in transcript {
             for part in message.parts {
                 guard case .tool(let id, let call, let isError, let resolved) = part,
-                      let info = call.subagent, byTool[id] == nil else { continue }
+                    let info = call.subagent, byTool[id] == nil
+                else { continue }
                 let status: SubagentPanelStatus
                 if !resolved {
                     guard message.status == .streaming else { continue }
                     status = .starting
                 } else if info.isAsync {
-                    guard isError else { continue } // success is only a launch ACK
+                    guard isError else { continue }  // success is only a launch ACK
                     status = .error
                 } else {
                     status = isError ? .error : .done
                 }
                 byTool[id] = out.count
-                out.append(SubagentPanelEntry(id: id, toolCallId: id, agent: info.agent,
-                    task: info.task, mode: info.isAsync ? .async : .sync, status: status,
-                    progress: call.progress, startedAt: message.createdAt, updatedAt: message.createdAt))
+                out.append(
+                    SubagentPanelEntry(
+                        id: id, toolCallId: id, agent: info.agent,
+                        task: info.task, mode: info.isAsync ? .async : .sync, status: status,
+                        progress: call.progress, startedAt: message.createdAt, updatedAt: message.createdAt))
             }
         }
         var seenRuns = Set<String>()
@@ -203,11 +211,13 @@ enum SubagentProjection {
                 }
                 out[index] = entry
             } else {
-                out.append(SubagentPanelEntry(id: run.runId, toolCallId: run.toolCallId,
-                    agent: run.agent, task: run.task, model: run.model, mode: run.mode,
-                    status: snapshotStatus(run, now: now), progress: run.progress,
-                    startedAt: run.startedAt, updatedAt: run.updatedAt,
-                    endedAt: run.endedAt, childChatId: run.childChatId))
+                out.append(
+                    SubagentPanelEntry(
+                        id: run.runId, toolCallId: run.toolCallId,
+                        agent: run.agent, task: run.task, model: run.model, mode: run.mode,
+                        status: snapshotStatus(run, now: now), progress: run.progress,
+                        startedAt: run.startedAt, updatedAt: run.updatedAt,
+                        endedAt: run.endedAt, childChatId: run.childChatId))
             }
         }
         for chat in children(of: parent, in: chats) {
@@ -224,12 +234,14 @@ enum SubagentProjection {
                 out[index].mode = child.mode
                 if let session { out[index].status = childStatus(session, now: now) }
             } else {
-                out.append(SubagentPanelEntry(id: child.parentRunId, toolCallId: child.toolCallId,
-                    agent: String(child.agent.prefix(120)), task: String(child.task.prefix(500)),
-                    model: chat.config?.model, mode: child.mode,
-                    status: session.map { childStatus($0, now: now) } ?? .starting,
-                    startedAt: chat.createdAt, updatedAt: session?.updatedAt ?? chat.createdAt,
-                    childChatId: chat.id))
+                out.append(
+                    SubagentPanelEntry(
+                        id: child.parentRunId, toolCallId: child.toolCallId,
+                        agent: String(child.agent.prefix(120)), task: String(child.task.prefix(500)),
+                        model: chat.config?.model, mode: child.mode,
+                        status: session.map { childStatus($0, now: now) } ?? .starting,
+                        startedAt: chat.createdAt, updatedAt: session?.updatedAt ?? chat.createdAt,
+                        childChatId: chat.id))
             }
         }
         return out.sorted {
@@ -237,7 +249,8 @@ enum SubagentProjection {
             if $0.status.inFlight {
                 return ($0.startedAt, $0.id) < ($1.startedAt, $1.id)
             }
-            let a = $0.endedAt ?? $0.updatedAt, b = $1.endedAt ?? $1.updatedAt
+            let a = $0.endedAt ?? $0.updatedAt
+            let b = $1.endedAt ?? $1.updatedAt
             return a == b ? $0.id < $1.id : a > b
         }
     }

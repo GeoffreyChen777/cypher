@@ -44,10 +44,13 @@ struct AppearancePicker: View {
     @AppStorage(AppAppearance.storageKey) private var storedAppearance = AppAppearance.system.rawValue
 
     var body: some View {
-        Picker("Appearance", selection: Binding(
-            get: { AppAppearance(storedValue: storedAppearance) },
-            set: { storedAppearance = $0.rawValue }
-        )) {
+        Picker(
+            "Appearance",
+            selection: Binding(
+                get: { AppAppearance(storedValue: storedAppearance) },
+                set: { storedAppearance = $0.rawValue }
+            )
+        ) {
             ForEach(AppAppearance.allCases) { appearance in
                 Text(appearance.label).tag(appearance)
             }

@@ -10,9 +10,13 @@ final class AppearanceTests: XCTestCase {
     }
 
     private func rgba(_ color: UIColor, _ style: UIUserInterfaceStyle) -> [CGFloat] {
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        XCTAssertTrue(color.resolvedColor(with: UITraitCollection(userInterfaceStyle: style))
-            .getRed(&r, green: &g, blue: &b, alpha: &a))
+        var r: CGFloat = 0
+        var g: CGFloat = 0
+        var b: CGFloat = 0
+        var a: CGFloat = 0
+        XCTAssertTrue(
+            color.resolvedColor(with: UITraitCollection(userInterfaceStyle: style))
+                .getRed(&r, green: &g, blue: &b, alpha: &a))
         return [r, g, b, a]
     }
 
@@ -24,9 +28,11 @@ final class AppearanceTests: XCTestCase {
             }
             return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722
         }
-        let fg = rgba(foreground, style), bg = rgba(background, style)
+        let fg = rgba(foreground, style)
+        let bg = rgba(background, style)
         let blended = (0..<3).map { fg[$0] * fg[3] + bg[$0] * (1 - fg[3]) }
-        let a = luminance(blended), b = luminance(bg)
+        let a = luminance(blended)
+        let b = luminance(bg)
         return (max(a, b) + 0.05) / (min(a, b) + 0.05)
     }
 
@@ -52,8 +58,10 @@ final class AppearanceTests: XCTestCase {
         for style: UIUserInterfaceStyle in [.light, .dark] {
             XCTAssertEqual(rgba(whiteAlpha(0.06), style)[3], 0.06, accuracy: 0.001)
             for surface in [Theme.bg, Theme.surface, Theme.surfaceRaised, Theme.sheetPanel] {
-                for text in [Theme.text, Theme.textMuted, Theme.inlineCodeText,
-                             Theme.tokenKeyword, Theme.tokenString, Theme.tokenNumber] {
+                for text in [
+                    Theme.text, Theme.textMuted, Theme.inlineCodeText,
+                    Theme.tokenKeyword, Theme.tokenString, Theme.tokenNumber,
+                ] {
                     XCTAssertGreaterThanOrEqual(contrast(text, surface, style), 4.5)
                 }
                 XCTAssertGreaterThanOrEqual(contrast(Theme.textFaint, surface, style), 3)

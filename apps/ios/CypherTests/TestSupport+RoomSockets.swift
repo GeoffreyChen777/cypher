@@ -28,7 +28,9 @@ final class ManualRoomClock: RoomClock, @unchecked Sendable {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 let wakeNow = lock.withLock { () -> Bool in
                     if cancelled.remove(id) != nil || nanoseconds == 0 { return true }
-                    sleepers.append(Sleeper(id: id, duration: nanoseconds, deadline: current + nanoseconds, continuation: continuation))
+                    sleepers.append(
+                        Sleeper(
+                            id: id, duration: nanoseconds, deadline: current + nanoseconds, continuation: continuation))
                     return false
                 }
                 if wakeNow { continuation.resume() }
@@ -159,8 +161,10 @@ func settle() async {
 
 /// Polls `condition` until it holds or two seconds pass.
 @MainActor
-func eventually(_ message: String = "condition never held", file: StaticString = #filePath, line: UInt = #line,
-                _ condition: () async -> Bool) async {
+func eventually(
+    _ message: String = "condition never held", file: StaticString = #filePath, line: UInt = #line,
+    _ condition: () async -> Bool
+) async {
     let deadline = Date().addingTimeInterval(2)
     while Date() < deadline {
         if await condition() { return }

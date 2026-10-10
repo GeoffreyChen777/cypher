@@ -38,8 +38,9 @@ final class MonoFontTests: XCTestCase {
     }
 
     private func glyphCount(_ string: String, _ font: UIFont) -> Int {
-        CTLineGetGlyphCount(CTLineCreateWithAttributedString(
-            NSAttributedString(string: string, attributes: [.font: font])))
+        CTLineGetGlyphCount(
+            CTLineCreateWithAttributedString(
+                NSAttributedString(string: string, attributes: [.font: font])))
     }
 
     private func width(_ text: NSAttributedString) -> CGFloat {

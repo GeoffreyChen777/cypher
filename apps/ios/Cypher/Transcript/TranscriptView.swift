@@ -104,7 +104,9 @@ struct TranscriptView: View {
                 Color.clear.frame(height: 44)  // bottom pad clears the fade + floating status strip
                     // The pad's on-screen frame is the one bottom-position
                     // reading the keyboard can't distort (see correctPin).
-                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { [scroll, padOwner] new in
+                    .onGeometryChange(for: CGFloat.self) {
+                        $0.frame(in: .global).maxY
+                    } action: { [scroll, padOwner] new in
                         scroll.padGlobalMaxY = new
                         scroll.padOwner = padOwner
                         correctPin()
@@ -126,9 +128,11 @@ struct TranscriptView: View {
         // Tap anywhere in the transcript to put the keyboard away (t3's
         // tap-to-blur; TapGesture already cancels on drag-sized movement).
         // Simultaneous so fold toggles and row buttons still receive theirs.
-        .simultaneousGesture(SpatialTapGesture(coordinateSpace: .global).onEnded { event in
-            TranscriptKeyboardDismissal.dismiss(at: event.location)
-        })
+        .simultaneousGesture(
+            SpatialTapGesture(coordinateSpace: .global).onEnded { event in
+                TranscriptKeyboardDismissal.dismiss(at: event.location)
+            }
+        )
         // Held invisible until it has settled at the bottom, then faded in.
         // The settling itself is unavoidable (see settleToBottom) — what is
         // avoidable is WATCHING it: painting mid-settle is what read as the
@@ -183,7 +187,9 @@ struct TranscriptView: View {
             hydrationTask?.cancel()
             hydrationTask = Task { await settleToBottom() }
         }
-        .onScrollGeometryChange(for: CGFloat.self) { $0.contentSize.height } action: { [scroll] old, new in
+        .onScrollGeometryChange(for: CGFloat.self) {
+            $0.contentSize.height
+        } action: { [scroll] old, new in
             scroll.contentHeight = new
             if let id = scroll.restoreTopRowId, new > old {
                 // The previous page just landed above the reader.
@@ -213,7 +219,9 @@ struct TranscriptView: View {
             scroll.scrollY = new
             scroll.motion.geometryChanged(now: Date().timeIntervalSinceReferenceDate)
         }
-        .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height + $0.contentInsets.bottom } action: { [scroll] _, new in
+        .onScrollGeometryChange(for: CGFloat.self) {
+            $0.containerSize.height + $0.contentInsets.bottom
+        } action: { [scroll] _, new in
             scroll.viewportHeight = new
             // The viewport resized under the content — keyboard up/down, the
             // composer's capsule↔card morph, the question-panel swap. t3's
@@ -308,7 +316,8 @@ struct TranscriptView: View {
             guard settled, hydrated else { return }
             guard scroll.pinned else { return }
             guard !scroll.keyboardTransitioning,
-                  !scroll.motion.blocksContentFollowing(now: Date().timeIntervalSinceReferenceDate) else {
+                !scroll.motion.blocksContentFollowing(now: Date().timeIntervalSinceReferenceDate)
+            else {
                 // The idle correction uses the latest geometry, coalescing
                 // all tokens that arrived while the user owned the scroll.
                 correctPin()
@@ -463,8 +472,9 @@ struct TranscriptView: View {
     /// originals folded away. Every index into the transcript (window floor,
     /// rounds, jumps) is into this array.
     private func transcriptRows() -> [TranscriptRow] {
-        store.transcriptCache.rows(revision: store.revision, entries: store.entries,
-                                   pendingSends: store.pendingSends, togglePins: togglePins)
+        store.transcriptCache.rows(
+            revision: store.revision, entries: store.entries,
+            pendingSends: store.pendingSends, togglePins: togglePins)
     }
 
     private func windowStart(of rows: [TranscriptRow]) -> Int {
@@ -500,7 +510,8 @@ struct TranscriptView: View {
         let rounds = store.transcriptCache.rounds
         guard rounds.indices.contains(index) else { return }
         let target = rounds[index]
-        let fromRow = turns.current.flatMap { rounds.indices.contains($0) ? rounds[$0].rowIndex : nil }
+        let fromRow =
+            turns.current.flatMap { rounds.indices.contains($0) ? rounds[$0].rowIndex : nil }
             ?? rows.count
         scroll.pinned = false
         turns.set(index)
@@ -574,8 +585,9 @@ struct TranscriptView: View {
             // Don't chase targets through a keyboard transition — the edge
             // math lies there and the budget burns on garbage jumps. The
             // didShow correction handles that endpoint; just wait it out.
-            if scroll.keyboardTransitioning ||
-                scroll.motion.blocksPositioning(now: Date().timeIntervalSinceReferenceDate) {
+            if scroll.keyboardTransitioning
+                || scroll.motion.blocksPositioning(now: Date().timeIntervalSinceReferenceDate)
+            {
                 try? await Task.sleep(nanoseconds: 60_000_000)
                 continue
             }
@@ -625,9 +637,10 @@ struct TranscriptView: View {
         Group {
             switch row.kind {
             case .user(let text, let isSteer):
-                UserBubble(text: text, pending: row.timestamp == nil,
-                           isSteer: isSteer,
-                           deviceId: store.hostDeviceId ?? "")
+                UserBubble(
+                    text: text, pending: row.timestamp == nil,
+                    isSteer: isSteer,
+                    deviceId: store.hostDeviceId ?? "")
 
             case .prose(let blocks, let streaming):
                 ProseRowView(row: row, blocks: blocks, streaming: streaming, veils: veils)
@@ -638,16 +651,18 @@ struct TranscriptView: View {
                     .opacity(row.muted ? 0.75 : 1)
 
             case .toolGroup(let tools, let autoOpen):
-                ToolGroupView(tools: tools,
-                              open: row.nested || (folds[row.id] ?? autoOpen),
-                              nested: row.nested,
-                              userToggled: folds[row.id] != nil,
-                              openChips: openChips[row.id] ?? [],
-                              toggleChip: { partId in
-                                  withAnimation(reduceMotion ? nil : Motion.resize) {
-                                      openChips[row.id, default: []].formSymmetricDifference([partId])
-                                  }
-                              }) {
+                ToolGroupView(
+                    tools: tools,
+                    open: row.nested || (folds[row.id] ?? autoOpen),
+                    nested: row.nested,
+                    userToggled: folds[row.id] != nil,
+                    openChips: openChips[row.id] ?? [],
+                    toggleChip: { partId in
+                        withAnimation(reduceMotion ? nil : Motion.resize) {
+                            openChips[row.id, default: []].formSymmetricDifference([partId])
+                        }
+                    }
+                ) {
                     withAnimation(reduceMotion ? nil : Motion.resize) {
                         folds[row.id] = !(folds[row.id] ?? autoOpen)
                     }
@@ -661,15 +676,19 @@ struct TranscriptView: View {
 
             case .translationOriginal:
                 let open = TranscriptRowBuilder.isOpen(row, pins: togglePins)
-                FoldToggle(open: open, closedLabel: "Show original",
-                           openLabel: "Hide original", identifier: "translation-original-toggle") {
+                FoldToggle(
+                    open: open, closedLabel: "Show original",
+                    openLabel: "Hide original", identifier: "translation-original-toggle"
+                ) {
                     togglePins[row.id] = !open
                 }
 
             case .activity(_, let summary, _):
                 let open = TranscriptRowBuilder.isOpen(row, pins: togglePins)
-                FoldToggle(open: open, closedLabel: summary, openLabel: summary,
-                           identifier: "activity-toggle") {
+                FoldToggle(
+                    open: open, closedLabel: summary, openLabel: summary,
+                    identifier: "activity-toggle"
+                ) {
                     togglePins[row.id] = !open
                 }
 
@@ -681,8 +700,10 @@ struct TranscriptView: View {
                     }
                 } else {
                     let label = live ? "Thinking…" : "Thought"
-                    FoldToggle(open: open, closedLabel: label,
-                               openLabel: label, identifier: "thought-toggle") {
+                    FoldToggle(
+                        open: open, closedLabel: label,
+                        openLabel: label, identifier: "thought-toggle"
+                    ) {
                         togglePins[row.id] = !open
                     }
                 }
@@ -693,8 +714,12 @@ struct TranscriptView: View {
         .padding(.leading, row.nested && row.partKey != nil ? ThoughtChipRow.textInset : 0)
         .padding(.top, row.topGap)
         .padding(.horizontal, 16)
-        .environment(\.transcriptEntry, TranscriptEntryContext(entryId: row.entryId, role: row.role,
-                                                               settled: row.timestamp != nil))
+        .environment(
+            \.transcriptEntry,
+            TranscriptEntryContext(
+                entryId: row.entryId, role: row.role,
+                settled: row.timestamp != nil)
+        )
         .modifier(TurnAnchor(round: store.transcriptCache.roundIndex[row.id], tracker: turns, scroll: scroll))
     }
 }

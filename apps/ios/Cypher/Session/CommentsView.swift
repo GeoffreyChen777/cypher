@@ -12,7 +12,9 @@ struct PendingCommentsBar: View {
     let drafts: CommentDrafts
     var body: some View {
         if !drafts.comments.isEmpty {
-            Button { drafts.showList() } label: {
+            Button {
+                drafts.showList()
+            } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "text.bubble").font(.system(size: 12))
                     Text("\(drafts.comments.count) \(drafts.comments.count == 1 ? "comment" : "comments") pending")
@@ -52,7 +54,9 @@ struct CommentsPanel: View {
                             }
                             ForEach(drafts.comments) { comment in
                                 HStack(alignment: .top, spacing: 6) {
-                                    Button { drafts.edit(comment) } label: {
+                                    Button {
+                                        drafts.edit(comment)
+                                    } label: {
                                         VStack(alignment: .leading, spacing: 6) {
                                             Text(comment.quote).lineLimit(2).foregroundStyle(Theme.textFaint)
                                             Text(comment.comment).lineLimit(3).foregroundStyle(Theme.text)
@@ -63,7 +67,9 @@ struct CommentsPanel: View {
                                     }
                                     .buttonStyle(.plain)
                                     .accessibilityHint("Edit comment")
-                                    Button { drafts.remove(comment.id) } label: {
+                                    Button {
+                                        drafts.remove(comment.id)
+                                    } label: {
                                         Image(systemName: "xmark").font(.system(size: 11, weight: .medium))
                                             .frame(width: 44, height: 44)
                                     }
@@ -140,8 +146,10 @@ private struct CommentEditor: View {
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") { error = drafts.save(source: source, quote: source.text, comment: comment) }
-                    .disabled(CommentPrompt.normalize(source.text).isEmpty
-                              || comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(
+                        CommentPrompt.normalize(source.text).isEmpty
+                            || comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
                     .accessibilityIdentifier("save-comment")
             }
         }

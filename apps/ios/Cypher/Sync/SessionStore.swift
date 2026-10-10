@@ -154,13 +154,15 @@ final class SessionStore {
                 // and fresh readers must fetch it rather than skip history.
                 guard !frontier.isEmpty else { return false }
                 guard let self,
-                      let vv = try? VersionVector.decode(bytes: frontier) else { return false }
+                    let vv = try? VersionVector.decode(bytes: frontier)
+                else { return false }
                 guard !vv.toHashmap().isEmpty else { return false }
                 return self.doc.oplogVv().includesVv(other: vv)
             },
             applyCheckpoint: { [weak self] bytes, seq in
                 guard let self,
-                      (try? self.doc.importWith(bytes: bytes, origin: "remote")) != nil else {
+                    (try? self.doc.importWith(bytes: bytes, origin: "remote")) != nil
+                else {
                     return false
                 }
                 self.cursor = max(self.cursor, seq)
@@ -199,16 +201,22 @@ final class SessionStore {
             preview: { [weak self] data in
                 guard let self else { return [] }
                 let replies: [Data]
-                if let data { replies = self.previewProjection.receive(data, chatId: self.chatId) }
-                else { self.previewProjection.disconnect(); replies = [] }
-                self.entries = self.previewProjection.overlay(self.durableEntries, coverage: self.durablePreviewCoverage)
+                if let data {
+                    replies = self.previewProjection.receive(data, chatId: self.chatId)
+                } else {
+                    self.previewProjection.disconnect()
+                    replies = []
+                }
+                self.entries = self.previewProjection.overlay(
+                    self.durableEntries, coverage: self.durablePreviewCoverage)
                 self.revision &+= 1
-                return replies // No saver, doc import, command, or status mutation.
+                return replies  // No saver, doc import, command, or status mutation.
             },
             previewRetry: { [weak self] in
                 guard let self else { return nil }
                 if self.previewProjection.expire() {
-                    self.entries = self.previewProjection.overlay(self.durableEntries, coverage: self.durablePreviewCoverage)
+                    self.entries = self.previewProjection.overlay(
+                        self.durableEntries, coverage: self.durablePreviewCoverage)
                     self.revision &+= 1
                 }
                 return self.previewProjection.retry(chatId: self.chatId, cursor: self.cursor)
@@ -237,7 +245,8 @@ final class SessionStore {
         // the doc's full update log as the join's first batch; once acked
         // the cursor moves and this never re-arms.
         if cursor == 0,
-           let all = try? doc.export(mode: .updates(from: VersionVector())), !all.isEmpty {
+            let all = try? doc.export(mode: .updates(from: VersionVector())), !all.isEmpty
+        {
             Task { await client.enqueue(update: all) }
         }
         Task { await client.start() }
@@ -313,7 +322,8 @@ final class SessionStore {
         projecting = true
         let doc = self.doc
         Task { @MainActor [weak self] in
-            let projection = await Task.detached(priority: .userInitiated) { () -> ([MessageEntry]?, PreviewCoverage?) in
+            let projection = await Task.detached(priority: .userInitiated) {
+                () -> ([MessageEntry]?, PreviewCoverage?) in
                 guard let root = doc.getDeepValue().mapValue else { return (nil, nil) }
                 let marker = root["meta"]?.mapValue?["previewCoverage"]?.stringValue
                 let coverage = marker.flatMap { try? JSONDecoder().decode(PreviewCoverage.self, from: Data($0.utf8)) }
@@ -332,7 +342,8 @@ final class SessionStore {
     }
 
     private func apply(_ decoded: [MessageEntry], coverage: PreviewCoverage? = nil) {
-        durableEntries = decoded; durablePreviewCoverage = coverage
+        durableEntries = decoded
+        durablePreviewCoverage = coverage
         entries = previewProjection.overlay(decoded, coverage: coverage)
         // Drop echoes the host has materialized.
         let ids = Set(decoded.map(\.id))
@@ -356,14 +367,16 @@ final class SessionStore {
         // optimistic echo and a reopened/cross-device transcript agree.
         // "applied" only means routed/queued, not consumed: don't expose it as
         // a delivery receipt. Old messages without a matching ID stay normal.
-        let steerIDs = Set((root["commands"]?.listValue ?? []).compactMap { command -> String? in
-            guard let command = command.mapValue,
-                  command["kind"]?.stringValue == "steer",
-                  let payload = command["payload"]?.mapValue,
-                  payload["kind"]?.stringValue == "steer",
-                  let id = payload["messageId"]?.stringValue, !id.isEmpty else { return nil }
-            return id
-        })
+        let steerIDs = Set(
+            (root["commands"]?.listValue ?? []).compactMap { command -> String? in
+                guard let command = command.mapValue,
+                    command["kind"]?.stringValue == "steer",
+                    let payload = command["payload"]?.mapValue,
+                    payload["kind"]?.stringValue == "steer",
+                    let id = payload["messageId"]?.stringValue, !id.isEmpty
+                else { return nil }
+                return id
+            })
         let raw = (root["messages"]?.listValue ?? []).compactMap(entryFrom).map { entry in
             var entry = entry
             entry.isSteer = entry.role == .user && steerIDs.contains(entry.id)
@@ -374,25 +387,29 @@ final class SessionStore {
 
     nonisolated static func entryFrom(_ value: LoroValue) -> MessageEntry? {
         guard let m = value.mapValue,
-              let id = m["id"]?.stringValue,
-              let roleStr = m["role"]?.stringValue,
-              let role = MessageRole(rawValue: roleStr) else { return nil }
+            let id = m["id"]?.stringValue,
+            let roleStr = m["role"]?.stringValue,
+            let role = MessageRole(rawValue: roleStr)
+        else { return nil }
         let parts = (m["parts"]?.listValue ?? []).compactMap(partFrom)
-        return MessageEntry(id: id, role: role, parts: parts,
-                            createdAt: m["createdAt"]?.i64Value ?? 0,
-                            deviceId: m["deviceId"]?.stringValue ?? "",
-                            status: m["status"]?.stringValue.flatMap(MessageStatus.init(rawValue:)),
-                            continuationOf: m["continuationOf"]?.stringValue)
+        return MessageEntry(
+            id: id, role: role, parts: parts,
+            createdAt: m["createdAt"]?.i64Value ?? 0,
+            deviceId: m["deviceId"]?.stringValue ?? "",
+            status: m["status"]?.stringValue.flatMap(MessageStatus.init(rawValue:)),
+            continuationOf: m["continuationOf"]?.stringValue)
     }
 
     nonisolated private static func partFrom(_ value: LoroValue) -> MessagePart? {
         guard let m = value.mapValue,
-              let id = m["id"]?.stringValue,
-              let kind = m["kind"]?.stringValue else { return nil }
+            let id = m["id"]?.stringValue,
+            let kind = m["kind"]?.stringValue
+        else { return nil }
         switch kind {
         case "text":
-            return .text(id: id, text: m["text"]?.stringValue ?? "",
-                         agentText: m["agentText"]?.stringValue)
+            return .text(
+                id: id, text: m["text"]?.stringValue ?? "",
+                agentText: m["agentText"]?.stringValue)
         case "reasoning":
             return .reasoning(id: id, text: m["reasoning"]?.stringValue ?? "")
         case "tool":
@@ -400,10 +417,13 @@ final class SessionStore {
             let tag = callMap["kind"]?.stringValue ?? "unknown"
             var fields: [String: AnyHashable] = [:]
             for (k, v) in callMap where k != "kind" {
-                if let s = v.stringValue { fields[k] = s }
-                else if let b = v.boolValue { fields[k] = b }
-                else if let i = v.i64Value { fields[k] = i }
-                else if let list = v.listValue {
+                if let s = v.stringValue {
+                    fields[k] = s
+                } else if let b = v.boolValue {
+                    fields[k] = b
+                } else if let i = v.i64Value {
+                    fields[k] = i
+                } else if let list = v.listValue {
                     // ApplyPatch changes / Todo items — keep a JSON echo.
                     fields[k] = list.map { "\($0.jsonObject)" }
                 }
@@ -411,32 +431,38 @@ final class SessionStore {
             // Pi's codemode script and tool_search query: the one input field
             // the doc keeps for each (parts.rs sanitize_tool_call).
             if tag == "unknown", let name = callMap["name"]?.stringValue,
-               let key = RenderToolCall.keptInputField(name),
-               let value = callMap["input"]?.mapValue?[key]?.stringValue {
+                let key = RenderToolCall.keptInputField(name),
+                let value = callMap["input"]?.mapValue?[key]?.stringValue
+            {
                 fields[key] = value
             }
             // isError presence IS the resolution marker (schema.rs:96).
             let isError = m["isError"]?.boolValue
             var call = RenderToolCall(tag: tag, fields: fields)
             if tag == "unknown", callMap["name"]?.stringValue == "subagent",
-               let input = callMap["input"]?.mapValue,
-               let agent = input["agent"]?.stringValue, !agent.isEmpty {
-                call.subagent = SubagentCallMetadata(agent: String(agent.prefix(120)),
+                let input = callMap["input"]?.mapValue,
+                let agent = input["agent"]?.stringValue, !agent.isEmpty
+            {
+                call.subagent = SubagentCallMetadata(
+                    agent: String(agent.prefix(120)),
                     task: String((input["task"]?.stringValue ?? "").prefix(500)),
                     isAsync: input["async"]?.boolValue ?? false)
                 call.progress = SubagentProjection.boundedProgress(m["progress"]?.stringValue)
             }
-            return .tool(id: id, call: call,
-                         isError: isError ?? false, resolved: isError != nil)
+            return .tool(
+                id: id, call: call,
+                isError: isError ?? false, resolved: isError != nil)
         case "input":
             var questions: [UserInputQuestion] = []
             if let list = m["questions"]?.listValue,
-               let data = try? JSONSerialization.data(withJSONObject: list.map(\.jsonObject)),
-               let decoded = try? JSONDecoder().decode([UserInputQuestion].self, from: data) {
+                let data = try? JSONSerialization.data(withJSONObject: list.map(\.jsonObject)),
+                let decoded = try? JSONDecoder().decode([UserInputQuestion].self, from: data)
+            {
                 questions = decoded
             }
-            return .input(id: id, requestId: id, questions: questions,
-                          resolved: m["resolved"]?.boolValue ?? false)
+            return .input(
+                id: id, requestId: id, questions: questions,
+                resolved: m["resolved"]?.boolValue ?? false)
         case "error":
             return .error(id: id, message: m["message"]?.stringValue ?? "")
         default:
@@ -481,7 +507,8 @@ final class SessionStore {
                 // An empty question list can't be answered, so it must not take
                 // the composer's place — leaving the user with no way to type.
                 if case .input(_, let requestId, let questions, let resolved) = part,
-                   !resolved, !questions.isEmpty {
+                    !resolved, !questions.isEmpty
+                {
                     return (entry.id, requestId, questions)
                 }
             }
@@ -500,14 +527,15 @@ final class SessionStore {
             return true
         }
         let messageId = UUID().uuidString.lowercased()
-        let request = RunRequest(prompt: prompt,
-                                 harness: chat.config?.harness,
-                                 model: chat.config?.model,
-                                 reasoning: chat.config?.reasoning,
-                                 modelOptions: chat.config?.modelOptions ?? [:],
-                                 cwd: chat.cwd ?? "",
-                                 sandbox: chat.config?.sandbox ?? "workspace-write",
-                                 attachments: attachments)
+        let request = RunRequest(
+            prompt: prompt,
+            harness: chat.config?.harness,
+            model: chat.config?.model,
+            reasoning: chat.config?.reasoning,
+            modelOptions: chat.config?.modelOptions ?? [:],
+            cwd: chat.cwd ?? "",
+            sandbox: chat.config?.sandbox ?? "workspace-write",
+            attachments: attachments)
         var payload: [String: Any] = [
             "kind": "run",
             "request": encodableJSON(request),
@@ -550,11 +578,13 @@ final class SessionStore {
     @discardableResult
     func respondInput(requestId: String, answers: [UserInputAnswer]) -> Bool {
         if let directTransport { return directTransport.respondInput(requestId, answers) }
-        return queueCommand(kind: "respondInput", payload: [
-            "kind": "respondInput",
-            "requestId": requestId,
-            "answers": answers.map(encodableJSON),
-        ])
+        return queueCommand(
+            kind: "respondInput",
+            payload: [
+                "kind": "respondInput",
+                "requestId": requestId,
+                "answers": answers.map(encodableJSON),
+            ])
     }
 
     /// A direct send, echoed optimistically like a queued one (the host's
@@ -578,10 +608,12 @@ final class SessionStore {
             try map.insert(key: "issuedBy", v: config.deviceId)
             try map.insert(key: "issuedAt", v: nowMs())
             if let turnId = lastEntryId {
-                try map.insert(key: "basedOn", v: LoroValue.map(value: [
-                    "turnId": .string(value: turnId),
-                    "frontier": .null,
-                ]))
+                try map.insert(
+                    key: "basedOn",
+                    v: LoroValue.map(value: [
+                        "turnId": .string(value: turnId),
+                        "frontier": .null,
+                    ]))
             }
             try map.insert(key: "expiresAt", v: nowMs() + commandDefaultTtlMs)
             try map.insert(key: "status", v: "pending")
@@ -604,6 +636,7 @@ final class SessionStore {
 
 private func encodableJSON<T: Encodable>(_ value: T) -> Any {
     guard let data = try? JSONEncoder().encode(value),
-          let obj = try? JSONSerialization.jsonObject(with: data) else { return [:] }
+        let obj = try? JSONSerialization.jsonObject(with: data)
+    else { return [:] }
     return obj
 }

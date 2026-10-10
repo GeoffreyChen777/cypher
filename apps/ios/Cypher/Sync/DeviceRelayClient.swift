@@ -63,8 +63,9 @@ actor DeviceRelayClient {
     private func connect() async throws {
         if connected, socket != nil { return }
         guard let token = await config.currentToken() else { throw RelayError.notConnected }
-        var components = URLComponents(url: config.edgeURL.appending(path: "device/\(deviceId)/ws"),
-                                       resolvingAgainstBaseURL: false)!
+        var components = URLComponents(
+            url: config.edgeURL.appending(path: "device/\(deviceId)/ws"),
+            resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "http" ? "ws" : "wss"
         components.queryItems = [
             URLQueryItem(name: "role", value: "client"),
@@ -145,12 +146,15 @@ actor DeviceRelayClient {
         return try await call(method: method, paramsJSON: json, timeoutSeconds: timeoutSeconds)
     }
 
-    private func call<Response: Decodable & Sendable>(method: String, paramsJSON: Data,
-                                                      timeoutSeconds: UInt64) async throws -> Response {
+    private func call<Response: Decodable & Sendable>(
+        method: String, paramsJSON: Data,
+        timeoutSeconds: UInt64
+    ) async throws -> Response {
         for attempt in 0..<3 {
             do {
-                return try await callOnce(method: method, paramsJSON: paramsJSON,
-                                          timeoutSeconds: timeoutSeconds)
+                return try await callOnce(
+                    method: method, paramsJSON: paramsJSON,
+                    timeoutSeconds: timeoutSeconds)
             } catch let error as RelayError {
                 guard attempt < 2 else { throw error }
                 switch error {
@@ -212,8 +216,10 @@ actor DeviceRelayClient {
         return stream
     }
 
-    private func openStream(method: String, paramsJSON: Data?,
-                            continuation: AsyncThrowingStream<Data, Error>.Continuation) async {
+    private func openStream(
+        method: String, paramsJSON: Data?,
+        continuation: AsyncThrowingStream<Data, Error>.Continuation
+    ) async {
         do {
             try await connect()
         } catch {
@@ -227,8 +233,9 @@ actor DeviceRelayClient {
             Task { await self?.closeStream(id: id) }
         }
         guard let paramsJSON, let params = try? JSONSerialization.jsonObject(with: paramsJSON),
-              let payload = try? JSONSerialization.data(withJSONObject: ["id": id, "method": method, "params": params]),
-              let socket else {
+            let payload = try? JSONSerialization.data(withJSONObject: ["id": id, "method": method, "params": params]),
+            let socket
+        else {
             finishStream(id: id, error: .notConnected)
             return
         }
@@ -248,7 +255,8 @@ actor DeviceRelayClient {
     /// The consumer let go: stop the host's side of a still-open stream.
     private func closeStream(id: UInt64) async {
         guard streams.removeValue(forKey: id) != nil, let socket,
-              let payload = try? JSONSerialization.data(withJSONObject: ["id": id, "cancel": true]) else { return }
+            let payload = try? JSONSerialization.data(withJSONObject: ["id": id, "cancel": true])
+        else { return }
         try? await socket.send(.data(Self.encodeFrame(header: #"{"s":"rpc","k":"rpc"}"#, payload: payload)))
     }
 
@@ -302,13 +310,16 @@ actor DeviceRelayClient {
         guard let text = String(data: payload, encoding: .utf8) else { return }
         for line in text.split(separator: "\n") {
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  let id = (obj["id"] as? NSNumber)?.uint64Value else { continue }
+                let id = (obj["id"] as? NSNumber)?.uint64Value
+            else { continue }
             if let stream = streams[id] {
                 if let err = obj["err"] as? String {
                     finishStream(id: id, error: .rpc(err))
                 } else if obj.keys.contains("item"),
-                          let item = try? JSONSerialization.data(withJSONObject: obj["item"] ?? NSNull(),
-                                                                 options: .fragmentsAllowed) {
+                    let item = try? JSONSerialization.data(
+                        withJSONObject: obj["item"] ?? NSNull(),
+                        options: .fragmentsAllowed)
+                {
                     stream.yield(item)
                 } else if obj["done"] != nil {
                     finishStream(id: id, error: nil)
@@ -319,8 +330,10 @@ actor DeviceRelayClient {
             if let err = obj["err"] as? String {
                 continuation.resume(returning: .failure(.rpc(err)))
             } else if obj.keys.contains("ok"),
-                      let okData = try? JSONSerialization.data(withJSONObject: obj["ok"] ?? NSNull(),
-                                                               options: .fragmentsAllowed) {
+                let okData = try? JSONSerialization.data(
+                    withJSONObject: obj["ok"] ?? NSNull(),
+                    options: .fragmentsAllowed)
+            {
                 continuation.resume(returning: .success(okData))
             } else {
                 continuation.resume(returning: .failure(.rpc("unexpected reply")))

@@ -34,17 +34,20 @@ final class SessionConnectionTests: XCTestCase {
             catalogLoading: false, catalogError: nil, modelAvailable: true)
         XCTAssertEqual(ready, .ready)
         XCTAssertNil(ready.summary(elapsed: 100))
-        XCTAssertEqual(SessionConnectionPhase.resolve(
-            transportReady: true, needsCatalog: false, catalogMatches: false,
-            catalogLoading: false, catalogError: nil, modelAvailable: false), .ready)
+        XCTAssertEqual(
+            SessionConnectionPhase.resolve(
+                transportReady: true, needsCatalog: false, catalogMatches: false,
+                catalogLoading: false, catalogError: nil, modelAvailable: false), .ready)
     }
 
     func testMissingSelectionIsNotMistakenForAConnectionFailureOrSilentlyReplaced() {
-        XCTAssertEqual(SessionConnectionPhase.resolve(
-            transportReady: true, needsCatalog: true, catalogMatches: true,
-            catalogLoading: false, catalogError: nil, modelAvailable: false), .missingModel)
-        XCTAssertEqual(SessionConnectionPhase.resolve(
-            transportReady: true, needsCatalog: true, catalogMatches: false,
-            catalogLoading: false, catalogError: .noModels, modelAvailable: false), .connecting)
+        XCTAssertEqual(
+            SessionConnectionPhase.resolve(
+                transportReady: true, needsCatalog: true, catalogMatches: true,
+                catalogLoading: false, catalogError: nil, modelAvailable: false), .missingModel)
+        XCTAssertEqual(
+            SessionConnectionPhase.resolve(
+                transportReady: true, needsCatalog: true, catalogMatches: false,
+                catalogLoading: false, catalogError: .noModels, modelAvailable: false), .connecting)
     }
 }

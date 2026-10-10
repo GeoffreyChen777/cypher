@@ -82,7 +82,9 @@ struct SpaceView: View {
         ContentUnavailableView {
             Label("No Sessions", systemImage: "bubble.left.and.bubble.right")
         } description: {
-            Text("Start a session to run Pi on \(space.map { model.deviceName($0.deviceId) } ?? "this project's device").")
+            Text(
+                "Start a session to run Pi on \(space.map { model.deviceName($0.deviceId) } ?? "this project's device")."
+            )
         } actions: {
             Button("New Session") {
                 path.append(.newSession(spaceId: spaceId))
@@ -93,7 +95,6 @@ struct SpaceView: View {
         .listRowBackground(Color.clear)
     }
 }
-
 
 // MARK: - New space: remote folder browser
 
@@ -193,8 +194,10 @@ struct NewSpaceSheet: View {
                     } label: {
                         HStack(spacing: 7) {
                             Circle()
-                                .fill(model.deviceOnline(device.id)
-                                    ? Theme.statusCompleted.opacity(0.9) : whiteAlpha(0.18))
+                                .fill(
+                                    model.deviceOnline(device.id)
+                                        ? Theme.statusCompleted.opacity(0.9) : whiteAlpha(0.18)
+                                )
                                 .frame(width: 6, height: 6)
                             Text(device.name)
                                 .font(Theme.sans(13, weight: .medium))
@@ -295,9 +298,11 @@ struct NewSpaceSheet: View {
             Task { await load(path: child, deviceId: target) }
         } label: {
             HStack(spacing: 12) {
-                LineIconView(entry.isRepo ? .folderWithFiles : .folder, size: 16,
-                             color: entry.isRepo ? Theme.accent.opacity(0.85) : Theme.textMuted)
-                    .frame(width: 22)
+                LineIconView(
+                    entry.isRepo ? .folderWithFiles : .folder, size: 16,
+                    color: entry.isRepo ? Theme.accent.opacity(0.85) : Theme.textMuted
+                )
+                .frame(width: 22)
                 Text(entry.name)
                     .font(Theme.sans(15))
                     .foregroundStyle(Theme.text)
@@ -354,7 +359,8 @@ struct NewSpaceSheet: View {
 
     private func load(path: String?, deviceId: String? = nil) async {
         guard let selectedDeviceId = deviceId ?? selectedDeviceId,
-              selectedDeviceId == self.selectedDeviceId else { return }
+            selectedDeviceId == self.selectedDeviceId
+        else { return }
         let ticket = UUID()
         loadGeneration = ticket
         loading = true
@@ -376,13 +382,15 @@ struct NewSpaceSheet: View {
 
     private func create() {
         guard !creating, !loading, let selectedDeviceId, listingDeviceId == selectedDeviceId,
-              let listing else { return }
+            let listing
+        else { return }
         creating = true
         // Initial git flag = the isRepo the engine stamped when we descended
         // into this folder; the owning device's SpacesSync re-verifies anyway.
         Task {
-            let id = await model.createSpace(deviceId: selectedDeviceId,
-                                             path: listing.path, gitDetected: currentIsRepo)
+            let id = await model.createSpace(
+                deviceId: selectedDeviceId,
+                path: listing.path, gitDetected: currentIsRepo)
             creating = false
             if let id {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()

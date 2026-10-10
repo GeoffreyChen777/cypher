@@ -10,10 +10,12 @@ private func hlc(_ ms: Int64, _ device: String = "dev-a", _ counter: UInt32 = 0)
     encodeHlc(ms: ms, counter: counter, device: device)
 }
 
-private func upsert(id: String = "chat-1",
-                    set: [String: JSONValue] = ["title": .string("hello"), "archived": .bool(false)],
-                    hlc at: Hlc = hlc(1000),
-                    clocks: [String: Hlc]? = nil) -> RegistryOp {
+private func upsert(
+    id: String = "chat-1",
+    set: [String: JSONValue] = ["title": .string("hello"), "archived": .bool(false)],
+    hlc at: Hlc = hlc(1000),
+    clocks: [String: Hlc]? = nil
+) -> RegistryOp {
     RegistryOp(kind: "chats", id: id, op: .upsert, set: set, hlc: at, clocks: clocks)
 }
 
@@ -26,8 +28,10 @@ private func deleteOp(kind: String = "chats", id: String = "chat-1", hlc at: Hlc
 }
 
 /// applyOp asserting the op changed something (the test.ts `applied` helper).
-private func applied(_ row: RegistryRow?, _ op: RegistryOp,
-                     file: StaticString = #filePath, line: UInt = #line) -> RegistryRow {
+private func applied(
+    _ row: RegistryRow?, _ op: RegistryOp,
+    file: StaticString = #filePath, line: UInt = #line
+) -> RegistryRow {
     let result = applyOp(row, op)
     XCTAssertTrue(result.changed, "expected op to apply", file: file, line: line)
     XCTAssertNotNil(result.row, file: file, line: line)
@@ -198,8 +202,9 @@ final class RegistryMaxClockTests: XCTestCase {
         let row = applied(nil, upsert(set: ["a": .int(1), "b": .int(2)], hlc: hlc(1000)))
         let bumped = applied(row, update(set: ["b": .int(3)], hlc: hlc(5000)))
         XCTAssertEqual(maxClock(bumped), hlc(5000))
-        let tomb = RegistryRow(kind: "x", id: "y", seq: 0, deleted: true,
-                               delHlc: hlc(9), fields: [:], clocks: [:])
+        let tomb = RegistryRow(
+            kind: "x", id: "y", seq: 0, deleted: true,
+            delHlc: hlc(9), fields: [:], clocks: [:])
         XCTAssertEqual(maxClock(tomb), hlc(9))
     }
 }

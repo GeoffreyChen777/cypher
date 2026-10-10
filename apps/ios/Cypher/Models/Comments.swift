@@ -43,13 +43,18 @@ enum CommentPrompt {
     }
 
     static func annotationJSON(_ comments: [DraftComment]) throws -> String {
-        struct Annotation: Encodable { let quotedText: String; let comment: String }
+        struct Annotation: Encodable {
+            let quotedText: String
+            let comment: String
+        }
         struct Envelope: Encodable { let comments: [Annotation] }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let data = try encoder.encode(Envelope(comments: comments.map {
-            Annotation(quotedText: $0.quote, comment: $0.comment)
-        }))
+        let data = try encoder.encode(
+            Envelope(
+                comments: comments.map {
+                    Annotation(quotedText: $0.quote, comment: $0.comment)
+                }))
         return String(decoding: data, as: UTF8.self)
     }
 
@@ -68,7 +73,8 @@ enum CommentPrompt {
     static func selectedText(_ source: String, range: NSRange) -> String {
         let length = source.utf16.count
         guard range.location >= 0, range.length >= 0, range.location <= length,
-              range.length <= length - range.location else { return "" }
+            range.length <= length - range.location
+        else { return "" }
         let text = source as NSString
         func splitsSurrogate(_ offset: Int) -> Bool {
             offset > 0 && offset < length && (0xDC00...0xDFFF).contains(text.character(at: offset))
@@ -108,8 +114,9 @@ final class CommentDrafts {
 
     func edit(_ comment: DraftComment) {
         guard comments.contains(where: { $0.id == comment.id }) else { return }
-        editor = CommentSource(editingId: comment.id, text: comment.quote,
-                               comment: comment.comment, generation: generation)
+        editor = CommentSource(
+            editingId: comment.id, text: comment.quote,
+            comment: comment.comment, generation: generation)
         presented = true
     }
 
@@ -143,11 +150,14 @@ final class CommentDrafts {
             guard let index = updated.firstIndex(where: { $0.id == id }) else { return "This comment was removed." }
             updated[index] = draft
         } else {
-            guard updated.count < CommentPrompt.maxComments else { return "Send or remove some comments first (maximum 32)." }
+            guard updated.count < CommentPrompt.maxComments else {
+                return "Send or remove some comments first (maximum 32)."
+            }
             updated.append(draft)
         }
         guard let json = try? CommentPrompt.annotationJSON(updated),
-              json.utf8.count <= CommentPrompt.maxAnnotationBytes else {
+            json.utf8.count <= CommentPrompt.maxAnnotationBytes
+        else {
             return "The pending comments are too large. Use shorter excerpts."
         }
         comments = updated
@@ -175,7 +185,8 @@ extension MDBlock {
         case .blockquote(let blocks): return blocks.map(\.commentText).joined(separator: "\n\n")
         case .list(let start, let items):
             return items.enumerated().map { index, item in
-                let marker = item.checked.map { $0 ? "☑ " : "☐ " }
+                let marker =
+                    item.checked.map { $0 ? "☑ " : "☐ " }
                     ?? start.map { "\($0 + index). " } ?? "• "
                 return marker + item.children.map(\.commentText).joined(separator: "\n")
             }.joined(separator: "\n")

@@ -20,10 +20,12 @@ final class AppConfig: @unchecked Sendable {
 
     var streamPreviewEnabled: Bool {
         #if CYPHER_DEVELOPMENT
-        return mode == .dev && (edgeURL == DevelopmentProfile.edge || ["localhost", "127.0.0.1", "::1"].contains(edgeURL.host ?? ""))
-            && (previewRequested || ProcessInfo.processInfo.arguments.contains("-dev-stream-preview"))
+            return mode == .dev
+                && (edgeURL == DevelopmentProfile.edge
+                    || ["localhost", "127.0.0.1", "::1"].contains(edgeURL.host ?? ""))
+                && (previewRequested || ProcessInfo.processInfo.arguments.contains("-dev-stream-preview"))
         #else
-        return false
+            return false
         #endif
     }
 
@@ -38,9 +40,11 @@ final class AppConfig: @unchecked Sendable {
     /// to count /auth/refresh calls deterministically.
     var makeClient: (URL) -> AuthClient = { AuthClient(baseURL: $0) }
 
-    init(edgeURL: URL, mode: Mode, userId: String, orgId: String,
-         deviceId: String, deviceName: String,
-         tokens: AuthTokens? = nil, devBearer: String? = nil, developmentPreview: Bool = false) {
+    init(
+        edgeURL: URL, mode: Mode, userId: String, orgId: String,
+        deviceId: String, deviceName: String,
+        tokens: AuthTokens? = nil, devBearer: String? = nil, developmentPreview: Bool = false
+    ) {
         self.edgeURL = edgeURL
         self.mode = mode
         self.userId = userId
@@ -64,19 +68,22 @@ final class AppConfig: @unchecked Sendable {
         switch mode {
         case .dev:
             #if CYPHER_DEVELOPMENT
-            guard edgeURL == DevelopmentProfile.edge || ["localhost", "127.0.0.1", "::1"].contains(edgeURL.host ?? "") else { return nil }
+                guard
+                    edgeURL == DevelopmentProfile.edge
+                        || ["localhost", "127.0.0.1", "::1"].contains(edgeURL.host ?? "")
+                else { return nil }
             #endif
             #if !CYPHER_DEVELOPMENT
-            // Local test/demo support remains, but public distribution
-            // builds cannot authenticate with a cloud development token.
-            guard ["localhost", "127.0.0.1", "::1"].contains(edgeURL.host ?? "") else { return nil }
+                // Local test/demo support remains, but public distribution
+                // builds cannot authenticate with a cloud development token.
+                guard ["localhost", "127.0.0.1", "::1"].contains(edgeURL.host ?? "") else { return nil }
             #endif
             return readDevBearer()
         case .workos:
             #if CYPHER_DEVELOPMENT
-            // A Dev bundle must not consume a real user's WorkOS session.
-            // Pure AuthClient unit tests exercise refresh independently.
-            if edgeURL.host == "edge.letscypher.app" { return nil }
+                // A Dev bundle must not consume a real user's WorkOS session.
+                // Pure AuthClient unit tests exercise refresh independently.
+                if edgeURL.host == "edge.letscypher.app" { return nil }
             #endif
             // Fast path: a still-fresh token needs no refresh.
             if let current = readTokens(), !Self.isExpired(jwt: current.accessToken) {
@@ -104,8 +111,9 @@ final class AppConfig: @unchecked Sendable {
         guard let current = readTokens() else { return nil }
         let client = makeClient(edgeURL)
         do {
-            let refreshed = try await client.refresh(refreshToken: current.refreshToken,
-                                                     organizationId: orgId)
+            let refreshed = try await client.refresh(
+                refreshToken: current.refreshToken,
+                organizationId: orgId)
             return persist(refreshed) ? refreshed : nil
         } catch let error as AuthError {
             if error.isPermanent {
@@ -127,25 +135,29 @@ final class AppConfig: @unchecked Sendable {
     }
 
     private func readTokens() -> AuthTokens? {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         return invalidated ? nil : tokens
     }
     private func readDevBearer() -> String? {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         return invalidated ? nil : devBearer
     }
 
     /// In-flight notification/sync refreshes from an old account must not
     /// repopulate Keychain after logout or overwrite a newly signed-in account.
     func invalidate() {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         invalidated = true
         tokens = nil
         devBearer = nil
     }
 
     private func persist(_ new: AuthTokens) -> Bool {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         guard !invalidated else { return false }
         tokens = new
         Keychain.save(new.accessToken, key: "accessToken")
@@ -155,7 +167,8 @@ final class AppConfig: @unchecked Sendable {
 
     /// Permanent rejection: wipe in-memory and stored credentials.
     private func clearTokens() {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         guard !invalidated else { return }
         tokens = nil
         Keychain.delete(key: "accessToken")
@@ -173,8 +186,10 @@ final class AppConfig: @unchecked Sendable {
     func registrySocketURL() async -> URL? {
         guard let token = await currentToken() else { return nil }
         var url = wsBase.appending(path: "registry/\(orgId)/ws")
-        url.append(queryItems: [URLQueryItem(name: "token", value: token),
-                                URLQueryItem(name: "device", value: deviceId)])
+        url.append(queryItems: [
+            URLQueryItem(name: "token", value: token),
+            URLQueryItem(name: "device", value: deviceId),
+        ])
         return url
     }
 
@@ -184,8 +199,10 @@ final class AppConfig: @unchecked Sendable {
     func chat2SocketURL(chatId: String) async -> URL? {
         guard let token = await currentToken() else { return nil }
         var url = wsBase.appending(path: "chat2/\(chatId)/ws")
-        url.append(queryItems: [URLQueryItem(name: "token", value: token),
-                                URLQueryItem(name: "device", value: deviceId)])
+        url.append(queryItems: [
+            URLQueryItem(name: "token", value: token),
+            URLQueryItem(name: "device", value: deviceId),
+        ])
         return url
     }
 
@@ -206,7 +223,7 @@ final class AppConfig: @unchecked Sendable {
         var url = edgeURL.appending(path: "chat2/\(chatId)/rows")
         url.append(queryItems: [
             URLQueryItem(name: "after", value: String(after)),
-            URLQueryItem(name: "device", value: deviceId)
+            URLQueryItem(name: "device", value: deviceId),
         ])
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -220,7 +237,7 @@ final class AppConfig: @unchecked Sendable {
         var url = edgeURL.appending(path: "chat2/\(chatId)/rows")
         url.append(queryItems: [
             URLQueryItem(name: "batchId", value: batchId),
-            URLQueryItem(name: "device", value: deviceId)
+            URLQueryItem(name: "device", value: deviceId),
         ])
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -235,7 +252,7 @@ final class AppConfig: @unchecked Sendable {
         var url = edgeURL.appending(path: "registry/\(orgId)/rows")
         var query = [
             URLQueryItem(name: "device", value: deviceId),
-            URLQueryItem(name: "beat", value: "1")
+            URLQueryItem(name: "beat", value: "1"),
         ]
         if let since {
             query.append(URLQueryItem(name: "since", value: String(since)))
@@ -267,8 +284,9 @@ final class AppConfig: @unchecked Sendable {
             .replacingOccurrences(of: "_", with: "/")
         while base64.count % 4 != 0 { base64 += "=" }
         guard let data = Data(base64Encoded: base64),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let exp = obj["exp"] as? TimeInterval else { return false }
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let exp = obj["exp"] as? TimeInterval
+        else { return false }
         return Date().timeIntervalSince1970 > exp - 60
     }
 

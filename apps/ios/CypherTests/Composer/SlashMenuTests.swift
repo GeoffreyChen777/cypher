@@ -15,15 +15,19 @@ final class SlashMenuTests: XCTestCase {
         sections.flatMap { ["# \($0.group.title)"] + $0.commands.map(\.name) }
     }
 
-    private let desktopCatalog = ["goal", "fast", "orchestrate", "subagents", "subagent-status",
-                                  "skill:wiki", "compact", "mcp", "scripts", "export-html"]
+    private let desktopCatalog = [
+        "goal", "fast", "orchestrate", "subagents", "subagent-status",
+        "skill:wiki", "compact", "mcp", "scripts", "export-html",
+    ]
 
     func testWithNothingTypedTheStatefulCommandsGroupInPageOrder() {
-        XCTAssertEqual(rows(SlashMenu.sections(catalog(desktopCatalog), query: "")), [
-            "# Conversation", "compact",
-            "# Agent modes", "goal", "fast", "orchestrate", "scripts",
-            "# Subagents", "subagent-status",
-        ])
+        XCTAssertEqual(
+            rows(SlashMenu.sections(catalog(desktopCatalog), query: "")),
+            [
+                "# Conversation", "compact",
+                "# Agent modes", "goal", "fast", "orchestrate", "scripts",
+                "# Subagents", "subagent-status",
+            ])
     }
 
     func testATypedNameAlsoFindsTheHostsOtherCommands() {
@@ -31,17 +35,21 @@ final class SlashMenuTests: XCTestCase {
         XCTAssertEqual(rows(SlashMenu.sections(commands, query: "exp")), ["# Conversation", "export-html"])
         XCTAssertEqual(rows(SlashMenu.sections(commands, query: "rev")), ["# Other", "review"])
         // Prefix matches come first within a group, then substrings.
-        XCTAssertEqual(rows(SlashMenu.sections(commands, query: "COMP")),
-                       ["# Conversation", "compact", "# Other", "compact-ui"])
-        XCTAssertEqual(rows(SlashMenu.sections(commands, query: "s")), [
-            "# Agent modes", "scripts", "fast", "orchestrate",
-            "# Subagents", "subagents", "subagent-status",
-            "# Skills", "skill:wiki",
-        ])
+        XCTAssertEqual(
+            rows(SlashMenu.sections(commands, query: "COMP")),
+            ["# Conversation", "compact", "# Other", "compact-ui"])
+        XCTAssertEqual(
+            rows(SlashMenu.sections(commands, query: "s")),
+            [
+                "# Agent modes", "scripts", "fast", "orchestrate",
+                "# Subagents", "subagents", "subagent-status",
+                "# Skills", "skill:wiki",
+            ])
         // What only configures desktop Settings never shows on the phone.
         for name in ["mcp", "provider", "subagent-config"] {
-            XCTAssertEqual(SlashMenu.sections(commands, query: name).flatMap(\.commands).map(\.name)
-                .filter { $0 == name }, [], name)
+            XCTAssertEqual(
+                SlashMenu.sections(commands, query: name).flatMap(\.commands).map(\.name)
+                    .filter { $0 == name }, [], name)
         }
         XCTAssertEqual(SlashMenu.sections(commands, query: "zzz"), [])
     }
@@ -79,11 +87,13 @@ final class SlashMenuTests: XCTestCase {
     func testChoicesOpenForAnOfferedCommandAndCloseOnAnotherWord() {
         let commands = catalog(desktopCatalog)
         XCTAssertEqual(SlashMenu.level(in: "/or", commands: commands), .commands(query: "or"))
-        XCTAssertEqual(SlashMenu.level(in: "/orchestrate ", commands: commands),
-                       .choices(command: "orchestrate", query: ""))
+        XCTAssertEqual(
+            SlashMenu.level(in: "/orchestrate ", commands: commands),
+            .choices(command: "orchestrate", query: ""))
         XCTAssertEqual(SlashMenu.choiceRows(command: "orchestrate", query: "o").map(\.value), ["on", "off"])
-        XCTAssertEqual(SlashMenu.level(in: "/orchestrate o", commands: commands),
-                       .choices(command: "orchestrate", query: "o"))
+        XCTAssertEqual(
+            SlashMenu.level(in: "/orchestrate o", commands: commands),
+            .choices(command: "orchestrate", query: "o"))
         // A goal's text matches no choice: the menu gets out of the way.
         XCTAssertNil(SlashMenu.level(in: "/goal ship", commands: commands))
         XCTAssertNil(SlashMenu.level(in: "/fast ", commands: commands), "no choices")
@@ -100,8 +110,9 @@ final class SlashMenuTests: XCTestCase {
 
     func testBadgesSayWhatIsInEffect() {
         let facts = SlashFacts(
-            modes: PiSessionModes(fast: true, codemode: false, orchestrate: false,
-                                  goal: .init(status: "paused", text: "Ship the menu")),
+            modes: PiSessionModes(
+                fast: true, codemode: false, orchestrate: false,
+                goal: .init(status: "paused", text: "Ship the menu")),
             context: ContextUsage(used: 170_000, size: 200_000),
             runningSubagents: 2)
         XCTAssertEqual(SlashMenu.badge(for: "fast", facts: facts), SlashBadge(label: "On", tone: .on))
@@ -109,8 +120,9 @@ final class SlashMenuTests: XCTestCase {
         XCTAssertEqual(SlashMenu.badge(for: "orchestrate", facts: facts), SlashBadge(label: "Off", tone: .off))
         XCTAssertEqual(SlashMenu.badge(for: "goal", facts: facts), SlashBadge(label: "Paused", tone: .neutral))
         XCTAssertEqual(SlashMenu.badge(for: "compact", facts: facts), SlashBadge(label: "85% used", tone: .warning))
-        XCTAssertEqual(SlashMenu.badge(for: "subagent-status", facts: facts),
-                       SlashBadge(label: "2 running", tone: .on))
+        XCTAssertEqual(
+            SlashMenu.badge(for: "subagent-status", facts: facts),
+            SlashBadge(label: "2 running", tone: .on))
         XCTAssertNil(SlashMenu.badge(for: "subagents", facts: facts))
         // A quieter context reads plainly; a running goal is on.
         var calm = facts
@@ -137,8 +149,11 @@ final class SlashMenuTests: XCTestCase {
     func testSessionModesDecodeTheEnginesShape() throws {
         let json = #"{"fast":true,"codemode":false,"orchestrate":true,"goal":{"status":"active","text":"Ship"}}"#
         let modes = try JSONDecoder().decode(PiSessionModes.self, from: Data(json.utf8))
-        XCTAssertEqual(modes, PiSessionModes(fast: true, codemode: false, orchestrate: true,
-                                             goal: .init(status: "active", text: "Ship")))
+        XCTAssertEqual(
+            modes,
+            PiSessionModes(
+                fast: true, codemode: false, orchestrate: true,
+                goal: .init(status: "active", text: "Ship")))
         // An engine from before the Scripts switch sends no codemode: on.
         let old = try JSONDecoder().decode(PiSessionModes.self, from: Data(#"{"fast":false,"orchestrate":false}"#.utf8))
         XCTAssertTrue(old.codemode)
@@ -168,7 +183,8 @@ final class SlashMenuTests: XCTestCase {
     }
 
     func testSlashCommandDecodesTheWireShape() throws {
-        let json = #"[{"name":"compact","description":"Compact","inputHint":"custom instructions"},{"name":"x"},{"name":"y","inputHint":"path"}]"#
+        let json =
+            #"[{"name":"compact","description":"Compact","inputHint":"custom instructions"},{"name":"x"},{"name":"y","inputHint":"path"}]"#
         let decoded = try JSONDecoder().decode([SlashCommand].self, from: Data(json.utf8))
         XCTAssertEqual(decoded[0].detail, "Compact · <custom instructions>")
         XCTAssertNil(decoded[1].detail)

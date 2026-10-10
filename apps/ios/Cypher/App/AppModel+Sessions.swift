@@ -46,7 +46,8 @@ extension AppModel {
             all.forEach { _ = demo.sessionStore(for: $0.id) }  // offline, no rooms
             return
         }
-        let active = all
+        let active =
+            all
             .sorted { ($0.lastMessageAt ?? $0.createdAt) > ($1.lastMessageAt ?? $1.createdAt) }
         for chat in active where sessionStores.count < Self.liveSessionLimit {
             _ = warmSessionStore(for: chat)
@@ -64,9 +65,10 @@ extension AppModel {
             }
             Task { @MainActor [weak self] in
                 guard await !store.hasUnpushedUpdates(), let self,
-                      self.sessionStores[id] === store,
-                      let rank = self.recentSessionIds.firstIndex(of: id),
-                      rank >= Self.liveSessionLimit else { return }
+                    self.sessionStores[id] === store,
+                    let rank = self.recentSessionIds.firstIndex(of: id),
+                    rank >= Self.liveSessionLimit
+                else { return }
                 self.sessionStores.removeValue(forKey: id)
                 self.recentSessionIds.remove(at: rank)
                 store.stop()

@@ -65,10 +65,12 @@ struct RefPickerSheet: View {
     }
 
     private func row(_ ref: RepoRef) -> some View {
-        PickRow(title: ref.name,
-                subtitle: subtitle(for: ref),
-                busy: switching == ref.name,
-                selected: ref.name == selected) {
+        PickRow(
+            title: ref.name,
+            subtitle: subtitle(for: ref),
+            busy: switching == ref.name,
+            selected: ref.name == selected
+        ) {
             guard switching == nil else { return }
             UISelectionFeedbackGenerator().selectionChanged()
             error = nil
@@ -108,12 +110,14 @@ struct CheckoutPickerSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     SheetLabel("Checkout")
-                    row(.local,
+                    row(
+                        .local,
                         title: selectedRefHasWorktree ? "Current worktree" : "Current checkout",
                         subtitle: selectedRefHasWorktree
                             ? "Reuse the picked ref's existing worktree"
                             : "Run in the space's folder as-is")
-                    row(.newWorktree, title: "New worktree",
+                    row(
+                        .newWorktree, title: "New worktree",
                         subtitle: "A fresh isolated worktree created off the picked base ref")
                 }
                 .padding(20)

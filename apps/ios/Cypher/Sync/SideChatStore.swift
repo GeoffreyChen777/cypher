@@ -41,8 +41,10 @@ final class SideChatStore {
 
     /// Live: talk to `relay` (the parent's host). Demo: `demo` supplies an
     /// offline store with a scripted responder.
-    init(parent: Chat, quote: String, anchorEntryId: String?, relay: DeviceRelayClient?,
-         config: AppConfig, demo: DemoDataset? = nil) {
+    init(
+        parent: Chat, quote: String, anchorEntryId: String?, relay: DeviceRelayClient?,
+        config: AppConfig, demo: DemoDataset? = nil
+    ) {
         self.parent = parent
         self.quote = quote
         self.anchorEntryId = anchorEntryId
@@ -75,11 +77,13 @@ final class SideChatStore {
         var source: [String: Any] = ["kind": "transcript"]
         if let anchorEntryId { source["anchorMessageId"] = anchorEntryId }
         do {
-            let started: Started = try await relay.call(method: "StartSideChat", params: [
-                "parentChatId": parent.id,
-                "source": source,
-                "selectedText": String(quote.prefix(64_000)),
-            ], timeoutSeconds: 15)
+            let started: Started = try await relay.call(
+                method: "StartSideChat",
+                params: [
+                    "parentChatId": parent.id,
+                    "source": source,
+                    "selectedText": String(quote.prefix(64_000)),
+                ], timeoutSeconds: 15)
             // Closed while starting: don't leave it running on the host.
             guard !disposed else {
                 dispose(started.sideChatId)
@@ -111,8 +115,9 @@ final class SideChatStore {
         }
         guard let relay else { throw RelayError.notConnected }
         struct Promoted: Decodable { var chatId: String }
-        let promoted: Promoted = try await relay.call(method: "PromoteSideChat",
-                                                      params: ["sideChatId": sideChatId], timeoutSeconds: 15)
+        let promoted: Promoted = try await relay.call(
+            method: "PromoteSideChat",
+            params: ["sideChatId": sideChatId], timeoutSeconds: 15)
         disposed = true  // it's a real chat now: nothing to dispose
         stopWatching()
         return promoted.chatId
@@ -145,14 +150,19 @@ final class SideChatStore {
             send: { [weak self] prompt, messageId in
                 // The side chat has no row, so the request must name the
                 // harness and model itself (else the host's default harness).
-                let request = RunRequest(prompt: prompt, harness: parent.config?.harness,
-                                         model: parent.config?.model,
-                                         reasoning: parent.config?.reasoning,
-                                         modelOptions: parent.config?.modelOptions ?? [:],
-                                         cwd: parent.cwd ?? "",
-                                         sandbox: parent.config?.sandbox ?? "workspace-write")
-                self?.call("SendSideChat", ["sideChatId": id, "request": Self.json(request),
-                                            "messageId": messageId], failure: "Couldn't send")
+                let request = RunRequest(
+                    prompt: prompt, harness: parent.config?.harness,
+                    model: parent.config?.model,
+                    reasoning: parent.config?.reasoning,
+                    modelOptions: parent.config?.modelOptions ?? [:],
+                    cwd: parent.cwd ?? "",
+                    sandbox: parent.config?.sandbox ?? "workspace-write")
+                self?.call(
+                    "SendSideChat",
+                    [
+                        "sideChatId": id, "request": Self.json(request),
+                        "messageId": messageId,
+                    ], failure: "Couldn't send")
                 return true
             },
             interrupt: { [weak self] in
@@ -160,9 +170,13 @@ final class SideChatStore {
                 return true
             },
             respondInput: { [weak self] requestId, answers in
-                self?.call("RespondSideChatInput", ["sideChatId": id, "requestId": requestId,
-                                                    "answers": answers.map(Self.json)],
-                           failure: "Couldn't send the answer")
+                self?.call(
+                    "RespondSideChatInput",
+                    [
+                        "sideChatId": id, "requestId": requestId,
+                        "answers": answers.map(Self.json),
+                    ],
+                    failure: "Couldn't send the answer")
                 return true
             })
     }
@@ -186,47 +200,53 @@ final class SideChatStore {
     /// blindly re-watching a reaped side chat would leave an empty chat doc
     /// on the host. `WatchSideChatStatus` rejects unknown ids — the probe.
     private func watch(id: String, relay: DeviceRelayClient) {
-        watches.append(Task { @MainActor [weak self] in
-            var desyncs = 0
-            while !Task.isCancelled {
-                do {
-                    for try await item in relay.subscribe(method: "WatchDocMessages", params: ["chatId": id]) {
-                        guard let self, !Task.isCancelled else { return }
-                        guard let frame = try JSONSerialization.jsonObject(with: item) as? [String: Any] else { continue }
-                        try self.feed.apply(frame)
-                        self.session.setEntries(self.feed.messages)
-                        desyncs = 0
+        watches.append(
+            Task { @MainActor [weak self] in
+                var desyncs = 0
+                while !Task.isCancelled {
+                    do {
+                        for try await item in relay.subscribe(method: "WatchDocMessages", params: ["chatId": id]) {
+                            guard let self, !Task.isCancelled else { return }
+                            guard let frame = try JSONSerialization.jsonObject(with: item) as? [String: Any] else {
+                                continue
+                            }
+                            try self.feed.apply(frame)
+                            self.session.setEntries(self.feed.messages)
+                            desyncs = 0
+                        }
+                        break  // the host ended it: disposed or reaped
+                    } catch is TranscriptFeed.Desync {
+                        // The stream was alive a moment ago; a fresh subscribe
+                        // starts with a reset.
+                        desyncs += 1
+                        if desyncs > 3 { break }
+                    } catch {
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                        guard !Task.isCancelled, await Self.alive(id: id, relay: relay) else { break }
                     }
-                    break  // the host ended it: disposed or reaped
-                } catch is TranscriptFeed.Desync {
-                    // The stream was alive a moment ago; a fresh subscribe
-                    // starts with a reset.
-                    desyncs += 1
-                    if desyncs > 3 { break }
-                } catch {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    guard !Task.isCancelled, await Self.alive(id: id, relay: relay) else { break }
                 }
-            }
-            guard let self, !Task.isCancelled, !self.disposed else { return }
-            self.phase = .ended("This side chat has ended — the connection to its device dropped, or it sat unwatched too long.")
-        })
-        watches.append(Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                do {
-                    for try await item in relay.subscribe(method: "WatchSideChatStatus", params: ["sideChatId": id]) {
-                        guard let self else { return }
-                        let object = try? JSONSerialization.jsonObject(with: item, options: .fragmentsAllowed)
-                        let status = (object as? [String: Any])?["status"] as? String
-                        self.status = status.flatMap(SessionStatus.init(rawValue:)) ?? .idle
+                guard let self, !Task.isCancelled, !self.disposed else { return }
+                self.phase = .ended(
+                    "This side chat has ended — the connection to its device dropped, or it sat unwatched too long.")
+            })
+        watches.append(
+            Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    do {
+                        for try await item in relay.subscribe(method: "WatchSideChatStatus", params: ["sideChatId": id])
+                        {
+                            guard let self else { return }
+                            let object = try? JSONSerialization.jsonObject(with: item, options: .fragmentsAllowed)
+                            let status = (object as? [String: Any])?["status"] as? String
+                            self.status = status.flatMap(SessionStatus.init(rawValue:)) ?? .idle
+                        }
+                        return
+                    } catch {
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                        guard !Task.isCancelled, await Self.alive(id: id, relay: relay) else { return }
                     }
-                    return
-                } catch {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    guard !Task.isCancelled, await Self.alive(id: id, relay: relay) else { return }
                 }
-            }
-        })
+            })
     }
 
     /// Whether the host still tracks this side chat: its status watch
@@ -260,7 +280,8 @@ final class SideChatStore {
 
     private static func json<T: Encodable>(_ value: T) -> Any {
         guard let data = try? JSONEncoder().encode(value),
-              let object = try? JSONSerialization.jsonObject(with: data) else { return [:] }
+            let object = try? JSONSerialization.jsonObject(with: data)
+        else { return [:] }
         return object
     }
 

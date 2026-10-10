@@ -5,21 +5,26 @@ import Loro
 @MainActor
 final class SteerBubbleTests: XCTestCase {
     private func entry(_ id: String, role: MessageRole = .user, steer: Bool = false) -> MessageEntry {
-        .fixture(id, role: role, parts: [.text(id: "text", text: "Continue")],
-                 createdAt: 10, deviceId: "host", isSteer: steer)
+        .fixture(
+            id, role: role, parts: [.text(id: "text", text: "Continue")],
+            createdAt: 10, deviceId: "host", isSteer: steer)
     }
 
     private func message(_ doc: LoroDoc, id: String, role: String = "user") throws {
         let map = try doc.getList(id: "messages").pushContainer(child: LoroMap())
         try map.insert(key: "id", v: id)
         try map.insert(key: "role", v: role)
-        try map.insert(key: "parts", v: LoroValue.fromJSON([
-            ["id": "text", "kind": "text", "text": "Continue"]
-        ]))
+        try map.insert(
+            key: "parts",
+            v: LoroValue.fromJSON([
+                ["id": "text", "kind": "text", "text": "Continue"]
+            ]))
     }
 
-    private func command(_ doc: LoroDoc, id: String?, kind: String = "steer",
-                         payloadKind: String = "steer", status: String = "applied") throws {
+    private func command(
+        _ doc: LoroDoc, id: String?, kind: String = "steer",
+        payloadKind: String = "steer", status: String = "applied"
+    ) throws {
         let map = try doc.getList(id: "commands").pushContainer(child: LoroMap())
         try map.insert(key: "kind", v: kind)
         try map.insert(key: "status", v: status)
@@ -95,16 +100,22 @@ final class SteerBubbleTests: XCTestCase {
             XCTAssertEqual(text, "Continue")
             XCTAssertTrue(isSteer)
         }
-        let normal = try XCTUnwrap(buildRows([preceding], pending: [
-            PendingSend(messageId: "normal", text: "Continue", at: 11)
-        ]).last)
+        let normal = try XCTUnwrap(
+            buildRows(
+                [preceding],
+                pending: [
+                    PendingSend(messageId: "normal", text: "Continue", at: 11)
+                ]
+            ).last)
         XCTAssertEqual(normal.topGap, 36)
     }
 
     func testDemoSendPathAlsoKeepsExplicitSteerIntent() {
-        let store = SessionStore(chatId: "demo", config: AppConfig(
-            edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
-            userId: "test", orgId: "test", deviceId: "phone", deviceName: "Phone"), offline: true)
+        let store = SessionStore(
+            chatId: "demo",
+            config: AppConfig(
+                edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
+                userId: "test", orgId: "test", deviceId: "phone", deviceName: "Phone"), offline: true)
         var received: (String, Bool)?
         store.demoResponder = { received = ($0, $1) }
         XCTAssertTrue(store.sendSteer(prompt: "Continue"))

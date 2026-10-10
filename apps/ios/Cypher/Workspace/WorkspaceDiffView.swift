@@ -27,20 +27,28 @@ struct WorkspaceDiffView: View {
             ZStack {
                 let oversized = entries == nil && patch.utf8.count > 512 * 1024
                 if !oversized && status != .failed && status != .tooLarge {
-                    WorkspaceDiffWebView(path: path, patch: patch, split: split,
-                                         dark: colorScheme == .dark,
-                                         entries: entries, loadSources: loadSources) { status = $0 }
-                        .id(revision)
+                    WorkspaceDiffWebView(
+                        path: path, patch: patch, split: split,
+                        dark: colorScheme == .dark,
+                        entries: entries, loadSources: loadSources
+                    ) { status = $0 }
+                    .id(revision)
                 }
                 if !oversized && status == .loading {
                     ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Theme.bg)
                 } else if oversized || status == .failed || status == .tooLarge {
                     ContentUnavailableView {
-                        Label(oversized || status == .tooLarge ? "Diff too large" : "Diff unavailable",
-                              systemImage: "doc.text")
+                        Label(
+                            oversized || status == .tooLarge ? "Diff too large" : "Diff unavailable",
+                            systemImage: "doc.text")
                     } actions: {
-                        if status == .failed { Button("Retry") { status = .loading; revision += 1 } }
+                        if status == .failed {
+                            Button("Retry") {
+                                status = .loading
+                                revision += 1
+                            }
+                        }
                         NavigationLink("Raw patch") {
                             WorkspaceDocumentView(title: path, text: patch, partial: partial)
                         }
@@ -165,10 +173,13 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
         }
         init(onStatus: @escaping (DiffRendererStatus) -> Void) { self.onStatus = onStatus }
 
-        func update(path: String, patch: String, split: Bool, dark: Bool,
-                    entries: [WorkspaceDiffEntry]? = nil, source: WorkspaceSourceDocument? = nil) {
-            let input = Input(path: path, patch: entries == nil && source == nil ? patch : "",
-                              split: split, dark: dark, entries: entries, source: source)
+        func update(
+            path: String, patch: String, split: Bool, dark: Bool,
+            entries: [WorkspaceDiffEntry]? = nil, source: WorkspaceSourceDocument? = nil
+        ) {
+            let input = Input(
+                path: path, patch: entries == nil && source == nil ? patch : "",
+                split: split, dark: dark, entries: entries, source: source)
             guard pending != input, !stopped else { return }
             cancelSourceTasks()
             pending = input
@@ -208,8 +219,10 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
                 payload["canLoadContext"] = false
             }
             let arguments: [String: Any] = ["input": payload]
-            webView.callAsyncJavaScript("await window.cypherDiff.render(input)",
-                                       arguments: arguments, in: nil, in: .page) { [weak self] result in
+            webView.callAsyncJavaScript(
+                "await window.cypherDiff.render(input)",
+                arguments: arguments, in: nil, in: .page
+            ) { [weak self] result in
                 guard let self, !self.stopped, self.activeID == id else { return }
                 if case .failure = result { self.report(.failed) }
             }
@@ -243,7 +256,8 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
         /// JS supplies an index, never a filesystem path or an RPC method.
         private func requestContext(_ body: [String: String]) {
             guard let token = body["token"], !token.isEmpty, token.utf8.count <= 64, sourceTasks[token] == nil,
-                  let index = body["file"].flatMap(Int.init), let pending, pending.source == nil else { return }
+                let index = body["file"].flatMap(Int.init), let pending, pending.source == nil
+            else { return }
             let paths = pending.entries?.prefix(250).map(\.path) ?? [pending.path]
             guard paths.indices.contains(index) else { return }
             guard let loadSources, sourceTasks.count < 2 else {
@@ -260,8 +274,11 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
                 } catch {
                     guard let self, !Task.isCancelled, !self.stopped, self.activeID == id else { return }
                     let code: String
-                    if case .stale? = error as? WorkspaceDiffContextError { code = "stale" }
-                    else { code = "unavailable" }
+                    if case .stale? = error as? WorkspaceDiffContextError {
+                        code = "stale"
+                    } else {
+                        code = "unavailable"
+                    }
                     self.respondContext(token: token, code: code)
                     self.sourceTasks[token] = nil
                 }
@@ -275,14 +292,18 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
                 value["oldText"] = sources.oldText.map { $0 as Any } ?? NSNull()
                 value["newText"] = sources.newText.map { $0 as Any } ?? NSNull()
             }
-            webView?.callAsyncJavaScript("window.cypherDiff.contextResult(value)",
+            webView?.callAsyncJavaScript(
+                "window.cypherDiff.contextResult(value)",
                 arguments: ["value": value], in: nil, in: .page, completionHandler: nil)
         }
-        func userContentController(_ userContentController: WKUserContentController,
-                                   didReceive message: WKScriptMessage) {
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage
+        ) {
             guard !stopped, message.frameInfo.isMainFrame,
-                  message.frameInfo.request.url == WorkspaceDiffWebView.resourceURL,
-                  let body = message.body as? [String: String], let event = body["event"] else { return }
+                message.frameInfo.request.url == WorkspaceDiffWebView.resourceURL,
+                let body = message.body as? [String: String], let event = body["event"]
+            else { return }
             if event == "ready" {
                 ready = true
                 renderIfReady()
@@ -296,9 +317,12 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
                 }
             }
         }
-        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                     decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
-            let allowed = navigationAction.targetFrame?.isMainFrame == true
+        func webView(
+            _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
+        ) {
+            let allowed =
+                navigationAction.targetFrame?.isMainFrame == true
                 && navigationAction.navigationType == .other
                 && navigationAction.request.url == WorkspaceDiffWebView.resourceURL
             decisionHandler(allowed ? .allow : .cancel)
@@ -307,8 +331,10 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
             guard (error as NSError).code != NSURLErrorCancelled else { return }
             report(.failed)
         }
-        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
-                     withError error: Error) {
+        func webView(
+            _ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+            withError error: Error
+        ) {
             guard (error as NSError).code != NSURLErrorCancelled else { return }
             report(.failed)
         }

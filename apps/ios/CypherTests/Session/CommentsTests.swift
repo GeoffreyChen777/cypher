@@ -43,7 +43,8 @@ final class CommentsTests: XCTestCase {
     }
 
     func testMarkdownQuotesAreVisibleTextNotHiddenLinkDestinations() {
-        let blocks = MarkdownParser.parse("Hello **world** [label](https://example.com/private)\n\n```swift\nlet x = 1\n```")
+        let blocks = MarkdownParser.parse(
+            "Hello **world** [label](https://example.com/private)\n\n```swift\nlet x = 1\n```")
         XCTAssertEqual(blocks[0].block.commentText, "Hello world label")
         XCTAssertEqual(blocks[1].block.commentText, "let x = 1")
         XCTAssertFalse(blocks[0].block.commentText.contains("https://"))
@@ -55,7 +56,7 @@ final class CommentsTests: XCTestCase {
         drafts.bind(to: "chat-a")
         drafts.begin(quote: "original text")
         XCTAssertTrue(drafts.comments.isEmpty)
-        drafts.presented = false // cancel, no saved state
+        drafts.presented = false  // cancel, no saved state
         XCTAssertTrue(drafts.comments.isEmpty)
         drafts.begin(quote: "original text")
         XCTAssertNil(drafts.save(source: try XCTUnwrap(drafts.editor), quote: "text", comment: "Explain"))
@@ -130,14 +131,17 @@ final class CommentsTests: XCTestCase {
 
     @MainActor
     func testRunAndSteerUseSiblingAgentPromptButKeepVisibleEchoClean() throws {
-        let config = AppConfig(edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
+        let config = AppConfig(
+            edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
             userId: "test", orgId: "test", deviceId: "ios-test", deviceName: "test")
-        let store = SessionStore(chatId: "test", config: config) // no start, no host/nudge
-        let chat = Chat(id: "test", deviceId: "host", title: nil, archived: false,
+        let store = SessionStore(chatId: "test", config: config)  // no start, no host/nudge
+        let chat = Chat(
+            id: "test", deviceId: "host", title: nil, archived: false,
             cwd: "/project", branch: nil, checkoutId: nil,
             config: ChatConfig(harness: "pi", model: "provider/model", reasoning: nil, sandbox: nil),
             lastMessagePreview: nil, lastMessageAt: nil, createdAt: 0, spaceId: "project", lastSeenAt: nil)
-        let effective = try CommentPrompt.agentPrompt([DraftComment(quote: "quote", comment: "explain")], visible: "visible")
+        let effective = try CommentPrompt.agentPrompt(
+            [DraftComment(quote: "quote", comment: "explain")], visible: "visible")
         XCTAssertTrue(store.sendRun(prompt: "visible", chat: chat, attachments: ["/image.png"], agentPrompt: effective))
         XCTAssertTrue(store.sendSteer(prompt: "", agentPrompt: effective))
         XCTAssertTrue(store.sendRun(prompt: "plain", chat: chat))

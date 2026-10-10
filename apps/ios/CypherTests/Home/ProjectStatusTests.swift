@@ -18,8 +18,10 @@ final class ProjectStatusTests: XCTestCase {
     }
 
     func testActivityBadgesPutAttentionFirstAndSkipIdle() {
-        let counts = ChatIndicator.activityCounts([.completed, .working, .idle, .awaitingInput,
-                                                   .awaitingInput, .errored, .completed])
+        let counts = ChatIndicator.activityCounts([
+            .completed, .working, .idle, .awaitingInput,
+            .awaitingInput, .errored, .completed,
+        ])
         XCTAssertEqual(counts.map(\.indicator), [.awaitingInput, .errored, .working, .completed])
         XCTAssertEqual(counts.map(\.label), ["2 need input", "1 failed", "1 running", "2 done"])
         XCTAssertEqual(ChatIndicator.activityCounts([.awaitingInput]).first?.label, "1 needs input")

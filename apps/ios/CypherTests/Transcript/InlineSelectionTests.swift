@@ -79,25 +79,31 @@ final class InlineSelectionTests: XCTestCase {
         XCTAssertEqual(attributed.string, "Text code link")
         XCTAssertEqual((attributed.attribute(.font, at: 0, effectiveRange: nil) as? UIFont)?.pointSize, MD.textSize)
         XCTAssertNotNil(attributed.attribute(.cypherInlineCode, at: 5, effectiveRange: nil))
-        XCTAssertEqual((attributed.attribute(.font, at: 5, effectiveRange: nil) as? UIFont)?.pointSize, MD.textSize - 1.5)
-        XCTAssertEqual(attributed.attribute(.link, at: 10, effectiveRange: nil) as? URL, URL(string: "https://example.com"))
-        XCTAssertEqual((attributed.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)?.maximumLineHeight, MD.lineHeight)
+        XCTAssertEqual(
+            (attributed.attribute(.font, at: 5, effectiveRange: nil) as? UIFont)?.pointSize, MD.textSize - 1.5)
+        XCTAssertEqual(
+            attributed.attribute(.link, at: 10, effectiveRange: nil) as? URL, URL(string: "https://example.com"))
+        XCTAssertEqual(
+            (attributed.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)?.maximumLineHeight,
+            MD.lineHeight)
     }
 
     func testCodeSelectionPreservesNewlinesAndSyntaxColors() {
         let source = "let x = 1\nprint(x)"
         let attributed = TranscriptTextStyle.code(source, spans: [[TokenSpan(range: 0..<3, cls: .keyword)]])
         XCTAssertEqual(attributed.string, source)
-        XCTAssertEqual(attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor,
-                       UIColor(Theme.tokenKeyword))
+        XCTAssertEqual(
+            attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor,
+            UIColor(Theme.tokenKeyword))
         XCTAssertEqual((attributed.attribute(.font, at: 0, effectiveRange: nil) as? UIFont)?.pointSize, MD.codeTextSize)
         XCTAssertEqual(CommentPrompt.selectedText(source, range: NSRange(location: 8, length: 9)), "1\nprint(x")
     }
 
     func testNativeTextLaysOutInsideSwiftUIWithoutReplacingTheScrollView() async throws {
-        let view = SelectableTranscriptText(attributed: TranscriptTextStyle.inline([
-            InlineRun(text: String(repeating: "A paragraph with selectable text. ", count: 8), style: .plain),
-        ]))
+        let view = SelectableTranscriptText(
+            attributed: TranscriptTextStyle.inline([
+                InlineRun(text: String(repeating: "A paragraph with selectable text. ", count: 8), style: .plain)
+            ]))
         let hosted = try HostedWindow(view.frame(width: 240), frame: CGRect(x: 0, y: 0, width: 300, height: 600))
         defer { hosted.close() }
         let host = hosted.host

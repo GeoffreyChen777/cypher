@@ -120,18 +120,22 @@ private struct FocusComposerFixture: View {
     let heightChanged: (CGFloat) -> Void
     var body: some View {
         ScrollView { Text("Synced transcript").frame(maxWidth: .infinity, minHeight: 500) }
-        .safeAreaBar(edge: .bottom, spacing: 0) {
-            ComposerShell(
-                draft: draft.binding,
-                editorRevision: draft.revision,
-                sendEnabled: true,
-                showStop: false,
-                onSend: { draft.clearAfterSend() }
-            ) { Text("Pi · High") }
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heightChanged($0) }
-        }
-        .frame(width: 360)
-        .frame(maxHeight: .infinity, alignment: .bottom)
+            .safeAreaBar(edge: .bottom, spacing: 0) {
+                ComposerShell(
+                    draft: draft.binding,
+                    editorRevision: draft.revision,
+                    sendEnabled: true,
+                    showStop: false,
+                    onSend: { draft.clearAfterSend() }
+                ) { Text("Pi · High") }
+                .onGeometryChange(for: CGFloat.self) {
+                    $0.size.height
+                } action: {
+                    heightChanged($0)
+                }
+            }
+            .frame(width: 360)
+            .frame(maxHeight: .infinity, alignment: .bottom)
     }
 }
 

@@ -80,9 +80,10 @@ struct RootView: View {
     /// Read only while the splash is up, so RootView stops observing the
     /// workspace rows once it's gone.
     private var splashReady: Bool {
-        BootSplash.contentReady(restored: model.restored, phase: model.phase,
-                                demo: model.demo != nil,
-                                connected: model.workspace?.connected == true,
-                                hasRows: !model.spaces.isEmpty || !model.allChats.isEmpty)
+        BootSplash.contentReady(
+            restored: model.restored, phase: model.phase,
+            demo: model.demo != nil,
+            connected: model.workspace?.connected == true,
+            hasRows: !model.spaces.isEmpty || !model.allChats.isEmpty)
     }
 }

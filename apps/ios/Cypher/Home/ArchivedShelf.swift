@@ -7,8 +7,8 @@
 
 import SwiftUI
 
-private extension Chat {
-    var shelfRowId: String { "archived-\(id)" }
+extension Chat {
+    fileprivate var shelfRowId: String { "archived-\(id)" }
 }
 
 struct ArchivedSection: View {

@@ -25,7 +25,8 @@ extension AppModel {
                         .setEntries(BenchRunner.syntheticEntries(turns: 120))
                 }
                 if let ix = args.firstIndex(of: "-turns"), ix + 1 < args.count,
-                   let turns = Int(args[ix + 1]), let demo {
+                    let turns = Int(args[ix + 1]), let demo
+                {
                     // A session of any length, e.g. for the turn scrubber.
                     demo.sessionStore(for: chatId)
                         .setEntries(BenchRunner.syntheticEntries(turns: turns))
@@ -76,8 +77,7 @@ extension AppModel {
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
                 withAnimation(Motion.resort) {
-                    if archived { self.archive(chatId: chatId) }
-                    else { self.unarchive(chatId: chatId) }
+                    if archived { self.archive(chatId: chatId) } else { self.unarchive(chatId: chatId) }
                 }
             }
         }

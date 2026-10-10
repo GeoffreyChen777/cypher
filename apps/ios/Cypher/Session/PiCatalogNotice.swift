@@ -13,12 +13,14 @@ struct PiCatalogNotice: View {
                 if catalog.loading {
                     ProgressView().controlSize(.small)
                 }
-                Text(catalog.loading
-                     ? "Loading Pi models from \(deviceName)…"
-                     : "\(deviceName): \(catalog.error?.message ?? "")")
-                    .font(Theme.sans(12))
-                    .foregroundStyle(Theme.textMuted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(
+                    catalog.loading
+                        ? "Loading Pi models from \(deviceName)…"
+                        : "\(deviceName): \(catalog.error?.message ?? "")"
+                )
+                .font(Theme.sans(12))
+                .foregroundStyle(Theme.textMuted)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 if !catalog.loading {
                     Button("Retry", action: retry).font(Theme.sans(12, weight: .medium))
                 }

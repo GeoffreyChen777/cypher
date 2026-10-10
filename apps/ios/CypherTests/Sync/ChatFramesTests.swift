@@ -8,13 +8,15 @@ import XCTest
 final class ChatFramesTests: XCTestCase {
     func testPinsTheWireLayout() {
         // Must match the Rust/TS vector: [type][headerLen u32 LE][header][payload].
-        let frame = ChatWire.encode(ChatFrameType.push,
-                                    header: ["batchId": "b1"],
-                                    payload: Data([9, 8, 7]))
+        let frame = ChatWire.encode(
+            ChatFrameType.push,
+            header: ["batchId": "b1"],
+            payload: Data([9, 8, 7]))
         XCTAssertEqual(frame[0], ChatFrameType.push)
         let header = Data(#"{"batchId":"b1"}"#.utf8)
-        XCTAssertEqual([UInt8](frame[1..<5]),
-                       [UInt8(header.count), 0, 0, 0])
+        XCTAssertEqual(
+            [UInt8](frame[1..<5]),
+            [UInt8(header.count), 0, 0, 0])
         XCTAssertEqual(frame.subdata(in: 5..<(5 + header.count)), header)
         XCTAssertEqual(frame.subdata(in: (5 + header.count)..<frame.count), Data([9, 8, 7]))
     }
@@ -40,8 +42,9 @@ final class ChatFramesTests: XCTestCase {
         arr.append(arrJSON)
         XCTAssertNil(ChatWire.decode(arr))
         // Oversized header.
-        let fat = ChatWire.encode(ChatFrameType.hello,
-                                  header: ["pad": String(repeating: "x", count: chatFrameMaxHeaderBytes)])
+        let fat = ChatWire.encode(
+            ChatFrameType.hello,
+            header: ["pad": String(repeating: "x", count: chatFrameMaxHeaderBytes)])
         XCTAssertNil(ChatWire.decode(fat))
     }
 
@@ -59,26 +62,34 @@ final class ChatFramesTests: XCTestCase {
     /// The catch-up decision table from chat_client.rs plan_catch_up.
     func testPlanCatchUp() {
         func state(_ head: UInt64, _ ckSeq: UInt64, _ ckSize: UInt64) -> ChatStateHeader {
-            ChatStateHeader(["headSeq": head, "seqFloor": 0,
-                             "checkpointSeq": ckSeq, "checkpointSize": ckSize])!
+            ChatStateHeader([
+                "headSeq": head, "seqFloor": 0,
+                "checkpointSeq": ckSeq, "checkpointSize": ckSize,
+            ])!
         }
         // No checkpoint: rows from the cursor.
-        XCTAssertEqual(chatPlanCatchUp(cursor: 4, state: state(10, 0, 0), frontierContained: false),
-                       .rowsOnly(after: 4))
+        XCTAssertEqual(
+            chatPlanCatchUp(cursor: 4, state: state(10, 0, 0), frontierContained: false),
+            .rowsOnly(after: 4))
         // Contained frontier skips rows the checkpoint covers.
-        XCTAssertEqual(chatPlanCatchUp(cursor: 2, state: state(10, 6, 100), frontierContained: true),
-                       .rowsOnly(after: 6))
-        XCTAssertEqual(chatPlanCatchUp(cursor: 8, state: state(10, 6, 100), frontierContained: true),
-                       .rowsOnly(after: 8))
+        XCTAssertEqual(
+            chatPlanCatchUp(cursor: 2, state: state(10, 6, 100), frontierContained: true),
+            .rowsOnly(after: 6))
+        XCTAssertEqual(
+            chatPlanCatchUp(cursor: 8, state: state(10, 6, 100), frontierContained: true),
+            .rowsOnly(after: 8))
         // Missing frontier: fetch the checkpoint, then rows after it.
-        XCTAssertEqual(chatPlanCatchUp(cursor: 2, state: state(10, 6, 100), frontierContained: false),
-                       .checkpointThenRows(after: 6))
+        XCTAssertEqual(
+            chatPlanCatchUp(cursor: 2, state: state(10, 6, 100), frontierContained: false),
+            .checkpointThenRows(after: 6))
         // Server behind the cursor (reset/wipe): the cursor is meaningless.
-        XCTAssertEqual(chatPlanCatchUp(cursor: 20, state: state(10, 0, 0), frontierContained: false),
-                       .rowsOnly(after: 0))
+        XCTAssertEqual(
+            chatPlanCatchUp(cursor: 20, state: state(10, 0, 0), frontierContained: false),
+            .rowsOnly(after: 0))
         // A freshly SEEDED room: checkpoint covers seq 0 but has SIZE — it
         // must not be misread as "no checkpoint".
-        XCTAssertEqual(chatPlanCatchUp(cursor: 0, state: state(0, 0, 5_000), frontierContained: false),
-                       .checkpointThenRows(after: 0))
+        XCTAssertEqual(
+            chatPlanCatchUp(cursor: 0, state: state(0, 0, 5_000), frontierContained: false),
+            .checkpointThenRows(after: 0))
     }
 }

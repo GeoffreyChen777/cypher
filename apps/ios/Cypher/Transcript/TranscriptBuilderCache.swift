@@ -26,13 +26,16 @@ final class TranscriptBuilderCache {
     /// (`togglePins` over each toggle's default) folded away. Rows only
     /// change when the doc or the pins do — gate on both and hand back the
     /// same array.
-    func rows(revision: UInt64,
-              entries: [MessageEntry],
-              pendingSends: [PendingSend],
-              togglePins: [String: Bool]) -> [TranscriptRow] {
+    func rows(
+        revision: UInt64,
+        entries: [MessageEntry],
+        pendingSends: [PendingSend],
+        togglePins: [String: Bool]
+    ) -> [TranscriptRow] {
         if cachedRevision != revision {
-            builtRows = TranscriptRowBuilder.rows(entries: entries, pendingSends: pendingSends,
-                                                  parsers: &parsers, completed: &completed)
+            builtRows = TranscriptRowBuilder.rows(
+                entries: entries, pendingSends: pendingSends,
+                parsers: &parsers, completed: &completed)
             cachedRevision = revision
             foldedFor = nil
         }
@@ -58,7 +61,8 @@ final class TranscriptBuilderCache {
             let streaming = entry.status == .streaming
             let lastIx = entry.parts.indices.last
             for (ix, part) in entry.parts.enumerated() {
-                let partId: String, text: String
+                let partId: String
+                let text: String
                 switch part {
                 case .text(let id, let body, _), .reasoning(let id, let body):
                     (partId, text) = (id, body)

@@ -110,7 +110,10 @@ struct ArcBand: Shape {
 
     var animatableData: AnimatablePair<Double, Double> {
         get { AnimatablePair(center, share) }
-        set { center = newValue.first; share = newValue.second }
+        set {
+            center = newValue.first
+            share = newValue.second
+        }
     }
 
     func path(in rect: CGRect) -> Path {
@@ -124,8 +127,9 @@ struct ArcBand: Shape {
             // CGFloat, like the radius: Xcode 26.3 finds a Double `cos` here
             // ambiguous between CoreGraphics and Darwin.
             let angle = CGFloat((start + (end - start) * Double(step) / Double(steps)) * .pi / 180)
-            let point = CGPoint(x: rect.midX + ContextArc.radius * cos(angle),
-                                y: rect.midY + ContextArc.radius * sin(angle))
+            let point = CGPoint(
+                x: rect.midX + ContextArc.radius * cos(angle),
+                y: rect.midY + ContextArc.radius * sin(angle))
             if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
         }
         return path

@@ -39,16 +39,23 @@ enum StreamPreviewWire {
         // Foundation otherwise auto-detects UTF-16/32 and accepts a BOM, unlike
         // the UTF-8-only contract. Require an ordinary JSON object's first token.
         guard String(data: rawHeader, encoding: .utf8) != nil,
-              rawHeader.first(where: { ![9, 10, 13, 32].contains($0) }) == 123,
-              let frame = ChatWire.decode(data),
-              [delta, snapshot, resume, finished, start, state, receipt].contains(frame.kind) else { return nil }
+            rawHeader.first(where: { ![9, 10, 13, 32].contains($0) }) == 123,
+            let frame = ChatWire.decode(data),
+            [delta, snapshot, resume, finished, start, state, receipt].contains(frame.kind)
+        else { return nil }
         if [start, state].contains(frame.kind) {
             let h = frame.header
-            let keys = frame.kind == start ? ["chatId", "runId", "segmentId"]
-                : h["mode"] as? String == "preview" ? ["chatId", "mode", "runId", "segmentId", "epoch"] : ["chatId", "mode"]
+            let keys =
+                frame.kind == start
+                ? ["chatId", "runId", "segmentId"]
+                : h["mode"] as? String == "preview"
+                    ? ["chatId", "mode", "runId", "segmentId", "epoch"] : ["chatId", "mode"]
             guard frame.payload.isEmpty, h.count == keys.count, keys.allSatisfy({ h[$0] != nil }),
-                  keys.filter({ $0 != "mode" }).allSatisfy({ identifier(h[$0]) }) else { return nil }
-            if frame.kind == state && !["legacy", "ready", "preview"].contains(h["mode"] as? String ?? "") { return nil }
+                keys.filter({ $0 != "mode" }).allSatisfy({ identifier(h[$0]) })
+            else { return nil }
+            if frame.kind == state && !["legacy", "ready", "preview"].contains(h["mode"] as? String ?? "") {
+                return nil
+            }
             return frame
         }
         var keys = ["chatId", "runId", "segmentId", "epoch", "revision", "baseSeq"]
@@ -56,13 +63,15 @@ enum StreamPreviewWire {
         if frame.kind == finished { keys.append("batchId") }
         let h = frame.header
         guard h.count == keys.count, keys.allSatisfy({ h[$0] != nil }),
-              keys.prefix(4).allSatisfy({ identifier(h[$0]) }),
-              let revision = integer(h["revision"]), integer(h["baseSeq"]) != nil,
-              frame.payload.count <= maxTextBytes,
-              String(data: frame.payload, encoding: .utf8) != nil else { return nil }
+            keys.prefix(4).allSatisfy({ identifier(h[$0]) }),
+            let revision = integer(h["revision"]), integer(h["baseSeq"]) != nil,
+            frame.payload.count <= maxTextBytes,
+            String(data: frame.payload, encoding: .utf8) != nil
+        else { return nil }
         if frame.kind == delta {
             guard let previous = integer(h["prevRevision"]), previous + 1 == revision,
-                  !frame.payload.isEmpty else { return nil }
+                !frame.payload.isEmpty
+            else { return nil }
         }
         if frame.kind == finished && !identifier(h["batchId"]) { return nil }
         if [resume, finished, receipt].contains(frame.kind) && !frame.payload.isEmpty { return nil }
