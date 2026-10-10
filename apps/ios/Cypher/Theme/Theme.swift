@@ -171,10 +171,10 @@ func oklchToSrgb(l: Double, c: Double, hDeg: Double) -> [Double] {
     let b = c * sin(h)
 
     // OKLab → LMS (cube roots undone)
-    let l_ = l + 0.39633778 * a + 0.21580376 * b
-    let m_ = l - 0.105561346 * a - 0.06385417 * b
-    let s_ = l - 0.08948418 * a - 1.2914855 * b
-    let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_)
+    let lPrime = l + 0.39633778 * a + 0.21580376 * b
+    let mPrime = l - 0.105561346 * a - 0.06385417 * b
+    let sPrime = l - 0.08948418 * a - 1.2914855 * b
+    let (l3, m3, s3) = (lPrime * lPrime * lPrime, mPrime * mPrime * mPrime, sPrime * sPrime * sPrime)
 
     // LMS → linear sRGB
     let r = 4.0767417 * l3 - 3.3077116 * m3 + 0.23096993 * s3

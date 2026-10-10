@@ -346,7 +346,9 @@ final class NotificationController {
                         saved.revocations.removeAll { $0.id == revoke.id }
                         persist()
                     }
-                } catch { /* retry on the next foreground/connect */ }
+                } catch {
+                    // Retried on the next foreground/connect.
+                }
             }
         }
     }

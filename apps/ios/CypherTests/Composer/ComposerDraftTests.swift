@@ -143,7 +143,8 @@ private struct LiveComposerFixture: View {
             editorRevision: draft.revision,
             sendEnabled: true,
             showStop: true,
-            onSend: { draft.clearAfterSend() }
-        ) { Text("Pi") }
+            onSend: { draft.clearAfterSend() },
+            chips: { Text("Pi") }
+        )
     }
 }
