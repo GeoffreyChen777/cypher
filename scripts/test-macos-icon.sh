@@ -7,7 +7,7 @@ scratch="$(mktemp -d "${TMPDIR:-/tmp}/cypher-icon-test.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT
 
 xcrun swift scripts/macos-icon.swift test
-xcrun swift scripts/macos-icon.swift check dist/cypher.png dist/macos/icon-1024.png
+xcrun swift scripts/macos-icon.swift check packaging/cypher.png packaging/macos/icon-1024.png
 
 # Explicit near-opaque regression fixture, independent of future brand artwork.
 # Writing simple RGBA PNG fixtures needs only the Python standard library.
@@ -39,7 +39,7 @@ fi
 grep -q 'stale or has unsafe alpha' "$scratch/negative.log"
 
 # Never rewrite artwork used by iOS, the website, or in-app UI.
-if xcrun swift scripts/macos-icon.swift generate dist/cypher.png dist/cypher.png \
+if xcrun swift scripts/macos-icon.swift generate packaging/cypher.png packaging/cypher.png \
     >"$scratch/same-path.log" 2>&1; then
   echo "FAIL: allowed overwriting the shared artwork" >&2
   exit 1
@@ -47,13 +47,13 @@ fi
 grep -q 'do not overwrite the shared artwork' "$scratch/same-path.log"
 
 # Disk round-trip, color-space preservation, idempotence, and path quoting.
-xcrun swift scripts/macos-icon.swift generate dist/cypher.png "$scratch/generated icon.png"
-xcrun swift scripts/macos-icon.swift check dist/macos/icon-1024.png "$scratch/generated icon.png"
+xcrun swift scripts/macos-icon.swift generate packaging/cypher.png "$scratch/generated icon.png"
+xcrun swift scripts/macos-icon.swift check packaging/macos/icon-1024.png "$scratch/generated icon.png"
 
 # Exercise the actual release icon code, without replacing target/package's app.
 bash scripts/package-macos.sh --icon-only "$scratch/Cypher icon.icns"
 iconutil -c iconset "$scratch/Cypher icon.icns" -o "$scratch/extracted.iconset"
-xcrun swift scripts/macos-icon.swift check dist/cypher.png \
+xcrun swift scripts/macos-icon.swift check packaging/cypher.png \
   "$scratch/extracted.iconset/icon_512x512@2x.png"
 python3 - "$scratch/extracted.iconset" <<'PY'
 from pathlib import Path

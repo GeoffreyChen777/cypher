@@ -270,9 +270,9 @@ own background color. It does not change macOS or in-app image assets.
 
 ```sh
 xcrun swift scripts/ios-icon.swift test
-xcrun swift scripts/ios-icon.swift generate dist/cypher.png \
+xcrun swift scripts/ios-icon.swift generate packaging/cypher.png \
   apps/ios/Cypher/Assets.xcassets/AppIcon.appiconset/AppIcon1024.png
-xcrun swift scripts/ios-icon.swift check dist/cypher.png \
+xcrun swift scripts/ios-icon.swift check packaging/cypher.png \
   apps/ios/Cypher/Assets.xcassets/AppIcon.appiconset/AppIcon1024.png
 ```
 
