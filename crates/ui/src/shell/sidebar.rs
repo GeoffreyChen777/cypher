@@ -81,8 +81,8 @@ impl Shell {
     }
 
     pub(super) fn close_sidebar_view_menu(&mut self, cx: &mut Context<Self>) {
-        if self.sidebar_view_menu.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.sidebar_view_menu);
+        if self.menus.sidebar_view.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.menus.sidebar_view);
             cx.notify();
         }
     }
@@ -144,8 +144,8 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let position = *self.sidebar_view_menu.get()?;
-        let closing = self.sidebar_view_menu.closing_since();
+        let position = *self.menus.sidebar_view.get()?;
+        let closing = self.menus.sidebar_view.closing_since();
         let (filter, sort) = (
             self.settings.sidebar_device_filter.clone(),
             self.settings.sidebar_sort,

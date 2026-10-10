@@ -597,7 +597,7 @@ impl Shell {
             header = header.on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.space_menu.open((menu_id.clone(), event.position));
+                    this.menus.space.open((menu_id.clone(), event.position));
                     cx.notify();
                 }),
             );
@@ -642,7 +642,8 @@ impl Shell {
                     window.prevent_default();
                     cx.stop_propagation();
                     this.close_space_menu(cx);
-                    this.space_style_menu
+                    this.menus
+                        .space_style
                         .open((space_id.clone(), event.position));
                     cx.notify();
                 }),

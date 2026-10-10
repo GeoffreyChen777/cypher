@@ -554,8 +554,8 @@ impl Shell {
     }
 
     pub(super) fn close_right_plus(&mut self, cx: &mut Context<Self>) {
-        if self.right_plus.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.right_plus);
+        if self.menus.right_plus.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.menus.right_plus);
         }
         cx.notify();
     }
@@ -1038,7 +1038,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let plus_open = self.right_plus.get() == Some(&sid);
+        let plus_open = self.menus.right_plus.get() == Some(&sid);
         let plus_group: SharedString = format!("right-surface-add-{sid}").into();
         let plus = div()
             .id(("right-surface-add", sid))
@@ -1062,15 +1062,15 @@ impl Shell {
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, _| {
                     window.prevent_default();
-                    this.right_plus.note_trigger_press();
+                    this.menus.right_plus.note_trigger_press();
                 }),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
-                if this.right_plus.take_press_was_open() {
+                if this.menus.right_plus.take_press_was_open() {
                     this.close_right_plus(cx);
                 } else {
-                    this.right_plus.open(sid);
+                    this.menus.right_plus.open(sid);
                     cx.notify();
                 }
             }))
@@ -1087,7 +1087,7 @@ impl Shell {
         if !plus_open {
             return plus;
         }
-        let closing = self.right_plus.closing_since();
+        let closing = self.menus.right_plus.closing_since();
         let menu = rail_plus_menu(sid, files_available, git, cx);
         plus.relative().child(popover::anchored_menu_below_end(
             "right-plus-menu",

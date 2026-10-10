@@ -540,8 +540,8 @@ impl Shell {
     }
 
     fn close_layout_menu(&mut self, cx: &mut Context<Self>) {
-        if self.layout_menu.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.layout_menu);
+        if self.menus.layout.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.menus.layout);
         }
         cx.notify();
     }
@@ -1283,22 +1283,22 @@ impl Shell {
                 icons::WINDOW_FRAME,
                 theme,
                 cx.listener(|this, _, _, cx| {
-                    if this.layout_menu.take_press_was_open() {
+                    if this.menus.layout.take_press_was_open() {
                         this.close_layout_menu(cx);
                     } else {
-                        this.layout_menu.open(());
+                        this.menus.layout.open(());
                         cx.notify();
                     }
                 }),
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.layout_menu.note_trigger_press()),
+                cx.listener(|this, _, _, _| this.menus.layout.note_trigger_press()),
             ),
         );
-        if self.layout_menu.get().is_some() {
+        if self.menus.layout.get().is_some() {
             let theme = Theme::of(cx).clone();
-            let closing = self.layout_menu.closing_since();
+            let closing = self.menus.layout.closing_since();
             let muted = theme.text_muted;
             let mut rows = div().flex().flex_col().gap(px(2.0));
             for preset in Preset::ALL {

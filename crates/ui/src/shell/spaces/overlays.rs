@@ -6,8 +6,8 @@ impl Shell {
     // ---- space context menu / rename / delete overlays ----
 
     pub(in crate::shell) fn close_space_menu(&mut self, cx: &mut Context<Self>) {
-        if self.space_menu.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.space_menu);
+        if self.menus.space.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.menus.space);
             cx.notify();
         }
     }
@@ -112,8 +112,8 @@ impl Shell {
     /// A project row's context menu: pin, rename, open in (or return from)
     /// its own window, remove.
     fn render_space_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (space_id, position) = self.space_menu.get().cloned()?;
-        let closing = self.space_menu.closing_since();
+        let (space_id, position) = self.menus.space.get().cloned()?;
+        let closing = self.menus.space.closing_since();
         let rename_id = space_id.clone();
         let delete_id = space_id.clone();
         let pin_id = space_id.clone();

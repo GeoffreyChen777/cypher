@@ -15,7 +15,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self.user_menu.is_open();
+        let open = self.menus.user.is_open();
         let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
         // Bottom-of-sidebar identity: avatar circle + scope/account label and
         // its secondary status line.
@@ -52,15 +52,15 @@ impl Shell {
             .on_hover(motion::hover_listener("user-menu-trigger"))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.user_menu.note_trigger_press()),
+                cx.listener(|this, _, _, _| this.menus.user.note_trigger_press()),
             )
             .on_click(cx.listener(|this, _, _, cx| {
                 // A press that found the menu open closes it (the card's
                 // mouse-down-out already began the close) — never reopen.
-                if this.user_menu.take_press_was_open() {
+                if this.menus.user.take_press_was_open() {
                     this.close_user_menu(cx);
                 } else {
-                    this.user_menu.open(());
+                    this.menus.user.open(());
                 }
                 cx.notify();
             }))
@@ -91,8 +91,8 @@ impl Shell {
                         )
                     }),
             );
-        if self.user_menu.get().is_some() {
-            let closing = self.user_menu.closing_since();
+        if self.menus.user.get().is_some() {
+            let closing = self.menus.user.closing_since();
             let menu = self.render_user_menu_card(menu_identity, action, cx);
             trigger = trigger.child(popover::anchored_menu_above(
                 "user-menu-popover",
@@ -636,8 +636,8 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (chat_id, position) = self.chat_menu.get().cloned()?;
-        let chat_menu_closing = self.chat_menu.closing_since();
+        let (chat_id, position) = self.menus.chat.get().cloned()?;
+        let chat_menu_closing = self.menus.chat.closing_since();
         let rename_id = chat_id.clone();
         let archive_id = chat_id.clone();
         let delete_id = chat_id.clone();

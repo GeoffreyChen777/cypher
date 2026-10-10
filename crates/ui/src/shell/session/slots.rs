@@ -255,7 +255,7 @@ impl Shell {
                 None => terminal.update(cx, |terminal, cx| terminal.close_all(cx)),
             }
         }
-        if self.right_plus.get() == Some(&sid) {
+        if self.menus.right_plus.get() == Some(&sid) {
             self.close_right_plus(cx);
         }
     }

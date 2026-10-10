@@ -596,7 +596,7 @@ impl Shell {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.chat_menu.open((menu_id.clone(), event.position));
+                    this.menus.chat.open((menu_id.clone(), event.position));
                     cx.notify();
                 }),
             )

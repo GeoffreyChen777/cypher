@@ -1019,6 +1019,25 @@ struct TileGeometry {
     tab_drop: Option<workspace_view::TabDropState>,
 }
 
+/// The window's popover menus (each a [`popover::Popup`] keyed by what it
+/// opened for).
+struct ShellMenus {
+    /// The dock surface strip's `+` menu, for the slot that opened it (one
+    /// menu is open at a time).
+    right_plus: popover::Popup<session::SlotId>,
+    /// The titlebar cluster's layout presets popover.
+    layout: popover::Popup<()>,
+    /// Session-row context menu: (chat id, window position).
+    chat: popover::Popup<(String, Point<Pixels>)>,
+    /// Space-row context menu (dropdown rows): (space id, window position).
+    space: popover::Popup<(String, Point<Pixels>)>,
+    /// Sidebar view menu (device filter + sort): window position.
+    sidebar_view: popover::Popup<Point<Pixels>>,
+    /// Project glyph/colour picker: (space id, window position).
+    space_style: popover::Popup<(String, Point<Pixels>)>,
+    user: popover::Popup<()>,
+}
+
 pub struct Shell {
     /// The window's main state: lists (sidebar, spaces, sessions) in
     /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
@@ -1042,11 +1061,8 @@ pub struct Shell {
     expected_chats: std::collections::HashMap<String, std::time::Instant>,
     /// Tile measurements and the tab-strip, rail and tab-drag state they drive.
     geometry: TileGeometry,
-    /// The dock surface strip's `+` menu, for the slot that opened it (one
-    /// menu is open at a time).
-    right_plus: popover::Popup<session::SlotId>,
-    /// The titlebar cluster's layout presets popover.
-    layout_menu: popover::Popup<()>,
+    /// The window's popover menus.
+    menus: ShellMenus,
     /// Chat outlet vs settings pages.
     route: Route,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
@@ -1073,8 +1089,6 @@ pub struct Shell {
     debug_setup: bool,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
-    /// Session-row context menu: (chat id, window position).
-    chat_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_dialog: Option<RenameChatDialog>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
@@ -1087,12 +1101,6 @@ pub struct Shell {
     scratch_cleanup_task: Option<Task<()>>,
     /// Follow-up after the last session of a linked worktree was deleted.
     delete_worktree_confirm: Option<OrphanWorktree>,
-    /// Space-row context menu (dropdown rows): (space id, window position).
-    space_menu: popover::Popup<(String, Point<Pixels>)>,
-    /// Sidebar view menu (device filter + sort): window position.
-    sidebar_view_menu: popover::Popup<Point<Pixels>>,
-    /// Project glyph/colour picker: (space id, window position).
-    space_style_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
     /// Space id awaiting delete confirmation (hard delete + session cascade).
     delete_space_confirm: Option<String>,
@@ -1109,7 +1117,6 @@ pub struct Shell {
     /// The count last written to the Dock badge (`None` = never written), so
     /// frequent state notifies only touch AppKit when the number changes.
     dock_badge: Option<usize>,
-    user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
     /// Session Fork idempotence: `(sourceChatId, anchorMessageId) → requestId`
@@ -1392,8 +1399,15 @@ impl Shell {
                 tile_bounds: Default::default(),
                 tab_drop: None,
             },
-            right_plus: popover::Popup::default(),
-            layout_menu: popover::Popup::default(),
+            menus: ShellMenus {
+                right_plus: popover::Popup::default(),
+                layout: popover::Popup::default(),
+                chat: popover::Popup::default(),
+                space: popover::Popup::default(),
+                sidebar_view: popover::Popup::default(),
+                space_style: popover::Popup::default(),
+                user: popover::Popup::default(),
+            },
             route,
             nav,
             devices_page: None,
@@ -1416,16 +1430,12 @@ impl Shell {
             debug_setup,
             shortcuts_sub: None,
             notifications_sub: None,
-            chat_menu: popover::Popup::default(),
             rename_dialog: None,
             delete_confirm: None,
             relaunch_quit_sent: false,
             quick_chat: None,
             scratch_cleanup_task: None,
             delete_worktree_confirm: None,
-            space_menu: popover::Popup::default(),
-            sidebar_view_menu: popover::Popup::default(),
-            space_style_menu: popover::Popup::default(),
             rename_space_dialog: None,
             delete_space_confirm: None,
             add_space: None,
@@ -1433,7 +1443,6 @@ impl Shell {
             space_boot_applied: false,
             sound_prev: std::collections::HashMap::new(),
             dock_badge: None,
-            user_menu: popover::Popup::default(),
             sidebar_notice: None,
             fork_request_ids: std::collections::HashMap::new(),
             update_flow: UpdateFlow::Idle,

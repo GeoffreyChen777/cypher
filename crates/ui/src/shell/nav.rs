@@ -5,16 +5,16 @@ use super::*;
 impl Shell {
     /// Close the user menu through the exit animation (no-op when closed).
     pub(super) fn close_user_menu(&mut self, cx: &mut Context<Self>) {
-        if self.user_menu.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.user_menu);
+        if self.menus.user.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.menus.user);
             cx.notify();
         }
     }
 
     /// Close the session-row context menu through the exit animation.
     pub(super) fn close_chat_menu(&mut self, cx: &mut Context<Self>) {
-        if self.chat_menu.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.chat_menu);
+        if self.menus.chat.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.menus.chat);
             cx.notify();
         }
     }
