@@ -273,8 +273,7 @@ impl PiRun {
         // Only AGENT-LIFECYCLE events prove a turn is running and
         // disarm the no-activity grace. Informational events fire
         // outside any turn — `thinking_level_changed` rides the
-        // set_model/set_thinking_level setup commands (live-verified:
-        // it is what hung /subagents runs), `extension_error` can
+        // set_model/set_thinking_level setup commands, `extension_error` can
         // arrive from extension activity — counting either would
         // leave a no-LLM run parked "Working" forever.
         let kind = ev.get("type").and_then(Value::as_str).unwrap_or("");

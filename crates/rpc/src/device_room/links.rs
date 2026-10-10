@@ -262,8 +262,7 @@ impl LinkCache {
     /// Transient dial failures retry in place a couple of times before
     /// surfacing: the host relay's DO periodically ends its session and
     /// rejoins within ~a second, and a user-facing call landing in that
-    /// window should ride over it, not error (user report: refs/folders
-    /// "unstable" vs the old app).
+    /// window should ride over it, not error.
     pub async fn client(self: &Arc<Self>, device_id: &str) -> Result<Arc<RpcClient>, RpcError> {
         if self.revoked.load(Ordering::Acquire) {
             return Err(RpcError::Transport("not signed in".into()));

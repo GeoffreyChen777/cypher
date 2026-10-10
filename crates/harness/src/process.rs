@@ -125,8 +125,7 @@ pub fn compose_child_path(cmd: &mut tokio::process::Command, exe: &std::path::Pa
 
 /// Rolling tail of a child's stderr, shared between the reader task and the
 /// crash-message composer: an unexpected exit surfaces "<name> exited
-/// unexpectedly (<status>): <last stderr lines>" instead of a bare shrug —
-/// the proper background-crash message old cypher showed (user requirement).
+/// unexpectedly (<status>): <last stderr lines>" instead of a bare shrug.
 #[derive(Clone, Default)]
 pub struct StderrTail(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
 
