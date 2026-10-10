@@ -6,9 +6,7 @@
 //! `CLOCK_MONOTONIC`) exclude suspend, so a wall jump far beyond the tick
 //! means the process just woke from system sleep. Subscribers — room actors,
 //! relay links, the token refresh loop — reconnect/refresh immediately
-//! instead of discovering half-open sockets by silence-lease timeout
-//! (Discord/Slack-style instant recovery; user report: "doesn't fix until I
-//! restart the app" / "shouldn't take a minute").
+//! instead of discovering half-open sockets by silence-lease timeout.
 //!
 //! The detector task is a lazily-spawned process-wide singleton; `subscribe`
 //! must first be called from within a tokio runtime (every caller is an

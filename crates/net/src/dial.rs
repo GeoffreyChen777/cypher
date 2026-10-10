@@ -16,13 +16,11 @@
 //! pointlessly pair with delayed ACKs.
 //!
 //! Proxies, for the same reason: reqwest honours `HTTPS_PROXY` / `HTTP_PROXY`
-//! / `ALL_PROXY` and `NO_PROXY` from the environment, and this dialer used to
-//! connect straight to the target regardless. Behind a network whose only way
-//! out is an HTTP proxy, every HTTPS request worked and every WebSocket failed
-//! before reaching the Edge -- so the client silently degraded to HTTP polling
-//! every 30s, which is how it was found: one host, 142 HTTP requests in 30
-//! minutes and not a single socket attempt. A WebSocket dial now reads the
-//! same variables and tunnels through the proxy with HTTP `CONNECT`.
+//! / `ALL_PROXY` and `NO_PROXY` from the environment, so a WebSocket dial reads
+//! the same variables and tunnels through the proxy with HTTP `CONNECT`.
+//! Otherwise, behind a network whose only way out is an HTTP proxy, every
+//! HTTPS request would work while every socket failed, and the clients would
+//! silently degrade to HTTP polling.
 
 use std::collections::VecDeque;
 use std::io;
