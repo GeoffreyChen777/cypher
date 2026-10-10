@@ -12,8 +12,8 @@
 #   scripts    script, release and installer tests; documentation links
 #   runtime    the Pi runtime suites that need no staged runtime
 #   workflows  actionlint and the workflow policy (downloads actionlint)
-#   macos      macOS only: icon, workspace clippy (gpui included), UI tests, and the
-#              Rust/Swift preview vectors
+#   macos      macOS only: icon, swift-format lint, workspace clippy (gpui included),
+#              UI tests, and the Rust/Swift preview vectors
 #   ios        the iOS unit tests on a simulator (needs Xcode 27)
 #   all        fmt lint rust edge scripts runtime workflows, plus macos on macOS
 #
@@ -103,6 +103,8 @@ stage_workflows() {
 stage_macos() {
   [[ "$(uname -s)" == Darwin ]] || { echo "the macos stage needs a macOS host" >&2; return 1; }
   run bash scripts/tests/test-macos-icon.sh
+  run xcrun swift-format lint --strict --recursive --parallel apps/ios/Cypher apps/ios/CypherTests \
+    apps/ios/CypherUITests
   run "$CARGO" clippy --workspace --all-targets --locked -- -D warnings
   run "$CARGO" clippy --locked -p cypher-ui -p cypher --features cypher/dev-capture -- -D warnings
   run "$CARGO" test --locked -p cypher-ui --lib

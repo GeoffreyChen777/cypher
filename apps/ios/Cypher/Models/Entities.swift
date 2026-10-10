@@ -1,5 +1,5 @@
 // Entity model — Swift mirrors of the workspace/session doc rows
-// (crates/doc/src/workspace.rs, schema.rs) and the derived display state
+// (crates/doc/src/registry/rows.rs, schema.rs) and the derived display state
 // (crates/ui/src/state.rs, entities.rs). Field names match the doc schema
 // exactly; derivations (indicator, staleness, attention rank) are ports.
 

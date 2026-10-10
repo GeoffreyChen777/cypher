@@ -38,7 +38,7 @@ gpui UI ─ in-proc/Unix IPC RPC ─ engine A ══ DeviceRoom DO relay ══ 
   chat2 row protocol) + RegistryRoom DO (per user) + DeviceRoom DO (per device) + R2
   attachments + WorkOS JWKS auth. The retired SessionRoom class stays bound as a 410 stub so
   its stored legacy rooms are not deleted.
-  Absorbs the old `apps/server` responsibilities (WorkOS code exchange/refresh, orgs) so
+  Absorbs zeron's old `apps/server` responsibilities (WorkOS code exchange/refresh, orgs) so
   **Postgres, the Hono server, and the WebRTC/signaling stack are all gone**.
 
 ### Headed / headless
@@ -273,7 +273,7 @@ Ported from zeron's `apps/edge` (device room byte relay + nudges, R2 attachments
 Its Loro-aware session room was replaced by the chat2 ChatRoom log relay
 ([chat2 sync](docs/design/chat2-sync.md)). On top of the port:
 1. Private per-user registry rooms (`/registry/{orgId}/ws` → `reg1/{orgId}/{userId}`) with authenticated row sync and ephemeral device presence.
-2. `/auth/*` routes absorbed from `apps/server` (WorkOS API key in Worker secret).
+2. `/auth/*` routes absorbed from zeron's `apps/server` (WorkOS API key in Worker secret).
 3. No `/seed` migration path or legacy sync (fresh app).
 Hibernation hygiene: no idle timers (flush timer only while dirty), auto-response ping/pong —
 per `docs/research/durable-objects-language.md`.

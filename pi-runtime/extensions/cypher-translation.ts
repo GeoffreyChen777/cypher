@@ -65,7 +65,7 @@ const MAX_TRANSLATION_CHARS = 24_000;
 const TRANSLATION_STATUS_KEY = "cypher.translation.v1";
 /** A translated prompt, reported so Cypher can keep it beside the prompt the
  *  transcript shows as typed (`INPUT_TRANSLATION_STATUS_KEY` in
- *  `crates/harness/src/pi/mod.rs`; `{version:1, source, text}`). */
+ *  `crates/harness/src/pi/wire.rs`; `{version:1, source, text}`). */
 const INPUT_TRANSLATION_STATUS_KEY = "cypher.translation.input.v1";
 /** Minimum gap between two published frames. Cypher commits the chat doc on a
  *  120ms tick, so a faster cadence buys no visible smoothness and costs one

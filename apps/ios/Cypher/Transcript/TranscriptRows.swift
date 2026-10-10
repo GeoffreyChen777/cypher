@@ -1,4 +1,4 @@
-// Transcript row model — a port of crates/ui/src/shell/transcript.rs
+// Transcript row model — a port of crates/ui/src/transcript/rows.rs
 // rows_for_entry. One row = one markdown top-level block / tool group / chip,
 // never one message: streamed tokens re-render one row, and SwiftUI's lazy
 // stack only re-measures what changed.

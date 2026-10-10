@@ -1,4 +1,4 @@
-// Line-by-line syntax tokenizer — a port of crates/ui/src/markdown/highlight.rs.
+// Line-by-line syntax tokenizer for iOS code blocks (the desktop highlights with tree-sitter in crates/syntax).
 //
 // Paint-only: tokens recolor text runs on the same mono font, so highlighting
 // can never change layout. Lines tokenize independently with a small carry

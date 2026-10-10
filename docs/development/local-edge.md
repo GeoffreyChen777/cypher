@@ -71,7 +71,7 @@ loopback Edge in `AUTH_MODE=dev` this is the identity `dev-user@dev-org`, which
 Production builds and the production profile cannot reach any of it.
 
 The iOS Dev bundle (`CypherDev` scheme, `scripts/dev-ios.sh`) follows the same
-rules (`apps/ios/Cypher/App/DevelopmentProfile.swift`): it defaults to
+rules (`apps/ios/Cypher/Development/DevelopmentProfile.swift`): it defaults to
 `http://127.0.0.1:27640`, which the simulator reaches on the Mac's loopback, and
 connects there as `dev-user@dev-org` with no secret. `CYPHER_DEV_EDGE_URL` names a
 staging Edge instead, which takes the 64-hex `CYPHER_DEV_ACCESS_TOKEN`;
