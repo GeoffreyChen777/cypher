@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, SharedString,
-    Subscription, Task, Window, div, prelude::*, px,
+    Subscription, Task, Window, actions, div, prelude::*, px,
 };
 
 use cypher_engine::registry::HarnessDescriptor;
@@ -24,6 +24,12 @@ use cypher_proto::{
     ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
 use cypher_rpc::methods;
+
+// The space picker's "New project…" row opens the add-project palette. The
+// action lives beside the picker (in the shell's action namespace, which its
+// key binding and menu use) so the picker doesn't depend on the shell; the
+// shell binds and handles it.
+actions!(shell, [AddSpacePalette]);
 
 /// Display cap for the ref list (t3code shows pages of 100 with a status
 /// footer; a flat cap + "Showing X of Y refs" reads the same without

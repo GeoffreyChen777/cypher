@@ -33,6 +33,7 @@ use crate::files::FilesPanel;
 use crate::icons::{self, cypher_app_icon, icon};
 use crate::loaders;
 use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
+use crate::pickers::AddSpacePalette;
 use crate::popover::{self, Loadable};
 use crate::prefs::slash_commands::ProviderIntent;
 use crate::prefs::{
@@ -83,7 +84,6 @@ actions!(
     [
         ToggleSidebar,
         ToggleChanges,
-        AddSpacePalette,
         FindInChat,
         NewSession,
         NextSession,

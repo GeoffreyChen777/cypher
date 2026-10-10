@@ -271,7 +271,7 @@ impl Pickers {
             .id("project-new")
             .on_click(cx.listener(|this, _, window, cx| {
                 this.close(cx);
-                window.dispatch_action(Box::new(crate::shell::AddSpacePalette), cx);
+                window.dispatch_action(Box::new(AddSpacePalette), cx);
             }))
             .child(
                 crate::icons::icon(crate::icons::PLUS)
