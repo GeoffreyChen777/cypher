@@ -24,8 +24,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use cypher_syntax::{HighlightRequest, HighlightSpan, HighlightedDocument, LanguageId};
 
+use crate::kit::theme::Theme;
 use crate::markdown::render;
-use crate::theme::Theme;
 
 pub const TEXT_SIZE: f32 = 12.0;
 pub const LINE_HEIGHT: f32 = 20.0;
@@ -1518,7 +1518,7 @@ impl gpui::Element for EditorElement {
                 ),
                 size(bounds.size.width, lh),
             ),
-            crate::theme::wash(0.035),
+            crate::kit::theme::wash(0.035),
         ));
 
         let mut selection = Vec::new();

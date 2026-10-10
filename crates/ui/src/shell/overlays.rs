@@ -954,8 +954,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let outlet = self.settings_outlet(section, cx);
-        let card_bg = crate::chat_style::panel_background(
-            crate::chat_style::settings(cx),
+        let card_bg = crate::appearance::chat_style::panel_background(
+            crate::appearance::chat_style::settings(cx),
             Theme::of(cx),
             false,
         );
@@ -1287,7 +1287,7 @@ impl Shell {
                                 .text_color(theme.text)
                                 .when(submitting, |el| el.opacity(0.5))
                                 .cursor_pointer()
-                                .hover(|s| s.bg(crate::theme::wash(0.11)))
+                                .hover(|s| s.bg(crate::kit::theme::wash(0.11)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.select_org(org_id.clone(), cx);
                                 }))

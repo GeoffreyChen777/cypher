@@ -12,7 +12,10 @@ impl Changes {
         let Some(row) = self.rows.get(ix).copied() else {
             return gpui::Empty.into_any_element();
         };
-        let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
+        let theme = crate::appearance::surface_style::theme(
+            crate::appearance::surface_style::Region::Git,
+            cx,
+        );
         let mono = theme.mono();
         let font_id = window.text_system().resolve_font(&mono);
         self.mono_advance = window
@@ -165,12 +168,12 @@ impl Changes {
         // chevron-down open; gpui divs have no rotation transform at the
         // pinned rev, so the glyph swap crossfades over the same 200 ms.
         let chevron_icon = if collapsed {
-            crate::icons::ALT_ARROW_RIGHT
+            crate::kit::icons::ALT_ARROW_RIGHT
         } else {
-            crate::icons::ALT_ARROW_DOWN
+            crate::kit::icons::ALT_ARROW_DOWN
         };
         let chevron = div().flex_none().size(px(14.0)).child(
-            crate::icons::icon(chevron_icon)
+            crate::kit::icons::icon(chevron_icon)
                 .size(px(13.0))
                 .text_color(theme.text_muted.opacity(0.7)),
         );
@@ -195,7 +198,8 @@ impl Changes {
             .w_full()
             .h(px(FILE_HEADER_HEIGHT))
             .when(ix > 0, |el| {
-                el.border_t_1().border_color(crate::theme::hairline(0.04))
+                el.border_t_1()
+                    .border_color(crate::kit::theme::hairline(0.04))
             })
             .flex_none()
             .flex()
@@ -203,9 +207,9 @@ impl Changes {
             .items_center()
             .gap(px(8.0))
             .px(px(Theme::SPACE_MD))
-            .bg(crate::theme::ink(0.025))
+            .bg(crate::kit::theme::ink(0.025))
             .cursor_pointer()
-            .hover(|s| s.bg(crate::theme::ink(0.05)))
+            .hover(|s| s.bg(crate::kit::theme::ink(0.05)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_fold(ix, cx);
                 cx.notify();
@@ -272,8 +276,8 @@ impl Changes {
             .cursor_pointer()
             .bg(motion::hover_blend(
                 id,
-                crate::theme::wash(0.0),
-                crate::theme::wash(0.14),
+                crate::kit::theme::wash(0.0),
+                crate::kit::theme::wash(0.14),
             ))
             .on_hover(motion::hover_listener(id))
             .occlude()
@@ -281,7 +285,7 @@ impl Changes {
                 window.prevent_default()
             })
             .child(
-                crate::icons::icon(icon_path)
+                crate::kit::icons::icon(icon_path)
                     .size(px(14.0))
                     .text_color(theme.text_muted.opacity(0.7)),
             )
@@ -294,7 +298,10 @@ impl Changes {
     /// under it would never see a click. The expand and close buttons ride
     /// alongside, shell-owned (they mutate shell state).
     pub fn render_header_controls(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
+        let theme = crate::appearance::surface_style::theme(
+            crate::appearance::surface_style::Region::Git,
+            cx,
+        );
         // Commit-pinned pane: the pin never changes, so a fixed identity
         // chip (mono short sha + subject) replaces the scope dropdown;
         // fold-all still trails.
@@ -314,7 +321,7 @@ impl Changes {
                         .rounded(px(5.0))
                         .flex()
                         .items_center()
-                        .bg(crate::theme::ink(0.05))
+                        .bg(crate::kit::theme::ink(0.05))
                         .mono(&theme)
                         .text_size(px(10.5))
                         .text_color(theme.text_muted)
@@ -331,11 +338,15 @@ impl Changes {
                 )
                 .child(self.layout_picker(&theme, cx))
                 .child(
-                    Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.toggle_collapse_all(cx);
-                        })),
+                    Self::header_button(
+                        "changes-fold-all",
+                        crate::kit::icons::FOLD_VERTICAL,
+                        &theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_collapse_all(cx);
+                    })),
                 )
                 .into_any_element();
         }
@@ -356,8 +367,8 @@ impl Changes {
             .cursor_pointer()
             .bg(motion::hover_blend(
                 "changes-scope-trigger",
-                crate::theme::wash(0.05),
-                crate::theme::wash(0.14),
+                crate::kit::theme::wash(0.05),
+                crate::kit::theme::wash(0.14),
             ))
             .on_hover(motion::hover_listener("changes-scope-trigger"))
             .occlude()
@@ -384,7 +395,7 @@ impl Changes {
                     .child(SharedString::from(scope.label())),
             )
             .child(
-                crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_DOWN)
                     .size(px(12.0))
                     .text_color(theme.text_muted.opacity(0.7)),
             );
@@ -409,17 +420,16 @@ impl Changes {
                 .gap(px(2.0))
                 .children(history_fetch_button)
                 .child(
-                    Self::header_button("history-refresh", crate::icons::REFRESH, &theme).on_click(
-                        cx.listener(|this, _, _, cx| {
+                    Self::header_button("history-refresh", crate::kit::icons::REFRESH, &theme)
+                        .on_click(cx.listener(|this, _, _, cx| {
                             cx.stop_propagation();
                             this.history_pane(cx)
                                 .update(cx, |history, cx| history.refresh(cx));
-                        }),
-                    ),
+                        })),
                 )
                 .into_any_element()
         } else {
-            Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
+            Self::header_button("changes-fold-all", crate::kit::icons::FOLD_VERTICAL, &theme)
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     this.toggle_collapse_all(cx);
@@ -517,8 +527,8 @@ impl Changes {
             .cursor_pointer()
             .bg(motion::hover_blend(
                 "changes-ref-trigger",
-                crate::theme::wash(0.0),
-                crate::theme::wash(0.12),
+                crate::kit::theme::wash(0.0),
+                crate::kit::theme::wash(0.12),
             ))
             .on_hover(motion::hover_listener("changes-ref-trigger"))
             .occlude()
@@ -548,7 +558,7 @@ impl Changes {
                     .child(SharedString::from(base)),
             )
             .child(
-                crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_DOWN)
                     .size(px(11.0))
                     .flex_none()
                     .text_color(theme.text_muted.opacity(0.7)),
@@ -586,7 +596,7 @@ impl Changes {
                         .child(SharedString::from(branch)),
                 )
                 .child(
-                    crate::icons::icon(crate::icons::ARROW_RIGHT)
+                    crate::kit::icons::icon(crate::kit::icons::ARROW_RIGHT)
                         .size(px(12.0))
                         .flex_none()
                         .text_color(theme.text_faint),
@@ -692,7 +702,7 @@ impl Changes {
                 .gap(px(10.0))
                 .px(px(Theme::SPACE_LG))
                 .border_b_1()
-                .border_color(crate::theme::hairline(0.06))
+                .border_color(crate::kit::theme::hairline(0.06))
                 .child(
                     div()
                         .min_w_0()
@@ -1115,7 +1125,10 @@ impl Render for Changes {
             history.update(cx, |history, cx| history.ensure_loaded(cx));
             return div().size_full().child(history).into_any_element();
         }
-        let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
+        let theme = crate::appearance::surface_style::theme(
+            crate::appearance::surface_style::Region::Git,
+            cx,
+        );
         let active = self.active_diff(cx);
         let scope = self.scope;
         let base = self.base_ref.clone();
@@ -1180,7 +1193,7 @@ impl Render for Changes {
                     .items_center()
                     .justify_center()
                     .gap(px(Theme::SPACE_SM))
-                    .child(crate::loaders::gradient_spinner(
+                    .child(crate::kit::loaders::gradient_spinner(
                         "changes-preparing",
                         &theme,
                         3.0,
@@ -1248,7 +1261,7 @@ impl Render for Changes {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(crate::loaders::gradient_spinner(
+                            .child(crate::kit::loaders::gradient_spinner(
                                 "changes-parsing",
                                 &theme,
                                 3.0,

@@ -20,12 +20,12 @@ use cypher_proto::{HarnessId, SlashCommand};
 use cypher_rpc::methods;
 
 use super::device_target::DeviceTarget;
-use crate::icons;
-use crate::popover::{self, Loadable};
+use crate::kit::icons;
+use crate::kit::popover::{self, Loadable};
+use crate::kit::theme::Theme;
 use crate::prefs::slash_commands::{CommandGroup, placement, set_visible, shows};
 use crate::settings::widgets;
 use crate::state::AppState;
-use crate::theme::Theme;
 
 #[derive(Debug, Clone)]
 pub enum CommandsEvent {
@@ -221,7 +221,7 @@ impl CommandsPage {
                     .items_center()
                     .gap(px(8.0))
                     .cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::ink(0.015)))
+                    .hover(|s| s.bg(crate::kit::theme::ink(0.015)))
                     .on_click(cx.listener(move |page, _, _, cx| {
                         if !page.advanced_open.remove(&group) {
                             page.advanced_open.insert(group);
@@ -283,7 +283,7 @@ impl CommandsPage {
             .pl(px(if nested { 42.0 } else { 20.0 }))
             .pr(px(20.0))
             .py(px(10.0))
-            .hover(|s| s.bg(crate::theme::ink(0.015)))
+            .hover(|s| s.bg(crate::kit::theme::ink(0.015)))
             .flex()
             .flex_row()
             .items_center()

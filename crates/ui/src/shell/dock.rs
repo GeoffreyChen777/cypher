@@ -671,8 +671,8 @@ impl Shell {
                 active,
                 DockSurface::SideChat(id) if slot.side_chats.contains_key(&id)
             );
-        let panel_bg = crate::chat_style::panel_background(
-            crate::chat_style::settings(cx),
+        let panel_bg = crate::appearance::chat_style::panel_background(
+            crate::appearance::chat_style::settings(cx),
             &theme,
             is_side_chat,
         );
@@ -680,7 +680,10 @@ impl Shell {
         // stay transparent.
         let panel_bg = match active {
             DockSurface::Diff(_) => {
-                let t = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
+                let t = crate::appearance::surface_style::theme(
+                    crate::appearance::surface_style::Region::Git,
+                    cx,
+                );
                 t.regions.git_background.unwrap_or(panel_bg)
             }
             _ => panel_bg,
@@ -776,13 +779,16 @@ impl Shell {
                 .rounded(px(10.0))
                 .border_1()
                 .border_color(border)
-                .bg(crate::theme::ink(0.02))
+                .bg(crate::kit::theme::ink(0.02))
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(10.0))
                 .cursor_pointer()
-                .hover(move |s| s.bg(crate::theme::ink(0.05)).border_color(border_strong))
+                .hover(move |s| {
+                    s.bg(crate::kit::theme::ink(0.05))
+                        .border_color(border_strong)
+                })
                 .child(icon(icon_path).size(px(15.0)).flex_none().text_color(muted))
                 .child(
                     div()
@@ -864,17 +870,20 @@ impl Shell {
     fn dock_header_theme(&self, active: DockSurface, cx: &App) -> Theme {
         match active {
             DockSurface::Diff(_) => {
-                let mut theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
+                let mut theme = crate::appearance::surface_style::theme(
+                    crate::appearance::surface_style::Region::Git,
+                    cx,
+                );
                 theme.surface = theme.regions.git_background.unwrap_or(theme.surface);
                 theme
             }
             DockSurface::SideChat(_) => {
-                let mut theme = crate::chat_style::theme(cx);
+                let mut theme = crate::appearance::chat_style::theme(cx);
                 if theme.text != Theme::of(cx).text || theme.bg != Theme::of(cx).bg {
                     theme.text_muted = theme.bg.blend(theme.text.opacity(0.72));
                 }
-                theme.surface = crate::chat_style::panel_background(
-                    crate::chat_style::settings(cx),
+                theme.surface = crate::appearance::chat_style::panel_background(
+                    crate::appearance::chat_style::settings(cx),
                     Theme::of(cx),
                     true,
                 );

@@ -7,11 +7,11 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::chat_style::{self, ChatAppearance, ChatAppearanceState, ChatColors};
+use crate::appearance::chat_style::{self, ChatAppearance, ChatAppearanceState, ChatColors};
 use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::kit::theme::{Appearance, Theme};
 use crate::markdown::{parser, render};
 use crate::settings::widgets;
-use crate::theme::{Appearance, Theme};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FontKind {
@@ -495,7 +495,7 @@ impl ChatStyleEditor {
                     .child(div().flex_1().min_w_0().truncate().child(label))
                     .when(is_selected, |el| {
                         el.child(
-                            crate::icons::icon(crate::icons::CHECK)
+                            crate::kit::icons::icon(crate::kit::icons::CHECK)
                                 .size(px(12.0))
                                 .text_color(theme.accent),
                         )
@@ -557,7 +557,7 @@ impl ChatStyleEditor {
                         .child("No matching fonts."),
                 )
             });
-        crate::popover::anchored_menu_below("chat-font-popup", menu.into_any_element(), None)
+        crate::kit::popover::anchored_menu_below("chat-font-popup", menu.into_any_element(), None)
     }
 
     fn font_row(
@@ -618,7 +618,7 @@ impl ChatStyleEditor {
                             .child(font_label(selected.as_deref())),
                     )
                     .child(
-                        crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                        crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_DOWN)
                             .size(px(12.0))
                             .text_color(theme.text_muted),
                     )
@@ -641,12 +641,12 @@ impl ChatStyleEditor {
             ColorField::Bubble => preview.bg.blend(chat_style::bubble(preview)),
             ColorField::CodeBackground => preview
                 .bg
-                .blend(crate::theme::code_block_background(preview)),
+                .blend(crate::kit::theme::code_block_background(preview)),
             ColorField::CodeText => preview.code_block_text.unwrap_or(preview.text),
-            ColorField::InlineText => crate::theme::inline_code_text(preview),
-            ColorField::InlineBackground => {
-                preview.bg.blend(crate::theme::inline_code_wash(preview))
-            }
+            ColorField::InlineText => crate::kit::theme::inline_code_text(preview),
+            ColorField::InlineBackground => preview
+                .bg
+                .blend(crate::kit::theme::inline_code_wash(preview)),
         };
         let index = field.index();
         let input = self.color_inputs[index].clone();
@@ -751,9 +751,9 @@ impl Render for ChatStyleEditor {
         let settings = chat_style::settings(cx).clone();
         let preview = chat_style::resolve(
             &settings,
-            &crate::surface_style::apply_preset(
+            &crate::appearance::surface_style::apply_preset(
                 Theme::for_appearance(self.palette),
-                crate::surface_style::settings(cx)
+                crate::appearance::surface_style::settings(cx)
                     .palette(self.palette)
                     .preset,
             ),

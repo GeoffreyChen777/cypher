@@ -25,8 +25,8 @@ pub mod surface_style;
 
 use std::path::{Path, PathBuf};
 
+use crate::kit::theme::{Appearance, Theme};
 use crate::prefs::{AppearanceMode, UiSettings};
-use crate::theme::{Appearance, Theme};
 use gpui::{App, Global, Subscription, Window};
 
 /// Global state behind the current theme: what the user chose, and what the OS
@@ -56,15 +56,16 @@ pub fn resolve(mode: AppearanceMode, system: Appearance) -> Appearance {
 /// colour preset and the surface-colour revision applied — and point the
 /// context-free paint helpers at it. The **only** way the appearance should
 /// change: setting the global directly leaves
-/// [`crate::theme::current_appearance`] stale.
+/// [`crate::kit::theme::current_appearance`] stale.
 pub fn install_theme(appearance: Appearance, cx: &mut App) {
-    crate::theme::set_current_appearance(appearance);
-    let preset = crate::surface_style::settings(cx)
+    crate::kit::theme::set_current_appearance(appearance);
+    let preset = crate::appearance::surface_style::settings(cx)
         .palette(appearance)
         .preset;
-    let mut theme = crate::surface_style::apply_preset(Theme::for_appearance(appearance), preset);
+    let mut theme =
+        crate::appearance::surface_style::apply_preset(Theme::for_appearance(appearance), preset);
     theme.text_style_revision = cx
-        .try_global::<crate::surface_style::SurfaceAppearanceState>()
+        .try_global::<crate::appearance::surface_style::SurfaceAppearanceState>()
         .map(|s| s.revision)
         .unwrap_or(0);
     cx.set_global(theme);

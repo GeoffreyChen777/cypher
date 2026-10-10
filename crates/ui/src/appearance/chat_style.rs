@@ -8,7 +8,7 @@ use std::sync::{Arc, LazyLock};
 use gpui::{App, Global, Hsla, SharedString, hsla};
 use serde::{Deserialize, Serialize};
 
-use crate::theme::{Appearance, MarkdownMetrics, Theme};
+use crate::kit::theme::{Appearance, MarkdownMetrics, Theme};
 
 pub const FILE_NAME: &str = "chat-appearance.json";
 pub const CONTENT_WIDTH: f32 = 736.0;
@@ -171,7 +171,7 @@ impl ChatAppearance {
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         let bytes =
             serde_json::to_vec_pretty(&self.clone().sanitized()).map_err(std::io::Error::other)?;
-        crate::fs_util::write_atomic(dir, FILE_NAME, &bytes, 0o600)
+        crate::kit::fs_util::write_atomic(dir, FILE_NAME, &bytes, 0o600)
     }
 }
 
@@ -312,16 +312,18 @@ pub fn contrast_warnings(theme: &Theme) -> Vec<&'static str> {
         ),
         (
             theme.code_block_text.unwrap_or(theme.text),
-            theme.bg.blend(crate::theme::code_block_background(theme)),
+            theme
+                .bg
+                .blend(crate::kit::theme::code_block_background(theme)),
             "Code text / code block background",
         ),
         (
-            crate::theme::inline_code_text(theme),
-            theme.bg.blend(crate::theme::inline_code_wash(theme)),
+            crate::kit::theme::inline_code_text(theme),
+            theme.bg.blend(crate::kit::theme::inline_code_wash(theme)),
             "Inline code text / inline code background",
         ),
     ] {
-        if crate::theme::contrast_ratio(foreground, background) < 4.5 {
+        if crate::kit::theme::contrast_ratio(foreground, background) < 4.5 {
             warnings.push(label);
         }
     }

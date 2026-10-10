@@ -350,13 +350,15 @@ pub(crate) fn normalize_model_rows(models: Vec<Model>) -> Vec<Model> {
 pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {
     match harness {
         HarnessId::ClaudeCode | HarnessId::Mock => (
-            crate::icons::CLAUDE_MARK,
-            Some(crate::icons::claude_brand()),
+            crate::kit::icons::CLAUDE_MARK,
+            Some(crate::kit::icons::claude_brand()),
         ),
-        HarnessId::Codex => (crate::icons::OPENAI_MARK, None),
+        HarnessId::Codex => (crate::kit::icons::OPENAI_MARK, None),
         // Retired harnesses without a brand asset (legacy chats only).
-        HarnessId::Cursor | HarnessId::Grok | HarnessId::Hermes => (crate::icons::GLOBAL, None),
-        HarnessId::Pi => (crate::icons::PI_MARK, None),
+        HarnessId::Cursor | HarnessId::Grok | HarnessId::Hermes => {
+            (crate::kit::icons::GLOBAL, None)
+        }
+        HarnessId::Pi => (crate::kit::icons::PI_MARK, None),
     }
 }
 

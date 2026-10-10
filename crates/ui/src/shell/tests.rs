@@ -17,7 +17,7 @@ fn unix_engine_directory_does_not_redirect_client_preferences(cx: &mut gpui::Tes
     let engine_bytes = std::fs::read(UiSettings::path(engine.path())).unwrap();
     cx.update(|cx| {
         gpui_tokio::init(cx);
-        cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+        cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
         crate::composer::init(cx);
         crate::terminal::panel::init(cx);
         let state = cx.new(|_| AppState::new());
@@ -79,7 +79,7 @@ fn test_shell(cx: &mut gpui::TestAppContext) -> (Entity<Shell>, Entity<AppState>
 fn test_shell_in(ui: PathBuf, cx: &mut gpui::TestAppContext) -> (Entity<Shell>, Entity<AppState>) {
     cx.update(|cx| {
         gpui_tokio::init(cx);
-        cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+        cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
         crate::composer::init(cx);
         crate::terminal::panel::init(cx);
         let state = cx.new(|_| AppState::new());
@@ -542,7 +542,7 @@ fn a_split_workspace_renders(cx: &mut gpui::TestAppContext) {
     let ui = tempfile::tempdir().unwrap().keep();
     cx.update(|cx| {
         gpui_tokio::init(cx);
-        cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+        cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
         crate::composer::init(cx);
         crate::terminal::panel::init(cx);
     });

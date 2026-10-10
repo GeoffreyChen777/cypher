@@ -15,10 +15,10 @@ use super::widgets;
 use crate::prefs::slash_commands::ProviderIntent;
 use crate::{
     composer::{ComposerInput, ComposerInputEvent},
-    icons,
-    popover::{self, Loadable},
+    kit::icons,
+    kit::popover::{self, Loadable},
+    kit::theme::Theme,
     state::AppState,
-    theme::Theme,
 };
 
 /// Kinds the Add-provider dropdown can create. Claude Code and ChatGPT are
@@ -1407,7 +1407,7 @@ impl ProvidersPage {
                         .h(px(36.0))
                         .track_focus(&self.submit_focus)
                         .when(busy, |el| {
-                            el.child(crate::loaders::mini_gradient_spinner(
+                            el.child(crate::kit::loaders::mini_gradient_spinner(
                                 "provider-saving",
                                 2.0,
                                 cx.entity_id(),
@@ -2672,9 +2672,10 @@ mod tests {
         for theme in [Theme::dark(), Theme::light()] {
             for state in ["connected", "signed_out", "error", "unverified"] {
                 let color = status_color(&theme, state);
-                let background = crate::theme::flatten(color.opacity(0.08), theme.surface_card);
+                let background =
+                    crate::kit::theme::flatten(color.opacity(0.08), theme.surface_card);
                 assert!(
-                    crate::theme::contrast_ratio(color, background) >= 4.5,
+                    crate::kit::theme::contrast_ratio(color, background) >= 4.5,
                     "{state} status text: {:?}",
                     theme.appearance
                 );
@@ -2698,7 +2699,7 @@ mod tests {
                 assert_eq!(glyph.style().size.width, Some(px(14.0).into()));
                 assert_eq!(glyph.style().size.height, Some(px(14.0).into()));
             }
-            assert!(crate::theme::contrast_ratio(theme.on_solid, theme.solid) >= 4.5);
+            assert!(crate::kit::theme::contrast_ratio(theme.on_solid, theme.solid) >= 4.5);
         }
     }
 }

@@ -92,7 +92,7 @@ impl Action {
 
     pub fn icon(self) -> &'static str {
         match self {
-            Self::Attach => crate::icons::PAPERCLIP,
+            Self::Attach => crate::kit::icons::PAPERCLIP,
         }
     }
 
@@ -160,7 +160,7 @@ pub fn command_level(
             Row::Header(_) | Row::Choice(_) => "",
         })
         .collect();
-    let ranked: Vec<&Row> = crate::popover::filter_indices(query, &labels)
+    let ranked: Vec<&Row> = crate::kit::popover::filter_indices(query, &labels)
         .into_iter()
         .map(|position| &candidates[position])
         .collect();

@@ -611,7 +611,7 @@ impl Theme {
     }
 
     /// The translucent tint floating cards paint over their backdrop blur
-    /// (see [`crate::frost::frosted`]). Dark: a mid-charcoal frost
+    /// (see [`crate::kit::frost::frosted`]). Dark: a mid-charcoal frost
     /// (`oklch(0.40 0 0 / 38%)`) so menus lift off the panel without reading
     /// as black slabs. Light: heavier — a translucent white tint left menu
     /// text ghosting over whatever sat behind the popover, so light coverage
@@ -649,7 +649,7 @@ impl Theme {
         }
     }
 
-    /// The composer pill's lift shadow at its densest ([`crate::soft_shadow`]):
+    /// The composer pill's lift shadow at its densest ([`crate::kit::soft_shadow`]):
     /// faint on light surfaces, deeper on dark ones where a light shadow
     /// would vanish.
     pub fn lift_shadow(&self) -> Hsla {

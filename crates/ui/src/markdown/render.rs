@@ -21,7 +21,9 @@ use gpui::{
     size,
 };
 
-use crate::theme::{MonoStyled, Theme, code_block_background, inline_code_text, inline_code_wash};
+use crate::kit::theme::{
+    MonoStyled, Theme, code_block_background, inline_code_text, inline_code_wash,
+};
 
 use super::parser::{Block, BlockTree, InlineRun, TableAlign};
 use super::veil::{RowVeil, apply_veil};
@@ -154,7 +156,7 @@ impl RenderOptions {
 pub struct RenderCache {
     flats: HashMap<(SharedString, usize, usize), Rc<FlatText>>,
     code: HashMap<(SharedString, usize, usize), Rc<CachedCode>>,
-    /// The [`crate::theme::theme_generation`] these entries were shaped under.
+    /// The [`crate::kit::theme::theme_generation`] these entries were shaped under.
     generation: u32,
     style_revision: u64,
 }
@@ -182,7 +184,7 @@ impl RenderCache {
     /// Drop every entry if the palette changed since they were shaped. Cheap
     /// enough (one relaxed atomic load) to call on every cache access.
     fn sync_palette(&mut self, theme: &Theme) {
-        let generation = crate::theme::theme_generation();
+        let generation = crate::kit::theme::theme_generation();
         if self.generation != generation || self.style_revision != theme.text_style_revision {
             self.clear();
             self.generation = generation;
@@ -1411,21 +1413,21 @@ fn render_code_block(
             .gap(px(4.0))
             .cursor_pointer()
             // Ghost-button hover wash fades over transition-colors like every
-            // other interactive chrome (crate::motion hover fades).
-            .bg(crate::motion::hover_blend(
+            // other interactive chrome (crate::kit::motion hover fades).
+            .bg(crate::kit::motion::hover_blend(
                 &fade_key,
                 gpui::transparent_black(),
                 theme.ink(0.08),
             ))
-            .on_hover(crate::motion::hover_listener(fade_key))
+            .on_hover(crate::kit::motion::hover_listener(fade_key))
             .text_size(px(10.5))
             .text_color(chrome_color)
             .on_click(move |_, window, cx| handler(ix, code_text.clone(), window, cx))
             .child(
-                crate::icons::icon(if copied {
-                    crate::icons::CHECK
+                crate::kit::icons::icon(if copied {
+                    crate::kit::icons::CHECK
                 } else {
-                    crate::icons::COPY
+                    crate::kit::icons::COPY
                 })
                 .size(px(12.0))
                 .text_color(chrome_color),

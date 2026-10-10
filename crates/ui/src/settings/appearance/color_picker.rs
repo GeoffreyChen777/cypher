@@ -2,10 +2,11 @@
 //! Dragging changes a local draft; release writes through the existing HEX
 //! input, so validation, persistence errors and region scoping stay centralized.
 use crate::{
-    chat_style,
+    appearance::chat_style,
     composer::{ComposerInput, ComposerInputEvent},
-    icons, popover,
-    theme::Theme,
+    kit::icons,
+    kit::popover,
+    kit::theme::Theme,
 };
 use gpui::{
     AppContext, Bounds, Context, Entity, FocusHandle, Hsla, MouseButton, Pixels, Point, Render,

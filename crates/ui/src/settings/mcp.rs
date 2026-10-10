@@ -9,11 +9,11 @@ use cypher_engine::mcp::{McpAuthKind, McpAuthStatus, McpServer, McpSnapshot};
 use cypher_rpc::methods;
 
 use super::device_target::DeviceTarget;
-use crate::icons;
-use crate::popover::{self, Loadable};
+use crate::kit::icons;
+use crate::kit::popover::{self, Loadable};
+use crate::kit::theme::Theme;
 use crate::settings::widgets;
 use crate::state::AppState;
-use crate::theme::Theme;
 
 mod add;
 mod login;
@@ -378,7 +378,7 @@ impl McpPage {
                 widgets::ghost_action(theme)
                     .flex_none()
                     .id(("mcp-auth", index))
-                    .bg(crate::theme::ink(0.08))
+                    .bg(crate::kit::theme::ink(0.08))
                     .text_color(theme.text)
                     .hover(|s| widgets::ghost_hover(theme, s))
                     .when(blocked && !busy, |el| el.opacity(0.5))

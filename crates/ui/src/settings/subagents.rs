@@ -44,11 +44,11 @@ use cypher_rpc::methods;
 
 use super::device_target::{DeviceTarget, DeviceTicket};
 use crate::composer::{ComposerInput, ComposerInputEvent};
-use crate::icons;
-use crate::popover::{self, Loadable};
+use crate::kit::icons;
+use crate::kit::popover::{self, Loadable};
+use crate::kit::theme::Theme;
 use crate::settings::widgets;
 use crate::state::AppState;
-use crate::theme::Theme;
 
 /// Pi's built-in tools (`core/tools/index.js` `allToolNames`). Anything else a
 /// profile lists — an extension or MCP tool — is kept as a custom chip.
@@ -874,7 +874,8 @@ impl SubagentsPage {
                 theme.text_muted
             })
             .when(enabled, |el| {
-                el.cursor_pointer().hover(|s| s.bg(crate::theme::ink(0.06)))
+                el.cursor_pointer()
+                    .hover(|s| s.bg(crate::kit::theme::ink(0.06)))
             })
             .when(!enabled, |el| el.opacity(0.45))
             .child(label.into())

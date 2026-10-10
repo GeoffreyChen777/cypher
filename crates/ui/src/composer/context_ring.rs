@@ -12,7 +12,7 @@ use gpui::{
 
 use cypher_proto::ContextUsage;
 
-use crate::theme::Theme;
+use crate::kit::theme::Theme;
 
 /// Occupancy at which the gauge turns amber, then red.
 const WARN_FRACTION: f32 = 0.75;

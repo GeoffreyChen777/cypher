@@ -1237,7 +1237,7 @@ impl ComposerInput {
 
     fn text_theme(&self, cx: &App) -> Theme {
         if self.use_chat_style {
-            crate::chat_style::theme(cx)
+            crate::appearance::chat_style::theme(cx)
         } else {
             Theme::of(cx).clone()
         }
@@ -1659,7 +1659,7 @@ impl Render for ComposerInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.text_theme(cx);
         let (font_size, line_height) = if self.use_chat_style {
-            let style = crate::chat_style::settings(cx);
+            let style = crate::appearance::chat_style::settings(cx);
             (style.font_size, style.input_line_height())
         } else {
             (INPUT_TEXT_SIZE, INPUT_LINE_HEIGHT)

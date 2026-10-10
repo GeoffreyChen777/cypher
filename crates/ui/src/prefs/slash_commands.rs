@@ -7,7 +7,7 @@
 
 use gpui::{App, Global};
 
-use crate::icons;
+use crate::kit::icons;
 
 /// The command names the user turned on; every other command stays out of
 /// the `/` menu. Names a device no longer offers are kept, so a preference

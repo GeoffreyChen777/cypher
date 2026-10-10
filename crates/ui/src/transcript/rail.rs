@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 
 use cypher_doc::{MessagePart, MessageRole, SessionMessageEntry};
 
-use crate::motion;
-use crate::popover;
-use crate::theme::Theme;
+use crate::kit::motion;
+use crate::kit::popover;
+use crate::kit::theme::Theme;
 use crate::transcript::Transcript;
 
 /// 48rem — the container width below which the rail (and wide gutters) collapse.
@@ -506,7 +506,7 @@ impl Transcript {
                 let bar_color = if is_active || is_hovered {
                     theme.text.opacity(0.8)
                 } else {
-                    crate::theme::ink(0.16)
+                    crate::kit::theme::ink(0.16)
                 };
                 let prompt = truncate_preview(&tick.prompt, PREVIEW_PROMPT_CHARS);
                 let reply = tick
@@ -546,7 +546,8 @@ impl Transcript {
                         });
                     // Mounted straight through deferred/anchored (not a popover
                     // mount helper), so the frost wrap happens here.
-                    crate::frost::frosted(12.0, crate::frost::MENU_BLUR, card).into_any_element()
+                    crate::kit::frost::frosted(12.0, crate::kit::frost::MENU_BLUR, card)
+                        .into_any_element()
                 });
                 div()
                     .id(("rail-tick", ix))

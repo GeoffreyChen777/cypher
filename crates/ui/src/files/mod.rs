@@ -32,12 +32,12 @@ use cypher_proto::{WorkspaceDirectory, WorkspaceFileContent, WorkspaceFileEntry}
 use cypher_rpc::{RpcError, methods};
 use cypher_syntax::{HighlightedDocument, LanguageId};
 
-use crate::icons::{self, icon};
+use crate::kit::icons::{self, icon};
+use crate::kit::theme::Theme;
 use crate::markdown::parser::{Block, BlockTree, parse_full};
 use crate::markdown::render;
 use crate::markdown::selection::{self, SelectionScope};
 use crate::state::AppState;
-use crate::theme::Theme;
 
 use editor::{CodeEditor, CodeEditorEvent};
 
@@ -762,11 +762,11 @@ impl FilesPanel {
                     .text_size(px(10.5))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .when(active, |el| {
-                        el.bg(crate::theme::wash(0.12)).text_color(theme.text)
+                        el.bg(crate::kit::theme::wash(0.12)).text_color(theme.text)
                     })
                     .when(!active, |el| {
                         el.text_color(theme.text_muted)
-                            .hover(|s| s.bg(crate::theme::wash(0.06)))
+                            .hover(|s| s.bg(crate::kit::theme::wash(0.06)))
                     })
                     .child(SharedString::from(label))
             };
@@ -779,7 +779,7 @@ impl FilesPanel {
                     .gap(px(2.0))
                     .p(px(1.0))
                     .rounded(px(6.0))
-                    .bg(crate::theme::ink(0.04))
+                    .bg(crate::kit::theme::ink(0.04))
                     .child(chip("files-md-source", "Source", !preview_on).on_click(
                         cx.listener(|this, _, window, cx| this.set_preview(false, window, cx)),
                     ))
@@ -807,7 +807,7 @@ impl FilesPanel {
                     .px(px(6.0))
                     .h(px(20.0))
                     .rounded(px(5.0))
-                    .bg(crate::theme::ink(0.05))
+                    .bg(crate::kit::theme::ink(0.05))
                     .flex()
                     .items_center()
                     .text_size(px(10.5))
@@ -1060,8 +1060,10 @@ fn render_tree_row(
         .gap(px(4.0))
         .cursor_pointer()
         .rounded(px(ROW_RADIUS))
-        .when(selected, |el| el.bg(crate::theme::wash(0.10)))
-        .when(!selected, |el| el.hover(|s| s.bg(crate::theme::wash(0.05))))
+        .when(selected, |el| el.bg(crate::kit::theme::wash(0.10)))
+        .when(!selected, |el| {
+            el.hover(|s| s.bg(crate::kit::theme::wash(0.05)))
+        })
         .on_click(move |_, window, cx| {
             panel.update(cx, |panel, cx| {
                 if is_dir {
@@ -1154,8 +1156,8 @@ fn small_icon_button(
         .justify_center()
         .rounded(px(6.0))
         .cursor_pointer()
-        .when(active, |el| el.bg(crate::theme::wash(0.10)))
-        .hover(|s| s.bg(crate::theme::wash(0.12)))
+        .when(active, |el| el.bg(crate::kit::theme::wash(0.10)))
+        .hover(|s| s.bg(crate::kit::theme::wash(0.12)))
         .child(icon(icon_path).size(px(13.0)).text_color(theme.text_muted))
 }
 

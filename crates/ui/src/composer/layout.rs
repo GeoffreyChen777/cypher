@@ -35,11 +35,12 @@ pub(super) const EDGE_RING_HIT_WIDTH: f32 = CLUSTER_INSET;
 pub(super) const SEND_BUTTON_SIZE: f32 = 28.0;
 /// How far the pill's lift shadow reaches: a little above, more at the
 /// sides, most below (Tailwind `shadow-lg`'s drop, roughly).
-pub(super) const PILL_SHADOW_REACH: crate::soft_shadow::Reach = crate::soft_shadow::Reach {
-    top: 3.0,
-    side: 8.0,
-    bottom: 14.0,
-};
+pub(super) const PILL_SHADOW_REACH: crate::kit::soft_shadow::Reach =
+    crate::kit::soft_shadow::Reach {
+        top: 3.0,
+        side: 8.0,
+        bottom: 14.0,
+    };
 /// Compact pill, border-box: one-line textarea `py-3` (24) + one 22.75px line
 /// (scrollHeight rounds to 47 in the original) + the 2px hairline = 49. The
 /// compact cluster (`py-1.5` + h-8 = 44) is shorter, so the textarea wins.

@@ -50,7 +50,7 @@ struct Rig {
 impl Rig {
     fn new(cx: &mut gpui::TestAppContext, entries: Vec<SessionMessageEntry>) -> Self {
         let state = cx.update(|cx| {
-            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
             let state = cx.new(|_| AppState::new());
             state.update(cx, |s, _| {
                 s.selected_chat = Some("chat".into());

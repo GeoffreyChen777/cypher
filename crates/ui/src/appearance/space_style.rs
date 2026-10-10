@@ -7,8 +7,8 @@
 
 use gpui::Hsla;
 
-use crate::icons;
-use crate::theme::Theme;
+use crate::kit::icons;
+use crate::kit::theme::Theme;
 
 /// The pickable glyphs: (key, asset). The first entry is the default.
 pub const SPACE_ICONS: &[(&str, &str)] = &[
@@ -65,8 +65,8 @@ pub fn space_color(key: Option<&str>, theme: &Theme) -> Option<Hsla> {
 
 /// One palette colour at display weight for the current appearance.
 pub fn swatch(hue: f32, theme: &Theme) -> Hsla {
-    let light = matches!(theme.appearance, crate::theme::Appearance::Light);
-    crate::theme::oklch(if light { 0.58 } else { 0.72 }, 0.15, hue)
+    let light = matches!(theme.appearance, crate::kit::theme::Appearance::Light);
+    crate::kit::theme::oklch(if light { 0.58 } else { 0.72 }, 0.15, hue)
 }
 
 #[cfg(test)]
@@ -78,7 +78,7 @@ mod tests {
         assert_eq!(space_icon(None), icons::FOLDER);
         assert_eq!(space_icon(Some("nope")), icons::FOLDER);
         assert_eq!(space_icon(Some("terminal")), icons::TERMINAL);
-        let theme = Theme::for_appearance(crate::theme::Appearance::Dark);
+        let theme = Theme::for_appearance(crate::kit::theme::Appearance::Dark);
         assert!(space_color(None, &theme).is_none());
         assert!(space_color(Some("nope"), &theme).is_none());
         assert!(space_color(Some("blue"), &theme).is_some());

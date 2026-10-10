@@ -27,11 +27,11 @@ use gpui::{
 use cypher_proto::{TerminalEvent, TerminalSession};
 use cypher_rpc::methods;
 
-use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
+use crate::kit::motion::{self, AnimationExt as _, TAB_SLIDE};
+use crate::kit::theme::Theme;
+use crate::kit::theme::terminal::terminal_panel_bg;
 use crate::prefs::{TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT};
 use crate::state::{AppState, EngineHandle};
-use crate::theme::Theme;
-use crate::theme::terminal::terminal_panel_bg;
 
 use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side};
 use super::view::{
@@ -1287,7 +1287,10 @@ impl TerminalPanel {
         // Hover-fade keys are global: scope them to this panel (one per
         // session tile).
         let panel_id = cx.entity_id();
-        let theme = crate::surface_style::theme(crate::surface_style::Region::Terminal, cx);
+        let theme = crate::appearance::surface_style::theme(
+            crate::appearance::surface_style::Region::Terminal,
+            cx,
+        );
         let tabs = self.chats.get(chat);
         let (active, count) = tabs.map(|t| (t.active, t.tabs.len())).unwrap_or((0, 0));
         let drag = self
@@ -1366,7 +1369,7 @@ impl TerminalPanel {
                         // Zeron tab: `h-7 rounded-lg pl-2 pr-1 gap-1.5 text-xs`,
                         // terminal glyph + label + close; active = white/8 wash.
                         let (text_color, bg, glyph_alpha) = if selected {
-                            (theme.text, crate::theme::ink(0.08), 0.8)
+                            (theme.text, crate::kit::theme::ink(0.08), 0.8)
                         } else {
                             (
                                 theme.text_muted.opacity(0.6),
@@ -1384,13 +1387,13 @@ impl TerminalPanel {
                             .rounded(px(6.0))
                             .when(!selected, |el| el.invisible())
                             .cursor_pointer()
-                            .hover(|s| s.bg(crate::theme::ink(0.09)))
+                            .hover(|s| s.bg(crate::kit::theme::ink(0.09)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.close_tab(&chat_close2, key, window, cx);
                             }))
                             .child(
-                                crate::icons::icon(crate::icons::CLOSE)
+                                crate::kit::icons::icon(crate::kit::icons::CLOSE)
                                     .size(px(12.0))
                                     .text_color(theme.text_muted.opacity(0.8)),
                             );
@@ -1440,7 +1443,7 @@ impl TerminalPanel {
                             )
                             .when(exited, |el| el.opacity(0.55))
                             .child(
-                                crate::icons::icon(crate::icons::TERMINAL)
+                                crate::kit::icons::icon(crate::kit::icons::TERMINAL)
                                     .size(px(16.0))
                                     .text_color(text_color.opacity(glyph_alpha)),
                             )
@@ -1488,7 +1491,7 @@ impl TerminalPanel {
                     .bg(motion::hover_blend(
                         &format!("term-new-tab-{panel_id}"),
                         gpui::transparent_black(),
-                        crate::theme::ink(0.05),
+                        crate::kit::theme::ink(0.05),
                     ))
                     .on_hover(motion::hover_listener(format!("term-new-tab-{panel_id}")))
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1497,7 +1500,7 @@ impl TerminalPanel {
                         }
                     }))
                     .child(
-                        crate::icons::icon(crate::icons::PLUS)
+                        crate::kit::icons::icon(crate::kit::icons::PLUS)
                             .size(px(16.0))
                             .text_color(theme.text_muted.opacity(0.6)),
                     ),
@@ -1517,14 +1520,14 @@ impl TerminalPanel {
                     .bg(motion::hover_blend(
                         &format!("term-collapse-{panel_id}"),
                         gpui::transparent_black(),
-                        crate::theme::ink(0.05),
+                        crate::kit::theme::ink(0.05),
                     ))
                     .on_hover(motion::hover_listener(format!("term-collapse-{panel_id}")))
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(ToggleTerminal), cx);
                     })
                     .child(
-                        crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                        crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_DOWN)
                             .size(px(13.0))
                             .text_color(theme.text_muted.opacity(0.55)),
                     ),
@@ -1539,7 +1542,10 @@ enum StreamDisposition {
 
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = crate::surface_style::theme(crate::surface_style::Region::Terminal, cx);
+        let theme = crate::appearance::surface_style::theme(
+            crate::appearance::surface_style::Region::Terminal,
+            cx,
+        );
         // Heal drag state if the pointer was released outside the bar.
         if self.drag.is_some() && !cx.has_active_drag() {
             self.drag = None;

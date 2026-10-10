@@ -8,9 +8,9 @@ use gpui::{
     prelude::*, px,
 };
 
+use crate::kit::theme::{MonoStyled, Theme};
 use crate::prefs::{KeymapConfig, ShortcutGroup, ShortcutId, combo_from_keystroke, display_combo};
 use crate::state::AppState;
-use crate::theme::{MonoStyled, Theme};
 
 /// Outcome of one keystroke while recording. Pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,7 +237,7 @@ impl Render for ShortcutsPage {
                                         // `hover:border-foreground/20` — the
                                         // neutral foreground, not pure white.
                                         s.border_color(theme.text.opacity(0.2))
-                                            .bg(crate::theme::ink(0.03))
+                                            .bg(crate::kit::theme::ink(0.03))
                                     })
                             }
                         })
@@ -342,7 +342,8 @@ impl Render for ShortcutsPage {
                                     .when(disabled, |el| el.opacity(0.35))
                                     .when(!disabled, |el| {
                                         el.hover(|s| {
-                                            s.bg(crate::theme::ink(0.04)).text_color(theme.text)
+                                            s.bg(crate::kit::theme::ink(0.04))
+                                                .text_color(theme.text)
                                         })
                                         .on_click(
                                             cx.listener(|this, _, _, cx| {
@@ -354,7 +355,7 @@ impl Render for ShortcutsPage {
                                         )
                                     })
                                     .child(
-                                        crate::icons::icon(crate::icons::RESTART)
+                                        crate::kit::icons::icon(crate::kit::icons::RESTART)
                                             .size(px(14.0))
                                             .text_color(theme.text_muted),
                                     )

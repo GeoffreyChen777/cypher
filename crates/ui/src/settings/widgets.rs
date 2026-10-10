@@ -5,7 +5,7 @@
 
 use gpui::{AnyElement, SharedString, div, prelude::*, px};
 
-use crate::theme::{Theme, ink};
+use crate::kit::theme::{Theme, ink};
 
 /// Centered page column: `mx-auto w-full max-w-3xl px-6 pb-16 pt-8`.
 pub fn page_column() -> gpui::Div {
@@ -198,7 +198,7 @@ fn row_tile_frame(theme: &Theme) -> gpui::Div {
 /// The identity tile on a row: frame around a 16px icon.
 pub fn row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
     row_tile_frame(theme).child(
-        crate::icons::icon(icon_path)
+        crate::kit::icons::icon(icon_path)
             .size(px(16.0))
             .text_color(theme.text_muted),
     )
@@ -341,7 +341,7 @@ pub fn error_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::Div
         .gap(px(8.0))
         .child(
             div().flex_none().mt(px(2.0)).child(
-                crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                crate::kit::icons::icon(crate::kit::icons::DANGER_TRIANGLE)
                     .size(px(16.0))
                     .text_color(red_text.opacity(0.9)),
             ),
@@ -371,7 +371,7 @@ pub fn warning_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::D
         .gap(px(8.0))
         .child(
             div().flex_none().mt(px(2.0)).child(
-                crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                crate::kit::icons::icon(crate::kit::icons::DANGER_TRIANGLE)
                     .size(px(14.0))
                     .text_color(amber_text.opacity(0.9)),
             ),

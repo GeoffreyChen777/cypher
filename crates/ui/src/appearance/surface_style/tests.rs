@@ -1,10 +1,10 @@
 use super::*;
+use crate::kit::theme::terminal;
 use crate::terminal::{emulator::CellColor, view};
-use crate::theme::terminal;
 
 #[test]
 fn default_content_backgrounds_match_for_every_color_theme() {
-    let chat = crate::chat_style::ChatAppearance::default();
+    let chat = crate::appearance::chat_style::ChatAppearance::default();
     for appearance in [Appearance::Light, Appearance::Dark] {
         for preset in ColorPreset::ALL {
             let p = Palette {
@@ -13,7 +13,7 @@ fn default_content_backgrounds_match_for_every_color_theme() {
             };
             let global = apply_preset(Theme::for_appearance(appearance), preset);
             let sidebar = resolve(&p, &global, Region::Sidebar);
-            let chat_bg = crate::chat_style::panel_background(&chat, &global, true);
+            let chat_bg = crate::appearance::chat_style::panel_background(&chat, &global, true);
             assert_eq!(
                 global.surface, sidebar.surface,
                 "settings / sidebar: {preset:?}"
@@ -352,14 +352,14 @@ fn git_custom_base_text_preserves_semantic_highlights() {
 
 #[test]
 fn overall_theme_preserves_existing_chat_colors_and_invalidates_cached_runs() {
-    let mut chat = crate::chat_style::ChatAppearance::default();
+    let mut chat = crate::appearance::chat_style::ChatAppearance::default();
     chat.dark.text = Some("#FEEDAA".into());
     chat.dark.background = Some("#112244".into());
     chat.dark.inline_code_text = Some("#FFCCBB".into());
     for preset in ColorPreset::ALL {
         let mut base = apply_preset(Theme::dark(), preset);
         base.text_style_revision = 20;
-        let t = crate::chat_style::resolve(&chat, &base, 7, &[]);
+        let t = crate::appearance::chat_style::resolve(&chat, &base, 7, &[]);
         assert_eq!(t.text, color(&chat.dark.text).unwrap());
         assert_eq!(t.bg, color(&chat.dark.background).unwrap());
         assert_eq!(t.inline_code_text, color(&chat.dark.inline_code_text));
@@ -408,7 +408,7 @@ fn custom_region_text_also_keeps_its_header_readable() {
         p.overrides.insert(bg_key.into(), bg.into());
         let t = resolve(&p, &base, region);
         let background = p.get(bg_key).unwrap();
-        assert!(crate::theme::contrast_ratio(t.text_muted, background) >= 4.5);
+        assert!(crate::kit::theme::contrast_ratio(t.text_muted, background) >= 4.5);
         assert_eq!(t.text, p.get(fg_key).unwrap());
     }
 }

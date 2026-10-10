@@ -73,17 +73,17 @@ impl Composer {
                 .when(!picked && multi, |el| {
                     el.border_1().border_color(theme.border_strong)
                 })
-                .when(!picked && !multi, |el| el.bg(crate::theme::ink(0.06)))
+                .when(!picked && !multi, |el| el.bg(crate::kit::theme::ink(0.06)))
                 .map(|el| {
                     if picked {
                         el.child(
-                            crate::icons::icon(crate::icons::CHECK)
+                            crate::kit::icons::icon(crate::kit::icons::CHECK)
                                 .size(px(12.0))
                                 .text_color(theme.on_solid),
                         )
                     } else if custom {
                         el.child(
-                            crate::icons::icon(crate::icons::PEN)
+                            crate::kit::icons::icon(crate::kit::icons::PEN)
                                 .size(px(11.0))
                                 .text_color(theme.text_muted),
                         )
@@ -158,12 +158,12 @@ impl Composer {
                     theme.border
                 })
                 .bg(if picked {
-                    crate::theme::ink(0.07)
+                    crate::kit::theme::ink(0.07)
                 } else {
                     motion::hover_blend(
                         &hover_key,
-                        crate::theme::ink(if custom { 0.0 } else { 0.02 }),
-                        crate::theme::ink(0.05),
+                        crate::kit::theme::ink(if custom { 0.0 } else { 0.02 }),
+                        crate::kit::theme::ink(0.05),
                     )
                 })
                 .on_hover(motion::hover_listener(hover_key))
@@ -209,10 +209,10 @@ impl Composer {
             .items_center()
             .gap(px(8.0))
             .child(
-                crate::icons::icon(if wizard.slash.is_some() {
-                    crate::icons::TUNING
+                crate::kit::icons::icon(if wizard.slash.is_some() {
+                    crate::kit::icons::TUNING
                 } else {
-                    crate::icons::QUESTION_CIRCLE
+                    crate::kit::icons::QUESTION_CIRCLE
                 })
                 .size(px(14.0))
                 .flex_none()
@@ -243,7 +243,7 @@ impl Composer {
                                 .bg(if ix <= page {
                                     theme.text_muted
                                 } else {
-                                    crate::theme::ink(0.12)
+                                    crate::kit::theme::ink(0.12)
                                 })
                         })),
                 )
@@ -266,10 +266,10 @@ impl Composer {
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::ink(0.08)))
+                    .hover(|s| s.bg(crate::kit::theme::ink(0.08)))
                     .on_click(cx.listener(|this, _, _, cx| this.wizard_cancel(cx)))
                     .child(
-                        crate::icons::icon(crate::icons::CLOSE)
+                        crate::kit::icons::icon(crate::kit::icons::CLOSE)
                             .size(px(12.0))
                             .text_color(theme.text_muted),
                     ),
@@ -339,7 +339,7 @@ impl Composer {
                                 .rounded(px(10.0))
                                 .border_1()
                                 .border_color(theme.border_strong)
-                                .bg(crate::theme::ink(0.07))
+                                .bg(crate::kit::theme::ink(0.07))
                                 .child(
                                     div()
                                         .flex_none()
@@ -351,7 +351,7 @@ impl Composer {
                                         .rounded(px(6.0))
                                         .bg(theme.text)
                                         .child(
-                                            crate::icons::icon(crate::icons::CHECK)
+                                            crate::kit::icons::icon(crate::kit::icons::CHECK)
                                                 .size(px(12.0))
                                                 .text_color(theme.on_solid),
                                         ),
@@ -469,14 +469,14 @@ impl Composer {
             .children(esc_action.map(|action| wizard_key_hint("esc", action, &theme)));
         let back = if optional_comment.is_some() {
             Some(
-                crate::popover::btn_ghost(&theme, "Skip", "wizard-comment-skip")
+                crate::kit::popover::btn_ghost(&theme, "Skip", "wizard-comment-skip")
                     .id("wizard-comment-skip")
                     .on_click(cx.listener(|this, _, _, cx| this.wizard_skip_comment(cx)))
                     .into_any_element(),
             )
         } else if page > 0 {
             Some(
-                crate::popover::btn_ghost(&theme, "Back", "wizard-back")
+                crate::kit::popover::btn_ghost(&theme, "Back", "wizard-back")
                     .id("wizard-back")
                     .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
                     .into_any_element(),
@@ -502,7 +502,7 @@ impl Composer {
             .children(back)
             .when(show_primary, |el| {
                 el.child(
-                    crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
+                    crate::kit::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
                         .id("wizard-submit")
                         .px(px(14.0))
                         .when(!can_advance, |el| el.opacity(0.4).cursor_default())
@@ -700,7 +700,7 @@ impl Composer {
                             .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
                     .child(
-                        crate::icons::icon(crate::icons::ARROW_UP)
+                        crate::kit::icons::icon(crate::kit::icons::ARROW_UP)
                             .size(px(14.0))
                             .text_color(theme.bg),
                     )
@@ -725,10 +725,11 @@ impl Render for Composer {
             let entity = cx.entity_id();
             window.on_next_frame(move |_, cx| cx.notify(entity));
         }
-        let theme = crate::chat_style::theme(cx);
-        let wide = crate::chat_style::settings(cx).wide;
-        let compact_height =
-            compact_height_for_line(crate::chat_style::settings(cx).input_line_height());
+        let theme = crate::appearance::chat_style::theme(cx);
+        let wide = crate::appearance::chat_style::settings(cx).wide;
+        let compact_height = compact_height_for_line(
+            crate::appearance::chat_style::settings(cx).input_line_height(),
+        );
         let wizard_active = self.wizard.is_some();
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
@@ -860,7 +861,9 @@ impl Render for Composer {
         // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
         let container = div()
             .w_full()
-            .when(!wide, |el| el.max_w(px(crate::chat_style::COMPOSER_WIDTH)))
+            .when(!wide, |el| {
+                el.max_w(px(crate::appearance::chat_style::COMPOSER_WIDTH))
+            })
             .mx_auto()
             .flex()
             .flex_col()
@@ -921,7 +924,7 @@ impl Render for Composer {
                             cx.notify();
                         }))
                         .child(
-                            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                            crate::kit::icons::icon(crate::kit::icons::DANGER_TRIANGLE)
                                 .size(px(14.0))
                                 .mt(px(2.0))
                                 .text_color(text_c),
@@ -952,7 +955,7 @@ impl Render for Composer {
                     .text_size(px(12.0))
                     .text_color(theme.danger_muted.opacity(0.9))
                     .child(
-                        crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                        crate::kit::icons::icon(crate::kit::icons::DANGER_TRIANGLE)
                             .size(px(14.0))
                             .text_color(theme.danger_muted.opacity(0.9)),
                     )
@@ -1239,7 +1242,7 @@ impl Render for Composer {
         // via `add_paths`.
         // Frosted: the pill backdrop-blurs the transcript scrolling under it
         // (the popover glass treatment; radius matches the pill's rounding).
-        let frosted = crate::frost::frosted(
+        let frosted = crate::kit::frost::frosted(
             PILL_RADIUS,
             16.0,
             // Handed back by an answer, the composer returns instantly — the
@@ -1261,7 +1264,7 @@ impl Render for Composer {
             .left(px(-reach.side))
             .right(px(-reach.side))
             .child(
-                crate::soft_shadow::outside_shadow(PILL_RADIUS, reach, theme.lift_shadow())
+                crate::kit::soft_shadow::outside_shadow(PILL_RADIUS, reach, theme.lift_shadow())
                     .size_full(),
             );
         let pill_shadow = if self.input_swap_instant {

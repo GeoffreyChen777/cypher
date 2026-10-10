@@ -29,7 +29,7 @@ impl Composer {
             self.comments.clear();
             self.comment_edit = None;
             if self.comments_popup.begin_close() {
-                crate::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
+                crate::kit::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
             }
             // Attachments stay stashed under their chat key (the map swap IS
             // the navigation); only the transient chrome resets.
@@ -537,7 +537,7 @@ impl Composer {
             let sent = std::mem::take(&mut self.comments);
             self.comment_edit = None;
             if self.comments_popup.begin_close() {
-                crate::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
+                crate::kit::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
             }
             sent
         } else {

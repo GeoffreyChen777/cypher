@@ -37,10 +37,10 @@ use cypher_proto::{
 use cypher_rpc::{RpcError, methods};
 
 use crate::attachments::{self, StagedAttachment};
-use crate::motion;
+use crate::kit::motion;
+use crate::kit::theme::{MonoStyled, Theme};
 use crate::pickers::Pickers;
 use crate::state::{AppState, EngineHandle, Indicator};
-use crate::theme::{MonoStyled, Theme};
 pub mod context_ring;
 mod layout;
 pub mod slash_menu;
@@ -264,8 +264,8 @@ fn slash_badge(theme: &Theme, badge: crate::composer::slash_menu::Badge) -> gpui
     let (background, color) = match badge.tone {
         Tone::On => (theme.success.opacity(0.14), theme.success),
         Tone::Warning => (theme.warning.opacity(0.16), theme.warning),
-        Tone::Neutral => (crate::theme::ink(0.06), theme.text_muted),
-        Tone::Off => (crate::theme::ink(0.04), theme.text_muted.opacity(0.75)),
+        Tone::Neutral => (crate::kit::theme::ink(0.06), theme.text_muted),
+        Tone::Off => (crate::kit::theme::ink(0.04), theme.text_muted.opacity(0.75)),
     };
     div()
         .flex_none()
@@ -669,7 +669,7 @@ pub struct Composer {
     /// on queue failure, gone on acceptance.
     comments: Vec<DraftComment>,
     /// Open/close lifecycle for the comments inspector popover.
-    comments_popup: crate::popover::Popup<()>,
+    comments_popup: crate::kit::popover::Popup<()>,
     /// A comment row being edited inside the inspector.
     comment_edit: Option<CommentEdit>,
     // -- compact/expanded flip state (hysteresis; see `composer_flip`) --
@@ -785,7 +785,7 @@ impl Composer {
         let input = cx.new(|cx| {
             let mut input = ComposerInput::new("Do anything…", cx);
             input.use_chat_style = true;
-            input.line_height = px(crate::chat_style::settings(cx).input_line_height());
+            input.line_height = px(crate::appearance::chat_style::settings(cx).input_line_height());
             input.content_height = f32::from(input.line_height);
             input.enable_mentions();
             input
@@ -848,18 +848,20 @@ impl Composer {
                 cx.notify();
             });
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
-        let style_observe =
-            cx.observe_global::<crate::chat_style::ChatAppearanceState>(|this: &mut Self, cx| {
-                this.flip_morph = None;
-                this.style_relayout_passes = 2;
-                this.flip_epoch = this.input.read(cx).layout_epoch;
-                this.last_seen_width = 0.0;
-                this.width_changed_at = None;
-                this.compact_capacity = 0.0;
-                this.expanded_anchor = 0.0;
-                this.input.update(cx, |_, cx| cx.notify());
-                cx.notify();
-            });
+        let style_observe = cx
+            .observe_global::<crate::appearance::chat_style::ChatAppearanceState>(
+                |this: &mut Self, cx| {
+                    this.flip_morph = None;
+                    this.style_relayout_passes = 2;
+                    this.flip_epoch = this.input.read(cx).layout_epoch;
+                    this.last_seen_width = 0.0;
+                    this.width_changed_at = None;
+                    this.compact_capacity = 0.0;
+                    this.expanded_anchor = 0.0;
+                    this.input.update(cx, |_, cx| cx.notify());
+                    cx.notify();
+                },
+            );
         let input_events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.on_submit(cx),
             ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved => {
@@ -947,7 +949,7 @@ impl Composer {
             send_task: None,
             transport,
             comments: Vec::new(),
-            comments_popup: crate::popover::Popup::default(),
+            comments_popup: crate::kit::popover::Popup::default(),
             comment_edit: None,
             expanded_mode: false,
             flip_epoch: 0,

@@ -11,9 +11,9 @@
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
 
 use super::*;
+use crate::kit::theme::MonoStyled;
 use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_path};
 use crate::state::SidebarGroupKind;
-use crate::theme::MonoStyled;
 use cypher_proto::{Chat, ChatIndicator, Device, FolderListing, Space};
 use gpui::FocusHandle;
 use std::collections::{HashMap, HashSet};
@@ -343,7 +343,7 @@ fn hover_add_plus(
         .left(px(2.0 * (1.0 - hover_t)))
         .opacity(hover_t)
         .cursor_pointer()
-        .hover(|s| s.bg(crate::theme::wash(0.10)))
+        .hover(|s| s.bg(crate::kit::theme::wash(0.10)))
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             window.prevent_default();
             cx.stop_propagation();
@@ -402,8 +402,8 @@ impl Shell {
             ))
             .bg(motion::hover_blend(
                 "sidebar-add-project",
-                crate::theme::wash(0.0),
-                crate::theme::wash(0.14),
+                crate::kit::theme::wash(0.0),
+                crate::kit::theme::wash(0.14),
             ))
             .on_hover(motion::hover_listener("sidebar-add-project"))
             .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx)))
@@ -434,8 +434,8 @@ impl Shell {
             .text_color(view_tint)
             .bg(motion::hover_blend(
                 "sidebar-view-menu",
-                crate::theme::wash(0.0),
-                crate::theme::wash(0.14),
+                crate::kit::theme::wash(0.0),
+                crate::kit::theme::wash(0.14),
             ))
             .on_hover(motion::hover_listener("sidebar-view-menu"))
             .on_mouse_down(
@@ -466,8 +466,8 @@ impl Shell {
             ))
             .bg(motion::hover_blend(
                 "sidebar-quick-chat",
-                crate::theme::wash(0.0),
-                crate::theme::wash(0.14),
+                crate::kit::theme::wash(0.0),
+                crate::kit::theme::wash(0.14),
             ))
             .on_hover(motion::hover_listener("sidebar-quick-chat"))
             .on_click(cx.listener(|this, _, _, cx| this.open_quick_chat_dialog(cx)))
@@ -605,7 +605,7 @@ impl Shell {
             (flow.active, flow.focus.clone(), flow.list_scroll.clone())
         };
         let rows = self.quick_chat_devices(cx);
-        let hairline = crate::theme::hairline(0.06);
+        let hairline = crate::kit::theme::hairline(0.06);
         let band = popover::band();
         let key_chip = |theme: &Theme| {
             div()
@@ -617,7 +617,7 @@ impl Shell {
                 .flex_row()
                 .items_center()
                 .gap(px(2.0))
-                .bg(crate::theme::ink(0.05))
+                .bg(crate::kit::theme::ink(0.05))
                 .text_size(px(11.0))
                 .mono(theme)
                 .text_color(theme.text_muted.opacity(0.7))
@@ -653,7 +653,7 @@ impl Shell {
                 key_chip(theme)
                     .id("quick-chat-esc")
                     .cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::ink(0.09)))
+                    .hover(|s| s.bg(crate::kit::theme::ink(0.09)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.quick_chat = None;
                         cx.notify();
@@ -709,8 +709,8 @@ impl Shell {
                                 .when(online, |el| el.cursor_pointer())
                                 .when(!online, |el| el.opacity(0.55))
                                 .when(is_active, |el| {
-                                    el.bg(crate::theme::card_selected_bg())
-                                        .shadow(crate::theme::card_selected_shadows())
+                                    el.bg(crate::kit::theme::card_selected_bg())
+                                        .shadow(crate::kit::theme::card_selected_shadows())
                                         .text_color(theme.text)
                                 })
                                 .when(!is_active, |el| {
@@ -763,7 +763,7 @@ impl Shell {
                                                 },
                                             ])
                                         })
-                                        .when(!online, |el| el.bg(crate::theme::ink(0.22))),
+                                        .when(!online, |el| el.bg(crate::kit::theme::ink(0.22))),
                                 )
                         }),
                 ),
@@ -792,7 +792,7 @@ impl Shell {
                 .w(px(420.0))
                 .rounded(px(14.0))
                 .border_1()
-                .border_color(crate::theme::hairline(0.10))
+                .border_color(crate::kit::theme::hairline(0.10))
                 .bg(if theme.is_glass() {
                     theme.glass_overlay()
                 } else {
@@ -1068,7 +1068,7 @@ impl Shell {
                             div()
                                 .ml(px(15.0))
                                 .border_l_1()
-                                .border_color(crate::theme::hairline(0.09))
+                                .border_color(crate::kit::theme::hairline(0.09))
                                 .flex()
                                 .flex_col()
                                 .children(chat_rows)
@@ -1259,10 +1259,10 @@ impl Shell {
         let card_icon = if group.kind == SidebarGroupKind::Scratch {
             icons::CHAT_ROUND_LINE
         } else {
-            crate::space_style::space_icon(group.icon.as_deref())
+            crate::appearance::space_style::space_icon(group.icon.as_deref())
         };
-        let icon_tint =
-            crate::space_style::space_color(group.color.as_deref(), theme).unwrap_or(theme.text);
+        let icon_tint = crate::appearance::space_style::space_color(group.color.as_deref(), theme)
+            .unwrap_or(theme.text);
         let pinned = group.pinned;
         // Online is the normal case and says nothing; only an unreachable
         // host earns a mark.
@@ -1364,7 +1364,7 @@ impl Shell {
                                 .flex_none()
                                 .px(px(5.0))
                                 .rounded_full()
-                                .bg(crate::theme::wash(0.06))
+                                .bg(crate::kit::theme::wash(0.06))
                                 .text_size(px(10.0))
                                 .line_height(px(15.0))
                                 .text_color(theme.text_muted.opacity(0.7))
@@ -1449,8 +1449,8 @@ impl Shell {
             .cursor_pointer()
             .bg(motion::hover_blend(
                 &fade_key,
-                crate::theme::wash(0.0),
-                crate::theme::wash(0.14),
+                crate::kit::theme::wash(0.0),
+                crate::kit::theme::wash(0.14),
             ))
             .on_hover(motion::hover_listener(fade_key))
             .on_mouse_down(
@@ -1514,44 +1514,48 @@ impl Shell {
                 space.and_then(|s| s.color.clone()),
             )
         };
-        let tint =
-            crate::space_style::space_color(color_key.as_deref(), theme).unwrap_or(theme.text);
-        let glyphs = div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(2.0))
-            .px(px(4.0))
-            .children(crate::space_style::SPACE_ICONS.iter().map(|(key, asset)| {
-                let on = icon_key.as_deref() == Some(*key)
-                    || (icon_key.is_none() && *key == crate::space_style::SPACE_ICONS[0].0);
-                let pick_space = space_id.clone();
-                let pick_color = color_key.clone();
-                let pick_icon =
-                    (*key != crate::space_style::SPACE_ICONS[0].0).then(|| (*key).to_string());
-                div()
-                    .id(SharedString::from(format!("space-style-icon-{key}")))
-                    .size(px(28.0))
-                    .rounded(px(7.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .when(on, |el| {
-                        el.bg(crate::theme::card_selected_bg())
-                            .shadow(crate::theme::card_selected_shadows())
-                    })
-                    .when(!on, |el| el.hover(|s| s.bg(theme.element_hover)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_space_appearance(
-                            pick_space.clone(),
-                            pick_icon.clone(),
-                            pick_color.clone(),
-                            cx,
-                        )
-                    }))
-                    .child(icon(asset).size(px(15.0)).text_color(tint))
-            }));
+        let tint = crate::appearance::space_style::space_color(color_key.as_deref(), theme)
+            .unwrap_or(theme.text);
+        let glyphs =
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(2.0))
+                .px(px(4.0))
+                .children(crate::appearance::space_style::SPACE_ICONS.iter().map(
+                    |(key, asset)| {
+                        let on = icon_key.as_deref() == Some(*key)
+                            || (icon_key.is_none()
+                                && *key == crate::appearance::space_style::SPACE_ICONS[0].0);
+                        let pick_space = space_id.clone();
+                        let pick_color = color_key.clone();
+                        let pick_icon = (*key != crate::appearance::space_style::SPACE_ICONS[0].0)
+                            .then(|| (*key).to_string());
+                        div()
+                            .id(SharedString::from(format!("space-style-icon-{key}")))
+                            .size(px(28.0))
+                            .rounded(px(7.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .when(on, |el| {
+                                el.bg(crate::kit::theme::card_selected_bg())
+                                    .shadow(crate::kit::theme::card_selected_shadows())
+                            })
+                            .when(!on, |el| el.hover(|s| s.bg(theme.element_hover)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_space_appearance(
+                                    pick_space.clone(),
+                                    pick_icon.clone(),
+                                    pick_color.clone(),
+                                    cx,
+                                )
+                            }))
+                            .child(icon(asset).size(px(15.0)).text_color(tint))
+                    },
+                ));
         let none_on = color_key.is_none();
         let none_space = space_id.clone();
         let none_icon = icon_key.clone();
@@ -1575,7 +1579,7 @@ impl Shell {
                     .items_center()
                     .justify_center()
                     .when(none_on, |el| {
-                        el.shadow(crate::theme::card_selected_shadows())
+                        el.shadow(crate::kit::theme::card_selected_shadows())
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_space_appearance(none_space.clone(), none_icon.clone(), None, cx)
@@ -1587,35 +1591,39 @@ impl Shell {
                             .bg(theme.text_muted.opacity(0.6)),
                     ),
             )
-            .children(crate::space_style::SPACE_COLORS.iter().map(|(key, hue)| {
-                let on = color_key.as_deref() == Some(*key);
-                let color = crate::space_style::swatch(*hue, theme);
-                let pick_space = space_id.clone();
-                let pick_icon = icon_key.clone();
-                let pick_color = Some((*key).to_string());
-                div()
-                    .id(SharedString::from(format!("space-style-color-{key}")))
-                    .size(px(18.0))
-                    .rounded_full()
-                    .bg(color)
-                    .cursor_pointer()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(on, |el| {
-                        el.border_2()
-                            .border_color(theme.text)
-                            .child(icon(icons::CHECK).size(px(10.0)).text_color(theme.on_solid))
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_space_appearance(
-                            pick_space.clone(),
-                            pick_icon.clone(),
-                            pick_color.clone(),
-                            cx,
-                        )
-                    }))
-            }));
+            .children(
+                crate::appearance::space_style::SPACE_COLORS
+                    .iter()
+                    .map(|(key, hue)| {
+                        let on = color_key.as_deref() == Some(*key);
+                        let color = crate::appearance::space_style::swatch(*hue, theme);
+                        let pick_space = space_id.clone();
+                        let pick_icon = icon_key.clone();
+                        let pick_color = Some((*key).to_string());
+                        div()
+                            .id(SharedString::from(format!("space-style-color-{key}")))
+                            .size(px(18.0))
+                            .rounded_full()
+                            .bg(color)
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(on, |el| {
+                                el.border_2().border_color(theme.text).child(
+                                    icon(icons::CHECK).size(px(10.0)).text_color(theme.on_solid),
+                                )
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_space_appearance(
+                                    pick_space.clone(),
+                                    pick_icon.clone(),
+                                    pick_color.clone(),
+                                    cx,
+                                )
+                            }))
+                    }),
+            );
         let reset_space = space_id.clone();
         let menu = popover::popover_card(theme)
             .w(px(232.0))
@@ -2148,7 +2156,7 @@ impl Shell {
             .map(|(_, suffix)| SharedString::from(suffix));
         search.update(cx, |input, cx| input.set_ghost(ghost, cx));
         let query_empty = search.read(cx).is_empty();
-        let hairline = crate::theme::hairline(0.06);
+        let hairline = crate::kit::theme::hairline(0.06);
         let now = Utc::now();
         // (browsed device name, online) per rail row — presence is the same
         // signal the sidebar space rows use.
@@ -2176,7 +2184,7 @@ impl Shell {
                 .flex_row()
                 .items_center()
                 .gap(px(2.0))
-                .bg(crate::theme::ink(0.05))
+                .bg(crate::kit::theme::ink(0.05))
                 .text_size(px(11.0))
                 .mono(theme)
                 .text_color(theme.text_muted.opacity(0.7))
@@ -2247,7 +2255,7 @@ impl Shell {
                 key_chip(&theme)
                     .id("add-space-esc")
                     .cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::ink(0.09)))
+                    .hover(|s| s.bg(crate::kit::theme::ink(0.09)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.add_space = None;
                         cx.notify();
@@ -2438,7 +2446,7 @@ impl Shell {
                             // The floating-card selection language: the wash
                             // plus the ring-only inset outline.
                             .when(ix == active, |el| {
-                                el.shadow(crate::theme::card_selected_shadows())
+                                el.shadow(crate::kit::theme::card_selected_shadows())
                             })
                             .id(("add-space-folder", ix))
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -2515,8 +2523,8 @@ impl Shell {
                     .when(is_active, |el| {
                         // The floating-card selection language: wash +
                         // ring-only inset outline.
-                        el.bg(crate::theme::card_selected_bg())
-                            .shadow(crate::theme::card_selected_shadows())
+                        el.bg(crate::kit::theme::card_selected_bg())
+                            .shadow(crate::kit::theme::card_selected_shadows())
                             .text_color(theme.text)
                     })
                     .when(!is_active, |el| {
@@ -2550,7 +2558,7 @@ impl Shell {
                                     inset: false,
                                 }])
                             })
-                            .when(!online, |el| el.bg(crate::theme::ink(0.22))),
+                            .when(!online, |el| el.bg(crate::kit::theme::ink(0.22))),
                     )
             }))
             .child(div().h(px(1.0)).mx(px(2.0)).my(px(6.0)).bg(hairline))
@@ -2633,7 +2641,7 @@ impl Shell {
                 .w(px(680.0))
                 .rounded(px(14.0))
                 .border_1()
-                .border_color(crate::theme::hairline(0.10))
+                .border_color(crate::kit::theme::hairline(0.10))
                 // The popover_card glass recipe: a translucent tint over the
                 // frosted backdrop blur (`popover::modal` wraps in `frosted`) —
                 // an opaque fill here killed the vibrancy every other float has.

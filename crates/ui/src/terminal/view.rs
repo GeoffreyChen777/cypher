@@ -1,7 +1,7 @@
 //! Terminal paint + input encoding.
 //!
 //! - cell colour resolution onto the terminal palette
-//!   ([`crate::theme::terminal`]);
+//!   ([`crate::kit::theme::terminal`]);
 //! - keystroke → PTY byte encoding (printables, control keys, arrows/nav
 //!   escape sequences, Ctrl- combos, Alt prefixing);
 //! - the 12 ms input coalescer and the 80 ms resize debounce constants (the
@@ -17,8 +17,8 @@ use gpui::{
     SharedString, Style, TextRun, Window, fill, outline, point, px, relative, size,
 };
 
-use crate::theme::Theme;
-use crate::theme::terminal::{ansi, background, rgb8, selection};
+use crate::kit::theme::Theme;
+use crate::kit::theme::terminal::{ansi, background, rgb8, selection};
 
 use super::emulator::{CellColor, CellSnapshot, Side};
 use super::panel::TerminalPanel;
@@ -359,7 +359,10 @@ impl gpui::Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let theme = crate::surface_style::theme(crate::surface_style::Region::Terminal, cx);
+        let theme = crate::appearance::surface_style::theme(
+            crate::appearance::surface_style::Region::Terminal,
+            cx,
+        );
         // Ligatures OFF. A terminal is a fixed grid: the shaper must emit one
         // cell-width advance per character, and a contextual substitution
         // (Geist Mono ligates `--`, `->`, …) collapses several cells into

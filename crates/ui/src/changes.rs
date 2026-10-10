@@ -38,11 +38,11 @@ use cypher_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::history::{GitHistory, GitHistoryCount, GitHistoryEvent, GitHistoryFetchButton};
+use crate::kit::motion::{self, AnimationExt as _, CHEVRON, COLLAPSE};
+use crate::kit::popover::{self, Popup};
+use crate::kit::theme::{MonoStyled, Theme};
 use crate::markdown::render;
-use crate::motion::{self, AnimationExt as _, CHEVRON, COLLAPSE};
-use crate::popover::{self, Popup};
 use crate::state::{AppState, EngineHandle};
-use crate::theme::{MonoStyled, Theme};
 use cypher_syntax::LanguageId as Lang;
 
 pub mod layout;
@@ -290,8 +290,8 @@ impl Changes {
                     )
                     .children(
                         [
-                            (-120.0, crate::icons::ALT_ARROW_LEFT),
-                            (120.0, crate::icons::ALT_ARROW_RIGHT),
+                            (-120.0, crate::kit::icons::ALT_ARROW_LEFT),
+                            (120.0, crate::kit::icons::ALT_ARROW_RIGHT),
                         ]
                         .into_iter()
                         .enumerate()
@@ -307,7 +307,7 @@ impl Changes {
                                 .justify_center()
                                 .cursor_pointer()
                                 .child(
-                                    crate::icons::icon(icon)
+                                    crate::kit::icons::icon(icon)
                                         .size(px(12.0))
                                         .text_color(theme.text_muted),
                                 )
@@ -644,9 +644,9 @@ impl Changes {
                     .tooltip(move |_, cx| cx.new(|_| DiffLayoutTooltip(mode)).into())
                     .tooltip_show_delay(Duration::from_millis(300))
                     .child(
-                        crate::icons::icon(match mode {
-                            DiffLayout::Unified => crate::icons::DIFF_UNIFIED,
-                            DiffLayout::Split => crate::icons::DIFF_SPLIT,
+                        crate::kit::icons::icon(match mode {
+                            DiffLayout::Unified => crate::kit::icons::DIFF_UNIFIED,
+                            DiffLayout::Split => crate::kit::icons::DIFF_SPLIT,
                         })
                         .size(px(16.0))
                         .text_color(if self.view_layout == mode {

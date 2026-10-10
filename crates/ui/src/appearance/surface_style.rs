@@ -7,8 +7,8 @@ use std::sync::LazyLock;
 use gpui::{App, Global, Hsla};
 use serde::{Deserialize, Serialize};
 
-use crate::chat_style::{ColorPreset, color, normalize_hex};
-use crate::theme::{Appearance, Theme};
+use crate::appearance::chat_style::{ColorPreset, color, normalize_hex};
+use crate::kit::theme::{Appearance, Theme};
 
 pub const FILE_NAME: &str = "appearance-colors.json";
 
@@ -77,7 +77,7 @@ impl Field {
         self.key.strip_prefix("terminalAnsi")?.parse().ok()
     }
     pub fn value(self, theme: &Theme) -> Hsla {
-        use crate::theme::terminal;
+        use crate::kit::theme::terminal;
         match self.key {
             "terminalBackground" => terminal::background(theme),
             "terminalText" | "gitText" | "sidebarText" => theme.text,
@@ -167,7 +167,7 @@ impl SurfaceAppearance {
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         let bytes =
             serde_json::to_vec_pretty(&self.clone().sanitized()).map_err(std::io::Error::other)?;
-        crate::fs_util::write_atomic(dir, FILE_NAME, &bytes, 0o600)
+        crate::kit::fs_util::write_atomic(dir, FILE_NAME, &bytes, 0o600)
     }
 }
 
@@ -273,7 +273,7 @@ pub fn resolve(palette: &Palette, base: &Theme, region: Region) -> Theme {
             }
             if let Some(v) = c("terminalText") {
                 t.text = v;
-                let bg = crate::theme::terminal::background(&t);
+                let bg = crate::kit::theme::terminal::background(&t);
                 secondary_text(&mut t, v, bg);
             }
             if let Some(v) = c("terminalCursor") {
@@ -338,12 +338,12 @@ pub fn contrast_warnings(region: Region, t: &Theme) -> Vec<String> {
     let mut pairs = Vec::new();
     match region {
         Region::Terminal => {
-            let bg = crate::theme::terminal::background(t);
+            let bg = crate::kit::theme::terminal::background(t);
             pairs.push(("Default text".into(), t.text, bg));
             pairs.push((
                 "Selected text".into(),
                 t.text,
-                bg.blend(crate::theme::terminal::selection(t)),
+                bg.blend(crate::kit::theme::terminal::selection(t)),
             ));
             for i in 0..16 {
                 // Report only explicitly configured ANSI colors: black/dim
@@ -396,7 +396,7 @@ pub fn contrast_warnings(region: Region, t: &Theme) -> Vec<String> {
     pairs
         .into_iter()
         .filter_map(|(label, fg, bg)| {
-            (crate::theme::contrast_ratio(bg.blend(fg), bg) < 4.5).then_some(label)
+            (crate::kit::theme::contrast_ratio(bg.blend(fg), bg) < 4.5).then_some(label)
         })
         .collect()
 }

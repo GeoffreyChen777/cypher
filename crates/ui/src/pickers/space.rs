@@ -195,7 +195,7 @@ impl Pickers {
                             // Disconnected glyph, not the word (user request).
                             .when(!online, |el| {
                                 el.child(
-                                    crate::icons::icon(crate::icons::WIFI_OFF)
+                                    crate::kit::icons::icon(crate::kit::icons::WIFI_OFF)
                                         .size(px(12.0))
                                         .flex_none()
                                         .text_color(theme.warning.opacity(0.8)),
@@ -274,7 +274,7 @@ impl Pickers {
                 window.dispatch_action(Box::new(AddSpacePalette), cx);
             }))
             .child(
-                crate::icons::icon(crate::icons::PLUS)
+                crate::kit::icons::icon(crate::kit::icons::PLUS)
                     .size(px(12.0))
                     .flex_none()
                     .text_color(theme.text_muted.opacity(0.7)),

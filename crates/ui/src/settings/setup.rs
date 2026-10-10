@@ -10,11 +10,11 @@ use cypher_engine::pi_packages::PiPackagesSnapshot;
 use cypher_engine::pi_runtime::PiRuntimeStatus;
 use cypher_rpc::methods;
 
-use crate::icons;
-use crate::popover::{self, Loadable};
+use crate::kit::icons;
+use crate::kit::popover::{self, Loadable};
+use crate::kit::theme::Theme;
 use crate::settings::widgets;
 use crate::state::AppState;
-use crate::theme::Theme;
 
 /// Shell listens for this and persists `setup_completed`.
 #[derive(Debug, Clone)]
@@ -191,7 +191,7 @@ impl SetupPage {
             .items_center()
             .gap(px(6.0))
             .child(
-                crate::icons::icon(icons::CHECK)
+                crate::kit::icons::icon(icons::CHECK)
                     .size(px(14.0))
                     .text_color(theme.success_muted),
             )
@@ -360,7 +360,7 @@ impl Render for SetupPage {
                             .py(px(32.0))
                             .flex()
                             .flex_col()
-                            .child(crate::icons::cypher_app_icon().w(px(28.0)).h(px(28.0)))
+                            .child(crate::kit::icons::cypher_app_icon().w(px(28.0)).h(px(28.0)))
                             .child(
                                 div()
                                     .mt(px(20.0))
@@ -480,7 +480,7 @@ pub(crate) mod tests {
         runtime.spawn(listener.serve(fixture.clone()));
         let state = cx.update(|cx| {
             gpui_tokio::init(cx);
-            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
             let state = cx.new(|_| AppState::new());
             AppState::bootstrap(
                 state.clone(),

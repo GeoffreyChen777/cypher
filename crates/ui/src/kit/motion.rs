@@ -337,7 +337,7 @@ where
 
 /// Popover exit: the reverse of [`menu_in`] — fade to 0 + translateY 0→−2 over
 /// [`MENU_OUT`]. Unlike the entrances, the eased progress `t` comes from the
-/// caller (computed off [`crate::popover::Popup`]'s closing instant at render
+/// caller (computed off [`crate::kit::popover::Popup`]'s closing instant at render
 /// time): `with_animation`'s element-id-keyed clock replays from 0 on remount
 /// (the hover-blend comment's warning), and a replay mid-exit is a full-opacity
 /// flash. The wall-clock progress is monotonic by construction; the animation
@@ -372,7 +372,7 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Loader math (pure; rendered by crate::loaders)
+// Loader math (pure; rendered by crate::kit::loaders)
 // ---------------------------------------------------------------------------
 
 // The loader constants and math live in `cypher_proto::motion` (pure phase
@@ -814,8 +814,8 @@ mod tests {
 
     #[test]
     fn mix_endpoints_and_transparent_blend() {
-        let rest = crate::theme::neutral(0.235);
-        let hover = crate::theme::neutral(0.29);
+        let rest = crate::kit::theme::neutral(0.235);
+        let hover = crate::kit::theme::neutral(0.29);
         assert_eq!(mix(rest, hover, 0.0), rest);
         assert_eq!(mix(rest, hover, 1.0), hover);
         assert_eq!(mix(rest, hover, -1.0), rest, "t clamps low");
@@ -829,8 +829,8 @@ mod tests {
         // — never a darkened grey mid-fade). `ink` reads the process-wide
         // appearance, which theme's tests flip — hold the lock so this test
         // never observes a mid-flip Light palette.
-        let _guard = crate::theme::lock_appearance();
-        let wash = crate::theme::ink(0.06);
+        let _guard = crate::kit::theme::lock_appearance();
+        let wash = crate::kit::theme::ink(0.06);
         let half = mix(gpui::transparent_black(), wash, 0.5);
         assert!((half.a - 0.03).abs() < 1e-4, "alpha midpoint {}", half.a);
         let half_rgba = Rgba::from(half);

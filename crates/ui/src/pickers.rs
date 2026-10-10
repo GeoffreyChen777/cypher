@@ -37,11 +37,11 @@ actions!(shell, [AddSpacePalette]);
 const MAX_REF_ROWS: usize = 300;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
-use crate::motion;
-use crate::popover::{self, Loadable, MenuKey};
+use crate::kit::motion;
+use crate::kit::popover::{self, Loadable, MenuKey};
+use crate::kit::theme::Theme;
 use crate::prefs::composer_defaults::ComposerDefaults;
 use crate::state::{AppState, EngineHandle};
-use crate::theme::Theme;
 mod pure;
 pub use pure::*;
 mod checkout;
@@ -133,15 +133,15 @@ fn provider_display_name(id: &str) -> SharedString {
 fn provider_brand_icon(id: &str) -> (&'static str, Option<gpui::Hsla>) {
     match id {
         "anthropic" | "claude-code" | "claude-bridge" => (
-            crate::icons::CLAUDE_MARK,
-            Some(crate::icons::claude_brand()),
+            crate::kit::icons::CLAUDE_MARK,
+            Some(crate::kit::icons::claude_brand()),
         ),
-        "openai-codex" | "openai" => (crate::icons::OPENAI_MARK, None),
+        "openai-codex" | "openai" => (crate::kit::icons::OPENAI_MARK, None),
         "mock" => (
-            crate::icons::CLAUDE_MARK,
-            Some(crate::icons::claude_brand()),
+            crate::kit::icons::CLAUDE_MARK,
+            Some(crate::kit::icons::claude_brand()),
         ),
-        _ => (crate::icons::GLOBAL, None),
+        _ => (crate::kit::icons::GLOBAL, None),
     }
 }
 

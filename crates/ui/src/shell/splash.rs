@@ -159,17 +159,17 @@ impl Shell {
                 let prev = self.sound_prev.insert(chat_id, status);
                 if in_scope
                     && let Some(prev) = prev
-                    && let Some(sound) = crate::sound::sound_for_transition(prev, status)
-                    && !(send_pending && sound == crate::sound::Sound::Done)
+                    && let Some(sound) = crate::kit::sound::sound_for_transition(prev, status)
+                    && !(send_pending && sound == crate::kit::sound::Sound::Done)
                 {
                     if sound_enabled {
-                        crate::sound::play(sound);
+                        crate::kit::sound::play(sound);
                     }
                     if notifications_enabled && !(background_only && app_focused) {
                         let title = title.unwrap_or_else(|| "New session".into());
                         let body = match sound {
-                            crate::sound::Sound::Done => "Run finished",
-                            crate::sound::Sound::Request => "Waiting on your input",
+                            crate::kit::sound::Sound::Done => "Run finished",
+                            crate::kit::sound::Sound::Request => "Waiting on your input",
                         };
                         crate::shell::notify::post(&title, body);
                     }

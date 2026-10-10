@@ -1626,7 +1626,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme_owned = crate::chat_style::theme(cx);
+        let theme_owned = crate::appearance::chat_style::theme(cx);
         let theme = &theme_owned;
         let faint = theme.text_faint;
         let Some(slot) = self.slots.get(&sid) else {
@@ -1841,7 +1841,7 @@ impl Shell {
                         .absolute()
                         .inset_0()
                         .child(
-                            crate::edge_fade::edge_faded(
+                            crate::kit::edge_fade::edge_faded(
                                 Theme::TRANSCRIPT_FADE_BAND,
                                 true,
                                 true,
@@ -2356,12 +2356,14 @@ impl Shell {
         // ends. Inset both accessories by their sum so the left/right trigger
         // boundaries land exactly on those corner endpoints.
         let accessory_inset = Theme::SPACE_LG + crate::composer::PILL_RADIUS;
-        let wide = crate::chat_style::settings(cx).wide;
+        let wide = crate::appearance::chat_style::settings(cx).wide;
         let strip = div()
             .h(px(Theme::STATUS_STRIP_HEIGHT))
             .flex_none()
             .w_full()
-            .when(!wide, |el| el.max_w(px(crate::chat_style::COMPOSER_WIDTH)))
+            .when(!wide, |el| {
+                el.max_w(px(crate::appearance::chat_style::COMPOSER_WIDTH))
+            })
             .mx_auto()
             .flex()
             .items_center()

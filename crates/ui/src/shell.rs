@@ -30,11 +30,12 @@ use gpui_tokio::Tokio;
 use crate::changes::{Changes, ChangesEvent};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
 use crate::files::FilesPanel;
-use crate::icons::{self, cypher_app_icon, icon};
-use crate::loaders;
-use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
+use crate::kit::icons::{self, cypher_app_icon, icon};
+use crate::kit::loaders;
+use crate::kit::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
+use crate::kit::popover::{self, Loadable};
+use crate::kit::theme::Theme;
 use crate::pickers::AddSpacePalette;
-use crate::popover::{self, Loadable};
 use crate::prefs::slash_commands::ProviderIntent;
 use crate::prefs::{
     KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, SAVE_DEBOUNCE_MS, SIDEBAR_DEFAULT,
@@ -58,7 +59,6 @@ use crate::state::{
 };
 use crate::subagents::SubagentsPanel;
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
-use crate::theme::Theme;
 use crate::transcript::rail;
 use crate::transcript::{self, Transcript};
 

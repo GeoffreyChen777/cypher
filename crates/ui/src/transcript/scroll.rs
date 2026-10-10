@@ -783,7 +783,7 @@ impl Transcript {
                 s.transcript_revision(),
                 s.selected_chat.clone(),
                 self.attachment_device_ids(cx),
-                crate::chat_style::settings(cx).tool_call_limit,
+                crate::appearance::chat_style::settings(cx).tool_call_limit,
             )
         };
         if self.synced_revision.as_ref() == Some(&revision) {

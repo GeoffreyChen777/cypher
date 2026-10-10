@@ -15,8 +15,8 @@ use gpui::{
     list, point, prelude::*, px,
 };
 
+use crate::kit::theme::{MonoStyled, Theme};
 use crate::state::AppState;
-use crate::theme::{MonoStyled, Theme};
 
 const HISTORY_PAGE_SIZE: usize = 100;
 const HISTORY_ROW_HEIGHT: f32 = 36.0;
@@ -267,9 +267,9 @@ fn ref_color(reference: &GitHistoryRef, theme: &Theme) -> gpui::Hsla {
 
 fn ref_icon(kind: GitHistoryRefKind) -> &'static str {
     match kind {
-        GitHistoryRefKind::Branch => crate::icons::GIT_BRANCH,
-        GitHistoryRefKind::Remote => crate::icons::CLOUD,
-        GitHistoryRefKind::Tag => crate::icons::TAG,
+        GitHistoryRefKind::Branch => crate::kit::icons::GIT_BRANCH,
+        GitHistoryRefKind::Remote => crate::kit::icons::CLOUD,
+        GitHistoryRefKind::Tag => crate::kit::icons::TAG,
     }
 }
 
@@ -379,7 +379,10 @@ impl GitHistoryFetchButton {
 
 impl Render for GitHistoryFetchButton {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
+        let theme = crate::appearance::surface_style::theme(
+            crate::appearance::surface_style::Region::Git,
+            cx,
+        );
         let fetching = self.history.read(cx).fetching_all;
         let history = self.history.clone();
         div()
@@ -393,12 +396,12 @@ impl Render for GitHistoryFetchButton {
             .gap(px(6.0))
             .rounded(px(6.0))
             .bg(if fetching {
-                crate::theme::wash(0.05)
+                crate::kit::theme::wash(0.05)
             } else {
-                crate::motion::hover_blend(
+                crate::kit::motion::hover_blend(
                     "history-fetch-all",
-                    crate::theme::wash(0.0),
-                    crate::theme::wash(0.14),
+                    crate::kit::theme::wash(0.0),
+                    crate::kit::theme::wash(0.14),
                 )
             })
             .occlude()
@@ -408,14 +411,14 @@ impl Render for GitHistoryFetchButton {
             .when(!fetching, |element| {
                 element
                     .cursor_pointer()
-                    .on_hover(crate::motion::hover_listener("history-fetch-all"))
+                    .on_hover(crate::kit::motion::hover_listener("history-fetch-all"))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         history.update(cx, |history, cx| history.fetch_all(cx));
                     })
             })
             .child(if fetching {
-                crate::loaders::mini_gradient_spinner(
+                crate::kit::loaders::mini_gradient_spinner(
                     "history-fetch-all-spinner",
                     1.75,
                     cx.entity_id(),
@@ -423,7 +426,7 @@ impl Render for GitHistoryFetchButton {
                 )
                 .into_any_element()
             } else {
-                crate::icons::icon(crate::icons::CLOUD)
+                crate::kit::icons::icon(crate::kit::icons::CLOUD)
                     .size(px(12.0))
                     .text_color(theme.text_muted.opacity(0.75))
                     .into_any_element()
@@ -454,7 +457,10 @@ impl GitHistoryCount {
 
 impl Render for GitHistoryCount {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = &crate::surface_style::theme(crate::surface_style::Region::Git, cx);
+        let theme = &crate::appearance::surface_style::theme(
+            crate::appearance::surface_style::Region::Git,
+            cx,
+        );
         let history = self.history.read(cx);
         let count = history.commit_count();
         let branch = history.current_branch(cx);
@@ -929,7 +935,7 @@ impl GitHistory {
             .text_size(px(10.0))
             .text_color(color.opacity(0.9))
             .child(
-                crate::icons::icon(icon)
+                crate::kit::icons::icon(icon)
                     .size(px(10.0))
                     .mt(px(1.0))
                     .text_color(color.opacity(0.78)),
@@ -998,7 +1004,10 @@ impl GitHistory {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if index >= self.commits.len() {
-            let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
+            let theme = crate::appearance::surface_style::theme(
+                crate::appearance::surface_style::Region::Git,
+                cx,
+            );
             let has_error = self.error.is_some();
             let label = if self.loading {
                 "Loading…"
@@ -1038,10 +1047,10 @@ impl GitHistory {
                 })
                 .when(!self.loading, |element| {
                     element.child(
-                        crate::icons::icon(if has_error {
-                            crate::icons::REFRESH
+                        crate::kit::icons::icon(if has_error {
+                            crate::kit::icons::REFRESH
                         } else {
-                            crate::icons::ALT_ARROW_DOWN
+                            crate::kit::icons::ALT_ARROW_DOWN
                         })
                         .size(px(11.0))
                         .flex_none()
@@ -1065,7 +1074,10 @@ impl GitHistory {
         let Some(graph_row) = self.graph.rows.get(index).cloned() else {
             return gpui::Empty.into_any_element();
         };
-        let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
+        let theme = crate::appearance::surface_style::theme(
+            crate::appearance::surface_style::Region::Git,
+            cx,
+        );
         let sha = commit.sha.clone();
         let open_commit = commit.clone();
         let copied = self.copied_sha.as_deref() == Some(sha.as_str());
@@ -1086,10 +1098,10 @@ impl GitHistory {
             .flex_row()
             .items_center()
             .border_b_1()
-            .border_color(crate::theme::hairline(0.04))
+            .border_color(crate::kit::theme::hairline(0.04))
             .text_size(px(11.0))
             .cursor_pointer()
-            .hover(|style| style.bg(crate::theme::ink(0.025)))
+            .hover(|style| style.bg(crate::kit::theme::ink(0.025)))
             // A commit row click opens the commit as its own diff tab (the
             // host — the right pane's surface strip — listens; user request).
             .on_click(cx.listener(move |_, _, _, cx| {
@@ -1165,7 +1177,7 @@ impl GitHistory {
                     .items_center()
                     .rounded(px(4.0))
                     .cursor_pointer()
-                    .hover(|style| style.bg(crate::theme::ink(0.07)))
+                    .hover(|style| style.bg(crate::kit::theme::ink(0.07)))
                     .mono(&theme)
                     .text_size(px(10.5))
                     .text_color(if copied {
@@ -1191,7 +1203,10 @@ impl GitHistory {
 impl Render for GitHistory {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_loaded(cx);
-        let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
+        let theme = crate::appearance::surface_style::theme(
+            crate::appearance::surface_style::Region::Git,
+            cx,
+        );
         let graph_column = graph_width(self.graph.max_lane_count);
 
         let body: AnyElement = if self.target_key.is_none() {
@@ -1212,7 +1227,7 @@ impl Render for GitHistory {
                 .items_center()
                 .justify_center()
                 .gap(px(8.0))
-                .child(crate::loaders::gradient_spinner(
+                .child(crate::kit::loaders::gradient_spinner(
                     "history-loading",
                     &theme,
                     3.0,
@@ -1308,7 +1323,7 @@ impl Render for GitHistory {
                         .flex()
                         .items_center()
                         .border_b_1()
-                        .border_color(crate::theme::hairline(0.06))
+                        .border_color(crate::kit::theme::hairline(0.06))
                         .text_size(px(9.5))
                         .text_color(theme.text_faint)
                         .child(div().w(px(graph_column)).flex_none())

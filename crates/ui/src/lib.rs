@@ -25,12 +25,6 @@ mod test_fixtures;
 mod transcript;
 mod workspace;
 
-use appearance::{chat_style, space_style, surface_style};
-use kit::{
-    edge_fade, frost, fs_util, icons, loaders, motion, popover, soft_shadow, sound, syntax_cache,
-    theme,
-};
-
 use std::borrow::Cow;
 use std::path::PathBuf;
 
@@ -157,7 +151,7 @@ pub fn run_app(config: UiConfig) {
     // profile-picture avatar is a remote URL, and gpui's default null client
     // would fail every fetch (the avatar always falls back to the initial).
     let app = gpui_platform::application()
-        .with_assets(icons::Assets)
+        .with_assets(kit::icons::Assets)
         .with_http_client(std::sync::Arc::new(reqwest_client::ReqwestClient::new()));
     // Dock-icon click with no window (⌘W closed it): rebuild the main window
     // around the still-running engine — zed does the same via `on_reopen`
@@ -188,9 +182,9 @@ pub fn run_app(config: UiConfig) {
             data_dir.clone(),
             cx,
         );
-        surface_style::init(data_dir.clone(), cx);
+        appearance::surface_style::init(data_dir.clone(), cx);
         changes::layout::init(data_dir.clone(), cx);
-        chat_style::init(data_dir, cx);
+        appearance::chat_style::init(data_dir, cx);
         composer::init(cx);
         transcript::init(cx);
         terminal::panel::init(cx);
@@ -311,7 +305,7 @@ fn shell_window_options(bounds: Bounds<gpui::Pixels>, cx: &App) -> WindowOptions
         // One source of truth with the re-apply loop in `appearance::apply`
         // — if these two ever disagree, vibrancy dies on the first theme
         // change and never comes back.
-        window_background: theme::Theme::of(cx).window_background_appearance(),
+        window_background: kit::theme::Theme::of(cx).window_background_appearance(),
         app_id: Some("cypher".into()),
         ..Default::default()
     }

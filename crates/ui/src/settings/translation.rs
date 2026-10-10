@@ -16,9 +16,9 @@ use super::device_target::DeviceTarget;
 use super::widgets;
 use crate::{
     composer::{ComposerInput, ComposerInputEvent},
-    popover::{self, Loadable},
+    kit::popover::{self, Loadable},
+    kit::theme::Theme,
     state::AppState,
-    theme::Theme,
 };
 
 /// Offering a language the offline detector cannot judge is worse than not
@@ -396,7 +396,7 @@ impl TranslationSettings {
             )
             .child(div().w(px(16.0)).when(selected, |row| {
                 row.child(
-                    crate::icons::icon(crate::icons::CHECK)
+                    crate::kit::icons::icon(crate::kit::icons::CHECK)
                         .size(px(12.0))
                         .text_color(theme.accent),
                 )
@@ -561,7 +561,7 @@ impl TranslationSettings {
             )
             .child(div().w(px(16.0)).when(selected, |row| {
                 row.child(
-                    crate::icons::icon(crate::icons::CHECK)
+                    crate::kit::icons::icon(crate::kit::icons::CHECK)
                         .size(px(12.0))
                         .text_color(theme.accent),
                 )
@@ -720,7 +720,7 @@ fn dropdown_trigger(
                 .child(label),
         )
         .child(
-            crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+            crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_DOWN)
                 .size(px(12.0))
                 .text_color(theme.text_muted),
         )
@@ -832,7 +832,7 @@ impl Render for TranslationSettings {
                     .flex()
                     .items_center()
                     .gap(px(12.0))
-                    .child(widgets::row_tile(&theme, crate::icons::GLOBAL))
+                    .child(widgets::row_tile(&theme, crate::kit::icons::GLOBAL))
                     .child(
                         div()
                             .flex_1()
@@ -891,7 +891,7 @@ impl Render for TranslationSettings {
                                     .children(source_popup),
                                 )
                                 .child(
-                                    crate::icons::icon(crate::icons::ALT_ARROW_RIGHT)
+                                    crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_RIGHT)
                                         .size(px(14.0))
                                         .text_color(theme.text_muted),
                                 )

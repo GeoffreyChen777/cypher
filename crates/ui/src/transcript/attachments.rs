@@ -201,8 +201,8 @@ impl Transcript {
                     frame
                         .id(SharedString::from(format!("{row_id}#att{aix}")))
                         .border_1()
-                        .border_color(crate::theme::hairline(0.11))
-                        .bg(crate::theme::ink(0.035))
+                        .border_color(crate::kit::theme::hairline(0.11))
+                        .bg(crate::kit::theme::ink(0.035))
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.attachment_preview = Some(preview.clone());
@@ -225,14 +225,14 @@ impl Transcript {
                 AttachmentSnapshot::Error { .. } => frame
                     .border_1()
                     .border_dashed()
-                    .border_color(crate::theme::hairline(0.14))
-                    .bg(crate::theme::ink(0.025))
+                    .border_color(crate::kit::theme::hairline(0.14))
+                    .bg(crate::kit::theme::ink(0.025))
                     .into_any_element(),
                 // Loading: the pulsing skeleton (same wash as popover skeletons).
                 AttachmentSnapshot::Loading => frame
                     .border_1()
-                    .border_color(crate::theme::hairline(0.08))
-                    .bg(crate::theme::ink(0.055))
+                    .border_color(crate::kit::theme::hairline(0.08))
+                    .bg(crate::kit::theme::ink(0.055))
                     .opacity(
                         0.35 + 0.4
                             * motion::pulse_wave(motion::pulse_delta(

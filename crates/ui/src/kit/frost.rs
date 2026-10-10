@@ -13,7 +13,7 @@ use gpui::{
     LayoutId, Pixels, Window, px,
 };
 
-use crate::theme::Theme;
+use crate::kit::theme::Theme;
 
 /// Backdrop-blur sigma for floating menu/dialog glass — the reference zeron
 /// `.glass-surface` runs `blur(44px)`, and the

@@ -87,7 +87,7 @@ impl Transcript {
                 .gap(px(Theme::SPACE_SM))
                 .pt(px(10.0))
                 .text_size(px(11.0))
-                .child(crate::loaders::gradient_spinner(
+                .child(crate::kit::loaders::gradient_spinner(
                     "working-indicator",
                     &theme,
                     2.5,
@@ -238,9 +238,9 @@ impl Transcript {
         // resolve their highlights (see [`crate::markdown::find`]). Rows build in
         // document order, which is the order the ordinals have to follow.
         crate::markdown::find::begin_row(self.scope, &row.id);
-        let theme = crate::chat_style::theme(cx);
+        let theme = crate::appearance::chat_style::theme(cx);
         let (wide, message_spacing, paragraph_spacing) = {
-            let style = crate::chat_style::settings(cx);
+            let style = crate::appearance::chat_style::settings(cx);
             (style.wide, style.message_spacing, style.paragraph_spacing)
         };
         // The first row's gap clears the small top fade band so a
@@ -322,7 +322,7 @@ impl Transcript {
                                     .text_color(theme.text_muted)
                                     .when(pending, |el| el.opacity(0.65))
                                     .child(
-                                        crate::icons::icon(crate::icons::STEER)
+                                        crate::kit::icons::icon(crate::kit::icons::STEER)
                                             .size(px(12.0))
                                             .text_color(theme.text_muted),
                                     )
@@ -356,7 +356,7 @@ impl Transcript {
                                     .gap(px(8.0))
                                     .when(pending, |el| el.opacity(0.65))
                                     .child(
-                                        crate::icons::icon(crate::icons::COMMAND)
+                                        crate::kit::icons::icon(crate::kit::icons::COMMAND)
                                             .size(px(13.0))
                                             .text_color(theme.text_muted),
                                     )
@@ -382,11 +382,14 @@ impl Transcript {
                                     .min_w_0()
                                     .when(!wide, |el| el.max_w(px(MAX_CONTENT_WIDTH * 0.8)))
                                     .when(wide, |el| el.max_w(gpui::relative(0.8)))
-                                    .when(!steer, |el| el.bg(crate::chat_style::bubble(&theme)))
+                                    .when(!steer, |el| {
+                                        el.bg(crate::appearance::chat_style::bubble(&theme))
+                                    })
                                     // A steer reads as a side note to the
                                     // live turn: fainter fill, hairline edge.
                                     .when(steer, |el| {
-                                        el.bg(crate::chat_style::bubble(&theme).opacity(0.55))
+                                        el.bg(crate::appearance::chat_style::bubble(&theme)
+                                            .opacity(0.55))
                                             .border_1()
                                             .border_color(theme.border)
                                     })
@@ -568,7 +571,7 @@ impl Transcript {
                     .items_center()
                     .justify_center()
                     .child(if fork_pending {
-                        crate::loaders::gradient_spinner(
+                        crate::kit::loaders::gradient_spinner(
                             "fork-spinner",
                             &theme,
                             2.5,
@@ -577,7 +580,7 @@ impl Transcript {
                         )
                         .into_any_element()
                     } else {
-                        crate::icons::icon(crate::icons::GIT_BRANCH)
+                        crate::kit::icons::icon(crate::kit::icons::GIT_BRANCH)
                             .size(px(10.0))
                             .text_color(if fork_enabled {
                                 theme.text_muted
@@ -652,7 +655,7 @@ impl Transcript {
                     .items_center()
                     .justify_center()
                     .child(if rewind_pending {
-                        crate::loaders::gradient_spinner(
+                        crate::kit::loaders::gradient_spinner(
                             "rewind-spinner",
                             &theme,
                             2.5,
@@ -661,7 +664,7 @@ impl Transcript {
                         )
                         .into_any_element()
                     } else {
-                        crate::icons::icon(crate::icons::RESTART)
+                        crate::kit::icons::icon(crate::kit::icons::RESTART)
                             .size(px(10.0))
                             .text_color(if rewind_armed {
                                 theme.danger
@@ -1050,7 +1053,7 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
                         .items_center()
                         .justify_center()
                         .child(
-                            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                            crate::kit::icons::icon(crate::kit::icons::DANGER_TRIANGLE)
                                 .size(px(12.0))
                                 .text_color(red_300.opacity(0.8)),
                         ),
@@ -1089,7 +1092,7 @@ fn answered_model_label(row_id: SharedString, label: AnsweredLabel, theme: &Them
         Some(tip) => el
             .text_color(theme.warning.opacity(0.85))
             .child(
-                crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                crate::kit::icons::icon(crate::kit::icons::DANGER_TRIANGLE)
                     .size(px(11.0))
                     .text_color(theme.warning.opacity(0.85)),
             )
@@ -1128,7 +1131,7 @@ fn worked_rule(label: SharedString, theme: &Theme) -> AnyElement {
                 .flex_1()
                 .min_w_0()
                 .h(px(1.0))
-                .bg(crate::theme::hairline(0.05)),
+                .bg(crate::kit::theme::hairline(0.05)),
         )
         .into_any_element()
 }
@@ -1159,8 +1162,8 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
                 .overflow_hidden()
                 .rounded(px(10.0))
                 .border_1()
-                .border_color(crate::theme::hairline(0.08))
-                .bg(crate::theme::ink(0.045))
+                .border_color(crate::kit::theme::hairline(0.08))
+                .bg(crate::kit::theme::ink(0.045))
                 .px(px(8.0))
                 .text_size(px(12.0))
                 .child(
@@ -1171,7 +1174,7 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
                         .items_center()
                         .justify_center()
                         .child(
-                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                            crate::kit::icons::icon(crate::kit::icons::CHAT_ROUND_LINE)
                                 .size(px(12.0))
                                 .text_color(theme.text_muted),
                         ),
@@ -1200,21 +1203,21 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
 /// The glyph for a tool call (zeron tool-chip.tsx `toolIcon`, Solar set).
 fn tool_icon_path(call: &ToolCall) -> &'static str {
     match call {
-        ToolCall::Exec { .. } => crate::icons::COMMAND,
-        ToolCall::ReadFile { .. } | ToolCall::ApplyPatch { .. } => crate::icons::DOCUMENT,
-        ToolCall::WriteFile { .. } => crate::icons::DOCUMENT_ADD,
-        ToolCall::EditFile { .. } => crate::icons::PEN,
-        ToolCall::Search { .. } => crate::icons::MAGNIFER,
-        ToolCall::Glob { .. } => crate::icons::FOLDER_WITH_FILES,
-        ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
-        ToolCall::Todo { .. } => crate::icons::CHECKLIST,
+        ToolCall::Exec { .. } => crate::kit::icons::COMMAND,
+        ToolCall::ReadFile { .. } | ToolCall::ApplyPatch { .. } => crate::kit::icons::DOCUMENT,
+        ToolCall::WriteFile { .. } => crate::kit::icons::DOCUMENT_ADD,
+        ToolCall::EditFile { .. } => crate::kit::icons::PEN,
+        ToolCall::Search { .. } => crate::kit::icons::MAGNIFER,
+        ToolCall::Glob { .. } => crate::kit::icons::FOLDER_WITH_FILES,
+        ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::kit::icons::GLOBAL,
+        ToolCall::Todo { .. } => crate::kit::icons::CHECKLIST,
         ToolCall::Unknown { name, .. } if name == cypher_proto::view::CODEMODE_TOOL => {
-            crate::icons::CODE
+            crate::kit::icons::CODE
         }
         ToolCall::Unknown { name, .. } if name == cypher_proto::view::TOOL_SEARCH_TOOL => {
-            crate::icons::MAGNIFER
+            crate::kit::icons::MAGNIFER
         }
-        ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
+        ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::kit::icons::WIDGET,
     }
 }
 
@@ -1225,7 +1228,7 @@ pub(super) fn guide_rail() -> gpui::Div {
         .ml(px(12.0))
         .w(px(1.0))
         .flex_none()
-        .bg(crate::theme::ink(0.08))
+        .bg(crate::kit::theme::ink(0.08))
 }
 
 /// Left inset of a work run's thought text from its rail: the text lines up
@@ -1250,7 +1253,7 @@ pub(super) fn nested_rails(depth: u8) -> impl Iterator<Item = gpui::Div> {
             .ml(px(NESTED_RAIL_INSET))
             .w(px(1.0))
             .flex_none()
-            .bg(crate::theme::ink(0.08))
+            .bg(crate::kit::theme::ink(0.08))
     })
 }
 
@@ -1379,7 +1382,7 @@ fn chip_header_row(
                 .items_center()
                 .justify_center()
                 .child(
-                    crate::icons::icon(tool_icon_path(&tool.call))
+                    crate::kit::icons::icon(tool_icon_path(&tool.call))
                         .size(px(12.0))
                         .text_color(theme.text_muted),
                 ),
@@ -1476,12 +1479,14 @@ pub(super) fn tool_status_icon(status: ToolStatus, key: SharedString, theme: &Th
         .flex()
         .items_center()
         .justify_center();
-    let icon = |path| crate::icons::icon(path).size(px(12.0));
+    let icon = |path| crate::kit::icons::icon(path).size(px(12.0));
     match status {
-        ToolStatus::Completed => slot.child(icon(crate::icons::CHECK).text_color(theme.success)),
-        ToolStatus::Failed => slot.child(icon(crate::icons::CROSS).text_color(theme.danger)),
+        ToolStatus::Completed => {
+            slot.child(icon(crate::kit::icons::CHECK).text_color(theme.success))
+        }
+        ToolStatus::Failed => slot.child(icon(crate::kit::icons::CROSS).text_color(theme.danger)),
         ToolStatus::Running => slot.child(
-            icon(crate::icons::SPINNER)
+            icon(crate::kit::icons::SPINNER)
                 .text_color(theme.text_muted)
                 .with_animation(
                     key,
@@ -1521,7 +1526,7 @@ pub(super) fn tool_chip(tool: &ToolItem, key: &SharedString, theme: &Theme) -> A
                 .h_full()
                 .w(px(1.0))
                 .flex_none()
-                .bg(crate::theme::ink(0.08)),
+                .bg(crate::kit::theme::ink(0.08)),
         )
         .children(nested_rails(tool.depth).map(|rail| rail.h_full()))
         .child(
@@ -1533,8 +1538,8 @@ pub(super) fn tool_chip(tool: &ToolItem, key: &SharedString, theme: &Theme) -> A
                 .overflow_hidden()
                 .rounded(px(9.0))
                 .border_1()
-                .border_color(crate::theme::hairline(0.07))
-                .bg(crate::theme::ink(0.03))
+                .border_color(crate::kit::theme::hairline(0.07))
+                .bg(crate::kit::theme::ink(0.03))
                 .child(chip_header_row(tool, None, key, theme)),
         )
         .into_any_element()

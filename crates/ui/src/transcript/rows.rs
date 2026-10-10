@@ -795,10 +795,10 @@ pub(super) fn message_copy_icon(copied: bool, enabled: bool, theme: &Theme) -> g
     } else {
         theme.text_muted
     };
-    crate::icons::icon(if copied {
-        crate::icons::CHECK
+    crate::kit::icons::icon(if copied {
+        crate::kit::icons::CHECK
     } else {
-        crate::icons::COPY
+        crate::kit::icons::COPY
     })
     .size(px(10.0))
     .text_color(color)

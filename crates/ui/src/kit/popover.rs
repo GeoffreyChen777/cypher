@@ -15,8 +15,8 @@ use gpui::{
     Anchor, AnyElement, ElementId, IntoElement, Pixels, Point, SharedString, div, prelude::*, px,
 };
 
-use crate::motion::{self, CYPHER_PULSE};
-use crate::theme::{MonoStyled, Theme, hairline, ink};
+use crate::kit::motion::{self, CYPHER_PULSE};
+use crate::kit::theme::{MonoStyled, Theme, hairline, ink};
 
 // ---------------------------------------------------------------------------
 // Loadable — async slot state shared by pickers/settings pages
@@ -288,7 +288,7 @@ pub fn classify_key(key: &str, cmd: bool, ctrl: bool) -> MenuKey {
 /// `rounded-xl border border-white/[0.1] p-1` over the frosted glass tint —
 /// the real recipe now that the fork paints backdrop blur: the
 /// [`Theme::glass_overlay`] tint (`oklch(0.40 0 0 / 38%)` on dark) over the
-/// [`crate::frost::MENU_BLUR`] blur from the mount helpers below, plus the
+/// [`crate::kit::frost::MENU_BLUR`] blur from the mount helpers below, plus the
 /// same hairline + baked-in shadow. Opaque platforms keep the near-opaque
 /// tone the reference composites to on the dark panels (~#161616).
 pub fn popover_card(theme: &Theme) -> gpui::Div {
@@ -303,7 +303,7 @@ pub fn popover_card(theme: &Theme) -> gpui::Div {
         .text_color(theme.text);
     if theme.is_glass() {
         // Translucent tint — the backdrop blur beneath it comes from the
-        // [`crate::frost::frosted`] wrapper at the mount helpers below.
+        // [`crate::kit::frost::frosted`] wrapper at the mount helpers below.
         card.bg(theme.glass_overlay())
     } else {
         card.bg(theme.surface_overlay)
@@ -349,8 +349,8 @@ fn exit_progress(since: std::time::Instant) -> f32 {
 /// primitive ignores `element_opacity`, so without this the glass slab would
 /// hold full strength through the fade and pop off at unmount.
 fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
-    let blur = crate::frost::MENU_BLUR * (1.0 - exit.unwrap_or(0.0));
-    crate::frost::frosted(12.0, blur, content).into_any_element()
+    let blur = crate::kit::frost::MENU_BLUR * (1.0 - exit.unwrap_or(0.0));
+    crate::kit::frost::frosted(12.0, blur, content).into_any_element()
 }
 
 /// Entrance or exit motion for a popover layer. While exiting (the [`Popup`]
@@ -576,7 +576,7 @@ pub fn menu_at(
 /// through [`Hsla::opacity`], whose `0..=1` clamp would clip a
 /// larger-than-0.6 alpha before it could scale the light side).
 pub(crate) fn scrim_alpha(alpha_dark: f32) -> gpui::Hsla {
-    crate::theme::scrim(alpha_dark)
+    crate::kit::theme::scrim(alpha_dark)
 }
 
 /// Full-window modal: dim scrim + centered card with the `dialog-in` entrance.
@@ -613,8 +613,8 @@ fn modal_with(
     corner_radius: f32,
     scrim: f32,
 ) -> AnyElement {
-    let card =
-        crate::frost::frosted(corner_radius, crate::frost::MENU_BLUR, card).into_any_element();
+    let card = crate::kit::frost::frosted(corner_radius, crate::kit::frost::MENU_BLUR, card)
+        .into_any_element();
     gpui::deferred(
         gpui::anchored()
             .position(gpui::point(px(0.0), px(0.0)))
@@ -652,7 +652,7 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
         .text_size(px(13.0))
         .cursor_pointer();
     if active {
-        row.bg(crate::theme::card_selected_bg())
+        row.bg(crate::kit::theme::card_selected_bg())
             .text_color(theme.text)
     } else {
         let fade_key = fade_key.into();
@@ -664,8 +664,8 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
             ))
             .bg(motion::hover_blend(
                 &fade_key,
-                crate::theme::wash(0.0),
-                crate::theme::card_selected_bg(),
+                crate::kit::theme::wash(0.0),
+                crate::kit::theme::card_selected_bg(),
             ));
         // Imperative form — the caller's `.id(...)` makes the element stateful
         // (hover listeners need element state, `.on_hover` needs `Stateful`).
@@ -687,7 +687,7 @@ pub fn menu_row_nav(
 ) -> gpui::Div {
     let row = menu_row(theme, selected, fade_key);
     if !selected && highlighted {
-        row.bg(crate::theme::card_selected_bg())
+        row.bg(crate::kit::theme::card_selected_bg())
             .text_color(theme.text)
     } else {
         row
@@ -740,7 +740,7 @@ pub fn menu_separator() -> gpui::Div {
 /// (some outside this crate's `ui` module tree — threading a `&Theme` param
 /// would ripple past this task's file scope).
 pub fn band() -> gpui::Hsla {
-    crate::theme::band()
+    crate::kit::theme::band()
 }
 
 /// One footer key-cap (22px, rounded-5, `white/[0.05]`) holding arbitrary
@@ -777,7 +777,7 @@ pub fn key_hint(theme: &Theme, icon_path: &'static str, label: &'static str) -> 
         .gap(px(5.0))
         .child(
             key_cap(theme).child(
-                crate::icons::icon(icon_path)
+                crate::kit::icons::icon(icon_path)
                     .size(px(12.5))
                     .text_color(theme.text_muted.opacity(0.7)),
             ),
@@ -819,13 +819,13 @@ pub fn key_hint_pair(
         .child(
             key_cap(theme)
                 .child(
-                    crate::icons::icon(first)
+                    crate::kit::icons::icon(first)
                         .size(px(12.5))
                         .text_color(theme.text_muted.opacity(0.7)),
                 )
                 .child(div().w(px(1.0)).h(px(11.0)).bg(hairline(0.10)))
                 .child(
-                    crate::icons::icon(second)
+                    crate::kit::icons::icon(second)
                         .size(px(12.5))
                         .text_color(theme.text_muted.opacity(0.7)),
                 ),
@@ -943,7 +943,7 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
         .text_color(motion::hover_blend(&fade_key, theme.text_muted, theme.text))
         .bg(motion::hover_blend(
             &fade_key,
-            crate::theme::wash(0.0),
+            crate::kit::theme::wash(0.0),
             ink(0.06),
         ))
         .cursor_pointer()

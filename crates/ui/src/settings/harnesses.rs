@@ -12,10 +12,10 @@ use cypher_rpc::methods;
 use super::device_target::DeviceTarget;
 use super::titles::TitlesPage;
 use super::translation::TranslationSettings;
-use crate::popover::{self, Loadable};
+use crate::kit::popover::{self, Loadable};
+use crate::kit::theme::Theme;
 use crate::settings::widgets;
 use crate::state::AppState;
-use crate::theme::Theme;
 
 pub struct HarnessesPage {
     state: Entity<AppState>,
@@ -270,7 +270,7 @@ impl Render for HarnessesPage {
                                 .flex()
                                 .items_center()
                                 .gap(px(12.0))
-                                .child(widgets::row_tile(&theme, crate::icons::TUNING))
+                                .child(widgets::row_tile(&theme, crate::kit::icons::TUNING))
                                 .child(
                                     div()
                                         .flex_1()
@@ -386,7 +386,7 @@ mod tests {
         runtime.spawn(listener.serve(fixture.clone()));
         let state = cx.update(|cx| {
             gpui_tokio::init(cx);
-            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
             let state = cx.new(|_| AppState::new());
             AppState::bootstrap(
                 state.clone(),

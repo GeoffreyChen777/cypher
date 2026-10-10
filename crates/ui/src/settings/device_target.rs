@@ -1,7 +1,7 @@
 //! One device selection shared by Agents, Providers, Commands and MCP.
 //! Requests bind an absolute device id before dispatch. Epochs reject late
 //! replies; RAII write leases keep the selector locked until a mutation settles.
-use crate::{icons, popover, state::AppState, theme::Theme};
+use crate::{kit::icons, kit::popover, kit::theme::Theme, state::AppState};
 use gpui::{Context, Entity, FocusHandle, SharedString, Subscription, Window, div, prelude::*, px};
 use std::sync::{
     Arc,

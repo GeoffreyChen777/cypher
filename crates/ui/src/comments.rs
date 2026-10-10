@@ -20,9 +20,9 @@ use gpui::{
 };
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::kit::theme::Theme;
 use crate::markdown::render;
 use crate::markdown::selection::{self, SelectionScope};
-use crate::theme::Theme;
 
 /// Events the shell listens for.
 pub enum CommentPopupEvent {
@@ -454,7 +454,7 @@ impl CommentPopup {
                 .cursor_pointer()
                 .text_size(px(11.0))
                 .text_color(theme.text_muted)
-                .hover(|s| s.text_color(theme.text).bg(crate::theme::wash(0.06)))
+                .hover(|s| s.text_color(theme.text).bg(crate::kit::theme::wash(0.06)))
                 // A click here must NOT land in the text-selection listener of
                 // the surface underneath (its mouse-down would dismiss this
                 // very pill).
@@ -553,7 +553,7 @@ impl CommentPopup {
             .py(px(4.0))
             .rounded(px(8.0))
             .text_size(px(11.0))
-            .text_color(crate::motion::hover_blend(
+            .text_color(crate::kit::motion::hover_blend(
                 "comment-cancel",
                 theme.text_muted,
                 theme.text,
@@ -564,7 +564,7 @@ impl CommentPopup {
         let mut cancel_btn = cancel;
         cancel_btn
             .interactivity()
-            .on_hover(crate::motion::hover_listener("comment-cancel"));
+            .on_hover(crate::kit::motion::hover_listener("comment-cancel"));
         let card = div()
             .id("comment-editor")
             .w(px(320.0))
@@ -589,7 +589,7 @@ impl CommentPopup {
                     .px(px(8.0))
                     .py(px(6.0))
                     .rounded(px(6.0))
-                    .bg(crate::theme::ink(0.03))
+                    .bg(crate::kit::theme::ink(0.03))
                     .child(quote_rail(&theme))
                     .child(
                         div()

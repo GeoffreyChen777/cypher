@@ -61,7 +61,7 @@ pub fn terminal_panel_bg(theme: &Theme) -> Hsla {
 /// so selected output keeps the colors the program asked for — the whole point
 /// of tuning those palettes per appearance in the first place.
 ///
-/// White on dark, black on light, the same direction [`crate::theme::ink`]
+/// White on dark, black on light, the same direction [`crate::kit::theme::ink`]
 /// takes. The alpha is heavier than a hover wash because this has to read as a
 /// deliberate highlight at a glance, and lighter than a plate because the
 /// glyphs underneath still have to be legible through it.

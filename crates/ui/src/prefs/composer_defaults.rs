@@ -83,7 +83,7 @@ impl ComposerDefaults {
     pub fn save(&self, data_dir: &Path) -> io::Result<()> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        crate::fs_util::write_atomic(data_dir, FILE_NAME, json.as_bytes(), 0o666)
+        crate::kit::fs_util::write_atomic(data_dir, FILE_NAME, json.as_bytes(), 0o666)
     }
 
     pub fn path(data_dir: &Path) -> PathBuf {

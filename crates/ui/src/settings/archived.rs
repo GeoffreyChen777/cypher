@@ -8,8 +8,8 @@ use gpui::{
 use cypher_proto::Chat;
 use cypher_rpc::methods;
 
+use crate::kit::theme::Theme;
 use crate::state::AppState;
-use crate::theme::Theme;
 
 /// Archived rows in sidebar (recency) order. Pure.
 pub fn archived_chats(chats: &[Chat]) -> Vec<&Chat> {
@@ -119,7 +119,7 @@ impl Render for ArchivedPage {
                     .rounded(px(8.0))
                     .px(px(12.0))
                     .py(px(8.0))
-                    .hover(|s| s.bg(crate::theme::ink(0.03)))
+                    .hover(|s| s.bg(crate::kit::theme::ink(0.03)))
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         if *hovered {
                             this.hovered = Some(ix);
@@ -139,7 +139,7 @@ impl Render for ArchivedPage {
                             .items_center()
                             .justify_center()
                             .child(
-                                crate::icons::icon(crate::icons::ARCHIVE_MINIMALISTIC)
+                                crate::kit::icons::icon(crate::kit::icons::ARCHIVE_MINIMALISTIC)
                                     .size(px(16.0))
                                     .text_color(theme.text_muted.opacity(0.6)),
                             ),
@@ -224,7 +224,7 @@ impl Render for ArchivedPage {
                                 this.unarchive(chat_id.clone(), cx);
                             }))
                             .child(
-                                crate::icons::icon(crate::icons::ARCHIVE_UP_MINIMALISTIC)
+                                crate::kit::icons::icon(crate::kit::icons::ARCHIVE_UP_MINIMALISTIC)
                                     .size(px(14.0))
                                     .text_color(theme.text_muted),
                             )
@@ -250,7 +250,7 @@ impl Render for ArchivedPage {
                 .child(
                     // `opacity-40` on top of the inherited muted/50 — an
                     // effectively ~20% glyph (zeron settings.archived.tsx).
-                    crate::icons::icon(crate::icons::ARCHIVE_MINIMALISTIC)
+                    crate::kit::icons::icon(crate::kit::icons::ARCHIVE_MINIMALISTIC)
                         .size(px(28.0))
                         .text_color(theme.text_muted.opacity(0.2)),
                 )

@@ -352,7 +352,7 @@ impl Transcript {
                             .size(px(18.0))
                             .flex_none()
                             .rounded(px(5.0))
-                            .bg(crate::theme::ink(0.06))
+                            .bg(crate::kit::theme::ink(0.06))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -396,7 +396,7 @@ impl Transcript {
                     .items_center()
                     .justify_center()
                     .child(
-                        crate::icons::icon(crate::icons::LIGHTBULB)
+                        crate::kit::icons::icon(crate::kit::icons::LIGHTBULB)
                             .size(px(12.0))
                             .text_color(theme.text_muted),
                     ),
@@ -456,8 +456,8 @@ impl Transcript {
                     .overflow_hidden()
                     .rounded(px(9.0))
                     .border_1()
-                    .border_color(crate::theme::hairline(0.07))
-                    .bg(crate::theme::ink(0.03))
+                    .border_color(crate::kit::theme::hairline(0.07))
+                    .bg(crate::kit::theme::ink(0.03))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_pins.insert(key.clone(), !open);
@@ -547,7 +547,7 @@ impl Transcript {
             (skip, false)
         } else {
             let revealed = self.tool_overflow.contains(row_id);
-            let limit = crate::chat_style::settings(cx).tool_call_limit;
+            let limit = crate::appearance::chat_style::settings(cx).tool_call_limit;
             let hidden = hidden_tool_count(tools.len(), limit, revealed);
             // The row stays after revealing (as "Show fewer") so the same
             // click target puts the chips back.
@@ -724,7 +724,7 @@ impl Transcript {
                     .size(px(18.0))
                     .flex_none()
                     .rounded(px(5.0))
-                    .bg(crate::theme::ink(0.06))
+                    .bg(crate::kit::theme::ink(0.06))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -784,7 +784,7 @@ impl Transcript {
                         .h_full()
                         .w(px(1.0))
                         .flex_none()
-                        .bg(crate::theme::ink(0.08)),
+                        .bg(crate::kit::theme::ink(0.08)),
                 )
                 .child(
                     div()
@@ -848,8 +848,8 @@ impl Transcript {
                     .overflow_hidden()
                     .rounded(px(9.0))
                     .border_1()
-                    .border_color(crate::theme::hairline(0.07))
-                    .bg(crate::theme::ink(0.03))
+                    .border_color(crate::kit::theme::hairline(0.07))
+                    .bg(crate::kit::theme::ink(0.03))
                     .child(
                         div()
                             .id(key.clone())
@@ -893,7 +893,7 @@ impl Transcript {
                                 div()
                                     .h(px(DETAIL_SEPARATOR))
                                     .flex_none()
-                                    .bg(crate::theme::hairline(0.06)),
+                                    .bg(crate::kit::theme::hairline(0.06)),
                             )
                             .child(detail_body(invocation, None, theme));
                     }
@@ -903,7 +903,7 @@ impl Transcript {
                                 div()
                                     .h(px(DETAIL_SEPARATOR))
                                     .flex_none()
-                                    .bg(crate::theme::hairline(0.06)),
+                                    .bg(crate::kit::theme::hairline(0.06)),
                             )
                             .child(detail_body(detail, detail_highlights[ix].clone(), theme));
                     }
@@ -958,7 +958,7 @@ impl Transcript {
                             .ml(px(12.0))
                             .w(px(1.0))
                             .flex_none()
-                            .bg(crate::theme::ink(0.08)),
+                            .bg(crate::kit::theme::ink(0.08)),
                     )
                     .children(nested_rails(tool.depth))
                     .child(card)

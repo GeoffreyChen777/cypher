@@ -1,9 +1,11 @@
 //! Overall theme selection and lazily expanded per-region color controls.
-use crate::chat_style::{ColorPreset, normalize_hex};
+use crate::appearance::chat_style::{ColorPreset, normalize_hex};
+use crate::appearance::surface_style::{
+    self, FIELDS, Field, Palette, Region, SurfaceAppearanceState,
+};
 use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::kit::theme::{Appearance, MonoStyled, Theme};
 use crate::settings::widgets;
-use crate::surface_style::{self, FIELDS, Field, Palette, Region, SurfaceAppearanceState};
-use crate::theme::{Appearance, MonoStyled, Theme};
 use gpui::{
     AnyElement, Context, Entity, Render, SharedString, Subscription, Window, div, prelude::*, px,
 };
@@ -379,7 +381,7 @@ fn region_preview(region: Region, t: &Theme) -> AnyElement {
             div()
                 .p(px(12.0))
                 .rounded(px(8.0))
-                .bg(crate::theme::terminal::background(t))
+                .bg(crate::kit::theme::terminal::background(t))
                 .mono(t)
                 .text_size(px(view::TERM_FONT_SIZE))
                 .line_height(px(view::TERM_LINE_HEIGHT))
@@ -394,7 +396,7 @@ fn region_preview(region: Region, t: &Theme) -> AnyElement {
                         .flex()
                         .child(
                             div()
-                                .bg(crate::theme::terminal::selection(t))
+                                .bg(crate::kit::theme::terminal::selection(t))
                                 .child("selected output"),
                         )
                         .child("  $ ")

@@ -17,9 +17,9 @@ use cypher_proto::WorkspaceScope;
 use cypher_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
-use crate::popover;
+use crate::kit::popover;
+use crate::kit::theme::{MonoStyled, Theme};
 use crate::state::{AppState, device_online};
-use crate::theme::{MonoStyled, Theme};
 
 /// Compact last-seen line. Pure.
 pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
@@ -595,10 +595,10 @@ impl Render for DevicesPage {
                     _ => None,
                 };
                 let platform_icon = match device.platform.as_str() {
-                    "macos" | "darwin" => crate::icons::LAPTOP,
-                    "web" => crate::icons::GLOBAL,
-                    "ios" | "android" => crate::icons::SMARTPHONE,
-                    _ => crate::icons::MONITOR,
+                    "macos" | "darwin" => crate::kit::icons::LAPTOP,
+                    "web" => crate::kit::icons::GLOBAL,
+                    "ios" | "android" => crate::kit::icons::SMARTPHONE,
+                    _ => crate::kit::icons::MONITOR,
                 };
                 // Presence lives ON the identity tile: a corner dot (emerald
                 // online with a soft glow, faint offline), ringed by the card
@@ -623,7 +623,7 @@ impl Render for DevicesPage {
                                 inset: false,
                             }])
                         })
-                        .when(!online, |el| el.bg(crate::theme::ink(0.22))),
+                        .when(!online, |el| el.bg(crate::kit::theme::ink(0.22))),
                 );
                 // One quiet meta line: platform · version · (offline: last
                 // seen) · id chip.
@@ -751,9 +751,11 @@ impl Render for DevicesPage {
                                     }
                                 }))
                                 .child(
-                                    crate::icons::icon(crate::icons::ARCHIVE_UP_MINIMALISTIC)
-                                        .size(px(14.0))
-                                        .text_color(theme.accent),
+                                    crate::kit::icons::icon(
+                                        crate::kit::icons::ARCHIVE_UP_MINIMALISTIC,
+                                    )
+                                    .size(px(14.0))
+                                    .text_color(theme.accent),
                                 )
                                 .child(SharedString::from(label)),
                         )
@@ -767,14 +769,14 @@ impl Render for DevicesPage {
                             .opacity(0.7)
                             .hover(|s| {
                                 s.opacity(1.0)
-                                    .bg(crate::theme::ink(0.06))
+                                    .bg(crate::kit::theme::ink(0.06))
                                     .text_color(theme.text)
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_rename(rename_id.clone(), rename_name.clone(), cx);
                             }))
                             .child(
-                                crate::icons::icon(crate::icons::PEN)
+                                crate::kit::icons::icon(crate::kit::icons::PEN)
                                     .size(px(14.0))
                                     .text_color(theme.text_muted),
                             )
@@ -794,9 +796,11 @@ impl Render for DevicesPage {
                                     this.open_delete(remove_id.clone(), cx);
                                 }))
                                 .child(
-                                    crate::icons::icon(crate::icons::TRASH_BIN_MINIMALISTIC)
-                                        .size(px(14.0))
-                                        .text_color(theme.danger),
+                                    crate::kit::icons::icon(
+                                        crate::kit::icons::TRASH_BIN_MINIMALISTIC,
+                                    )
+                                    .size(px(14.0))
+                                    .text_color(theme.danger),
                                 )
                                 .child(SharedString::from("Remove")),
                         )
@@ -853,7 +857,7 @@ impl Render for DevicesPage {
                                         .when(checking, |el| el.opacity(0.6))
                                         .on_click(cx.listener(|this, _, _, cx| this.check_all(cx)))
                                         .child(
-                                            crate::icons::icon(crate::icons::REFRESH)
+                                            crate::kit::icons::icon(crate::kit::icons::REFRESH)
                                                 .size(px(14.0))
                                                 .text_color(theme.text_muted),
                                         )
@@ -876,8 +880,8 @@ impl Render for DevicesPage {
                                                 cx.listener(|this, _, _, cx| this.apply_all(cx)),
                                             )
                                             .child(
-                                                crate::icons::icon(
-                                                    crate::icons::ARCHIVE_UP_MINIMALISTIC,
+                                                crate::kit::icons::icon(
+                                                    crate::kit::icons::ARCHIVE_UP_MINIMALISTIC,
                                                 )
                                                 .size(px(14.0))
                                                 .text_color(theme.accent),

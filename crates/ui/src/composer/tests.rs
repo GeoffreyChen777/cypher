@@ -320,7 +320,7 @@ fn mention_token_requires_a_token_boundary_and_tracks_full_token() {
 #[gpui::test]
 fn removing_a_plain_token_keeps_the_rest_of_the_draft(cx: &mut gpui::TestAppContext) {
     let input = cx.update(|cx| {
-        cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+        cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
         cx.new(|cx| ComposerInput::new("", cx))
     });
     cx.update(|cx| {

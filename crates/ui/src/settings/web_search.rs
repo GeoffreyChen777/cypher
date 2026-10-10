@@ -12,10 +12,10 @@ use gpui::{
 use super::{device_target::DeviceTarget, widgets};
 use crate::{
     composer::{ComposerInput, ComposerInputEvent},
-    icons,
-    popover::{self, Loadable},
+    kit::icons,
+    kit::popover::{self, Loadable},
+    kit::theme::Theme,
     state::AppState,
-    theme::Theme,
 };
 
 pub struct WebSearchFallbackControl {

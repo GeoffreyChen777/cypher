@@ -1,5 +1,5 @@
 //! Loaders: the gradient matrix spinner and the boot splash content. All
-//! motion routes through `crate::motion` pure helpers, so the math is
+//! motion routes through `crate::kit::motion` pure helpers, so the math is
 //! unit-tested and these elements are testable-by-compile.
 //!
 //! Rendering pattern: every cell reads the one shared pulse clock
@@ -9,8 +9,8 @@
 
 use gpui::{AnyElement, App, EntityId, IntoElement, ParentElement, SharedString, Styled, div, px};
 
-use crate::motion::{self, GRADIENT_SPIN, SPLASH_OUT};
-use crate::theme::{MonoStyled, Theme};
+use crate::kit::motion::{self, GRADIENT_SPIN, SPLASH_OUT};
+use crate::kit::theme::{MonoStyled, Theme};
 
 // Shared with the terminal viewport (`cypher_proto::motion`) so both animate the
 // same loaders from the same numbers.
