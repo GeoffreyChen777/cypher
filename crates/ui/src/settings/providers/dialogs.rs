@@ -113,9 +113,58 @@ impl ProvidersPage {
     ) -> AnyElement {
         let form = self.form.as_ref().unwrap();
         let editing = form.original.is_some();
-        let saved = form.original.as_ref().is_some_and(|p| p.credential_saved);
         let busy = self.busy.is_some();
         let width = (f32::from(window.viewport_size().width) - 40.0).clamp(280.0, 464.0);
+        let fields = self.render_form_fields(window, theme, cx);
+        let footer = self.render_form_footer(editing, busy, theme, cx);
+        popover::dialog_card(theme)
+            .id("provider-form-dialog")
+            .role(gpui::Role::Dialog)
+            .aria_label(if editing {
+                "Provider settings"
+            } else {
+                "Add provider"
+            })
+            .track_focus(&self.dialog_focus)
+            .key_context("ProviderDialog")
+            .tab_group()
+            .p_0()
+            .w(px(width))
+            .overflow_hidden()
+            .on_key_down(cx.listener(Self::on_dialog_key))
+            .child(self.dialog_heading(
+                theme,
+                if editing {
+                    "Provider settings"
+                } else {
+                    "Add provider"
+                },
+                "Connect models to your workspace.",
+                cx,
+            ))
+            .child(
+                div()
+                    .id("provider-form-scroll")
+                    .max_h(px(
+                        (f32::from(window.viewport_size().height) - 252.0).max(120.0)
+                    ))
+                    .overflow_y_scroll()
+                    .child(fields),
+            )
+            .child(footer)
+            .into_any_element()
+    }
+
+    /// The form's body: kind header, provider name (read-only once saved),
+    /// base URL, API key, and any error.
+    fn render_form_fields(
+        &self,
+        window: &Window,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let form = self.form.as_ref().unwrap();
+        let saved = form.original.as_ref().is_some_and(|p| p.credential_saved);
         let spec = form.kind.spec();
         let mut fields = div()
             .px(px(24.0))
@@ -193,7 +242,18 @@ impl ProvidersPage {
         if let Some(error) = &self.error {
             fields = fields.child(widgets::error_strip(theme, error.clone()).mt_0());
         }
-        let footer = div()
+        fields
+    }
+
+    /// Where the key is kept, then Cancel and Save.
+    fn render_form_footer(
+        &self,
+        editing: bool,
+        busy: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        div()
             .px(px(24.0))
             .py(px(16.0))
             .border_t_1()
@@ -276,43 +336,7 @@ impl ProvidersPage {
                             el.on_click(cx.listener(|page, _, _, cx| page.save(cx)))
                         }),
                     ),
-            );
-        popover::dialog_card(theme)
-            .id("provider-form-dialog")
-            .role(gpui::Role::Dialog)
-            .aria_label(if editing {
-                "Provider settings"
-            } else {
-                "Add provider"
-            })
-            .track_focus(&self.dialog_focus)
-            .key_context("ProviderDialog")
-            .tab_group()
-            .p_0()
-            .w(px(width))
-            .overflow_hidden()
-            .on_key_down(cx.listener(Self::on_dialog_key))
-            .child(self.dialog_heading(
-                theme,
-                if editing {
-                    "Provider settings"
-                } else {
-                    "Add provider"
-                },
-                "Connect models to your workspace.",
-                cx,
-            ))
-            .child(
-                div()
-                    .id("provider-form-scroll")
-                    .max_h(px(
-                        (f32::from(window.viewport_size().height) - 252.0).max(120.0)
-                    ))
-                    .overflow_y_scroll()
-                    .child(fields),
             )
-            .child(footer)
-            .into_any_element()
     }
 
     pub(super) fn dialog_heading(
