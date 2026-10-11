@@ -45,6 +45,8 @@ pub use wizard::*;
 mod mentions;
 pub use mentions::*;
 mod comments;
+pub mod permission_card;
+pub(crate) mod question_card;
 mod render;
 mod send;
 mod slash;
@@ -639,6 +641,13 @@ pub struct Composer {
     failure: Option<SharedString>,
     wizard: Option<Wizard>,
     wizard_focus: FocusHandle,
+    /// When the current card appeared: its shortcuts wait out
+    /// [`question_card::SHORTCUT_GRACE`] so keys typed as it opens don't
+    /// answer it.
+    wizard_opened_at: Option<Instant>,
+    /// A card without a text field takes keyboard focus on its next render,
+    /// if this composer had it.
+    wizard_focus_pending: bool,
     /// Selection scope of the question card's text (question, context and
     /// option copy select + copy like transcript text).
     wizard_selection: crate::markdown::selection::SelectionScope,
@@ -934,6 +943,8 @@ impl Composer {
             failure: None,
             wizard: None,
             wizard_focus: cx.focus_handle(),
+            wizard_opened_at: None,
+            wizard_focus_pending: false,
             wizard_selection: crate::markdown::selection::next_question_scope(),
             answered_requests: HashSet::new(),
             advance_task: None,

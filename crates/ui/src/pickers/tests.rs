@@ -423,6 +423,41 @@ fn resolved_chat_config_requires_harness() {
     assert_eq!(config.harness, HarnessId::Mock);
     assert_eq!(config.model.as_deref(), Some("opus"));
     assert_eq!(config.sandbox, SandboxLevel::WorkspaceWrite);
+    // A draft's permission pick rides the new chat's config and its run.
+    resolved.sandbox = Some(SandboxLevel::ReadOnly);
+    assert_eq!(
+        resolved.chat_config().unwrap().sandbox,
+        SandboxLevel::ReadOnly
+    );
+    assert_eq!(resolved.sandbox_level(), SandboxLevel::ReadOnly);
+}
+
+#[test]
+fn permission_levels_are_labeled_strictest_first() {
+    assert_eq!(
+        PERMISSION_LEVELS.map(|entry| entry.level),
+        [
+            SandboxLevel::ReadOnly,
+            SandboxLevel::WorkspaceWrite,
+            SandboxLevel::DangerFullAccess
+        ]
+    );
+    assert_eq!(
+        PERMISSION_LEVELS.map(|entry| entry.value),
+        ["ask", "workspace", "full"]
+    );
+    assert_eq!(
+        permission_level(SandboxLevel::WorkspaceWrite).label,
+        "Edit workspace"
+    );
+    assert_eq!(
+        permission_level(SandboxLevel::ReadOnly).label,
+        "Ask before edits"
+    );
+    assert_eq!(
+        permission_level(SandboxLevel::DangerFullAccess).label,
+        "Full access"
+    );
 }
 
 #[test]

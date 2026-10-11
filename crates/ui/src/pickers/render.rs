@@ -24,6 +24,7 @@ impl Pickers {
             PickerKind::Traits => "picker-traits",
             PickerKind::Space => "picker-space",
             PickerKind::Device => "picker-device",
+            PickerKind::Permissions => "picker-permissions",
         };
         let open = self.open_kind() == Some(kind);
         let fade = format!("{id}-{}", cx.entity_id());
@@ -78,7 +79,10 @@ impl Pickers {
                         .text_color(tint.unwrap_or(theme.text_muted)),
                 )
             })
-            .child(div().min_w_0().truncate().child(label))
+            // An icon-only trigger (Full access) has no label slot.
+            .when(!label.is_empty(), |el| {
+                el.child(div().min_w_0().truncate().child(label))
+            })
             // The effort half of the combined model+effort chip (and the space
             // chip's "@ device" tag): muted, no icon — one button, two tones.
             // `tint` overrides the muted tone (the offline warning).
@@ -519,8 +523,8 @@ impl Pickers {
                             this.models.clear();
                             this.ensure_harnesses(false, cx);
                         }
-                        // Projects/devices load nothing; no retry surface exists.
-                        PickerKind::Space | PickerKind::Device => {}
+                        // Projects/devices/levels load nothing; no retry surface exists.
+                        PickerKind::Space | PickerKind::Device | PickerKind::Permissions => {}
                     }))
                     .child(SharedString::from("Retry")),
             )
@@ -1191,6 +1195,47 @@ impl Pickers {
     /// label, a "Default" badge on the section's default choice, and the
     /// trailing check on the selected row. Sections split by hairline
     /// separators. Selecting keeps the menu open for multi-adjust.
+    /// The permission level menu: one row per level with its description.
+    fn render_permissions_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let current = self.effective_sandbox(cx);
+        let active = self.active;
+        div()
+            .p(px(4.0))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(popover::menu_heading(&theme, "Permissions"))
+            .children(PERMISSION_LEVELS.iter().enumerate().map(|(ix, entry)| {
+                let (level, label, detail) = (entry.level, entry.label, entry.description);
+                popover::menu_row(&theme, ix == active, format!("permission-level-{ix}"))
+                    .id(("permission-level", ix))
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_permission(level, cx)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .child(SharedString::from(label))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(detail)),
+                            ),
+                    )
+                    .child(div().w(px(16.0)).flex_none().when(level == current, |el| {
+                        el.child(
+                            crate::kit::icons::icon(crate::kit::icons::CHECK)
+                                .size(px(12.0))
+                                .text_color(theme.accent),
+                        )
+                    }))
+            }))
+            .into_any_element()
+    }
+
     fn render_traits_sections(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(model) = self.selected_model(cx).cloned() else {
@@ -1522,6 +1567,13 @@ impl Render for Pickers {
                     self.popover_frame_flush(240.0, content, cx),
                 ))
             }
+            Some(PickerKind::Permissions) => {
+                let content = self.render_permissions_menu(cx);
+                Some((
+                    PickerKind::Permissions,
+                    self.popover_frame_flush(280.0, content, cx),
+                ))
+            }
             None => None,
         };
 
@@ -1542,6 +1594,29 @@ impl Render for Pickers {
         // run's traits read without opening; it brightens only when something
         // departs from its default. No chip at all when the model has neither
         // a ladder nor options — a dead trigger reads as broken.
+        // The permission level is set with `/permissions`. Only Full access
+        // leaves a mark here: an amber shield that opens the same choices,
+        // to switch back. A side chat runs with its parent's level.
+        let sandbox = self.effective_sandbox(cx);
+        let permissions_chip =
+            (!self.side_chat && sandbox == SandboxLevel::DangerFullAccess).then(|| {
+                self.trigger_chip(
+                    TriggerChip {
+                        kind: PickerKind::Permissions,
+                        label: SharedString::default(),
+                        set: true,
+                        icon: Some((crate::kit::icons::SHIELD_CHECK, Some(theme.warning))),
+                        suffix: None,
+                    },
+                    &theme,
+                    cx,
+                )
+                .px(px(8.0))
+                .tooltip(|_, cx| {
+                    cx.new(|_| PermissionHint("Full access: no checks and no sandbox".into()))
+                        .into()
+                })
+            });
         let model_chip = self.trigger_chip(
             TriggerChip {
                 kind: PickerKind::HarnessModel,
@@ -1580,6 +1655,15 @@ impl Render for Pickers {
             .flex_1()
             .min_w_0()
             .gap(px(4.0))
+            .children(permissions_chip.map(|chip| {
+                attach_overlay_end(
+                    chip,
+                    &mut overlay,
+                    PickerKind::Permissions,
+                    "permissions-popover",
+                    closing,
+                )
+            }))
             // End-anchored: the menu's right edge sits flush with the chip's
             // right edge (user request), same as the footer's ref popover.
             .child(attach_overlay_end(
@@ -1608,5 +1692,24 @@ impl Render for Pickers {
             .gap(px(Theme::SPACE_SM))
             .child(left)
             .child(right)
+    }
+}
+
+/// The Full access shield's tooltip.
+struct PermissionHint(SharedString);
+
+impl Render for PermissionHint {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_overlay)
+            .text_color(theme.text)
+            .text_size(px(12.0))
+            .child(self.0.clone())
     }
 }

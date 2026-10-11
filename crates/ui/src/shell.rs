@@ -345,6 +345,8 @@ pub enum SettingsSection {
     Titles,
     Commands,
     Mcp,
+    /// What agents on the device may touch (the Runtime's permission extension).
+    Permissions,
     /// The `agents/*.md` profiles a chat can spawn as children.
     Subagents,
     /// The device's GitHub sign-in (`#` issue references).
@@ -356,12 +358,13 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const DEVICE_SETTINGS: [Self; 6] = [
+    pub const DEVICE_SETTINGS: [Self; 7] = [
         Self::Harnesses,
         Self::Providers,
         Self::Subagents,
         Self::Commands,
         Self::Mcp,
+        Self::Permissions,
         Self::Github,
     ];
     pub const CLIENT_SETTINGS: [Self; 3] = [Self::Appearance, Self::Notifications, Self::Shortcuts];
@@ -375,13 +378,14 @@ impl SettingsSection {
     ];
 
     #[cfg(test)]
-    pub const ALL: [SettingsSection; 11] = [
+    pub const ALL: [SettingsSection; 12] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Providers,
         SettingsSection::Subagents,
         SettingsSection::Commands,
         SettingsSection::Mcp,
+        SettingsSection::Permissions,
         SettingsSection::Github,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
@@ -399,6 +403,7 @@ impl SettingsSection {
             SettingsSection::Titles => "Automatic titles",
             SettingsSection::Commands => "Commands",
             SettingsSection::Mcp => "MCP",
+            SettingsSection::Permissions => "Permissions",
             SettingsSection::Subagents => "Subagents",
             SettingsSection::Github => "GitHub",
             SettingsSection::Appearance => "Appearance",
@@ -1103,6 +1108,7 @@ struct SettingsPages {
     commands: Option<Entity<CommandsPage>>,
     commands_sub: Option<Subscription>,
     mcp: Option<Entity<McpPage>>,
+    permissions: Option<Entity<crate::settings::permissions::PermissionsPage>>,
     subagents: Option<Entity<SubagentsPage>>,
     github: Option<Entity<crate::settings::github::GithubPage>>,
     setup: Option<Entity<SetupPage>>,
@@ -1558,6 +1564,7 @@ impl Shell {
                 commands: None,
                 commands_sub: None,
                 mcp: None,
+                permissions: None,
                 subagents: None,
                 github: None,
                 setup: None,
@@ -1750,6 +1757,7 @@ impl Shell {
             Some("settings/harnesses") => Route::Settings(SettingsSection::Harnesses),
             Some("settings/commands") => Route::Settings(SettingsSection::Commands),
             Some("settings/mcp") => Route::Settings(SettingsSection::Mcp),
+            Some("settings/permissions") => Route::Settings(SettingsSection::Permissions),
             Some("settings/subagents") => Route::Settings(SettingsSection::Subagents),
             Some("settings/github") => Route::Settings(SettingsSection::Github),
             Some("settings/appearance") => Route::Settings(SettingsSection::Appearance),

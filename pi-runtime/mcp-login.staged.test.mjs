@@ -110,10 +110,7 @@ test("/mcp login over RPC takes a pasted callback and stores tokens where the en
   await mkdir(join(agent, "npm"), { recursive: true });
   await writeFile(join(agent, "npm/package.json"), '{"name":"cypher-ci-agent","private":true}');
   // Every curated package, as activation registers them: none may replace /mcp.
-  const packages = Object.keys(manifest.plugins).sort().map((name) => {
-    const source = join(runtime, "npm/node_modules", name);
-    return name === "pi-permission-control" ? { source, extensions: ["-index.ts"] } : source;
-  });
+  const packages = Object.keys(manifest.plugins).sort().map((name) => join(runtime, "npm/node_modules", name));
   await writeFile(join(agent, "settings.json"), JSON.stringify({ packages }));
   await writeFile(join(agent, "mcp.json"), JSON.stringify({ mcpServers: { "fixture-docs": { url: `${origin}/mcp` } } }));
   // Pi opens the authorization page itself; keep it from reaching a browser.

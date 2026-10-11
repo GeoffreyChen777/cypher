@@ -21,6 +21,7 @@ how it works. Everything else is grouped here by who reads it.
 - [Syntax highlighting](design/syntax-highlighting.md) — the tree-sitter highlighter in `cypher-syntax`.
 - [Notifications](design/notifications.md) — session-targeted mobile notifications.
 - [Pi RPC harness](design/pi-rpc.md) — how the engine drives Pi over its native RPC protocol.
+- [Permission control](design/permission-control.md) — zones, the Landstrip bash sandbox and elevation approval.
 
 ## Development — working on the code
 

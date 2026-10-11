@@ -28,6 +28,11 @@ const ENV_CYPHER_ENGINE_SOCKET: &str = "CYPHER_ENGINE_SOCKET";
 const ENV_CYPHER_SUBAGENT_BRIDGE: &str = "CYPHER_SUBAGENT_BRIDGE";
 const SUBAGENT_BRIDGE_VERSION: &str = "2";
 const ENV_AGENT_DIR: &str = "PI_CODING_AGENT_DIR";
+/// The chat's sandbox setting, read by the Runtime's permission extension
+/// (`extensions/cypher-permissions.ts`): `read-only`, `workspace-write` or
+/// `danger-full-access`. Absent for discovery and slash-command processes,
+/// which then use the extension's configured default.
+const ENV_PERMISSION_LEVEL: &str = "CYPHER_PERMISSION_LEVEL";
 const ENV_PACKAGE_DIR: &str = "PI_PACKAGE_DIR";
 
 /// The messaging tools every child gets regardless of its allowlist (the
@@ -90,6 +95,15 @@ fn inject_engine_client(cmd: &mut Command) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The wire name of a sandbox level (`SandboxLevel`'s serde form).
+fn permission_level(level: SandboxLevel) -> &'static str {
+    match level {
+        SandboxLevel::ReadOnly => "read-only",
+        SandboxLevel::WorkspaceWrite => "workspace-write",
+        SandboxLevel::DangerFullAccess => "danger-full-access",
+    }
+}
+
 /// Resolve the pi CLI: `PI_EXECUTABLE` override, then the shared CLI resolver
 /// (PATH + login-shell PATH + npm-global bins + node-version-manager bins).
 pub(super) fn resolve_executable() -> Option<PathBuf> {
@@ -139,7 +153,7 @@ impl PiHarness {
         host: &RunHostContext,
         append_prompt: Option<&PathBuf>,
     ) -> Result<Command, HarnessError> {
-        self.spawn_command_with_config(cwd, host, append_prompt, None, None)
+        self.spawn_command_with_config(cwd, host, append_prompt, None, None, None)
     }
 
     /// Test seam for the exact command used by a normal run, including the
@@ -161,6 +175,7 @@ impl PiHarness {
             append_prompt,
             request.model.as_deref(),
             request.reasoning.map(thinking_level),
+            Some(request.sandbox),
         )
     }
 
@@ -171,6 +186,7 @@ impl PiHarness {
         append_prompt: Option<&PathBuf>,
         requested_model: Option<&str>,
         requested_thinking: Option<&str>,
+        sandbox: Option<SandboxLevel>,
     ) -> Result<Command, HarnessError> {
         let (exe, mut args) = self.resolve_program()?;
         // Child-subagent semantics (Cypher-hosted child chats): restrict tools
@@ -226,6 +242,10 @@ impl PiHarness {
             cmd.env(ENV_PACKAGE_DIR, package_dir);
         }
         inject_engine_client(&mut cmd)?;
+        cmd.env_remove(ENV_PERMISSION_LEVEL);
+        if let Some(level) = sandbox {
+            cmd.env(ENV_PERMISSION_LEVEL, permission_level(level));
+        }
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
         }
@@ -266,6 +286,7 @@ impl PiHarness {
         append_prompt: Option<&PathBuf>,
         requested_model: Option<&str>,
         requested_thinking: Option<&str>,
+        sandbox: Option<SandboxLevel>,
     ) -> Result<(Child, crate::process::StderrTail), HarnessError> {
         let mut cmd = self.spawn_command_with_config(
             cwd,
@@ -273,6 +294,7 @@ impl PiHarness {
             append_prompt,
             requested_model,
             requested_thinking,
+            sandbox,
         )?;
         let exe = cmd.as_std().get_program().to_string_lossy().into_owned();
         cmd.stdin(Stdio::piped())

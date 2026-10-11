@@ -752,6 +752,7 @@ const CYPHER_EXTENSIONS: &[&str] = &[
     "cypher-translation.ts",
     "cypher-fast-mode.ts",
     "cypher-codemode.ts",
+    "cypher-permissions.ts",
 ];
 
 fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String> {
@@ -781,14 +782,7 @@ fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String
                     .join(name)
                     .display()
                     .to_string();
-                if name == "pi-permission-control" {
-                    serde_json::json!({
-                        "source": source,
-                        "extensions": ["-index.ts"]
-                    })
-                } else {
-                    Value::String(source)
-                }
+                Value::String(source)
             })
             .collect::<Vec<_>>();
         let bytes = serde_json::to_vec_pretty(&serde_json::json!({
@@ -924,14 +918,7 @@ fn reconcile_bundled_packages(paths: &PiRuntimePaths, runtime: &Path) -> Result<
         if !source.join("package.json").is_file() {
             continue;
         }
-        packages.push(if name == "pi-permission-control" {
-            serde_json::json!({
-                "source": source.display().to_string(),
-                "extensions": ["-index.ts"]
-            })
-        } else {
-            Value::String(source.display().to_string())
-        });
+        packages.push(Value::String(source.display().to_string()));
         changed = true;
     }
     if changed {

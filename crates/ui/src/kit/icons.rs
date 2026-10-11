@@ -86,6 +86,8 @@ icon_assets![
     // as `sidebar-minimalistic`, with a title bar and two window dots).
     (WINDOW_FRAME, "window-frame"),
     (KEY_MINIMALISTIC, "key-minimalistic"),
+    // Solar `shield-check` (Linear) — Settings → Permissions.
+    (SHIELD_CHECK, "shield-check"),
     (KEYBOARD, "keyboard"),
     (ARROW_LEFT, "arrow-left"),
     (ARROW_RIGHT, "arrow-right"),

@@ -136,6 +136,11 @@ impl Shell {
         if section == SettingsSection::Mcp {
             self.pages.mcp = None;
         }
+        // The device's sandbox status and MCP servers can change between
+        // visits: re-read them.
+        if section == SettingsSection::Permissions {
+            self.pages.permissions = None;
+        }
         // Same reason as the pages above: the profiles are files on the target
         // device, so a fresh visit re-reads them.
         if section == SettingsSection::Subagents {
@@ -303,6 +308,19 @@ impl Shell {
                     self.pages.mcp = Some(cx.new(|cx| McpPage::new(state, target, cx)));
                 }
                 match &self.pages.mcp {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Permissions => {
+                if self.pages.permissions.is_none() {
+                    let state = self.state.clone();
+                    let target = self.pages.target.clone();
+                    self.pages.permissions = Some(cx.new(|cx| {
+                        crate::settings::permissions::PermissionsPage::new(state, target, cx)
+                    }));
+                }
+                match &self.pages.permissions {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }

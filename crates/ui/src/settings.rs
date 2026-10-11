@@ -11,6 +11,7 @@ pub mod github;
 pub mod harnesses;
 pub mod mcp;
 pub mod notifications;
+pub mod permissions;
 pub mod providers;
 pub mod setup;
 pub mod shortcuts;

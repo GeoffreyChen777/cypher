@@ -1,4 +1,5 @@
-//! Pi runtime: install, packages, subagent profiles, translation, providers.
+//! Pi runtime: install, packages, subagent profiles, translation, permissions,
+//! providers.
 
 use serde_json::Value;
 
@@ -122,6 +123,32 @@ pub(super) async fn set_pi_translation_settings(
     // The extension reads translation.json on every input/message
     // hook. Do not invalidate model discovery or recycle sessions.
     RpcReply::value(&saved)
+}
+
+pub(super) async fn get_pi_permission_settings(rpc: &EngineRpc) -> Result<RpcReply, RpcError> {
+    let paths = rpc.pi_runtime()?.paths().clone();
+    // `landstrip doctor` spawns a process: keep it off the runtime threads.
+    let snapshot = crate::util::off_runtime(move || crate::pi::permissions::load(&paths))
+        .await
+        .map_err(RpcError::Failed)?;
+    RpcReply::value(&snapshot)
+}
+
+pub(super) async fn set_pi_permission_settings(
+    rpc: &EngineRpc,
+    params: Value,
+) -> Result<RpcReply, RpcError> {
+    let body = strip_target(params);
+    let settings: crate::pi::permissions::PiPermissionSettings = parse_params(body)?;
+    settings.validate().map_err(RpcError::BadParams)?;
+    let paths = rpc.pi_runtime()?.paths().clone();
+    let snapshot = crate::util::off_runtime(move || crate::pi::permissions::save(&paths, settings))
+        .await
+        .and_then(|result| result)
+        .map_err(RpcError::Failed)?;
+    // The extension reads permissions.json at the start of every turn: no
+    // session needs recycling.
+    RpcReply::value(&snapshot)
 }
 
 pub(super) fn detect_pi_language(params: Value) -> Result<RpcReply, RpcError> {

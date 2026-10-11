@@ -43,7 +43,7 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
     for (const name of Object.keys(manifest.plugins).sort()) {
       const source = join(runtime, "npm/node_modules", name);
       await access(join(source, "package.json"));
-      packages.push(name === "pi-permission-control" ? { source, extensions: ["-index.ts"] } : source);
+      packages.push(source);
     }
     assert.ok(packages.length > 0, "Runtime must register its curated packages");
     // Guards pi-runtime/patches/pi-agent-squad-cypher-host.mjs: an
@@ -57,6 +57,7 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
       join(runtime, "extensions/cypher-translation.ts"),
       join(runtime, "extensions/cypher-fast-mode.ts"),
       join(runtime, "extensions/cypher-codemode.ts"),
+      join(runtime, "extensions/cypher-permissions.ts"),
     ];
     if (brokenExtension) {
       const path = join(root, "broken.ts");

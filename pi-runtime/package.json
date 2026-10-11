@@ -4,21 +4,21 @@
   "version": "1.0.0",
   "description": "Pinned Pi and extension set for Cypher's isolated runtime",
   "scripts": {
-    "test": "node --test provider-service.test.mjs patches/pi-agent-squad-cypher-host/cypher-host.test.mjs extensions/cypher-translation.test.mjs extensions/cypher-fast-mode.test.mjs extensions/cypher-codemode.test.mjs",
-    "test:staged": "node --test patches/pi-agent-squad-prompt-options.staged.test.mjs patches/response-model.staged.test.mjs patches/context-files.staged.test.mjs mcp-login.staged.test.mjs"
+    "test": "node --test provider-service.test.mjs patches/pi-agent-squad-cypher-host/cypher-host.test.mjs extensions/cypher-translation.test.mjs extensions/cypher-fast-mode.test.mjs extensions/cypher-codemode.test.mjs extensions/cypher-permissions.test.mjs",
+    "test:staged": "node --test patches/pi-agent-squad-prompt-options.staged.test.mjs patches/response-model.staged.test.mjs patches/context-files.staged.test.mjs mcp-login.staged.test.mjs extensions/cypher-permissions.staged.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.1.0",
     "@earendil-works/pi-coding-agent": "1.1.0",
     "@earendil-works/pi-server": "1.1.0",
     "@earendil-works/pi-tui": "1.1.0",
+    "@landstrip/landstrip": "0.18.38",
     "@lll9p/pi-better-compaction": "0.7.4",
     "@narumitw/pi-goal": "0.54.11",
     "pi-agent-squad": "0.9.0",
     "pi-ask-user": "0.16.0",
     "pi-claude-bridge": "git+https://github.com/elidickinson/pi-claude-bridge.git#b2e7255ece0b8bfd3a6429fd5c147fd59984c785",
     "pi-codex-tools": "0.4.0",
-    "pi-permission-control": "0.2.0",
     "pi-provider-newapi": "0.5.1",
     "pi-web-search": "1.7.0",
     "pi-web-search-claude-bridge": "0.2.0"

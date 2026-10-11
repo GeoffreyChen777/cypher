@@ -55,6 +55,9 @@ cp "$SPEC/extensions/cypher-provider-auth.ts" "$STAGE/extensions/"
 cp "$SPEC/extensions/cypher-translation.ts" "$STAGE/extensions/"
 cp "$SPEC/extensions/cypher-fast-mode.ts" "$STAGE/extensions/"
 cp "$SPEC/extensions/cypher-codemode.ts" "$STAGE/extensions/"
+cp "$SPEC/extensions/cypher-permissions.ts" "$STAGE/extensions/"
+mkdir -p "$STAGE/extensions/cypher-permissions"
+cp "$SPEC"/extensions/cypher-permissions/*.ts "$STAGE/extensions/cypher-permissions/"
 cp "$SPEC/provider-service.mjs" "$STAGE/"
 
 # A private production dependency tree: Pi and every Cypher-curated extension
@@ -94,6 +97,14 @@ node "$SPEC/patches/pi-coding-agent-cwd-context-files.mjs" \
   "$STAGE/npm/node_modules/@earendil-works/pi-coding-agent"
 node "$SPEC/patches/pi-claude-bridge-context-files.mjs" \
   "$STAGE/npm/node_modules/pi-claude-bridge"
+
+# The permission extension runs ripgrep (behind `grep`) inside Landstrip and
+# checks apply_patch's file access at the operation (see the patch headers).
+# Missing anchors fail the build on purpose.
+node "$SPEC/patches/pi-coding-agent-grep-spawn-hook.mjs" \
+  "$STAGE/npm/node_modules/@earendil-works/pi-coding-agent"
+node "$SPEC/patches/pi-codex-tools-permissions.mjs" \
+  "$STAGE/npm/node_modules/pi-codex-tools"
 
 # Keep only this artifact's native esbuild binary. Pi's shrinkwrap currently
 # brings every platform package into some npm layouts (~285 MB uncompressed).
@@ -179,8 +190,10 @@ const fs = require("fs");
 const spec = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const dependencies = { ...spec.dependencies };
 const piVersion = dependencies["@earendil-works/pi-coding-agent"];
+// Pi itself and the Landstrip sandbox runner ship in the bundle but are not
+// Pi packages: only the rest are registered as plugins.
 for (const name of Object.keys(dependencies)) {
-  if (name.startsWith("@earendil-works/")) delete dependencies[name];
+  if (name.startsWith("@earendil-works/") || name.startsWith("@landstrip/")) delete dependencies[name];
 }
 fs.writeFileSync(process.argv[3], JSON.stringify({
   version: process.argv[4],
@@ -211,6 +224,11 @@ CYPHER_PI_RUNTIME_STAGE="$STAGE" \
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-translation.test.mjs"
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-fast-mode.test.mjs"
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-codemode.test.mjs"
+"$STAGE/bin/node" --test "$SPEC/extensions/cypher-permissions.test.mjs"
+# A real Pi with the patched tools, a scripted model and the real Landstrip:
+# the sandbox, the grep and apply_patch hooks and the approval dialogs.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/extensions/cypher-permissions.staged.test.mjs"
 # Settings → MCP signs in through Pi's built-in `/mcp login`: the RPC dialog
 # shapes and the credential key the engine reads, against a local OAuth fixture.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
