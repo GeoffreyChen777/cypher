@@ -571,8 +571,9 @@ struct SessionView: View {
 }
 
 /// A status item over the transcript (the run status, the subagents count):
-/// its own tinted glass capsule, like the expanded composer's, so the text
-/// scrolling underneath can't read through it. Inactive draws nothing.
+/// its own glass capsule, the collapsed composer pill's material — plain
+/// glass, a faint wash and hairline — so the row reads as one family with
+/// the composer under it. Inactive draws nothing.
 struct StatusCapsule: ViewModifier {
     var active = true
     /// A button's capsule: the glass itself answers the press.
@@ -583,11 +584,9 @@ struct StatusCapsule: ViewModifier {
             content
                 .padding(.horizontal, 10)
                 .frame(height: 28)
-                .glassEffect(
-                    interactive
-                        ? .regular.tint(Theme.surface.opacity(0.72)).interactive()
-                        : .regular.tint(Theme.surface.opacity(0.72)),
-                    in: Capsule())
+                .background(whiteAlpha(0.04), in: Capsule())
+                .glassEffect(interactive ? .regular.interactive() : .regular, in: Capsule())
+                .overlay(Capsule().strokeBorder(whiteAlpha(0.05), lineWidth: 1).allowsHitTesting(false))
         } else {
             content
                 .frame(height: 28)
