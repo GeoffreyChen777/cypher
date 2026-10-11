@@ -33,8 +33,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, BorderStyle, ClipboardItem, Context, Entity, EventEmitter, KeyBinding,
-    ListAlignment, ListOffset, ListScrollEvent, ListState, ObjectFit, SharedString,
+    AnyElement, App, BorderStyle, ClipboardItem, Context, Entity, EntityId, EventEmitter,
+    KeyBinding, ListAlignment, ListOffset, ListScrollEvent, ListState, ObjectFit, SharedString,
     StyledImage as _, StyledText, Subscription, Task, TextRun, Window, actions, canvas, div, img,
     list, prelude::*, px, quad,
 };

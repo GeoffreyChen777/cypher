@@ -1480,13 +1480,14 @@ pub(super) fn detail_body(
 
 /// The chip's content row: icon + label + parameter, then the status icon
 /// (+ chevron when the chip expands). Shared between the plain chip and the
-/// header of an expandable chip card. `key` is unique per chip; it names the
-/// running spinner's animation.
+/// header of an expandable chip card. `view` is the transcript that keeps a
+/// running spinner turning.
 fn chip_header_row(
     tool: &ToolItem,
     chevron: Option<bool>,
-    key: &SharedString,
     theme: &Theme,
+    view: EntityId,
+    cx: &mut App,
 ) -> gpui::Div {
     let (label, parameter) = tool_row_text(tool);
     let tint = if tool.is_error {
@@ -1542,11 +1543,7 @@ fn chip_header_row(
                 })
                 .child(SharedString::from(parameter)),
         )
-        .child(tool_status_icon(
-            ToolStatus::of(tool),
-            SharedString::from(format!("{key}-status")),
-            theme,
-        ))
+        .child(tool_status_icon(ToolStatus::of(tool), theme, view, cx))
         .when_some(chevron, |row, open| {
             // Output/diff affordance: a bare chevron in the tile's former
             // 18px box, flipped while the detail body is open.
@@ -1598,13 +1595,22 @@ impl ToolStatus {
     }
 }
 
-/// One spinner turn. Linear, so the arc never appears to stall.
-const STATUS_SPIN_PERIOD: Duration = Duration::from_millis(900);
+/// One spinner turn, on the shared ~30fps pulse clock: a per-chip repeating
+/// `with_animation` redrew the whole window every display frame for as long
+/// as a tool ran. Only the period is read; the rotation stays linear so the
+/// arc never appears to stall.
+const STATUS_SPIN: motion::MotionSpec = motion::MotionSpec::new(900, motion::EASE);
 
 /// The chip's status: a check once the call completed, a cross when it
-/// failed, and a rotating arc while it runs (`key` names the rotation; under
-/// reduced motion gpui holds it still). Same 18px slot as the other icons.
-pub(super) fn tool_status_icon(status: ToolStatus, key: SharedString, theme: &Theme) -> AnyElement {
+/// failed, and a rotating arc while it runs (`view` re-renders on the pulse
+/// clock; under reduced motion the arc holds still). Same 18px slot as the
+/// other icons.
+pub(super) fn tool_status_icon(
+    status: ToolStatus,
+    theme: &Theme,
+    view: EntityId,
+    cx: &mut App,
+) -> AnyElement {
     let slot = div()
         .size(px(18.0))
         .flex_none()
@@ -1617,17 +1623,14 @@ pub(super) fn tool_status_icon(status: ToolStatus, key: SharedString, theme: &Th
             slot.child(icon(crate::kit::icons::CHECK).text_color(theme.success))
         }
         ToolStatus::Failed => slot.child(icon(crate::kit::icons::CROSS).text_color(theme.danger)),
-        ToolStatus::Running => slot.child(
-            icon(crate::kit::icons::SPINNER)
-                .text_color(theme.text_muted)
-                .with_animation(
-                    key,
-                    gpui::Animation::new(STATUS_SPIN_PERIOD).repeat(),
-                    |icon, t| {
-                        icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(t)))
-                    },
-                ),
-        ),
+        ToolStatus::Running => {
+            let turn = motion::pulse_delta(&STATUS_SPIN, view, cx);
+            slot.child(
+                icon(crate::kit::icons::SPINNER)
+                    .text_color(theme.text_muted)
+                    .with_transformation(gpui::Transformation::rotate(gpui::percentage(turn))),
+            )
+        }
     }
     .into_any_element()
 }
@@ -1636,14 +1639,20 @@ pub(super) fn tool_status_icon(status: ToolStatus, key: SharedString, theme: &Th
 pub(super) fn chip_header(
     tool: &ToolItem,
     open: bool,
-    key: &SharedString,
     theme: &Theme,
+    view: EntityId,
+    cx: &mut App,
 ) -> gpui::Div {
-    chip_header_row(tool, Some(open), key, theme)
+    chip_header_row(tool, Some(open), theme, view, cx)
 }
 
 /// A plain (non-expandable) chip: guide rail + bordered card.
-pub(super) fn tool_chip(tool: &ToolItem, key: &SharedString, theme: &Theme) -> AnyElement {
+pub(super) fn tool_chip(
+    tool: &ToolItem,
+    theme: &Theme,
+    view: EntityId,
+    cx: &mut App,
+) -> AnyElement {
     div()
         .h(px(CHIP_HEIGHT))
         .w_full()
@@ -1672,7 +1681,7 @@ pub(super) fn tool_chip(tool: &ToolItem, key: &SharedString, theme: &Theme) -> A
                 .border_1()
                 .border_color(crate::kit::theme::hairline(0.07))
                 .bg(crate::kit::theme::ink(0.03))
-                .child(chip_header_row(tool, None, key, theme)),
+                .child(chip_header_row(tool, None, theme, view, cx)),
         )
         .into_any_element()
 }
