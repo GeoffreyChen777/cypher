@@ -43,6 +43,16 @@ use workos::{ExchangeOutcome, SignInResult, jwt_claims, new_pkce_verifier, pkce_
 const SIGN_IN_TTL: Duration = Duration::from_secs(15 * 60);
 /// Refresh when the cached token has less than this much life left.
 const TOKEN_SLACK: Duration = Duration::from_secs(30);
+
+/// How long the background loop may sleep before refreshing a token with
+/// `remaining` life left; zero means refresh now. Must match `refresh`'s own
+/// under-the-gate re-check, which returns a token with more than
+/// [`TOKEN_SLACK`] left without renewing it: a loop that woke earlier got that
+/// instant no-op back and spun on it until the token crossed the slack — one
+/// core pinned for 30s of every 300s token lifetime.
+fn refresh_wait(remaining: Duration) -> Duration {
+    remaining.saturating_sub(TOKEN_SLACK)
+}
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ---------------------------------------------------------------------------
@@ -439,7 +449,7 @@ impl Auth {
                     .as_ref()
                     .map(AccessEntry::remaining)
                     .unwrap_or(Duration::ZERO);
-                let wait = remaining.saturating_sub(Duration::from_secs(60));
+                let wait = refresh_wait(remaining);
                 if wait > Duration::ZERO {
                     // Re-evaluate at least once a minute rather than parking
                     // on one long timer: tokio timers ride the monotonic

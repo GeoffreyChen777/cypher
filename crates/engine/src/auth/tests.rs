@@ -535,6 +535,22 @@ fn auth_state_serializes_as_proto_shape() {
     );
 }
 
+// The background loop only stops sleeping once `refresh` would really renew:
+// a wake while `refresh` still returns the cached token is a busy loop.
+#[test]
+fn refresh_loop_sleeps_while_refresh_would_return_the_cached_token() {
+    for secs in 0..=300 {
+        let remaining = Duration::from_secs(secs);
+        let refresh_renews = remaining <= TOKEN_SLACK;
+        assert_eq!(
+            refresh_wait(remaining).is_zero(),
+            refresh_renews,
+            "{secs}s left"
+        );
+    }
+    assert!(!refresh_wait(TOKEN_SLACK + Duration::from_millis(1)).is_zero());
+}
+
 // -- Refresh error semantics (Phase C) --------------------------------
 //
 // A transient WorkOS/edge failure must NEVER revoke a signed-in device:
