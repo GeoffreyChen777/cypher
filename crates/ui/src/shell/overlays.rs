@@ -1268,7 +1268,7 @@ impl Shell {
                         "org-skeleton",
                         &theme,
                         2,
-                        cx.entity_id(),
+                        self.pulse_ticker.entity_id(),
                         cx,
                     ))
                     .into_any_element(),

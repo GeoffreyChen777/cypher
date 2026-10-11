@@ -350,7 +350,7 @@ impl Shell {
                             "sending-indicator",
                             &theme,
                             2.5,
-                            cx.entity_id(),
+                            self.pulse_ticker.entity_id(),
                             cx,
                         ))
                         .child(

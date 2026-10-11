@@ -334,10 +334,9 @@ impl Shell {
         let status = collapsed
             .then(|| {
                 render_status_summary(
-                    &format!("branch-{key}"),
                     status_summary(group.chats.iter().map(|(status, _)| status)),
+                    &self.sidebar.replay,
                     theme,
-                    cx,
                 )
             })
             .flatten();
@@ -477,15 +476,14 @@ impl Shell {
         let status = collapsed
             .then(|| {
                 render_status_summary(
-                    &format!("space-{}", group.key),
                     status_summary(
                         group
                             .groups
                             .iter()
                             .flat_map(|g| g.chats.iter().map(|(status, _)| status)),
                     ),
+                    &self.sidebar.replay,
                     theme,
-                    cx,
                 )
             })
             .flatten()
@@ -705,10 +703,9 @@ impl Shell {
 /// awaiting input `? n` (amber), working (the spinner, uncounted), finished
 /// unseen `✓ n` (green) — most urgent first. `None` when nothing shows.
 fn render_status_summary(
-    key: &str,
     summary: StatusSummary,
+    replay: &super::sidebar_pane::SidebarReplay,
     theme: &Theme,
-    cx: &mut Context<Shell>,
 ) -> Option<AnyElement> {
     if summary.is_empty() {
         return None;
@@ -731,18 +728,15 @@ fn render_status_summary(
             )
     };
     let awaiting = (summary.awaiting > 0).then(|| {
-        let mark =
-            super::render::status_mark(String::new(), ChatIndicator::AwaitingInput, theme, cx);
+        let mark = super::render::status_mark(ChatIndicator::AwaitingInput, replay, theme);
         counted(mark, summary.awaiting, theme.warning)
     });
     let working = summary
         .working
-        .then(|| {
-            super::render::status_mark(format!("{key}-working"), ChatIndicator::Working, theme, cx)
-        })
+        .then(|| super::render::status_mark(ChatIndicator::Working, replay, theme))
         .flatten();
     let completed = (summary.completed > 0).then(|| {
-        let mark = super::render::status_mark(String::new(), ChatIndicator::Completed, theme, cx);
+        let mark = super::render::status_mark(ChatIndicator::Completed, replay, theme);
         counted(mark, summary.completed, theme.success.opacity(0.9))
     });
     Some(

@@ -7,7 +7,10 @@
 //! stay phase-locked. Cells animate inside fixed-size slots — opacity and
 //! inner size are paint-local and never move surrounding layout.
 
-use gpui::{AnyElement, App, EntityId, IntoElement, ParentElement, SharedString, Styled, div, px};
+use gpui::{
+    AnyElement, App, EntityId, IntoElement, ParentElement, Pixels, SharedString, Styled, Window,
+    div, px,
+};
 
 use crate::kit::motion::{self, GRADIENT_SPIN, SPLASH_OUT};
 use crate::kit::theme::{Appearance, MonoStyled, Theme, oklch};
@@ -80,6 +83,59 @@ pub fn gradient_spinner(
         }))
 }
 
+const MINI_COLS: usize = 2;
+const MINI_ROWS: usize = 3;
+/// Clockwise ring position of each `(row, col)` mini-spinner cell, top-left
+/// first: (0,0) → (0,1) → (1,1) → (2,1) → (2,0) → (1,0).
+const MINI_RING: [[usize; MINI_COLS]; MINI_ROWS] = [[0, 1], [5, 2], [4, 3]];
+
+/// Every cell of a mini spinner at pulse `delta`: its offset from the grid's
+/// top-left and its color (the row tint at the cell's pulse opacity). Shared
+/// by the element and [`paint_mini_spinner`], so both draw the same frames.
+fn mini_spinner_cells(
+    cell_px: f32,
+    delta: f32,
+) -> impl Iterator<Item = (gpui::Point<Pixels>, Hsla)> {
+    let appearance = crate::kit::theme::current_appearance();
+    let tints = mini_row_tints(appearance);
+    let dim = match appearance {
+        Appearance::Dark => GSPIN_DIM,
+        Appearance::Light => GSPIN_DIM_LIGHT,
+    };
+    let pitch = cell_px * 1.5;
+    (0..MINI_ROWS).flat_map(move |row| {
+        (0..MINI_COLS).map(move |col| {
+            let phase = MINI_RING[row][col] as f32 / (MINI_COLS * MINI_ROWS) as f32;
+            let opacity = motion::gspin_opacity(delta + phase, dim);
+            (
+                gpui::point(px(col as f32 * pitch), px(row as f32 * pitch)),
+                tints[row].opacity(opacity),
+            )
+        })
+    })
+}
+
+/// The footprint of a [`mini_gradient_spinner`] with `cell_px` cells.
+pub fn mini_spinner_size(cell_px: f32) -> gpui::Size<Pixels> {
+    let span = |cells: usize| px(cells as f32 * cell_px + (cells - 1) as f32 * cell_px / 2.0);
+    gpui::size(span(MINI_COLS), span(MINI_ROWS))
+}
+
+/// Paint a [`mini_gradient_spinner`]'s frame at pulse `delta` straight into
+/// the scene, its grid's top-left at `origin` — for a spinner whose host view
+/// is cached and replays instead of re-rendering on each pulse.
+pub fn paint_mini_spinner(
+    origin: gpui::Point<Pixels>,
+    cell_px: f32,
+    delta: f32,
+    window: &mut Window,
+) {
+    for (offset, color) in mini_spinner_cells(cell_px, delta) {
+        let cell = gpui::Bounds::new(origin + offset, gpui::size(px(cell_px), px(cell_px)));
+        window.paint_quad(gpui::fill(cell, color).corner_radii(px(cell_px / 2.0)));
+    }
+}
+
 /// A 2×3 miniature of [`gradient_spinner`] sized for a status-dot slot
 /// (sessions-sidebar working rows): same row tints and pulse timing, but the
 /// brightness SNAKES around the grid's perimeter (every cell of a 2×3 grid is
@@ -92,38 +148,22 @@ pub fn mini_gradient_spinner(
     view: EntityId,
     cx: &mut App,
 ) -> impl IntoElement {
-    const COLS: usize = 2;
-    const ROWS: usize = 3;
-    /// Clockwise ring position of each `(row, col)` cell, top-left first:
-    /// (0,0) → (0,1) → (1,1) → (2,1) → (2,0) → (1,0).
-    const RING: [[usize; COLS]; ROWS] = [[0, 1], [5, 2], [4, 3]];
-    const RING_LEN: f32 = (COLS * ROWS) as f32;
     let _key = key.into();
     let delta = motion::pulse_delta(&GRADIENT_SPIN, view, cx);
-    let appearance = crate::kit::theme::current_appearance();
-    let tints = mini_row_tints(appearance);
-    let dim = match appearance {
-        Appearance::Dark => GSPIN_DIM,
-        Appearance::Light => GSPIN_DIM_LIGHT,
-    };
+    let size = mini_spinner_size(cell_px);
     div()
-        .flex()
-        .flex_col()
-        .gap(px(cell_px / 2.0))
-        .children((0..ROWS).map(move |row| {
-            let tint = tints[row];
+        .relative()
+        .flex_none()
+        .w(size.width)
+        .h(size.height)
+        .children(mini_spinner_cells(cell_px, delta).map(|(offset, color)| {
             div()
-                .flex()
-                .flex_row()
-                .gap(px(cell_px / 2.0))
-                .children((0..COLS).map(move |col| {
-                    let phase = RING[row][col] as f32 / RING_LEN;
-                    div()
-                        .size(px(cell_px))
-                        .rounded(px(cell_px / 2.0))
-                        .bg(tint)
-                        .opacity(motion::gspin_opacity(delta + phase, dim))
-                }))
+                .absolute()
+                .left(offset.x)
+                .top(offset.y)
+                .size(px(cell_px))
+                .rounded(px(cell_px / 2.0))
+                .bg(color)
         }))
 }
 
@@ -197,3 +237,26 @@ const _: () = {
     assert!(SPLASH_OUT.delay_ms == 150);
     assert!(GRADIENT_SPIN.duration_ms == 750);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mini_spinner_cells_fill_their_footprint() {
+        // The shell paints sidebar marks into slots sized by
+        // `mini_spinner_size`: every cell must land inside it, and the grid
+        // must reach its far edges.
+        let cell = 2.0;
+        let size = mini_spinner_size(cell);
+        let cells: Vec<_> = mini_spinner_cells(cell, 0.3).collect();
+        assert_eq!(cells.len(), MINI_COLS * MINI_ROWS);
+        for (offset, _) in &cells {
+            assert!(offset.x >= px(0.0) && offset.x + px(cell) <= size.width);
+            assert!(offset.y >= px(0.0) && offset.y + px(cell) <= size.height);
+        }
+        let right = cells.iter().map(|(o, _)| o.x + px(cell)).max().unwrap();
+        let bottom = cells.iter().map(|(o, _)| o.y + px(cell)).max().unwrap();
+        assert_eq!((right, bottom), (size.width, size.height));
+    }
+}

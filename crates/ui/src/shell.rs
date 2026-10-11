@@ -76,6 +76,7 @@ mod render;
 use render::*;
 mod session;
 mod sidebar;
+mod sidebar_pane;
 mod spaces;
 mod splash;
 mod tabs;
@@ -1200,6 +1201,9 @@ struct SidebarUi {
     /// handing the lift from it to `focused_card`.
     focus_from: Option<String>,
     focus_tween: Option<WidthTween>,
+    /// Working marks and hover fades carried through the frames that replay
+    /// the cached sidebar (see [`sidebar_pane`]).
+    replay: sidebar_pane::SidebarReplay,
 }
 
 /// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`); see
@@ -1331,6 +1335,11 @@ pub struct Shell {
     scratch_cleanup_task: Option<Task<()>>,
     /// Sidebar scroll, notice strip, resort glide and disclosure state.
     sidebar: SidebarUi,
+    /// The sidebar column's content as a cached view (see [`sidebar_pane`]).
+    sidebar_pane: Entity<sidebar_pane::SidebarPane>,
+    /// Leases the pulse clock for loaders the shell renders itself, so pulses
+    /// don't notify the shell (and through it the cached sidebar).
+    pulse_ticker: Entity<sidebar_pane::PulseTicker>,
     /// `settings.last_space_id` applied once after the first spaces frame.
     space_boot_applied: bool,
     /// Chimes, the Dock badge and desktop activity.
@@ -1491,6 +1500,9 @@ impl Shell {
         // The shared comment popup is created FIRST so every surface can
         // hold a weak handle to it.
         let comment_popup = cx.new(crate::comment_popup::CommentPopup::new);
+        let shell = cx.weak_entity();
+        let sidebar_pane = cx.new(|_| sidebar_pane::SidebarPane::new(shell));
+        let pulse_ticker = cx.new(|_| sidebar_pane::PulseTicker);
         if main_window {
             crate::prefs::slash_commands::publish_shown(Vec::new(), cx);
         }
@@ -1584,7 +1596,10 @@ impl Shell {
                 focused_card: None,
                 focus_from: None,
                 focus_tween: None,
+                replay: sidebar_pane::SidebarReplay::default(),
             },
+            sidebar_pane,
+            pulse_ticker,
             space_boot_applied: false,
             attention: Attention::default(),
             fork_request_ids: std::collections::HashMap::new(),

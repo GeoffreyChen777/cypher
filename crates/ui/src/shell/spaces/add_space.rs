@@ -864,7 +864,7 @@ impl Shell {
                     "add-space-skeleton",
                     theme,
                     6,
-                    cx.entity_id(),
+                    self.pulse_ticker.entity_id(),
                     cx,
                 ))
                 .into_any_element()

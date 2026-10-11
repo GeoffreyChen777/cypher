@@ -441,6 +441,8 @@ impl FadeEntry {
 pub struct HoverFades {
     entries: HashMap<String, FadeEntry>,
     frame: u64,
+    /// Keys read inside [`capture_hover_reads`], when one is running.
+    capture: Option<Vec<String>>,
 }
 
 impl HoverFades {
@@ -477,12 +479,27 @@ impl HoverFades {
     /// Hover progress (0..1) for `key` at `now`; stamps liveness.
     pub fn value_at(&mut self, key: &str, now: Instant) -> f32 {
         let frame = self.frame;
+        if let Some(capture) = &mut self.capture {
+            capture.push(key.to_string());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => {
                 entry.seen = frame;
                 entry.value(now, Self::duration())
             }
             None => 0.0,
+        }
+    }
+
+    /// Stamp `keys` as read this frame without reading them: a cached view
+    /// replays last frame's paint instead of re-rendering, so its elements are
+    /// still mounted although none of them read their fade.
+    pub fn keep_alive(&mut self, keys: &[String]) {
+        let frame = self.frame;
+        for key in keys {
+            if let Some(entry) = self.entries.get_mut(key) {
+                entry.seen = frame;
+            }
         }
     }
 
@@ -543,6 +560,31 @@ pub fn hover_listener(
         // coming via its tail while the fade is mid-flight.
         window.refresh();
     }
+}
+
+/// Run `f` and return the hover keys it read alongside its result — what a
+/// cached view's elements read, for [`keep_hover_alive`] to stamp on the
+/// frames that replay them.
+pub fn capture_hover_reads<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    let outer = HOVER_FADES.with(|fades| fades.borrow_mut().capture.replace(Vec::new()));
+    let result = f();
+    let keys = HOVER_FADES.with(|fades| {
+        let mut fades = fades.borrow_mut();
+        let keys = fades.capture.take().unwrap_or_default();
+        // A capture nested in another hands its keys on to the outer one.
+        fades.capture = outer.map(|mut outer| {
+            outer.extend(keys.iter().cloned());
+            outer
+        });
+        keys
+    });
+    (result, keys)
+}
+
+/// Keep the hover fades of a cached view's elements alive on a frame that
+/// replays them (see [`HoverFades::keep_alive`]).
+pub fn keep_hover_alive(keys: &[String]) {
+    HOVER_FADES.with(|fades| fades.borrow_mut().keep_alive(keys));
 }
 
 /// Frame-drive hook: call ONCE per window frame (the shell render tail); true
@@ -810,6 +852,28 @@ mod tests {
         fades.tick_at(ms(48)); // frame 3: a full unread frame has passed
         assert!(fades.entries.is_empty(), "unread entry evicted");
         assert_eq!(fades.value_at("menu-row", ms(64)), 0.0);
+    }
+
+    #[test]
+    fn kept_alive_entries_survive_unread_frames() {
+        // A cached view replays its rows without reading their fades: the
+        // keys it read on its last render stay alive, everything else still
+        // evicts.
+        let mut fades = HoverFades::default();
+        let t0 = Instant::now();
+        let ms = |m: u64| t0 + Duration::from_millis(m);
+        fades.set_at("row", true, false, t0);
+        fades.set_at("gone", true, false, t0);
+        fades.capture = Some(Vec::new());
+        fades.value_at("row", ms(16));
+        let keys = fades.capture.take().unwrap();
+        assert_eq!(keys, ["row"]);
+        for frame in 2..6 {
+            fades.tick_at(ms(16 * frame));
+            fades.keep_alive(&keys);
+        }
+        assert_eq!(fades.value_at("row", ms(200)), 1.0, "still hovered");
+        assert!(!fades.entries.contains_key("gone"), "unread entry evicted");
     }
 
     #[test]

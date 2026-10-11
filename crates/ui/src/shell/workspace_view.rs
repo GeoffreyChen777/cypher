@@ -1109,7 +1109,7 @@ impl Shell {
                     .child(loaders::mini_gradient_spinner(
                         format!("tile-tab-working-{}-{index}", group.0),
                         2.0,
-                        cx.entity_id(),
+                        self.pulse_ticker.entity_id(),
                         cx,
                     ))
                     .into_any_element(),

@@ -324,7 +324,43 @@ impl Shell {
         )
     }
 
-    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// The sidebar column: the animated-width container around the cached
+    /// [`sidebar_pane::SidebarPane`], with the working marks painted over it
+    /// on every frame (see [`sidebar_pane`]).
+    fn render_sidebar(&self) -> AnyElement {
+        let target = self.sidebar_target();
+        let replay = self.sidebar.replay.clone();
+        let pane = self.sidebar_pane.clone();
+        let ticker = self.pulse_ticker.entity_id();
+        let marks = gpui::canvas(
+            |_, _, _| (),
+            move |_, _, window, cx| {
+                replay.paint(ticker, window, cx);
+                if replay.has_marks() {
+                    pane.update(cx, |pane, cx| pane.schedule_refresh(cx));
+                }
+            },
+        )
+        .absolute()
+        .size_full();
+        self.pane_container(
+            self.motion.sidebar_tween,
+            target,
+            div()
+                .relative()
+                .size_full()
+                .child(
+                    self.sidebar_pane
+                        .clone()
+                        .cached(gpui::StyleRefinement::default().size_full()),
+                )
+                .child(marks)
+                .into_any_element(),
+        )
+    }
+
+    /// The sidebar's content, rendered by the cached pane.
+    pub(super) fn render_sidebar_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = crate::appearance::surface_style::theme(
             crate::appearance::surface_style::Region::Sidebar,
             cx,
@@ -333,7 +369,6 @@ impl Shell {
             Route::Settings(section) => self.render_settings_nav(section, &theme, cx),
             Route::Chat => self.render_chat_sidebar(&theme, cx),
         };
-        let target = self.sidebar_target();
         // Transparent — the sidebar sits directly on the frost shell; the main
         // card's gutter, tone, and shadow provide the separation without a
         // vertical divider. The content row spans the full window height (the
@@ -341,15 +376,11 @@ impl Shell {
         // Chat lays its list under the titlebar band itself (frosted top
         // chrome); Settings navigation starts below it.
         let below_titlebar = matches!(self.route, Route::Settings(_));
-        self.pane_container(
-            self.motion.sidebar_tween,
-            target,
-            div()
-                .h_full()
-                .when(below_titlebar, |el| el.pt(px(SIDEBAR_TITLEBAR_BAND)))
-                .child(inner)
-                .into_any_element(),
-        )
+        div()
+            .h_full()
+            .when(below_titlebar, |el| el.pt(px(SIDEBAR_TITLEBAR_BAND)))
+            .child(inner)
+            .into_any_element()
     }
 
     /// Settings navigation has a pinned device selector, scrollable scope
@@ -565,7 +596,7 @@ impl Shell {
             pinned,
             nested,
         } = row;
-        let corner = chat_row_corner(&id, time_ago, status, theme, cx);
+        let corner = chat_row_corner(time_ago, status, &self.sidebar.replay, theme);
         let (hover, text) = (
             crate::appearance::surface_style::sidebar_hover(theme),
             theme.text,
@@ -870,37 +901,41 @@ impl Shell {
                         top_chrome,
                         true,
                         false,
-                        div().size_full().child(
-                            div()
-                                .id("sidebar-lists")
-                                .size_full()
-                                .overflow_y_scroll()
-                                .track_scroll(&self.sidebar.scroll)
-                                .px(px(Theme::SPACE_SM))
-                                .flex()
-                                .flex_col()
-                                // No "Sessions" header (user request) —
-                                // the list is the whole column; a little
-                                // air stands in.
-                                .pt(px(top_chrome + 4.0))
-                                .child(if !list_items.is_empty() {
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(GROUP_CARD_GAP))
-                                        .pb(px(Theme::SPACE_SM))
-                                        .children(list_items)
-                                        .into_any_element()
-                                } else {
-                                    div()
-                                        .px(px(Theme::SPACE_SM))
-                                        .pb(px(Theme::SPACE_SM))
-                                        .text_size(px(12.0))
-                                        .text_color(theme.text_faint)
-                                        .child(SharedString::from("No projects yet"))
-                                        .into_any_element()
-                                }),
-                        ),
+                        div()
+                            .size_full()
+                            .relative()
+                            .child(self.sidebar.replay.fade_probe(top_chrome))
+                            .child(
+                                div()
+                                    .id("sidebar-lists")
+                                    .size_full()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.sidebar.scroll)
+                                    .px(px(Theme::SPACE_SM))
+                                    .flex()
+                                    .flex_col()
+                                    // No "Sessions" header (user request) —
+                                    // the list is the whole column; a little
+                                    // air stands in.
+                                    .pt(px(top_chrome + 4.0))
+                                    .child(if !list_items.is_empty() {
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(GROUP_CARD_GAP))
+                                            .pb(px(Theme::SPACE_SM))
+                                            .children(list_items)
+                                            .into_any_element()
+                                    } else {
+                                        div()
+                                            .px(px(Theme::SPACE_SM))
+                                            .pb(px(Theme::SPACE_SM))
+                                            .text_size(px(12.0))
+                                            .text_color(theme.text_faint)
+                                            .child(SharedString::from("No projects yet"))
+                                            .into_any_element()
+                                    }),
+                            ),
                     )),
             )
             .when(!update_strips.is_empty(), |el| {
@@ -940,16 +975,15 @@ impl Shell {
 /// A chat row's status corner. It shares the relative-time slot so the
 /// compact row's width stays stable: spinner while working, amber question
 /// mark while the agent waits on the user, emerald check for an unseen
-/// finished turn ("ready for you"), time otherwise. The pulse clock drives
-/// the spinner while it stays mounted.
+/// finished turn ("ready for you"), time otherwise. The shell paints the
+/// spinner over the cached sidebar ([`status_mark`]).
 fn chat_row_corner(
-    id: &str,
     time_ago: SharedString,
     status: ChatIndicator,
+    replay: &sidebar_pane::SidebarReplay,
     theme: &Theme,
-    cx: &mut Context<Shell>,
 ) -> AnyElement {
-    status_mark(format!("chat-working-{id}"), status, theme, cx).unwrap_or_else(|| {
+    status_mark(status, replay, theme).unwrap_or_else(|| {
         div()
             .flex_none()
             .text_size(px(10.0))
@@ -962,24 +996,15 @@ fn chat_row_corner(
 /// The sidebar's session status mark — a session row's corner, and the marks
 /// in the status summary a collapsed project or checkout header shows for the
 /// sessions it hides. `None` for statuses without a mark (idle, errored).
+/// Working is the mini spinner, painted by the shell over the cached sidebar
+/// ([`sidebar_pane::SidebarReplay::mark`]).
 pub(super) fn status_mark(
-    spinner_key: String,
     status: ChatIndicator,
+    replay: &sidebar_pane::SidebarReplay,
     theme: &Theme,
-    cx: &mut Context<Shell>,
 ) -> Option<AnyElement> {
     match status {
-        ChatIndicator::Working => Some(
-            div()
-                .flex_none()
-                .child(loaders::mini_gradient_spinner(
-                    spinner_key,
-                    2.0,
-                    cx.entity_id(),
-                    cx,
-                ))
-                .into_any_element(),
-        ),
+        ChatIndicator::Working => Some(replay.mark()),
         // The turn is parked on a question, so the spinner has stopped —
         // without a corner of its own the row fell back to the relative
         // time and read exactly like an idle session (user report). Amber
@@ -1322,6 +1347,7 @@ impl Render for Shell {
             .font_family(font)
             .text_size(px(14.0))
             .child(scroll_activity)
+            .child(div().absolute().size_0().child(self.pulse_ticker.clone()))
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
                 if this
                     .attention
@@ -1749,7 +1775,7 @@ impl Shell {
     /// The Ready page: sidebar | workspace (or settings), the titlebar over
     /// it, and the overlays, as one keyed entrance.
     fn render_ready_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let sidebar = self.render_sidebar(cx);
+        let sidebar = self.render_sidebar();
         let sidebar_handle = self.resize_handle(
             "sidebar-resize",
             || SidebarResize,
