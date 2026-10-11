@@ -48,6 +48,7 @@ struct SideChatSheet: View {
         // side chats from inside it.
         .environment(\.commentDrafts, nil)
         .environment(\.transcriptSelectionActions, nil)
+        .environment(\.transcriptMessageActions, nil)
         .task { await store.start() }
     }
 

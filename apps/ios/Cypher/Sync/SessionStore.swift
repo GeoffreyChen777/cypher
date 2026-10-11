@@ -424,7 +424,11 @@ final class SessionStore {
             createdAt: m["createdAt"]?.i64Value ?? 0,
             deviceId: m["deviceId"]?.stringValue ?? "",
             status: m["status"]?.stringValue.flatMap(MessageStatus.init(rawValue:)),
-            continuationOf: m["continuationOf"]?.stringValue)
+            continuationOf: m["continuationOf"]?.stringValue,
+            models: (m["models"]?.listValue ?? []).compactMap { value -> AnsweredModel? in
+                guard let model = value.mapValue?["model"]?.stringValue, !model.isEmpty else { return nil }
+                return AnsweredModel(model: model, requested: value.mapValue?["requested"]?.stringValue)
+            })
     }
 
     nonisolated private static func partFrom(_ value: LoroValue) -> MessagePart? {
@@ -505,6 +509,9 @@ final class SessionStore {
         for entry in raw {
             if let rootId = entry.continuationOf, let ix = index[rootId] {
                 roots[ix].parts.append(contentsOf: entry.parts)
+                for model in entry.models where !roots[ix].models.contains(model) {
+                    roots[ix].models.append(model)
+                }
             } else {
                 index[entry.id] = roots.count
                 roots.append(entry)

@@ -84,6 +84,36 @@ extension AppModel {
         }
     }
 
+    enum RewindOutcome: Equatable {
+        /// The notice to show (shell fork.rs: "Conversation restarted — …").
+        case rewound(notice: String)
+        case failed(String)
+    }
+
+    /// Session Rewind: restart `chat` at `anchor` in place. A user anchor's
+    /// text comes back as the composer's draft (seeded only into an empty
+    /// composer, as on the desktop).
+    func rewindSession(_ chat: Chat, anchor: MessageEntry) async -> RewindOutcome {
+        guard let data else { return .failed("Not connected") }
+        do {
+            switch try await data.rewind(chat, anchor: anchor) {
+            case .rewound(let composerText, let removed):
+                if let composerText, !composerText.isEmpty {
+                    pendingDrafts[chat.id] = composerText
+                    draftOffers &+= 1
+                }
+                let count = removed == 1 ? "1 message" : "\(removed) messages"
+                return .rewound(notice: "Conversation restarted — \(count) removed")
+            case .unavailable(let message):
+                return .failed("Can't restart here: \(message)")
+            }
+        } catch RelayError.rpc(let message) where message.lowercased().contains("unknown method") {
+            return .failed("Restarting needs a newer Cypher on \(deviceName(chat.deviceId)).")
+        } catch {
+            return .failed("Couldn't restart — \(error.localizedDescription)")
+        }
+    }
+
     /// The composer's seeded draft for a session, once.
     func takePendingDraft(chatId: String) -> String? {
         pendingDrafts.removeValue(forKey: chatId)

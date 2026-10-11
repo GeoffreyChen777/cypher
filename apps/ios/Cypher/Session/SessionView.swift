@@ -28,7 +28,14 @@ struct SessionView: View {
     @State private var connectionRetry = 0
     @State private var workspaceDestination: WorkspaceDestination?
     @State private var actions = SessionActions()
-    @State private var forking = false
+    /// The entry a fork / restart is in flight for (its strip button spins).
+    @State private var forkingEntry: String?
+    @State private var rewindingEntry: String?
+    /// The message whose restart waits for the user's confirmation.
+    @State private var rewindCandidate: TranscriptEntryContext?
+    /// A passing outcome under the status strip ("Conversation restarted…").
+    @State private var notice: String?
+    @State private var noticeClear: Task<Void, Never>?
     @State private var sideChat: SideChatStore?
     @State private var promotedSideChat: String?
 
@@ -197,6 +204,21 @@ struct SessionView: View {
             }
             .sessionActionPrompts(actions) { _ in leave() }
             .environment(\.transcriptSelectionActions, chat.map(selectionActions))
+            .environment(\.transcriptMessageActions, chat.map(messageActions))
+            .confirmationDialog(
+                "Restart from here?",
+                isPresented: Binding(
+                    get: { rewindCandidate != nil },
+                    set: { if !$0 { rewindCandidate = nil } }),
+                titleVisibility: .visible,
+                presenting: rewindCandidate
+            ) { entry in
+                Button("Restart from Here", role: .destructive) {
+                    if let chat { rewind(chat, at: entry) }
+                }
+            } message: { entry in
+                Text(rewindWarning(for: entry))
+            }
             .sheet(
                 item: $sideChat,
                 onDismiss: {
@@ -230,7 +252,7 @@ struct SessionView: View {
         let reachable = model.demo != nil || (model.connected && model.deviceOnline(chat.deviceId))
         guard chat.config?.harness == "pi", reachable else { return TranscriptSelectionActions() }
         let live = liveStatus(chat: chat)
-        let canFork = !chat.isChild && live != .working && live != .awaitingInput && !forking
+        let canFork = !chat.isChild && live != .working && live != .awaitingInput && forkingEntry == nil
         return TranscriptSelectionActions(
             fork: canFork ? { entry in fork(chat, at: entry) } : nil,
             sideChat: { entry, quote in
@@ -238,14 +260,81 @@ struct SessionView: View {
             })
     }
 
+    /// The message strips' fork and restart, gated like the desktop's
+    /// (transcript.rs `fork_gate` / `rewind_gate`, same order and wording).
+    private func messageActions(for chat: Chat) -> TranscriptMessageActions {
+        let live = liveStatus(chat: chat)
+        func blocked(_ forked: String, _ finish: String) -> String? {
+            if model.demo == nil, !model.connected { return "Not connected." }
+            if chat.isChild { return "Subagent chats can't be \(forked)." }
+            if chat.config?.harness != "pi" { return "Only Pi chats can be \(forked)." }
+            if live == .working || live == .awaitingInput {
+                return "Wait for the chat to finish before \(finish)."
+            }
+            if model.demo == nil, !model.deviceOnline(chat.deviceId) {
+                return "The device hosting this chat is offline."
+            }
+            if forkingEntry != nil || rewindingEntry != nil {
+                return "Wait for the current fork or restart to finish."
+            }
+            return nil
+        }
+        return TranscriptMessageActions(
+            forkBlocked: blocked("forked", "forking"),
+            rewindBlocked: blocked("restarted from a message", "restarting it"),
+            forking: forkingEntry,
+            rewinding: rewindingEntry,
+            fork: { entry in fork(chat, at: entry) },
+            rewind: { entry in rewindCandidate = entry })
+    }
+
+    /// What the confirming tap deletes — named, since it's permanent
+    /// (gates.rs `rewind_tooltip`, armed).
+    private func rewindWarning(for entry: TranscriptEntryContext) -> String {
+        let entries = chat.flatMap { model.sessionStore(for: $0)?.entries } ?? []
+        let later = entries.firstIndex { $0.id == entry.entryId }.map { entries.count - $0 - 1 } ?? 0
+        let count = later == 1 ? "1 message" : "\(later) messages"
+        return entry.role == .user
+            ? "Deletes this message and \(count) after it. Its text comes back to the composer."
+            : "Deletes \(count) after this response."
+    }
+
+    private func rewind(_ chat: Chat, at context: TranscriptEntryContext) {
+        guard let anchor = model.sessionStore(for: chat)?.entries.first(where: { $0.id == context.entryId })
+        else { return }
+        rewindingEntry = anchor.id
+        controlError = nil
+        Task { @MainActor in
+            let outcome = await model.rewindSession(chat, anchor: anchor)
+            rewindingEntry = nil
+            switch outcome {
+            case .rewound(let message):
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                show(notice: message)
+            case .failed(let message):
+                controlError = message
+            }
+        }
+    }
+
+    private func show(notice message: String) {
+        notice = message
+        noticeClear?.cancel()
+        noticeClear = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            notice = nil
+        }
+    }
+
     private func fork(_ chat: Chat, at context: TranscriptEntryContext) {
         guard let anchor = model.sessionStore(for: chat)?.entries.first(where: { $0.id == context.entryId })
         else { return }
-        forking = true
+        forkingEntry = anchor.id
         controlError = nil
         Task { @MainActor in
             let outcome = await model.forkSession(chat, anchor: anchor)
-            forking = false
+            forkingEntry = nil
             switch outcome {
             case .created(let forkId):
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -349,13 +438,17 @@ struct SessionView: View {
                         .padding(.trailing, 16)
                     }
                     .frame(minHeight: 44)
-                    if forking {
+                    if forkingEntry != nil || rewindingEntry != nil {
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.mini)
-                            Text("Forking…").font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
+                            Text(forkingEntry != nil ? "Forking…" : "Restarting…")
+                                .font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
                         }
                     } else if let controlError {
                         Text(controlError).font(Theme.sans(12)).foregroundStyle(Theme.danger)
+                            .padding(.horizontal, 20)
+                    } else if let notice {
+                        Text(notice).font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
                             .padding(.horizontal, 20)
                     }
                     Group {

@@ -267,6 +267,13 @@ struct ComposerView: View {
                 showModelPicker = true
             }
         }
+        .onChange(of: model.draftOffers) {
+            // A restart hands its prompt back while this composer is open;
+            // a draft in progress is never clobbered.
+            if let seeded = model.takePendingDraft(chatId: chat.id), draftState.text.isEmpty {
+                draftState.replace(with: seeded)
+            }
+        }
     }
 
     /// Merge a model/effort change into the chat's config row (LWW; the host

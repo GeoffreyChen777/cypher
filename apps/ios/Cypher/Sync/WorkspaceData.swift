@@ -24,6 +24,9 @@ protocol WorkspaceData: AnyObject {
     /// project there. Returns the chat id.
     func createQuickChat(deviceId: String, config: ChatConfig) async throws -> String
     func fork(_ chat: Chat, anchor: MessageEntry, requestId: String) async throws -> ForkResponse
+    /// Restart the conversation at `anchor` inside the same chat: the host
+    /// deletes everything after it (and a user anchor itself).
+    func rewind(_ chat: Chat, anchor: MessageEntry) async throws -> RewindResponse
     /// Returns a notice when part of the cleanup couldn't happen.
     func deleteChat(_ chat: Chat, hostOnline: Bool) async -> String?
     func rename(chatId: String, title: String)

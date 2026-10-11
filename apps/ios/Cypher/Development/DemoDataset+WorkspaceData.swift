@@ -80,6 +80,22 @@ extension DemoDataset: WorkspaceData {
         return .created(chatId: id, title: fork.title, composerText: draft)
     }
 
+    /// Truncates the transcript at the anchor; a user anchor goes too and
+    /// comes back as the draft.
+    func rewind(_ chat: Chat, anchor: MessageEntry) async throws -> RewindResponse {
+        let store = sessionStore(for: chat.id)
+        let entries = store.entries
+        guard let ix = entries.firstIndex(where: { $0.id == anchor.id }), ix + 1 < entries.count else {
+            return .unavailable(message: "Nothing to remove after the last message.")
+        }
+        let isUser = anchor.role == .user
+        let kept = isUser ? ix : ix + 1
+        store.setEntries(Array(entries.prefix(kept)))
+        return .rewound(
+            composerText: isUser ? MessageCopy.text(anchor) : nil,
+            removed: entries.count - kept)
+    }
+
     func deleteChat(_ chat: Chat, hostOnline: Bool) async -> String? {
         chats.removeAll { $0.id == chat.id || $0.child?.parentChatId == chat.id }
         return nil

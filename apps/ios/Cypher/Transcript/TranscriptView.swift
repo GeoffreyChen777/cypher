@@ -98,8 +98,9 @@ struct TranscriptView: View {
                     .padding(.top, 8)
                     .padding(.bottom, 4)
                 }
+                let lastEntryId = allRows.last?.entryId
                 ForEach(rows) { row in
-                    rowView(row).id(row.id)
+                    rowView(row, lastEntryId: lastEntryId).id(row.id)
                 }
                 Color.clear.frame(height: 44)  // bottom pad clears the fade + floating status strip
                     // The pad's on-screen frame is the one bottom-position
@@ -632,8 +633,29 @@ struct TranscriptView: View {
 
     // MARK: Row rendering
 
+    private func rowView(_ row: TranscriptRow, lastEntryId: String?) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            rowContent(row)
+                // A work run's thought text sits under its chip, lined up
+                // with the chips' icons.
+                .padding(.leading, row.nested && row.partKey != nil ? ThoughtChipRow.textInset : 0)
+            if row.timestamp != nil {
+                MessageStrip(row: row, isLastEntry: row.entryId == lastEntryId) { [store] in
+                    store.entries.first { $0.id == row.entryId }.flatMap(MessageCopy.text)
+                }
+            }
+        }
+        .padding(.top, row.topGap)
+        .padding(.horizontal, 16)
+        .environment(
+            \.transcriptEntry,
+            TranscriptEntryContext(entryId: row.entryId, role: row.role, settled: row.settled)
+        )
+        .modifier(TurnAnchor(round: store.transcriptCache.roundIndex[row.id], tracker: turns, scroll: scroll))
+    }
+
     @ViewBuilder
-    private func rowView(_ row: TranscriptRow) -> some View {
+    private func rowContent(_ row: TranscriptRow) -> some View {
         Group {
             switch row.kind {
             case .user(let text, let isSteer):
@@ -709,17 +731,5 @@ struct TranscriptView: View {
                 }
             }
         }
-        // A work run's thought text sits under its chip, lined up with the
-        // chips' icons.
-        .padding(.leading, row.nested && row.partKey != nil ? ThoughtChipRow.textInset : 0)
-        .padding(.top, row.topGap)
-        .padding(.horizontal, 16)
-        .environment(
-            \.transcriptEntry,
-            TranscriptEntryContext(
-                entryId: row.entryId, role: row.role,
-                settled: row.timestamp != nil)
-        )
-        .modifier(TurnAnchor(round: store.transcriptCache.roundIndex[row.id], tracker: turns, scroll: scroll))
     }
 }

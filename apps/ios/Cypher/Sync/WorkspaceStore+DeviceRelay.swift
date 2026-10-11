@@ -1,5 +1,6 @@
 // WorkspaceStore's direct host RPCs over the device relay: folder browsing,
-// refs, worktrees, model and command catalogs, file search and forks.
+// refs, worktrees, model and command catalogs, file search, forks and
+// restarts.
 
 import Foundation
 
@@ -14,6 +15,19 @@ extension WorkspaceStore {
             params: [
                 "requestId": requestId,
                 "sourceChatId": chat.id,
+                "anchorMessageId": anchor.id,
+            ], timeoutSeconds: 90)
+    }
+
+    /// RewindSession on the chat's host (shell fork.rs `rewind_session`):
+    /// truncates the transcript in place and re-points the chat's Pi
+    /// session; the doc watch shows the result. Deliberately not retried —
+    /// after a lost reply a blind retry would cut at the next boundary.
+    func rewind(_ chat: Chat, anchor: MessageEntry) async throws -> RewindResponse {
+        try await relayClient(for: chat.deviceId).call(
+            method: "RewindSession",
+            params: [
+                "chatId": chat.id,
                 "anchorMessageId": anchor.id,
             ], timeoutSeconds: 90)
     }

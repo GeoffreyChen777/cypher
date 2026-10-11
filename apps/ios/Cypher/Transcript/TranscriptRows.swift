@@ -75,7 +75,15 @@ struct TranscriptRow: Identifiable {
     var turnStart: Bool
     var kind: RowKind
     var entryId: String
+    /// Epoch-ms for the message strip UNDER this row (date, answering model,
+    /// fork / restart / copy): set on the LAST row of a settled entry — user
+    /// rows always, replies once they stop streaming (transcript.rs).
     var timestamp: Int64?
+    /// The model(s) that wrote the answer, shown after the date. Travels
+    /// with `timestamp`; only on settled replies whose host recorded it.
+    var answered: AnsweredLabel?
+    /// The entry has text the strip's copy button can put on the clipboard.
+    var copyable = false
     /// "{entryId}#{partId}" for markdown rows, nil otherwise — two adjacent
     /// rows sharing it are blocks of the same part (the tighter gap).
     var partKey: String?
@@ -86,11 +94,64 @@ struct TranscriptRow: Identifiable {
     /// The owning entry's role — what a selection's actions may do with it
     /// (fork before a prompt / after a reply; never a system row).
     var role: MessageRole = .assistant
+    /// The owning entry is complete (a prompt the host has, a finished
+    /// reply) — only those anchor a fork or a restart.
+    var settled = false
     /// A block of the model's thinking: painted in the muted tone.
     var muted = false
     /// Part of a work run (`activity`): a tool group shows only its chips, a
     /// thought is a chip, and a thought's blocks sit indented under it.
     var nested = false
+}
+
+/// rows.rs `AnsweredLabel`: what a settled answer's strip says about the
+/// model(s) that wrote it.
+struct AnsweredLabel: Equatable {
+    /// The answering model ids, in the order they first answered.
+    var text: String
+    /// Set when a model answered that wasn't the one requested: the strip
+    /// shows the label in the warning tone and this explains it.
+    var substituted: String?
+
+    /// nil when the entry records no model (another harness, or written
+    /// before models were recorded).
+    init?(_ models: [AnsweredModel]) {
+        var served: [String] = []
+        var swaps: [String] = []
+        for answered in models {
+            if !served.contains(answered.model) { served.append(answered.model) }
+            if answered.substituted, let requested = answered.requested {
+                let swap = "Requested \(requested), answered by \(answered.model)"
+                if !swaps.contains(swap) { swaps.append(swap) }
+            }
+        }
+        guard !served.isEmpty else { return nil }
+        text = served.joined(separator: ", ")
+        substituted = swaps.isEmpty ? nil : swaps.joined(separator: "\n")
+    }
+}
+
+/// rows.rs `message_copy_text`: what a message's copy button puts on the
+/// clipboard. Markdown stays intact; tool payloads and question internals
+/// aren't prose. A prompt copies as its bubble reads — no attachment
+/// transport lines, mentions as their `@name` chips.
+enum MessageCopy {
+    static func text(_ entry: MessageEntry) -> String? {
+        let joined = entry.parts.compactMap { part -> String? in
+            switch part {
+            case .text(_, let text, _): return text
+            case .error(_, let message) where entry.role != .user: return message
+            default: return nil
+            }
+        }
+        .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        .joined(separator: "\n\n")
+        let text =
+            entry.role == .user
+            ? Mentions.project(parseUserMessageImages(joined).text).display
+            : joined
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
+    }
 }
 
 /// A settled part's parse, keyed by content so a completed block is parsed
@@ -117,7 +178,11 @@ enum TranscriptRowBuilder {
             rowsForEntry(
                 entry, into: &rows, parsers: &parsers,
                 completed: &completed, live: &live)
-            for ix in first..<rows.count { rows[ix].role = entry.role }
+            let settled = entry.role == .user || entry.status != .streaming
+            for ix in first..<rows.count {
+                rows[ix].role = entry.role
+                rows[ix].settled = settled
+            }
         }
         // Optimistic echo: pending sends share their client-minted id, so the
         // host's real entry replaces them without a flicker.
@@ -187,7 +252,6 @@ enum TranscriptRowBuilder {
         live: inout Set<String>
     ) {
         let streaming = entry.status == .streaming
-        let settled = entry.status != nil && !streaming
 
         if entry.role == .user {
             // One bubble row per user message.
@@ -196,15 +260,18 @@ enum TranscriptRowBuilder {
                 return nil
             }.joined(separator: "\n")
             guard !text.isEmpty else { return }
-            rows.append(
-                TranscriptRow(
-                    id: entry.id, version: userVersion(text, isSteer: entry.isSteer),
-                    turnStart: true, kind: .user(text: text, isSteer: entry.isSteer),
-                    entryId: entry.id, timestamp: entry.createdAt,
-                    partKey: nil))
+            var row = TranscriptRow(
+                id: entry.id, version: userVersion(text, isSteer: entry.isSteer),
+                turnStart: true, kind: .user(text: text, isSteer: entry.isSteer),
+                entryId: entry.id, timestamp: entry.createdAt,
+                partKey: nil)
+            row.copyable = !parseUserMessageImages(text).text
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            rows.append(row)
             return
         }
 
+        let entryStart = rows.count
         var first = true
         var pendingTools: [ToolItem] = []
         var groupIx = 0
@@ -272,15 +339,13 @@ enum TranscriptRowBuilder {
         /// One row per prose run / other block of a part, named by its first
         /// block so a run keeps its id as blocks join it.
         func appendBlockRows(
-            key: String, blocks: [TopBlock], runs: [Range<Int>], partIx: Int,
+            key: String, blocks: [TopBlock], runs: [Range<Int>],
             liveTail: Bool, muted: Bool
         ) {
             for run in runs {
-                let lastOfPart = run.upperBound == blocks.count
-                let live = liveTail && lastOfPart
-                let stamped = settled && partIx == lastPartIx && lastOfPart
+                let live = liveTail && run.upperBound == blocks.count
                 let kind: RowKind
-                var version: UInt64
+                let version: UInt64
                 if TranscriptTextStyle.isProse(blocks[run.lowerBound].block) {
                     var hash: UInt64 = 0xcbf2_9ce4_8422_2325
                     for top in blocks[run] { hash = (hash ^ top.fingerprint) &* 0x100_0000_01b3 }
@@ -290,15 +355,12 @@ enum TranscriptRowBuilder {
                     version = (blocks[run.lowerBound].fingerprint << 1) | (live ? 1 : 0)
                     kind = .markdown(block: blocks[run.lowerBound].block, streaming: live)
                 }
-                if stamped {
-                    version ^= 1 << 62  // timestamp attach keeps the diff key honest
-                }
                 rows.append(
                     TranscriptRow(
                         id: "\(key).\(run.lowerBound)", version: version, turnStart: first,
                         kind: kind,
                         entryId: entry.id,
-                        timestamp: stamped ? entry.createdAt : nil,
+                        timestamp: nil,
                         partKey: key,
                         muted: muted))
                 first = false
@@ -342,7 +404,7 @@ enum TranscriptRowBuilder {
                     first = false
                 }
                 appendBlockRows(
-                    key: key, blocks: blocks, runs: runs, partIx: ix,
+                    key: key, blocks: blocks, runs: runs,
                     liveTail: isLiveTail, muted: false)
 
             case .reasoning(let partId, let text):
@@ -368,7 +430,7 @@ enum TranscriptRowBuilder {
                         entryId: entry.id, timestamp: nil, partKey: nil))
                 first = false
                 appendBlockRows(
-                    key: key, blocks: blocks, runs: runs, partIx: ix,
+                    key: key, blocks: blocks, runs: runs,
                     liveTail: isLiveTail, muted: true)
 
             case .input(let partId, _, let questions, let resolved):
@@ -399,6 +461,26 @@ enum TranscriptRowBuilder {
         flushTools(lastIx: lastPartIx)
         // Still the tail of a streaming reply: open, like a live tool group.
         closeRun(autoOpen: streaming)
+
+        // The message strip under the entry's LAST row, whatever it is, once
+        // the turn has settled ("no timestamp mid-stream"). The version bits
+        // keep the diff key honest for rows whose own version wouldn't change
+        // when streaming flips off (chips).
+        guard !streaming, rows.count > entryStart else { return }
+        let last = rows.count - 1
+        rows[last].timestamp = entry.createdAt
+        rows[last].version ^= 1 << 62
+        rows[last].copyable = entry.parts.contains { part in
+            switch part {
+            case .text(_, let text, _), .error(_, let text):
+                return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            default: return false
+            }
+        }
+        if entry.role == .assistant, let label = AnsweredLabel(entry.models) {
+            rows[last].answered = label
+            rows[last].version ^= fnv1a(label.text + (label.substituted ?? ""))
+        }
     }
 
     /// transcript.rs `thought_preview`: a thought's label in a work run — its
@@ -474,7 +556,12 @@ enum TranscriptRowBuilder {
                 hide -= 1
                 if let stamp = row.timestamp, let toggle = folded.indices.last {
                     folded[toggle].timestamp = stamp
+                    folded[toggle].answered = row.answered
+                    folded[toggle].copyable = row.copyable
                     folded[toggle].version ^= 1 << 62
+                    if let label = row.answered {
+                        folded[toggle].version ^= fnv1a(label.text + (label.substituted ?? ""))
+                    }
                 }
                 continue
             }

@@ -71,8 +71,12 @@ final class AppModel {
     /// Fork retries reuse their request id (the host dedupes on it); a
     /// definite answer retires it (shell.rs fork_request_ids).
     @ObservationIgnored var forkRequestIds: [String: String] = [:]
-    /// Drafts waiting for a session's composer (a fork's edited prompt).
+    /// Drafts waiting for a session's composer (a fork's or a restart's
+    /// edited prompt).
     @ObservationIgnored var pendingDrafts: [String: String] = [:]
+    /// Bumped when a draft lands for a composer that is already open (a
+    /// restart hands its prompt back to the session on screen).
+    var draftOffers = 0
 
     func restore() {
         defer { restored = true }

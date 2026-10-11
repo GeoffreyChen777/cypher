@@ -264,6 +264,51 @@ struct MessageEntry: Identifiable, Hashable {
     /// Explicit sender intent from the durable command ledger, not a claim
     /// that the agent has consumed the instruction (or a new wire field).
     var isSteer = false
+    /// schema.rs `models`: the models that answered an assistant entry,
+    /// distinct and in the order they first answered. Only Pi writes it.
+    var models: [AnsweredModel] = []
+}
+
+/// proto agent.rs `AnsweredModel`: a model that answered (part of) a turn,
+/// and the one that was asked for when the host recorded it.
+struct AnsweredModel: Hashable {
+    var model: String
+    var requested: String?
+
+    /// A different model answered than the one requested. Spellings of the
+    /// same model don't count (agent.rs `substituted`).
+    var substituted: Bool {
+        requested.map { Self.family($0) != Self.family(model) } ?? false
+    }
+
+    /// agent.rs `model_family`: the id without the decorations that name the
+    /// same model — provider prefix, `[1m]`, a dated snapshot
+    /// (`-20261001`, `@20261001`, `-2026-10-01`), `-latest`, and case.
+    static func family(_ id: String) -> String {
+        var id = Substring(id.trimmingCharacters(in: .whitespaces).lowercased())
+        if let slash = id.lastIndex(of: "/") { id = id[id.index(after: slash)...] }
+        if id.hasSuffix("]"), let open = id.lastIndex(of: "[") { id = id[..<open] }
+        let digits = { (s: Substring) in !s.isEmpty && s.allSatisfy(\.isASCIIDigit) }
+        if let at = id.lastIndex(where: { $0 == "-" || $0 == "@" }),
+            id.distance(from: at, to: id.endIndex) == 9,
+            digits(id[id.index(after: at)...])
+        {
+            id = id[..<at]
+        }
+        if id.count > 11 {
+            let date = Array(id.suffix(11))
+            let numeric = [date[1..<5], date[6..<8], date[9...]].allSatisfy { $0.allSatisfy(\.isASCIIDigit) }
+            if date[0] == "-", date[5] == "-", date[8] == "-", numeric {
+                id = id.dropLast(11)
+            }
+        }
+        if id.hasSuffix("-latest") { id = id.dropLast(7) }
+        return String(id)
+    }
+}
+
+extension Character {
+    fileprivate var isASCIIDigit: Bool { isASCII && isNumber }
 }
 
 struct PendingSend {
@@ -345,6 +390,29 @@ enum ForkResponse: Decodable, Equatable {
             self = .unavailable(
                 message: try c.decodeIfPresent(String.self, forKey: .message)
                     ?? "This session can't be forked here.")
+        }
+    }
+}
+
+/// proto session_fork.rs `SessionRewindResponse`, tagged by `kind`.
+enum RewindResponse: Decodable, Equatable {
+    /// `composerText`: a rewind at a user message hands its text back.
+    case rewound(composerText: String?, removed: Int)
+    case unavailable(message: String)
+
+    private enum Keys: String, CodingKey { case kind, composerText, removedMessageIds, message }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "rewound":
+            self = .rewound(
+                composerText: try c.decodeIfPresent(String.self, forKey: .composerText),
+                removed: (try c.decodeIfPresent([String].self, forKey: .removedMessageIds))?.count ?? 0)
+        default:
+            self = .unavailable(
+                message: try c.decodeIfPresent(String.self, forKey: .message)
+                    ?? "This conversation can't be restarted here.")
         }
     }
 }

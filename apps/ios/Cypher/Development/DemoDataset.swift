@@ -421,7 +421,8 @@ final class DemoDataset {
                                 The row keeps one `RowVeil` while streaming (`row === liveRow`) and \
                                 drops it on the live→complete flip, exactly like the desktop lifecycle.
                                 """),
-                    ], createdAt: now - 3_400_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+                    ], createdAt: now - 3_400_000, deviceId: "dev-mac", status: .complete, continuationOf: nil,
+                    models: [AnsweredModel(model: "claude-opus-5-5")]),
             ]
         case "chat-picker":
             // Match the real Pi RPC fallback, including the duplicated title.

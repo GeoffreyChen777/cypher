@@ -100,6 +100,14 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   purges the host's doc), then removes the rows here even if the host is
   offline; a quick chat's scratch folder is removed too. The desktop's
   "Delete worktree too?" follow-up is not ported.
+- **Message strip:** under each settled message, the desktop's hover strip,
+  always shown: the date ("Oct 11, 9:21 AM"), the model that answered (warning
+  tone + tap for what was requested when another model answered), then fork,
+  restart and copy. Fork/restart follow the desktop's gates (Pi root chat, not
+  running, host online; restart never on the newest message); a blocked one
+  stays dimmed and explains itself on tap. Restart asks first, naming how many
+  messages it deletes, then calls the host's `RewindSession`; a prompt's text
+  returns to an empty composer. Side chats show date and copy only.
 - **Quick chat:** Home's speech-bubble button starts a project-less session on
   a chosen online device (`CreateScratchDir` on the host, then a row without a
   space). Quick chats get their own Home section; other project-less sessions

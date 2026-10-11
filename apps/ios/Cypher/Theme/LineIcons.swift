@@ -24,6 +24,11 @@ enum LineIcon {
     // The composer `@` menu's rows (composer.rs render_mention_popup).
     case document
     case chatRoundLine
+    // A message's strip (transcript render.rs: copy, its confirmation, and
+    // the substituted-model warning).
+    case copy
+    case check
+    case dangerTriangle
 
     /// (paths, circles cx/cy/r) in a 24×24 viewbox.
     var elements: (paths: [String], circles: [(CGFloat, CGFloat, CGFloat)]) {
@@ -120,6 +125,25 @@ enum LineIcon {
                     "M8 14H13.5",
                 ],
                 circles: []
+            )
+        case .copy:
+            return (
+                paths: [
+                    "M6.6 11.4c0-2.263 0-3.394.703-4.097C8.006 6.6 9.137 6.6 11.4 6.6h4.8c2.263 0 3.394 0 4.097.703c.703.703.703 1.834.703 4.097v4.8c0 2.263 0 3.394-.703 4.097c-.703.703-1.834.703-4.097.703h-4.8c-2.263 0-3.394 0-4.097-.703C6.6 19.594 6.6 18.463 6.6 16.2z",
+                    "M17.396 6.6c-.005-1.774-.05-2.707-.657-3.314C16.036 2.583 14.905 2.583 12.642 2.583h-3.6c-2.263 0-3.394 0-4.097.703c-.703.703-.703 1.834-.703 4.097v3.6c0 2.263 0 3.394.703 4.097c.607.607 1.54.652 3.314.657",
+                ],
+                circles: []
+            )
+        case .check:
+            // check.svg is drawn on a 16 grid; scaled to this one.
+            return (paths: ["M5.25 12.75l4.5 4.5l9-10.5"], circles: [])
+        case .dangerTriangle:
+            return (
+                paths: [
+                    "M5.312 10.762C8.23 5.587 9.689 3 12 3s3.77 2.587 6.688 7.762l.364.644c2.425 4.3 3.638 6.45 2.542 8.022S17.786 21 12.364 21h-.728c-5.422 0-8.134 0-9.23-1.572s.117-3.722 2.542-8.022z",
+                    "M12 8v5",
+                ],
+                circles: [(12, 16, 0.5)]
             )
         }
     }
