@@ -95,6 +95,8 @@ impl Composer {
                         wizard = wizard.quietly();
                     }
                     self.wizard = Some(wizard);
+                    self.wizard_opened_at = Some(Instant::now());
+                    self.wizard_focus_pending = pick_only;
                     self.advance_task = None;
                     // The composer is unmounting now, so this is the safe
                     // moment to arm its next entrance: a card the user

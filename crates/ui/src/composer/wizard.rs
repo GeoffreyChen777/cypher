@@ -297,12 +297,9 @@ pub(super) fn wizard_context_block(
     theme: &crate::kit::theme::Theme,
 ) -> gpui::Div {
     div()
-        .mt(px(10.0))
-        .pl(px(10.0))
-        .border_l_2()
-        .border_color(crate::kit::theme::ink(0.12))
-        .text_size(px(12.5))
-        .line_height(px(18.0))
+        .mt(px(6.0))
+        .text_size(px(13.0))
+        .line_height(px(19.0))
         .text_color(theme.text_muted)
         .cursor_text()
         .child(crate::markdown::render::selectable_plain_text(
@@ -316,8 +313,9 @@ pub(super) fn wizard_context_block(
 /// Section label inside the card ("Pick one", "Your answer", …).
 pub(super) fn wizard_section_label(label: &str, theme: &crate::kit::theme::Theme) -> gpui::Div {
     div()
-        .mb(px(8.0))
-        .text_size(px(11.5))
+        .mb(px(6.0))
+        .px(px(2.0))
+        .text_size(px(12.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text_faint)
         .child(SharedString::from(label.to_owned()))
@@ -336,16 +334,14 @@ pub(super) fn wizard_key_hint(
         .gap(px(5.0))
         .child(
             div()
-                .h(px(18.0))
-                .min_w(px(18.0))
-                .px(px(5.0))
+                .h(px(17.0))
+                .min_w(px(17.0))
+                .px(px(4.0))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded(px(5.0))
-                .border_1()
-                .border_color(theme.border)
-                .bg(crate::kit::theme::ink(0.03))
+                .bg(crate::kit::theme::ink(0.05))
                 .text_size(px(10.5))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text_muted)
@@ -359,7 +355,8 @@ pub(super) fn wizard_key_hint(
         )
 }
 
-pub(super) fn split_question_context(prompt: &str) -> (String, Option<String>) {
+/// `question\n\nContext:\ncontext` split into its two parts.
+pub fn split_question_context(prompt: &str) -> (String, Option<String>) {
     let prompt = prompt.replace("\r\n", "\n");
     if let Some((question, context)) = prompt.split_once("\n\nContext:\n") {
         (
@@ -660,6 +657,29 @@ impl Composer {
         let input_empty = self.input.read(cx).is_empty();
         let key = event.keystroke.key.as_str();
         let modifiers = event.keystroke.modifiers;
+        // A permission request answers to letters (Y, C, A, N, S) and ⌘↵;
+        // see `permission_card::option_for_key`.
+        if let Some(options) = self.permission_options() {
+            let other = modifiers.control || modifiers.alt || modifiers.shift || modifiers.function;
+            let picked = permission_card::option_for_key(&options, key, modifiers.platform, other);
+            let numbered = !modifiers.modified()
+                && key
+                    .parse::<usize>()
+                    .is_ok_and(|digit| (1..=options.len().min(9)).contains(&digit));
+            if picked.is_some() || numbered {
+                // Keys typed as the card appeared, or a held key repeating,
+                // answer nothing.
+                let settled = self
+                    .wizard_opened_at
+                    .is_some_and(|opened| opened.elapsed() >= question_card::SHORTCUT_GRACE);
+                if settled && !event.is_held {
+                    let ix = picked.unwrap_or_else(|| key.parse::<usize>().unwrap_or(1) - 1);
+                    self.wizard_select(ix, cx);
+                }
+                cx.stop_propagation();
+                return;
+            }
+        }
         if key == "c" && (modifiers.platform || modifiers.control) {
             // Clicking card text focuses the card, not the input, so Copy
             // has no input binding to reach: copy the text selection here.

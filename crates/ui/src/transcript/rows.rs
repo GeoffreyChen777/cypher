@@ -986,11 +986,13 @@ impl EntryRows<'_> {
         // Only resolved questions get here (`part_is_silent`): the composer
         // wizard is the interaction, and a pending "Awaiting your answer…"
         // chip made slash-command settings read as the model asking a
-        // question. Model-generated header onto the one-line chip.
+        // question. Model-generated header onto the one-line chip: the
+        // question alone, without its `Context:` part (a permission
+        // request's paths and notes).
         let header: SharedString = single_line(
             &questions
                 .first()
-                .map(|q| q.header.clone())
+                .map(|q| crate::composer::split_question_context(&q.header).0)
                 .unwrap_or_else(|| "Question".to_string()),
         )
         .into();
