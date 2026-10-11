@@ -163,6 +163,14 @@ impl DocHost {
         // what this run actually executes with. Claimed rows and
         // catalog-not-loaded createChats both land here; the racing
         // real createChat carries the same picked values.
+        // The chat's permission level is the row's: the composer's
+        // permissions picker writes it there with `setChatConfig`, and
+        // clients (older ones included) send a fixed default in the
+        // request. The Runtime's permission extension reads the level the
+        // harness passes from `request.sandbox`.
+        if let Some(config) = self.workspace().and_then(|ws| ws.chat_config(chat_id)) {
+            request.sandbox = config.sandbox;
+        }
         if let Some(ws) = self.workspace()
             && ws.chat_config(chat_id).is_none()
         {

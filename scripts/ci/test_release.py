@@ -35,7 +35,7 @@ class Fixture(unittest.TestCase):
         self.rv = definition["version"]
         self.minimum = definition["minimumCypherVersion"]
         dependencies = json.loads(self.spec.read_text())["dependencies"]
-        self.plugins = {k: v for k, v in dependencies.items() if not k.startswith("@earendil-works/")}
+        self.plugins = {k: v for k, v in dependencies.items() if not k.startswith(("@earendil-works/", "@landstrip/"))}
         self.inner = {"version": self.rv, "piVersion": dependencies["@earendil-works/pi-coding-agent"],
                       "plugins": self.plugins}
         for platform in release.PLATFORMS:

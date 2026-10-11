@@ -211,6 +211,45 @@ fn requested_model_and_thinking_are_applied_at_process_launch() {
 }
 
 #[test]
+fn the_chat_sandbox_level_reaches_the_permission_extension() {
+    let harness = harness();
+    let level = |cmd: &tokio::process::Command| {
+        cmd.as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "CYPHER_PERMISSION_LEVEL")
+            .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+    };
+    for (sandbox, expected) in [
+        (cypher_proto::SandboxLevel::ReadOnly, "read-only"),
+        (
+            cypher_proto::SandboxLevel::WorkspaceWrite,
+            "workspace-write",
+        ),
+        (
+            cypher_proto::SandboxLevel::DangerFullAccess,
+            "danger-full-access",
+        ),
+    ] {
+        let mut request = request("scenario:happy");
+        request.sandbox = sandbox;
+        let cmd = harness
+            .spawn_run_command(
+                Some(&request.cwd),
+                &RunHostContext::default(),
+                None,
+                &request,
+            )
+            .expect("run command builds");
+        assert_eq!(level(&cmd), Some(Some(expected.to_string())));
+    }
+    // Discovery processes carry no chat, so no level: an inherited one is cleared.
+    let probe = harness
+        .spawn_command(None, &RunHostContext::default(), None)
+        .expect("command builds");
+    assert_eq!(level(&probe), Some(None));
+}
+
+#[test]
 fn empty_catalog_placeholder_is_not_passed_to_pi() {
     let harness = harness();
     let mut request = request("/newapi-provider-add");

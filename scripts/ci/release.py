@@ -162,7 +162,7 @@ def runtime_plan(dist, spec):
     """
     definition = read_json(spec.with_name("release.json").read_bytes())
     spec = read_json(spec.read_bytes())["dependencies"]
-    plugins = {k: val for k, val in spec.items() if not k.startswith("@earendil-works/")}
+    plugins = {k: val for k, val in spec.items() if not k.startswith(("@earendil-works/", "@landstrip/"))}
     runtime_files = {}
     runtime = None
     names = set()

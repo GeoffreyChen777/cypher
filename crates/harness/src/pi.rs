@@ -86,7 +86,7 @@ use tokio::sync::mpsc;
 
 use cypher_proto::{
     AgentEvent, AnsweredModel, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
-    SlashCommand, SteeringMode, UserInputQuestion,
+    SandboxLevel, SlashCommand, SteeringMode, UserInputQuestion,
 };
 
 use crate::pi::client::{Incoming, PiClient};
@@ -426,6 +426,7 @@ impl Harness for PiHarness {
                 temp_prompt.as_ref(),
                 request.model.as_deref(),
                 request.reasoning.map(thinking_level),
+                Some(request.sandbox),
             )
             .await;
         let (mut child, stderr_tail) = match spawn {

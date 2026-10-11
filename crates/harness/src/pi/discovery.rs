@@ -62,7 +62,7 @@ impl PiHarness {
     /// cache a Claude-only catalog.
     pub(super) async fn discover_models(&self) -> Result<DiscoveredModels, HarnessError> {
         let (mut child, _stderr) = self
-            .spawn_child(None, &RunHostContext::default(), None, None, None)
+            .spawn_child(None, &RunHostContext::default(), None, None, None, None)
             .await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => PiClient::new(stdin, stdout),
@@ -143,7 +143,7 @@ impl PiHarness {
     /// (extension / prompt / skill commands, all three sources).
     pub(super) async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         let (mut child, _stderr) = self
-            .spawn_child(None, &RunHostContext::default(), None, None, None)
+            .spawn_child(None, &RunHostContext::default(), None, None, None, None)
             .await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => PiClient::new(stdin, stdout),

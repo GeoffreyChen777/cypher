@@ -99,10 +99,6 @@ const RECOMMENDED: &[(&str, &str)] = &[
         "Goal tracking and completion workflow.",
     ),
     (
-        "npm:pi-permission-control",
-        "Permission prompts and controls.",
-    ),
-    (
         "npm:pi-ask-user",
         "Let the model ask you questions with a choice picker.",
     ),
@@ -171,16 +167,7 @@ fn bundled_source(paths: &crate::pi::runtime::PiRuntimePaths, source: &str) -> O
 }
 
 fn bundled_setting(paths: &crate::pi::runtime::PiRuntimePaths, source: &str) -> Option<Value> {
-    let name = source_name(source);
-    let source = bundled_source(paths, source)?;
-    Some(if name == "pi-permission-control" {
-        serde_json::json!({
-            "source": source,
-            "extensions": ["-index.ts"]
-        })
-    } else {
-        Value::String(source)
-    })
+    bundled_source(paths, source).map(Value::String)
 }
 
 fn npm(paths: &crate::pi::runtime::PiRuntimePaths) -> Option<PathBuf> {
