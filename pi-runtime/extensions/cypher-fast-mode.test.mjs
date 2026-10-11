@@ -24,7 +24,7 @@ test("GPT 5.4 and every later version qualify, whatever the provider", () => {
     ["some-proxy", "gpt-5.4"],
     ["some-proxy", "gpt-5.4-mini"],
     ["openrouter", "openai/gpt-7"],
-    ["azure-openai-responses", "gpt-5.10"],
+    ["azure", "gpt-5.10"],
   ]) {
     assert.ok(supportsFastMode({ provider, id }), `${provider}/${id}`);
   }
@@ -37,7 +37,7 @@ test("older GPT versions and ids without a GPT version do not qualify", () => {
     ["openai", "gpt-4o"],
     ["openai", "o3"],
     ["openrouter", "openai/gpt-oss-120b"],
-    ["azure-openai-responses", "prod-deployment-2"],
+    ["azure", "prod-deployment-2"],
     ["claude-bridge", "claude-opus-5-5"],
   ]) {
     assert.ok(!supportsFastMode({ provider, id }), `${provider}/${id}`);

@@ -30,7 +30,7 @@ import { packageDirArg, patchFile, requireVersion } from "./lib/apply-anchors.mj
 const packageDir = packageDirArg("pi-claude-bridge-response-model.mjs <pi-claude-bridge-package-dir>");
 
 const MARKER = "CYPHER-RUNTIME-PATCH: response-model";
-const EXPECTED_VERSION = "0.9.1";
+const EXPECTED_VERSION = "0.9.2";
 requireVersion(packageDir, { name: "pi-claude-bridge", expected: EXPECTED_VERSION, script: "pi-claude-bridge-response-model.mjs" });
 
 const EDITS = [

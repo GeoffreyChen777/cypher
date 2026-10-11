@@ -31,7 +31,7 @@ import { packageDirArg, patchFile, requireVersion } from "./lib/apply-anchors.mj
 const packageDir = packageDirArg("pi-ai-response-model.mjs <pi-ai-package-dir>");
 
 const MARKER = "CYPHER-RUNTIME-PATCH: response-model";
-const EXPECTED_VERSION = "1.0.1";
+const EXPECTED_VERSION = "1.1.0";
 requireVersion(packageDir, { name: "pi-ai", expected: EXPECTED_VERSION, script: "pi-ai-response-model.mjs" });
 
 const EDITS = [

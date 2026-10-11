@@ -40,7 +40,7 @@ import { packageDirArg, patchFile, requireVersion } from "./lib/apply-anchors.mj
 const packageDir = packageDirArg("pi-coding-agent-cwd-context-files.mjs <pi-coding-agent-package-dir>");
 
 const MARKER = "CYPHER-RUNTIME-PATCH: cwd-context-files";
-const EXPECTED_VERSION = "1.0.1";
+const EXPECTED_VERSION = "1.1.0";
 const NAME = "pi-coding-agent";
 requireVersion(packageDir, { name: NAME, expected: EXPECTED_VERSION, script: "pi-coding-agent-cwd-context-files.mjs" });
 
