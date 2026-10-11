@@ -215,9 +215,11 @@ enum Highlighter {
                 continue
             }
 
-            // Numbers
-            if c.isNumber {
+            // Numbers. ASCII digits only: `isNumber` also accepts 一, ², ½, ①, ٣,
+            // which fail `isHexDigit` below and would never advance `i`.
+            if c.isASCII, c.isNumber {
                 let start = i
+                i += 1
                 while i < n,
                     chars[i].isHexDigit || chars[i] == "." || chars[i] == "_"
                         || chars[i] == "x" || chars[i] == "o" || chars[i] == "b" || chars[i] == "e"
