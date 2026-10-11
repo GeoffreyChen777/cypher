@@ -57,6 +57,19 @@ Tests sit beside the file they cover and come in two tiers:
   An installed Runtime only passes the staged suites whose patches it was
   built with.
 
+## Context files
+
+Pi loads `AGENTS.md` / `CLAUDE.md` from the chat's working directory only (one
+file per directory, `AGENTS.md` first), after the Runtime's own
+`agent/AGENTS.md` if there is one. Upstream Pi also walks every ancestor up to
+`/`; `patches/pi-coding-agent-cwd-context-files.mjs` removes that walk. On
+Claude, pi-claude-bridge tells Claude Code to load none of its own memory files
+(`CLAUDE.md`, `AGENTS.md`, `.claude/rules`, and `CLAUDE.local.md` via
+`patches/pi-claude-bridge-context-files.mjs`) and the provider path forwards
+Pi's list, so the same rule holds there; AskClaude receives no context files.
+Only Claude Code's managed policy memory, which cannot be excluded, still
+loads.
+
 ## Provider management
 
 The first version supports NewAPI / OpenAI-compatible gateways using API keys.

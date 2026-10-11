@@ -86,6 +86,15 @@ node "$SPEC/patches/pi-ai-response-model.mjs" \
 node "$SPEC/patches/pi-claude-bridge-response-model.mjs" \
   "$STAGE/npm/node_modules/pi-claude-bridge"
 
+# Pi walked from the cwd up to `/`, loading every ancestor's AGENTS.md /
+# CLAUDE.md, and Claude Code still read every ancestor's CLAUDE.local.md. Load
+# the cwd's only, on both routes (see the patch headers). Missing anchors fail
+# the build on purpose.
+node "$SPEC/patches/pi-coding-agent-cwd-context-files.mjs" \
+  "$STAGE/npm/node_modules/@earendil-works/pi-coding-agent"
+node "$SPEC/patches/pi-claude-bridge-context-files.mjs" \
+  "$STAGE/npm/node_modules/pi-claude-bridge"
+
 # Keep only this artifact's native esbuild binary. Pi's shrinkwrap currently
 # brings every platform package into some npm layouts (~285 MB uncompressed).
 keep="${ESBUILD#@esbuild/}"
@@ -194,6 +203,9 @@ CYPHER_PI_RUNTIME_STAGE="$STAGE" \
 # Feeds the patched Responses stream; loads the patched bridge.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
   "$STAGE/bin/node" --test "$SPEC/patches/response-model.staged.test.mjs"
+# Both copies of Pi's loader skip ancestors; loads the patched bridge.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/patches/context-files.staged.test.mjs"
 # Language gating decides whether a message costs a translation request at all,
 # so it is covered here rather than only through a live session.
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-translation.test.mjs"
