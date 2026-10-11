@@ -368,6 +368,7 @@ impl Shell {
             SettingsSection::Titles => icons::TUNING,
             SettingsSection::Commands => icons::COMMAND,
             SettingsSection::Mcp => icons::GLOBAL,
+            SettingsSection::Permissions => icons::SHIELD_CHECK,
             SettingsSection::Subagents => icons::CHECKLIST,
             SettingsSection::Github => icons::GITHUB_MARK,
             SettingsSection::Appearance => icons::TUNING,

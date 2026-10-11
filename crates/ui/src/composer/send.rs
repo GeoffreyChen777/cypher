@@ -256,6 +256,23 @@ impl Composer {
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself.
     fn send(&mut self, text: String, steer: bool, cx: &mut Context<Self>) {
+        // `/permissions <level>` is the composer's own: it sets the chat's
+        // level and never reaches the agent.
+        if let Some(level) = self.typed_permission(&text, cx) {
+            match level {
+                Some(level) => {
+                    self.pickers
+                        .update(cx, |pickers, cx| pickers.pick_permission(level, cx));
+                    self.input.update(cx, |input, cx| input.set_text("", cx));
+                    self.failure = None;
+                }
+                None => {
+                    self.failure = Some("Pick a level: /permissions ask, workspace or full".into());
+                }
+            }
+            cx.notify();
+            return;
+        }
         self.send_with(text, steer, SendDraft::Take, cx);
     }
 
@@ -1567,7 +1584,9 @@ fn run_command(
             reasoning: resolved.reasoning,
             model_options: resolved.model_options.clone(),
             cwd,
-            sandbox: SandboxLevel::WorkspaceWrite,
+            // The engine runs an existing chat with its row's level; this
+            // carries a new chat's draft pick.
+            sandbox: resolved.sandbox_level(),
             auto_approve: false,
             resume: None,
             attachments,

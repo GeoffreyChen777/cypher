@@ -376,6 +376,7 @@ impl Pickers {
                     Some(PickerKind::Traits) => 0, // merged into HarnessModel
                     Some(PickerKind::Space) => self.filtered_space_rows(cx).len(),
                     Some(PickerKind::Device) => self.filtered_device_rows(cx).len(),
+                    Some(PickerKind::Permissions) => PERMISSION_LEVELS.len(),
                     None => 0,
                 };
                 let current = (self.active != NO_ACTIVE_ROW).then_some(self.active);
@@ -394,6 +395,10 @@ impl Pickers {
             MenuKey::Enter if !search_focused => {
                 if self.open_kind() == Some(PickerKind::HarnessModel) {
                     self.activate_model_row(cx);
+                } else if self.open_kind() == Some(PickerKind::Permissions) {
+                    if let Some(entry) = PERMISSION_LEVELS.get(self.active) {
+                        self.pick_permission(entry.level, cx);
+                    }
                 } else if self.open_kind() == Some(PickerKind::Checkout) {
                     let kind = if self.active == 0 {
                         CheckoutKind::Local

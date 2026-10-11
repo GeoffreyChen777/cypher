@@ -10,12 +10,17 @@
 //! pause|resume|…`, `/provider add` — shows a chevron, and choosing it (or
 //! typing its name and a space) opens the list of its choices, the one in
 //! effect checked.
+//!
+//! `/permissions` is the composer's own: the chat's permission level, under
+//! Agent modes whatever Settings → Commands turns on. Its choices set the
+//! level directly; nothing is sent to the agent.
 
 use std::ops::Range;
 
 use cypher_engine::pi::session_modes::PiSessionModes;
-use cypher_proto::{ContextUsage, SlashCommand};
+use cypher_proto::{ContextUsage, SandboxLevel, SlashCommand};
 
+use crate::pickers::{PERMISSION_LEVELS, PermissionLevel, permission_level};
 use crate::prefs::slash_commands::{CommandGroup, placement};
 
 /// One named choice of a command: what gets typed after the command, and
@@ -23,13 +28,22 @@ use crate::prefs::slash_commands::{CommandGroup, placement};
 #[derive(Debug, PartialEq, Eq)]
 pub struct Choice {
     pub value: &'static str,
+    /// Shown instead of `value` when set (the permission levels).
+    pub label: Option<&'static str>,
     pub description: &'static str,
     pub takes_text: bool,
+}
+
+impl Choice {
+    pub fn title(&self) -> &'static str {
+        self.label.unwrap_or(self.value)
+    }
 }
 
 const fn choice(value: &'static str, description: &'static str) -> Choice {
     Choice {
         value,
+        label: None,
         description,
         takes_text: false,
     }
@@ -49,6 +63,7 @@ const GOAL: [Choice; 5] = [
     choice("clear", "Clear the current goal"),
     Choice {
         value: "edit",
+        label: None,
         description: "Edit the current goal objective",
         takes_text: true,
     },
@@ -56,12 +71,40 @@ const GOAL: [Choice; 5] = [
 
 const PROVIDER: [Choice; 1] = [choice("add", "Add a provider in Settings")];
 
+/// The composer's own command for the chat's permission level.
+pub const PERMISSIONS: &str = "permissions";
+
+const fn level_choice(level: PermissionLevel) -> Choice {
+    Choice {
+        value: level.value,
+        label: Some(level.label),
+        description: level.description,
+        takes_text: false,
+    }
+}
+
+const PERMISSION_CHOICES: [Choice; 3] = [
+    level_choice(PERMISSION_LEVELS[0]),
+    level_choice(PERMISSION_LEVELS[1]),
+    level_choice(PERMISSION_LEVELS[2]),
+];
+
+/// The level a `/permissions` choice (or a typed value) stands for.
+pub fn permission_for(value: &str) -> Option<SandboxLevel> {
+    let value = value.trim().to_lowercase();
+    PERMISSION_LEVELS
+        .iter()
+        .find(|entry| entry.value == value || entry.label.to_lowercase() == value)
+        .map(|entry| entry.level)
+}
+
 /// The named choices of a command, empty for commands without any.
 pub fn choices(command: &str) -> &'static [Choice] {
     match command {
         "orchestrate" => &ORCHESTRATE,
         "goal" => &GOAL,
         "provider" => &PROVIDER,
+        PERMISSIONS => &PERMISSION_CHOICES,
         _ => &[],
     }
 }
@@ -72,27 +115,49 @@ pub fn choices(command: &str) -> &'static [Choice] {
 pub enum Action {
     /// Open the file picker (the composer's former paperclip button).
     Attach,
+    /// Open the permission level's choices (`/permissions`).
+    Permissions,
 }
 
 impl Action {
-    /// Every action, in menu order. Every composer offers them all.
-    pub const ALL: [Self; 1] = [Self::Attach];
+    /// Every action, in menu order. A composer offers the ones that apply
+    /// to it (`/permissions` only for a Pi chat's own composer).
+    pub const ALL: [Self; 2] = [Self::Attach, Self::Permissions];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Attach => "Attach files",
+            Self::Permissions => "/permissions",
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
             Self::Attach => "Add files or images to this message",
+            Self::Permissions => "What the agent may do without asking in this chat",
         }
     }
 
     pub fn icon(self) -> &'static str {
         match self {
             Self::Attach => crate::kit::icons::PAPERCLIP,
+            Self::Permissions => crate::kit::icons::SHIELD_CHECK,
+        }
+    }
+
+    /// The command whose choices the action opens.
+    pub fn choices_command(self) -> Option<&'static str> {
+        match self {
+            Self::Attach => None,
+            Self::Permissions => Some(PERMISSIONS),
+        }
+    }
+
+    /// The group it is listed under; `None` is the message's own heading.
+    pub fn group(self) -> Option<CommandGroup> {
+        match self {
+            Self::Attach => None,
+            Self::Permissions => Some(CommandGroup::AgentModes),
         }
     }
 
@@ -101,6 +166,7 @@ impl Action {
     fn search_text(self) -> &'static str {
         match self {
             Self::Attach => "attach files images upload",
+            Self::Permissions => "permissions access sandbox",
         }
     }
 }
@@ -177,18 +243,25 @@ pub fn command_level(
     let mut menu = Menu::default();
     let actions_found: Vec<Row> = ranked
         .iter()
-        .filter(|row| matches!(row, Row::Action(_)))
+        .filter(|row| matches!(row, Row::Action(action) if action.group().is_none()))
         .map(|row| (*row).clone())
         .collect();
     push_group(&mut menu, ACTIONS_HEADING, actions_found);
     for group in CommandGroup::ALL {
-        let members: Vec<Row> = ranked
+        // A group's own actions (`/permissions`) lead it.
+        let mut members: Vec<Row> = ranked
             .iter()
-            .filter(|row| {
-                matches!(row, Row::Command(ix) if placement(&commands[*ix].name).group == group)
-            })
+            .filter(|row| matches!(row, Row::Action(action) if action.group() == Some(group)))
             .map(|row| (*row).clone())
             .collect();
+        members.extend(
+            ranked
+                .iter()
+                .filter(|row| {
+                    matches!(row, Row::Command(ix) if placement(&commands[*ix].name).group == group)
+                })
+                .map(|row| (*row).clone()),
+        );
         push_group(&mut menu, group.title(), members);
     }
     menu.preferred = if query.trim().is_empty() {
@@ -208,7 +281,12 @@ pub fn choice_level(command: &str, query: &str) -> Menu {
     let query = query.to_lowercase();
     let rows: Vec<Row> = choices(command)
         .iter()
-        .filter(|choice| choice.value.starts_with(&query))
+        .filter(|choice| {
+            choice.value.starts_with(&query)
+                || choice
+                    .label
+                    .is_some_and(|label| label.to_lowercase().starts_with(&query))
+        })
         .map(Row::Choice)
         .collect();
     Menu {
@@ -267,6 +345,8 @@ pub struct Facts<'a> {
     pub modes: Option<&'a PiSessionModes>,
     pub context: Option<ContextUsage>,
     pub running_subagents: usize,
+    /// The chat's permission level (the draft's for a new chat).
+    pub permission: Option<SandboxLevel>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,8 +415,27 @@ pub fn command_badge(command: &str, facts: &Facts) -> Option<Badge> {
     }
 }
 
+/// The badge an action's row carries: the permission level in effect,
+/// amber at Full access.
+pub fn action_badge(action: Action, facts: &Facts) -> Option<Badge> {
+    match action {
+        Action::Attach => None,
+        Action::Permissions => facts.permission.map(|level| {
+            let tone = if level == SandboxLevel::DangerFullAccess {
+                Tone::Warning
+            } else {
+                Tone::Neutral
+            };
+            badge(permission_level(level).label, tone)
+        }),
+    }
+}
+
 /// Whether `choice` is the one in effect (the check on its row).
 pub fn choice_in_effect(command: &str, choice: &Choice, facts: &Facts) -> bool {
+    if command == PERMISSIONS {
+        return facts.permission.is_some() && facts.permission == permission_for(choice.value);
+    }
     match (command, facts.modes) {
         ("orchestrate", Some(modes)) => {
             choice.value == if modes.orchestrate { "on" } else { "off" }
@@ -347,6 +446,11 @@ pub fn choice_in_effect(command: &str, choice: &Choice, facts: &Facts) -> bool {
 
 /// The line above a command's choices: what is in effect now.
 pub fn choice_summary(command: &str, facts: &Facts) -> Option<String> {
+    if command == PERMISSIONS {
+        return facts
+            .permission
+            .map(|level| format!("Now: {}", permission_level(level).label));
+    }
     let modes = facts.modes?;
     match command {
         "orchestrate" => Some(format!(
@@ -427,6 +531,7 @@ mod tests {
                 "# Conversation",
                 "compact",
                 "# Agent modes",
+                "/permissions",
                 "goal",
                 "fast",
                 "orchestrate",
@@ -438,18 +543,18 @@ mod tests {
             ]
         );
         // Headers are skipped by the keyboard; the top row is preferred.
-        assert_eq!(menu.selectable, [1, 3, 5, 6, 7, 9, 10, 12]);
+        assert_eq!(menu.selectable, [1, 3, 5, 6, 7, 8, 10, 11, 13]);
         assert_eq!(menu.preferred, Some(0));
     }
 
     #[test]
     fn attach_is_offered_with_no_command_turned_on() {
         let commands = catalog();
-        let menu = command_level(&Action::ALL, &commands, |_| false, "");
+        let menu = command_level(&[Action::Attach], &commands, |_| false, "");
         assert_eq!(names(&menu, &commands), ["# Message", "Attach files"]);
         // Found by what someone looking for it would type.
         for query in ["att", "files", "image", "upload"] {
-            let menu = command_level(&Action::ALL, &commands, |_| false, query);
+            let menu = command_level(&[Action::Attach], &commands, |_| false, query);
             assert_eq!(
                 menu.rows,
                 [Row::Header(ACTIONS_HEADING), Row::Action(Action::Attach)],
@@ -457,7 +562,7 @@ mod tests {
             );
         }
         assert!(
-            command_level(&Action::ALL, &commands, |_| false, "fast")
+            command_level(&[Action::Attach], &commands, |_| false, "fast")
                 .rows
                 .is_empty()
         );
@@ -466,7 +571,7 @@ mod tests {
     #[test]
     fn the_best_match_is_preferred_even_in_a_later_group() {
         let commands = catalog();
-        let menu = command_level(&Action::ALL, &commands, |_| true, "fa");
+        let menu = command_level(&[Action::Attach], &commands, |_| true, "fa");
         assert_eq!(names(&menu, &commands), ["# Agent modes", "fast"]);
         // Prefix matches beat substrings: `subagents` (Subagents group) wins
         // over `fast` and `orchestrate`, which only contain an "s" and sit in
@@ -522,6 +627,7 @@ mod tests {
                 size: 200_000,
             }),
             running_subagents: 2,
+            permission: None,
         };
         assert_eq!(command_badge("fast", &facts), Some(badge("On", Tone::On)));
         assert_eq!(
@@ -559,6 +665,86 @@ mod tests {
         assert_eq!(
             choice_summary("orchestrate", &facts).as_deref(),
             Some("Adaptive orchestration is off")
+        );
+    }
+
+    #[test]
+    fn permissions_lead_agent_modes_without_any_command_turned_on() {
+        let commands = catalog();
+        let menu = command_level(&Action::ALL, &commands, |_| false, "");
+        assert_eq!(
+            names(&menu, &commands),
+            ["# Message", "Attach files", "# Agent modes", "/permissions"]
+        );
+        for query in ["perm", "access", "sandbox"] {
+            let menu = command_level(&Action::ALL, &commands, |_| false, query);
+            assert_eq!(
+                menu.rows,
+                [
+                    Row::Header(CommandGroup::AgentModes.title()),
+                    Row::Action(Action::Permissions)
+                ],
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_choices_check_the_level_in_effect() {
+        let facts = Facts {
+            permission: Some(SandboxLevel::WorkspaceWrite),
+            ..Facts::default()
+        };
+        let menu = choice_level(PERMISSIONS, "");
+        let titles: Vec<&str> = menu
+            .rows
+            .iter()
+            .map(|row| match row {
+                Row::Choice(choice) => choice.title(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            ["Ask before edits", "Edit workspace", "Full access"]
+        );
+        let checked: Vec<bool> = PERMISSION_CHOICES
+            .iter()
+            .map(|choice| choice_in_effect(PERMISSIONS, choice, &facts))
+            .collect();
+        assert_eq!(checked, [false, true, false]);
+        assert_eq!(
+            choice_summary(PERMISSIONS, &facts).as_deref(),
+            Some("Now: Edit workspace")
+        );
+        // Typed by value or by label.
+        assert_eq!(choice_level(PERMISSIONS, "fu").rows.len(), 1);
+        assert_eq!(choice_level(PERMISSIONS, "edit").rows.len(), 1);
+        assert_eq!(permission_for("full"), Some(SandboxLevel::DangerFullAccess));
+        assert_eq!(
+            permission_for("Ask before edits"),
+            Some(SandboxLevel::ReadOnly)
+        );
+        assert_eq!(permission_for("everything"), None);
+    }
+
+    #[test]
+    fn the_permissions_badge_is_amber_only_at_full_access() {
+        let at = |level| Facts {
+            permission: Some(level),
+            ..Facts::default()
+        };
+        assert_eq!(
+            action_badge(Action::Permissions, &at(SandboxLevel::WorkspaceWrite)),
+            Some(badge("Edit workspace", Tone::Neutral))
+        );
+        assert_eq!(
+            action_badge(Action::Permissions, &at(SandboxLevel::DangerFullAccess)),
+            Some(badge("Full access", Tone::Warning))
+        );
+        assert_eq!(
+            action_badge(Action::Attach, &at(SandboxLevel::ReadOnly)),
+            None
         );
     }
 }

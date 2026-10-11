@@ -225,6 +225,48 @@ impl Pickers {
         cx.notify();
     }
 
+    /// The permission level: the chat's row (read by the engine on every
+    /// run), or the draft for a chat not yet sent.
+    pub fn pick_permission(&mut self, level: SandboxLevel, cx: &mut Context<Self>) {
+        let chat_id = self.state.read(cx).selected_chat.clone();
+        match chat_id {
+            Some(chat_id) => {
+                let Some(mut config) = self
+                    .state
+                    .read(cx)
+                    .selected_chat_row()
+                    .and_then(|c| c.config.clone())
+                    .or_else(|| self.resolved(cx).chat_config())
+                else {
+                    return;
+                };
+                config.sandbox = level;
+                self.state.update(cx, |state, cx| {
+                    state.set_chat_config_optimistic(&chat_id, config.clone(), cx);
+                });
+                if !self.side_chat
+                    && let Some(engine) = self.engine(cx)
+                {
+                    self.mutate_task = Some(cx.spawn(async move |_, _| {
+                        let params = serde_json::json!({
+                            "op": "setChatConfig",
+                            "chatId": chat_id,
+                            "config": config,
+                        });
+                        if let Err(err) = engine.client().call(methods::MUTATE, params).await {
+                            tracing::warn!(error = %err, "setChatConfig (permissions) failed");
+                        }
+                    }));
+                }
+            }
+            None => {
+                self.config.sandbox = (level != SandboxLevel::WorkspaceWrite).then_some(level);
+            }
+        }
+        self.animate_close(cx);
+        cx.notify();
+    }
+
     pub(super) fn pick_reasoning(&mut self, level: ReasoningLevel, cx: &mut Context<Self>) {
         // Always a concrete selection (no toggle-back-to-default).
         if self.state.read(cx).selected_chat.is_some() {

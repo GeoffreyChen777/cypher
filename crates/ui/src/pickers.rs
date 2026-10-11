@@ -189,6 +189,8 @@ pub enum PickerKind {
     /// New-session canvas only: the device project-less sessions run on (a
     /// project pick implies its own host and overrides this).
     Device,
+    /// The chat's permission level (Standard / Read only / Full access).
+    Permissions,
 }
 
 pub struct Pickers {
@@ -606,7 +608,20 @@ impl Pickers {
                 .or_else(|| self.effective_model_id(cx).map(str::to_string)),
             reasoning: self.effective_reasoning(cx),
             model_options: self.explicit_options(cx),
+            sandbox: Some(self.effective_sandbox(cx)),
         }
+    }
+
+    /// The chat's permission level: the selected chat's row, else the draft
+    /// pick, else Standard.
+    pub fn effective_sandbox(&self, cx: &App) -> SandboxLevel {
+        let state = self.state.read(cx);
+        if state.selected_chat.is_some()
+            && let Some(config) = state.selected_chat_row().and_then(|c| c.config.as_ref())
+        {
+            return config.sandbox;
+        }
+        self.config.sandbox.unwrap_or(SandboxLevel::WorkspaceWrite)
     }
 
     // ---- open/close ----
@@ -705,6 +720,13 @@ impl Pickers {
             PickerKind::HarnessModel | PickerKind::Traits => self.selected_model_index(cx),
             PickerKind::Space => self.selected_space_index(cx),
             PickerKind::Device => self.selected_device_index(cx),
+            PickerKind::Permissions => {
+                let current = self.effective_sandbox(cx);
+                PERMISSION_LEVELS
+                    .iter()
+                    .position(|entry| entry.level == current)
+                    .unwrap_or(1)
+            }
         };
         if kind == PickerKind::HarnessModel {
             self.model_scroll.set_offset(gpui::Point::default());
@@ -757,8 +779,8 @@ impl Pickers {
                 self.ensure_harnesses(true, cx);
                 self.prefetch_models(cx);
             }
-            // Projects and devices are already synced state — nothing to load.
-            PickerKind::Space | PickerKind::Device => {}
+            // Projects, devices and levels are already synced state — nothing to load.
+            PickerKind::Space | PickerKind::Device | PickerKind::Permissions => {}
         }
         cx.notify();
     }

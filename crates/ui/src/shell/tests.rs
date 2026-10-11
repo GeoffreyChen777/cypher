@@ -1531,6 +1531,7 @@ fn settings_navigation_groups_are_disjoint_and_complete() {
             SettingsSection::Subagents,
             SettingsSection::Commands,
             SettingsSection::Mcp,
+            SettingsSection::Permissions,
             SettingsSection::Github,
         ]
     );

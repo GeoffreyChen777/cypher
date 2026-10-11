@@ -65,6 +65,11 @@ pub mod methods {
     pub const GET_PI_TRANSLATION_SETTINGS: &str = "GetPiTranslationSettings";
     pub const SET_PI_TRANSLATION_SETTINGS: &str = "SetPiTranslationSettings";
     pub const DETECT_PI_LANGUAGE: &str = "DetectPiLanguage";
+    /// The permission extension's settings on the target device
+    /// (`permissions.json`) and whether the device can sandbox.
+    pub const GET_PI_PERMISSION_SETTINGS: &str = "GetPiPermissionSettings";
+    /// Save the Settings → Permissions fields; replies with the fresh snapshot.
+    pub const SET_PI_PERMISSION_SETTINGS: &str = "SetPiPermissionSettings";
     pub const LIST_PI_PROVIDERS: &str = "ListPiProviders";
     pub const SAVE_PI_PROVIDER: &str = "SavePiProvider";
     pub const REFRESH_PI_PROVIDER: &str = "RefreshPiProvider";
@@ -340,6 +345,8 @@ pub mod methods {
         MethodSpec::unary(GET_PI_TRANSLATION_SETTINGS).forwardable(),
         MethodSpec::unary(SET_PI_TRANSLATION_SETTINGS).forwardable(),
         MethodSpec::unary(DETECT_PI_LANGUAGE).forwardable(),
+        MethodSpec::unary(GET_PI_PERMISSION_SETTINGS).forwardable(),
+        MethodSpec::unary(SET_PI_PERMISSION_SETTINGS).forwardable(),
         MethodSpec::unary(LIST_PI_PROVIDERS).forwardable(),
         MethodSpec::unary(SAVE_PI_PROVIDER)
             .forwardable()

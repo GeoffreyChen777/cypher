@@ -81,6 +81,40 @@ impl Composer {
         }));
     }
 
+    /// Whether this composer offers `/permissions`: a Pi chat's own composer
+    /// (a side chat runs with its parent's level).
+    pub(super) fn offers_permissions(&self, harness: Option<HarnessId>) -> bool {
+        matches!(self.transport, ComposerTransport::Main)
+            && harness.unwrap_or(HarnessId::Pi) == HarnessId::Pi
+    }
+
+    /// The composer's own `/` actions this composer offers.
+    fn slash_actions(
+        &self,
+        harness: Option<HarnessId>,
+    ) -> Vec<crate::composer::slash_menu::Action> {
+        use crate::composer::slash_menu::Action;
+        Action::ALL
+            .into_iter()
+            .filter(|action| *action != Action::Permissions || self.offers_permissions(harness))
+            .collect()
+    }
+
+    /// `/permissions <level>` typed in full: apply it here, never send it.
+    /// `Some(false)` names no level.
+    pub(super) fn typed_permission(&self, text: &str, cx: &App) -> Option<Option<SandboxLevel>> {
+        use crate::composer::slash_menu::{PERMISSIONS, permission_for};
+        let rest = text.trim().strip_prefix('/')?.strip_prefix(PERMISSIONS)?;
+        if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+            return None;
+        }
+        let harness = self.pickers.read(cx).resolved(cx).harness;
+        if !self.offers_permissions(harness) {
+            return None;
+        }
+        Some(permission_for(rest))
+    }
+
     /// The `/` token under the cursor, and the command whose choices it picks
     /// from: the command list while a name is typed, a command's choices
     /// once a command that has them is followed by a space. The command list
@@ -99,6 +133,19 @@ impl Composer {
         let Some(choice) = crate::composer::slash_menu::choice_token(text, cursor) else {
             return (None, None);
         };
+        // The composer's own `/permissions` needs no agent command list.
+        if choice.command == crate::composer::slash_menu::PERMISSIONS {
+            if !self.offers_permissions(harness) {
+                return (None, None);
+            }
+            return (
+                Some(MentionToken {
+                    range: choice.range,
+                    query: choice.query,
+                }),
+                Some(choice.command),
+            );
+        }
         let offered = harness
             .and_then(|harness| self.slash_cache.get(&harness))
             .is_some_and(|commands| commands.iter().any(|c| c.name == choice.command));
@@ -279,7 +326,7 @@ impl Composer {
                     .map(Vec::as_slice)
                     .unwrap_or_default();
                 crate::composer::slash_menu::command_level(
-                    &crate::composer::slash_menu::Action::ALL,
+                    &self.slash_actions(self.slash.harness),
                     commands,
                     |name| crate::prefs::slash_commands::shows_in_app(cx, name),
                     &query,
@@ -349,7 +396,27 @@ impl Composer {
         else {
             return;
         };
+        // A `/permissions` choice sets the level here and types nothing:
+        // the whole `/permissions …` goes.
+        if let (Row::Choice(choice), Some(parent)) = (&row, self.slash.parent.as_deref())
+            && parent == crate::composer::slash_menu::PERMISSIONS
+        {
+            if let Some(level) = crate::composer::slash_menu::permission_for(choice.value) {
+                self.input.update(cx, |input, cx| {
+                    input.remove_plain_token(0..token.range.end, cx)
+                });
+                self.reset_slash(None, cx);
+                self.pickers
+                    .update(cx, |pickers, cx| pickers.pick_permission(level, cx));
+                cx.notify();
+            }
+            return;
+        }
         let replacement = match row {
+            Row::Action(crate::composer::slash_menu::Action::Permissions) => {
+                // Types `/permissions`; the space after it opens the choices.
+                format!("/{}", crate::composer::slash_menu::PERMISSIONS)
+            }
             Row::Action(crate::composer::slash_menu::Action::Attach) => {
                 // The action types nothing: drop the `/…` that summoned it.
                 self.input
@@ -442,6 +509,7 @@ impl Composer {
             modes,
             context,
             running_subagents,
+            permission: main.then(|| self.pickers.read(cx).effective_sandbox(cx)),
         };
         let mut card = crate::kit::popover::popover_card(theme)
             .w(px(420.0))
@@ -455,6 +523,7 @@ impl Composer {
                 Row::Command(ix) => commands
                     .get(*ix)
                     .is_some_and(|command| !slash_menu::choices(&command.name).is_empty()),
+                Row::Action(action) => action.choices_command().is_some(),
                 _ => false,
             });
             // A command's choices: which command, and what is in effect now.
@@ -492,7 +561,9 @@ impl Composer {
                         );
                         continue;
                     }
-                    Row::Action(action) => slash_action_line(line, *action, chevron_column, theme),
+                    Row::Action(action) => {
+                        slash_action_line(line, *action, &facts, chevron_column, theme)
+                    }
                     Row::Command(ix) => {
                         let Some(command) = commands.get(*ix) else {
                             continue;
@@ -618,13 +689,17 @@ fn slash_choice_header(
         }))
 }
 
-/// One of the composer's own actions: icon, label, description.
+/// One of the composer's own actions: icon, label, description, and for
+/// `/permissions` the level in effect and the chevron to its choices.
 fn slash_action_line(
     line: gpui::Div,
     action: crate::composer::slash_menu::Action,
+    facts: &crate::composer::slash_menu::Facts<'_>,
     chevron_column: bool,
     theme: &Theme,
 ) -> gpui::Div {
+    let badge = crate::composer::slash_menu::action_badge(action, facts);
+    let has_choices = action.choices_command().is_some();
     line.child(
         crate::kit::icons::icon(action.icon())
             .size(px(14.0))
@@ -648,8 +723,23 @@ fn slash_action_line(
             .text_color(theme.text_muted.opacity(0.65))
             .child(SharedString::from(action.description())),
     )
+    .children(badge.map(|badge| slash_badge(theme, badge)))
     .when(chevron_column, |line| {
-        line.child(div().size(px(12.0)).flex_none())
+        line.child(
+            div()
+                .size(px(12.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(has_choices, |slot| {
+                    slot.child(
+                        crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_RIGHT)
+                            .size(px(12.0))
+                            .text_color(theme.text_muted.opacity(0.7)),
+                    )
+                }),
+        )
     })
 }
 
@@ -754,7 +844,7 @@ fn slash_choice_line(
             .text_size(px(12.5))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(theme.text)
-            .child(SharedString::from(choice.value)),
+            .child(SharedString::from(choice.title())),
     )
     .child(
         div()

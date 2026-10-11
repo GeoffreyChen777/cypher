@@ -634,6 +634,10 @@ impl RpcService for EngineRpc {
                 pi::set_pi_translation_settings(self, params).await
             }
             methods::DETECT_PI_LANGUAGE => pi::detect_pi_language(params),
+            methods::GET_PI_PERMISSION_SETTINGS => pi::get_pi_permission_settings(self).await,
+            methods::SET_PI_PERMISSION_SETTINGS => {
+                pi::set_pi_permission_settings(self, params).await
+            }
             methods::LIST_PI_PROVIDERS
             | methods::SAVE_PI_PROVIDER
             | methods::REFRESH_PI_PROVIDER

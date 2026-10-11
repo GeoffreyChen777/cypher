@@ -18,6 +18,9 @@ pub struct DraftConfig {
     pub branch: Option<String>,
     /// Where the new session runs (the t3code env-mode).
     pub checkout: CheckoutKind,
+    /// The new chat's permission level; `None` is the default
+    /// (`WorkspaceWrite`, the "Standard" level).
+    pub sandbox: Option<SandboxLevel>,
 }
 
 /// Where a new session runs (t3code's env-mode: `local | worktree`). "Current
@@ -77,6 +80,8 @@ pub struct ResolvedRunConfig {
     pub model: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
     pub model_options: serde_json::Map<String, serde_json::Value>,
+    /// The chat's permission level (`None` reads as `WorkspaceWrite`).
+    pub sandbox: Option<SandboxLevel>,
 }
 
 impl ResolvedRunConfig {
@@ -87,9 +92,52 @@ impl ResolvedRunConfig {
             model: self.model.clone(),
             reasoning: self.reasoning,
             model_options: self.model_options.clone(),
-            sandbox: SandboxLevel::WorkspaceWrite,
+            sandbox: self.sandbox_level(),
         })
     }
+
+    pub fn sandbox_level(&self) -> SandboxLevel {
+        self.sandbox.unwrap_or(SandboxLevel::WorkspaceWrite)
+    }
+}
+
+/// One permission level a chat can run at, as `/permissions` offers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PermissionLevel {
+    pub level: SandboxLevel,
+    /// What `/permissions <value>` takes.
+    pub value: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+}
+
+/// The permission levels, strictest first. Edit workspace is the default.
+pub const PERMISSION_LEVELS: [PermissionLevel; 3] = [
+    PermissionLevel {
+        level: SandboxLevel::ReadOnly,
+        value: "ask",
+        label: "Ask before edits",
+        description: "Reads freely; every change needs your OK",
+    },
+    PermissionLevel {
+        level: SandboxLevel::WorkspaceWrite,
+        value: "workspace",
+        label: "Edit workspace",
+        description: "Edits this project; asks before touching anything else",
+    },
+    PermissionLevel {
+        level: SandboxLevel::DangerFullAccess,
+        value: "full",
+        label: "Full access",
+        description: "No checks and no sandbox",
+    },
+];
+
+pub fn permission_level(level: SandboxLevel) -> &'static PermissionLevel {
+    PERMISSION_LEVELS
+        .iter()
+        .find(|candidate| candidate.level == level)
+        .unwrap_or(&PERMISSION_LEVELS[1])
 }
 
 // ---------------------------------------------------------------------------
