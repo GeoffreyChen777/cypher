@@ -8,6 +8,12 @@ The Runtime extension `pi-runtime/extensions/cypher-permissions.ts` (modules in
 dropped from the bundle; the engine prunes its stale `settings.json` entry like any
 retired curated package.
 
+**Master switch.** Permission control is off unless the user's `permissions.json` sets
+`"enabled": true` (the switch at the top of Settings → Permissions; a project's file
+cannot turn it on). The extension reads it when Pi starts, so it applies from the next
+run; while off it registers nothing (no tool overrides, no `request_permission`, no
+commands) and Pi's own tools run unchecked.
+
 ## 1. Goals
 
 Control what an agent session can touch, with a model simple enough to explain in one

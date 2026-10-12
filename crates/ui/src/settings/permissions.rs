@@ -3,7 +3,8 @@
 //! Device-scoped like Translation: the device's Runtime extension
 //! (`cypher-permissions`) owns every decision and reads `permissions.json` at
 //! the start of each turn; this page edits the part of that file it shows and
-//! reports whether the device can sandbox at all. Design:
+//! reports whether the device can sandbox at all. A master switch at the top
+//! turns the extension on; it is off by default. Design:
 //! `docs/design/permission-control.md`.
 
 use cypher_engine::mcp::McpSnapshot;
@@ -577,8 +578,15 @@ impl PermissionsPage {
             )
     }
 
-    fn status_card(&self, snapshot: &PiPermissionSnapshot, theme: &Theme) -> AnyElement {
+    /// The master switch, with what it means on this device.
+    fn status_card(
+        &self,
+        snapshot: &PiPermissionSnapshot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let status = &snapshot.status;
+        let on = snapshot.settings.enabled;
         let (title, detail, badge) = if !status.installed {
             (
                 "Permission control is not installed",
@@ -586,7 +594,13 @@ impl PermissionsPage {
                     .error
                     .clone()
                     .unwrap_or_else(|| "Update this device's Pi Runtime.".into()),
-                widgets::badge(theme, "Off"),
+                Some(widgets::badge(theme, "Off")),
+            )
+        } else if !on {
+            (
+                "Permission control is off",
+                "Agents read, write and run commands without checks or approval requests. Turn it on to sandbox shell commands and check every file access. Applies from the next turn.".into(),
+                None,
             )
         } else if !status.sandbox_available {
             (
@@ -598,7 +612,7 @@ impl PermissionsPage {
                         .clone()
                         .unwrap_or_else(|| "The OS sandbox does not work here.".into())
                 ),
-                widgets::badge(theme, "Off"),
+                None,
             )
         } else {
             let mechanism = match status.implementation.as_deref() {
@@ -612,8 +626,25 @@ impl PermissionsPage {
                 format!(
                     "Shell commands run in {mechanism}. Each chat's level is set with /permissions in the composer."
                 ),
-                widgets::badge_active(theme, "On"),
+                None,
             )
+        };
+        let can_toggle = status.installed && self.editable(cx);
+        let control = match badge {
+            Some(badge) => badge.into_any_element(),
+            None => div()
+                .id("permissions-enabled-toggle")
+                .debug_selector(|| "permissions-enabled-toggle".into())
+                .flex_none()
+                .when(can_toggle, |el| el.cursor_pointer())
+                .opacity(if can_toggle { 1.0 } else { 0.5 })
+                .on_click(cx.listener(move |page, _, _, cx| {
+                    if can_toggle {
+                        page.update(move |settings| settings.enabled = !on, None, cx);
+                    }
+                }))
+                .child(widgets::toggle_switch(theme, on))
+                .into_any_element(),
         };
         widgets::section_card(theme)
             .child(
@@ -638,7 +669,7 @@ impl PermissionsPage {
                                     .child(SharedString::from(detail)),
                             ),
                     )
-                    .child(badge),
+                    .child(control),
             )
             .into_any_element()
     }
@@ -1197,15 +1228,19 @@ impl Render for PermissionsPage {
                 .into_any_element(),
             Loadable::Ready(snapshot) => {
                 let settings = snapshot.settings.clone();
-                div()
-                    .child(self.status_card(&snapshot, &theme))
+                let page = div()
+                    .child(self.status_card(&snapshot, &theme, cx))
                     .when(snapshot.unreadable, |el| {
                         el.child(widgets::warning_strip(
                             &theme,
                             "permissions.json on this device is not valid JSON, so the defaults apply. Saving here replaces it.",
                         ))
-                    })
-                    .child(Self::section_heading(
+                    });
+                if !settings.enabled {
+                    // Off: nothing below applies, so only the switch shows.
+                    page.into_any_element()
+                } else {
+                    page.child(Self::section_heading(
                         &theme,
                         "Approvals",
                         "Inside the workspace, agents read and write freely; they read everything else except sensitive files. Anything more is a request, decided here.",
@@ -1231,6 +1266,7 @@ impl Render for PermissionsPage {
                     ))
                     .child(self.always_card(&settings, &theme, cx))
                     .into_any_element()
+                }
             }
         };
         div()

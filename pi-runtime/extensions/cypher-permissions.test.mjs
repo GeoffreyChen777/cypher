@@ -14,6 +14,7 @@ import {
   loadConfig,
   mergeProjectConfig,
   mergeUserConfig,
+  permissionControlEnabled,
   resolveLevel,
   approvalMode,
 } from "./cypher-permissions/config.ts";
@@ -154,6 +155,20 @@ test("safety rules survive any file: sensitive and self approvals are never assi
   assert.equal(config.approval["sensitive.read"], "ask");
   assert.equal(approvalMode(config, "self.write"), "ask");
   assert.equal(approvalMode(config, "unknown.key"), "ask", "a missing key asks");
+});
+
+test("the master switch is off unless the user's file turns it on", () => {
+  const dir = join(scratch, "agent-switch");
+  mkdirSync(dir, { recursive: true });
+  assert.equal(permissionControlEnabled(dir), false, "no file");
+  write(join(dir, "permissions.json"), JSON.stringify({ approval: { network: "ask" } }));
+  assert.equal(permissionControlEnabled(dir), false, "no field");
+  write(join(dir, "permissions.json"), JSON.stringify({ enabled: "yes" }));
+  assert.equal(permissionControlEnabled(dir), false, "only true turns it on");
+  write(join(dir, "permissions.json"), "{ not json");
+  assert.equal(permissionControlEnabled(dir), false, "unreadable");
+  write(join(dir, "permissions.json"), JSON.stringify({ enabled: true }));
+  assert.equal(permissionControlEnabled(dir), true);
 });
 
 test("Cypher's per-chat sandbox setting picks the level", () => {

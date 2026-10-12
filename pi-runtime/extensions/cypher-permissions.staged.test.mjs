@@ -46,6 +46,9 @@ write(join(workspace, ".env"), "API_TOKEN=hunter2\n");
 write(join(workspace, "notes.md"), "API_TOKEN is read from .env\n");
 write(join(other, "readme.md"), "other\n");
 mkdirSync(agentDir, { recursive: true });
+// Permission control is off unless the user's file turns it on.
+const enabledConfig = JSON.stringify({ enabled: true });
+writeFileSync(join(agentDir, "permissions.json"), enabledConfig);
 spawnSync("git", ["init", "-q", workspace]);
 symlinkSync(join(home, ".ssh", "id_ed25519"), join(workspace, "key-link"));
 
@@ -277,7 +280,7 @@ test("apply_patch goes through the same checks", async () => {
 
 test("filtered network: a new domain asks; a denied one never connects", { skip }, async () => {
   const config = join(agentDir, "permissions.json");
-  writeFileSync(config, JSON.stringify({ network: { mode: "filtered" } }));
+  writeFileSync(config, JSON.stringify({ enabled: true, network: { mode: "filtered" } }));
   try {
     const { results, dialogs } = await turn(
       [
@@ -297,7 +300,7 @@ test("filtered network: a new domain asks; a denied one never connects", { skip 
     assert.match(results[0].text, /proxy=http:\/\/cypher:/);
     assert.doesNotMatch(results[0].text, /code=200/);
   } finally {
-    rmSync(config, { force: true });
+    writeFileSync(config, enabledConfig);
   }
 });
 
@@ -313,4 +316,20 @@ test("full access: no checks and no sandbox", { skip }, async () => {
   assert.equal(dialogs.length, 0);
   assert.match(results[0].text, /hunter2/);
   assert.match(results[1].text, /hunter2/);
+});
+
+test("off by default: without the switch the extension registers nothing", async () => {
+  const config = join(agentDir, "permissions.json");
+  rmSync(config, { force: true });
+  try {
+    const { results, dialogs } = await turn([
+      { tool: "read", args: { path: ".env" } },
+      { tool: "request_permission", args: { capability: "read", paths: [".env"], reason: "test" } },
+    ]);
+    assert.equal(dialogs.length, 0);
+    assert.match(results[0].text, /hunter2/);
+    assert.equal(results[1].isError, true, "no request_permission tool");
+  } finally {
+    writeFileSync(config, enabledConfig);
+  }
 });

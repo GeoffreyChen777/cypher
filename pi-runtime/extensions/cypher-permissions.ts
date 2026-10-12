@@ -9,6 +9,10 @@
  * with a policy compiled per launch. The chat's level comes from Cypher's
  * per-chat sandbox setting (`CYPHER_PERMISSION_LEVEL`).
  *
+ * Off unless `permissions.json` says `"enabled": true` (Settings →
+ * Permissions). While off the extension registers nothing and Pi's own tools
+ * run. The switch is read when Pi starts, so it applies from the next run.
+ *
  * On a host where Landstrip cannot sandbox (Linux without Landlock), the
  * extension stands down: tools run as they would without it, and the chat is
  * told once.
@@ -45,6 +49,7 @@ import {
 import type { AccessRequest, RequestContext } from "./cypher-permissions/core.ts";
 import { DENIAL_TEXT, parseDenials, scrubEnv, wrapCommand, writePolicyFile } from "./cypher-permissions/sandbox.ts";
 import { isUnder } from "./cypher-permissions/paths.ts";
+import { permissionControlEnabled } from "./cypher-permissions/config.ts";
 import { liveApprovalsSupported, trappedExec } from "./cypher-permissions/live.ts";
 
 const FS_HOOK = Symbol.for("cypher.permissions.fs");
@@ -54,6 +59,8 @@ const OWN_TOOLS = new Set(["read", "write", "edit", "ls", "grep", "find", "bash"
 type AnyResult = { content: { type: string; text?: string }[]; details?: unknown; isError?: boolean; structuredContent?: unknown };
 
 export default function cypherPermissions(pi: ExtensionAPI): void {
+  if (!permissionControlEnabled(getAgentDir())) return;
+
   let permissions: Permissions | undefined;
 
   const state = (ctx: { cwd: string; sessionManager?: ExtensionContext["sessionManager"] }): Permissions => {

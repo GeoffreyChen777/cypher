@@ -406,6 +406,15 @@ function readJson(path: string): unknown {
   }
 }
 
+/**
+ * The master switch: `"enabled": true` in the user's file. Off by default,
+ * and only the user's file can turn it on.
+ */
+export function permissionControlEnabled(agentDir: string): boolean {
+  const raw = readJson(join(agentDir, CONFIG_FILE));
+  return isObject(raw) && raw.enabled === true;
+}
+
 export interface LoadedConfig {
   config: PermissionsConfig;
   /** Problems worth showing in `/perm`; the config still loads. */

@@ -3,7 +3,9 @@
 //! `docs/design/permission-control.md`).
 //!
 //! The extension owns every decision; it reads `permissions.json` from the Pi
-//! agent directory at the start of each turn. The engine edits the part of
+//! agent directory at the start of each turn. Its master switch, `enabled`,
+//! is off unless the file sets it, and is read when Pi starts: while off the
+//! extension registers nothing. The engine edits the part of
 //! that file Settings → Permissions shows and leaves everything else as the
 //! user wrote it (levels, `remove` lists, unknown fields). It also reports
 //! whether this device can sandbox at all: the extension stands down where
@@ -127,6 +129,8 @@ pub struct PermissionRule {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PiPermissionSettings {
+    /// The master switch. Off by default; applies from the next run.
+    pub enabled: bool,
     pub approval: PermissionApprovals,
     /// `provider/model` for the judge; empty uses the chat's own model.
     pub judge_model: String,
@@ -152,6 +156,7 @@ pub struct PiPermissionSettings {
 impl Default for PiPermissionSettings {
     fn default() -> Self {
         Self {
+            enabled: false,
             approval: PermissionApprovals::default(),
             judge_model: String::new(),
             tools_default: ToolDecision::Allow,
@@ -217,7 +222,10 @@ fn decision(value: Option<&Value>) -> Option<ToolDecision> {
 /// The UI's view of a parsed file. Fields the UI does not own are ignored here
 /// and preserved by [`save`].
 pub fn from_json(root: &Value) -> PiPermissionSettings {
-    let mut settings = PiPermissionSettings::default();
+    let mut settings = PiPermissionSettings {
+        enabled: root.get("enabled").and_then(Value::as_bool) == Some(true),
+        ..PiPermissionSettings::default()
+    };
     if let Some(approval) = root.get("approval").and_then(Value::as_object) {
         for key in APPROVAL_KEYS {
             if let Some(mode) = approval
@@ -356,6 +364,7 @@ impl PiPermissionSettings {
     /// Write the UI-owned fields into `root`, keeping everything else.
     fn apply(&self, root: &mut Map<String, Value>) {
         root.entry("version").or_insert(Value::from(1));
+        root.insert("enabled".into(), Value::from(self.enabled));
         let approval = object_at(root, "approval");
         for key in APPROVAL_KEYS {
             approval.insert(
@@ -585,8 +594,34 @@ mod tests {
             snapshot.settings.approval.external_write,
             ApprovalMode::Assisted
         );
+        assert!(!snapshot.settings.enabled, "off by default");
         assert!(!snapshot.unreadable);
         assert!(!snapshot.status.installed);
+    }
+
+    #[test]
+    fn the_master_switch_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        std::fs::write(
+            settings_path(&paths),
+            r#"{ "enabled": "yes", "custom": 1 }"#,
+        )
+        .unwrap();
+        assert!(!load(&paths).settings.enabled, "only true turns it on");
+        let mut settings = load(&paths).settings;
+        settings.enabled = true;
+        save(&paths, settings).unwrap();
+        let root: Value =
+            serde_json::from_slice(&std::fs::read(settings_path(&paths)).unwrap()).unwrap();
+        assert_eq!(root["enabled"], true);
+        assert_eq!(root["custom"], 1);
+        assert!(load(&paths).settings.enabled);
+        let mut settings = load(&paths).settings;
+        settings.enabled = false;
+        save(&paths, settings).unwrap();
+        assert!(!load(&paths).settings.enabled);
     }
 
     #[test]
