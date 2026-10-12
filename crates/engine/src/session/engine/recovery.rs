@@ -51,7 +51,7 @@ impl SessionsEngine {
 impl SessionsEngine {
     /// Keep a chat's live run from serving a turn that wants different model
     /// settings than its harness process was launched with (a mid-session
-    /// model/reasoning/harness switch). A PARKED run ends cleanly — the idle
+    /// model/reasoning/harness or permission-level switch). A PARKED run ends cleanly — the idle
     /// reaper's path, no aborted stamp — so the caller's turn spawns fresh
     /// (engine-owned resume keeps the conversation). A BUSY run keeps its
     /// current turn (anything routed into it now still lands there); its
@@ -88,7 +88,9 @@ impl SessionsEngine {
             chat = %chat_id,
             from = ?launched.model,
             to = ?wanted.model,
-            "model settings changed; ending parked session so the next turn respawns"
+            from_level = ?launched.sandbox,
+            to_level = ?wanted.sandbox,
+            "launch settings changed; ending parked session so the next turn respawns"
         );
         // Harness token only: flipping the engine cancel watch would stamp
         // the parked turn aborted.

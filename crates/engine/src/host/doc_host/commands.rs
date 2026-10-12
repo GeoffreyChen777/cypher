@@ -386,7 +386,8 @@ impl DocHost {
         Ok((worktree.path.clone(), Some(worktree)))
     }
 
-    /// The chat row's current model settings, if the row has a config.
+    /// The chat row's current launch settings (model and permission level),
+    /// if the row has a config.
     fn chat_launch_config(&self, chat_id: &str) -> Option<crate::session::engine::LaunchConfig> {
         let chat = self.workspace()?.chat(chat_id).ok().flatten()?;
         chat.config

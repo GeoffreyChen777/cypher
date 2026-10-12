@@ -34,7 +34,7 @@ use cypher_harness::{
 };
 use cypher_proto::{
     AgentEvent, AnsweredModel, ChatConfig, ContextUsage, DoneStatus, HarnessId, ReasoningLevel,
-    RunRequest, Session, SessionStatus, SubagentRun, SubagentRunStatus, Throughput,
+    RunRequest, SandboxLevel, Session, SessionStatus, SubagentRun, SubagentRunStatus, Throughput,
     UserInputAnswer, UserInputQuestion,
 };
 
@@ -63,16 +63,18 @@ pub struct JournaledEvent {
 
 type PendingInputs = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserInputAnswer>>>>>;
 
-/// The model settings a run's harness process was launched with. A parked
-/// (persistent) process keeps them for its whole life, so a turn asking for
-/// different ones must not be routed into it — see
-/// [`SessionsEngine::retire_stale_run`].
+/// The settings a run's harness process was launched with: the model, and
+/// the permission level (Pi's permission extension reads it from the
+/// process environment). A parked (persistent) process keeps them for its
+/// whole life, so a turn asking for different ones must not be routed into
+/// it — see [`SessionsEngine::retire_stale_run`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct LaunchConfig {
     pub harness: HarnessId,
     pub model: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
     pub model_options: serde_json::Map<String, serde_json::Value>,
+    pub sandbox: SandboxLevel,
 }
 
 impl LaunchConfig {
@@ -82,6 +84,7 @@ impl LaunchConfig {
             model: request.model.clone(),
             reasoning: request.reasoning,
             model_options: request.model_options.clone(),
+            sandbox: request.sandbox,
         }
     }
 
@@ -91,6 +94,7 @@ impl LaunchConfig {
             model: config.model.clone(),
             reasoning: config.reasoning,
             model_options: config.model_options.clone(),
+            sandbox: config.sandbox,
         }
     }
 
@@ -100,6 +104,7 @@ impl LaunchConfig {
         request.model = self.model.clone();
         request.reasoning = self.reasoning;
         request.model_options = self.model_options.clone();
+        request.sandbox = self.sandbox;
     }
 }
 
@@ -638,8 +643,18 @@ impl SessionsEngine {
             .unwrap_or_else(|| visible_prompt.clone());
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
-        // A parked process launched with other model settings must not take
-        // this turn: end it here so the turn below spawns with the new ones.
+        // The chat's permission level is its row's, whatever request this
+        // turn was rebuilt from (a remembered one predates a level change).
+        if let Some(config) = self
+            .inner
+            .workspace()
+            .and_then(|ws| ws.chat_config(chat_id))
+        {
+            request.sandbox = config.sandbox;
+        }
+        // A parked process launched with other model settings or another
+        // level must not take this turn: end it here so the turn below
+        // spawns with the new ones.
         self.retire_stale_run(chat_id, &LaunchConfig::of_request(harness_id, &request))
             .await?;
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
