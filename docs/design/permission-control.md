@@ -1,6 +1,6 @@
 # Permission control (cypher-permissions)
 
-Status: **phases 0–1 implemented** (Runtime 1.1.0.2). Phases 2–3 (§10) are planned.
+Status: **phases 0–1 implemented** (Runtime 1.1.0.2; off by default since 1.1.0.3). Phases 2–3 (§10) are planned.
 
 The Runtime extension `pi-runtime/extensions/cypher-permissions.ts` (modules in
 `pi-runtime/extensions/cypher-permissions/`) replaces the npm package
