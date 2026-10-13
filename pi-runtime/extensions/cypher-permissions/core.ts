@@ -10,10 +10,10 @@ import { randomBytes } from "node:crypto";
 import { constants, realpathSync, statSync } from "node:fs";
 import { open, mkdir, access as fsAccess, stat as fsStat, readdir as fsReaddir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { AuditLog } from "./audit.ts";
 import type { AuditRecord } from "./audit.ts";
-import { appendRule, approvalMode as approvalModeFor, loadConfig, resolveLevel } from "./config.ts";
+import { appendCommandRule, appendRule, approvalMode as approvalModeFor, loadConfig, resolveLevel } from "./config.ts";
 import type { Capability, LevelName, PermissionsConfig } from "./config.ts";
 import {
   anchorDirectories,
@@ -34,9 +34,11 @@ import { isUnder, PathContext } from "./paths.ts";
 import type { Classification } from "./paths.ts";
 import { decide, describe } from "./policy.ts";
 import type { Verdict } from "./policy.ts";
-import { compilePolicy, landstripStatus, startFilterProxy, tempDirs } from "./sandbox.ts";
+import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs } from "./sandbox.ts";
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
-import type { TrapQuery } from "./live.ts";
+import { describePattern, fileSha256, INERT_PROGRAMS, patternError, patternMatches, resolveProgram } from "./commands.ts";
+import type { CommandRule } from "./commands.ts";
+import { parseShell } from "./shell.ts";
 
 export const UNAVAILABLE_ENTRY = "cypher-permissions.unavailable";
 
@@ -57,6 +59,34 @@ export interface RequestContext {
   /** One completion from the judge model; undefined on any failure. */
   complete?(system: string, prompt: string, signal: AbortSignal): Promise<string | undefined>;
   abort?(): void;
+  /** The tool call a dialog gates, so Cypher files the dialog under it. */
+  toolCallId?: string;
+}
+
+/**
+ * How permission control treated one tool call: the `cypherPermissions`
+ * record in its result's details, which Cypher shows on the call's row
+ * (`cypher_proto::ToolPermission`).
+ */
+export interface PermissionRecord {
+  /** `outside` the sandbox, `blocked` by it, `denied`, or a file access `allowed`. */
+  outcome: "outside" | "blocked" | "denied" | "allowed";
+  /** How long the approval lasts; `rule` when an earlier grant or rule allowed it. */
+  scope?: "once" | "chat" | "always" | "rule";
+  /** The command rule that let it run outside. */
+  rule?: string;
+  /** What the agent said the command was for. */
+  purpose?: string;
+}
+
+/**
+ * The last line of every permission dialog's title: what it is about, for
+ * Cypher (`crates/harness/src/pi/wire.rs` `permission_prompt` strips it).
+ */
+const PROMPT_MARK = "cypher-permission: ";
+
+function promptLine(kind: "escalate" | "access" | "network" | "tool", toolCallId: string | undefined): string {
+  return `\n${PROMPT_MARK}${JSON.stringify({ kind, ...(toolCallId ? { toolCallId } : {}) })}`;
 }
 
 export interface AccessRequest {
@@ -74,7 +104,10 @@ export interface CallInfo {
   justification?: string;
 }
 
-export type AuthResult = { ok: true; approved: Approved } | { ok: false; reason: string; abort?: boolean };
+export type AuthResult =
+  /** `record`: set when an access went past the defaults (asked, or a grant or rule). */
+  | { ok: true; approved: Approved; record?: PermissionRecord }
+  | { ok: false; reason: string; abort?: boolean };
 
 /** Canonical paths approved for one call, by capability. Write implies read. */
 export class Approved {
@@ -109,12 +142,30 @@ const HUMAN = {
   stop: "Deny and stop",
 } as const;
 
-const COMMAND_HUMAN = {
-  once: "Allow this command once",
-  chat: "Allow this command for this chat",
-} as const;
-
 const DOMAIN_ONCE = "Allow for this command";
+
+const RUN_ONCE = "Run once";
+
+const ESCALATE_HINT =
+  "If the command needs what the sandbox withholds (files outside the workspace, credentials, keys, the keychain, other processes, system services), run it again with `escalate`: the user decides whether it runs outside the sandbox.";
+
+/** What command rules say about one bash call. */
+export type CommandCheck =
+  /** A `deny` rule matches: the call never runs. */
+  | { kind: "deny"; reason: string }
+  /** Every command in it is allowed outside the sandbox. */
+  | { kind: "outside"; rules: CommandRule[] }
+  /** It runs in the sandbox unless an escalation is approved. */
+  | { kind: "sandbox" };
+
+/** What the agent proposes when it asks to leave the sandbox. */
+export interface EscalationProposal {
+  /** Patterns that later matching commands may run outside without asking. */
+  patterns?: string[][];
+  /** What the commands are for, in plain words. */
+  label?: string;
+  reason?: string;
+}
 
 const ELEVATE_HINT =
   "If the access is needed, call request_permission with the paths (and, for bash, the exact command), then retry.";
@@ -181,10 +232,7 @@ export class Permissions {
   private proxy: Promise<FilterProxy | undefined> | undefined;
   private readonly proxyToken = randomBytes(18).toString("base64url");
   /** Running bash calls, for the filter proxy's domain questions (latest last). */
-  private readonly commands = new Map<
-    string,
-    { command: string; ctx: RequestContext; domains: Set<string>; read: Set<string>; write: Set<string>; compiled?: CompiledPolicy }
-  >();
+  private readonly commands = new Map<string, { command: string; ctx: RequestContext; domains: Set<string> }>();
 
   constructor(init: PermissionsInit) {
     this.agentDir = init.agentDir;
@@ -309,6 +357,12 @@ export class Permissions {
   async authorize(requests: readonly AccessRequest[], call: CallInfo, ctx: RequestContext): Promise<AuthResult> {
     const approved = new Approved();
     if (!this.enforcing) return { ok: true, approved };
+    // The widest approval this call used, for its row in Cypher.
+    const order = ["rule", "once", "chat", "always"] as const;
+    let scope: PermissionRecord["scope"];
+    const used = (next: NonNullable<PermissionRecord["scope"]>) => {
+      if (!scope || order.indexOf(next) > order.indexOf(scope)) scope = next;
+    };
     for (const request of requests) {
       const classification = this.classify(request.path, ctx.cwd);
       const canonical = classification.path;
@@ -323,11 +377,13 @@ export class Permissions {
         this.audit.write({ tool: call.tool, capability: request.capability, zone: classification.zone, guard: classification.guard, paths: [canonical], decision: "allow", decidedBy: "grant", grantId: grant.id, scope: grant.scope });
         this.grants.used(grant);
         approved.add(request.capability, canonical);
+        used("rule");
         continue;
       }
       if (classification.zone !== "sensitive" && this.ruleCovers(request.capability, canonical)) {
         this.audit.write({ tool: call.tool, capability: request.capability, zone: classification.zone, guard: classification.guard, paths: [canonical], decision: "allow", decidedBy: "rule" });
         approved.add(request.capability, canonical);
+        used("rule");
         continue;
       }
       const outcome = await this.serialized(() =>
@@ -346,96 +402,66 @@ export class Permissions {
       );
       if (!outcome.allowed) return { ok: false, reason: outcome.reason, abort: outcome.abort };
       approved.add(request.capability, canonical);
-      if (outcome.scope && outcome.scope !== "once") this.persistGrant(request.capability, [classification], outcome.scope, outcome.by, undefined, false);
+      used(outcome.scope ?? "once");
+      if (outcome.scope && outcome.scope !== "once") this.persistGrant(request.capability, [classification], outcome.scope, outcome.by);
     }
-    return { ok: true, approved };
+    return { ok: true, approved, ...(scope ? { record: { outcome: "allowed", scope } } : {}) };
   }
 
   /**
-   * `request_permission`: ask ahead, for bash (bound to the exact command) or
-   * for later file tool calls. Returns text for the agent.
+   * `request_permission`: ask ahead for paths the file tools will touch.
+   * Commands never get extra paths: one that needs them runs outside the
+   * sandbox instead (`requestEscalation`). Returns text for the agent.
    */
   async requestPermission(
-    input: { capability: Capability; paths?: string[]; command?: string; network?: boolean; reason?: string },
+    input: { capability: Capability; paths?: string[]; reason?: string },
     ctx: RequestContext,
-  ): Promise<{ ok: boolean; text: string; abort?: boolean }> {
+  ): Promise<{ ok: boolean; text: string; abort?: boolean; record?: PermissionRecord }> {
     if (!this.enforcing) return { ok: true, text: "Permission control is not active here; nothing to request." };
-    const command = input.command?.trim() || undefined;
     const requested = input.paths ?? [];
-    if (requested.length === 0 && !(input.network && command)) {
-      return { ok: false, text: "Name the paths you need, or set network: true with the exact command." };
-    }
-    const classifications = requested.map((path) =>
-      path.startsWith("env:") ? { path, zone: "sensitive" as const, match: "environment variable" } : this.classify(path, ctx.cwd),
-    );
-    const sensitive = classifications.some((item) => item.zone === "sensitive");
-    const verdicts = classifications.map((item) => (item.path.startsWith("env:") ? decide(this.config, this.level, { path: item.path, zone: "sensitive" }, "read") : this.verdict(input.capability, item)));
+    if (requested.length === 0) return { ok: false, text: "Name the paths the file tools need." };
+    const classifications = requested.map((path) => this.classify(path, ctx.cwd));
+    const verdicts = classifications.map((item) => this.verdict(input.capability, item));
     const denied = verdicts.find((verdict) => verdict.kind === "deny");
     if (denied && denied.kind === "deny") {
-      this.audit.write({ tool: "request_permission", command, capability: input.capability, paths: classifications.map((item) => item.path), decision: "deny", decidedBy: "policy", reason: denied.reason });
+      this.audit.write({ tool: "request_permission", capability: input.capability, paths: classifications.map((item) => item.path), decision: "deny", decidedBy: "policy", reason: denied.reason });
       return { ok: false, text: `Denied: ${denied.reason}.` };
     }
     const elevations = verdicts.filter((verdict): verdict is Extract<Verdict, { kind: "elevate" }> => verdict.kind === "elevate");
-    // Open mode: only a command that can read a secret loses the network.
-    // Filtered mode: any command may ask for direct access (ssh, programs
-    // that ignore the proxy).
-    const filtered = this.config.network.mode === "filtered";
-    const needsNetwork = Boolean(input.network && command && (sensitive || filtered));
-    if (elevations.length === 0 && !needsNetwork) {
-      return { ok: true, text: `Already allowed: ${classifications.map((item) => item.path).join(", ")}. Run the command again; if it still fails, the cause is not a permission.` };
+    if (elevations.length === 0) {
+      return { ok: true, text: `Already allowed: ${classifications.map((item) => item.path).join(", ")}. Run the tool again; if it still fails, the cause is not a permission.` };
     }
-    // The strictest elevation decides the mode; sensitive + network always goes to a human.
+    // The strictest elevation decides the mode.
     const order = ["sensitive.read", "sensitive.write", "self.write", "protected.write"];
-    const key = elevations.map((verdict) => verdict.key).sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99))[0] ?? "network";
-    let mode = elevations.some((verdict) => verdict.mode === "ask") ? "ask" : (elevations[0]?.mode ?? "ask");
-    if (needsNetwork && sensitive) mode = "ask";
-    else if (elevations.length === 0) {
-      const networkMode = approvalModeFor(this.config, "network");
-      if (networkMode === "deny") return { ok: false, text: "Denied: direct network access is set to always deny." };
-      mode = networkMode;
-    }
+    const key = elevations.map((verdict) => verdict.key).sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99))[0];
+    const mode = elevations.some((verdict) => verdict.mode === "ask") ? "ask" : elevations[0].mode;
     const outcome = await this.serialized(() =>
       this.elevate(
-        {
-          capability: input.capability,
-          classifications: classifications as Classification[],
-          key,
-          mode: mode as "ask" | "assisted",
-          tool: command ? "bash" : "request_permission",
-          command,
-          network: needsNetwork,
-          justification: input.reason,
-        },
+        { capability: input.capability, classifications, key, mode: mode === "assisted" ? "assisted" : "ask", tool: "request_permission", justification: input.reason },
         ctx,
       ),
     );
     if (!outcome.allowed) return { ok: false, text: outcome.reason, abort: outcome.abort };
-    const grant = newGrant({
-      capability: input.capability,
-      paths: classifications.map((item) => item.path),
-      command,
-      network: needsNetwork || undefined,
-      sensitive: sensitive || undefined,
-      scope: outcome.scope ?? "once",
-      approvedBy: outcome.by,
-      chatId: this.chatId,
-    });
-    if (grant.scope === "always" && !command && !sensitive) {
-      for (const path of grant.paths) appendRule(this.agentDir, { capability: input.capability, path, createdAt: grant.createdAt });
-      this.config.rules.push(...grant.paths.map((path) => ({ capability: input.capability, path, createdAt: grant.createdAt })));
+    const sensitive = classifications.some((item) => item.zone === "sensitive");
+    const scope = outcome.scope ?? "once";
+    if (scope === "always" && !sensitive) {
+      this.persistGrant(input.capability, classifications, "always", outcome.by);
     } else {
+      const grant = newGrant({ capability: input.capability, paths: classifications.map((item) => item.path), sensitive: sensitive || undefined, scope, approvedBy: outcome.by, chatId: this.chatId });
       this.grants.add(grant);
-      if (grant.scope === "chat") this.appendEntry?.(GRANT_ENTRY, grant);
+      if (scope === "chat") this.appendEntry?.(GRANT_ENTRY, grant);
     }
-    const what = command ? `the command \`${command}\`` : "file tools";
-    const network = needsNetwork ? " with network access" : sensitive && command ? " (it runs offline because it can read a sensitive path)" : "";
-    return { ok: true, text: `Approved (${grant.scope}) for ${what}${network}: ${grant.paths.join(", ")}. Run it now.` };
+    return {
+      ok: true,
+      record: { outcome: "allowed", scope },
+      text: `Approved (${scope}) for the file tools (read, write, edit, ls, grep, find): ${classifications.map((item) => item.path).join(", ")}. Run the file tool now. Commands never get this: a command that needs it (ssh, git, a CLI reading credentials) runs again with \`escalate\`.`,
+    };
   }
 
   /** Set by the extension: persist a custom session entry. */
   appendEntry?: (type: string, data: unknown) => void;
 
-  private persistGrant(capability: Capability, classifications: Classification[], scope: GrantScope, by: Grant["approvedBy"], command: string | undefined, network: boolean): void {
+  private persistGrant(capability: Capability, classifications: Classification[], scope: GrantScope, by: Grant["approvedBy"]): void {
     const sensitive = classifications.some((item) => item.zone === "sensitive");
     const paths = classifications.map((item) => item.path);
     if (scope === "always") {
@@ -444,7 +470,7 @@ export class Permissions {
       this.config.rules.push(...paths.map((path) => ({ capability, path, createdAt: new Date().toISOString() })));
       return;
     }
-    const grant = newGrant({ capability, paths, command, network: network || undefined, sensitive: sensitive || undefined, scope, approvedBy: by, chatId: this.chatId });
+    const grant = newGrant({ capability, paths, sensitive: sensitive || undefined, scope, approvedBy: by, chatId: this.chatId });
     this.grants.add(grant);
     if (scope === "chat") this.appendEntry?.(GRANT_ENTRY, grant);
   }
@@ -471,16 +497,14 @@ export class Permissions {
       key: string;
       mode: "ask" | "assisted";
       tool: string;
+      /** The command a domain request comes from, for the dialog. */
       command?: string;
-      network?: boolean;
       justification?: string;
       diff?: string;
       /** A tool-level request (MCP and other extension tools). */
       toolInput?: string;
       /** A domain a filtered command wants to reach. */
       domain?: string;
-      /** A held syscall of a running command (Linux live approvals). */
-      live?: boolean;
     },
     ctx: RequestContext,
   ): Promise<{ allowed: true; scope?: GrantScope; by: Grant["approvedBy"] } | { allowed: false; reason: string; abort?: boolean }> {
@@ -500,10 +524,10 @@ export class Permissions {
     // question to the user with its reason. It never rejects, and a judge
     // that cannot run (no model, an error, a timeout) also asks the user.
     let judgeNote: string | undefined;
-    if (request.mode === "assisted" && !sensitive && !request.network && !ctx.complete) {
+    if (request.mode === "assisted" && !sensitive && !ctx.complete) {
       judgeNote = "No reviewing model is available here.";
     }
-    if (request.mode === "assisted" && !sensitive && !request.network && ctx.complete) {
+    if (request.mode === "assisted" && !sensitive && ctx.complete) {
       // A domain request reads as "network" to the judge, with the domain as its path.
       const { userMessages, recentToolCalls } = conversationContext(ctx.branch());
       const first = request.classifications[0];
@@ -551,31 +575,27 @@ export class Permissions {
       this.audit.write({ ...base, decidedBy: "policy", reason });
       return { allowed: false, reason };
     }
-    // Once for a running command lasts until it ends; a request ahead of a
-    // command binds to that command's text.
-    const runningCommand = request.domain !== undefined || request.live === true;
-    const forCommand = request.command !== undefined && !runningCommand;
-    const allowAlways = !sensitive && !forCommand && !request.classifications.some((item) => item.guard === "self");
+    // Once for a domain lasts until the command that asked ends.
+    const allowAlways = !sensitive && !request.classifications.some((item) => item.guard === "self");
     const options = [
-      runningCommand ? DOMAIN_ONCE : forCommand ? COMMAND_HUMAN.once : HUMAN.once,
-      forCommand ? COMMAND_HUMAN.chat : HUMAN.chat,
+      request.domain !== undefined ? DOMAIN_ONCE : HUMAN.once,
+      HUMAN.chat,
       ...(allowAlways ? [HUMAN.always] : []),
       HUMAN.deny,
       HUMAN.stop,
     ];
-    const title = approvalTitle(request, judgeNote, this.home);
+    const kind = request.domain !== undefined ? "network" : request.toolInput !== undefined ? "tool" : "access";
+    const title = approvalTitle(request, judgeNote, this.home) + promptLine(kind, ctx.toolCallId);
     const choice = await ctx.ui.select(title, options, {
       signal: ctx.signal,
       timeout: this.config.ask.timeoutMs ?? undefined,
     });
     switch (choice) {
       case HUMAN.once:
-      case COMMAND_HUMAN.once:
       case DOMAIN_ONCE:
         this.audit.write({ ...base, decision: "allow", scope: "once" });
         return { allowed: true, scope: "once", by: "user" };
       case HUMAN.chat:
-      case COMMAND_HUMAN.chat:
         this.audit.write({ ...base, decision: "allow", scope: "chat" });
         return { allowed: true, scope: "chat", by: "user" };
       case HUMAN.always:
@@ -626,6 +646,156 @@ export class Permissions {
     return { ok: true };
   }
 
+  // --- Running outside the sandbox ------------------------------------------------
+
+  /** Every command rule in effect: the user's and project's, then this chat's. */
+  commandRules(): CommandRule[] {
+    return [...this.config.commands, ...this.grants.commandRules()];
+  }
+
+  /** Places a sandboxed command may write: a program there could be the agent's. */
+  private writableRoots(): string[] {
+    return [...this.roots, ...this.writableSupportDirs(), ...tempDirs()];
+  }
+
+  /**
+   * Whether a rule may run this program outside the sandbox: the program
+   * exists, and one in a writable place still has the contents the rule
+   * pinned.
+   */
+  private programTrusted(program: string, cwd: string, rule: CommandRule): boolean {
+    const resolved = resolveProgram(program, cwd);
+    if (!resolved) return false;
+    if (!this.writableRoots().some((root) => isUnder(resolved, root))) return true;
+    return rule.sha256 !== undefined && fileSha256(resolved) === rule.sha256;
+  }
+
+  /** The simple commands of a line that need the sandbox's leave, with the directory each runs in. */
+  private commandsOf(words: string[][], cwd: string): { words: string[]; cwd: string }[] {
+    const out: { words: string[]; cwd: string }[] = [];
+    let here = cwd;
+    for (const command of words) {
+      if (INERT_PROGRAMS.has(command[0])) {
+        if (command[0] === "cd" && command.length === 2) here = resolvePath(here, command[1]);
+        continue;
+      }
+      out.push({ words: command, cwd: here });
+    }
+    return out;
+  }
+
+  /** What the rules say about a bash call, before it runs. */
+  checkCommand(command: string, cwd: string): CommandCheck {
+    if (!this.enforcing) return { kind: "sandbox" };
+    const parsed = parseShell(command, this.home);
+    // A line the parser cannot read cannot match a rule: it runs in the
+    // sandbox unless it is approved as written.
+    if (parsed.kind === "opaque") return { kind: "sandbox" };
+    const rules = this.commandRules();
+    const commands = this.commandsOf(parsed.commands, cwd);
+    const used: CommandRule[] = [];
+    let outside = commands.length > 0;
+    for (const item of commands) {
+      const matching = rules.filter((rule) => patternMatches(rule.match, item.words));
+      const deny = matching.find((rule) => rule.decision === "deny");
+      if (deny) return { kind: "deny", reason: `Permission denied: \`${describePattern(deny.match)}\` is set to never run.` };
+      if (matching.some((rule) => rule.decision === "ask")) {
+        outside = false;
+        continue;
+      }
+      const allow = matching.find((rule) => rule.decision === "allow" && this.programTrusted(item.words[0], item.cwd, rule));
+      if (allow) used.push(allow);
+      else outside = false;
+    }
+    return outside ? { kind: "outside", rules: used } : { kind: "sandbox" };
+  }
+
+  /**
+   * The agent asks to run a bash call outside the sandbox, proposing
+   * patterns for later calls. A human decides: once, for this chat or always
+   * (the patterns), or no.
+   */
+  async requestEscalation(
+    command: string,
+    proposal: EscalationProposal,
+    ctx: RequestContext,
+  ): Promise<{ ok: true; scope: GrantScope } | { ok: false; reason: string; abort?: boolean }> {
+    const mode = approvalModeFor(this.config, "escalate");
+    const audit: AuditRecord = { tool: "bash", command, capability: "escalate", decision: "deny", decidedBy: "policy" };
+    if (mode === "deny") {
+      const reason = "Permission denied: running commands outside the sandbox is set to always deny.";
+      this.audit.write({ ...audit, reason });
+      return { ok: false, reason };
+    }
+    const check = this.checkCommand(command, ctx.cwd);
+    if (check.kind === "deny") return { ok: false, reason: check.reason };
+    const parsed = parseShell(command, this.home);
+    // Patterns, each with the pin for a program in a writable place.
+    const patterns: { match: string[]; sha256?: string }[] = [];
+    if (parsed.kind === "simple" && proposal.patterns?.length) {
+      const commands = this.commandsOf(parsed.commands, ctx.cwd);
+      for (const pattern of proposal.patterns) {
+        const error = patternError(pattern);
+        if (error) return { ok: false, reason: `Invalid pattern ${JSON.stringify(pattern)}: ${error}` };
+        const matched = commands.find((item) => patternMatches(pattern, item.words));
+        if (!matched) return { ok: false, reason: `The pattern \`${describePattern(pattern)}\` does not match this command; propose patterns that cover it.` };
+        const resolved = resolveProgram(matched.words[0], matched.cwd);
+        if (!resolved) return { ok: false, reason: `\`${matched.words[0]}\` was not found.` };
+        const pin = this.writableRoots().some((root) => isUnder(resolved, root)) ? fileSha256(resolved) : undefined;
+        patterns.push({ match: pattern, sha256: pin });
+      }
+      const uncovered = commands.find((item) => !proposal.patterns!.some((pattern) => patternMatches(pattern, item.words)));
+      if (uncovered) return { ok: false, reason: `No proposed pattern covers \`${uncovered.words.join(" ")}\`; propose one for every command in the line, or none to run it once.` };
+    }
+    if (!ctx.hasUI) {
+      const reason = "Permission denied: running outside the sandbox needs approval and no one is here to approve it.";
+      this.audit.write({ ...audit, reason });
+      return { ok: false, reason };
+    }
+    const lines: string[] = [];
+    if (proposal.label) lines.push(`Purpose: ${proposal.label}`);
+    lines.push(`Command: ${command}`);
+    for (const pattern of patterns) lines.push(`Pattern: ${describePattern(pattern.match)}`);
+    if (proposal.reason) lines.push(`Reason: ${proposal.reason}`);
+    lines.push("Note: It runs as you, with your files, keys, keychain and network.");
+    if (patterns.some((pattern) => pattern.sha256)) lines.push("Note: A program here is in a writable place; approval covers its current contents only.");
+    if (parsed.kind === "opaque") lines.push(`Note: It uses ${parsed.reason}, which rules can't check, so it can only run once as written.`);
+    const title = `Run this command outside the sandbox?\n\nContext:\n${lines.join("\n")}${promptLine("escalate", ctx.toolCallId)}`;
+    const options = patterns.length ? [RUN_ONCE, HUMAN.chat, HUMAN.always, HUMAN.deny, HUMAN.stop] : [RUN_ONCE, HUMAN.deny, HUMAN.stop];
+    const choice = await this.serialized(() => ctx.ui.select(title, options, { signal: ctx.signal, timeout: this.config.ask.timeoutMs ?? undefined }));
+    const label = proposal.label?.trim() || undefined;
+    switch (choice) {
+      case RUN_ONCE:
+        this.audit.write({ ...audit, decision: "allow", decidedBy: "user", scope: "once" });
+        return { ok: true, scope: "once" };
+      case HUMAN.chat:
+        for (const pattern of patterns) {
+          const grant = newGrant({ capability: "read", paths: [], pattern: pattern.match, label, sha256: pattern.sha256, scope: "chat", approvedBy: "user", chatId: this.chatId });
+          this.grants.add(grant);
+          this.appendEntry?.(GRANT_ENTRY, grant);
+        }
+        this.audit.write({ ...audit, decision: "allow", decidedBy: "user", scope: "chat" });
+        return { ok: true, scope: "chat" };
+      case HUMAN.always:
+        for (const pattern of patterns) {
+          const rule: CommandRule = { match: pattern.match, decision: "allow", label, sha256: pattern.sha256, createdAt: new Date().toISOString() };
+          appendCommandRule(this.agentDir, rule);
+          this.config.commands.push(rule);
+        }
+        this.audit.write({ ...audit, decision: "allow", decidedBy: "user", scope: "always" });
+        return { ok: true, scope: "always" };
+      case HUMAN.stop:
+        this.audit.write({ ...audit, decision: "abort", decidedBy: "user" });
+        ctx.abort?.();
+        return { ok: false, reason: "The user denied this and stopped the turn.", abort: true };
+      default: {
+        const reason = choice === HUMAN.deny ? "The user denied running this outside the sandbox." : "No approval was given (the request was dismissed or timed out).";
+        this.audit.write({ ...audit, decidedBy: "user", reason });
+        return { ok: false, reason: `${reason} Continue in the sandbox or ask the user.` };
+      }
+    }
+  }
+
   statusText(): string {
     const lines: string[] = [];
     if (!this.status.available) {
@@ -645,9 +815,9 @@ export class Permissions {
       this.config.network.mode === "filtered"
         ? `filtered: ${this.config.network.allowDomains.length} allowed domains, others ask`
         : "on";
-    lines.push("  protected  write elevate", `  network    ${network} (off for a command that can read a sensitive path)`);
+    lines.push("  protected  write elevate", `  network    ${network}`);
     lines.push("", "Approval:");
-    for (const key of ["external.write", "protected.write", "self.write", "sensitive.read", "sensitive.write", "network", "tools"]) {
+    for (const key of ["external.write", "protected.write", "self.write", "sensitive.read", "sensitive.write", "network", "tools", "escalate"]) {
       lines.push(`  ${key.padEnd(16)} ${approvalModeFor(this.config, key)}`);
     }
     lines.push("", this.grantsText());
@@ -659,12 +829,18 @@ export class Permissions {
     const grants = this.grants.all();
     const lines = [grants.length ? "Grants:" : "No grants in this chat."];
     for (const grant of grants) {
-      const target = grant.command ? ` for \`${grant.command}\`${grant.network ? " with network" : ""}` : "";
-      lines.push(`  ${grant.id.slice(0, 8)}  ${grant.scope.padEnd(5)} ${grant.capability} ${grant.paths.join(", ")}${target} (by ${grant.approvedBy})`);
+      const what = grant.pattern
+        ? `outside the sandbox: ${describePattern(grant.pattern)}${grant.label ? ` (${grant.label})` : ""}`
+        : `${grant.capability} ${grant.paths.join(", ")}`;
+      lines.push(`  ${grant.id.slice(0, 8)}  ${grant.scope.padEnd(5)} ${what} (by ${grant.approvedBy})`);
     }
     if (this.config.rules.length) {
       lines.push("", "Always-allow rules (permissions.json):");
       for (const rule of this.config.rules) lines.push(`  ${rule.capability} ${rule.path}`);
+    }
+    if (this.config.commands.length) {
+      lines.push("", "Command rules (permissions.json and the project's):");
+      for (const rule of this.config.commands) lines.push(`  ${rule.decision.padEnd(5)} ${describePattern(rule.match)}${rule.label ? ` (${rule.label})` : ""}`);
     }
     return lines.join("\n");
   }
@@ -713,8 +889,12 @@ export class Permissions {
       ...deferred.map((item) => listMatching([item.glob], [item.base], { rg, signal, timeoutMs: 15_000 })),
     ]);
     const anywhere = anchorDirectories([...workspaceHits, ...(homeIndex?.files ?? [])], sensitive.anywhere);
-    const allSensitive = dropExceptions([...sensitiveRead, ...anywhere, ...deferredHits.flat()], sensitive.exceptions, roots, this.home);
-    const allSensitiveWrite = dropExceptions([...sensitiveWrite, ...anywhere, ...deferredHits.flat()], sensitive.exceptions, roots, this.home);
+    // A sensitive directory with an exception inside (~/.ssh and its config)
+    // is denied child by child, around the exception.
+    const inside = sensitive.exceptions.filter((exception) => exception.startsWith("/"));
+    const carve = (list: string[]) => list.flatMap((path) => splitSelf(path, inside));
+    const allSensitive = dropExceptions(carve([...sensitiveRead, ...anywhere, ...deferredHits.flat()]), sensitive.exceptions, roots, this.home);
+    const allSensitiveWrite = dropExceptions(carve([...sensitiveWrite, ...anywhere, ...deferredHits.flat()]), sensitive.exceptions, roots, this.home);
 
     const guarded = splitPatterns(this.config.protected, roots, this.home);
     const protectedPaths: string[] = [];
@@ -745,9 +925,9 @@ export class Permissions {
   }
 
   /** The Landstrip policy for one bash command or one ripgrep run. */
-  async compile(options: { command?: string; readOnly?: boolean; signal?: AbortSignal; proxyPort?: number }): Promise<CompiledPolicy> {
+  async compile(options: { readOnly?: boolean; signal?: AbortSignal; proxyPort?: number }): Promise<CompiledPolicy> {
     const paths = await this.concretePaths(options.signal);
-    const grants = options.command !== undefined ? this.grants.forCommand(options.command) : this.grants.all().filter((grant) => grant.command === undefined);
+    const grants = this.grants.forSandbox();
     return compilePolicy({
       config: this.config,
       level: this.level,
@@ -762,28 +942,10 @@ export class Permissions {
           newGrant({ capability: rule.capability, paths: [rule.path], scope: "always", approvedBy: "rule" }),
         ),
       ],
-      command: options.command,
       readOnly: options.readOnly,
       proxyPort: options.proxyPort,
       home: this.home,
     });
-  }
-
-  /** Mark a launch done: consume its once grants and record sensitive use. */
-  launched(command: string, compiled: CompiledPolicy): void {
-    if (compiled.sensitiveGranted.length) {
-      this.audit.write({
-        tool: "bash",
-        command,
-        capability: "read",
-        zone: "sensitive",
-        paths: compiled.sensitiveGranted,
-        decision: "allow",
-        decidedBy: "grant",
-        reason: compiled.policy.network.allowNetwork ? "with network" : "offline",
-      });
-    }
-    this.grants.consumeForCommand(command);
   }
 
   /** The hint appended to a sandboxed command that failed. */
@@ -798,15 +960,9 @@ export class Permissions {
       );
     }
     if (compiled.policy.network.httpProxyPort !== undefined) {
-      lines.push(
-        "The network goes through a filter (HTTP_PROXY/HTTPS_PROXY): allowed domains pass, new ones ask for approval. Programs that ignore the proxy variables (ssh, some CLIs) need request_permission with network: true for the exact command.",
-      );
-    } else if (!compiled.policy.network.allowNetwork) {
-      lines.push("The network is off for this command because it can read a sensitive path.");
+      lines.push("The network goes through a filter (HTTP_PROXY/HTTPS_PROXY): allowed domains pass, new ones ask for approval.");
     }
-    lines.push(
-      "If the failure is a permission denial and the access is needed, call request_permission with the exact command, the paths it needs and whether it needs the network, then run the same command again.",
-    );
+    lines.push(ESCALATE_HINT);
     return lines.join("\n");
   }
 
@@ -829,76 +985,8 @@ export class Permissions {
     return { HTTP_PROXY: url, HTTPS_PROXY: url, ALL_PROXY: url, http_proxy: url, https_proxy: url, all_proxy: url, NO_PROXY: local, no_proxy: local };
   }
 
-  beginCommand(id: string, command: string, ctx: RequestContext, compiled?: CompiledPolicy): void {
-    this.commands.set(id, { command, ctx, domains: new Set(), read: new Set(), write: new Set(), compiled });
-  }
-
-  /**
-   * A held syscall from a running command (Linux, see live.ts): may it go on?
-   * Approvals last for the rest of the command; "for this chat" also grants
-   * later commands (a sensitive grant only this exact command, offline).
-   */
-  async answerTrap(id: string, query: TrapQuery): Promise<boolean> {
-    const running = this.commands.get(id);
-    if (!running) return false;
-    const network = running.compiled?.policy.network;
-    const networked = Boolean(network && (network.allowNetwork || network.httpProxyPort !== undefined));
-    if (query.kind === "network") {
-      // Only the filtered network asks about direct connections; a command
-      // that may read a secret stays offline, and lookups and binds are not
-      // worth a question each.
-      if (this.config.network.mode !== "filtered" || query.operation !== "connect") return false;
-      if (running.compiled?.sensitiveGranted.length) return false;
-      if (/:53$/.test(query.target)) return false;
-      if (running.domains.has(query.target)) return true;
-      const mode = approvalModeFor(this.config, "network");
-      if (mode === "deny") return false;
-      const classification: Classification = { path: `net:${query.target}`, zone: "external", match: "network" };
-      const outcome = await this.serialized(() =>
-        this.elevate({ capability: "read", classifications: [classification], key: "network", mode, tool: "bash", command: running.command, domain: query.target, live: true }, running.ctx),
-      );
-      if (!outcome.allowed) return false;
-      running.domains.add(query.target);
-      if (outcome.scope === "chat" || outcome.scope === "always") {
-        // Direct network for this exact command in later runs too.
-        const grant = newGrant({ capability: "read", paths: [], command: running.command, network: true, scope: "chat", approvedBy: outcome.by, chatId: this.chatId });
-        this.grants.add(grant);
-        this.appendEntry?.(GRANT_ENTRY, grant);
-      }
-      return true;
-    }
-    const capability: Capability = query.operation === "write" ? "write" : "read";
-    const classification = this.paths.classify(this.paths.canonical(query.target, this.cwd));
-    const canonical = classification.path;
-    if (running[capability].has(canonical)) return true;
-    const verdict = this.verdict(capability, classification);
-    // Allowed by the zones but held by the sandbox: an ancestor guard (a
-    // rename that would move a protected file) or a stale scan. Not a
-    // question to ask; the denial hint explains.
-    if (verdict.kind !== "elevate") return false;
-    if (classification.zone === "sensitive" && networked) return false;
-    const outcome = await this.serialized(() =>
-      this.elevate(
-        {
-          capability,
-          classifications: [classification],
-          key: verdict.key,
-          mode: verdict.mode === "assisted" ? "assisted" : "ask",
-          tool: "bash",
-          command: running.command,
-          live: true,
-        },
-        running.ctx,
-      ),
-    );
-    if (!outcome.allowed) return false;
-    running.read.add(canonical);
-    if (capability === "write") running.write.add(canonical);
-    if (outcome.scope && outcome.scope !== "once") {
-      const sensitive = classification.zone === "sensitive";
-      this.persistGrant(capability, [classification], outcome.scope, outcome.by, sensitive ? running.command : undefined, false);
-    }
-    return true;
+  beginCommand(id: string, command: string, ctx: RequestContext): void {
+    this.commands.set(id, { command, ctx, domains: new Set() });
   }
 
   endCommand(id: string): void {
@@ -971,7 +1059,7 @@ function describeAll(classifications: readonly Classification[]): string {
  * which also recognises a permission request by its "Deny and stop" option.
  */
 function approvalTitle(
-  request: { capability: Capability; classifications: Classification[]; tool: string; command?: string; network?: boolean; justification?: string; diff?: string; toolInput?: string; domain?: string; live?: boolean },
+  request: { capability: Capability; classifications: Classification[]; tool: string; command?: string; justification?: string; diff?: string; toolInput?: string; domain?: string },
   judgeNote: string | undefined,
   home: string,
 ): string {
@@ -982,11 +1070,7 @@ function approvalTitle(
   if (request.domain !== undefined) {
     lines.push(`Domain: ${request.domain}`);
     if (request.command) lines.push(`Command: ${request.command}`);
-    lines.push(
-      request.live
-        ? "Note: The command is paused until you answer."
-        : "Note: Commands reach the network only through the filter; other domains still ask.",
-    );
+    lines.push("Note: Commands reach the network only through the filter; other domains still ask.");
     review();
     return `Allow the agent to reach ${request.domain}?\n\nContext:\n${lines.join("\n")}`;
   }
@@ -1008,15 +1092,11 @@ function approvalTitle(
   for (const item of request.classifications) lines.push(`Path: ${displayPath(item.path, home)}`);
   const matches = [...new Set(request.classifications.map((item) => item.match).filter((match): match is string => Boolean(match)))];
   if (matches.length) lines.push(`Matches: ${matches.join(", ")}`);
-  if (request.command) lines.push(`Command: ${request.command}`);
-  else if (request.tool !== "request_permission") lines.push(`Tool: ${request.tool}`);
+  if (request.tool !== "request_permission") lines.push(`Tool: ${request.tool}`);
   if (request.justification) lines.push(`Reason: ${request.justification}`);
   const sensitive = request.classifications.some((item) => item.zone === "sensitive");
-  if (request.command && sensitive) {
-    lines.push(request.network ? "Network: This command can read these files AND use the network." : "Network: Off for this command, because it can read these files.");
-  }
-  if (!request.command && sensitive && request.capability === "read") lines.push("Note: The contents will be sent to the model provider.");
-  if (request.live) lines.push("Note: The command is paused until you answer.");
+  if (sensitive && request.capability === "read") lines.push("Note: The contents will be sent to the model provider.");
+  if (request.tool === "request_permission") lines.push("Note: For the agent's file tools only; commands such as ssh never get it.");
   review();
   if (request.diff) lines.push("Change:", request.diff.length > 1200 ? `${request.diff.slice(0, 1200)}\n…` : request.diff);
   return `Allow the agent to ${what}?\n\nContext:\n${lines.join("\n")}`;

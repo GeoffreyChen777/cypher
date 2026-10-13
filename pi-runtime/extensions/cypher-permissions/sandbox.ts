@@ -144,10 +144,8 @@ export interface CompileInput {
   supportDirs: readonly string[];
   tempDirs: readonly string[];
   paths: ConcretePaths;
-  /** Grants that apply to this launch (see GrantStore.forCommand). */
+  /** Path grants that apply to this launch (see GrantStore.forSandbox): never sensitive. */
   grants: readonly Grant[];
-  /** The bash command, when the launch is a bash call. */
-  command?: string;
   /** ripgrep for `grep`: reads only, no network. */
   readOnly?: boolean;
   /** Filtered network mode: the command reaches the network only through this proxy port. */
@@ -157,10 +155,6 @@ export interface CompileInput {
 
 export interface CompiledPolicy {
   policy: LandstripPolicy;
-  /** Environment variable names the grants let through the scrub. */
-  envAllowed: string[];
-  /** Sensitive paths this launch may read (for the audit and the offline rule). */
-  sensitiveGranted: string[];
 }
 
 /**
@@ -252,9 +246,8 @@ export function compilePolicy(input: CompileInput): CompiledPolicy {
   const { config, level, grants, paths } = input;
   const home = input.home ?? homedir();
   const matrix = config.levels[level];
-  const command = input.command;
 
-  // Grants on environment variables, domains and tools are not filesystem rules.
+  // Grants on domains, tools and commands are not filesystem rules.
   const fileGrants = grants
     .map((grant) => ({ ...grant, paths: grant.paths.filter((path) => path.startsWith("/")) }))
     .filter((grant) => grant.paths.length > 0);
@@ -320,19 +313,11 @@ export function compilePolicy(input: CompileInput): CompiledPolicy {
     denyRead.add(dirname(home));
   }
 
-  const sensitiveGranted = unique(
-    grants.filter((grant) => grant.sensitive && (command === undefined || grant.command === command)).flatMap((grant) => grant.paths),
-  );
-  const networkGranted = grants.some((grant) => grant.network && grant.command !== undefined && grant.command === command);
+  // No secret is readable here (a command that needs one runs outside the
+  // sandbox), so the network is open, or only through the filter proxy.
   const filtered = config.network.mode === "filtered";
-  // Open mode: the network unless a secret is readable. Filtered mode: only
-  // through the proxy (and not even that while a secret is readable), unless
-  // the network was approved for this exact command.
-  const allowNetwork = !input.readOnly && (filtered ? networkGranted : sensitiveGranted.length === 0 || networkGranted);
-  const viaProxy = !input.readOnly && filtered && !allowNetwork && sensitiveGranted.length === 0 && input.proxyPort !== undefined;
-  const envAllowed = unique(
-    grants.filter((grant) => command !== undefined && grant.command === command).flatMap((grant) => grant.paths.filter((path) => path.startsWith("env:")).map((path) => path.slice(4))),
-  );
+  const allowNetwork = !input.readOnly && !filtered;
+  const viaProxy = !input.readOnly && filtered && input.proxyPort !== undefined;
 
   return {
     policy: {
@@ -350,8 +335,6 @@ export function compilePolicy(input: CompileInput): CompiledPolicy {
         ...(viaProxy ? { httpProxyPort: input.proxyPort } : {}),
       },
     },
-    envAllowed,
-    sensitiveGranted,
   };
 }
 
@@ -364,7 +347,7 @@ function isSocket(path: string): boolean {
 }
 
 /** Remove secret-looking variables unless a grant lets one through. */
-export function scrubEnv(env: NodeJS.ProcessEnv, patterns: readonly string[], allowed: readonly string[]): NodeJS.ProcessEnv {
+export function scrubEnv(env: NodeJS.ProcessEnv, patterns: readonly string[], allowed: readonly string[] = []): NodeJS.ProcessEnv {
   const matchers = patterns.map((pattern) => globToRegExp(pattern, false));
   const keep = new Set(allowed);
   const out: NodeJS.ProcessEnv = {};
@@ -447,4 +430,9 @@ export function parseDenials(output: string): { denials: DenialEvent[]; rest: st
   return { denials, rest: kept.join("\n") };
 }
 
-export const DENIAL_TEXT = /Operation not permitted|Permission denied|EPERM|EACCES|Could not resolve host|Couldn't resolve host|getaddrinfo|ENOTFOUND|Network is unreachable/;
+/**
+ * Output that looks like the sandbox's doing even when it reported nothing:
+ * a refused syscall, or a credential it hides failing like a wrong one.
+ */
+export const DENIAL_TEXT =
+  /Operation not permitted|Permission denied|EPERM|EACCES|Could not resolve host|Couldn't resolve host|getaddrinfo|ENOTFOUND|Network is unreachable|Host key verification failed|Authentication failed|could not read Username|terminal prompts disabled|Unable to locate credentials|not logged in|SecKeychain|keychain/i;

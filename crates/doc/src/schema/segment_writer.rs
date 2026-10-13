@@ -284,6 +284,9 @@ pub(super) fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<()
     if let Some(diff_stats) = &doc_part.diff_stats {
         map.insert("diffStats", loro_value_from_json(diff_stats))?;
     }
+    if let Some(permission) = &doc_part.permission {
+        map.insert("permission", loro_value_from_json(permission))?;
+    }
     if doc_part.kind == "text" {
         write_agent_text(map, doc_part.agent_text.as_deref())?;
     }

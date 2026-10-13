@@ -3,6 +3,8 @@
 use super::comments::{MarkdownBlockRow, ToolGroupRow};
 use super::*;
 
+use cypher_proto::{PermissionOutcome, PermissionScope, ToolPermission};
+
 impl Transcript {
     /// The working loader, INSIDE the conversation flow: appended under the
     /// last row while the run is live (moved out of the shell's status strip
@@ -479,8 +481,11 @@ impl Transcript {
                 self.render_fold_toggle(&row.id, open, summary.clone(), theme, cx)
             }
             RowKind::InputChip {
-                header, resolved, ..
-            } => input_chip(header.clone(), *resolved, theme),
+                header,
+                resolved,
+                permission,
+                ..
+            } => input_chip(header.clone(), *resolved, *permission, theme),
             RowKind::ErrorChip { message } => error_chip(message.clone(), theme),
             RowKind::Worked { label } => worked_rule(label.clone(), theme),
             RowKind::TranslationOriginal { .. } => {
@@ -1275,7 +1280,9 @@ fn worked_rule(label: SharedString, theme: &Theme) -> AnyElement {
 /// ChatRoundLine, the medium "Question" label, then the truncating value —
 /// the first question's header once resolved, "Awaiting your answer…" while
 /// pending. Neutral tones throughout; resolution never recolors the chip.
-fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement {
+/// A resolved question's one-line record. A permission prompt that has no
+/// call to file under says "Permission" with a shield, not "Question".
+fn input_chip(header: SharedString, resolved: bool, permission: bool, theme: &Theme) -> AnyElement {
     let value: SharedString = if resolved {
         header
     } else {
@@ -1306,9 +1313,13 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
                         .items_center()
                         .justify_center()
                         .child(
-                            crate::kit::icons::icon(crate::kit::icons::CHAT_ROUND_LINE)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
+                            crate::kit::icons::icon(if permission {
+                                crate::kit::icons::SHIELD_CHECK
+                            } else {
+                                crate::kit::icons::CHAT_ROUND_LINE
+                            })
+                            .size(px(12.0))
+                            .text_color(theme.text_muted),
                         ),
                 )
                 .child(
@@ -1316,7 +1327,11 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
                         .flex_none()
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.text_muted)
-                        .child(SharedString::from("Question")),
+                        .child(SharedString::from(if permission {
+                            "Permission"
+                        } else {
+                            "Question"
+                        })),
                 )
                 .child(
                     div()
@@ -1490,7 +1505,10 @@ fn chip_header_row(
     cx: &mut App,
 ) -> gpui::Div {
     let (label, parameter) = tool_row_text(tool);
-    let tint = if tool.is_error {
+    // A call permission control held back did not fail: it reads calm, and
+    // its badge says what happened.
+    let failed = tool.is_error && !held(tool);
+    let tint = if failed {
         theme.danger
     } else {
         theme.text_muted
@@ -1536,12 +1554,17 @@ fn chip_header_row(
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_color(if tool.is_error {
+                .text_color(if failed {
                     theme.danger
                 } else {
                     theme.text.opacity(0.85)
                 })
                 .child(SharedString::from(parameter)),
+        )
+        .children(
+            tool.permission
+                .as_ref()
+                .map(|permission| permission_badge(permission, theme)),
         )
         .child(tool_status_icon(ToolStatus::of(tool), theme, view, cx))
         .when_some(chevron, |row, open| {
@@ -1575,17 +1598,89 @@ pub(super) fn tool_row_text(tool: &ToolItem) -> (String, String) {
     }
 }
 
+/// Whether permission control held the call back (the sandbox blocked it,
+/// or it was refused): it did not fail on its own.
+pub(super) fn held(tool: &ToolItem) -> bool {
+    tool.permission.as_ref().is_some_and(|permission| {
+        matches!(
+            permission.outcome,
+            PermissionOutcome::Blocked | PermissionOutcome::Denied
+        )
+    })
+}
+
+/// The words on a call's permission badge.
+pub(super) fn permission_badge_text(permission: &ToolPermission) -> &'static str {
+    match (permission.outcome, permission.scope) {
+        (PermissionOutcome::Outside, Some(PermissionScope::Once)) => "Outside the sandbox · once",
+        (PermissionOutcome::Outside, Some(PermissionScope::Chat)) => {
+            "Outside the sandbox · this chat"
+        }
+        (PermissionOutcome::Outside, Some(PermissionScope::Always)) => {
+            "Outside the sandbox · always"
+        }
+        (PermissionOutcome::Outside, _) => "Outside the sandbox",
+        (PermissionOutcome::Blocked, _) => "Blocked by the sandbox",
+        (PermissionOutcome::Denied, _) => "Denied",
+        (PermissionOutcome::Allowed, Some(PermissionScope::Once)) => "Allowed once",
+        (PermissionOutcome::Allowed, Some(PermissionScope::Chat)) => "Allowed for this chat",
+        (PermissionOutcome::Allowed, Some(PermissionScope::Always)) => "Always allowed",
+        (PermissionOutcome::Allowed, Some(PermissionScope::Rule)) => "Allowed earlier",
+        (PermissionOutcome::Allowed, None) => "Allowed",
+    }
+}
+
+/// The glyph for what permission control did: the shield, with an arrow
+/// leaving it for a run outside the sandbox, a keyhole for a call the
+/// sandbox held, a cross for a refusal, a check for an approved access.
+pub(super) fn permission_badge_icon(outcome: PermissionOutcome) -> &'static str {
+    match outcome {
+        PermissionOutcome::Outside => crate::kit::icons::SHIELD_OUT,
+        PermissionOutcome::Blocked => crate::kit::icons::SHIELD_KEYHOLE,
+        PermissionOutcome::Denied => crate::kit::icons::SHIELD_CROSS,
+        PermissionOutcome::Allowed => crate::kit::icons::SHIELD_CHECK,
+    }
+}
+
+/// A quiet status after the call's text: an icon for what permission control
+/// did, and its words, on no background. Running outside the sandbox is the
+/// one worth noticing, so it takes the warning tint; the rest stay muted.
+fn permission_badge(permission: &ToolPermission, theme: &Theme) -> gpui::Div {
+    let tint = if permission.outcome == PermissionOutcome::Outside {
+        theme.warning
+    } else {
+        theme.text_muted
+    };
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(px(11.0))
+        .text_color(tint)
+        .child(
+            crate::kit::icons::icon(permission_badge_icon(permission.outcome))
+                .size(px(11.0))
+                .text_color(tint),
+        )
+        .child(SharedString::from(permission_badge_text(permission)))
+}
+
 /// Where a tool call is in its lifecycle, shown as the chip's status icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToolStatus {
     Running,
     Completed,
     Failed,
+    /// Held back by permission control: a muted cross, not a failure.
+    Held,
 }
 
 impl ToolStatus {
     pub(super) fn of(tool: &ToolItem) -> Self {
-        if tool.is_error {
+        if held(tool) {
+            Self::Held
+        } else if tool.is_error {
             Self::Failed
         } else if !tool.resolved {
             Self::Running
@@ -1623,6 +1718,7 @@ pub(super) fn tool_status_icon(
             slot.child(icon(crate::kit::icons::CHECK).text_color(theme.success))
         }
         ToolStatus::Failed => slot.child(icon(crate::kit::icons::CROSS).text_color(theme.danger)),
+        ToolStatus::Held => slot.child(icon(crate::kit::icons::CROSS).text_color(theme.text_muted)),
         ToolStatus::Running => {
             let turn = motion::pulse_delta(&STATUS_SPIN, view, cx);
             slot.child(

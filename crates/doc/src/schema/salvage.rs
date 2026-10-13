@@ -164,6 +164,7 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             output_bytes: None,
             diff_ref: None,
             diff_stats: None,
+            permission: None,
         });
     }
     if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {

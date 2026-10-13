@@ -33,6 +33,7 @@ fn subagent_part(id: &str, is_async: bool, resolved: bool, is_error: bool) -> Me
         output_bytes: None,
         diff_ref: None,
         diff_stats: None,
+        permission: None,
     }
 }
 
@@ -257,6 +258,7 @@ fn missing_fields_do_not_panic() {
         output_bytes: None,
         diff_ref: None,
         diff_stats: None,
+        permission: None,
     }])];
     let out = aggregate_subagents(&entries, &[], ms(2000));
     assert_eq!(out.len(), 1);
@@ -277,6 +279,7 @@ fn missing_fields_do_not_panic() {
         output_bytes: None,
         diff_ref: None,
         diff_stats: None,
+        permission: None,
     }])];
     assert!(aggregate_subagents(&entries, &[], ms(2000)).is_empty());
 }

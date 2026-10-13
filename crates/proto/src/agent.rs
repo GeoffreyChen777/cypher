@@ -397,6 +397,73 @@ pub struct UserInputQuestion {
     pub options: Vec<String>,
     #[serde(default)]
     pub multi_select: bool,
+    /// Set when this is a permission prompt rather than a question the agent
+    /// asks: clients show it as an approval and file it under the tool call
+    /// it gates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<PermissionPrompt>,
+}
+
+/// What a permission prompt is about (Cypher's Pi permission extension).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionPrompt {
+    pub kind: PermissionPromptKind,
+    /// The tool call waiting on the answer, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PermissionPromptKind {
+    /// Run a command outside the sandbox.
+    Escalate,
+    /// A file tool reaching past the defaults.
+    Access,
+    /// A domain the filtered network does not allow yet.
+    Network,
+    /// An MCP or extension tool set to ask.
+    Tool,
+}
+
+/// How permission control treated one tool call, for the transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPermission {
+    pub outcome: PermissionOutcome,
+    /// How long the approval behind `outside` or `allowed` lasts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<PermissionScope>,
+    /// The command rule that let it run outside, as people read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    /// What the agent said the command was for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PermissionOutcome {
+    /// Ran outside the sandbox.
+    Outside,
+    /// Ran in the sandbox, which withheld something it needed.
+    Blocked,
+    /// The user or a rule refused it; it did not run.
+    Denied,
+    /// A file tool's access was approved.
+    Allowed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PermissionScope {
+    Once,
+    Chat,
+    Always,
+    /// An existing grant or rule; nobody was asked.
+    Rule,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -461,6 +528,9 @@ pub enum AgentEvent {
         /// Inline file diff for edit-shaped tools (older ACP transcripts only).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<ToolDiff>,
+        /// How permission control treated the call (Pi only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission: Option<ToolPermission>,
     },
     /// Live progress for an UNRESOLVED tool (pi `tool_execution_update`): the
     /// streamed partial output while a long-running tool — a subagent, a long

@@ -154,6 +154,9 @@ struct DocPartJson {
     /// Per-file diff stats (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     diff_stats: Option<serde_json::Value>,
+    /// How permission control treated a tool call (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    permission: Option<serde_json::Value>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -182,9 +185,11 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             output_bytes,
             diff_ref,
             diff_stats,
+            permission,
         } => DocPartJson {
             id: id.clone(),
             kind: "tool".into(),
+            permission: permission.as_ref().map(serde_json::to_value).transpose()?,
             call: Some(serde_json::to_value(call)?),
             // TS shape parity: `isError` is written only once the tool result arrived;
             // its presence IS the resolution marker.
@@ -241,6 +246,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 output_bytes: p.output_bytes,
                 diff_ref: p.diff_ref,
                 diff_stats: p.diff_stats.and_then(|s| serde_json::from_value(s).ok()),
+                permission: p.permission.and_then(|v| serde_json::from_value(v).ok()),
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -868,6 +874,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     }
     if let Some(diff_stats) = &doc_part.diff_stats {
         map.insert("diffStats", loro_value_from_json(diff_stats))?;
+    }
+    if let Some(permission) = &doc_part.permission {
+        map.insert("permission", loro_value_from_json(permission))?;
     }
     Ok(())
 }

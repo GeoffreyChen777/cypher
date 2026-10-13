@@ -2,6 +2,10 @@
 
 use super::*;
 
+use std::collections::{HashMap, HashSet};
+
+use cypher_proto::{PermissionOutcome, ToolPermission};
+
 mod fold;
 mod gates;
 mod tools;
@@ -93,6 +97,10 @@ pub enum RowKind {
         /// while the interactive wizard for the same request is visible.
         request_id: SharedString,
         resolved: bool,
+        /// A permission prompt with no call to file it under (one asked
+        /// ahead, or from a Runtime that does not say which call): shown as
+        /// a permission, not a question.
+        permission: bool,
     },
     ErrorChip {
         message: SharedString,
@@ -415,10 +423,14 @@ pub(super) fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         let (label, detail) = tool_chip_content(&t.call);
         acc.extend_from_slice(label.as_bytes());
         acc.extend_from_slice(&(detail.len() as u32).to_le_bytes());
-        acc.push(t.is_error as u8 | (t.resolved as u8) << 1);
+        acc.push(t.is_error as u8 | (t.resolved as u8) << 1 | (t.blocked_first as u8) << 2);
         // A call nesting under its caller once the caller's part arrives
         // re-indents the chip.
         acc.push(t.depth);
+        // The permission badge arriving or changing redraws the row.
+        if let Some(permission) = &t.permission {
+            acc.extend_from_slice(&serde_json::to_vec(permission).unwrap_or_default());
+        }
         // Detail payload arriving (or growing) must re-splice the row even
         // when the resolved bit didn't change.
         match t.detail.as_deref() {
@@ -604,6 +616,7 @@ pub fn rows_for_entry(
         streaming: entry.status == Some(MessageStatus::Streaming),
         last_part_ix: entry.parts.len().saturating_sub(1),
     };
+    let fold = PermissionFold::of(entry);
     let mut rows: Vec<Row> = Vec::new();
     let mut group_ix = 0usize;
     // Each tool with its part id, which carries the nesting
@@ -616,7 +629,14 @@ pub fn rows_for_entry(
     let mut run: Option<(usize, String)> = None;
 
     for (part_ix, part) in entry.parts.iter().enumerate() {
-        if let Some((part_id, item)) = tool_item(part) {
+        // A blocked attempt folded into its retry, and an answered prompt
+        // filed under its call, render nothing and split nothing.
+        match part {
+            MessagePart::Tool { id, .. } if fold.folded.contains(id) => continue,
+            MessagePart::Input { request_id, .. } if fold.filed.contains(request_id) => continue,
+            _ => {}
+        }
+        if let Some((part_id, item)) = tool_item(part, &fold) {
             // Nothing is pushed until the group flushes, so the run's
             // rows start here.
             run.get_or_insert_with(|| (rows.len(), part_id.clone()));
@@ -778,8 +798,103 @@ fn user_row(entry: &SessionMessageEntry, pending: bool) -> Row {
     }
 }
 
+/// The "Deny and stop" option a permission prompt from a Runtime that does
+/// not mark its prompts is recognised by (`composer::permission_card`).
+const PERMISSION_STOP_OPTION: &str = "Deny and stop";
+
+/// Whether a question is a permission prompt rather than one the agent asks.
+fn is_permission_prompt(questions: &[cypher_proto::UserInputQuestion]) -> bool {
+    questions.first().is_some_and(|question| {
+        question.permission.is_some()
+            || question
+                .options
+                .iter()
+                .any(|option| option == PERMISSION_STOP_OPTION)
+    })
+}
+
+/// How an entry's permission prompts and sandbox retries fold into its tool
+/// rows. An answered prompt files under the call it gated instead of a row
+/// of its own, and a command the sandbox blocked folds into the run of the
+/// same command that followed (outside the sandbox, or refused).
+#[derive(Default)]
+struct PermissionFold {
+    /// Answered prompts filed under a call of this entry (request ids).
+    filed: HashSet<String>,
+    /// Calls an answered prompt gated (part ids), for a call the extension
+    /// keeps no record of.
+    prompted: HashSet<String>,
+    /// Blocked attempts folded into a later run (part ids): no row.
+    folded: HashSet<String>,
+    /// The later run (part id) → the folded attempt's output.
+    attempts: HashMap<String, Option<String>>,
+}
+
+impl PermissionFold {
+    fn of(entry: &SessionMessageEntry) -> Self {
+        let mut fold = Self::default();
+        let tool_ids: HashSet<&str> = entry
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Tool { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        for part in &entry.parts {
+            if let MessagePart::Input {
+                request_id,
+                questions,
+                resolved: true,
+                ..
+            } = part
+                && let Some(call_id) = questions
+                    .first()
+                    .and_then(|question| question.permission.as_ref())
+                    .and_then(|permission| permission.tool_call_id.as_deref())
+                && tool_ids.contains(call_id)
+            {
+                fold.filed.insert(request_id.clone());
+                fold.prompted.insert(call_id.to_owned());
+            }
+        }
+        let command = |part: &MessagePart| match part {
+            MessagePart::Tool {
+                call: ToolCall::Exec { command },
+                permission: Some(permission),
+                resolved: true,
+                ..
+            } => Some((command.clone(), permission.outcome)),
+            _ => None,
+        };
+        for (ix, part) in entry.parts.iter().enumerate() {
+            let Some((blocked, PermissionOutcome::Blocked)) = command(part) else {
+                continue;
+            };
+            let retry = entry.parts[ix + 1..].iter().find(|later| {
+                command(later).is_some_and(|(again, outcome)| {
+                    again == blocked
+                        && matches!(
+                            outcome,
+                            PermissionOutcome::Outside | PermissionOutcome::Denied
+                        )
+                })
+            });
+            if let (
+                Some(MessagePart::Tool { id: retry_id, .. }),
+                MessagePart::Tool { id, output, .. },
+            ) = (retry, part)
+            {
+                fold.folded.insert(id.clone());
+                fold.attempts.insert(retry_id.clone(), output.clone());
+            }
+        }
+        fold
+    }
+}
+
 /// A tool part as its group item, keyed by part id; `None` for other parts.
-fn tool_item(part: &MessagePart) -> Option<(String, ToolItem)> {
+fn tool_item(part: &MessagePart, fold: &PermissionFold) -> Option<(String, ToolItem)> {
     let MessagePart::Tool {
         id: part_id,
         call,
@@ -791,10 +906,32 @@ fn tool_item(part: &MessagePart) -> Option<(String, ToolItem)> {
         output_bytes,
         diff_ref,
         diff_stats,
+        permission,
         ..
     } = part
     else {
         return None;
+    };
+    // A call the extension keeps no record of (an MCP tool) that a prompt
+    // gated: it ran if it did not fail.
+    let permission = permission.clone().or_else(|| {
+        (fold.prompted.contains(part_id) && *resolved).then_some(ToolPermission {
+            outcome: if *is_error {
+                PermissionOutcome::Denied
+            } else {
+                PermissionOutcome::Allowed
+            },
+            scope: None,
+            rule: None,
+            purpose: None,
+        })
+    });
+    let attempt = fold.attempts.get(part_id);
+    let output = match &permission {
+        Some(permission) if attempt.is_some() || permission.purpose.is_some() => {
+            Some(permission_output(permission, attempt, output.as_deref()))
+        }
+        _ => output.clone(),
     };
     Some((
         part_id.clone(),
@@ -809,8 +946,48 @@ fn tool_item(part: &MessagePart) -> Option<(String, ToolItem)> {
             output_bytes: *output_bytes,
             diff_ref: diff_ref.clone().map(SharedString::from),
             depth: 0,
+            permission,
+            blocked_first: attempt.is_some(),
         },
     ))
+}
+
+/// A permission-handled call's detail: what it was for, the blocked attempt
+/// folded into it, then its own output.
+fn permission_output(
+    permission: &ToolPermission,
+    attempt: Option<&Option<String>>,
+    output: Option<&str>,
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(purpose) = &permission.purpose {
+        lines.push(format!("Purpose: {purpose}"));
+    }
+    if let Some(rule) = &permission.rule {
+        lines.push(format!("Allowed by: {rule}"));
+    }
+    if let Some(attempt) = attempt {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push("In the sandbox, blocked:".into());
+        lines.push(
+            attempt
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or("(no output)")
+                .to_owned(),
+        );
+        lines.push(String::new());
+        lines.push(match permission.outcome {
+            PermissionOutcome::Denied => "Not run outside the sandbox:".into(),
+            _ => "Outside the sandbox:".into(),
+        });
+    } else if !lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines.push(output.unwrap_or("(no output)").to_owned());
+    lines.join("\n")
 }
 
 /// Whether a part renders no row: an empty text or thought, or a question
@@ -996,13 +1173,15 @@ impl EntryRows<'_> {
                 .unwrap_or_else(|| "Question".to_string()),
         )
         .into();
+        let permission = is_permission_prompt(questions);
         self.row(
             format!("{}#{}", self.entry.id, part_id),
-            fnv1a(header.as_bytes()) << 1 | resolved as u64,
+            (fnv1a(header.as_bytes()) << 2 | (permission as u64) << 1) | resolved as u64,
             RowKind::InputChip {
                 header,
                 request_id: request_id.to_string().into(),
                 resolved,
+                permission,
             },
         )
     }

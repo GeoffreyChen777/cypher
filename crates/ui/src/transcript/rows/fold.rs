@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 
 use cypher_doc::SessionMessageEntry;
-use cypher_proto::ToolCall;
 use gpui::SharedString;
 
 use crate::markdown::parser::{Block, BlockTree};
@@ -25,13 +24,11 @@ pub(super) fn fold_work_run(
     auto_open: bool,
 ) {
     let mut thoughts = 0usize;
-    let mut tools: Vec<(ToolCall, bool)> = Vec::new();
+    let mut tools: Vec<ToolItem> = Vec::new();
     for row in &rows[start..] {
         match &row.kind {
             RowKind::Thought { .. } => thoughts += 1,
-            RowKind::ToolGroup { tools: group, .. } => {
-                tools.extend(group.iter().map(|t| (t.call.clone(), t.is_error)));
-            }
+            RowKind::ToolGroup { tools: group, .. } => tools.extend(group.iter().cloned()),
             _ => {}
         }
     }
@@ -48,7 +45,7 @@ pub(super) fn fold_work_run(
             row.version ^= 1 << 61;
         }
     }
-    let summary = cypher_proto::view::work_summary(&tools, thoughts);
+    let summary = crate::transcript::chips::tools_summary(&tools, thoughts);
     let count = rows.len() - start;
     rows.insert(
         start,

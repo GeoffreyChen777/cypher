@@ -1,7 +1,9 @@
 //! Wire parsing for pi's RPC stream: the Cypher extension status frames (subagents,
 //! translation) and the mapping of pi tool calls/results onto typed calls.
 
-use cypher_proto::{SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall};
+use cypher_proto::{
+    PermissionPrompt, SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall, ToolPermission,
+};
 use serde_json::Value;
 
 use crate::{OUTPUT_CAP, cap_text};
@@ -350,6 +352,51 @@ pub(super) fn without_codemode_header(result: &Value) -> Value {
         content.remove(0);
     }
     result
+}
+
+/// The line a permission dialog's title ends with (Cypher's Pi permission
+/// extension, `cypher-permissions/core.ts` `PROMPT_MARK`): what the prompt is
+/// about, as JSON.
+const PERMISSION_PROMPT_MARK: &str = "cypher-permission: ";
+
+/// A dialog title without its permission line, and what that line says. Any
+/// other dialog comes back unchanged.
+pub(super) fn permission_prompt(title: &str) -> (String, Option<PermissionPrompt>) {
+    let mut prompt = None;
+    let kept: Vec<&str> = title
+        .lines()
+        .filter(|line| match line.strip_prefix(PERMISSION_PROMPT_MARK) {
+            Some(json) => {
+                prompt = serde_json::from_str(json).ok();
+                false
+            }
+            None => true,
+        })
+        .collect();
+    if prompt.is_none() && kept.len() == title.lines().count() {
+        return (title.to_owned(), None);
+    }
+    (kept.join("\n").trim_end().to_owned(), prompt)
+}
+
+/// How the permission extension treated a tool call: the `cypherPermissions`
+/// record it puts in the result's details.
+pub(super) fn tool_permission(result: &Value) -> Option<ToolPermission> {
+    let record = result.get("details")?.get("cypherPermissions")?;
+    serde_json::from_value(record.clone()).ok()
+}
+
+/// A permission-handled result's output as the transcript shows it: without
+/// the `[permissions]` notes the extension writes for the model (its badge
+/// says the same).
+pub(super) fn without_permission_notes(output: String) -> String {
+    match output
+        .match_indices("[permissions] ")
+        .find(|(at, _)| *at == 0 || output[..*at].ends_with('\n'))
+    {
+        Some((at, _)) => output[..at].trim_end().to_owned(),
+        None => output,
+    }
 }
 
 /// The joined text of a pi tool result's `content` blocks (`{type: "text",

@@ -634,6 +634,7 @@ fn ui_question_shapes_match_the_bridge() {
                 })
                 .unwrap_or_default(),
             multi_select: false,
+            permission: None,
         }
     };
     let question = q(&select);
@@ -722,4 +723,60 @@ fn parse_translation_status_bounds_only_on_the_snapshot_byte_cap() {
     let oversized =
         json!({ "version": 1, "text": "x".repeat(TRANSLATION_STATUS_MAX_BYTES) }).to_string();
     assert!(parse_translation_status(&oversized).is_none());
+}
+
+#[test]
+fn a_permission_prompt_names_itself_in_a_line_the_user_never_sees() {
+    let title = "Run this command outside the sandbox?\n\nContext:\nCommand: ssh web uptime\ncypher-permission: {\"kind\":\"escalate\",\"toolCallId\":\"call-7\"}";
+    let (shown, prompt) = super::wire::permission_prompt(title);
+    assert_eq!(
+        shown,
+        "Run this command outside the sandbox?\n\nContext:\nCommand: ssh web uptime"
+    );
+    assert_eq!(
+        prompt,
+        Some(cypher_proto::PermissionPrompt {
+            kind: cypher_proto::PermissionPromptKind::Escalate,
+            tool_call_id: Some("call-7".into()),
+        })
+    );
+    let question = "Which branch?\n\nContext:\nmain or dev";
+    assert_eq!(
+        super::wire::permission_prompt(question),
+        (question.to_owned(), None),
+        "an ordinary question is untouched"
+    );
+}
+
+#[test]
+fn a_tool_result_carries_how_permission_control_treated_it() {
+    let result = serde_json::json!({
+        "content": [{ "type": "text", "text": "signed-in" }],
+        "details": { "cypherPermissions": { "outcome": "outside", "scope": "chat", "purpose": "Deploy" } }
+    });
+    assert_eq!(
+        super::wire::tool_permission(&result),
+        Some(cypher_proto::ToolPermission {
+            outcome: cypher_proto::PermissionOutcome::Outside,
+            scope: Some(cypher_proto::PermissionScope::Chat),
+            rule: None,
+            purpose: Some("Deploy".into()),
+        })
+    );
+    assert_eq!(
+        super::wire::tool_permission(&serde_json::json!({ "content": [] })),
+        None
+    );
+    assert_eq!(
+        super::wire::without_permission_notes(
+            "Permission denied (publickey).\nCommand exited with code 255\n\n[permissions] This command ran in a sandbox.\nBlocked:\n- read ~/.ssh/id"
+                .into()
+        ),
+        "Permission denied (publickey).\nCommand exited with code 255"
+    );
+    assert_eq!(
+        super::wire::without_permission_notes("a [permissions] b".into()),
+        "a [permissions] b",
+        "only a line that starts with it"
+    );
 }

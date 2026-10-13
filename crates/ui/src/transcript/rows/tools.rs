@@ -33,6 +33,13 @@ pub struct ToolItem {
     /// made, 1 for a call a Pi codemode script made from inside its run
     /// (deeper if that call made calls of its own). See [`nest_tool_calls`].
     pub depth: u8,
+    /// How permission control treated the call: the badge on its row. From
+    /// the extension's record, or for a call it has no record of (an MCP
+    /// tool) from the answered prompt that gated it.
+    pub permission: Option<cypher_proto::ToolPermission>,
+    /// The same command ran in the sandbox first and was blocked; that
+    /// attempt is folded into this row (its output leads the detail).
+    pub blocked_first: bool,
 }
 
 /// A chip's expandable detail payload.

@@ -23,6 +23,66 @@ const FILE_NAME: &str = "permissions.json";
 const EXTENSION: &str = "extensions/cypher-permissions.ts";
 const MAX_PATTERNS: usize = 256;
 const MAX_PATTERN_CHARS: usize = 512;
+const MAX_COMMAND_WORDS: usize = 32;
+/// Programs a command rule cannot start with: each can run any other
+/// command. Kept in step with `cypher-permissions/commands.ts`.
+const BANNED_PROGRAMS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "csh",
+    "tcsh",
+    "fish",
+    "nu",
+    "pwsh",
+    "powershell",
+    "env",
+    "sudo",
+    "doas",
+    "su",
+    "xargs",
+    "eval",
+    "exec",
+    "command",
+    "builtin",
+    "nohup",
+    "time",
+    "timeout",
+    "nice",
+    "watch",
+    "script",
+    "parallel",
+    "caffeinate",
+    "python",
+    "python2",
+    "python3",
+    "node",
+    "deno",
+    "bun",
+    "bunx",
+    "npx",
+    "pnpx",
+    "uvx",
+    "pipx",
+    "ruby",
+    "perl",
+    "php",
+    "lua",
+    "tclsh",
+    "Rscript",
+    "osascript",
+    "expect",
+    "awk",
+    "gawk",
+    "sed",
+    "find",
+];
+/// Builtins that never need to leave the sandbox.
+const INERT_PROGRAMS: &[&str] = &[
+    "cd", "pushd", "popd", "pwd", "true", "false", ":", "echo", "printf", "sleep",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -67,6 +127,14 @@ pub struct PermissionApprovals {
     /// command.
     pub network: ApprovalMode,
     pub tools: ApprovalMode,
+    /// Running a command outside the sandbox: `ask` or `deny`, never the
+    /// judge.
+    #[serde(default = "ask")]
+    pub escalate: ApprovalMode,
+}
+
+fn ask() -> ApprovalMode {
+    ApprovalMode::Ask
 }
 
 impl Default for PermissionApprovals {
@@ -78,17 +146,19 @@ impl Default for PermissionApprovals {
             sensitive_write: ApprovalMode::Ask,
             network: ApprovalMode::Assisted,
             tools: ApprovalMode::Ask,
+            escalate: ApprovalMode::Ask,
         }
     }
 }
 
-const APPROVAL_KEYS: [&str; 6] = [
+const APPROVAL_KEYS: [&str; 7] = [
     "external.write",
     "protected.write",
     "sensitive.read",
     "sensitive.write",
     "network",
     "tools",
+    "escalate",
 ];
 
 impl PermissionApprovals {
@@ -99,6 +169,7 @@ impl PermissionApprovals {
             "sensitive.read" => self.sensitive_read,
             "sensitive.write" => self.sensitive_write,
             "network" => self.network,
+            "escalate" => self.escalate,
             _ => self.tools,
         }
     }
@@ -110,6 +181,7 @@ impl PermissionApprovals {
             "sensitive.read" => self.sensitive_read = mode,
             "sensitive.write" => self.sensitive_write = mode,
             "network" => self.network = mode,
+            "escalate" => self.escalate = mode,
             _ => self.tools = mode,
         }
     }
@@ -124,6 +196,75 @@ pub struct PermissionRule {
     pub path: String,
     #[serde(default)]
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommandDecision {
+    /// Runs outside the sandbox without asking.
+    Allow,
+    /// Always asks before leaving the sandbox.
+    Ask,
+    /// Never runs.
+    Deny,
+}
+
+/// A command rule: matching commands run outside the sandbox, ask first, or
+/// never run (`cypher-permissions/commands.ts`). `Always allow` on an
+/// escalation writes one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandRule {
+    /// The program, then words: `*` globs within a word, `**` is any words.
+    #[serde(rename = "match")]
+    pub pattern: Vec<String>,
+    pub decision: CommandDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The program's contents, for a program in a writable place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created_at: String,
+}
+
+impl CommandRule {
+    pub fn validate(&self) -> Result<(), String> {
+        let words = &self.pattern;
+        if words.is_empty() || words.len() > MAX_COMMAND_WORDS {
+            return Err("A command pattern has 1 to 32 words.".into());
+        }
+        if words.iter().any(|word| {
+            word.is_empty()
+                || word.chars().count() > MAX_PATTERN_CHARS
+                || word.contains(['\r', '\n', '\0'])
+        }) {
+            return Err("Each command pattern word is a non-empty line of text.".into());
+        }
+        let program = &words[0];
+        if program == "**" || program.contains(['*', '?', '[']) {
+            return Err("A command pattern starts with the literal program name.".into());
+        }
+        let name = program.rsplit('/').next().unwrap_or(program);
+        if BANNED_PROGRAMS.contains(&name) || INERT_PROGRAMS.contains(&name) {
+            return Err(format!("`{name}` cannot start a command pattern."));
+        }
+        if self
+            .sha256
+            .as_ref()
+            .is_some_and(|hash| hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err("A pinned program hash is 64 hex digits.".into());
+        }
+        if self
+            .label
+            .as_ref()
+            .is_some_and(|label| label.chars().count() > 512 || label.contains('\0'))
+        {
+            return Err("A command rule's label is too long.".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +292,7 @@ pub struct PiPermissionSettings {
     /// subdomains).
     pub allow_domains: Vec<String>,
     pub rules: Vec<PermissionRule>,
+    pub commands: Vec<CommandRule>,
 }
 
 impl Default for PiPermissionSettings {
@@ -169,6 +311,7 @@ impl Default for PiPermissionSettings {
             network_mode: NetworkMode::Open,
             allow_domains: Vec::new(),
             rules: Vec::new(),
+            commands: Vec::new(),
         }
     }
 }
@@ -277,14 +420,22 @@ pub fn from_json(root: &Value) -> PiPermissionSettings {
             .filter_map(|rule| serde_json::from_value(rule.clone()).ok())
             .collect();
     }
+    if let Some(commands) = root.get("commands").and_then(Value::as_array) {
+        settings.commands = commands
+            .iter()
+            .filter_map(|rule| serde_json::from_value::<CommandRule>(rule.clone()).ok())
+            .filter(|rule| rule.validate().is_ok())
+            .collect();
+    }
     settings
 }
 
-/// Sensitive requests never go to the judge.
+/// Sensitive requests and commands leaving the sandbox never go to the judge.
 fn clamp_sensitive(mut approvals: PermissionApprovals) -> PermissionApprovals {
     for mode in [
         &mut approvals.sensitive_read,
         &mut approvals.sensitive_write,
+        &mut approvals.escalate,
     ] {
         if *mode == ApprovalMode::Assisted {
             *mode = ApprovalMode::Ask;
@@ -299,6 +450,15 @@ impl PiPermissionSettings {
             || self.approval.sensitive_write == ApprovalMode::Assisted
         {
             return Err("Sensitive requests cannot be model-assisted.".into());
+        }
+        if self.approval.escalate == ApprovalMode::Assisted {
+            return Err("Running outside the sandbox cannot be model-assisted.".into());
+        }
+        if self.commands.len() > 4096 {
+            return Err("Too many command rules.".into());
+        }
+        for rule in &self.commands {
+            rule.validate()?;
         }
         if self.judge_model.chars().count() > 256 || self.judge_model.contains(['\r', '\n', '\0']) {
             return Err("The judge model id is invalid.".into());
@@ -415,6 +575,10 @@ impl PiPermissionSettings {
         root.insert(
             "rules".into(),
             serde_json::to_value(&self.rules).expect("rules serialize"),
+        );
+        root.insert(
+            "commands".into(),
+            serde_json::to_value(&self.commands).expect("commands serialize"),
         );
     }
 }
@@ -704,6 +868,70 @@ mod tests {
             path: "relative".into(),
             created_at: String::new(),
         });
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn command_rules_round_trip_and_bad_ones_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        std::fs::write(
+            settings_path(&paths),
+            r#"{
+              "commands": [
+                { "match": ["git", "push", "**"], "decision": "allow", "label": "Push", "createdAt": "t" },
+                { "match": ["bash", "-c", "**"], "decision": "allow" },
+                { "match": ["kubectl", "delete", "**"], "decision": "deny" }
+              ],
+              "approval": { "escalate": "assisted" }
+            }"#,
+        )
+        .unwrap();
+        let mut settings = load(&paths).settings;
+        assert_eq!(
+            settings
+                .commands
+                .iter()
+                .map(|rule| rule.pattern[0].as_str())
+                .collect::<Vec<_>>(),
+            ["git", "kubectl"],
+            "a rule on a shell is dropped"
+        );
+        assert_eq!(
+            settings.approval.escalate,
+            ApprovalMode::Ask,
+            "never assisted"
+        );
+        settings.commands.remove(1);
+        save(&paths, settings).unwrap();
+        let root: Value =
+            serde_json::from_slice(&std::fs::read(settings_path(&paths)).unwrap()).unwrap();
+        assert_eq!(
+            root["commands"],
+            serde_json::json!([{ "match": ["git", "push", "**"], "decision": "allow", "label": "Push", "createdAt": "t" }])
+        );
+        assert_eq!(root["approval"]["escalate"], "ask");
+
+        for pattern in [
+            vec!["**"],
+            vec!["git*", "push"],
+            vec!["/bin/bash", "-c"],
+            vec!["cd", "x"],
+            vec![""],
+        ] {
+            let mut settings = PiPermissionSettings::default();
+            settings.commands.push(CommandRule {
+                pattern: pattern.iter().map(|word| word.to_string()).collect(),
+                decision: CommandDecision::Allow,
+                label: None,
+                sha256: None,
+                created_at: String::new(),
+            });
+            assert!(settings.validate().is_err(), "{pattern:?}");
+        }
+        let mut settings = PiPermissionSettings::default();
+        settings.approval.escalate = ApprovalMode::Assisted;
         assert!(settings.validate().is_err());
     }
 

@@ -19,6 +19,10 @@ pub enum FactKind {
     Domain,
     Tool,
     Command,
+    /// What the agent says a command outside the sandbox is for.
+    Purpose,
+    /// A command pattern the approval would allow from now on.
+    Pattern,
     Reason,
     /// A sentence about the network for this command.
     Network,
@@ -36,6 +40,8 @@ impl FactKind {
             "Domain" => Self::Domain,
             "Tool" => Self::Tool,
             "Command" => Self::Command,
+            "Purpose" => Self::Purpose,
+            "Pattern" => Self::Pattern,
             "Reason" => Self::Reason,
             "Network" => Self::Network,
             "Note" => Self::Note,
@@ -52,6 +58,8 @@ impl FactKind {
             Self::Domain => "Domain",
             Self::Tool => "Tool",
             Self::Command => "Command",
+            Self::Purpose => "Purpose",
+            Self::Pattern => "Pattern",
             Self::Reason => "Reason",
             Self::Network | Self::Note | Self::Review => return None,
         })
@@ -61,7 +69,7 @@ impl FactKind {
     pub fn monospace(self) -> bool {
         matches!(
             self,
-            Self::Path | Self::Matches | Self::Domain | Self::Tool | Self::Command
+            Self::Path | Self::Matches | Self::Domain | Self::Tool | Self::Command | Self::Pattern
         )
     }
 }
@@ -170,7 +178,11 @@ pub fn option_for_key(
 }
 
 pub fn parse(question: &UserInputQuestion, prompt: &str) -> Option<PermissionRequest> {
-    if question.multi_select || !question.options.iter().any(|option| option == STOP_OPTION) {
+    // A permission prompt says so (`question.permission`); a Runtime from
+    // before that is still recognised by its "Deny and stop" option.
+    let permission = question.permission.is_some()
+        || question.options.iter().any(|option| option == STOP_OPTION);
+    if question.multi_select || !permission {
         return None;
     }
     let (question_text, context) = split_question_context(prompt);
@@ -199,7 +211,9 @@ pub fn parse(question: &UserInputQuestion, prompt: &str) -> Option<PermissionReq
     if facts.is_empty() {
         return None;
     }
-    let serious = question_text.contains("sensitive") || question_text.contains("Cypher's own");
+    let serious = question_text.contains("sensitive")
+        || question_text.contains("Cypher's own")
+        || question_text.contains("outside the sandbox");
     Some(PermissionRequest {
         question: question_text,
         facts,
@@ -221,10 +235,23 @@ mod tests {
             question: prompt.into(),
             options: options.iter().map(|option| option.to_string()).collect(),
             multi_select: false,
+            permission: None,
         }
     }
 
     const OPTIONS: [&str; 4] = ["Allow once", "Allow for this chat", "Deny", "Deny and stop"];
+
+    #[test]
+    fn a_prompt_that_says_it_is_a_permission_needs_no_stop_option() {
+        let prompt = "Allow the agent to reach example.com?\n\nContext:\nDomain: example.com";
+        let mut marked = question(prompt, &["Allow for this command", "Deny"]);
+        assert!(parse(&marked, prompt).is_none(), "unmarked, no stop option");
+        marked.permission = Some(cypher_proto::PermissionPrompt {
+            kind: cypher_proto::PermissionPromptKind::Network,
+            tool_call_id: Some("call-1".into()),
+        });
+        assert!(parse(&marked, prompt).is_some());
+    }
 
     #[test]
     fn a_request_reads_as_facts_sentences_and_a_block() {
@@ -273,6 +300,38 @@ mod tests {
             "no stop option"
         );
         assert!(parse(&question(prompt, &OPTIONS), prompt).unwrap().serious);
+    }
+
+    #[test]
+    fn a_request_to_leave_the_sandbox_shows_purpose_and_patterns() {
+        let options = [
+            "Run once",
+            "Allow for this chat",
+            "Always allow",
+            "Deny",
+            "Deny and stop",
+        ];
+        let prompt = "Run this command outside the sandbox?\n\nContext:\nPurpose: Deploy to the server web\nCommand: scp app.tgz deploy@web:/srv/\nPattern: scp … deploy@web:*\nReason: the user asked\nNote: It runs as you, with your files, keys, keychain and network.";
+        let request = parse(&question(prompt, &options), prompt).expect("a permission request");
+        assert!(request.serious);
+        let rows: Vec<_> = request
+            .rows()
+            .map(|fact| (fact.kind.label().unwrap(), fact.kind.monospace()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Purpose", false),
+                ("Command", true),
+                ("Pattern", true),
+                ("Reason", false)
+            ]
+        );
+        assert_eq!(request.sentences().count(), 1);
+        assert_eq!(
+            shortcut_keys(&labels(&options)),
+            [Some("y"), Some("c"), Some("a"), Some("n"), Some("s")]
+        );
     }
 
     fn labels(options: &[&str]) -> Vec<String> {

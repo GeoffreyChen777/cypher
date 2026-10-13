@@ -116,6 +116,7 @@ fn tool_result_marks_resolution() {
             is_error: true,
             output: None,
             diff: None,
+            permission: None,
         },
     );
     match &parts[0] {
@@ -352,6 +353,7 @@ fn fold_strips_output_to_summary_and_diff_to_stats() {
                 old_text: Some("a\n".into()),
                 new_text: "b\n".into(),
             }),
+            permission: None,
         },
     );
     match &parts[0] {
@@ -438,6 +440,7 @@ fn tool_progress_tails_onto_unresolved_parts_and_resolve_clears() {
             is_error: false,
             output: Some("final".into()),
             diff: None,
+            permission: None,
         },
     );
     match &parts[0] {
@@ -575,6 +578,7 @@ fn tool_progress_ignores_unknown_and_resolved_ids() {
             is_error: false,
             output: None,
             diff: None,
+            permission: None,
         },
     );
     fold_event_into_parts(

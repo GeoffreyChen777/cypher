@@ -1,6 +1,6 @@
 //! Tool summaries / chips and the working-indicator flavour (pure).
 
-use cypher_proto::ToolCall;
+use cypher_proto::{PermissionOutcome, ToolCall};
 use gpui::SharedString;
 
 use super::{
@@ -13,8 +13,36 @@ use super::{
 /// The rule lives in `cypher_proto::view` so the terminal viewport reports the
 /// same summary; this only adapts the row model's [`ToolItem`] to it.
 pub fn tool_group_summary(tools: &[ToolItem]) -> String {
-    let pairs: Vec<(ToolCall, bool)> = tools.iter().map(|t| (t.call.clone(), t.is_error)).collect();
-    cypher_proto::view::tool_group_summary(&pairs)
+    tools_summary(tools, 0)
+}
+
+/// A run's summary line over its tools and thoughts. A call permission
+/// control held back (blocked, denied) is not a failure; calls that ran
+/// outside the sandbox, and the held ones, are counted on their own:
+/// "Ran 3 commands · 2 outside the sandbox · 1 denied".
+pub fn tools_summary(tools: &[ToolItem], thoughts: usize) -> String {
+    let pairs: Vec<(ToolCall, bool)> = tools
+        .iter()
+        .map(|t| (t.call.clone(), t.is_error && !super::render::held(t)))
+        .collect();
+    let mut summary = cypher_proto::view::work_summary(&pairs, thoughts);
+    let count = |outcome: PermissionOutcome| {
+        tools
+            .iter()
+            .filter(|t| t.permission.as_ref().is_some_and(|p| p.outcome == outcome))
+            .count()
+    };
+    for (outcome, words) in [
+        (PermissionOutcome::Outside, "outside the sandbox"),
+        (PermissionOutcome::Blocked, "blocked"),
+        (PermissionOutcome::Denied, "denied"),
+    ] {
+        let n = count(outcome);
+        if n > 0 {
+            summary.push_str(&format!(" · {n} {words}"));
+        }
+    }
+    summary
 }
 
 // `single_line` and the per-kind chip label/detail are shared with the terminal

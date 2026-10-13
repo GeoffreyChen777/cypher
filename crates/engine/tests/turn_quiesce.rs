@@ -256,6 +256,7 @@ async fn open_tool_call_never_quiesces() {
             is_error: false,
             output: None,
             diff: None,
+            permission: None,
         })
         .unwrap();
     rig.feed.send(text("Build done.")).unwrap();
@@ -296,6 +297,7 @@ async fn stale_tool_echo_stays_parked() {
             is_error: false,
             output: None,
             diff: None,
+            permission: None,
         })
         .unwrap();
     rig.feed
@@ -613,6 +615,7 @@ async fn question_on_a_quiesced_turn_reaches_the_user() {
                 question: "Online or offline migration?".into(),
                 options: vec!["Online".into(), "Offline".into()],
                 multi_select: false,
+                permission: None,
             }]);
             if let Ok(labels) = answer.await {
                 let _ = answer_tx.send(labels.len());

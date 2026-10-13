@@ -1410,6 +1410,7 @@ fn question(id: &str, options: &[&str], multi: bool) -> UserInputQuestion {
         question: format!("Question {id}"),
         options: options.iter().map(|s| s.to_string()).collect(),
         multi_select: multi,
+        permission: None,
     }
 }
 
@@ -1518,6 +1519,7 @@ fn blank_optional_comment_answers_empty_text_not_a_cancel() {
         question: "Which mode?\n\nSelected option:\n- Safe mode".into(),
         options: Vec::new(),
         multi_select: false,
+        permission: None,
     };
     let mut w = Wizard::new("req".into(), vec![comment.clone()]);
     let WizardStep::Done(answers) = w.advance() else {

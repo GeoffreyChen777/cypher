@@ -531,6 +531,7 @@ impl PiRun {
             .unwrap_or_default()
             .to_owned();
         let is_error = ev.get("isError").and_then(Value::as_bool).unwrap_or(false);
+        let permission = ev.get("result").and_then(tool_permission);
         let output = ev.get("result").and_then(|result| {
             if ev.get("toolName").and_then(Value::as_str) == Some(cypher_proto::view::CODEMODE_TOOL)
             {
@@ -539,6 +540,12 @@ impl PiRun {
                 tool_output_text(result)
             }
         });
+        let output = match &permission {
+            Some(_) => output
+                .map(without_permission_notes)
+                .filter(|text| !text.is_empty()),
+            None => output,
+        };
         // The tool settled: retire its throttle entry (no
         // more progress) and stop forwarding late updates.
         self.progress_last.remove(&id);
@@ -550,6 +557,7 @@ impl PiRun {
                 is_error,
                 output,
                 diff: None,
+                permission,
             },
         )
         .await

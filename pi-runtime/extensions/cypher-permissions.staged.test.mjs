@@ -21,9 +21,6 @@ const landstrip = createRequire(join(modules, "@landstrip", "landstrip", "packag
 const doctor = spawnSync(landstrip, ["doctor"], { encoding: "utf8" });
 const sandboxed = doctor.status === 0 && doctor.stdout.includes('"ok":true');
 const skip = sandboxed ? false : `Landstrip cannot sandbox on this host: ${doctor.stdout || doctor.stderr}`;
-// Linux holds a denied syscall and asks (live approvals); macOS fails it and
-// the agent requests, then reruns.
-const linux = process.platform === "linux";
 
 // Not under the temp directory: every sandboxed command may write /tmp, and
 // the fake home must be "outside the workspace" for real.
@@ -137,7 +134,7 @@ async function turn(steps, { answers = [], level = "workspace-write", judge, ext
         child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: event.id, value: answer })}\n`);
       } else if (event.type === "tool_execution_end") {
         const text = (event.result?.content ?? []).map((part) => part.text ?? "").join("\n");
-        results.push({ tool: event.toolName, isError: event.isError, text });
+        results.push({ tool: event.toolName, isError: event.isError, text, record: event.result?.details?.cypherPermissions });
       } else if (event.type === "agent_end") {
         clearTimeout(timer);
         resolve();
@@ -178,42 +175,59 @@ test("bash runs sandboxed: the workspace is writable, secrets and the outside ar
   assert.equal(readFileSync(join(workspace, "out.txt"), "utf8"), "built\n");
 });
 
-test("macOS: a denied command gets a hint; request_permission then the same command succeeds", { skip: skip || (linux && "Linux asks live instead") }, async () => {
-  const command = "echo approved > ../other/approved.txt";
+test("a command that needs more fails in the sandbox; escalated and approved, it runs outside", { skip }, async () => {
+  const command = "echo outside > ../other/outside.txt && cat ~/.ssh/id_ed25519 | head -c 11";
   const { results, dialogs } = await turn(
     [
       { tool: "bash", args: { command } },
-      { tool: "request_permission", args: { capability: "write", paths: [other], command, reason: "the user asked to update the other repo" } },
-      { tool: "bash", args: { command } },
+      { tool: "bash", args: { command, escalate: { label: "Update the other repo", reason: "the user asked", patterns: [["head", "**"], ["cat", "**"]] } } },
     ],
-    { answers: ["Allow this command once"], judge: '{"decision":"ask-user","reason":"not sure","confidence":0.4}' },
+    { answers: ["Run once"] },
   );
   assert.equal(results[0].isError, true);
-  assert.match(results[0].text, /request_permission/);
+  assert.match(results[0].text, /run it again with `escalate`/);
   assert.equal(dialogs.length, 1);
-  assert.match(dialogs[0].title, /couldn't approve this automatically\. not sure/);
-  assert.match(results[1].text, /Approved \(once\)/);
-  assert.equal(results[2].isError, false);
-  assert.equal(readFileSync(join(other, "approved.txt"), "utf8"), "approved\n");
+  assert.match(dialogs[0].title, /^Run this command outside the sandbox\?\n\nContext:\nPurpose: Update the other repo\n/);
+  assert.equal(results[1].isError, false, results[1].text);
+  assert.match(results[1].text, /PRIVATE KEY/);
+  assert.match(results[1].text, /Ran outside the sandbox \(approved once\)/);
+  assert.equal(readFileSync(join(other, "outside.txt"), "utf8"), "outside\n");
 });
 
-test("Linux: a held write asks, and the same command finishes once approved", { skip: skip || (!linux && "macOS has no syscall broker") }, async () => {
+test("allowed for the chat, matching commands run outside without asking; others still ask", { skip }, async () => {
   const { results, dialogs } = await turn(
-    [{ tool: "bash", args: { command: "echo live > ../other/live.txt && cat ../other/live.txt" } }],
-    { answers: ["Allow for this command"], judge: '{"decision":"ask-user","reason":"not sure","confidence":0.4}' },
+    [
+      { tool: "bash", args: { command: "cat ~/.ssh/id_ed25519", escalate: { label: "Read the key", reason: "x", patterns: [["cat", "**/.ssh/*"]] } } },
+      { tool: "bash", args: { command: "cat ~/.ssh/id_ed25519" } },
+      { tool: "bash", args: { command: "cat .env", escalate: { label: "Read the env", reason: "x" } } },
+    ],
+    { answers: ["Allow for this chat", "Deny"] },
   );
-  assert.equal(dialogs.length, 1);
-  assert.match(dialogs[0].title, /paused until you answer/);
-  assert.equal(results[0].isError, false, results[0].text);
-  assert.match(results[0].text, /^live$/m);
-  assert.equal(readFileSync(join(other, "live.txt"), "utf8"), "live\n");
+  assert.equal(dialogs.length, 2, "the second command matched the pattern");
+  assert.match(results[0].text, /PRIVATE KEY/);
+  assert.match(results[1].text, /PRIVATE KEY/);
+  assert.match(results[1].text, /allowed by `cat \*\*\/\.ssh\/\*`/);
+  assert.equal(results[2].isError, true);
+  assert.doesNotMatch(results[2].text, /hunter2/);
 });
 
-test("Linux: the live executor keeps Pi's timeout contract", { skip: skip || (!linux && "macOS uses Pi's own executor") }, async () => {
-  const { results } = await turn([{ tool: "bash", args: { command: "echo started; sleep 20", timeout: 1 } }]);
-  assert.equal(results[0].isError, true);
-  assert.match(results[0].text, /started/);
-  assert.match(results[0].text, /timed out after 1 seconds/);
+test("a deny rule blocks a command before it runs, escalated or not", { skip }, async () => {
+  const config = join(agentDir, "permissions.json");
+  writeFileSync(config, JSON.stringify({ enabled: true, commands: [{ match: ["touch", "**"], decision: "deny" }] }));
+  try {
+    const { results, dialogs } = await turn([
+      { tool: "bash", args: { command: "touch never.txt" } },
+      { tool: "bash", args: { command: "touch never.txt", escalate: { label: "x", reason: "x" } } },
+    ]);
+    assert.equal(dialogs.length, 0);
+    for (const result of results) {
+      assert.match(result.text, /set to never run/);
+      assert.equal(result.record.outcome, "denied");
+    }
+    assert.ok(!existsSync(join(workspace, "never.txt")));
+  } finally {
+    writeFileSync(config, enabledConfig);
+  }
 });
 
 test("file tools: a sensitive read asks a human; symlinks resolve to their target", async () => {
@@ -331,5 +345,72 @@ test("off by default: without the switch the extension registers nothing", async
     assert.equal(results[1].isError, true, "no request_permission tool");
   } finally {
     writeFileSync(config, enabledConfig);
+  }
+});
+
+// A throwaway sshd on localhost that accepts one generated key, so a real ssh
+// signs in without touching real servers or known_hosts.
+function startSshd() {
+  const dir = mkdtempSync(join(scratch, "sshd-"));
+  const keygen = (file) => spawnSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", file]).status === 0;
+  if (!keygen(join(dir, "host_key")) || !keygen(join(home, ".ssh", "id_test"))) return undefined;
+  writeFileSync(join(dir, "authorized_keys"), readFileSync(join(home, ".ssh", "id_test.pub")), { mode: 0o600 });
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  writeFileSync(
+    join(dir, "sshd_config"),
+    [`Port ${port}`, "ListenAddress 127.0.0.1", `HostKey ${join(dir, "host_key")}`, `AuthorizedKeysFile ${join(dir, "authorized_keys")}`, `PidFile ${join(dir, "pid")}`, "PasswordAuthentication no", "KbdInteractiveAuthentication no", "UsePAM no", "StrictModes no"].join("\n"),
+  );
+  const sshd = ["/usr/sbin/sshd", "/usr/bin/sshd"].find((path) => existsSync(path));
+  if (!sshd || spawnSync(sshd, ["-f", join(dir, "sshd_config")]).status !== 0) return undefined;
+  return {
+    port,
+    stop: () => {
+      spawnSync("sh", ["-c", `kill $(cat ${join(dir, "pid")}) 2>/dev/null`]);
+      for (const name of ["id_test", "id_test.pub"]) rmSync(join(home, ".ssh", name), { force: true });
+    },
+  };
+}
+
+test("ssh: fails in the sandbox; approving the key files doesn't change that; escalated it signs in", { skip }, async (t) => {
+  const sshd = startSshd();
+  if (!sshd) return t.skip("no sshd to sign in to");
+  try {
+    const ssh = `ssh -p ${sshd.port} -i ~/.ssh/id_test -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR 127.0.0.1 echo signed-in`;
+    const { results, dialogs } = await turn(
+      [
+        { tool: "bash", args: { command: ssh } },
+        { tool: "request_permission", args: { capability: "read", paths: ["~/.ssh"], reason: "ssh needs the key" } },
+        { tool: "bash", args: { command: ssh } },
+        { tool: "bash", args: { command: ssh, escalate: { label: "Sign in to the test server", reason: "the task", patterns: [["ssh", "**"]] } } },
+        { tool: "bash", args: { command: ssh.replace("echo signed-in", "echo again") } },
+      ],
+      { answers: ["Allow for this chat", "Allow for this chat"] },
+    );
+    // In the sandbox the key is hidden: ssh fails, and the hint says how to go on.
+    assert.equal(results[0].isError, true);
+    assert.match(results[0].text, /Permission denied \(publickey\)/);
+    assert.match(results[0].text, /run it again with `escalate`/);
+    // Approving the key files serves the file tools; both sides are told so.
+    assert.match(dialogs[0].title, /Note: For the agent's file tools only; commands such as ssh never get it\./);
+    assert.match(results[1].text, /Commands never get this: a command that needs it .* runs again with `escalate`/);
+    assert.equal(results[2].isError, true, "still sandboxed");
+    // Escalated, ssh signs in; allowed for the chat, the next one needs no dialog.
+    assert.match(dialogs[1].title, /^Run this command outside the sandbox\?/);
+    assert.equal(results[3].isError, false, results[3].text);
+    assert.match(results[3].text, /^signed-in$/m);
+    assert.match(results[4].text, /^again$/m);
+    assert.match(results[4].text, /allowed by `ssh …`/);
+    assert.equal(dialogs.length, 2);
+    // What Cypher shows on each row, and which call each dialog belongs to.
+    assert.deepEqual(results.map((result) => result.record), [
+      { outcome: "blocked" },
+      { outcome: "allowed", scope: "chat" },
+      { outcome: "blocked" },
+      { outcome: "outside", scope: "chat", purpose: "Sign in to the test server" },
+      { outcome: "outside", scope: "rule", rule: "ssh …", purpose: "Sign in to the test server" },
+    ]);
+    for (const dialog of dialogs) assert.match(dialog.title.split("\n").at(-1), /^cypher-permission: \{"kind":"(access|escalate)","toolCallId":"[^"]+"\}$/);
+  } finally {
+    sshd.stop();
   }
 });

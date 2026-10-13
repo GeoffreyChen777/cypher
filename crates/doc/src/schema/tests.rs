@@ -185,6 +185,7 @@ fn segment_writer_streams_text_incrementally() {
             is_error: false,
             output: None,
             diff: None,
+            permission: None,
         },
     );
     writer.sync(&folded).unwrap();
@@ -465,6 +466,7 @@ fn segment_writer_persists_progress_and_clears_on_resolve() {
             is_error: false,
             output: None,
             diff: None,
+            permission: None,
         },
     );
     writer.sync(&folded).unwrap();
@@ -511,6 +513,7 @@ fn segment_writer_round_trips_stripped_tool_fields() {
                 old_text: Some("old\n".into()),
                 new_text: "new\n".into(),
             }),
+            permission: None,
         },
     );
     // Docs from earlier builds carry a diff sidecar ref; it must round-trip.
@@ -572,6 +575,7 @@ fn pre_strip_doc_parts_still_round_trip() {
             output_bytes: None,
             diff_ref: None,
             diff_stats: None,
+            permission: None,
         }],
         created_at: 1,
         device_id: "dev-a".into(),
@@ -903,4 +907,45 @@ fn malformed_entries_salvage_instead_of_vanishing() {
     });
     let entry = entry_from_json(v).expect("strict");
     assert_eq!(entry.id, "m1");
+}
+
+#[test]
+fn a_tool_result_keeps_how_permission_control_treated_it() {
+    let doc = SessionDoc::init("chat-perm").unwrap();
+    let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
+    let permission = cypher_proto::ToolPermission {
+        outcome: cypher_proto::PermissionOutcome::Outside,
+        scope: Some(cypher_proto::PermissionScope::Chat),
+        rule: None,
+        purpose: Some("Deploy".into()),
+    };
+    let mut folded = Vec::new();
+    fold_event_into_parts(
+        &mut folded,
+        &AgentEvent::ToolCall {
+            id: "t1".into(),
+            call: ToolCall::Exec {
+                command: "ssh web uptime".into(),
+            },
+        },
+    );
+    writer.sync(&folded).unwrap();
+    fold_event_into_parts(
+        &mut folded,
+        &AgentEvent::ToolResult {
+            id: "t1".into(),
+            is_error: false,
+            output: Some("up".into()),
+            diff: None,
+            permission: Some(permission.clone()),
+        },
+    );
+    writer.sync(&folded).unwrap();
+    writer.finish(&folded, MessageStatus::Complete).unwrap();
+    match &doc.read_entries().unwrap()[0].parts[0] {
+        MessagePart::Tool {
+            permission: read, ..
+        } => assert_eq!(read.as_ref(), Some(&permission)),
+        other => panic!("unexpected {other:?}"),
+    }
 }

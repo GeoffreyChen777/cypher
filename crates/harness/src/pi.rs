@@ -65,8 +65,9 @@ use session::*;
 use spawn::{resolve_executable, write_temp_prompt};
 use wire::{
     INPUT_TRANSLATION_STATUS_KEY, SUBAGENTS_STATUS_KEY, TRANSLATION_STATUS_KEY, mcp_server_names,
-    parse_input_translation_status, parse_subagent_status, parse_translation_status, pi_typed_call,
-    tool_output_text, without_codemode_header,
+    parse_input_translation_status, parse_subagent_status, parse_translation_status,
+    permission_prompt, pi_typed_call, tool_output_text, tool_permission, without_codemode_header,
+    without_permission_notes,
 };
 
 use std::collections::{HashMap, HashSet, VecDeque};

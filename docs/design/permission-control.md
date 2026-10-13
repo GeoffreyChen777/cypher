@@ -1,6 +1,6 @@
 # Permission control (cypher-permissions)
 
-Status: **phases 0–1 implemented** (Runtime 1.1.0.2; off by default since 1.1.0.3). Phases 2–3 (§10) are planned.
+Status: **phases 0–4 implemented** (Runtime 1.1.0.2; off by default since 1.1.0.3; §10).
 
 The Runtime extension `pi-runtime/extensions/cypher-permissions.ts` (modules in
 `pi-runtime/extensions/cypher-permissions/`) replaces the npm package
@@ -26,6 +26,9 @@ table:
 - **Network**: whether a command may reach the network.
 - **Elevation**: anything outside the defaults goes through one approval pipeline, whose
   behavior the user chooses: always deny, always ask, or model-assisted.
+- **Leaving the sandbox**: a command that needs what the sandbox withholds (credentials,
+  keys, other processes, system services) runs outside it, as the user, once the user
+  allows it: for that run, or for matching commands from then on (§6.3).
 
 Non-goals are listed in §11. This is not a VM: it protects against model mistakes and
 prompt-injection-driven misuse, not against a determined attacker running as the same
@@ -37,11 +40,12 @@ user.
 |---|---|
 | **Zone** | Classification of a path: `workspace`, `external`, `sensitive` |
 | **Guard** | A write rule on top of the zone: `protected` or `self` (§3.4, §3.5) |
-| **Capability** | `read`, `write` (write includes read); network is per command (§4.2) |
+| **Capability** | `read`, `write` (write includes read) |
 | **Decision** | Per zone × capability: `allow`, `elevate`, `deny` |
 | **Approval mode** | How an elevation is decided: `deny`, `ask`, `assisted` |
 | **Grant** | A recorded approval: what it covers and for how long (`once`, `chat`, `always`) |
 | **Level** | A named preset of decisions, chosen per chat (§5.2) |
+| **Command rule** | A pattern of command words: matching commands run outside the sandbox (`allow`), ask first (`ask`) or never run (`deny`) (§6.3) |
 
 ## 3. Zones and guards
 
@@ -60,6 +64,9 @@ external   otherwise
 
 On top of the zone, a path may be write-guarded: `self` is checked before `protected`.
 Pattern matching ignores case on macOS.
+
+An explicit exception inside a sensitive directory (`!~/.ssh/config`) splits it: the
+sandbox denies the directory's other entries one by one instead of the whole directory.
 
 **Pattern syntax**: `~/x` is in the home directory, `<root>/x` in each workspace root, a
 pattern starting with `**` and `/` matches anywhere, `/**` at the end also matches the
@@ -80,7 +87,7 @@ commands may write them whenever the level lets them write the workspace:
   (`/dev/null`, `/dev/tty`, …; on macOS also `/dev/stdout`, `/dev/stderr`, `/dev/fd`).
 - Toolchain caches (editable): `~/.npm`, `~/.cache`, `~/Library/Caches`,
   `~/.cargo/registry`, `~/.cargo/git`, `~/go/pkg/mod`, `~/.gradle/caches`,
-  `~/.pnpm-store`, `~/.bun/install/cache`, `~/.yarn/berry/cache`.
+  `~/.pnpm-store`, `~/.bun/install/cache`, `~/.yarn/berry/cache`, and `~/.ssh/known_hosts`.
 
 ### 3.3 Sensitive patterns
 
@@ -88,7 +95,7 @@ Defaults (editable, `config.ts` `DEFAULT_SENSITIVE`):
 
 | Group | Patterns |
 |---|---|
-| Credentials in the home directory | `~/.ssh/**`, `~/.gnupg/**`, `~/.aws/**`, `~/.azure/**`, `~/.config/gcloud/**`, `~/.kube/**`, `~/.docker/config.json`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.config/gh/**`, `~/.git-credentials`, `~/.config/git/credentials`, `~/Library/Keychains/**`, `~/Library/Cookies/**`, browser profiles (Chrome, Brave, Edge, Arc, Firefox, Safari, Chromium) |
+| Credentials in the home directory | `~/.ssh/**` (except `config`, `known_hosts`, `known_hosts.old` and `*.pub`: not secret), `~/.gnupg/**`, `~/.aws/**`, `~/.azure/**`, `~/.config/gcloud/**`, `~/.kube/**`, `~/.docker/config.json`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.config/gh/**`, `~/.git-credentials`, `~/.config/git/credentials`, `~/Library/Keychains/**`, `~/Library/Cookies/**`, browser profiles (Chrome, Brave, Edge, Arc, Firefox, Safari, Chromium) |
 | Secrets in any project | `**/.env`, `**/.env.*` (except `.env.example`, `.env.sample`, `.env.template`), `**/*.pem`, `**/*.key`, `**/id_rsa*`, `**/id_ed25519*`, `**/id_ecdsa*`, `**/*.p12`, `**/*.pfx`, `**/*.keystore`, `**/*.jks` |
 | Cypher's and Pi's own secrets | `~/.cypher*/session.json`, `profiles/`, `orgs/` (and the same one level down, for development data dirs), `pi-runtime/agent/auth.json`, `mcp-auth.json`, `sessions/` (other chats' transcripts), `~/.pi/agent/auth.json`, `~/.pi/agent/sessions/**` |
 
@@ -105,7 +112,7 @@ add` after "publish this repo" passes; an unexplained `core.fsmonitor` goes to t
 
 Defaults: `**/.git/config`, `**/.git/config.worktree`, `**/.git/hooks/**`,
 `<root>/.gitmodules`, `<root>/.envrc`, `<root>/.vscode/tasks.json`, `<root>/.husky/**`,
-`~/.gitconfig`, `~/.config/git/**`, the zsh/bash/profile startup files,
+`~/.ssh/config` (`ProxyCommand`), `~/.gitconfig`, `~/.config/git/**`, the zsh/bash/profile startup files,
 `~/.config/fish/**`, `~/Library/LaunchAgents/**`, `~/.config/systemd/user/**`,
 `~/.config/autostart/**`.
 
@@ -132,27 +139,19 @@ the judge must never approve an edit to its own policy. The list cannot be edite
 | protected guard | zone's rule | **elevate** (`assisted`) |
 | self guard | zone's rule | **elevate** (human only) |
 
-### 4.2 Network is per command
+### 4.2 Network
 
-A path cannot have network access; a process can. So the sensitive zone's "no network" is
-a rule on commands:
-
-> A shell command has the network unless it holds a grant to a sensitive path. A command
-> that can read a secret runs **offline**, unless the network was approved together with
-> it.
-
-A command can have the secret or the network, not both, unless a human says so. A bash
-grant to a sensitive path is therefore always bound to one exact command (§7.5). Common
-cases need both (`git push` over SSH, `gh pr create`); `request_permission` with
-`network: true` asks the human, and the dialog says *"This command will be able to read
-these paths AND use the network."*
+Sandboxed commands never read a secret: a sensitive grant serves the file tools only
+(§7.5). So they keep the network. A command that needs a secret and the network (`git
+push` over SSH or HTTPS, `gh pr create`, a cloud CLI) runs outside the sandbox instead,
+once the user allows it (§6.3).
 
 Other network rules for every sandboxed command:
 
 - Local binding (dev servers, tests on `localhost`): allowed (`network.localBinding`).
 - Unix sockets: denied, which covers `docker.sock` (root-equivalent) and `SSH_AUTH_SOCK`.
-  It also breaks the `docker` CLI, ssh-agent and GPG-signed commits; list a socket in
-  `network.unixSockets` to allow it.
+  Commands that need one (the `docker` CLI, ssh-agent, GPG-signed commits) run outside the
+  sandbox when allowed, or list a socket in `network.unixSockets`.
 - The ripgrep behind `grep` never has the network.
 
 **Filtered mode** (`network.mode: "filtered"`, Settings → Permissions → Network). Commands
@@ -164,17 +163,16 @@ GitHub, npm, Yarn, PyPI, crates.io, the Rust and Go toolchains, Maven Central, R
 Docker Hub, plus `network.allowDomains` (`*.x` covers subdomains). Any other domain is a
 `network` elevation (`assisted` by default) asked in the running command's context:
 "Allow for this command", "Allow for this chat" (a `net:<domain>` grant), "Always allow"
-(a `net:<domain>` rule). A command that can read a secret gets no proxy either. Programs
-that ignore the proxy variables (ssh) need `request_permission` with `network: true` for
-the exact command. A project's file may switch its chats to filtered mode, never back.
+(a `net:<domain>` rule). Programs that ignore the proxy variables (ssh) run outside the
+sandbox when allowed (§6.3). A project's file may switch its chats to filtered mode, never
+back.
 
 ### 4.3 Secrets in the environment
 
 A sandboxed command's environment drops variables matching `*_TOKEN`, `*_SECRET`,
 `*_SECRET_KEY`, `*_API_KEY`, `*_APIKEY`, `*_PASSWORD`, `*_ACCESS_KEY`, `*_PRIVATE_KEY`,
 `AWS_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`, `CYPHER_ENGINE_SOCKET` (editable).
-`request_permission` with the path `env:NAME` restores one variable for one command; it
-counts as sensitive, so the command runs offline unless the network was also approved.
+A command that needs one runs outside the sandbox, with the user's whole environment.
 
 ## 5. Configuration
 
@@ -303,13 +301,13 @@ The policy for one command:
 
 ```text
 allowRead   = ["/"]
-denyRead    = sensitive paths − read grants
+denyRead    = sensitive paths (no sensitive grant reaches a command)
 allowWrite  = workspace roots + writable support + temp + devices + write grants
               ("/" when the level lets the external zone be written)
 denyWrite   = (sensitive + protected + self) paths inside a writable root − write grants
               + every ancestor of those, between the writable root and the path,
                 as a single-entry pattern
-network     = allowNetwork unless a sensitive grant applies (and no network grant);
+network     = allowNetwork (filtered mode: only the filter proxy);
               local binding per config; no Unix sockets but those listed
 ```
 
@@ -338,38 +336,78 @@ Facts measured with the bundled Landstrip 0.18.38 that shaped this:
 Missing patterns: a protected path that does not exist yet (`<root>/.envrc`) is still
 write-denied (creating it is the risk); a missing sensitive path needs no read rule.
 
-### 6.3 Bash denials
+### 6.3 Bash denials and running outside the sandbox
 
-macOS Seatbelt is fixed at process start and reports no per-access events, so elevation for
-bash is **request, then retry**:
+macOS Seatbelt is fixed at process start and reports no per-access events, so a command
+that needs more than the sandbox gives fails first:
 
-1. The command hits `EPERM`.
-2. If a sandboxed command fails with a denial in its output (`Operation not permitted`,
-   `Permission denied`, DNS failures), the tool result gets a hint: what the sandbox blocks,
-   whether the network is off, and how to call `request_permission`.
-3. The agent calls `request_permission` with the exact command, the paths and whether it
-   needs the network.
-4. The approval creates a grant bound to that command, and the agent reruns it.
+1. The command hits `EPERM`, or fails like a wrong credential (a key or token the sandbox
+   hides).
+2. If its output looks like the sandbox's doing (`Operation not permitted`, `Permission
+   denied`, DNS failures, `Host key verification failed`, `Authentication failed`, `not
+   logged in`, the keychain), the tool result gets a hint: what the sandbox blocks, and to
+   run the command again with `escalate`. An ordinary failure gets no hint.
+3. The agent runs it again with `escalate` (below); the user decides.
 
 On Linux, Landstrip also prints JSON denial events (`FILESYSTEM_DENIED`,
 `NETWORK_DENIED`): the extension strips them from the output, lists the blocked paths in
 the hint and records them in the audit log.
 
-**Linux: live approvals** (`live.ts`). Landstrip's seccomp broker can hold a denied
-syscall and ask over a socket (`--trap-fd 3`): one JSON query per syscall, one
-`{"query_id","action"}` line back. Pi's bash executor spawns with three stdio streams
-only, so on Linux the extension supplies its own `exec` with Pi's contract (output
-streaming, process-group kill on abort and timeout, `aborted` / `timeout:<seconds>`
-errors, 128 + signal for a killed shell). A query goes through the approval pipeline in
-the running command's context while the command waits ("The command is paused until you
-answer"): "Allow for this command" lasts until it ends, "Allow for this chat" grants later
-commands (a sensitive path only to this exact command). Not asked:
+**Leaving the sandbox.** Many tasks reach something the sandbox cannot express: a server
+over SSH (keys, agent socket, known hosts), a Git remote (the keychain's credential
+helper), `gh`, cloud CLIs, `launchctl`, `kill` of another process, a simulator. Rather than
+widening the sandbox piece by piece, such a command runs **outside it, as the user**. The
+extension does not need to understand the program; the user approves the command (and,
+optionally, a pattern for similar ones).
 
-- a sensitive read while the command has the network (the offline rule; the agent gets
-  the request-then-retry path instead, which compiles an offline policy);
-- a path the zones allow but the sandbox held (an ancestor guard against a rename);
-- network queries outside filtered mode, DNS (port 53) and binds; in filtered mode a
-  direct connect from a command without secrets is a `network` elevation.
+The bash tool takes an optional `escalate: { label, reason, patterns? }`. `label` says what
+the command is for in plain words, `patterns` are command rules the agent proposes for
+later commands. Command rules (`commands.ts`, in `permissions.json`'s `commands`, a
+project's `.pi/permissions.json`, or the chat's grants):
+
+```jsonc
+{ "match": ["git", "push", "**"], "decision": "allow", "label": "Push to GitHub" }
+{ "match": ["git", "push", "**", "--force", "**"], "decision": "ask" }
+{ "match": ["kubectl", "delete", "**"], "decision": "deny" }
+{ "match": ["./scripts/deploy.sh", "**"], "decision": "allow", "sha256": "9f2c…" }
+```
+
+- A pattern is the program, then words: `*` and `?` glob within a word, `**` stands for
+  any number of words. The program is literal and matches by name (`git` matches
+  `/usr/bin/git`); a pattern naming a path matches that path as written.
+- Shells, interpreters and wrappers cannot start a pattern (`sh`, `bash`, `env`, `sudo`,
+  `xargs`, `python`, `node`, `npx`, `awk`, `sed`, `find`, …): a rule on them would cover
+  any command. `cd`, `echo` and other inert builtins never need to leave.
+- **Reading the line** (`shell.ts`): words, quotes, `~`, comments, and `&&`, `||`, `;`,
+  `|`, newlines between commands; `2>&1` and redirection to `/dev/null` are dropped.
+  Anything else (expansions, substitutions, other redirections, unquoted globs and braces,
+  subshells, background jobs, assignments, `if`/`for`/…) makes the line **opaque**: no rule
+  matches it, so it runs in the sandbox, or outside once if the user approves it as
+  written.
+- **Deciding**: every command in the line is checked (inert builtins skipped). A `deny`
+  anywhere blocks the line before it runs, escalated or not. If every command matches an
+  `allow` and none an `ask`, the line runs outside without asking, with a note in the
+  result (`[permissions] Ran outside the sandbox (allowed by …)`). Otherwise it runs in
+  the sandbox, unless the agent escalates and the user approves.
+- **The program must be the one approved**: it is resolved as bash would (a path against
+  the working directory, else `PATH`). A program that does not exist is never trusted. A
+  program inside a place sandboxed commands can write (the workspace, temp, the writable
+  caches) is trusted only at the contents pinned when it was approved (`sha256`); a
+  changed file asks again. The agent cannot change `PATH` in the line (an assignment is
+  opaque).
+- **The request**: proposed patterns are checked before anyone is asked: each must be
+  valid, match a command in the line, and together they must cover every command. The
+  dialog reads *Run this command outside the sandbox?* with `Purpose`, `Command`, one
+  `Pattern` line each, `Reason`, and notes (it runs as the user; a pinned program; an
+  opaque line). Options: Run once, Allow for this chat, Always allow (patterns only),
+  Deny, Deny and stop. Always a human (`approval.escalate`: `ask` or `deny`; never the
+  judge). Without a UI it is denied.
+- **What an approval leaves behind**: Run once, nothing. Allow for this chat, one chat
+  grant per pattern (§7.5). Always allow, one `allow` rule per pattern in
+  `permissions.json`.
+- A project's file may add `ask` and `deny` rules, never `allow`.
+- The level still applies inside the sandbox; outside it nothing does. Full access runs
+  everything outside without asking.
 
 ### 6.4 Runtime patches
 
@@ -398,9 +436,11 @@ is unavailable on this device: …"). `/perm` shows the error.
 ### 7.1 Requests
 
 - **Automatic**: a file tool call whose path needs elevation.
-- **`request_permission`**: `{ capability: "read" | "write", paths, command?, network?,
-  reason }`. With `command`, the approval is bound to that exact command string (bash).
-  Without it, it covers later file tool calls. `env:NAME` names an environment variable.
+- **`request_permission`**: `{ capability: "read" | "write", paths, reason }`, ahead of
+  file tool calls. Not for bash: the dialog says the approval serves the file tools only,
+  and the agent's answer says a command that needs the paths runs with `escalate`
+  (approving `~/.ssh` this way never let ssh connect, which confused users).
+- **`escalate`** on a bash call: run it outside the sandbox (§6.3).
 - **Tool-level**: an MCP or extension tool whose decision is `elevate`.
 
 ### 7.2 Approval modes
@@ -420,7 +460,7 @@ Safety rules:
    reviewing model could not approve this automatically: <reason>"*. The reason is also
    recorded in the audit log (`reviewer`).
 3. Judge approvals are `once`. Only a human creates `chat` or `always` grants.
-4. A sensitive + network request always goes to a human.
+4. Running a command outside the sandbox always goes to a human.
 
 When several paths are requested together, the strictest mode wins.
 
@@ -452,9 +492,9 @@ verdict.
 
 | Option | Grant | Offered for |
 |---|---|---|
-| Allow once (Allow this command once) | `once` | all |
-| Allow for this chat (Allow this command for this chat) | `chat` | all |
-| Always allow | `always` (a rule in `permissions.json`) | file tools, not sensitive, not self |
+| Allow once (Run once outside the sandbox) | `once` | all |
+| Allow for this chat | `chat` | all; for a command, its patterns |
+| Always allow | `always` (a rule in `permissions.json`) | file tools, not sensitive, not self; commands with patterns |
 | Deny | — | all |
 | Deny and stop | — (aborts the turn) | all |
 
@@ -467,9 +507,10 @@ denies after a delay. Without a UI (print mode) a request is denied.
 interface Grant {
   id: string;
   capability: "read" | "write";   // write implies read
-  paths: string[];                // canonical; a directory covers its subtree; env:NAME
-  command?: string;               // bash: the exact command
-  network?: boolean;              // bash: network despite a sensitive path
+  paths: string[];                // canonical; a directory covers its subtree
+  pattern?: string[];             // a command rule: matching commands run outside the sandbox
+  label?: string;                 // what the pattern is for
+  sha256?: string;                // the pinned program, when it lives in a writable place
   sensitive?: boolean;
   scope: "once" | "chat" | "always";
   approvedBy: "user" | "judge" | "rule";
@@ -478,18 +519,18 @@ interface Grant {
 }
 ```
 
-- `once`: in memory, consumed by the next matching use (a bash grant by the next run of
-  its command). Pi runs one process per turn, and a once grant is asked for and used in
-  the same turn.
+- `once`: in memory, consumed by the next matching use. Pi runs one process per turn, and
+  a once grant is asked for and used in the same turn.
 - `chat`: a `cypher-permissions.grant` custom entry in the Pi session file, tagged with
   `CYPHER_CHAT_ID`. Cypher forks a chat by copying its session file
   (`crates/harness/src/pi/fork.rs`), so entries from another chat id are ignored: a fork
   starts without grants. Revocation appends `cypher-permissions.revoke`.
 - `always`: a rule in `permissions.json`.
-- Bash runs with the unbound non-sensitive grants plus the grants bound to its exact
-  command. A sensitive grant is never unbound for bash.
-- Pseudo-paths: `env:NAME` (an environment variable), `net:<domain>` (the filter
-  proxy), `tool:<name>` (an MCP or extension tool). They never become filesystem rules.
+- A sandboxed command runs with the non-sensitive path grants; a sensitive grant serves
+  the file tools only. Grants bound to one command's text (from older Runtimes) are
+  dropped when a session is restored.
+- Pseudo-paths: `net:<domain>` (the filter proxy), `tool:<name>` (an MCP or extension
+  tool). They never become filesystem rules.
 - A child chat (subagent) does not inherit its parent's grants.
 
 ## 8. Audit and commands
@@ -507,23 +548,52 @@ sandbox (the engine runs the Runtime's `landstrip doctor`), the approval mode pe
 kind (sensitive rows offer no "Model first"; Cypher's own data is always "Ask me"), the
 reviewing model (the chat's model or any catalog model), the MCP/extension tool default
 and a per-server override for each configured MCP server, the network mode, local servers,
-the extra sensitive / protected / writable / allowed-domain / Unix-socket lists, and the
-always-allow rules with Remove.
+the extra sensitive / protected / writable / allowed-domain / Unix-socket lists, the
+command rules (what runs outside the sandbox, what always asks, what never runs) with
+Remove, and the always-allow rules with Remove. Running outside the sandbox is "Ask me" or
+"Deny".
 
 **Approval dialogs** ride Cypher's question channel (`ctx.ui.select` → the harness's
 `UserInputQuestion` → the composer's question card, iOS's question panel, the push
-notification). The title is `question\n\nContext:\n` followed by one `Label: value` line
-per fact (`Path`, `Matches`, `Domain`, `Tool`, `Command`, `Reason`, `Network`, `Note`,
-`Review`), with a `Change:` or `Input:` block last; paths show the home directory as `~`.
-The desktop recognises a permission request by its "Deny and stop" option and lays it out
-as a permission card (`crates/ui/src/composer/permission_card.rs`, `question_card.rs`):
-the facts as rows, the sentences as notes, the change in a code block, and the options as
-buttons weighted by what they grant (the narrowest approval filled, broader ones outlined,
-Deny quiet, Deny and stop in red). Other clients show the same text as a headline over a
-context block. The transcript's answered chip shows only the question.
+notification), but are not questions. The title is `question\n\nContext:\n` followed by
+one `Label: value` line per fact (`Path`, `Matches`, `Domain`, `Tool`, `Command`,
+`Purpose`, `Pattern`, `Reason`, `Note`, `Review`; `Network` from older Runtimes), with a
+`Change:` or `Input:` block last; paths show the home directory as `~`. Its last line is for
+Cypher only: `cypher-permission: {"kind": "escalate" | "access" | "network" | "tool",
+"toolCallId": "…"}`. The harness strips it (`pi/wire.rs` `permission_prompt`) and sets
+`UserInputQuestion.permission` (`cypher_proto::PermissionPrompt`): what the prompt is about
+and the tool call it gates. The desktop lays a permission prompt out as a permission card
+(`crates/ui/src/composer/permission_card.rs`, `question_card.rs`; a prompt from an older
+Runtime is recognised by its "Deny and stop" option): the facts as rows, the sentences as
+notes, the change in a code block, and the options as buttons weighted by what they grant
+(the narrowest approval filled, broader ones outlined, Deny quiet, Deny and stop in red).
+Other clients show the same text as a headline over a context block.
+
+**In the transcript** a permission prompt never reads as a question. Each tool result
+carries how permission control treated it, as a `cypherPermissions` record in its details
+(`{ outcome: "outside" | "blocked" | "denied" | "allowed", scope?: "once" | "chat" |
+"always" | "rule", rule?, purpose? }`), which the harness folds into the tool part's
+`permission` (`cypher_proto::ToolPermission`) and strips the `[permissions]` notes meant
+for the model from the shown output. The desktop (`transcript/rows.rs`
+`PermissionFold`):
+
+- files an answered prompt under the call it gated (`toolCallId`): no row of its own, so
+  it does not split the work run;
+- folds a command the sandbox blocked into the run of the same command that followed
+  (outside the sandbox, or refused): one row, the attempt's output first in its detail;
+- puts a badge on the call's row ("Outside the sandbox · this chat", "Blocked by the
+  sandbox", "Denied", "Allowed for this chat"; outside in the warning tint), and shows a
+  blocked or denied call calm, with a muted cross, not as a failure;
+- counts them in the run's summary ("Ran 3 commands · 2 outside the sandbox · 1 denied");
+- shows a prompt it cannot file under a call as a "Permission" row with a shield, not a
+  "Question".
+
+A call the extension keeps no record of (an MCP tool) that a prompt gated shows
+"Allowed" or "Denied" by whether it ran. iOS shows the old rows until it gets the same
+treatment; the new fields are additive and older readers ignore them.
 
 **Shortcuts** (desktop permission card; letters shown as keycaps on the buttons): `Y` the
-narrowest approval (Allow once / Allow this command once / Allow for this command), `C`
+narrowest approval (Allow once / Run once / Allow for this command), `C`
 for this chat, `A` always (when offered), `N` deny, `S` deny and stop, `⌘↵` the narrowest
 approval, `esc` dismiss (no approval), and number keys by position. Plain `↵` approves
 nothing. The card takes keyboard focus wherever focus lands on its composer (opening, chat
@@ -533,7 +603,8 @@ answers it.
 
 Commands:
 
-- `/perm`: level, sandbox, workspace roots, defaults, approval modes, grants, warnings.
+- `/perm`: level, sandbox, workspace roots, defaults, approval modes, grants, command
+  rules, warnings.
 - `/perm-grants`: list; `/perm-grants revoke <id>`; `/perm-grants clear`.
 - `/perm-root add|remove <path>`: extra workspace roots for this chat. A slash command is
   typed by the user, so it is itself the approval.
@@ -553,7 +624,8 @@ Commands:
 | `cypher-permissions/sandbox.ts` | Landstrip status, policy compiler, wrapper, env scrub, denial events |
 | `cypher-permissions/judge.ts` | Judge prompt and verdict parsing |
 | `cypher-permissions/audit.ts` | The audit log |
-| `cypher-permissions/live.ts` | Linux live approvals: the trap socket and Pi's `exec` contract |
+| `cypher-permissions/shell.ts` | Reading a command line into simple commands, or opaque |
+| `cypher-permissions/commands.ts` | Command rules: patterns, validation, the banned programs, resolving a program |
 | `crates/engine/src/pi/permissions.rs` | The settings Settings → Permissions edits; `landstrip doctor` |
 | `crates/ui/src/settings/permissions.rs` | Settings → Permissions |
 | `crates/ui/src/composer/slash_menu.rs`, `slash.rs` | `/permissions` in the composer's `/` menu |
@@ -562,8 +634,7 @@ Commands:
 Tests: `cypher-permissions.test.mjs` (engine, no Pi or Landstrip) and
 `cypher-permissions.staged.test.mjs` (a real `bin/pi` in RPC mode from a staged Runtime,
 a scripted faux model that also answers as the judge, the real Landstrip, the patched
-grep and apply_patch, dialogs answered over RPC; the live-approval and request-retry cases
-run on their own platform). The package script runs both on macOS and Linux builds; the
+grep and apply_patch, dialogs answered over RPC). The package script runs both on macOS and Linux builds; the
 staged suite skips its sandbox cases where `landstrip doctor` fails. Rust:
 `pi::permissions` (the settings file merge), `tests/chat_permission_level.rs` (the row's
 level wins), the harness's `CYPHER_PERMISSION_LEVEL` test, and the picker and Settings
@@ -581,8 +652,13 @@ page unit tests.
   honoring the row's level; Settings → Permissions with the device's sandbox status
   (§8); structured approval cards. A chat's grants are listed and revoked with
   `/perm-grants` (the composer's `/` menu).
-- **Phase 3**: done. The filtered network (§4.2); Linux live approvals (§6.3);
-  per-MCP-server decisions in Settings → Permissions.
+- **Phase 3**: done. The filtered network (§4.2); per-MCP-server decisions in Settings →
+  Permissions. (Linux live approvals, which held a denied syscall while the user was
+  asked, were removed in phase 4.)
+- **Phase 4, leaving the sandbox**: commands that need more than the sandbox run outside it
+  once the user allows them, by command rules the agent proposes (§6.3). The per-command
+  grants to sensitive paths, the network and environment variables, and Linux live
+  approvals, are gone: a sandboxed command never holds a secret.
 
 ## 11. Limits
 
@@ -593,11 +669,16 @@ page unit tests.
 - **Secrets outside the workspace, for bash**: a secret created outside the workspace is
   denied to file tools at once, but to bash only after the home index refreshes (up to
   10 minutes; caches and `node_modules` are not indexed).
-- **No taint tracking across a turn**: a secret read into the model's context can later
-  leave through an allowed network command. The offline rule covers shell processes only.
-- **Bash elevation on macOS is request-then-retry** (§6.3); Linux asks live.
+- **No taint tracking across a turn**: a secret read into the model's context (a file
+  tool approval) can later leave through a command's network.
+- **Outside the sandbox nothing applies**: an allowed command has the user's files,
+  credentials, network and processes within what its pattern matches. A program that reads
+  workspace files as code (`make`, `npm` scripts, `cargo` build scripts) runs them with
+  those rights; the dialog shows the command, not what it will read. Git hooks and config
+  are protected (§3.4), so the agent cannot plant code for an allowed `git` command.
+- **A command that needs more fails once first** (§6.3), on both platforms.
 - **Filtered network**: only programs that honor `HTTP(S)_PROXY` reach allowed domains;
-  others need direct network for their command. Domain filtering sees host names (CONNECT
+  others run outside the sandbox when allowed. Domain filtering sees host names (CONNECT
   and the `Host` header), not URLs.
 - **`/permissions`** is still offered on a device where permission control is
   unavailable; Settings → Permissions says so, and the chat runs unrestricted there.
@@ -629,9 +710,13 @@ Decided (2026-10-11):
 - **D7.** Cypher's and Pi's data is split: its secrets are sensitive, the rest is
   self-guarded (readable, human-only writes), worktrees are neither.
 - **D8.** The judge defaults to the chat's own model.
+- **D9.** (2026-10-13) Composite resources (SSH, Git remotes, keychains, processes,
+  system services) are reached by running the command outside the sandbox with the
+  user's approval, by command patterns the agent proposes, not by widening the sandbox
+  piece by piece. The sandbox never hands a command a secret.
 
 Open:
 
-- **Q1. Command-scoped "always" rules** for credential + network tools (`git push` may
-  use `~/.ssh` with the network). Only safe for a single simple command, so it needs a
-  shell parser that rejects compound commands. Not built yet.
+- **Q1. Command-scoped "always" rules**: resolved by command rules (§6.3, decided
+  2026-10-13): approved commands run outside the sandbox; the shell reader refuses lines it
+  cannot read reliably.

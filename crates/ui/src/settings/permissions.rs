@@ -9,8 +9,8 @@
 
 use cypher_engine::mcp::McpSnapshot;
 use cypher_engine::pi::permissions::{
-    ApprovalMode, NetworkMode, PermissionApprovals, PiPermissionSettings, PiPermissionSnapshot,
-    ToolDecision,
+    ApprovalMode, CommandDecision, NetworkMode, PermissionApprovals, PiPermissionSettings,
+    PiPermissionSnapshot, ToolDecision,
 };
 use cypher_proto::Model;
 use cypher_rpc::methods;
@@ -24,7 +24,7 @@ use super::widgets;
 use crate::{
     kit::icons,
     kit::popover::{self, Loadable},
-    kit::theme::Theme,
+    kit::theme::{MonoStyled, Theme},
     state::AppState,
     widgets::text_input::{TextInput, TextInputEvent},
 };
@@ -38,10 +38,12 @@ enum ApprovalKey {
     SensitiveWrite,
     Network,
     Tools,
+    Escalate,
 }
 
 impl ApprovalKey {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
+        Self::Escalate,
         Self::ExternalWrite,
         Self::ProtectedWrite,
         Self::SensitiveRead,
@@ -58,6 +60,7 @@ impl ApprovalKey {
             Self::SensitiveWrite => "Writing sensitive files",
             Self::Network => "Network beyond the filter",
             Self::Tools => "Tools set to Ask",
+            Self::Escalate => "Running commands outside the sandbox",
         }
     }
 
@@ -68,19 +71,24 @@ impl ApprovalKey {
                 "Git config and hooks, shell startup files, launch agents: a write there runs code later."
             }
             Self::SensitiveRead => {
-                "Keys, .env files and credentials. A command that reads one runs offline."
+                "Keys, .env files and credentials, for the file tools. Sandboxed commands never read them."
             }
-            Self::SensitiveWrite => "Keys, .env files and credentials.",
-            Self::Network => {
-                "With the filtered network: a domain not on the list, or direct access for one command."
-            }
+            Self::SensitiveWrite => "Keys, .env files and credentials, for the file tools.",
+            Self::Network => "With the filtered network: a domain not on the list.",
             Self::Tools => "MCP and extension tools whose setting below is Ask.",
+            Self::Escalate => {
+                "A command that needs more than the sandbox (ssh, git push, gh, other processes) runs as you once you allow it."
+            }
         }
     }
 
-    /// Sensitive requests never go to the judge.
+    /// Sensitive requests and commands leaving the sandbox never go to the
+    /// judge.
     fn allows_assisted(self) -> bool {
-        !matches!(self, Self::SensitiveRead | Self::SensitiveWrite)
+        !matches!(
+            self,
+            Self::SensitiveRead | Self::SensitiveWrite | Self::Escalate
+        )
     }
 
     fn get(self, approvals: &PermissionApprovals) -> ApprovalMode {
@@ -91,6 +99,7 @@ impl ApprovalKey {
             Self::SensitiveWrite => approvals.sensitive_write,
             Self::Network => approvals.network,
             Self::Tools => approvals.tools,
+            Self::Escalate => approvals.escalate,
         }
     }
 
@@ -102,6 +111,7 @@ impl ApprovalKey {
             Self::SensitiveWrite => approvals.sensitive_write = mode,
             Self::Network => approvals.network = mode,
             Self::Tools => approvals.tools = mode,
+            Self::Escalate => approvals.escalate = mode,
         }
     }
 
@@ -113,6 +123,7 @@ impl ApprovalKey {
             Self::SensitiveWrite => "sensitive-write",
             Self::Network => "network",
             Self::Tools => "tools",
+            Self::Escalate => "escalate",
         }
     }
 }
@@ -1119,6 +1130,94 @@ impl PermissionsPage {
             .into_any_element()
     }
 
+    /// Command rules: what runs outside the sandbox without asking, what
+    /// always asks, what never runs.
+    fn commands_card(
+        &self,
+        settings: &PiPermissionSettings,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let enabled = self.editable(cx);
+        let mut card = widgets::section_card(theme).mt(px(12.0));
+        if settings.commands.is_empty() {
+            return card
+                .child(
+                    div()
+                        .px(px(20.0))
+                        .py(px(14.0))
+                        .text_size(px(12.5))
+                        .text_color(theme.text_muted)
+                        .child(
+                            "Nothing yet. Choosing Always allow when the agent asks to run a command outside the sandbox adds it here.",
+                        ),
+                )
+                .into_any_element();
+        }
+        for (index, rule) in settings.commands.iter().enumerate() {
+            let pattern = command_pattern_text(&rule.pattern);
+            let title = rule.label.clone().unwrap_or_else(|| pattern.clone());
+            let decision = match rule.decision {
+                CommandDecision::Allow => "Runs outside the sandbox",
+                CommandDecision::Ask => "Always asks",
+                CommandDecision::Deny => "Never runs",
+            };
+            let pinned = if rule.sha256.is_some() {
+                " · pinned to its current contents"
+            } else {
+                ""
+            };
+            let target = rule.clone();
+            card = card.child(
+                widgets::card_row(theme, index == 0)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(widgets::row_title(theme, title).truncate())
+                            .child(
+                                div()
+                                    .mt(px(2.0))
+                                    .text_size(px(12.0))
+                                    .mono(theme)
+                                    .text_color(theme.text_muted)
+                                    .truncate()
+                                    .child(SharedString::from(pattern)),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(2.0))
+                                    .text_size(px(12.0))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(format!("{decision}{pinned}"))),
+                            ),
+                    )
+                    .child(
+                        widgets::ghost_action(theme)
+                            .id(SharedString::from(format!(
+                                "permissions-command-remove-{index}"
+                            )))
+                            .hover(|s| widgets::ghost_hover(theme, s))
+                            .child("Remove")
+                            .when(!enabled, |el| el.opacity(0.45))
+                            .when(enabled, |el| {
+                                el.on_click(cx.listener(move |page, _, _, cx| {
+                                    let target = target.clone();
+                                    page.update(
+                                        move |settings| {
+                                            settings.commands.retain(|rule| *rule != target)
+                                        },
+                                        None,
+                                        cx,
+                                    )
+                                }))
+                            }),
+                    ),
+            );
+        }
+        card.into_any_element()
+    }
+
     fn always_card(
         &self,
         settings: &PiPermissionSettings,
@@ -1261,6 +1360,12 @@ impl Render for PermissionsPage {
                     .child(self.rules_card(&settings, &theme, cx))
                     .child(Self::section_heading(
                         &theme,
+                        "Commands outside the sandbox",
+                        "Commands you allowed to run as you, with your files, keys and network. A command the agent's own changes could alter is pinned to the contents you approved.",
+                    ))
+                    .child(self.commands_card(&settings, &theme, cx))
+                    .child(Self::section_heading(
+                        &theme,
                         "Always allowed",
                         "Paths and tools you approved with Always allow.",
                     ))
@@ -1297,9 +1402,39 @@ impl Render for PermissionsPage {
     }
 }
 
+/// A command pattern as the extension shows it: `**` reads as `…`.
+fn command_pattern_text(pattern: &[String]) -> String {
+    pattern
+        .iter()
+        .map(|word| {
+            if word == "**" {
+                "…".to_string()
+            } else if word.contains([' ', '\t', '\'', '"']) {
+                serde_json::to_string(word).unwrap_or_else(|_| word.clone())
+            } else {
+                word.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_patterns_read_as_the_extension_shows_them() {
+        let words = |list: &[&str]| list.iter().map(|word| word.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            command_pattern_text(&words(&["git", "push", "**"])),
+            "git push …"
+        );
+        assert_eq!(
+            command_pattern_text(&words(&["ssh", "web", "uptime -p"])),
+            "ssh web \"uptime -p\""
+        );
+    }
 
     #[test]
     fn list_text_becomes_trimmed_non_empty_lines() {
@@ -1310,13 +1445,15 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_rows_never_offer_the_model() {
+    fn sensitive_and_escalation_rows_never_offer_the_model() {
         for key in ApprovalKey::ALL {
             assert_eq!(
                 key.allows_assisted(),
                 !matches!(
                     key,
-                    ApprovalKey::SensitiveRead | ApprovalKey::SensitiveWrite
+                    ApprovalKey::SensitiveRead
+                        | ApprovalKey::SensitiveWrite
+                        | ApprovalKey::Escalate
                 ),
                 "{key:?}"
             );

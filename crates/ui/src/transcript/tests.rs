@@ -265,6 +265,7 @@ fn tool_part(id: &str, command: &str) -> MessagePart {
         output_bytes: None,
         diff_ref: None,
         diff_stats: None,
+        permission: None,
     }
 }
 
@@ -1513,6 +1514,8 @@ fn tool_group_summaries() {
         output_bytes: None,
         diff_ref: None,
         depth: 0,
+        permission: None,
+        blocked_first: false,
     };
     let edit = |p: &str| ToolItem {
         call: ToolCall::EditFile {
@@ -1528,6 +1531,8 @@ fn tool_group_summaries() {
         output_bytes: None,
         diff_ref: None,
         depth: 0,
+        permission: None,
+        blocked_first: false,
     };
     let tools = vec![
         exec("ls"),
@@ -1559,6 +1564,8 @@ fn tool_group_summaries() {
             output_bytes: None,
             diff_ref: None,
             depth: 0,
+            permission: None,
+            blocked_first: false,
         },
         ToolItem {
             call: ToolCall::Glob {
@@ -1572,6 +1579,8 @@ fn tool_group_summaries() {
             output_bytes: None,
             diff_ref: None,
             depth: 0,
+            permission: None,
+            blocked_first: false,
         },
         ToolItem {
             call: ToolCall::WebSearch { query: "q".into() },
@@ -1583,6 +1592,8 @@ fn tool_group_summaries() {
             output_bytes: None,
             diff_ref: None,
             depth: 0,
+            permission: None,
+            blocked_first: false,
         },
     ];
     assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
@@ -1668,6 +1679,8 @@ fn tool_rows_show_name_parameter_and_status() {
         output_bytes: None,
         diff_ref: None,
         depth: 0,
+        permission: None,
+        blocked_first: false,
     };
     let text = |tool: &ToolItem| {
         let (label, parameter) = tool_row_text(tool);
@@ -1759,6 +1772,7 @@ fn script_part(id: &str, code: &str) -> MessagePart {
         output_bytes: None,
         diff_ref: None,
         diff_stats: None,
+        permission: None,
     }
 }
 
@@ -1833,6 +1847,8 @@ fn nested_calls_keep_sibling_order_and_go_deeper() {
         output_bytes: None,
         diff_ref: None,
         depth: 0,
+        permission: None,
+        blocked_first: false,
     };
     let nested = nest_tool_calls(vec![
         ("a".into(), item("a")),
@@ -2499,4 +2515,263 @@ fn rows_carry_their_entry_role_for_fork_gating() {
     let rows = rows_for_entry(&tool_entry, false, &mut parse);
     assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
     assert_eq!(rows[0].role, MessageRole::Assistant);
+}
+
+// ---- permission control in the transcript ----
+
+fn sandboxed(
+    id: &str,
+    command: &str,
+    outcome: cypher_proto::PermissionOutcome,
+    scope: Option<cypher_proto::PermissionScope>,
+    output: &str,
+) -> MessagePart {
+    MessagePart::Tool {
+        id: id.into(),
+        call: ToolCall::Exec {
+            command: command.into(),
+        },
+        is_error: matches!(
+            outcome,
+            cypher_proto::PermissionOutcome::Blocked | cypher_proto::PermissionOutcome::Denied
+        ),
+        resolved: true,
+        output: Some(output.into()),
+        progress: None,
+        diff: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        permission: Some(cypher_proto::ToolPermission {
+            outcome,
+            scope,
+            rule: None,
+            purpose: Some("Check the server".into()),
+        }),
+    }
+}
+
+fn permission_question(request: &str, call: Option<&str>, marked: bool) -> MessagePart {
+    MessagePart::Input {
+        id: format!("in-{request}"),
+        request_id: request.into(),
+        questions: vec![cypher_proto::UserInputQuestion {
+            id: request.into(),
+            header: "Run this command outside the sandbox?\n\nContext:\nCommand: ssh web uptime"
+                .into(),
+            question: String::new(),
+            options: vec![
+                "Run once".into(),
+                "Allow for this chat".into(),
+                "Deny".into(),
+                "Deny and stop".into(),
+            ],
+            multi_select: false,
+            permission: marked.then(|| cypher_proto::PermissionPrompt {
+                kind: cypher_proto::PermissionPromptKind::Escalate,
+                tool_call_id: call.map(str::to_owned),
+            }),
+        }],
+        resolved: true,
+    }
+}
+
+fn permission_tools(rows: &[Row]) -> Vec<ToolItem> {
+    rows.iter()
+        .filter_map(|row| match &row.kind {
+            RowKind::ToolGroup { tools, .. } => Some(tools.iter().cloned().collect::<Vec<_>>()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+#[test]
+fn a_blocked_command_and_its_escalated_retry_read_as_one_row_with_the_approval_on_it() {
+    use cypher_proto::{PermissionOutcome::*, PermissionScope::*};
+    let entry = assistant(
+        "e-perm",
+        MessageStatus::Complete,
+        vec![
+            sandboxed(
+                "t1",
+                "ssh web uptime",
+                Blocked,
+                None,
+                "Permission denied (publickey).",
+            ),
+            sandboxed("t2", "ssh web uptime", Outside, Some(Chat), "up 3 days"),
+            permission_question("q1", Some("t2"), true),
+            tool_part("t3", "ls"),
+            text_part("x", "Done."),
+        ],
+    );
+    let rows = rows_for_entry(&entry, false, &mut parse);
+    assert!(
+        !rows
+            .iter()
+            .any(|row| matches!(row.kind, RowKind::InputChip { .. })),
+        "the answered prompt is filed under its call"
+    );
+    let tools = permission_tools(&rows);
+    assert_eq!(
+        tools.len(),
+        2,
+        "one row for the attempt and its retry, then ls"
+    );
+    let ssh = &tools[0];
+    assert!(ssh.blocked_first);
+    assert_eq!(
+        render::permission_badge_text(ssh.permission.as_ref().unwrap()),
+        "Outside the sandbox · this chat"
+    );
+    let Some(ToolDetail::Output { lines, .. }) = ssh.detail.as_deref() else {
+        panic!("an output detail");
+    };
+    let text: Vec<&str> = lines.iter().map(|line| line.as_ref()).collect();
+    assert_eq!(
+        text,
+        [
+            "Purpose: Check the server",
+            "",
+            "In the sandbox, blocked:",
+            "Permission denied (publickey).",
+            "",
+            "Outside the sandbox:",
+            "up 3 days"
+        ]
+    );
+    assert_eq!(
+        tool_group_summary(&tools),
+        "Ran 2 commands · 1 outside the sandbox",
+        "the blocked attempt is no failure"
+    );
+}
+
+#[test]
+fn a_permission_prompt_without_a_call_is_a_permission_row_not_a_question() {
+    let question = |marked| {
+        let entry = assistant(
+            "e-q",
+            MessageStatus::Complete,
+            vec![permission_question("q", None, marked), text_part("x", "ok")],
+        );
+        rows_for_entry(&entry, false, &mut parse)
+            .into_iter()
+            .find_map(|row| match row.kind {
+                RowKind::InputChip { permission, .. } => Some(permission),
+                _ => None,
+            })
+    };
+    assert_eq!(question(true), Some(true));
+    assert_eq!(
+        question(false),
+        Some(true),
+        "an older Runtime's prompt, by its Deny and stop option"
+    );
+    let entry = assistant(
+        "e-ask",
+        MessageStatus::Complete,
+        vec![
+            MessagePart::Input {
+                id: "in-a".into(),
+                request_id: "a".into(),
+                questions: vec![cypher_proto::UserInputQuestion {
+                    id: "a".into(),
+                    header: "Which branch?".into(),
+                    question: String::new(),
+                    options: vec!["main".into(), "dev".into()],
+                    multi_select: false,
+                    permission: None,
+                }],
+                resolved: true,
+            },
+            text_part("x", "ok"),
+        ],
+    );
+    assert!(
+        rows_for_entry(&entry, false, &mut parse)
+            .iter()
+            .any(|row| matches!(
+                row.kind,
+                RowKind::InputChip {
+                    permission: false,
+                    ..
+                }
+            )),
+        "an ordinary question stays a question"
+    );
+}
+
+#[test]
+fn held_calls_are_counted_apart_from_failures_and_a_prompted_call_without_a_record_shows_its_answer()
+ {
+    use cypher_proto::PermissionOutcome::*;
+    let mcp = MessagePart::Tool {
+        id: "m1".into(),
+        call: ToolCall::Mcp {
+            server: "github".into(),
+            tool: "create_issue".into(),
+            input: None,
+        },
+        is_error: false,
+        resolved: true,
+        output: None,
+        progress: None,
+        diff: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        permission: None,
+    };
+    let entry = assistant(
+        "e-held",
+        MessageStatus::Complete,
+        vec![
+            sandboxed("t1", "rm -rf build", Denied, None, "denied"),
+            sandboxed(
+                "t2",
+                "cat ~/.ssh/id",
+                Blocked,
+                None,
+                "Operation not permitted",
+            ),
+            mcp,
+            permission_question("q", Some("m1"), true),
+            text_part("x", "ok"),
+        ],
+    );
+    let tools = permission_tools(&rows_for_entry(&entry, false, &mut parse));
+    assert_eq!(tools.len(), 3, "different commands are not folded together");
+    assert_eq!(
+        tool_group_summary(&tools[..2]),
+        "Ran 2 commands · 1 blocked · 1 denied"
+    );
+    assert_eq!(
+        render::permission_badge_text(tools[2].permission.as_ref().unwrap()),
+        "Allowed"
+    );
+}
+
+#[test]
+fn each_permission_status_has_its_own_icon() {
+    use cypher_proto::PermissionOutcome::*;
+    let icons: Vec<&str> = [Outside, Blocked, Denied, Allowed]
+        .into_iter()
+        .map(render::permission_badge_icon)
+        .collect();
+    let mut distinct = icons.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), icons.len(), "{icons:?}");
+    assert_eq!(icons[0], crate::kit::icons::SHIELD_OUT);
+    assert_eq!(icons[2], crate::kit::icons::SHIELD_CROSS);
+    for icon in icons {
+        assert!(
+            icon.starts_with("icons/shield-"),
+            "every status keeps the shield: {icon}"
+        );
+    }
 }

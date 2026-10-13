@@ -21,6 +21,7 @@ pub(super) fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 output_bytes,
                 diff_ref,
                 diff_stats,
+                permission,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -39,6 +40,9 @@ pub(super) fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 output_bytes: *output_bytes,
                 diff_ref: diff_ref.clone(),
                 diff_stats: diff_stats.clone(),
+                // How permission control treated the call: the badge on its
+                // row. Patterns and the agent's stated purpose, no inputs.
+                permission: permission.clone(),
             },
             other => other.clone(),
         })

@@ -691,6 +691,7 @@ async fn codemode_scripts_keep_their_calls_and_drop_the_status_header() {
         is_error: false,
         output: Some("3 messages".into()),
         diff: None,
+        permission: None,
     }));
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }

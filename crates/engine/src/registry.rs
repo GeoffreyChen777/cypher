@@ -405,6 +405,7 @@ fn default_registry_with_runtime(
                 is_error: false,
                 output: None,
                 diff: None,
+                permission: None,
             },
             AgentEvent::ToolCall {
                 id: "mock-tool-2".into(),
@@ -418,6 +419,7 @@ fn default_registry_with_runtime(
                 is_error: false,
                 output: None,
                 diff: None,
+                permission: None,
             },
             AgentEvent::TextDelta {
                 text: "The `SegmentWriter` appends into `LoroText`, so the oplog stays RLE-merged:\n\n```rust\nfold_event_into_parts(&mut folded, &event);\nwriter.sync(&folded)?; // commits coalesce every 120ms\n```\n\nWith sync on, each commit reaches your other devices through the chat's relay room.".into(),

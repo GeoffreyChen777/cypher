@@ -7,6 +7,8 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { isCommandRule } from "./commands.ts";
+import type { CommandRule } from "./commands.ts";
 
 export type Decision = "allow" | "elevate" | "deny";
 export type ApprovalMode = "deny" | "ask" | "assisted";
@@ -32,7 +34,7 @@ export interface PermissionsConfig {
   version: 1;
   defaultLevel: LevelName;
   levels: Record<LevelName, LevelMatrix>;
-  /** Keyed `<zone>.<capability>`, `protected.write`, `network`, `tools`. */
+  /** Keyed `<zone>.<capability>`, `protected.write`, `network`, `tools`, `escalate`. */
   approval: Record<string, ApprovalMode>;
   judge: { model: string | null; timeoutMs: number; minConfidence: number };
   ask: { timeoutMs: number | null };
@@ -53,6 +55,11 @@ export interface PermissionsConfig {
   };
   tools: { mcp: Decision; overrides: Record<string, Decision> };
   rules: Rule[];
+  /**
+   * Commands that run outside the sandbox (`allow`), ask first (`ask`) or
+   * never run (`deny`); see commands.ts. The strictest match wins.
+   */
+  commands: CommandRule[];
 }
 
 export const CONFIG_FILE = "permissions.json";
@@ -63,8 +70,13 @@ export const PROJECT_CONFIG_FILE = join(".pi", "permissions.json");
  * a leading `**` plus `/` matches anywhere, a leading `!` makes an exception.
  */
 export const DEFAULT_SENSITIVE: readonly string[] = [
-  // Credentials in the home directory.
+  // Credentials in the home directory. In ~/.ssh the config, the known hosts
+  // and the public keys are not secret.
   "~/.ssh/**",
+  "!~/.ssh/config",
+  "!~/.ssh/known_hosts",
+  "!~/.ssh/known_hosts.old",
+  "!~/.ssh/*.pub",
   "~/.gnupg/**",
   "~/.aws/**",
   "~/.azure/**",
@@ -129,6 +141,7 @@ export const DEFAULT_PROTECTED: readonly string[] = [
   "<root>/.envrc",
   "<root>/.vscode/tasks.json",
   "<root>/.husky/**",
+  "~/.ssh/config",
   "~/.gitconfig",
   "~/.config/git/**",
   "~/.zshrc",
@@ -168,6 +181,8 @@ export const DEFAULT_WRITABLE_SUPPORT: readonly string[] = [
   "~/.pnpm-store/**",
   "~/.bun/install/cache/**",
   "~/.yarn/berry/cache/**",
+  // ssh records a new host here.
+  "~/.ssh/known_hosts",
 ];
 
 /** Domains a filtered network allows without asking (`*.x` covers subdomains). */
@@ -235,6 +250,8 @@ export const DEFAULT_APPROVAL: Record<string, ApprovalMode> = {
   "sensitive.write": "ask",
   network: "assisted",
   tools: "ask",
+  // Running a command outside the sandbox: a human decides.
+  escalate: "ask",
 };
 
 export function defaultConfig(): PermissionsConfig {
@@ -253,6 +270,7 @@ export function defaultConfig(): PermissionsConfig {
     network: { localBinding: true, unixSockets: [], mode: "open", allowDomains: [...DEFAULT_ALLOW_DOMAINS] },
     tools: { mcp: "allow", overrides: {} },
     rules: [],
+    commands: [],
   };
 }
 
@@ -360,6 +378,7 @@ export function mergeUserConfig(base: PermissionsConfig, raw: unknown): Permissi
     }
     applyToolOverrides(config.tools.overrides, raw.tools.overrides, false, config.tools.mcp);
   }
+  if (Array.isArray(raw.commands)) config.commands = raw.commands.filter(isCommandRule);
   if (Array.isArray(raw.rules)) {
     config.rules = raw.rules.filter(
       (rule): rule is Rule =>
@@ -394,6 +413,10 @@ export function mergeProjectConfig(base: PermissionsConfig, raw: unknown): Permi
       }
     }
     applyToolOverrides(config.tools.overrides, raw.tools.overrides, true, config.tools.mcp);
+  }
+  // A project can make commands ask or never run, not run outside the sandbox.
+  if (Array.isArray(raw.commands)) {
+    config.commands.push(...raw.commands.filter((rule) => isCommandRule(rule) && rule.decision !== "allow"));
   }
   return config;
 }
@@ -446,12 +469,21 @@ export function loadConfig(agentDir: string, projectRoots: readonly string[]): L
 
 /** Append one persistent rule to the user's file, keeping everything else as written. */
 export function appendRule(agentDir: string, rule: Rule): void {
+  appendTo(agentDir, "rules", rule);
+}
+
+/** Append one command rule ("Always allow" outside the sandbox) to the user's file. */
+export function appendCommandRule(agentDir: string, rule: CommandRule): void {
+  appendTo(agentDir, "commands", rule);
+}
+
+function appendTo(agentDir: string, key: "rules" | "commands", entry: Rule | CommandRule): void {
   const path = join(agentDir, CONFIG_FILE);
   const raw = readJson(path);
   const root: Json = isObject(raw) ? raw : { version: 1 };
-  const rules = Array.isArray(root.rules) ? root.rules : [];
-  rules.push(rule);
-  root.rules = rules;
+  const list = Array.isArray(root[key]) ? (root[key] as unknown[]) : [];
+  list.push(entry);
+  root[key] = list;
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.tmp-${process.pid}`;
   writeFileSync(temporary, `${JSON.stringify(root, null, 2)}\n`, { mode: 0o600 });
@@ -473,7 +505,7 @@ export function resolveLevel(env: string | undefined, config: PermissionsConfig)
 
 export function approvalMode(config: PermissionsConfig, key: string): ApprovalMode {
   const mode = config.approval[key] ?? "ask";
-  if ((key === "sensitive.read" || key === "sensitive.write" || key === "self.write") && mode === "assisted") {
+  if ((key === "sensitive.read" || key === "sensitive.write" || key === "self.write" || key === "escalate") && mode === "assisted") {
     return "ask";
   }
   if (key === "self.write") return mode === "deny" ? "deny" : "ask";

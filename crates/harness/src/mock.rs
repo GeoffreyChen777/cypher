@@ -138,6 +138,7 @@ pub fn work_script() -> Vec<AgentEvent> {
                         .into()
                 }),
                 diff: None,
+                permission: None,
             });
         }
     }
@@ -314,6 +315,7 @@ fn marked_run(
                             question: "Which approach should I take?".into(),
                             options: vec!["Patch it in place".into(), "Rewrite the module".into()],
                             multi_select: false,
+                            permission: None,
                         }]);
                         tokio::select! {
                             _ = answer => {}

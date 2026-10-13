@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use cypher_proto::{AgentEvent, ToolCall, ToolDiff, UserInputQuestion};
+use cypher_proto::{AgentEvent, ToolCall, ToolDiff, ToolPermission, UserInputQuestion};
 
 /// Line cap for the tool-output SUMMARY persisted into the doc. Keeping a
 /// small number of complete lines makes the expandable detail useful without
@@ -193,6 +193,9 @@ pub enum MessagePart {
         /// Per-file diff stats (additive replacement for inline `diff`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff_stats: Option<Vec<ToolDiffStat>>,
+        /// How permission control treated the call (additive; Pi only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission: Option<ToolPermission>,
     },
     #[serde(rename_all = "camelCase")]
     Input {
@@ -239,6 +242,7 @@ impl MessagePart {
                 progress,
                 diff,
                 diff_stats,
+                permission,
                 ..
             } => {
                 serde_json::to_vec(call).map_or(0, |v| v.len())
@@ -250,6 +254,9 @@ impl MessagePart {
                     + diff_stats
                         .as_ref()
                         .map_or(0, |s| serde_json::to_vec(s).map_or(0, |v| v.len()))
+                    + permission
+                        .as_ref()
+                        .map_or(0, |p| serde_json::to_vec(p).map_or(0, |v| v.len()))
             }
             MessagePart::Input { questions, .. } => {
                 serde_json::to_vec(questions).map_or(0, |v| v.len())
@@ -328,6 +335,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     output_bytes: None,
                     diff_ref: None,
                     diff_stats: None,
+                    permission: None,
                 });
             }
         }
@@ -389,6 +397,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             is_error,
             output,
             diff,
+            permission,
         } => {
             for p in out.iter_mut() {
                 if let MessagePart::Tool {
@@ -400,12 +409,14 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     diff: diff_slot,
                     output_bytes,
                     diff_stats,
+                    permission: permission_slot,
                     ..
                 } = p
                     && pid == id
                 {
                     *e = *is_error;
                     *resolved = true;
+                    *permission_slot = permission.clone();
                     // Resolve clears the live tail: the transient progress
                     // column is a running-state artifact, gone the moment the
                     // tool settles (the chip collapses back to its plain

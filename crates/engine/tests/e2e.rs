@@ -37,6 +37,7 @@ fn asking_harness() -> common::TestHarness {
                 question: "Which one?".into(),
                 options: vec!["a".into(), "b".into()],
                 multi_select: false,
+                permission: None,
             }])
             .await
             .unwrap_or_default();
@@ -80,6 +81,7 @@ fn mock_script() -> Vec<AgentEvent> {
             is_error: false,
             output: None,
             diff: None,
+            permission: None,
         },
         done(DoneStatus::Completed),
     ]
@@ -1045,6 +1047,7 @@ async fn abandoned_question_is_withdrawn_mid_turn() {
                 question: "Which one?".into(),
                 options: vec!["a".into(), "b".into()],
                 multi_select: false,
+                permission: None,
             }]);
             let _ = tokio::time::timeout(Duration::from_millis(300), answer).await;
             let _ = tx
@@ -1292,6 +1295,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                         question: "Which one?".into(),
                         options: vec!["a".into(), "b".into()],
                         multi_select: false,
+                        permission: None,
                     }])
                     .await;
                     interrupt.cancelled().await;
@@ -1440,6 +1444,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                 question: "Which one?".into(),
                 options: vec!["a".into(), "b".into()],
                 multi_select: false,
+                permission: None,
             };
             // The pre-fix Claude/Codex shape: surface the question under
             // the harness's own id BEFORE asking through the bridge.
@@ -1880,6 +1885,7 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
             is_error: false,
             output: None,
             diff: None,
+            permission: None,
         },
         AgentEvent::TextDelta { text: "two".into() },
         done(DoneStatus::Completed),

@@ -17,11 +17,13 @@ fn bridge_ui_request(
     method: &str,
     payload: &Value,
 ) {
-    let title = payload
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("Agent question")
-        .to_owned();
+    // A permission prompt names itself in a last line the user never sees.
+    let (title, permission) = permission_prompt(
+        payload
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("Agent question"),
+    );
     // The RPC fallback used by pi-ask-user has two dialog stages for the
     // TUI's in-place "optional comment" mode: select first, then input with
     // the original prompt plus a `Selected option(s):` section. Preserve that
@@ -61,6 +63,7 @@ fn bridge_ui_request(
             _ => Vec::new(),
         },
         multi_select: false,
+        permission,
     };
     // Pi resolves a dialog with a `timeout` to its default on its own and
     // tells no one. Give up on the answer at the same moment: dropping the

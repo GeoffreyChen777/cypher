@@ -122,6 +122,7 @@ async fn subagent_status_updates_projection_without_polluting_run_state() {
             is_error: false,
             output: None,
             diff: None,
+            permission: None,
         })
         .unwrap();
     rig.feed

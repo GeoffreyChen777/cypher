@@ -88,6 +88,13 @@ icon_assets![
     (KEY_MINIMALISTIC, "key-minimalistic"),
     // Solar `shield-check` (Linear) — Settings → Permissions.
     (SHIELD_CHECK, "shield-check"),
+    // Permission states on a command's row, each the shield with its mark:
+    // Solar `shield-keyhole-minimalistic` (held by the sandbox) and
+    // `shield-cross` (refused), and `shield-out`, Solar's shield outline with
+    // an arrow leaving it (ran outside the sandbox), drawn in the same stroke.
+    (SHIELD_OUT, "shield-out"),
+    (SHIELD_KEYHOLE, "shield-keyhole"),
+    (SHIELD_CROSS, "shield-cross"),
     (KEYBOARD, "keyboard"),
     (ARROW_LEFT, "arrow-left"),
     (ARROW_RIGHT, "arrow-right"),

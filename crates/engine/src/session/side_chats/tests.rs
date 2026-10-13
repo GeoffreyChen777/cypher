@@ -177,6 +177,7 @@ fn transcript_context_serializes_safe_visible_content_only() {
                     output_bytes: Some(999_999),
                     diff_ref: None,
                     diff_stats: None,
+                    permission: None,
                 },
                 MessagePart::Error {
                     id: "t3".into(),
@@ -191,6 +192,7 @@ fn transcript_context_serializes_safe_visible_content_only() {
                         question: "which one?".into(),
                         options: vec![],
                         multi_select: false,
+                        permission: None,
                     }],
                     resolved: true,
                 },
