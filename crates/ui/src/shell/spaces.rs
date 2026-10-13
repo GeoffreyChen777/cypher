@@ -20,12 +20,14 @@ use gpui::FocusHandle;
 use std::collections::{HashMap, HashSet};
 
 mod add_space;
+mod card_plate;
 mod group_cards;
 mod groups;
 mod overlays;
 mod quick_chat;
 mod style_menu;
 
+pub(super) use card_plate::CardPlate;
 use groups::*;
 
 /// The add-space palette (a command-K surface, summoned by ⌘K): search bar

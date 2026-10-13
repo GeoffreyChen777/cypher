@@ -1207,6 +1207,8 @@ struct SidebarUi {
     /// handing the lift from it to `focused_card`.
     focus_from: Option<String>,
     focus_tween: Option<WidthTween>,
+    /// The one floating plate under the focused card, gliding between cards.
+    plate: spaces::CardPlate,
     /// Working marks and hover fades carried through the frames that replay
     /// the cached sidebar (see [`sidebar_pane`]).
     replay: sidebar_pane::SidebarReplay,
@@ -1613,6 +1615,7 @@ impl Shell {
                 focused_card: None,
                 focus_from: None,
                 focus_tween: None,
+                plate: Default::default(),
                 replay: sidebar_pane::SidebarReplay::default(),
                 time_input: None,
                 time_track: Default::default(),

@@ -118,8 +118,9 @@ impl Shell {
                 .collect()
         };
         // Only the project holding the selected session floats as a card; the
-        // rest are bare groups with the same layout. A focus move crossfades
-        // the card plate over — never on first paint.
+        // rest are bare groups with the same layout. A focus move glides the
+        // one card plate over ([`CardPlate`]) — never on first paint.
+        self.sidebar.plate.begin_render();
         let focused = selected.as_deref().and_then(|id| {
             cards
                 .iter()
@@ -131,9 +132,10 @@ impl Shell {
             if !self.sidebar.prev_order.is_empty() {
                 self.sidebar.focus_from = previous;
                 self.sidebar.focus_tween = Some(WidthTween::new(0.0, 1.0));
+                self.sidebar.plate.begin_glide();
             }
         }
-        let focus_t = self.eval_tween(self.sidebar.focus_tween, 1.0);
+        let focus_t = self.eval_tween_with(self.sidebar.focus_tween, 1.0, RESORT);
         cards
             .into_iter()
             .map(|card| {
@@ -183,9 +185,10 @@ impl Shell {
     }
 
     /// One project group (12px radius, clipped). Every project has the same
-    /// layout, and `lift` only adds the card plate: 1 is the opaque floating
-    /// card (`theme.surface`, subtle shadow + hairline ring) of the project
-    /// holding the selected session, 0 a bare group on the sidebar frost.
+    /// layout; the opaque floating plate (`theme.surface`, subtle shadow +
+    /// hairline ring) under the project holding the selected session is
+    /// painted by the list ([`CardPlate`]), so each card only records where
+    /// it sits. `lift` (1 focused, 0 bare) weights the header label.
     /// The header owns the prominent project label, a hover-revealed target
     /// machine and a presence dot. Real space headers host the rename/remove
     /// context menu on right-click; synthetic cards have no menu. Below the
@@ -290,12 +293,12 @@ impl Shell {
         };
         let has_body = !rows.is_empty();
         div()
+            .relative()
             .rounded(px(12.0))
-            .bg(theme.sidebar_card_fill(lift))
-            .shadow(theme.sidebar_card_shadows_at(lift))
             .overflow_hidden()
             .flex()
             .flex_col()
+            .child(self.sidebar.plate.probe(group.key.clone()))
             .child(header)
             .children(rows)
             .when(has_body, |el| el.pb(px(super::GROUP_CARD_BODY_PADDING)))

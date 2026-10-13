@@ -9,19 +9,29 @@ impl Shell {
     /// schedules the next animation frame. Finished, stale, absent, or under
     /// reduced motion: exactly `target`.
     pub(super) fn eval_tween(&self, tween: Option<WidthTween>, target: f32) -> f32 {
+        self.eval_tween_with(tween, target, RESIZE)
+    }
+
+    /// [`Self::eval_tween`] on another motion spec.
+    pub(super) fn eval_tween_with(
+        &self,
+        tween: Option<WidthTween>,
+        target: f32,
+        spec: MotionSpec,
+    ) -> f32 {
         let Some(WidthTween { from, to, started }) = tween else {
             return target;
         };
         if self.motion.reduced_motion {
             return target;
         }
-        let total = RESIZE.total();
+        let total = spec.total();
         let raw = started.elapsed().as_secs_f32() / total.as_secs_f32();
         if raw >= 1.0 {
             return target;
         }
         self.motion.active.set(true);
-        motion::lerp(from, to, RESIZE.progress(raw))
+        motion::lerp(from, to, spec.progress(raw))
     }
 
     /// Animated width container: tweens 200ms ease-out on collapse/expand, and
@@ -906,6 +916,12 @@ impl Shell {
             })
             .collect();
 
+        let plate = self.sidebar.plate.element(
+            self.sidebar.focused_card.clone(),
+            self.eval_tween_with(self.sidebar.focus_tween, 1.0, RESORT),
+            theme.clone(),
+        );
+
         let top_chrome = SIDEBAR_TITLEBAR_BAND + SIDEBAR_HEADER_HEIGHT;
         // Update strips — app-wide chrome, the main window's alone — sit
         // under the list with the sidebar's bottom gutter.
@@ -956,10 +972,14 @@ impl Shell {
                                     .pt(px(top_chrome + 4.0))
                                     .child(if !list_items.is_empty() {
                                         div()
+                                            .relative()
                                             .flex()
                                             .flex_col()
                                             .gap(px(GROUP_CARD_GAP))
                                             .pb(px(Theme::SPACE_SM))
+                                            // First, so it paints under every
+                                            // card after they all prepainted.
+                                            .child(plate)
                                             .children(list_items)
                                             .into_any_element()
                                     } else {
