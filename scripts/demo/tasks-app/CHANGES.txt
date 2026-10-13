@@ -1,0 +1,6 @@
+0.4.0
+- Store tasks as JSON instead of the old CSV format.
+- `tasks import` reads lists exported by tasks 0.3.
+
+0.3.0
+- First release.

@@ -20,12 +20,20 @@
 #   scripts/dev-demo.sh --diffs   # "Diff fences" under "Diff fence demo": an
 #                                 # answer with chat-style and git-patch
 #                                 # ```diff blocks
+#   scripts/dev-demo.sh --changes # turn changes: "Due dates for tasks" under
+#                                 # "Turn changes demo", four rounds on a small
+#                                 # Git project — each round's answer lists the
+#                                 # files it changed (added, modified, deleted,
+#                                 # renamed; one round with more files than the
+#                                 # card lists, one that changed nothing); click
+#                                 # a file for the round's diff
 #
-# The flags combine (--permissions or --diffs takes the place of the default
-# seed).
+# The flags combine (--permissions, --diffs or --changes takes the place of
+# the default seed).
 # Everything lives under /tmp/cypher-demo-* (--work: /tmp/cypher-demo-work-*,
 # --permissions: /tmp/cypher-demo-permissions-*, --diffs:
-# /tmp/cypher-demo-diffs-*); re-runs reuse it (delete
+# /tmp/cypher-demo-diffs-*, --changes: /tmp/cypher-demo-changes-*); re-runs
+# reuse it (delete
 # those directories to reseed). Quitting the app stops the engine.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -34,16 +42,18 @@ WORK=""
 DELAY=""
 PERMS=""
 DIFFS=""
+CHANGES=""
 for arg in "$@"; do
   case "$arg" in
     --work) WORK=1 ;;
     --slow) DELAY=350 ;;
     --permissions) PERMS=1 ;;
     --diffs) DIFFS=1 ;;
-    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs]' >&2; exit 2 ;;
+    --changes) CHANGES=1 ;;
+    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs] [--changes]' >&2; exit 2 ;;
   esac
 done
-DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}
+DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}${CHANGES:+-changes}
 DAEMON_DIR=$DEMO_DIR-daemon
 UI_DIR=$DEMO_DIR-ui
 
@@ -79,6 +89,23 @@ create_chat() { # id space title
 run_prompt() { # chat cwd [prompt] [what the agent receives, e.g. with a mock marker]
   local prompt="${3:-Walk me through the streaming pipeline}"
   probe QueueCommand "{\"chatId\":\"$1\",\"command\":{\"kind\":\"run\",\"messageId\":\"$(uuidgen)\",\"request\":{\"prompt\":\"$prompt\",\"model\":null,\"reasoning\":null,\"modelOptions\":{},\"cwd\":\"$2\",\"sandbox\":\"workspace-write\",\"autoApprove\":true,\"resume\":null}${4:+,\"agentPrompt\":\"$4\"}}}" >/dev/null
+}
+
+# Wait until `chat` has `n` settled answers and, with `recorded`, the last
+# one carries the round's changes (recorded just after the round settles).
+wait_round() { # chat n [recorded]
+  for _ in $(seq 1 120); do
+    probe WatchDocMessages "{\"chatId\":\"$1\"}" --stream 1 2>/dev/null | python3 -c '
+import json, sys
+n, recorded = int(sys.argv[1]), sys.argv[2] == "recorded"
+answers = [e for e in json.load(sys.stdin).get("reset", [])
+           if e["role"] == "assistant" and e.get("status") == "complete"]
+sys.exit(0 if len(answers) >= n and (not recorded or "turnChanges" in answers[-1]) else 1)
+' "$2" "${3:-}" && return 0
+    sleep 0.25
+  done
+  echo "round $2 of $1 did not settle" >&2
+  return 1
 }
 
 if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
@@ -118,6 +145,31 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
   ]
 }
 JSON
+  elif [[ -n "$CHANGES" ]]; then
+    # A small Python project as its own Git repository; the mock agent's
+    # [mock:changes:N] rounds edit it like a real agent's tools would.
+    project="$DEMO_DIR-projects/tasks-app"
+    rm -rf "$project"
+    mkdir -p "$project"
+    cp -R scripts/demo/tasks-app/. "$project/"
+    find "$project" -name __pycache__ -prune -exec rm -rf {} +
+    git -C "$project" init -q -b main
+    git -C "$project" add .
+    git -C "$project" -c user.name=Demo -c user.email=demo@example.com commit -q -m "tasks 0.4.0"
+    space=$(new_id) chat=$(new_id)
+    create_space "$space" "$project" '"name":"Turn changes demo","gitDetected":true'
+    create_chat "$chat" "$space" "Due dates for tasks"
+    prompts=(
+      "Add due dates to tasks: tasks add --due fri, and flag overdue ones in the list."
+      "Drop the legacy CSV importer, add tests for the due-date parser, and get the changelog ready for 0.5.0."
+      "Rename Task to Todo across the project."
+      "Anything else worth doing before the release?"
+    )
+    for n in 1 2 3 4; do
+      prompt="${prompts[$((n - 1))]}"
+      run_prompt "$chat" "$project" "$prompt" "$prompt [mock:changes:$n]"
+      wait_round "$chat" "$n" "$([[ $n -lt 4 ]] && echo recorded)"
+    done
   elif [[ -n "$DIFFS" ]]; then
     space=$(new_id) chat=$(new_id)
     create_space "$space" "$PWD" '"name":"Diff fence demo","gitDetected":true'

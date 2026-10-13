@@ -115,7 +115,9 @@ Tests per platform:
   calls), chats waiting on a permission card and on an ordinary question, and command
   rules in Settings → Permissions (the mock harness's `[mock:permissions]` and
   `[mock:permission-card]` markers); `--diffs` seeds an answer with chat-style and
-  git-patch ```` ```diff ```` fences (the `[mock:diffs]` marker).
+  git-patch ```` ```diff ```` fences (the `[mock:diffs]` marker); `--changes` seeds four
+  rounds on a small Git project (`scripts/demo/tasks-app`), each answer listing the files
+  its round changed (the `[mock:changes:N]` markers).
 - `scripts/dev-ios.sh` runs the iOS Dev bundle against a local Edge.
 - `dev` mode syncs through a local Edge: [Local Edge development](local-edge.md).
 - `scripts/e2e-smoke.sh` runs two headless engines against a local Edge.

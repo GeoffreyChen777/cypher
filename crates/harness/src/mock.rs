@@ -11,9 +11,11 @@ use cypher_proto::{
 
 use crate::{Harness, HarnessError, RunControls};
 
+mod changes;
 mod diffs;
 mod permissions;
 
+pub use changes::{MARKER as CHANGES_MARKER, ROUNDS as CHANGES_ROUNDS};
 pub use diffs::MARKER as DIFFS_MARKER;
 pub use permissions::{CARD_MARKER as PERMISSION_CARD_MARKER, STORY_MARKER as PERMISSIONS_MARKER};
 
@@ -252,6 +254,17 @@ impl Harness for MockHarness {
                 controls,
                 delay,
                 !story,
+            ));
+        }
+        // Turn changes demo ([`CHANGES_MARKER`]): round N edits the run's
+        // checkout between the script's opening and its Done.
+        if let Some(round) = changes::round_of(&request.prompt) {
+            return Ok(changes::run(
+                body[..lead].to_vec(),
+                tail.to_vec(),
+                std::path::PathBuf::from(&request.cwd),
+                round,
+                delay,
             ));
         }
         // Diff fence showcase ([`DIFFS_MARKER`]): its reply replaces the
