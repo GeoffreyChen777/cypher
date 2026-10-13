@@ -28,6 +28,7 @@ fn round_trip() {
         sidebar_sort: SidebarSort::Device,
         sidebar_device_filter: Some("dev-1".into()),
         sidebar_sort_reversed: true,
+        sidebar_active_within_mins: Some(24 * 60),
         workspace: Some(sample_workspace()),
         project_workspaces: HashMap::from([("space-1".to_string(), sample_workspace())]),
         session_docks: HashMap::from([(

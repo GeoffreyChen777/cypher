@@ -1086,7 +1086,7 @@ struct ShellMenus {
     chat: popover::Popup<(String, Point<Pixels>)>,
     /// Space-row context menu (dropdown rows): (space id, window position).
     space: popover::Popup<(String, Point<Pixels>)>,
-    /// Sidebar view menu (device filter + sort): window position.
+    /// Sidebar view menu (device + time filters, sort): window position.
     sidebar_view: popover::Popup<Point<Pixels>>,
     /// Project glyph/colour picker: (space id, window position).
     space_style: popover::Popup<(String, Point<Pixels>)>,
@@ -1210,6 +1210,16 @@ struct SidebarUi {
     /// Working marks and hover fades carried through the frames that replay
     /// the cached sidebar (see [`sidebar_pane`]).
     replay: sidebar_pane::SidebarReplay,
+    /// The view menu's typed "last active" window; dropped once the menu is
+    /// gone so its focus doesn't outlive it.
+    time_input: Option<(Entity<TextInput>, Subscription)>,
+    /// The view menu's last-active slider track, measured at paint (where a
+    /// click or drag lands on it).
+    time_track: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+    /// The slider's thumb is held (pressed or dragging): it swells into a
+    /// glass lens. The spring toward the new state starts from (value, at).
+    time_pressed: bool,
+    time_press: Option<(f32, std::time::Instant)>,
 }
 
 /// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`); see
@@ -1604,6 +1614,10 @@ impl Shell {
                 focus_from: None,
                 focus_tween: None,
                 replay: sidebar_pane::SidebarReplay::default(),
+                time_input: None,
+                time_track: Default::default(),
+                time_pressed: false,
+                time_press: None,
             },
             sidebar_pane,
             pulse_ticker,

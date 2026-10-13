@@ -386,10 +386,13 @@ impl Default for AppState {
     }
 }
 
-/// The sidebar view menu's state: device filter + card sort.
+/// The sidebar view menu's state: device + time filters and card sort.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SidebarView {
     pub device: Option<String>,
+    /// Only sessions active within this many minutes (live and pinned ones
+    /// stay); `None` keeps them all.
+    pub active_within_mins: Option<u32>,
     pub sort: SidebarSort,
     /// Flip the sort's natural direction (see
     /// [`SidebarSort::natural_descending`]).

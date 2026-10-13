@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 pub mod composer_defaults;
+pub mod sidebar_time;
 pub mod slash_commands;
 
 /// Sidebar drag-resize bounds (px).
@@ -108,6 +109,10 @@ pub struct UiSettings {
     /// Sidebar sort direction flipped from the sort's natural one (newest
     /// first for activity/date, A→Z for name/device).
     pub sidebar_sort_reversed: bool,
+    /// Sidebar time filter: only sessions active within this many minutes
+    /// ([`sidebar_time`]). `None` shows every session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_active_within_mins: Option<u32>,
     /// The main window's workspace layout (docs/design/workspace-layout.md,
     /// decision 1). Deserialization repairs it; the shell prunes tabs of
     /// chats that no longer exist once the first chats frame lands.
@@ -276,6 +281,7 @@ impl Default for UiSettings {
             sidebar_sort: SidebarSort::Activity,
             sidebar_device_filter: None,
             sidebar_sort_reversed: false,
+            sidebar_active_within_mins: None,
             workspace: None,
             project_workspaces: HashMap::new(),
             session_docks: HashMap::new(),
@@ -635,6 +641,7 @@ impl UiSettings {
             *dock = dock.clamped();
         }
         self.cap_session_docks();
+        self.sidebar_active_within_mins = sidebar_time::clamp(self.sidebar_active_within_mins);
         self
     }
 

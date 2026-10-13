@@ -205,10 +205,11 @@ impl AppState {
         self.sidebar_groups_with(now, &SidebarView::default())
     }
 
-    /// [`Self::sidebar_groups`] under the sidebar view menu's filter and
-    /// sort. The filter drops cards hosted elsewhere; the sort reorders
-    /// cards (and their sessions) with stable sorts so ties keep the
-    /// activity order, and pins always lead.
+    /// [`Self::sidebar_groups`] under the sidebar view menu's filters and
+    /// sort. The device filter drops cards hosted elsewhere; the time filter
+    /// drops sessions (then emptied cards) quiet for longer than its window;
+    /// the sort reorders cards (and their sessions) with stable sorts so ties
+    /// keep the activity order, and pins always lead.
     pub fn sidebar_groups_with(
         &self,
         now: DateTime<Utc>,
@@ -217,6 +218,25 @@ impl AppState {
         let mut groups = self.sidebar_groups_unsorted(now);
         if let Some(device) = view.device.as_deref() {
             groups.retain(|g| g.device_id == device);
+        }
+        if let Some(mins) = view.active_within_mins {
+            let cutoff = now - chrono::Duration::minutes(i64::from(mins));
+            for group in &mut groups {
+                group.chats.retain(|(status, chat)| {
+                    chat.pinned
+                        || matches!(
+                            status,
+                            ChatIndicator::Working | ChatIndicator::AwaitingInput
+                        )
+                        || chat.last_message_at.unwrap_or(chat.created_at) >= cutoff
+                });
+            }
+            // A card with nothing left goes too, unless it is a pinned or
+            // freshly added project (so a new project doesn't vanish).
+            groups.retain(|g| {
+                !g.chats.is_empty()
+                    || (g.kind == SidebarGroupKind::Space && (g.pinned || g.created_at >= cutoff))
+            });
         }
         merge_scratch_groups(&mut groups);
         match view.sort {

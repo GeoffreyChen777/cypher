@@ -384,6 +384,24 @@ pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
     from + (to - from) * t
 }
 
+/// A lightly underdamped spring from `from` to `to`, `elapsed` seconds in —
+/// the liquid-glass press pop: ~8% overshoot, settled in ~0.4s. Returns the
+/// value and whether it has settled (then exactly `to`). Pure; unlike the
+/// [`CubicBezier`] curves it may leave the `from..to` span, so clamp
+/// anything (alpha) that must stay in range.
+pub fn spring(from: f32, to: f32, elapsed: f32) -> (f32, bool) {
+    const OMEGA: f32 = 22.0;
+    const ZETA: f32 = 0.62;
+    let damped = OMEGA * (1.0 - ZETA * ZETA).sqrt();
+    let decay = (-ZETA * OMEGA * elapsed.max(0.0)).exp();
+    if decay < 0.003 {
+        return (to, true);
+    }
+    let phase = damped * elapsed.max(0.0);
+    let x = 1.0 - decay * (phase.cos() + ZETA * OMEGA / damped * phase.sin());
+    (lerp(from, to, x), false)
+}
+
 // ---------------------------------------------------------------------------
 // Hover color fades (CSS `transition-colors` parity)
 // ---------------------------------------------------------------------------
@@ -636,6 +654,17 @@ pub fn reduced_motion(cx: &App) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spring_starts_overshoots_a_little_and_settles() {
+        assert_eq!(super::spring(0.0, 1.0, 0.0), (0.0, false));
+        let peak = (0..400)
+            .map(|ms| super::spring(0.0, 1.0, ms as f32 / 1000.0).0)
+            .fold(0.0_f32, f32::max);
+        assert!(peak > 1.0 && peak < 1.12, "peak {peak}");
+        assert_eq!(super::spring(0.0, 1.0, 0.6), (1.0, true));
+        assert_eq!(super::spring(1.0, 0.0, 0.6), (0.0, true));
+    }
+
     #[test]
     fn eval_never_escapes_unit_interval_dense_sweep() {
         // Regression: f32 rounding produced 1.000000119 near the tail of

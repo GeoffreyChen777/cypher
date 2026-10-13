@@ -35,6 +35,19 @@ pub fn frosted(corner_radius: f32, blur_radius: f32, child: impl IntoElement) ->
     Frosted {
         corner_radius,
         blur_radius,
+        always: false,
+        child: child.into_any_element(),
+    }
+}
+
+/// [`frosted`] on every theme: a small glass element (a slider's lens)
+/// whose blur is part of its look, not a platform material. A zero radius
+/// paints `child` alone.
+pub fn frosted_always(corner_radius: f32, blur_radius: f32, child: impl IntoElement) -> Frosted {
+    Frosted {
+        corner_radius,
+        blur_radius,
+        always: true,
         child: child.into_any_element(),
     }
 }
@@ -42,6 +55,8 @@ pub fn frosted(corner_radius: f32, blur_radius: f32, child: impl IntoElement) ->
 pub struct Frosted {
     corner_radius: f32,
     blur_radius: f32,
+    /// Blur even off glass ([`frosted_always`]).
+    always: bool,
     child: AnyElement,
 }
 
@@ -89,7 +104,12 @@ impl Element for Frosted {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if Theme::of(cx).is_glass() {
+        let blur = if self.always {
+            self.blur_radius > 0.0
+        } else {
+            Theme::of(cx).is_glass()
+        };
+        if blur {
             window.paint_layer(bounds, |window| {
                 window.paint_backdrop_blur(
                     bounds,

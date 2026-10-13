@@ -1274,7 +1274,7 @@ fn sidebar_view_filters_by_device_and_sorts_with_pins_first() {
     let view = |sort: SidebarSort, device: Option<&str>| SidebarView {
         sort,
         device: device.map(str::to_string),
-        reversed: false,
+        ..SidebarView::default()
     };
     assert_eq!(
         keys(&state, &view(SidebarSort::Activity, None)),
@@ -1301,8 +1301,8 @@ fn sidebar_view_filters_by_device_and_sorts_with_pins_first() {
     // Reversed: Z→A, and the pin still leads afterwards.
     let reversed = SidebarView {
         sort: SidebarSort::Name,
-        device: None,
         reversed: true,
+        ..SidebarView::default()
     };
     assert!(reversed.descending());
     assert!(!view(SidebarSort::Name, None).descending());
@@ -1318,6 +1318,91 @@ fn sidebar_view_filters_by_device_and_sorts_with_pins_first() {
     assert_eq!(
         keys(&state, &view(SidebarSort::Name, None)),
         ["s:s-zeta", "s:s-alpha", "s:s-mid"]
+    );
+}
+
+#[test]
+fn sidebar_time_filter_keeps_recent_live_and_pinned() {
+    let mut state = AppState::new();
+    state.devices = vec![device("dev-a", "Mac")];
+    // `now` is two days after the fixtures' base time (minute 0).
+    let now = chat("base", 0, None).created_at + TimeDelta::minutes(48 * 60);
+    let recent = 48 * 60 - 60;
+    let mut pinned_project = space("s-pin", "dev-a", "/pin", 0);
+    pinned_project.pinned = true;
+    state.apply_spaces(vec![
+        space("s-mixed", "dev-a", "/mixed", 0),
+        space("s-live", "dev-a", "/live", 0),
+        space("s-stale", "dev-a", "/stale", 0),
+        space("s-quiet", "dev-a", "/quiet", 0),
+        space("s-new", "dev-a", "/new", recent),
+        pinned_project,
+    ]);
+    let in_space = |mut row: Chat, space: &str| {
+        row.space_id = Some(space.into());
+        row
+    };
+    let mut pinned = in_space(chat("pinned", 0, Some(0)), "s-stale");
+    pinned.pinned = true;
+    let mut loose = chat("loose", 0, Some(0));
+    loose.space_id = None;
+    state.apply_chats(vec![
+        in_space(chat("fresh", 0, Some(recent)), "s-mixed"),
+        in_space(chat("old", 0, Some(0)), "s-mixed"),
+        in_space(chat("running", 0, Some(0)), "s-live"),
+        pinned,
+        in_space(chat("gone", 0, Some(0)), "s-stale"),
+        in_space(chat("forgotten", 0, Some(0)), "s-pin"),
+        loose,
+    ]);
+    state.apply_sessions(vec![session("running", SessionStatus::Working, 5, now)]);
+    let cards = |active_within_mins: Option<u32>| -> Vec<(String, Vec<String>)> {
+        let view = SidebarView {
+            active_within_mins,
+            ..SidebarView::default()
+        };
+        let mut cards: Vec<_> = state
+            .sidebar_groups_with(now, &view)
+            .iter()
+            .map(|g| {
+                let ids = g.chats.iter().map(|(_, c)| c.id.clone()).collect();
+                (g.key.clone(), ids)
+            })
+            .collect();
+        cards.sort();
+        cards
+    };
+    let card = |key: &str, ids: &[&str]| {
+        (
+            key.to_string(),
+            ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+        )
+    };
+    // Old sessions go; a live or pinned one stays; emptied cards go unless
+    // the project is pinned or was added within the window.
+    assert_eq!(
+        cards(Some(24 * 60)),
+        [
+            card("s:s-live", &["running"]),
+            card("s:s-mixed", &["fresh"]),
+            card("s:s-new", &[]),
+            card("s:s-pin", &[]),
+            card("s:s-stale", &["pinned"]),
+        ]
+    );
+    // Everything here is under two days old.
+    assert_eq!(cards(None).len(), 7);
+    assert_eq!(cards(Some(30 * 24 * 60)), cards(None));
+    // The cutoff is exact to the minute: the fresh session is 60 minutes old.
+    assert!(
+        cards(Some(59))
+            .iter()
+            .all(|(_, ids)| !ids.contains(&"fresh".to_string()))
+    );
+    assert!(
+        cards(Some(60))
+            .iter()
+            .any(|(_, ids)| ids.contains(&"fresh".to_string()))
     );
 }
 

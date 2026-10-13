@@ -811,6 +811,41 @@ impl Shell {
         )
     }
 
+    /// The sidebar list's empty state. Under a time filter it says so and
+    /// offers the way back to every session.
+    fn render_sidebar_empty(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let within = self.settings.sidebar_active_within_mins;
+        let empty = div()
+            .px(px(Theme::SPACE_SM))
+            .pb(px(Theme::SPACE_SM))
+            .text_size(px(12.0))
+            .text_color(theme.text_faint);
+        let Some(mins) = within else {
+            return empty
+                .child(SharedString::from("No projects yet"))
+                .into_any_element();
+        };
+        empty
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(SharedString::from(format!(
+                "No sessions active in the last {}",
+                crate::prefs::sidebar_time::format(Some(mins))
+            )))
+            .child(
+                div()
+                    .id("sidebar-empty-show-all")
+                    .cursor_pointer()
+                    .text_color(theme.accent)
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.set_sidebar_active_within(None, cx)),
+                    )
+                    .child(SharedString::from("Show all sessions")),
+            )
+            .into_any_element()
+    }
+
     /// Chat-mode sidebar: project-grouped session cards (every host
     /// together) under the top chrome ([`Self::render_sidebar_top_chrome`]),
     /// then the update and notice strips.
@@ -928,13 +963,7 @@ impl Shell {
                                             .children(list_items)
                                             .into_any_element()
                                     } else {
-                                        div()
-                                            .px(px(Theme::SPACE_SM))
-                                            .pb(px(Theme::SPACE_SM))
-                                            .text_size(px(12.0))
-                                            .text_color(theme.text_faint)
-                                            .child(SharedString::from("No projects yet"))
-                                            .into_any_element()
+                                        self.render_sidebar_empty(theme, cx)
                                     }),
                             ),
                     )),

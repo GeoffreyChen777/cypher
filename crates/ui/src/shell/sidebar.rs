@@ -2,6 +2,18 @@
 //! account actions behind the user menu (sign in/out, the sync switch).
 
 use super::*;
+use crate::prefs::sidebar_time;
+use gpui::{Hsla, relative};
+
+/// Drag marker for the view menu's last-active slider.
+struct SidebarTimeDrag;
+
+/// The time field's text for a window: empty (the "All" placeholder) when
+/// there is none.
+fn time_field_text(mins: Option<u32>) -> String {
+    mins.map(|m| sidebar_time::format(Some(m)))
+        .unwrap_or_default()
+}
 
 impl Shell {
     /// Fire a Mutate op; failures surface in the sidebar notice strip.
@@ -97,6 +109,7 @@ impl Shell {
                 .sidebar_device_filter
                 .clone()
                 .filter(|_| !self.is_project_window()),
+            active_within_mins: self.settings.sidebar_active_within_mins,
             sort: self.settings.sidebar_sort,
             reversed: self.settings.sidebar_sort_reversed,
         }
@@ -136,15 +149,391 @@ impl Shell {
         cx.notify();
     }
 
+    /// The last-active window (minutes; `None` = all). The menu stays open:
+    /// the slider and the field adjust it live.
+    pub(super) fn set_sidebar_active_within(&mut self, mins: Option<u32>, cx: &mut Context<Self>) {
+        let mins = sidebar_time::clamp(mins);
+        if self.settings.sidebar_active_within_mins != mins {
+            self.settings.sidebar_active_within_mins = mins;
+            self.schedule_save(cx);
+        }
+        cx.notify();
+    }
+
+    /// Open the view menu at `position`, its time field showing the current
+    /// window.
+    pub(super) fn open_sidebar_view_menu(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_space_menu(cx);
+        let input = self.sidebar_time_input(cx);
+        let text = time_field_text(self.settings.sidebar_active_within_mins);
+        input.update(cx, |input, cx| input.set_text(text, cx));
+        self.menus.sidebar_view.open(position);
+        cx.notify();
+    }
+
+    /// The view menu's time field: every readable edit applies live; Enter
+    /// tidies the text to its canonical form and closes the menu.
+    fn sidebar_time_input(&mut self, cx: &mut Context<Self>) -> Entity<TextInput> {
+        if let Some((input, _)) = &self.sidebar.time_input {
+            return input.clone();
+        }
+        let input = cx.new(|cx| TextInput::new("All", cx));
+        let events = cx.subscribe(&input, |this: &mut Shell, input, event, cx| match event {
+            TextInputEvent::Edited => {
+                if let Some(mins) = sidebar_time::parse(input.read(cx).text()) {
+                    this.set_sidebar_active_within(mins, cx);
+                }
+            }
+            TextInputEvent::Submitted => {
+                let text = time_field_text(this.settings.sidebar_active_within_mins);
+                input.update(cx, |input, cx| input.set_text(text, cx));
+                this.close_sidebar_view_menu(cx);
+            }
+            _ => {}
+        });
+        self.sidebar.time_input = Some((input.clone(), events));
+        input
+    }
+
+    /// A press or drag at window x on the slider: snap to the nearest stop
+    /// and mirror it into the field.
+    fn sample_sidebar_time_slider(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        let Some(track) = self.sidebar.time_track.get() else {
+            return;
+        };
+        let width = f32::from(track.size.width);
+        if width <= 0.0 {
+            return;
+        }
+        let mins = sidebar_time::from_slider(f32::from(x - track.left()) / width);
+        if mins == self.settings.sidebar_active_within_mins {
+            return;
+        }
+        self.set_sidebar_active_within(mins, cx);
+        if let Some((input, _)) = &self.sidebar.time_input {
+            input.update(cx, |input, cx| input.set_text(time_field_text(mins), cx));
+        }
+    }
+
+    /// The slider thumb's press state, 0 (resting capsule) → 1 (glass
+    /// lens), on a spring — it overshoots a little either way.
+    fn sidebar_time_press(&self) -> f32 {
+        let target = if self.sidebar.time_pressed { 1.0 } else { 0.0 };
+        let Some((from, at)) = self.sidebar.time_press else {
+            return target;
+        };
+        if self.motion.reduced_motion {
+            return target;
+        }
+        let (value, settled) = motion::spring(from, target, at.elapsed().as_secs_f32());
+        if !settled {
+            self.motion.active.set(true);
+        }
+        value
+    }
+
+    fn set_sidebar_time_pressed(&mut self, pressed: bool, cx: &mut Context<Self>) {
+        if self.sidebar.time_pressed == pressed {
+            return;
+        }
+        let from = self.sidebar_time_press();
+        self.sidebar.time_pressed = pressed;
+        self.sidebar.time_press = Some((from, std::time::Instant::now()));
+        cx.notify();
+    }
+
+    /// The last-active slider, after the macOS 26 (Liquid Glass) slider: a
+    /// rounded rail filled up to the thumb, one dot per stop beneath it, and
+    /// scale labels under those. At rest the thumb is a white capsule; held,
+    /// it springs into a clear glass lens that magnifies the rail and dots
+    /// beneath it. Click jumps, drag scrubs (tracking past either end).
+    fn render_sidebar_time_slider(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        /// The track box: tall enough for the swollen lens.
+        const TRACK_H: f32 = 24.0;
+        const RAIL: f32 = 5.0;
+        /// Dot centers sit this far below the rail's center line.
+        const DOT_DROP: f32 = 8.0;
+        const DOT: f32 = 2.0;
+        /// Thumb size at rest and held.
+        const REST: (f32, f32) = (22.0, 14.0);
+        const HELD: (f32, f32) = (36.0, 24.0);
+        /// The lens's magnification of what it covers.
+        const ZOOM: f32 = 1.45;
+        /// Backdrop blur under the held lens (frosts the rail it covers).
+        const BLUR: f32 = 2.5;
+        let mid = TRACK_H / 2.0;
+        let position = sidebar_time::slider_position(self.settings.sidebar_active_within_mins);
+        let press = self.sidebar_time_press();
+        let glass = press.clamp(0.0, 1.0);
+        let measure = self.sidebar.time_track.clone();
+        let track_w = self
+            .sidebar
+            .time_track
+            .get()
+            .map_or(0.0, |b| f32::from(b.size.width));
+        let fill = theme.text_faint;
+        let rail = theme.hairline(0.10);
+        let dot = theme.hairline(0.28);
+        let positions = sidebar_time::STOPS.len() + 1;
+        let stop_at = |ix: usize| ix as f32 / (positions - 1) as f32;
+
+        let dots = (0..positions).map(|ix| {
+            div()
+                .absolute()
+                .top(px(mid + DOT_DROP - DOT / 2.0))
+                .left(relative(stop_at(ix)))
+                .ml(px(-DOT / 2.0))
+                .size(px(DOT))
+                .rounded_full()
+                .bg(dot)
+        });
+
+        // The thumb: capsule → lens. Sizes ride the spring (and its
+        // overshoot); colours and the lens contents blend on the clamped
+        // value.
+        let w = motion::lerp(REST.0, HELD.0, press);
+        let h = motion::lerp(REST.1, HELD.1, press);
+        let dark = theme.appearance.is_dark();
+        let capsule = if dark {
+            gpui::hsla(0.0, 0.0, 0.92, 1.0)
+        } else {
+            gpui::white()
+        };
+        // The lens is mostly clear: a thin veil of the menu surface hides the
+        // unmagnified rail beneath, so only the magnified copy reads.
+        let veil = theme
+            .surface_overlay
+            .opacity(if dark { 0.55 } else { 0.62 });
+        let body = motion::mix(capsule, veil, glass);
+        let shadow = |alpha: f32, y: f32, blur: f32| gpui::BoxShadow {
+            color: gpui::black().opacity(alpha),
+            offset: gpui::point(px(0.0), px(y)),
+            blur_radius: px(blur),
+            spread_radius: px(0.0),
+            inset: false,
+        };
+        let inner = |color: Hsla, x: f32, y: f32, blur: f32| gpui::BoxShadow {
+            color,
+            offset: gpui::point(px(x), px(y)),
+            blur_radius: px(blur),
+            spread_radius: px(0.0),
+            inset: true,
+        };
+        let shadows = vec![
+            // Rest: a crisp contact shadow under the capsule.
+            shadow(0.22 * (1.0 - glass), 0.5, 1.5),
+            shadow(0.10 * (1.0 - glass), 1.0, 4.0),
+            // Held: the lens floats — a wider, softer drop.
+            shadow(0.16 * glass, 3.0, 10.0),
+        ];
+
+        // Inside the lens: the rail and dots around the thumb's centre,
+        // magnified about it. Track point (x, y) lands at lens
+        // ((x - centre) * zoom + w/2, (y - mid) * zoom + h/2).
+        let zoom = motion::lerp(1.0, ZOOM, glass);
+        let centre = position * track_w;
+        let to_lens = |x: f32| (x - centre) * zoom + w / 2.0;
+        let band = |from: f32, to: f32, color: Hsla| {
+            div()
+                .absolute()
+                .left(px(to_lens(from)))
+                .w(px((to - from) * zoom))
+                .top(px(h / 2.0 - RAIL * zoom / 2.0))
+                .h(px(RAIL * zoom))
+                .rounded_full()
+                .bg(color)
+        };
+        let radius = h / 2.0;
+        let dot_y = DOT_DROP * zoom;
+        // A dot only shows where the capsule outline covers it (the clip is
+        // rectangular; the lens is not).
+        let inset_at_dot = radius - (radius * radius - dot_y * dot_y).max(0.0).sqrt();
+        let lens_dots = (0..positions).filter_map(|ix| {
+            let x = to_lens(stop_at(ix) * track_w);
+            let size = DOT * zoom;
+            (x - size / 2.0 >= inset_at_dot && x + size / 2.0 <= w - inset_at_dot).then(|| {
+                div()
+                    .absolute()
+                    .left(px(x - size / 2.0))
+                    .top(px(h / 2.0 + dot_y - size / 2.0))
+                    .size(px(size))
+                    .rounded_full()
+                    .bg(dot)
+            })
+        });
+        let lens = div()
+            .absolute()
+            .inset_0()
+            .opacity(glass)
+            .child(band(0.0, track_w, rail))
+            .child(band(0.0, centre, fill))
+            .children(lens_dots);
+        // Over the blur: the rim and the sheen stay crisp.
+        let rim = div()
+            .absolute()
+            .inset_0()
+            .rounded_full()
+            .border_1()
+            .border_color(motion::mix(
+                theme.hairline(0.12),
+                gpui::white().opacity(if dark { 0.35 } else { 0.85 }),
+                glass,
+            ))
+            .shadow(vec![
+                // Light caught on the upper edge, a refraction shade on the
+                // lower one, and a soft inner glow.
+                inner(gpui::white().opacity(0.95 * glass), 0.0, 1.0, 1.5),
+                inner(gpui::black().opacity(0.10 * glass), 0.0, -1.0, 2.0),
+                inner(gpui::white().opacity(0.55 * glass), 0.0, 0.0, 4.0),
+            ])
+            .when(glass > 0.0, |el| {
+                el.child(div().absolute().inset_0().rounded_full().opacity(glass).bg(
+                    gpui::linear_gradient(
+                        180.0,
+                        gpui::linear_color_stop(gpui::white().opacity(0.35), 0.0),
+                        gpui::linear_color_stop(gpui::white().opacity(0.0), 0.55),
+                    ),
+                ))
+            });
+        // Paint order: body, magnified rail, then the blur over both (and
+        // the real rail beneath), then the rim on top.
+        let thumb = div()
+            .absolute()
+            .top(px(mid - h / 2.0))
+            .left(relative(position))
+            .ml(px(-w / 2.0))
+            .w(px(w))
+            .h(px(h))
+            .rounded_full()
+            .overflow_hidden()
+            .shadow(shadows)
+            .child(div().absolute().inset_0().rounded_full().bg(body))
+            .when(glass > 0.0, |el| el.child(lens))
+            .child(crate::kit::frost::frosted_always(
+                h / 2.0,
+                BLUR * glass,
+                rim,
+            ));
+
+        let track = div()
+            .relative()
+            .w_full()
+            .h(px(TRACK_H))
+            .child(
+                gpui::canvas(
+                    move |bounds, _, _| measure.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(mid - RAIL / 2.0))
+                    .h(px(RAIL))
+                    .rounded_full()
+                    .bg(rail),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(mid - RAIL / 2.0))
+                    .w(relative(position))
+                    .h(px(RAIL))
+                    .rounded_full()
+                    .bg(fill),
+            )
+            .children(dots)
+            .child(thumb);
+        let label = |text: &'static str, at: f32| {
+            div()
+                .absolute()
+                .top_0()
+                .left(relative(at))
+                .ml(px(-14.0))
+                .w(px(28.0))
+                .flex()
+                .justify_center()
+                .child(SharedString::from(text))
+        };
+        let scale = |stop: usize| sidebar_time::slider_position(Some(sidebar_time::STOPS[stop]));
+        div()
+            .id("sidebar-view-time-slider")
+            .flex_1()
+            .min_w_0()
+            .px(px(REST.0 / 2.0))
+            .cursor_pointer()
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.set_sidebar_time_pressed(true, cx);
+                    this.sample_sidebar_time_slider(event.position.x, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.set_sidebar_time_pressed(false, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.set_sidebar_time_pressed(false, cx)),
+            )
+            .on_drag(SidebarTimeDrag, |_, _, _, cx| cx.new(|_| DragGhost))
+            .on_drag_move(cx.listener(
+                |this, event: &gpui::DragMoveEvent<SidebarTimeDrag>, _, cx| {
+                    this.sample_sidebar_time_slider(event.event.position.x, cx);
+                },
+            ))
+            // A release the up listeners missed (the drag machinery can eat
+            // it): the next move with the button up lets go.
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                if this.sidebar.time_pressed && event.pressed_button != Some(MouseButton::Left) {
+                    this.set_sidebar_time_pressed(false, cx);
+                }
+            }))
+            .child(track)
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(12.0))
+                    .text_size(px(10.0))
+                    .text_color(theme.text_faint)
+                    .child(label("1h", scale(0)))
+                    .child(label("12h", scale(4)))
+                    .child(label("7d", scale(8)))
+                    .child(label("All", 1.0)),
+            )
+            .into_any_element()
+    }
+
     /// The sidebar view menu: a Devices section (All devices + one row per
-    /// device, this device first) and a Sort section, each with a check on
-    /// the current choice.
+    /// device, this device first), a Last active section (slider + typed
+    /// window) and Sort / Order sections, each with a check on the current
+    /// choice.
     pub(super) fn render_sidebar_view_menu(
         &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let position = *self.menus.sidebar_view.get()?;
+        let Some(&position) = self.menus.sidebar_view.get() else {
+            // Gone (closed and reaped): its field's focus goes with it.
+            self.sidebar.time_input = None;
+            self.sidebar.time_pressed = false;
+            self.sidebar.time_press = None;
+            return None;
+        };
         let closing = self.menus.sidebar_view.closing_since();
         let (filter, sort) = (
             self.settings.sidebar_device_filter.clone(),
@@ -170,7 +559,7 @@ impl Shell {
             })
         };
         let mut menu = popover::popover_card(theme)
-            .w(px(200.0))
+            .w(px(236.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.close_sidebar_view_menu(cx);
             }))
@@ -205,6 +594,41 @@ impl Shell {
                     ),
             );
         }
+        menu = menu
+            .child(popover::menu_separator())
+            .child(popover::menu_heading(theme, "Last active"));
+        let input = self.sidebar_time_input(cx);
+        let readable = sidebar_time::parse(input.read(cx).text()).is_some();
+        let slider = self.render_sidebar_time_slider(theme, cx);
+        menu = menu.child(
+            div()
+                .px(px(8.0))
+                .pb(px(6.0))
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(10.0))
+                .child(slider)
+                .child(
+                    div()
+                        .id("sidebar-view-time-field")
+                        .flex_none()
+                        .w(px(64.0))
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(if readable {
+                            theme.hairline(0.10)
+                        } else {
+                            theme.danger
+                        })
+                        .bg(theme.ink(0.04))
+                        .text_size(px(12.0))
+                        .cursor_text()
+                        .child(input),
+                ),
+        );
         menu = menu
             .child(popover::menu_separator())
             .child(popover::menu_heading(theme, "Sort by"));

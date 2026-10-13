@@ -277,9 +277,11 @@ impl Shell {
                     .size(px(14.0))
                     .text_color(tint("sidebar-add-project")),
             );
-        // View menu: filter the cards by device and pick their sort. Tinted
-        // while a non-default view is active so the narrowed list is obvious.
+        // View menu: filter the cards by device and time, and pick their
+        // sort. Tinted while a non-default view is active so the narrowed
+        // list is obvious.
         let view_active = self.settings.sidebar_device_filter.is_some()
+            || self.settings.sidebar_active_within_mins.is_some()
             || self.settings.sidebar_sort != crate::prefs::SidebarSort::Activity
             || self.settings.sidebar_sort_reversed;
         let view_tint = if view_active {
@@ -306,9 +308,7 @@ impl Shell {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    this.close_space_menu(cx);
-                    this.menus.sidebar_view.open(event.position);
-                    cx.notify();
+                    this.open_sidebar_view_menu(event.position, cx);
                 }),
             )
             // gpui SVGs take no colour from their parent: tint the glyph itself.
