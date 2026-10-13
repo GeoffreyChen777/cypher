@@ -212,6 +212,47 @@ struct UserInputQuestion: Hashable, Codable {
     /// options to show and an unresolved request crashed the app.
     var options: [String]
     var multiSelect: Bool?
+    /// Set when this is a permission prompt, not a question the agent asks
+    /// (proto agent.rs `PermissionPrompt`): shown as an approval, and filed
+    /// under the tool call it gates once answered.
+    var permission: PermissionPrompt?
+}
+
+/// proto agent.rs `PermissionPrompt`: what a permission prompt is about.
+struct PermissionPrompt: Hashable, Codable {
+    /// `escalate` (run a command outside the sandbox), `access` (a file
+    /// tool past the defaults), `network`, `tool`.
+    var kind: String
+    /// The tool call waiting on the answer.
+    var toolCallId: String?
+}
+
+/// proto agent.rs `ToolPermission`: how permission control treated one tool
+/// call — the badge on its row.
+struct ToolPermission: Hashable, Codable {
+    enum Outcome: String, Codable {
+        /// Ran outside the sandbox.
+        case outside
+        /// Ran in the sandbox, which withheld something it needed.
+        case blocked
+        /// Refused; it did not run.
+        case denied
+        /// A file tool's access was approved.
+        case allowed
+    }
+
+    enum Scope: String, Codable {
+        case once, chat, always
+        /// An earlier grant or rule; nobody was asked.
+        case rule
+    }
+
+    var outcome: Outcome
+    var scope: Scope?
+    /// The command rule that let it run outside, as people read it.
+    var rule: String?
+    /// What the agent said the command was for.
+    var purpose: String?
 }
 
 struct UserInputAnswer: Hashable, Codable {
@@ -228,6 +269,9 @@ struct RenderToolCall: Hashable, @unchecked Sendable {
     var fields: [String: AnyHashable]
     var subagent: SubagentCallMetadata? = nil
     var progress: String? = nil
+    /// How permission control treated the call (the part's `permission`).
+    /// Not part of the call; it rides here so every tool part keeps one shape.
+    var permission: ToolPermission? = nil
 
     var string: (String) -> String? { { key in self.fields[key] as? String } }
 }

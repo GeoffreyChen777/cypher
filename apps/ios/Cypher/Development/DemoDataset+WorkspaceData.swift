@@ -163,4 +163,17 @@ extension DemoDataset: WorkspaceData {
     func piModels(deviceId: String) async throws -> [ModelInfo] {
         HarnessCatalog.demoModels
     }
+
+    func permissionSettings(deviceId: String) async throws -> PermissionSnapshot {
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        return PermissionSnapshot(
+            settings: demoPermissionSettings,
+            status: .init(installed: true, sandboxAvailable: true, implementation: "seatbelt", error: nil),
+            unreadable: false)
+    }
+
+    func savePermissionSettings(deviceId: String, settings: PermissionSettings) async throws -> PermissionSnapshot {
+        demoPermissionSettings = settings
+        return try await permissionSettings(deviceId: deviceId)
+    }
 }

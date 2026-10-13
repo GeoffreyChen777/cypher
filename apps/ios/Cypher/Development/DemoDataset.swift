@@ -13,6 +13,48 @@ final class DemoDataset {
     var spaces: [Space]
     var chats: [Chat]
     var sessions: [String: SessionRow]
+    /// Settings → Permissions in demo mode: on, with command rules of each kind.
+    var demoPermissionSettings = PermissionSettings(raw: [
+        "enabled": .bool(true),
+        "approval": .object([
+            "escalate": .string("ask"), "externalWrite": .string("assisted"),
+            "protectedWrite": .string("assisted"), "sensitiveRead": .string("ask"),
+            "sensitiveWrite": .string("ask"), "network": .string("assisted"), "tools": .string("ask"),
+        ]),
+        "judgeModel": .string(""),
+        "toolsDefault": .string("allow"),
+        "toolOverrides": .object([:]),
+        "sensitive": .array([.string("**/secrets.yaml")]),
+        "protected": .array([]),
+        "writableSupport": .array([]),
+        "localBinding": .bool(true),
+        "unixSockets": .array([]),
+        "networkMode": .string("open"),
+        "allowDomains": .array([]),
+        "rules": .array([
+            .object(["capability": .string("write"), "path": .string("/Users/demo/Developer/shared")]),
+            .object(["capability": .string("read"), "path": .string("tool:mcp__github__create_issue")]),
+        ]),
+        "commands": .array([
+            .object([
+                "match": .array([.string("ssh"), .string("deploy@web"), .string("**")]),
+                "decision": .string("allow"), "label": .string("Check the app on the server web"),
+            ]),
+            .object([
+                "match": .array([.string("./scripts/deploy.sh"), .string("**")]),
+                "decision": .string("allow"), "label": .string("Deploy the web app"),
+                "sha256": .string(String(repeating: "a", count: 64)),
+            ]),
+            .object([
+                "match": .array([.string("git"), .string("push"), .string("**"), .string("--force"), .string("**")]),
+                "decision": .string("ask"), "label": .string("Force-push"),
+            ]),
+            .object([
+                "match": .array([.string("kubectl"), .string("delete"), .string("**")]),
+                "decision": .string("deny"),
+            ]),
+        ]),
+    ])
     private var stores: [String: SessionStore] = [:]
     private var streamTask: Task<Void, Never>?
 
@@ -143,8 +185,34 @@ final class DemoDataset {
                 startedAt: now - 50_000, updatedAt: now - 5_000, endedAt: now - 5_000,
                 childChatId: reviewer.id),
         ]
+        // Permission control: a settled deploy with every kind of permission
+        // row (at Full access, so the composer shows the amber shield), and a
+        // chat waiting on a "Run this command outside the sandbox?" card.
+        let webapp = Space(
+            id: "space-webapp", deviceId: "dev-mac",
+            path: "/Users/dev/webapp", name: nil, gitDetected: true,
+            gitCheckedAt: now, checkoutId: nil, createdAt: now - 86_400_000 * 2)
+        var fullAccess = claude
+        fullAccess.sandbox = "danger-full-access"
+        chats += [
+            Chat(
+                id: "chat-permissions-story", deviceId: "dev-mac", title: "Deploy the web app",
+                archived: false, cwd: webapp.path, branch: "main", checkoutId: nil,
+                config: fullAccess, lastMessagePreview: "Done: the app on web is running again.",
+                lastMessageAt: now - 300_000, createdAt: now - 900_000,
+                spaceId: webapp.id, lastSeenAt: now - 300_000),
+            Chat(
+                id: "chat-permissions-card", deviceId: "dev-mac", title: "Is the app on web healthy?",
+                archived: false, cwd: webapp.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "Let me check the app on web.",
+                lastMessageAt: now - 60_000, createdAt: now - 120_000,
+                spaceId: webapp.id, lastSeenAt: now - 100_000),
+        ]
+        sessions["chat-permissions-card"] = SessionRow(
+            chatId: "chat-permissions-card", deviceId: "dev-mac",
+            status: .awaitingInput, startedAt: now - 70_000, updatedAt: now - 60_000)
         return DemoDataset(
-            devices: [mac, vps], spaces: [cypher, edge],
+            devices: [mac, vps], spaces: [cypher, edge, webapp],
             chats: chats, sessions: sessions)
     }
 
@@ -598,9 +666,156 @@ final class DemoDataset {
                         ),
                     ], createdAt: now - 86_400_000, deviceId: "dev-vps", status: .complete, continuationOf: nil),
             ]
+        case "chat-permissions-story":
+            return permissionStory(now: now)
+        case "chat-permissions-card":
+            return permissionCard(now: now)
         default:
             return []  // freshly minted chats start empty
         }
+    }
+
+    // MARK: Permission control (the mock harness's [mock:permissions] story)
+
+    private static func command(
+        _ id: String, _ command: String, _ outcome: ToolPermission.Outcome?,
+        scope: ToolPermission.Scope? = nil, rule: String? = nil, purpose: String? = nil
+    ) -> MessagePart {
+        .tool(
+            id: id,
+            call: RenderToolCall(
+                tag: "exec", fields: ["command": command],
+                permission: outcome.map { ToolPermission(outcome: $0, scope: scope, rule: rule, purpose: purpose) }),
+            isError: outcome == .blocked || outcome == .denied, resolved: true)
+    }
+
+    private static func prompt(
+        _ id: String, _ title: String, options: [String], kind: String?, call: String?, resolved: Bool = true
+    ) -> MessagePart {
+        .input(
+            id: "in-\(id)", requestId: id,
+            questions: [
+                UserInputQuestion(
+                    id: id, header: title, question: title, options: options,
+                    permission: kind.map { PermissionPrompt(kind: $0, toolCallId: call) })
+            ],
+            resolved: resolved)
+    }
+
+    private static let escalateOptions = ["Run once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"]
+    private static let accessOptions = ["Allow once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"]
+    private static let sshStatus = "ssh deploy@web 'systemctl status app --no-pager'"
+    private static let push = "git push --force origin release/0.3.49"
+
+    private static func escalateTitle(_ command: String, purpose: String, pattern: String, reason: String) -> String {
+        """
+        Run this command outside the sandbox?
+
+        Context:
+        Purpose: \(purpose)
+        Command: \(command)
+        Pattern: \(pattern)
+        Reason: \(reason)
+        Note: It runs as you, with your files, keys, keychain and network.
+        """
+    }
+
+    private static func permissionStory(now: Int64) -> [MessageEntry] {
+        let purpose = "Check the app on the server web"
+        return [
+            MessageEntry(
+                id: "p1", role: .user,
+                parts: [.text(id: "t0", text: "Restart the app on web, then publish the release.")],
+                createdAt: now - 900_000, deviceId: "ios-demo", status: .complete),
+            MessageEntry(
+                id: "p2", role: .assistant,
+                parts: [
+                    .text(id: "t0", text: "I'll check the app on **web** before restarting it."),
+                    command("perm-1", sshStatus, .blocked),
+                    command("perm-2", sshStatus, .outside, scope: .chat, purpose: purpose),
+                    prompt(
+                        "q-2",
+                        escalateTitle(
+                            sshStatus, purpose: purpose, pattern: "ssh deploy@web …",
+                            reason: "The sandbox hides the SSH key; the task needs the server."),
+                        options: escalateOptions, kind: "escalate", call: "perm-2"),
+                    command(
+                        "perm-3", "ssh deploy@web 'sudo systemctl restart app'", .outside, scope: .rule,
+                        rule: "ssh deploy@web …", purpose: purpose),
+                    .tool(
+                        id: "perm-4",
+                        call: RenderToolCall(
+                            tag: "editFile", fields: ["path": "../shared/deploy-notes.md"],
+                            permission: ToolPermission(outcome: .allowed, scope: .chat)),
+                        isError: false, resolved: true),
+                    prompt(
+                        "q-4",
+                        "Allow the agent to write outside the workspace?\n\nContext:\nPath: ~/Developer/shared/deploy-notes.md\nTool: edit",
+                        options: accessOptions, kind: "access", call: "perm-4"),
+                    .text(id: "t5", text: "The app is back up. Then the release steps:"),
+                    command("perm-5", "cat .env", .blocked),
+                    command("perm-6", push, .blocked),
+                    command("perm-7", push, .denied, purpose: "Publish the release branch"),
+                    prompt(
+                        "q-7",
+                        escalateTitle(
+                            push, purpose: "Publish the release branch", pattern: "git push …",
+                            reason: "Pushing needs the keychain's GitHub credentials."),
+                        options: escalateOptions, kind: "escalate", call: "perm-7"),
+                    .tool(
+                        id: "perm-8",
+                        call: RenderToolCall(tag: "mcp", fields: ["server": "github", "tool": "create_issue"]),
+                        isError: false, resolved: true),
+                    prompt(
+                        "q-8",
+                        "Allow the agent to use mcp__github__create_issue?\n\nContext:\nTool: mcp__github__create_issue",
+                        options: accessOptions, kind: "tool", call: "perm-8"),
+                    // A prompt from a Runtime that does not mark its prompts.
+                    prompt(
+                        "q-old",
+                        "Allow the agent to reach registry.example.com?\n\nContext:\nDomain: registry.example.com",
+                        options: [
+                            "Allow for this command", "Allow for this chat", "Always allow", "Deny", "Deny and stop",
+                        ],
+                        kind: nil, call: nil),
+                    // An ordinary question, for contrast.
+                    prompt(
+                        "q-question", "Which environment should the next deploy go to?",
+                        options: ["staging", "production"], kind: nil, call: nil),
+                    .text(
+                        id: "t9",
+                        text:
+                            "Done: the app on **web** is running again and the notes are updated. You declined the force-push, so `release/0.3.49` is still local, and I left `.env` alone; I opened issue #42 to track publishing."
+                    ),
+                ],
+                createdAt: now - 880_000, deviceId: "dev-mac", status: .complete),
+        ]
+    }
+
+    private static func permissionCard(now: Int64) -> [MessageEntry] {
+        let purpose = "Check the app on the server web"
+        return [
+            MessageEntry(
+                id: "c1", role: .user,
+                parts: [.text(id: "t0", text: "Is the app on web healthy?")],
+                createdAt: now - 70_000, deviceId: "ios-demo", status: .complete),
+            MessageEntry(
+                id: "c2", role: .assistant,
+                parts: [
+                    .text(id: "t0", text: "Let me check the app on **web**."),
+                    command("card-1", sshStatus, .blocked),
+                    .tool(
+                        id: "card-2", call: RenderToolCall(tag: "exec", fields: ["command": sshStatus]),
+                        isError: false, resolved: false),
+                    prompt(
+                        "q-card",
+                        escalateTitle(
+                            sshStatus, purpose: purpose, pattern: "ssh deploy@web …",
+                            reason: "The sandbox hides the SSH key; the task needs the server."),
+                        options: escalateOptions, kind: "escalate", call: "card-2", resolved: false),
+                ],
+                createdAt: now - 65_000, deviceId: "dev-mac", status: .streaming),
+        ]
     }
 
     // MARK: Streaming simulation

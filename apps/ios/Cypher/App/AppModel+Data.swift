@@ -182,6 +182,17 @@ extension AppModel {
         return try await data.slashCommands(deviceId: deviceId)
     }
 
+    /// A device's permission settings (Settings → Permissions).
+    func permissionSettings(deviceId: String) async throws -> PermissionSnapshot {
+        guard let data else { throw RelayError.hostOffline }
+        return try await data.permissionSettings(deviceId: deviceId)
+    }
+
+    func savePermissionSettings(deviceId: String, settings: PermissionSettings) async throws -> PermissionSnapshot {
+        guard let data else { throw RelayError.hostOffline }
+        return try await data.savePermissionSettings(deviceId: deviceId, settings: settings)
+    }
+
     /// What the chat's Pi switches are set to, for the `/` menu's badges.
     func piSessionModes(deviceId: String, chatId: String) async throws -> PiSessionModes {
         guard let data else { throw RelayError.hostOffline }

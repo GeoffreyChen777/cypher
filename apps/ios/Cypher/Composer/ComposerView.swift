@@ -86,7 +86,30 @@ struct ComposerView: View {
 
     /// The `/` menu's list for the draft, nil while it's closed.
     private var slashLevel: SlashLevel? {
-        canControl ? SlashMenu.level(in: text, commands: commands.commands) : nil
+        canControl
+            ? SlashMenu.level(
+                in: text,
+                commands: SlashMenu.withComposerCommands(commands.commands, permissions: offersPermissions))
+            : nil
+    }
+
+    /// composer/slash.rs `offers_permissions`: a Pi chat's own composer. A
+    /// side chat runs at its parent's level.
+    private var offersPermissions: Bool { !sideChat && harness == "pi" }
+
+    /// The chat's permission level (its config's sandbox).
+    private var permissionLevel: PermissionLevel { PermissionLevel.of(sandbox: chat.config?.sandbox) }
+
+    /// Set the chat's level: its config row, which the host reads on every
+    /// run (pickers/selections.rs `pick_permission`).
+    private func setPermission(_ level: PermissionLevel) {
+        guard canControl, offersPermissions else { return }
+        var config =
+            chat.config
+            ?? ChatConfig(harness: harness, model: nil, reasoning: nil, sandbox: "workspace-write")
+        config.sandbox = level.sandbox
+        model.setChatConfig(chatId: chat.id, config: config)
+        UISelectionFeedbackGenerator().selectionChanged()
     }
 
     /// The `@query` under the caret, while the `/` menu isn't up. A side
@@ -119,6 +142,7 @@ struct ComposerView: View {
         guard !sideChat else { return SlashFacts() }
         return SlashFacts(
             modes: modes.chatId == chat.id ? modes.modes : nil,
+            permission: offersPermissions ? permissionLevel.sandbox : nil,
             context: sessionRow?.contextUsage,
             runningSubagents: sessionRow?.subagents.filter { $0.status == .running }.count ?? 0)
     }
@@ -154,8 +178,20 @@ struct ComposerView: View {
                 SlashMenuView(
                     catalog: commands, level: slashLevel, facts: slashFacts,
                     onPickCommand: { draftState.replace(with: SlashMenu.accept($0)) },
-                    onPickChoice: { draftState.replace(with: SlashMenu.accept($0, in: text)) },
+                    onPickChoice: { choice in
+                        // A `/permissions` choice sets the level here and
+                        // types nothing: the whole `/permissions …` goes.
+                        if case .choices(SlashMenu.permissions, _) = slashLevel,
+                            let level = PermissionLevel.named(choice.value)
+                        {
+                            setPermission(level)
+                            draftState.replace(with: "")
+                        } else {
+                            draftState.replace(with: SlashMenu.accept(choice, in: text))
+                        }
+                    },
                     onRetry: { Task { await loadCommands(force: true) } },
+                    offersPermissions: offersPermissions,
                     maxHeight: slashMenuMaxHeight
                 )
                 .padding(.horizontal, 16)
@@ -205,6 +241,12 @@ struct ComposerView: View {
                         showModelPicker = true
                     }
                     .disabled(harness != "pi" || !canControl)
+                    // Only Full access shows: an amber shield that opens the
+                    // levels (pickers/render.rs).
+                    if offersPermissions, permissionLevel.sandbox == PermissionLevel.fullAccess {
+                        PermissionLevelChip(level: permissionLevel, onPick: setPermission)
+                            .disabled(!canControl)
+                    }
                 }
             }
         }
@@ -319,6 +361,18 @@ struct ComposerView: View {
     private func send() {
         guard canSend, !uploading else { return }
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // `/permissions <level>` is the composer's own: it sets the chat's
+        // level and never reaches the agent.
+        if offersPermissions, let typed = SlashMenu.typedPermission(prompt) {
+            if let level = typed {
+                setPermission(level)
+                uploadError = nil
+                clearDraft()
+            } else {
+                uploadError = "Pick a level: /permissions ask, workspace or full"
+            }
+            return
+        }
         let staged = attachments
         let batch = commentDrafts?.snapshot()
         let hasComments = !(batch?.comments.isEmpty ?? true)

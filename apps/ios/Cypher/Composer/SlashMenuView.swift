@@ -13,6 +13,9 @@ struct SlashMenuView: View {
     let onPickCommand: (SlashCommand) -> Void
     let onPickChoice: (SlashChoice) -> Void
     let onRetry: () -> Void
+    /// The composer's own `/permissions` leads the list (a Pi chat's own
+    /// composer; a side chat runs at its parent's level).
+    var offersPermissions = false
     /// The tallest the list may grow before it scrolls; the session passes
     /// what's left above the composer (the keyboard takes the rest).
     var maxHeight: CGFloat = SlashMenuView.defaultMaxHeight
@@ -40,7 +43,8 @@ struct SlashMenuView: View {
 
     @ViewBuilder
     private func commandList(query: String) -> some View {
-        let sections = SlashMenu.sections(catalog.commands, query: query)
+        let sections = SlashMenu.sections(
+            SlashMenu.withComposerCommands(catalog.commands, permissions: offersPermissions), query: query)
         if catalog.loading {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
@@ -157,7 +161,7 @@ struct SlashMenuView: View {
 
     private func choiceRow(_ choice: SlashChoice, of command: String) -> some View {
         let inEffect = SlashMenu.choiceInEffect(choice, of: command, facts: facts)
-        return row(title: choice.value, hint: choice.description, action: { onPickChoice(choice) }) {
+        return row(title: choice.title ?? choice.value, hint: choice.description, action: { onPickChoice(choice) }) {
             // The check marks the choice in effect; the slot keeps every
             // value aligned either way.
             if inEffect {

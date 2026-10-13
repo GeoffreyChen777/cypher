@@ -49,6 +49,10 @@ protocol WorkspaceData: AnyObject {
     func searchFiles(_ scope: MentionScope.Files, query: String) async throws -> [FileSearchMatch]
     /// The models a device's installed, enabled Pi offers.
     func piModels(deviceId: String) async throws -> [ModelInfo]
+    /// A device's permission settings (Settings → Permissions).
+    func permissionSettings(deviceId: String) async throws -> PermissionSnapshot
+    /// Save them; the engine answers with what it saved.
+    func savePermissionSettings(deviceId: String, settings: PermissionSettings) async throws -> PermissionSnapshot
 }
 
 extension WorkspaceData {

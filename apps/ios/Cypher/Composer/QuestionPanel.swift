@@ -22,7 +22,13 @@ struct QuestionPanel: View {
     @FocusState private var answerFocused: Bool
 
     var body: some View {
-        if !questions.isEmpty {
+        // A permission prompt reads as a permission card, not a question.
+        if questions.count == 1, let request = PermissionRequest(questions[0]) {
+            PermissionPanel(
+                requestId: requestId, question: questions[0], request: request,
+                maximumHeight: maximumHeight, canRespond: canRespond, notice: notice,
+                respond: respond)
+        } else if !questions.isEmpty {
             let wire = questions[min(max(page, 0), questions.count - 1)]
             let presentation = QuestionPresentation(wire)
             let question = presentation.displayQuestion(wire)

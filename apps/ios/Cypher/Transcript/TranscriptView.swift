@@ -690,8 +690,8 @@ struct TranscriptView: View {
                     }
                 }
 
-            case .inputChip(let header, let resolved):
-                InputChipView(header: header, resolved: resolved)
+            case .inputChip(let header, let resolved, let permission):
+                InputChipView(header: header, resolved: resolved, permission: permission)
 
             case .errorChip(let message):
                 ErrorChipView(message: message)

@@ -589,8 +589,18 @@ for the model from the shown output. The desktop (`transcript/rows.rs`
   "Question".
 
 A call the extension keeps no record of (an MCP tool) that a prompt gated shows
-"Allowed" or "Denied" by whether it ran. iOS shows the old rows until it gets the same
-treatment; the new fields are additive and older readers ignore them.
+"Allowed" or "Denied" by whether it ran. The new fields are additive and older readers
+ignore them.
+
+**iOS** does the same: the transcript (`Transcript/TranscriptRows.swift`
+`PermissionFold`, `PermissionBadge` with the same shield icons), a permission card in
+place of the question panel (`Composer/PermissionPanel.swift`: the facts as rows, one tap
+answers), `/permissions` leading Agent modes in the `/` menu with the amber shield beside
+the model chip at Full access, and Permissions in the account menu
+(`Permissions/PermissionSettingsView.swift`): a device's settings through the relay's
+`GetPiPermissionSettings` / `SetPiPermissionSettings`, kept as raw JSON so a save never
+drops a field the phone does not know. The tool rows carry no output on iOS, so a folded
+attempt shows only in its badge and the summary.
 
 **Shortcuts** (desktop permission card; letters shown as keycaps on the buttons): `Y` the
 narrowest approval (Allow once / Run once / Allow for this command), `C`

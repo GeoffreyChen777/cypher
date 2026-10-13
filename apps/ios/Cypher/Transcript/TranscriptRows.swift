@@ -24,7 +24,9 @@ enum RowKind {
     /// they are dropped while it is closed. Open by default only while the
     /// run is the streaming tail, like a tool group.
     case activity(rows: Int, summary: String, autoOpen: Bool)
-    case inputChip(header: String, resolved: Bool)
+    /// `permission`: a permission prompt with no call to file it under (one
+    /// from an older Runtime): a Permission row, not a Question.
+    case inputChip(header: String, resolved: Bool, permission: Bool = false)
     case errorChip(message: String)
     /// The toggle over an append-mode translation's original answer. The
     /// `rows` that follow it — the original's blocks and the separator rule —
@@ -53,8 +55,22 @@ struct ToolItem: Hashable {
     /// made, 1 for a call a Pi codemode script made from inside its run
     /// (deeper if that call made calls of its own). See `nestToolCalls`.
     var depth = 0
+    /// How permission control treated the call: the badge on its row. From
+    /// the extension's record, or for a call it keeps none of (an MCP tool)
+    /// from the answered prompt that gated it (rows.rs `tool_item`).
+    var permission: ToolPermission?
+    /// The same command ran in the sandbox first and was blocked; that
+    /// attempt is folded into this row.
+    var blockedFirst = false
+
+    /// Permission control held the call back (the sandbox blocked it, or it
+    /// was refused): it did not fail on its own (render.rs `held`).
+    var held: Bool {
+        permission.map { $0.outcome == .blocked || $0.outcome == .denied } ?? false
+    }
 
     var status: ToolStatus {
+        if held { return .held }
         if isError { return .failed }
         return resolved ? .completed : .running
     }
@@ -62,9 +78,73 @@ struct ToolItem: Hashable {
 
 /// transcript.rs `ToolStatus`: where a tool call is in its lifecycle, shown
 /// as the chip's status icon. A failed call reads as failed even if it never
-/// resolved.
+/// resolved. `held`: permission control held it back — a muted cross.
 enum ToolStatus: Equatable {
-    case running, completed, failed
+    case running, completed, failed, held
+}
+
+/// rows.rs `PermissionFold`: how an entry's permission prompts and sandbox
+/// retries fold into its tool rows. An answered prompt files under the call
+/// it gated instead of a row of its own, and a command the sandbox blocked
+/// folds into the run of the same command that followed (outside the
+/// sandbox, or refused).
+struct PermissionFold {
+    /// Answered prompts filed under a call of this entry (request ids).
+    var filed: Set<String> = []
+    /// Calls an answered prompt gated (part ids), for a call the extension
+    /// keeps no record of.
+    var prompted: Set<String> = []
+    /// Blocked attempts folded into a later run (part ids): no row.
+    var folded: Set<String> = []
+    /// Later runs (part ids) a blocked attempt folded into.
+    var retries: Set<String> = []
+
+    init(_ entry: MessageEntry) {
+        var toolIds = Set<String>()
+        for part in entry.parts {
+            if case .tool(let id, _, _, _) = part { toolIds.insert(id) }
+        }
+        for part in entry.parts {
+            if case .input(_, let requestId, let questions, true) = part,
+                let callId = questions.first?.permission?.toolCallId,
+                toolIds.contains(callId)
+            {
+                filed.insert(requestId)
+                prompted.insert(callId)
+            }
+        }
+        func command(_ part: MessagePart) -> (id: String, command: String, outcome: ToolPermission.Outcome)? {
+            guard case .tool(let id, let call, _, true) = part, call.tag == "exec",
+                let command = call.string("command"), let permission = call.permission
+            else { return nil }
+            return (id, command, permission.outcome)
+        }
+        for (ix, part) in entry.parts.enumerated() {
+            guard let blocked = command(part), blocked.outcome == .blocked else { continue }
+            let retry = entry.parts[(ix + 1)...].lazy.compactMap(command).first {
+                $0.command == blocked.command && ($0.outcome == .outside || $0.outcome == .denied)
+            }
+            if let retry {
+                folded.insert(blocked.id)
+                retries.insert(retry.id)
+            }
+        }
+    }
+
+    /// The call's badge: its record, or for a call a prompt gated that has
+    /// none, whether it ran.
+    func permission(id: String, call: RenderToolCall, isError: Bool, resolved: Bool) -> ToolPermission? {
+        if let permission = call.permission { return permission }
+        guard prompted.contains(id), resolved else { return nil }
+        return ToolPermission(outcome: isError ? .denied : .allowed)
+    }
+}
+
+/// Whether a question is a permission prompt rather than one the agent asks:
+/// it says so, or (from a Runtime that does not) it offers "Deny and stop".
+func isPermissionPrompt(_ questions: [UserInputQuestion]) -> Bool {
+    guard let question = questions.first else { return false }
+    return question.permission != nil || question.options.contains(PermissionRequest.stopOption)
 }
 
 struct TranscriptRow: Identifiable {
@@ -272,6 +352,7 @@ enum TranscriptRowBuilder {
         }
 
         let entryStart = rows.count
+        let fold = PermissionFold(entry)
         var first = true
         var pendingTools: [ToolItem] = []
         var groupIx = 0
@@ -370,10 +451,20 @@ enum TranscriptRowBuilder {
         for (ix, part) in entry.parts.enumerated() {
             switch part {
             case .tool(let partId, let call, let isError, let resolved):
+                // A blocked attempt folded into its retry renders nothing and
+                // splits nothing.
+                if fold.folded.contains(partId) {
+                    if ix == lastPartIx { flushTools(lastIx: ix) }
+                    continue
+                }
                 // Nothing is appended until the group flushes, so the run's
                 // rows start here.
                 openRun(partId)
-                pendingTools.append(ToolItem(id: partId, call: call, isError: isError, resolved: resolved))
+                pendingTools.append(
+                    ToolItem(
+                        id: partId, call: call, isError: isError, resolved: resolved,
+                        permission: fold.permission(id: partId, call: call, isError: isError, resolved: resolved),
+                        blockedFirst: fold.retries.contains(partId)))
                 if ix == lastPartIx { flushTools(lastIx: ix) }
 
             case .text(let partId, let text, let agentText):
@@ -433,16 +524,25 @@ enum TranscriptRowBuilder {
                     key: key, blocks: blocks, runs: runs,
                     liveTail: isLiveTail, muted: true)
 
-            case .input(let partId, _, let questions, let resolved):
+            case .input(let partId, let requestId, let questions, let resolved):
+                // An answered prompt filed under its call: no row, no split.
+                if fold.filed.contains(requestId) {
+                    if ix == lastPartIx { flushTools(lastIx: ix) }
+                    continue
+                }
                 flushTools(lastIx: ix - 1)
                 closeRun(autoOpen: false)
-                let header = questions.first.map { QuestionPresentation($0).header } ?? "Question"
+                let permission = isPermissionPrompt(questions)
+                let header =
+                    permission
+                    ? questions.first.map { PermissionRequest.question(of: $0) } ?? "Permission request"
+                    : questions.first.map { QuestionPresentation($0).header } ?? "Question"
                 rows.append(
                     TranscriptRow(
                         id: "\(entry.id)#\(partId)",
-                        version: (fnv1a(header) << 1) | (resolved ? 1 : 0),
+                        version: (fnv1a(header) << 2) | (permission ? 2 : 0) | (resolved ? 1 : 0),
                         turnStart: first,
-                        kind: .inputChip(header: header, resolved: resolved),
+                        kind: .inputChip(header: header, resolved: resolved, permission: permission),
                         entryId: entry.id, timestamp: nil, partKey: nil))
                 first = false
 
@@ -637,8 +737,17 @@ enum TranscriptRowBuilder {
                 hash ^= UInt64(byte)
                 hash = hash &* 0x100_0000_01b3
             }
-            hash ^= UInt64(tool.call.fields.count) &+ (tool.isError ? 2 : 0) &+ (tool.resolved ? 4 : 0)
+            hash ^=
+                UInt64(tool.call.fields.count) &+ (tool.isError ? 2 : 0) &+ (tool.resolved ? 4 : 0)
+                &+ (tool.blockedFirst ? 8 : 0)
             hash = hash &* 0x100_0000_01b3
+            // The permission badge arriving or changing redraws the row.
+            if let permission = tool.permission {
+                for byte in "\(permission.outcome)/\(permission.scope?.rawValue ?? "")/\(permission.rule ?? "")".utf8 {
+                    hash ^= UInt64(byte)
+                    hash = hash &* 0x100_0000_01b3
+                }
+            }
             // A call nesting under its caller once the caller's part arrives
             // re-indents the chip.
             hash ^= UInt64(tool.depth)
@@ -728,8 +837,19 @@ func toolGroupSummary(_ tools: [ToolItem], thoughts: Int = 0) -> String {
     let other = tools.count - runs - scripts - edits - reads - searches
     if other > 0 { segments.append(other == 1 ? "1 tool" : "\(other) tools") }
     if thoughts > 0 { segments.append(thoughts == 1 ? "1 thought" : "\(thoughts) thoughts") }
-    let failed = tools.filter(\.isError).count
+    // A call permission control held back is not a failure; calls that ran
+    // outside the sandbox and the held ones count on their own (chips.rs
+    // `tools_summary`).
+    let failed = tools.filter { $0.isError && !$0.held }.count
     if failed > 0 { segments.append("\(failed) failed") }
+    for (outcome, words) in [
+        (ToolPermission.Outcome.outside, "outside the sandbox"),
+        (.blocked, "blocked"),
+        (.denied, "denied"),
+    ] {
+        let count = tools.filter { $0.permission?.outcome == outcome }.count
+        if count > 0 { segments.append("\(count) \(words)") }
+    }
     guard var summary = segments.first else { return "\(tools.count) tools" }
     summary = summary.prefix(1).uppercased() + summary.dropFirst()
     return ([summary] + segments.dropFirst()).joined(separator: " · ")

@@ -66,3 +66,37 @@ struct ModelChip: View {
         .accessibilityIdentifier("model-chip")
     }
 }
+
+/// The chat's permission level at Full access: an amber shield beside the
+/// model chip that opens the levels (pickers/render.rs; Ask before edits and
+/// Edit workspace show nothing). Picking one sets it for the chat.
+struct PermissionLevelChip: View {
+    let level: PermissionLevel
+    let onPick: (PermissionLevel) -> Void
+
+    var body: some View {
+        Menu {
+            Section("Permissions") {
+                ForEach(PermissionLevel.all, id: \.value) { option in
+                    Button {
+                        onPick(option)
+                    } label: {
+                        if option == level {
+                            Label(option.label, systemImage: "checkmark")
+                        } else {
+                            Text(option.label)
+                        }
+                        Text(option.description)
+                    }
+                }
+            }
+        } label: {
+            LineIconView(.shieldCheck, size: 17, color: Theme.warning)
+                .frame(width: 40, height: 40)
+                .background(Theme.warning.opacity(0.12), in: Circle())
+                .overlay(Circle().strokeBorder(Theme.warning.opacity(0.25), lineWidth: 1))
+        }
+        .accessibilityLabel("Permissions: \(level.label)")
+        .accessibilityIdentifier("permission-level-chip")
+    }
+}

@@ -114,7 +114,7 @@ final class QuestionPanelTests: XCTestCase {
         }
         let pending = try row(resolved: false)
         let resolved = try row(resolved: true)
-        if case .inputChip(let header, _) = resolved.kind {
+        if case .inputChip(let header, _, _) = resolved.kind {
             XCTAssertEqual(header, "Your input")
         } else {
             XCTFail("Expected question chip")

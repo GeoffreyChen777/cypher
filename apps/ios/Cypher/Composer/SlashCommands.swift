@@ -83,6 +83,45 @@ struct SlashChoice: Hashable {
     var value: String
     var description: String
     var takesText = false
+    /// The row's name when it differs from what gets typed (a permission
+    /// level reads "Full access", types `full`).
+    var title: String? = nil
+}
+
+/// pickers/pure.rs `PermissionLevel`: a level a chat can run at, as
+/// `/permissions` offers it. `sandbox` is the chat config's value.
+struct PermissionLevel: Equatable {
+    var sandbox: String
+    /// What `/permissions <value>` takes.
+    var value: String
+    var label: String
+    var description: String
+
+    /// Strictest first; Edit workspace is the default.
+    static let all = [
+        PermissionLevel(
+            sandbox: "read-only", value: "ask", label: "Ask before edits",
+            description: "Reads freely; every change needs your OK"),
+        PermissionLevel(
+            sandbox: "workspace-write", value: "workspace", label: "Edit workspace",
+            description: "Edits this project; asks before touching anything else"),
+        PermissionLevel(
+            sandbox: "danger-full-access", value: "full", label: "Full access",
+            description: "No checks and no sandbox"),
+    ]
+
+    static let fullAccess = "danger-full-access"
+
+    /// The level a chat runs at; an unknown value reads as the default.
+    static func of(sandbox: String?) -> PermissionLevel {
+        all.first { $0.sandbox == sandbox } ?? all[1]
+    }
+
+    /// slash_menu.rs `permission_for`: a typed level, by value or label.
+    static func named(_ text: String) -> PermissionLevel? {
+        let text = text.trimmingCharacters(in: .whitespaces).lowercased()
+        return all.first { $0.value == text || $0.label.lowercased() == text }
+    }
 }
 
 /// slash_menu.rs `Badge`: what a command's row says about what it controls.
@@ -107,6 +146,9 @@ struct SlashFacts {
     /// The Pi plugins' switches; nil until the host answered (or for a side
     /// chat, which has none of its own).
     var modes: PiSessionModes?
+    /// The chat's permission level (its config's `sandbox`); nil for a side
+    /// chat, which runs at its parent's.
+    var permission: String?
     var context: ContextUsage?
     var runningSubagents = 0
 }
@@ -128,7 +170,34 @@ enum SlashMenu {
     /// what is in effect. The desktop shows any other command only once it is
     /// turned on in Settings → Commands; the phone has no such page, so a
     /// typed name finds the host's other commands too (`sections`).
-    static let shownByDefault = ["compact", "goal", "fast", "scripts", "orchestrate", "subagent-status"]
+    static let shownByDefault = [
+        "permissions", "compact", "goal", "fast", "scripts", "orchestrate", "subagent-status",
+    ]
+
+    /// slash_menu.rs `PERMISSIONS`: the composer's own command. Picking a
+    /// level (or sending `/permissions <level>`) sets the chat's level; it
+    /// never reaches the agent.
+    static let permissions = "permissions"
+
+    static let permissionsCommand = SlashCommand(
+        name: permissions, description: "What the agent may do without asking in this chat")
+
+    /// The commands the menu lists: the composer's own `/permissions` first
+    /// (it leads Agent modes), then the host's.
+    static func withComposerCommands(_ commands: [SlashCommand], permissions: Bool) -> [SlashCommand] {
+        guard permissions else { return commands }
+        return [permissionsCommand] + commands.filter { $0.name != Self.permissions }
+    }
+
+    /// `/permissions <level>` typed whole: the level, nil for a word that
+    /// names none (`.some(nil)`), or nil when the text is something else.
+    static func typedPermission(_ text: String) -> PermissionLevel?? {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.hasPrefix("/\(permissions)") else { return nil }
+        let rest = text.dropFirst(permissions.count + 1)
+        guard rest.isEmpty || rest.first?.isWhitespace == true else { return nil }
+        return .some(PermissionLevel.named(String(rest)))
+    }
 
     /// The filter text while the draft is a bare `/token`: the menu belongs
     /// to the command name only, so it closes at the first whitespace (the
@@ -173,7 +242,7 @@ enum SlashMenu {
         let name = name.lowercased()
         switch name {
         case "compact", "export-html": return (.conversation, false)
-        case "goal", "fast", "scripts", "orchestrate": return (.agentModes, false)
+        case "permissions", "goal", "fast", "scripts", "orchestrate": return (.agentModes, false)
         case "subagent-config": return (.subagents, true)
         case "subagents": return (.subagents, false)
         case _ where name.hasPrefix("subagent-"): return (.subagents, false)
@@ -193,6 +262,7 @@ enum SlashMenu {
     static func icon(for name: String) -> LineIcon {
         let name = name.lowercased()
         switch name {
+        case "permissions": return .shieldCheck
         case "compact": return .foldVertical
         case "export-html": return .archiveUp
         case "goal": return .flag
@@ -211,6 +281,10 @@ enum SlashMenu {
     /// settings shortcuts never reach the phone's menu.)
     static func choices(for command: String) -> [SlashChoice] {
         switch command {
+        case permissions:
+            return PermissionLevel.all.map {
+                SlashChoice(value: $0.value, description: $0.description, title: $0.label)
+            }
         case "orchestrate":
             return [
                 SlashChoice(value: "on", description: "Let the main agent delegate to subagents"),
@@ -259,7 +333,9 @@ enum SlashMenu {
     /// `query`.
     static func choiceRows(command: String, query: String) -> [SlashChoice] {
         let query = query.lowercased()
-        return choices(for: command).filter { $0.value.hasPrefix(query) }
+        return choices(for: command).filter {
+            $0.value.hasPrefix(query) || ($0.title?.lowercased().hasPrefix(query) ?? false)
+        }
     }
 
     /// The draft after picking `command`: the token becomes `/name `, ready
@@ -285,6 +361,12 @@ enum SlashMenu {
             on ? SlashBadge(label: "On", tone: .on) : SlashBadge(label: "Off", tone: .off)
         }
         switch command {
+        case permissions:
+            return facts.permission.map {
+                let level = PermissionLevel.of(sandbox: $0)
+                return SlashBadge(
+                    label: level.label, tone: level.sandbox == PermissionLevel.fullAccess ? .warning : .neutral)
+            }
         case "fast": return facts.modes.map { onOff($0.fast) }
         case "scripts": return facts.modes.map { onOff($0.codemode) }
         case "orchestrate": return facts.modes.map { onOff($0.orchestrate) }
@@ -306,6 +388,9 @@ enum SlashMenu {
 
     /// slash_menu.rs `choice_in_effect`: the check on a choice's row.
     static func choiceInEffect(_ choice: SlashChoice, of command: String, facts: SlashFacts) -> Bool {
+        if command == permissions {
+            return facts.permission.map { PermissionLevel.of(sandbox: $0).value == choice.value } ?? false
+        }
         guard command == "orchestrate", let modes = facts.modes else { return false }
         return choice.value == (modes.orchestrate ? "on" : "off")
     }
@@ -313,6 +398,9 @@ enum SlashMenu {
     /// slash_menu.rs `choice_summary`: the line above a command's choices,
     /// what is in effect now.
     static func choiceSummary(of command: String, facts: SlashFacts) -> String? {
+        if command == permissions {
+            return facts.permission.map { "Now: \(PermissionLevel.of(sandbox: $0).label)" }
+        }
         guard let modes = facts.modes else { return nil }
         switch command {
         case "orchestrate":

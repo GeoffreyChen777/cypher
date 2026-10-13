@@ -480,6 +480,11 @@ final class SessionStore {
                     isAsync: input["async"]?.boolValue ?? false)
                 call.progress = SubagentProjection.boundedProgress(m["progress"]?.stringValue)
             }
+            if let record = m["permission"],
+                let data = try? JSONSerialization.data(withJSONObject: record.jsonObject)
+            {
+                call.permission = try? JSONDecoder().decode(ToolPermission.self, from: data)
+            }
             return .tool(
                 id: id, call: call,
                 isError: isError ?? false, resolved: isError != nil)

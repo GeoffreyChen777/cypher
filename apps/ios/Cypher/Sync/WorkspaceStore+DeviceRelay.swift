@@ -133,6 +133,23 @@ extension WorkspaceStore {
             method: "SearchFiles", params: params, timeoutSeconds: 15)
     }
 
+    /// GetPiPermissionSettings — the device's permissions.json and whether it
+    /// can sandbox (the engine runs `landstrip doctor`, so it gets time).
+    /// Forwardable, so the device answers.
+    func permissionSettings(deviceId: String) async throws -> PermissionSnapshot {
+        guard deviceOnline(deviceId) else { throw RelayError.hostOffline }
+        return try await relayClient(for: deviceId).call(
+            method: "GetPiPermissionSettings", params: [:], timeoutSeconds: 20)
+    }
+
+    /// SetPiPermissionSettings — the whole settings object back, fields this
+    /// app does not show included; the engine keeps the rest of the file.
+    func savePermissionSettings(deviceId: String, settings: PermissionSettings) async throws -> PermissionSnapshot {
+        guard deviceOnline(deviceId) else { throw RelayError.hostOffline }
+        return try await relayClient(for: deviceId).call(
+            method: "SetPiPermissionSettings", params: try settings.params(), timeoutSeconds: 20)
+    }
+
     /// PiSessionModes — the Pi plugins' switches for one chat (Fast mode,
     /// Scripts, orchestration, the goal), read from its Pi session file on
     /// the host. Forwardable, so the host answers directly.

@@ -295,6 +295,10 @@ struct ToolChipRow: View {
         .overlay(RoundedRectangle(cornerRadius: Self.radius).strokeBorder(whiteAlpha(0.05), lineWidth: 1))
     }
 
+    /// A call permission control held back did not fail: it reads calm,
+    /// and its badge says what happened.
+    private var failed: Bool { tool.isError && !tool.held }
+
     private func header(expandable: Bool) -> some View {
         HStack(spacing: 8) {
             Image(systemName: tool.call.chipSymbol)
@@ -303,13 +307,17 @@ struct ToolChipRow: View {
                 .frame(width: 18, height: 18)
             Text(tool.call.chipLabel)
                 .font(Theme.sans(12, weight: .medium))
-                .foregroundStyle(tool.isError ? Theme.danger : Theme.textMuted)
+                .foregroundStyle(failed ? Theme.danger : Theme.textMuted)
             Text(tool.call.chipDetail)
                 .font(Theme.sans(12))
-                .foregroundStyle(tool.isError ? Theme.danger : Theme.text.opacity(0.85))
+                .foregroundStyle(failed ? Theme.danger : Theme.text.opacity(0.85))
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .layoutPriority(-1)
             Spacer(minLength: 0)
+            if let permission = tool.permission {
+                PermissionBadge(permission: permission)
+            }
             ToolStatusIcon(status: tool.status)
             if expandable {
                 Image(systemName: "chevron.right")
@@ -367,6 +375,8 @@ struct ToolStatusIcon: View {
             stroked(StatusGlyph(data: "M3.5 8.5l3 3 6-7"), Theme.success)
         case .failed:
             stroked(StatusGlyph(data: "m4.5 4.5 7 7m0-7-7 7"), Theme.danger)
+        case .held:
+            stroked(StatusGlyph(data: "m4.5 4.5 7 7m0-7-7 7"), Theme.textMuted)
         case .running:
             TimelineView(.animation(paused: reduceMotion)) { timeline in
                 let turns = reduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate / Self.spinPeriod
@@ -391,6 +401,7 @@ struct ToolStatusIcon: View {
         case .running: return "Running"
         case .completed: return "Completed"
         case .failed: return "Failed"
+        case .held: return "Held by permissions"
         }
     }
 }
@@ -444,16 +455,25 @@ struct ErrorChipView: View {
 struct InputChipView: View {
     let header: String
     let resolved: Bool
+    /// A permission prompt with no call to file it under: a shield and
+    /// "Permission", never "Question".
+    var permission = false
 
     var body: some View {
         // Neutral throughout — resolution never recolors.
         HStack(spacing: 8) {
-            Image(systemName: "bubble.left.and.text.bubble.right")
-                .font(.system(size: 10))
-                .foregroundStyle(Theme.textMuted)
-                .frame(width: 20, height: 20)
-                .background(whiteAlpha(0.09), in: RoundedRectangle(cornerRadius: 6))
-            Text("Question")
+            Group {
+                if permission {
+                    LineIconView(.shieldCheck, size: 12, color: Theme.textMuted)
+                } else {
+                    Image(systemName: "bubble.left.and.text.bubble.right")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.textMuted)
+                }
+            }
+            .frame(width: 20, height: 20)
+            .background(whiteAlpha(0.09), in: RoundedRectangle(cornerRadius: 6))
+            Text(permission ? "Permission" : "Question")
                 .font(Theme.sans(12, weight: .medium))
                 .foregroundStyle(Theme.text)
             Text(resolved ? (header == "Your input" ? "Answered" : header) : "Awaiting your answer…")
@@ -466,5 +486,56 @@ struct InputChipView: View {
         .frame(height: 34)
         .background(whiteAlpha(0.045), in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(whiteAlpha(0.08), lineWidth: 1))
+    }
+}
+
+// MARK: - Permission badge (transcript render.rs `permission_badge`)
+
+/// What permission control did with a call, after its text: the shield with
+/// the outcome's mark and a few words, on no background. Running outside
+/// the sandbox is the one worth noticing (the warning tint); the rest stay
+/// muted.
+struct PermissionBadge: View {
+    let permission: ToolPermission
+
+    var body: some View {
+        let tint = permission.outcome == .outside ? Theme.warning : Theme.textMuted
+        HStack(spacing: 4) {
+            LineIconView(Self.icon(permission.outcome), size: 11, color: tint)
+            Text(Self.text(permission))
+                .font(Theme.sans(11))
+                .foregroundStyle(tint)
+                .lineLimit(1)
+        }
+        .fixedSize()
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("permission-badge")
+    }
+
+    /// render.rs `permission_badge_icon`.
+    static func icon(_ outcome: ToolPermission.Outcome) -> LineIcon {
+        switch outcome {
+        case .outside: return .shieldOut
+        case .blocked: return .shieldKeyhole
+        case .denied: return .shieldCross
+        case .allowed: return .shieldCheck
+        }
+    }
+
+    /// render.rs `permission_badge_text`.
+    static func text(_ permission: ToolPermission) -> String {
+        switch (permission.outcome, permission.scope) {
+        case (.outside, .once): return "Outside the sandbox · once"
+        case (.outside, .chat): return "Outside the sandbox · this chat"
+        case (.outside, .always): return "Outside the sandbox · always"
+        case (.outside, _): return "Outside the sandbox"
+        case (.blocked, _): return "Blocked by the sandbox"
+        case (.denied, _): return "Denied"
+        case (.allowed, .once): return "Allowed once"
+        case (.allowed, .chat): return "Allowed for this chat"
+        case (.allowed, .always): return "Always allowed"
+        case (.allowed, .rule): return "Allowed earlier"
+        case (.allowed, nil): return "Allowed"
+        }
     }
 }
