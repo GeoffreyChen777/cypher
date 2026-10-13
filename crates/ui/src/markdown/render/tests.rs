@@ -746,3 +746,68 @@ fn adjacent_same_link_runs_merge_into_one_range() {
     let flat = flatten_runs(&runs, &theme, false);
     assert_eq!(flat.links, vec![(0..9, "https://x.dev".to_string())]);
 }
+
+#[gpui::test]
+fn wide_blocks_scroll_sideways_only_on_sideways_gestures(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, ScrollDelta, ScrollHandle, ScrollWheelEvent, TouchPhase};
+
+    struct Page(ScrollHandle);
+    impl gpui::Render for Page {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            div()
+                .id("page")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.0)
+                .child(
+                    horizontal_scroller("wide-block".into())
+                        .w(px(300.0))
+                        .child(div().w(px(1200.0)).h(px(60.0))),
+                )
+                .child(div().h(px(2000.0)))
+        }
+    }
+    let page = ScrollHandle::new();
+    let window = cx.open_window(gpui::size(px(300.0), px(400.0)), {
+        let page = page.clone();
+        |_, _| Page(page)
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let block = scroller_handle(&"wide-block".into());
+    // Near the block's top: it stays under the pointer after the page moves.
+    let mut wheel = |dx: f32, dy: f32| {
+        visual.simulate_event(ScrollWheelEvent {
+            position: point(px(100.0), px(10.0)),
+            delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    };
+
+    // A vertical swipe with trackpad drift moves the page, never the block.
+    wheel(-3.0, -40.0);
+    assert_eq!(block.offset().x, px(0.0));
+    assert!(page.offset().y < px(0.0));
+    // A sideways swipe moves the block and leaves the page where it was.
+    let page_y = page.offset().y;
+    wheel(-50.0, -4.0);
+    assert!(block.offset().x < px(0.0));
+    assert_eq!(page.offset().y, page_y);
+    // A plain wheel tick is vertical even over a block that scrolls sideways.
+    let block_x = block.offset().x;
+    visual.simulate_event(ScrollWheelEvent {
+        position: point(px(100.0), px(10.0)),
+        delta: ScrollDelta::Lines(point(0.0, -1.0)),
+        modifiers: Modifiers::default(),
+        touch_phase: TouchPhase::Moved,
+    });
+    assert_eq!(block.offset().x, block_x);
+}

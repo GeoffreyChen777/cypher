@@ -536,12 +536,52 @@ fn render_table(
     // The horizontal scroller — when the floors exceed the viewport the inner
     // block keeps `min_table_width` and this viewport scrolls it.
     let scroll_id: SharedString = format!("{}-table{ix}", opts.row_key).into();
-    div()
-        .id(scroll_id)
+    horizontal_scroller(scroll_id)
         .w_full()
-        .overflow_x_scroll()
         .child(inner)
         .into_any_element()
+}
+
+thread_local! {
+    /// Horizontal offsets of wide blocks, by scroller id. A handle at offset
+    /// zero is indistinguishable from a fresh one, so those are pruned.
+    static SCROLLERS: RefCell<HashMap<SharedString, gpui::ScrollHandle>> =
+        RefCell::new(HashMap::new());
+}
+
+fn scroller_handle(id: &SharedString) -> gpui::ScrollHandle {
+    SCROLLERS.with(|scrollers| {
+        let mut scrollers = scrollers.borrow_mut();
+        if scrollers.len() > 256 && !scrollers.contains_key(id) {
+            scrollers.retain(|_, handle| handle.offset() != gpui::Point::default());
+        }
+        scrollers.entry(id.clone()).or_default().clone()
+    })
+}
+
+/// A wide block (code, diff, table) that scrolls sideways without stealing
+/// the transcript's vertical scroll. gpui's `overflow_x_scroll` alone turns a
+/// plain wheel into horizontal travel and applies a trackpad's sideways
+/// drift while the transcript scrolls too, so the block slid as the page
+/// moved. Here a gesture belongs to the block only when it is mostly
+/// horizontal, and then the transcript sits it out; otherwise the block's
+/// share is undone and only the transcript moves.
+pub(super) fn horizontal_scroller(id: SharedString) -> gpui::Stateful<gpui::Div> {
+    let handle = scroller_handle(&id);
+    let mut scroller = div().id(id).overflow_x_scroll().track_scroll(&handle);
+    scroller.style().restrict_scroll_to_axis = Some(true);
+    // Runs after gpui's own scroll listener on this element (bubble order is
+    // reverse registration), so the offset already includes `delta.x`.
+    scroller.on_scroll_wheel(move |event, window, cx| {
+        let delta = event.delta.pixel_delta(window.line_height());
+        if delta.x.abs() > delta.y.abs() {
+            cx.stop_propagation();
+        } else if delta.x != px(0.0) {
+            let mut offset = handle.offset();
+            offset.x -= delta.x;
+            handle.set_offset(offset);
+        }
+    })
 }
 
 /// Flattened inline runs: one string, gpui `TextRun`s, clickable link ranges
@@ -1418,9 +1458,7 @@ fn render_code_block(
     let scroll_id: SharedString = format!("{}-code{ix}", opts.row_key).into();
     fence_frame(ctx, language.map(fence_label))
         .child(
-            div()
-                .id(scroll_id)
-                .overflow_x_scroll()
+            horizontal_scroller(scroll_id)
                 .px(px(CODE_PADDING_X))
                 .py(px(CODE_PADDING_Y))
                 .mono(theme)

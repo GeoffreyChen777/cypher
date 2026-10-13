@@ -17,7 +17,7 @@ use crate::changes::{
     parse_fence_diff,
 };
 
-use super::render::{BlockCtx, CodeHighlight, copy_button, fence_frame};
+use super::render::{BlockCtx, CodeHighlight, copy_button, fence_frame, horizontal_scroller};
 use crate::kit::theme::MonoStyled;
 
 /// Fence tags that render as a diff.
@@ -175,9 +175,7 @@ pub fn render(code: &str, ctx: BlockCtx, highlight: CodeHighlight) -> AnyElement
     let scroll_id: SharedString = format!("{}-diff{ix}", opts.row_key).into();
     fence_frame(ctx, Some(header))
         .child(
-            div()
-                .id(scroll_id)
-                .overflow_x_scroll()
+            horizontal_scroller(scroll_id)
                 .py(px(4.0))
                 .flex()
                 .flex_col()
