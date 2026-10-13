@@ -336,6 +336,157 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
     files
 }
 
+/// One `---`/`+++` header path: `None` for `/dev/null`, otherwise without
+/// the `a/`/`b/` prefix or a trailing tab-separated timestamp.
+fn fence_header_path(raw: &str) -> Option<String> {
+    let path = raw.split('\t').next().unwrap_or(raw).trim();
+    (path != "/dev/null").then(|| strip_git_prefix(path).to_string())
+}
+
+/// Parse the body of a ```` ```diff ```` fence. Chat diffs are rarely clean
+/// git patches — hunk headers lack line ranges (`@@ fn name`), file headers
+/// are missing, context lines lose their leading space — so this is lenient
+/// where [`parse_patch`] is strict: lines before any header open an implicit
+/// file and hunk, unprefixed lines are context, and lines carry numbers only
+/// under a numbered `@@ -a +b @@` header.
+pub fn parse_fence_diff(src: &str) -> Vec<FileDiff> {
+    fn current(files: &mut Vec<FileDiff>) -> &mut FileDiff {
+        if files.is_empty() {
+            files.push(FileDiff::new(String::new(), None));
+        }
+        files.last_mut().expect("pushed above")
+    }
+    let mut files: Vec<FileDiff> = Vec::new();
+    // Next (old, new) line numbers under a numbered hunk header.
+    let mut numbers: Option<(u32, u32)> = None;
+    let mut lines = src.lines().peekable();
+    while let Some(raw) = lines.next() {
+        if let Some(rest) = raw.strip_prefix("diff --git ") {
+            let (old, new) = parse_git_paths(rest);
+            let old_path = (old != new).then_some(old);
+            files.push(FileDiff::new(new, old_path));
+            numbers = None;
+            continue;
+        }
+        // A file header is the `---`/`+++` PAIR; either alone is a body line.
+        if let Some(old) = raw.strip_prefix("--- ")
+            && let Some(new) = lines.peek().and_then(|next| next.strip_prefix("+++ "))
+        {
+            let (old, new) = (fence_header_path(old), fence_header_path(new));
+            lines.next();
+            // `diff --git` already opened this file.
+            if !files.last().is_some_and(|file| file.hunks.is_empty()) {
+                files.push(FileDiff::new(String::new(), None));
+            }
+            let file = current(&mut files);
+            match (old, new) {
+                (None, Some(new)) => {
+                    file.status = FileStatus::Added;
+                    file.path = new;
+                }
+                (Some(old), None) => {
+                    file.status = FileStatus::Deleted;
+                    file.path = old;
+                }
+                (Some(old), Some(new)) => {
+                    file.old_path = (old != new).then_some(old);
+                    file.path = new;
+                }
+                (None, None) => {}
+            }
+            numbers = None;
+            continue;
+        }
+        if raw.starts_with("@@") {
+            numbers = parse_hunk_header(raw);
+            current(&mut files).hunks.push(Hunk {
+                header: raw.to_string(),
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        // Git's extended header lines, only between a file header and its
+        // first hunk — anywhere else they are ordinary context.
+        if let Some(file) = files.last_mut()
+            && file.hunks.is_empty()
+        {
+            let header = if raw.starts_with("new file mode") {
+                file.status = FileStatus::Added;
+                true
+            } else if raw.starts_with("deleted file mode") {
+                file.status = FileStatus::Deleted;
+                true
+            } else if raw.starts_with("Binary files") {
+                file.binary = true;
+                true
+            } else {
+                [
+                    "index ",
+                    "similarity index",
+                    "rename from",
+                    "rename to",
+                    "old mode",
+                    "new mode",
+                ]
+                .iter()
+                .any(|prefix| raw.starts_with(prefix))
+            };
+            if header {
+                continue;
+            }
+        }
+
+        let file = current(&mut files);
+        let (kind, text) = match raw.as_bytes().first() {
+            Some(b'+') => (LineKind::Add, &raw[1..]),
+            Some(b'-') => (LineKind::Del, &raw[1..]),
+            Some(b' ') => (LineKind::Context, &raw[1..]),
+            Some(b'\\') => (LineKind::Meta, raw.trim_start_matches('\\').trim()),
+            _ => (LineKind::Context, raw),
+        };
+        let (old_no, new_no) = match (kind, numbers.as_mut()) {
+            (LineKind::Add, Some((_, new))) => {
+                *new += 1;
+                (None, Some(*new - 1))
+            }
+            (LineKind::Del, Some((old, _))) => {
+                *old += 1;
+                (Some(*old - 1), None)
+            }
+            (LineKind::Context, Some((old, new))) => {
+                *old += 1;
+                *new += 1;
+                (Some(*old - 1), Some(*new - 1))
+            }
+            _ => (None, None),
+        };
+        match kind {
+            LineKind::Add => file.additions += 1,
+            LineKind::Del => file.deletions += 1,
+            _ => {}
+        }
+        file.max_line = file
+            .max_line
+            .max(old_no.unwrap_or(0))
+            .max(new_no.unwrap_or(0));
+        if file.hunks.is_empty() {
+            file.hunks.push(Hunk {
+                header: String::new(),
+                lines: Vec::new(),
+            });
+        }
+        if let Some(hunk) = file.hunks.last_mut() {
+            hunk.lines.push(DiffLine {
+                kind,
+                old_no,
+                new_no,
+                text: text.to_string(),
+            });
+        }
+    }
+    files
+}
+
 /// Derived per-file notice rows (new/deleted/renamed/binary + parser notices).
 pub fn file_notices(file: &FileDiff) -> Vec<String> {
     let mut notices = Vec::new();

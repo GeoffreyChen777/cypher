@@ -17,10 +17,15 @@
 #                                 # permission card, one waiting on an ordinary
 #                                 # question, and command rules in Settings →
 #                                 # Permissions
+#   scripts/dev-demo.sh --diffs   # "Diff fences" under "Diff fence demo": an
+#                                 # answer with chat-style and git-patch
+#                                 # ```diff blocks
 #
-# The flags combine (--permissions takes the place of the default seed).
+# The flags combine (--permissions or --diffs takes the place of the default
+# seed).
 # Everything lives under /tmp/cypher-demo-* (--work: /tmp/cypher-demo-work-*,
-# --permissions: /tmp/cypher-demo-permissions-*); re-runs reuse it (delete
+# --permissions: /tmp/cypher-demo-permissions-*, --diffs:
+# /tmp/cypher-demo-diffs-*); re-runs reuse it (delete
 # those directories to reseed). Quitting the app stops the engine.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -28,15 +33,17 @@ cd "$(dirname "$0")/.."
 WORK=""
 DELAY=""
 PERMS=""
+DIFFS=""
 for arg in "$@"; do
   case "$arg" in
     --work) WORK=1 ;;
     --slow) DELAY=350 ;;
     --permissions) PERMS=1 ;;
-    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions]' >&2; exit 2 ;;
+    --diffs) DIFFS=1 ;;
+    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs]' >&2; exit 2 ;;
   esac
 done
-DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}
+DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}
 DAEMON_DIR=$DEMO_DIR-daemon
 UI_DIR=$DEMO_DIR-ui
 
@@ -111,6 +118,12 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
   ]
 }
 JSON
+  elif [[ -n "$DIFFS" ]]; then
+    space=$(new_id) chat=$(new_id)
+    create_space "$space" "$PWD" '"name":"Diff fence demo","gitDetected":true'
+    create_chat "$chat" "$space" "Diff fences"
+    run_prompt "$chat" "$PWD" "Show me the fingerprint changes as diffs." \
+      "Show me the fingerprint changes as diffs. [mock:diffs]"
   elif [[ -n "$WORK" ]]; then
     # The scripted commands read this repo's files, so the project is this checkout.
     space=$(new_id) chat=$(new_id)

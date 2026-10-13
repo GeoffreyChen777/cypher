@@ -130,13 +130,17 @@ pub struct SelectionSnapshot {
 
 /// The row id an element key belongs to (`{row_key}:{element ix}`) — the
 /// anchor for dismissing a comment offer when that row is replaced.
-/// Assistant Markdown's production keys append `-t{element_ix}`; user
-/// bubbles append `:u`. Strip only recognized renderer suffixes so
-/// punctuation inside a real row id remains untouched.
+/// Assistant Markdown's production keys append `-t{element_ix}` (a diff
+/// fence's lines `-t{element_ix}l{line}`); user bubbles append `:u`. Strip
+/// only recognized renderer suffixes so punctuation inside a real row id
+/// remains untouched.
 pub fn row_of_key(key: &str) -> &str {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     if let Some((row, suffix)) = key.rsplit_once("-t")
-        && !suffix.is_empty()
-        && suffix.bytes().all(|b| b.is_ascii_digit())
+        && (digits(suffix)
+            || suffix
+                .split_once('l')
+                .is_some_and(|(element, line)| digits(element) && digits(line)))
     {
         return row;
     }

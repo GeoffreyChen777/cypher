@@ -74,8 +74,9 @@ impl Changes {
                     line,
                     spans,
                     &theme,
-                    gutter_width(file_diff),
+                    Some(gutter_width(file_diff)),
                     Some((self.sel_scope, &key, &selection)),
+                    false,
                 )
             }
             DiffRow::SplitLine {
@@ -760,7 +761,7 @@ fn del_color(theme: &Theme) -> gpui::Hsla {
 }
 
 /// One notice row ("New file", "Binary file — contents not shown", …).
-fn notice_row(notice: String, theme: &Theme) -> AnyElement {
+pub(crate) fn notice_row(notice: String, theme: &Theme) -> AnyElement {
     div()
         .h(px(NOTICE_HEIGHT))
         .w_full()
@@ -775,7 +776,7 @@ fn notice_row(notice: String, theme: &Theme) -> AnyElement {
 }
 
 /// One `@@ … @@` hunk-header row on the bluish-grey wash.
-fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
+pub(crate) fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
     div()
         .h(px(HUNK_HEADER_HEIGHT))
         .w_full()
@@ -799,30 +800,35 @@ pub fn diff_line_key(owner: &str, file: u32, hunk: u32, line: u32) -> String {
 }
 
 /// One +/−/context/meta diff line: coloured accent bar, dual line-number
-/// gutters (`gutter_px` wide — see [`gutter_width`]), marker column, and
-/// paint-only syntax runs. `select` (the Changes pane only) makes the CODE
-/// TEXT selectable with a stable per-line key + the shared selection
-/// callbacks — gutters, markers and headers stay inert; the transcript's
-/// tool-diff renders pass `None`.
-fn diff_line_row(
+/// gutters (`gutter_px` wide — see [`gutter_width`]; `None` drops them for
+/// diffs without line numbers), marker column, and paint-only syntax runs.
+/// `select` makes the CODE TEXT selectable with a stable per-line key + the
+/// shared selection callbacks — gutters, markers and headers stay inert; the
+/// transcript's tool-diff renders pass `None`. `fit_content` sizes the row to
+/// its text instead of clipping it, for a parent that scrolls horizontally.
+pub(crate) fn diff_line_row(
     line: &DiffLine,
     spans: &[cypher_syntax::HighlightSpan],
     theme: &Theme,
-    gutter_px: f32,
+    gutter_px: Option<f32>,
     select: Option<(
         crate::markdown::selection::SelectionScope,
         &str,
         &markdown::render::SelectionUi,
     )>,
+    fit_content: bool,
 ) -> AnyElement {
     if line.kind == LineKind::Meta {
         return div()
             .h(px(DIFF_LINE_HEIGHT))
-            .w_full()
+            .when(!fit_content, |el| el.w_full())
             .flex_none()
             .flex()
             .items_center()
-            .pl(px(ACCENT_BAR_WIDTH + 2.0 * gutter_px + MARKER_WIDTH + 12.0))
+            .pl(px(ACCENT_BAR_WIDTH
+                + 2.0 * gutter_px.unwrap_or(0.0)
+                + MARKER_WIDTH
+                + 12.0))
             .text_size(px(10.5))
             .text_color(theme.text_faint)
             .italic()
@@ -862,18 +868,20 @@ fn diff_line_row(
         ),
     };
     let gutter = |no: Option<u32>, color: gpui::Hsla| {
-        div()
-            .w(px(gutter_px))
-            .flex_none()
-            .mono(theme)
-            .text_size(px(11.0))
-            .text_color(theme.regions.git_line_number.unwrap_or(color))
-            .flex()
-            .justify_end()
-            .pr(px(8.0))
-            .child(SharedString::from(
-                no.map(|n| n.to_string()).unwrap_or_default(),
-            ))
+        gutter_px.map(|gutter_px| {
+            div()
+                .w(px(gutter_px))
+                .flex_none()
+                .mono(theme)
+                .text_size(px(11.0))
+                .text_color(theme.regions.git_line_number.unwrap_or(color))
+                .flex()
+                .justify_end()
+                .pr(px(8.0))
+                .child(SharedString::from(
+                    no.map(|n| n.to_string()).unwrap_or_default(),
+                ))
+        })
     };
     let mono = theme.mono();
     let runs = markdown::render::runs_for_syntax_line_with_plain(
@@ -885,7 +893,7 @@ fn diff_line_row(
     );
     div()
         .h(px(DIFF_LINE_HEIGHT))
-        .w_full()
+        .when(!fit_content, |el| el.w_full())
         .flex_none()
         .flex()
         .flex_row()
@@ -900,7 +908,7 @@ fn diff_line_row(
                 .flex_none()
                 .when_some(accent, |el, color| el.bg(color)),
         )
-        .child(gutter(
+        .children(gutter(
             line.old_no,
             if line.kind == LineKind::Del {
                 number_color
@@ -908,7 +916,7 @@ fn diff_line_row(
                 theme.text_faint.opacity(0.8)
             },
         ))
-        .child(gutter(
+        .children(gutter(
             line.new_no,
             if line.kind == LineKind::Add {
                 number_color
@@ -929,9 +937,13 @@ fn diff_line_row(
         )
         .child(
             div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
+                .map(|el| {
+                    if fit_content {
+                        el.flex_none().pr(px(12.0))
+                    } else {
+                        el.flex_1().min_w_0().overflow_hidden()
+                    }
+                })
                 .pl(px(12.0))
                 .mono(theme)
                 .text_size(px(DIFF_TEXT_SIZE))
@@ -974,8 +986,9 @@ pub fn color_preview(theme: &Theme) -> AnyElement {
                     kind: HighlightKind::Keyword,
                 }],
                 theme,
-                32.0,
+                Some(32.0),
                 None,
+                false,
             )
         }))
         .into_any_element()
@@ -1006,11 +1019,20 @@ pub(super) fn diff_text_element(
     let layout = styled.layout().clone();
     let sel_key: std::sync::Arc<str> = key.into();
     let sel_text: SharedString = line.text.clone().into();
+    // In-chat find (diff fences in the transcript): resolved at build time,
+    // in document order, like every other markdown text element.
+    let find_hits = crate::markdown::find::element_matches(
+        scope,
+        crate::markdown::selection::row_of_key(&sel_key),
+        &line.text,
+    );
+    let find_washes = markdown::render::find_wash(theme);
     let theme = theme.clone();
     let selection = selection.clone();
     let underlay = gpui::canvas(
         |_, _, _| (),
         move |_, _, window, _| {
+            markdown::render::paint_find_hits(window, &layout, &find_hits, find_washes);
             markdown::render::paint_text_selection(
                 window,
                 scope,
@@ -1060,7 +1082,14 @@ pub fn render_file_body_with_syntax(
             // Inert here: this stacked form serves the transcript's tool-diff
             // and the fold tween — only the Changes pane's virtualized rows
             // are selectable.
-            children.push(diff_line_row(line, spans, theme, gutter_px, None));
+            children.push(diff_line_row(
+                line,
+                spans,
+                theme,
+                Some(gutter_px),
+                None,
+                false,
+            ));
         }
     }
     div()
@@ -1105,7 +1134,14 @@ fn render_file_body_upto(
                     .as_deref()
                     .map(|highlights| highlights.spans(line))
                     .unwrap_or(&[]);
-                children.push(diff_line_row(line, spans, theme, gutter_px, None));
+                children.push(diff_line_row(
+                    line,
+                    spans,
+                    theme,
+                    Some(gutter_px),
+                    None,
+                    false,
+                ));
                 y += DIFF_LINE_HEIGHT;
             }
         }

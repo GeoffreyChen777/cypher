@@ -186,10 +186,12 @@ fn preview_highlights(
             let parser::Block::CodeBlock { language, code } = &top.block else {
                 return None;
             };
+            let (lang, source) =
+                crate::markdown::diff_fence::highlight_input(language.as_deref(), code)?;
             cypher_syntax::highlight(cypher_syntax::HighlightRequest {
-                source: code,
+                source: &source,
                 path: None,
-                fence_tag: language.as_deref(),
+                fence_tag: Some(crate::files::fence_tag(lang)),
             })
             .ok()
             .map(|document| (index, Arc::new(document)))

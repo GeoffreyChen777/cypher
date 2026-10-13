@@ -273,6 +273,11 @@ pub fn render_block(
             let line = line * theme.markdown.body_line_height / MD_LINE_HEIGHT;
             text_element(runs, size, line, true, ctx)
         }
+        Block::CodeBlock { language, code }
+            if super::diff_fence::is_diff_fence(language.as_deref()) =>
+        {
+            super::diff_fence::render(code, ctx, highlight)
+        }
         Block::CodeBlock { language, code } => {
             render_code_block(language.as_deref(), code, ctx, highlight)
         }
@@ -605,6 +610,12 @@ pub fn count_block_matches(block: &Block, query: &str) -> usize {
     match block {
         Block::Paragraph { runs } | Block::Heading { runs, .. } => {
             crate::markdown::find::count_matches(&runs_text(runs), query)
+        }
+        // A diff fence selects line by line, markers excluded.
+        Block::CodeBlock { language, code }
+            if super::diff_fence::is_diff_fence(language.as_deref()) =>
+        {
+            super::diff_fence::count_matches(code, query)
         }
         // A fence is ONE selectable text model (see `flatten_code`), so its
         // matches are counted over the raw source, newlines included.
@@ -1376,7 +1387,6 @@ fn render_code_block(
         theme,
     } = ctx;
     let code_theme = code_block_theme(theme);
-    let chrome_color = theme.code_block_text.unwrap_or(theme.text_muted);
     // Whole-fence text + runs through the cross-frame cache (validity: code
     // length + highlight slice identity — a fresh highlight Arc re-derives).
     let hl_key = highlight.map_or((0, 0), |h| (h.as_ptr() as usize, h.len()));
@@ -1406,12 +1416,75 @@ fn render_code_block(
     // This also applies the streaming veil without changing text or layout.
     let text = flat_text_element(&cached.flat, ix, opts, &code_theme);
     let scroll_id: SharedString = format!("{}-code{ix}", opts.row_key).into();
-    // Copy affordance (no source counterpart — the original block is
-    // header + body only): a small ghost button in the block's top-right,
-    // absolutely overlaid so clicking / the "Copied" flash never shifts
-    // layout. Sits centered in the header when there is one, floats over the
-    // first code line otherwise.
-    let copy_button = opts.copy.clone().map(|copy| {
+    fence_frame(ctx, language.map(fence_label))
+        .child(
+            div()
+                .id(scroll_id)
+                .overflow_x_scroll()
+                .px(px(CODE_PADDING_X))
+                .py(px(CODE_PADDING_Y))
+                .mono(theme)
+                .text_size(px(theme.markdown.code_size))
+                .line_height(px(theme.markdown.code_line_height))
+                .whitespace_nowrap()
+                .cursor_text()
+                .flex()
+                .flex_col()
+                // Keep the selectable wrapper at intrinsic text width;
+                // stretching it to the viewport hides horizontal overflow.
+                .items_start()
+                .child(text),
+        )
+        // Overlay LAST so it paints above the header/body.
+        .children(copy_button(code, ctx))
+        .into_any_element()
+}
+
+fn fence_label(language: &str) -> AnyElement {
+    SharedString::from(language.to_string()).into_any_element()
+}
+
+/// A fence's chrome: the rounded panel and, when `header` is given, the
+/// label strip above the body. Callers add the body, then [`copy_button`].
+pub(super) fn fence_frame(ctx: BlockCtx, header: Option<AnyElement>) -> gpui::Div {
+    let theme = ctx.theme;
+    let chrome_color = theme.code_block_text.unwrap_or(theme.text_muted);
+    div()
+        .rounded(px(10.0))
+        // Faint white wash over the near-black panel ≈ #101010 (zeron's code
+        // surface), with the hairline border.
+        .bg(code_block_background(theme))
+        .border_1()
+        .border_color(theme.border)
+        .overflow_hidden()
+        .relative()
+        .when_some(header, |el, header| {
+            el.child(
+                div()
+                    .px(px(CODE_PADDING_X))
+                    .py(px(5.0))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    // A whisper of tone separation between header and body.
+                    .bg(theme.ink(0.02))
+                    .text_size(px(11.0))
+                    .text_color(chrome_color)
+                    .child(header),
+            )
+        })
+}
+
+/// Copy affordance (no source counterpart — the original block is
+/// header + body only): a small ghost button in the block's top-right,
+/// absolutely overlaid so clicking / the "Copied" flash never shifts
+/// layout. Sits centered in the header when there is one, floats over the
+/// first code line otherwise.
+pub(super) fn copy_button(code: &str, ctx: BlockCtx) -> Option<AnyElement> {
+    let BlockCtx {
+        ix, opts, theme, ..
+    } = ctx;
+    let chrome_color = theme.code_block_text.unwrap_or(theme.text_muted);
+    opts.copy.clone().map(|copy| {
         let copied = copy.copied_ix == Some(ix);
         let code_text: SharedString = code.to_string().into();
         let handler = copy.handler.clone();
@@ -1450,51 +1523,8 @@ fn render_code_block(
                 .text_color(chrome_color),
             )
             .when(copied, |el| el.child(SharedString::from("Copied")))
-    });
-    div()
-        .rounded(px(10.0))
-        // Faint white wash over the near-black panel ≈ #101010 (zeron's code
-        // surface), with the hairline border.
-        .bg(code_block_background(theme))
-        .border_1()
-        .border_color(theme.border)
-        .overflow_hidden()
-        .relative()
-        .when_some(language, |el, lang| {
-            el.child(
-                div()
-                    .px(px(CODE_PADDING_X))
-                    .py(px(5.0))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    // A whisper of tone separation between header and body.
-                    .bg(theme.ink(0.02))
-                    .text_size(px(11.0))
-                    .text_color(chrome_color)
-                    .child(SharedString::from(lang.to_string())),
-            )
-        })
-        .child(
-            div()
-                .id(scroll_id)
-                .overflow_x_scroll()
-                .px(px(CODE_PADDING_X))
-                .py(px(CODE_PADDING_Y))
-                .mono(theme)
-                .text_size(px(theme.markdown.code_size))
-                .line_height(px(theme.markdown.code_line_height))
-                .whitespace_nowrap()
-                .cursor_text()
-                .flex()
-                .flex_col()
-                // Keep the selectable wrapper at intrinsic text width;
-                // stretching it to the viewport hides horizontal overflow.
-                .items_start()
-                .child(text),
-        )
-        // Overlay LAST so it paints above the header/body.
-        .children(copy_button)
-        .into_any_element()
+            .into_any_element()
+    })
 }
 
 /// Paint color for a token class — the soft syntax palette (the

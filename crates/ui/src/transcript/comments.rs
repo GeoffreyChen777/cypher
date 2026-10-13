@@ -190,13 +190,13 @@ impl Transcript {
                 continue;
             }
             if let Block::CodeBlock { language, code } = &top.block
-                && let Some(lang) = language
-                    .as_deref()
-                    .and_then(cypher_syntax::language_for_alias)
+                && let Some((lang, source)) =
+                    crate::markdown::diff_fence::highlight_input(language.as_deref(), code)
             {
                 out.insert(
                     ix,
-                    self.highlights.request(row_id.clone(), ix, lang, code, cx),
+                    self.highlights
+                        .request(row_id.clone(), ix, lang, &source, cx),
                 );
             }
         }

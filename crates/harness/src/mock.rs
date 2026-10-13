@@ -11,8 +11,10 @@ use cypher_proto::{
 
 use crate::{Harness, HarnessError, RunControls};
 
+mod diffs;
 mod permissions;
 
+pub use diffs::MARKER as DIFFS_MARKER;
 pub use permissions::{CARD_MARKER as PERMISSION_CARD_MARKER, STORY_MARKER as PERMISSIONS_MARKER};
 
 /// Prompt marker: the run asks one question through the engine's input bridge
@@ -252,6 +254,19 @@ impl Harness for MockHarness {
                 !story,
             ));
         }
+        // Diff fence showcase ([`DIFFS_MARKER`]): its reply replaces the
+        // script's text and tools.
+        let diffs_reply;
+        let body = if request.prompt.contains(DIFFS_MARKER) {
+            diffs_reply = body[..lead]
+                .iter()
+                .cloned()
+                .chain(diffs::reply())
+                .collect::<Vec<_>>();
+            &diffs_reply[..]
+        } else {
+            body
+        };
         // Dev/demo prompt markers ([`ASK_MARKER`], [`HOLD_MARKER`]): the
         // data-side way to put live awaiting-input and working sessions on
         // screen, e.g. when seeding a demo sidebar.

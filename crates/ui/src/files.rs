@@ -637,12 +637,11 @@ impl FilesPanel {
             .iter()
             .enumerate()
             .filter_map(|(ix, top)| match &top.block {
-                Block::CodeBlock {
-                    language: Some(tag),
-                    code,
-                } => cypher_syntax::language_for_alias(tag)
-                    .filter(|lang| cypher_syntax::supports_language(*lang))
-                    .map(|lang| (ix, lang, code.clone())),
+                Block::CodeBlock { language, code } => {
+                    crate::markdown::diff_fence::highlight_input(language.as_deref(), code)
+                        .filter(|(lang, _)| cypher_syntax::supports_language(*lang))
+                        .map(|(lang, source)| (ix, lang, source.into_owned()))
+                }
                 _ => None,
             })
             .collect();
@@ -975,7 +974,7 @@ impl FilesPanel {
 /// The fence alias `cypher_syntax` resolves back to `lang` (the transcript's
 /// table): highlighting a fenced block goes through the alias path so the
 /// parser picks the same injections it would for a chat reply.
-fn fence_tag(lang: LanguageId) -> &'static str {
+pub(crate) fn fence_tag(lang: LanguageId) -> &'static str {
     match lang {
         LanguageId::Rust => "rust",
         LanguageId::JavaScript => "javascript",
