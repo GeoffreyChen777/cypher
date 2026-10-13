@@ -9,23 +9,34 @@
 #                                 # "Thinking between commands" under "Work run
 #                                 # demo" to see the run fold into one
 #                                 # "Ran 10 commands · 8 thoughts · 1 failed" row
+#   scripts/dev-demo.sh --permissions
+#                                 # permission control: under "Permission control
+#                                 # demo", a settled deploy (commands run outside
+#                                 # the sandbox, blocked, denied, approvals filed
+#                                 # under their calls), a chat waiting on a live
+#                                 # permission card, one waiting on an ordinary
+#                                 # question, and command rules in Settings →
+#                                 # Permissions
 #
-# The flags combine. Everything lives under /tmp/cypher-demo-* (--work:
-# /tmp/cypher-demo-work-*); re-runs reuse it (delete those directories to
-# reseed). Quitting the app stops the engine.
+# The flags combine (--permissions takes the place of the default seed).
+# Everything lives under /tmp/cypher-demo-* (--work: /tmp/cypher-demo-work-*,
+# --permissions: /tmp/cypher-demo-permissions-*); re-runs reuse it (delete
+# those directories to reseed). Quitting the app stops the engine.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 WORK=""
 DELAY=""
+PERMS=""
 for arg in "$@"; do
   case "$arg" in
     --work) WORK=1 ;;
     --slow) DELAY=350 ;;
-    *) echo 'Usage: dev-demo.sh [--work] [--slow]' >&2; exit 2 ;;
+    --permissions) PERMS=1 ;;
+    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions]' >&2; exit 2 ;;
   esac
 done
-DEMO_DIR=/tmp/cypher-demo${WORK:+-work}
+DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}
 DAEMON_DIR=$DEMO_DIR-daemon
 UI_DIR=$DEMO_DIR-ui
 
@@ -58,14 +69,49 @@ create_chat() { # id space title
   mutate "{\"op\":\"createChat\",\"chatId\":\"$1\",\"spaceId\":\"$2\",\"config\":{\"harness\":\"mock\",\"model\":\"mock-fable-5\",\"reasoning\":null,\"sandbox\":\"workspace-write\"}}"
   mutate "{\"op\":\"renameChat\",\"chatId\":\"$1\",\"title\":\"$3\"}"
 }
-run_prompt() { # chat cwd
-  probe QueueCommand "{\"chatId\":\"$1\",\"command\":{\"kind\":\"run\",\"messageId\":\"$(uuidgen)\",\"request\":{\"prompt\":\"Walk me through the streaming pipeline\",\"model\":null,\"reasoning\":null,\"modelOptions\":{},\"cwd\":\"$2\",\"sandbox\":\"workspace-write\",\"autoApprove\":true,\"resume\":null}}}" >/dev/null
+run_prompt() { # chat cwd [prompt] [what the agent receives, e.g. with a mock marker]
+  local prompt="${3:-Walk me through the streaming pipeline}"
+  probe QueueCommand "{\"chatId\":\"$1\",\"command\":{\"kind\":\"run\",\"messageId\":\"$(uuidgen)\",\"request\":{\"prompt\":\"$prompt\",\"model\":null,\"reasoning\":null,\"modelOptions\":{},\"cwd\":\"$2\",\"sandbox\":\"workspace-write\",\"autoApprove\":true,\"resume\":null}${4:+,\"agentPrompt\":\"$4\"}}}" >/dev/null
 }
 
 if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
   echo "▸ seeding demo data"
   DEV=$(probe EngineInfo '{}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["deviceId"])')
-  if [[ -n "$WORK" ]]; then
+  if [[ -n "$PERMS" ]]; then
+    # A placeholder project, with a deploy script a command rule pins.
+    project="$DEMO_DIR-projects/webapp"
+    mkdir -p "$project/scripts"
+    printf '#!/bin/sh\nrsync -az dist/ deploy@web:/srv/app/\n' >"$project/scripts/deploy.sh"
+    chmod +x "$project/scripts/deploy.sh"
+    space=$(new_id) story=$(new_id) card=$(new_id) ask=$(new_id)
+    create_space "$space" "$project" '"name":"Permission control demo"'
+    # Oldest first: the settled story ends up on top.
+    create_chat "$ask" "$space" "Tidy up the config loader"
+    run_prompt "$ask" "$project" "Tidy up the config loader." "Tidy up the config loader. [mock:ask]"
+    sleep 1
+    create_chat "$card" "$space" "Is the app on web healthy?"
+    run_prompt "$card" "$project" "Is the app on web healthy?" "Is the app on web healthy? [mock:permission-card]"
+    sleep 1
+    create_chat "$story" "$space" "Deploy the web app"
+    run_prompt "$story" "$project" "Restart the app on web, then publish the release." \
+      "Restart the app on web, then publish the release. [mock:permissions]"
+    # Settings → Permissions: permission control on, with command rules.
+    mkdir -p "$DAEMON_DIR/pi-runtime/agent"
+    deploy_sha=$(shasum -a 256 "$project/scripts/deploy.sh" | cut -d' ' -f1)
+    cat >"$DAEMON_DIR/pi-runtime/agent/permissions.json" <<JSON
+{
+  "version": 1,
+  "enabled": true,
+  "approval": { "escalate": "ask" },
+  "commands": [
+    { "match": ["ssh", "deploy@web", "**"], "decision": "allow", "label": "Check the app on the server web", "createdAt": "2026-10-12T09:10:00Z" },
+    { "match": ["./scripts/deploy.sh", "**"], "decision": "allow", "label": "Deploy the web app", "sha256": "$deploy_sha", "createdAt": "2026-10-12T09:12:00Z" },
+    { "match": ["git", "push", "**", "--force", "**"], "decision": "ask", "label": "Force-push" },
+    { "match": ["kubectl", "delete", "**"], "decision": "deny" }
+  ]
+}
+JSON
+  elif [[ -n "$WORK" ]]; then
     # The scripted commands read this repo's files, so the project is this checkout.
     space=$(new_id) chat=$(new_id)
     create_space "$space" "$PWD" '"name":"Work run demo","gitDetected":true'

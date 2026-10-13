@@ -109,7 +109,12 @@ Tests per platform:
   headless engine with the mock harness; `scripts/dev-app.sh [local|dev]` runs a
   UI attached to it over Unix IPC. Data lives in `~/.cypher-development/`;
   `CYPHER_DEV_INSTANCE=<name>` keeps a second checkout's instance separate.
-- `scripts/dev-demo.sh` starts an offline engine seeded with demo chats.
+- `scripts/dev-demo.sh` starts an offline engine seeded with demo chats. `--work` seeds a
+  run of thoughts between commands; `--permissions` seeds permission control: a settled
+  deploy (commands outside the sandbox, blocked, denied, approvals filed under their
+  calls), chats waiting on a permission card and on an ordinary question, and command
+  rules in Settings → Permissions (the mock harness's `[mock:permissions]` and
+  `[mock:permission-card]` markers).
 - `scripts/dev-ios.sh` runs the iOS Dev bundle against a local Edge.
 - `dev` mode syncs through a local Edge: [Local Edge development](local-edge.md).
 - `scripts/e2e-smoke.sh` runs two headless engines against a local Edge.

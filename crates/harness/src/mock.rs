@@ -11,6 +11,10 @@ use cypher_proto::{
 
 use crate::{Harness, HarnessError, RunControls};
 
+mod permissions;
+
+pub use permissions::{CARD_MARKER as PERMISSION_CARD_MARKER, STORY_MARKER as PERMISSIONS_MARKER};
+
 /// Prompt marker: the run asks one question through the engine's input bridge
 /// (the session sits in awaiting-input) and replays its script once answered.
 pub const ASK_MARKER: &str = "[mock:ask]";
@@ -235,6 +239,19 @@ impl Harness for MockHarness {
             .iter()
             .take_while(|e| matches!(e, AgentEvent::SessionStarted { .. }))
             .count();
+        // Permission control demos ([`PERMISSIONS_MARKER`],
+        // [`PERMISSION_CARD_MARKER`]): the transcript rows and the permission
+        // card, scripted, between the script's opening and its Done.
+        let story = request.prompt.contains(PERMISSIONS_MARKER);
+        if story || request.prompt.contains(PERMISSION_CARD_MARKER) {
+            return Ok(permissions::run(
+                body[..lead].to_vec(),
+                tail.to_vec(),
+                controls,
+                delay,
+                !story,
+            ));
+        }
         // Dev/demo prompt markers ([`ASK_MARKER`], [`HOLD_MARKER`]): the
         // data-side way to put live awaiting-input and working sessions on
         // screen, e.g. when seeding a demo sidebar.
