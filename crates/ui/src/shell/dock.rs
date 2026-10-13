@@ -497,6 +497,39 @@ impl Shell {
         self.register_diff_surface(sid, changes, cx);
     }
 
+    /// A transcript changed-files card: the round's diff opens as its own
+    /// pinned tab — or the tab already showing that round comes forward —
+    /// brought to the clicked file.
+    pub(in crate::shell) fn open_turn_diff(
+        &mut self,
+        sid: SlotId,
+        turn: std::sync::Arc<cypher_proto::TurnChanges>,
+        path: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
+            return;
+        };
+        let open = slot
+            .diffs
+            .iter()
+            .find(|(_, changes)| changes.read(cx).shows_turn(&turn))
+            .map(|(id, changes)| (*id, changes.clone()));
+        let state = slot.state.clone();
+        self.ensure_dock_open(sid, cx);
+        match open {
+            Some((id, changes)) => {
+                changes.update(cx, |changes, cx| changes.focus_file(path, cx));
+                self.set_dock_active(sid, DockSurface::Diff(id), cx);
+            }
+            None => {
+                let popup = self.comments.popup.clone().downgrade();
+                let changes = cx.new(|cx| Changes::for_turn(state, popup, turn, path, cx));
+                self.register_diff_surface(sid, changes, cx);
+            }
+        }
+    }
+
     fn register_diff_surface(
         &mut self,
         sid: SlotId,

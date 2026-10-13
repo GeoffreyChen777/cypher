@@ -4,7 +4,7 @@
 //! - `meta`:     LoroMap  { chatId: string, schemaVersion: number }         (host-only writer)
 //! - `messages`: LoroList of LoroMap {
 //!   id, role, parts: LoroList<part map>, createdAt, deviceId, status?, continuationOf?,
-//!   completedAt?, comments?: json, models?: json }
+//!   completedAt?, comments?: json, models?: json, turnChanges?: json }
 //! - `commands`: LoroList of LoroMap {
 //!   id, kind, payload(json), issuedBy, issuedAt, basedOn?, expiresAt?, status, resolution? }
 //!
@@ -15,7 +15,7 @@
 use loro::{ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use cypher_proto::AnsweredModel;
+use cypher_proto::{AnsweredModel, TurnChanges};
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::SESSION_SCHEMA_VERSION;
@@ -78,6 +78,12 @@ pub struct SessionMessageEntry {
     /// Additive: absent on old rows, old writers, and other harnesses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<AnsweredModel>,
+    /// The files the round this entry closed changed in its checkout,
+    /// stamped by the host after the round settled
+    /// ([`SessionDoc::set_turn_changes`]). Additive: absent on old rows,
+    /// old writers, and rounds that changed nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_changes: Option<TurnChanges>,
 }
 
 /// One comment sent with a user prompt: the quote as the user selected it
@@ -573,6 +579,56 @@ impl SessionDoc {
         Ok(false)
     }
 
+    /// Record the files a settled round changed on the entry that closed it.
+    /// Returns `false` when no entry with that id exists (a rewind removed
+    /// it while the round's diff was being captured).
+    pub fn set_turn_changes(
+        &self,
+        message_id: &str,
+        changes: &TurnChanges,
+    ) -> Result<bool, DocError> {
+        let messages = self.doc.get_list("messages");
+        for i in (0..messages.len()).rev() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+                messages.get(i)
+            else {
+                continue;
+            };
+            if matches!(
+                map.get("id"),
+                Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == message_id
+            ) {
+                map.insert(
+                    "turnChanges",
+                    loro_value_from_json(&serde_json::to_value(changes)?),
+                )?;
+                self.doc.commit();
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The id of the transcript's last entry when an assistant wrote it —
+    /// the entry a round that just settled closed on. `None` when the tail is
+    /// anything else (a round that failed before answering ends on its
+    /// prompt). Reads only the tail map, never the transcript.
+    pub fn last_assistant_entry_id(&self) -> Option<String> {
+        let messages = self.doc.get_list("messages");
+        let last = messages.len().checked_sub(1)?;
+        let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) = messages.get(last)
+        else {
+            return None;
+        };
+        let field = |key: &str| match map.get(key) {
+            Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
+            _ => None,
+        };
+        (field("role").as_deref() == Some("assistant"))
+            .then(|| field("id"))
+            .flatten()
+    }
+
     /// Append an error part to an existing entry (crash recovery: the aborted
     /// entry must SAY why it ended — "Run interrupted by engine restart…" —
     /// not just truncate silently). Returns `false` when no entry matches.
@@ -809,6 +865,12 @@ fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Resu
             loro_value_from_json(&serde_json::to_value(&entry.models)?),
         )?;
     }
+    if let Some(changes) = &entry.turn_changes {
+        map.insert(
+            "turnChanges",
+            loro_value_from_json(&serde_json::to_value(changes)?),
+        )?;
+    }
     Ok(())
 }
 
@@ -903,6 +965,11 @@ pub fn join_continuation_entries(entries: Vec<SessionMessageEntry>) -> Vec<Sessi
                         if !out[at].models.contains(&model) {
                             out[at].models.push(model);
                         }
+                    }
+                    // The round closed on its last segment; the joined
+                    // entry ends where that segment did.
+                    if entry.turn_changes.is_some() {
+                        out[at].turn_changes = entry.turn_changes;
                     }
                 } else {
                     // Orphan continuation — surface as its own entry rather than dropping.

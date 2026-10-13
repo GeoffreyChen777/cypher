@@ -110,6 +110,9 @@ impl Shell {
                                 cx,
                             );
                         }
+                        crate::transcript::TranscriptEvent::OpenTurnDiff { changes, path } => {
+                            this.open_turn_diff(sid, changes.clone(), path.clone(), cx);
+                        }
                     }
                 },
             ),

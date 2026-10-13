@@ -4,10 +4,32 @@ use serde_json::Value;
 
 use super::*;
 
+/// A recorded round's tree pair, validated: only full object ids reach git.
+fn tree_pair<'a>(
+    base: Option<&'a str>,
+    target: Option<&'a str>,
+) -> Result<(&'a str, &'a str), RpcError> {
+    match (base, target) {
+        (Some(base), Some(target))
+            if crate::git::diff_sync::is_object_id(base)
+                && crate::git::diff_sync::is_object_id(target) =>
+        {
+            Ok((base, target))
+        }
+        (Some(_), Some(_)) => Err(RpcError::BadParams(
+            "baseTree and targetTree must be object ids".into(),
+        )),
+        _ => Err(RpcError::BadParams(
+            "baseTree and targetTree required".into(),
+        )),
+    }
+}
+
 /// One-shot scoped capture for the Changes pane: `branch` diffs the
 /// working tree against merge-base(baseRef, HEAD); `turn` diffs the
-/// turn-start tree snapshot against the current tree; anything else
-/// is the plain working-tree capture.
+/// turn-start tree snapshot against the current tree; `trees` diffs a
+/// recorded round's start and end trees; anything else is the plain
+/// working-tree capture.
 pub(super) async fn get_checkout_diff(
     rpc: &EngineRpc,
     params: Value,
@@ -50,6 +72,10 @@ pub(super) async fn get_checkout_diff(
                 .filter(|s| s.root == identity.root)
                 .ok_or_else(|| RpcError::Failed("no turn recorded".into()))?;
             crate::git::diff_sync::capture_turn_diff(&rpc.repos, root, &snapshot.tree).await
+        }
+        "trees" => {
+            let (base, target) = tree_pair(p.base_tree.as_deref(), p.target_tree.as_deref())?;
+            crate::git::diff_sync::capture_tree_diff(&rpc.repos, root, base, target).await
         }
         _ => crate::git::diff_sync::capture_diff(&rpc.repos, root).await,
     }
@@ -128,6 +154,15 @@ pub(super) async fn get_checkout_file_diff_text(
             .map_err(failed)?;
             (snapshot, turn.tree, None)
         }
+        "trees" => {
+            let (base, target) = tree_pair(p.base_tree.as_deref(), p.target_tree.as_deref())?;
+            let snapshot = Box::pin(crate::git::diff_sync::capture_tree_diff(
+                &rpc.repos, root, base, target,
+            ))
+            .await
+            .map_err(failed)?;
+            (snapshot, base.to_string(), Some(target.to_string()))
+        }
         _ => {
             let base = Box::pin(crate::git::diff_sync::working_diff_base(root))
                 .await
@@ -176,6 +211,13 @@ pub(super) async fn get_checkout_file_diff_text(
         "turn" => {
             Box::pin(crate::git::diff_sync::capture_turn_diff(
                 &rpc.repos, root, &base,
+            ))
+            .await
+        }
+        "trees" => {
+            let target = target.as_deref().unwrap_or_default();
+            Box::pin(crate::git::diff_sync::capture_tree_diff(
+                &rpc.repos, root, &base, target,
             ))
             .await
         }

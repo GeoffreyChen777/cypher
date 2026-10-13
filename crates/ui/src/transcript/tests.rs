@@ -2775,3 +2775,103 @@ fn each_permission_status_has_its_own_icon() {
         );
     }
 }
+
+// ---- round changes ----
+
+fn round_changes(paths: &[(&str, &str)]) -> cypher_proto::TurnChanges {
+    cypher_proto::TurnChanges {
+        cwd: "/repo".into(),
+        base: "a".repeat(40),
+        head: "b".repeat(40),
+        files: paths
+            .iter()
+            .map(|(path, status)| cypher_proto::DiffFileSummary {
+                path: (*path).into(),
+                old_path: None,
+                status: (*status).into(),
+                additions: 2,
+                deletions: 1,
+                binary: false,
+            })
+            .collect(),
+        file_count: paths.len() as u32,
+        additions: 2 * paths.len() as u32,
+        deletions: paths.len() as u32,
+    }
+}
+
+/// A settled round's changes close its last answer, under the answer text
+/// and over the hover strip; a streaming entry never shows them.
+#[test]
+fn round_changes_card_closes_the_settled_answer() {
+    let mut entry = assistant(
+        "m9",
+        MessageStatus::Complete,
+        vec![text_part("t0", "Done.")],
+    );
+    entry.turn_changes = Some(round_changes(&[("src/lib.rs", "modified")]));
+    let rows = rows_for_entry(&entry, false, &mut parse);
+    let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
+    assert_eq!(ids, ["m9#t0.0", "m9#changes"]);
+    let RowKind::TurnChanges { changes } = &rows[1].kind else {
+        panic!("changes card expected last");
+    };
+    assert_eq!(changes.files[0].path, "src/lib.rs");
+    assert!(rows[1].timestamp.is_some() && rows[0].timestamp.is_none());
+
+    let mut live = entry.clone();
+    live.status = Some(MessageStatus::Streaming);
+    assert!(
+        rows_for_entry(&live, false, &mut parse)
+            .iter()
+            .all(|r| !matches!(r.kind, RowKind::TurnChanges { .. }))
+    );
+}
+
+/// Changes landing on an already-settled answer re-key its rows — the row
+/// cache must not serve the card-less rows again.
+#[test]
+fn round_changes_rekey_the_entry() {
+    let entry = assistant(
+        "m9",
+        MessageStatus::Complete,
+        vec![text_part("t0", "Done.")],
+    );
+    let mut recorded = entry.clone();
+    recorded.turn_changes = Some(round_changes(&[("a.txt", "added")]));
+    assert_ne!(
+        render::entry_fingerprint(&entry, false),
+        render::entry_fingerprint(&recorded, false)
+    );
+}
+
+#[test]
+fn round_changes_card_labels() {
+    use super::turn_changes::{CARD_FILES, changed_label, hidden_files, split_path, status_tag};
+    assert_eq!(
+        split_path("crates/ui/src/lib.rs"),
+        ("lib.rs", "crates/ui/src")
+    );
+    assert_eq!(split_path("README.md"), ("README.md", ""));
+    assert_eq!(status_tag("added"), Some(("new", Some(true))));
+    assert_eq!(status_tag("deleted"), Some(("deleted", Some(false))));
+    assert_eq!(status_tag("renamed"), Some(("renamed", None)));
+    // A plain modification is the common case: no word at all.
+    assert_eq!(status_tag("modified"), None);
+
+    let one = round_changes(&[("a.txt", "added")]);
+    assert_eq!(changed_label(&one), "1 file changed");
+    assert_eq!(hidden_files(&one), 0);
+    let paths: Vec<String> = (0..CARD_FILES + 2).map(|i| format!("f{i}.txt")).collect();
+    let many: Vec<(&str, &str)> = paths.iter().map(|p| (p.as_str(), "modified")).collect();
+    let mut changes = round_changes(&many);
+    assert_eq!(
+        changed_label(&changes),
+        format!("{} files changed", CARD_FILES + 2)
+    );
+    assert_eq!(hidden_files(&changes), 2);
+    // The doc entry keeps at most MAX_FILES; the count still covers them all.
+    changes.file_count = 500;
+    assert_eq!(changed_label(&changes), "500 files changed");
+    assert_eq!(hidden_files(&changes), 500 - CARD_FILES as u32);
+}

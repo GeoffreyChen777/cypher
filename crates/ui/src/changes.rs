@@ -32,7 +32,7 @@ use gpui::{
     ListState, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
 
-use cypher_proto::{CheckoutDiff, GitHistoryCommit};
+use cypher_proto::{CheckoutDiff, GitHistoryCommit, TurnChanges};
 use cypher_rpc::methods;
 
 use crate::history::{GitHistory, GitHistoryCount, GitHistoryEvent, GitHistoryFetchButton};
@@ -204,6 +204,12 @@ pub struct Changes {
     /// Pinned commit for a [`DiffScope::Commit`] pane (sha + subject drive
     /// the fetch and the surface-tab title).
     commit: Option<GitHistoryCommit>,
+    /// Pinned round for a [`DiffScope::Turn`] pane (its checkout and tree
+    /// pair drive the fetch).
+    turn: Option<Arc<TurnChanges>>,
+    /// A file to bring into view once the diff that holds it is parsed (a
+    /// changed-files card's file click).
+    focus_path: Option<String>,
     /// Per-pane owner token prefixing every selectable diff-line key — two
     /// diff tabs never collide, and a closed pane's keys can't be claimed by
     /// a new one.
@@ -556,6 +562,8 @@ impl Changes {
             history_fetch_button: None,
             history_events: None,
             commit: None,
+            turn: None,
+            focus_path: None,
             owner: format!("changes-{}", cx.entity_id()),
             sel_scope,
             comment_popup,
@@ -677,6 +685,58 @@ impl Changes {
         changes.scope = DiffScope::Commit;
         changes.commit = Some(commit);
         changes
+    }
+
+    /// A pane pinned to one recorded round's diff (a transcript changed-files
+    /// card click), brought to `path` once it loads.
+    pub fn for_turn(
+        state: Entity<AppState>,
+        comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
+        turn: Arc<TurnChanges>,
+        path: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut changes = Self::new(state, comment_popup, cx);
+        changes.scope = DiffScope::Turn;
+        changes.turn = Some(turn);
+        changes.focus_path = path;
+        changes
+    }
+
+    /// Whether this pane is pinned to `turn`'s round.
+    pub fn shows_turn(&self, turn: &TurnChanges) -> bool {
+        self.turn
+            .as_deref()
+            .is_some_and(|pinned| pinned.base == turn.base && pinned.head == turn.head)
+    }
+
+    /// Bring `path` into view: its header to the top, its body unfolded. A
+    /// pane still loading keeps the request until the diff lands.
+    pub fn focus_file(&mut self, path: Option<String>, cx: &mut Context<Self>) {
+        self.focus_path = path;
+        self.apply_focus(cx);
+    }
+
+    fn apply_focus(&mut self, cx: &mut Context<Self>) {
+        let Some(parsed) = &self.parsed else {
+            return;
+        };
+        let Some(path) = self.focus_path.take() else {
+            return;
+        };
+        let Some(ix) = parsed.files.iter().position(|file| file.path == path) else {
+            return;
+        };
+        if self.folds.get(&path).is_some_and(|fold| fold.collapsed) {
+            self.toggle_fold(ix, cx);
+        }
+        if let Some(range) = self.row_ranges.get(ix) {
+            self.list.scroll_to(gpui::ListOffset {
+                item_ix: range.start,
+                offset_in_item: px(0.0),
+            });
+        }
+        cx.notify();
     }
 
     /// The surface-tab title (contextual, user request): the pinned commit's

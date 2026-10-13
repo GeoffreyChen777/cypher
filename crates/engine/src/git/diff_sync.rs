@@ -21,18 +21,26 @@
 //! (vs `merge-base(baseRef, HEAD)`, same capture path with the base overridden)
 //! and *latest turn* (vs a temp-index `write-tree` snapshot taken when a turn
 //! dispatches — see [`CheckoutDiffSync::note_turn_start`]).
+//!
+//! The same snapshots bracket each *round* of a chat — from the prompt that set
+//! the agent working to the moment it settles. When a round settles, its start
+//! and end trees are diffed and the changed files recorded on the transcript
+//! ([`CheckoutDiffSync::note_turn_end`]); the `trees` capture mode reads that
+//! pair back for the round's diff.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+use futures::FutureExt as _;
+use futures::future::{BoxFuture, Shared};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use cypher_proto::{Chat, CheckoutDiff, DiffFileSummary};
+use cypher_proto::{Chat, CheckoutDiff, DiffFileSummary, TurnChanges};
 
 use crate::EngineError;
 use crate::git::repos::{CheckoutIdentity, Repos};
@@ -104,6 +112,10 @@ pub struct TurnSnapshot {
     pub at: chrono::DateTime<chrono::Utc>,
 }
 
+/// The start snapshot of a chat's open round, shared so a round that settles
+/// before its start was captured waits for it instead of losing the round.
+type RoundStart = Shared<BoxFuture<'static, Option<TurnSnapshot>>>;
+
 struct DiffSyncInner {
     repos: Repos,
     workspace: WorkspaceHost,
@@ -118,6 +130,9 @@ struct DiffSyncInner {
     diffs_tx: watch::Sender<Vec<CheckoutDiff>>,
     /// chat_id → turn-start tree (see [`TurnSnapshot`]).
     turn_trees: Mutex<HashMap<String, TurnSnapshot>>,
+    /// chat_id → the start of its open round. Set by the turn that opens the
+    /// round (a steer into a working round keeps it), taken when it settles.
+    rounds: Mutex<HashMap<String, RoundStart>>,
     /// The tasks hold `Weak` refs, but an in-flight iteration holds an
     /// upgraded Arc — the token cuts it so no sidecar HTTP outlives shutdown.
     cancel: CancellationToken,
@@ -155,6 +170,7 @@ impl CheckoutDiffSync {
                 orphan_grace,
                 diffs_tx,
                 turn_trees: Mutex::new(HashMap::new()),
+                rounds: Mutex::new(HashMap::new()),
                 cancel: CancellationToken::new(),
                 supervisor: Mutex::new(None),
             }),
@@ -201,34 +217,81 @@ impl CheckoutDiffSync {
 
     /// A turn is starting for `chat_id` in `cwd`: snapshot the checkout's tree
     /// in the background so "Latest turn" has a base. Best-effort — failures
-    /// only log; a chat outside a checkout simply records nothing.
-    pub fn note_turn_start(&self, chat_id: &str, cwd: &str) {
+    /// only log; a chat outside a checkout simply records nothing. A turn
+    /// that `opens_round` also makes the snapshot that round's start; a steer
+    /// into a working round keeps the round's own.
+    pub fn note_turn_start(&self, chat_id: &str, cwd: &str, opens_round: bool) {
+        let weak = Arc::downgrade(&self.inner);
+        let chat = chat_id.to_string();
+        let cwd = PathBuf::from(cwd);
+        let snapshot: RoundStart = async move {
+            let inner = weak.upgrade()?;
+            // Not a checkout: nothing to snapshot.
+            let identity = inner.repos.checkout_identity(&cwd).await.ok()?;
+            match snapshot_tree(&identity.root).await {
+                Ok(tree) => Some(TurnSnapshot {
+                    root: identity.root,
+                    tree,
+                    at: chrono::Utc::now(),
+                }),
+                Err(err) => {
+                    tracing::debug!(chat = %chat, error = %err,
+                        "diff-sync: turn snapshot failed");
+                    None
+                }
+            }
+        }
+        .boxed()
+        .shared();
+        {
+            let mut rounds = lock(&self.inner.rounds);
+            if opens_round || !rounds.contains_key(chat_id) {
+                rounds.insert(chat_id.to_string(), snapshot.clone());
+            }
+        }
         let inner = Arc::downgrade(&self.inner);
         let chat_id = chat_id.to_string();
-        let cwd = PathBuf::from(cwd);
         tokio::spawn(async move {
-            let Some(inner) = inner.upgrade() else { return };
-            let identity = match inner.repos.checkout_identity(&cwd).await {
-                Ok(identity) => identity,
-                Err(_) => return, // not a checkout
+            if let Some(snapshot) = snapshot.await
+                && let Some(inner) = inner.upgrade()
+            {
+                lock(&inner.turn_trees).insert(chat_id, snapshot);
+            }
+        });
+    }
+
+    /// The round open for `chat_id` settled: diff its start snapshot against
+    /// the checkout now and hand the result to `record` when the round changed
+    /// anything. Best-effort like the start — a round with no start (the
+    /// engine restarted mid-round, the chat is not in a checkout) records
+    /// nothing.
+    pub fn note_turn_end(&self, chat_id: &str, record: impl FnOnce(TurnChanges) + Send + 'static) {
+        let Some(start) = lock(&self.inner.rounds).remove(chat_id) else {
+            return;
+        };
+        let chat_id = chat_id.to_string();
+        let cancel = self.inner.cancel.clone();
+        tokio::spawn(async move {
+            let Some(start) = start.await else { return };
+            let changes = tokio::select! {
+                _ = cancel.cancelled() => return,
+                changes = round_changes(&start) => changes,
             };
-            match snapshot_tree(&identity.root).await {
-                Ok(tree) => {
-                    lock(&inner.turn_trees).insert(
-                        chat_id,
-                        TurnSnapshot {
-                            root: identity.root,
-                            tree,
-                            at: chrono::Utc::now(),
-                        },
-                    );
-                }
+            match changes {
+                Ok(Some(changes)) => record(changes),
+                Ok(None) => {}
                 Err(err) => {
                     tracing::debug!(chat = %chat_id, error = %err,
-                        "diff-sync: turn snapshot failed");
+                        "diff-sync: round diff failed");
                 }
             }
         });
+    }
+
+    /// Forget the open round of `chat_id` without recording it (it settled
+    /// with no answer to record it on).
+    pub fn drop_round(&self, chat_id: &str) {
+        lock(&self.inner.rounds).remove(chat_id);
     }
 
     /// The recorded turn-start snapshot for a chat, if any turn dispatched
@@ -1287,15 +1350,22 @@ pub async fn capture_turn_diff(
     turn_tree: &str,
 ) -> Result<DiffSnapshot, EngineError> {
     let current = snapshot_tree(root).await?;
-    let head = capture_git(root, &["rev-parse", "--verify", "HEAD"], 256)
-        .await
-        .map(|c| String::from_utf8_lossy(&c.stdout).trim().to_string())
-        .unwrap_or_default();
-    let branch = repos
-        .current_branch(root)
-        .await
-        .unwrap_or_else(|_| "HEAD".into());
+    capture_tree_diff(repos, root, turn_tree, &current).await
+}
 
+/// Whether `value` names a Git object by its full hex id (SHA-1 or SHA-256).
+/// Tree ids reach the `trees` capture from clients, so nothing else — no
+/// revision syntax, no option-looking text — is passed on to git.
+pub fn is_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The files changed between two trees, with their line counts.
+async fn tree_files(
+    root: &Path,
+    base: &str,
+    target: &str,
+) -> Result<(Vec<DiffFileSummary>, bool), EngineError> {
     let names = capture_git(
         root,
         &[
@@ -1303,8 +1373,8 @@ pub async fn capture_turn_diff(
             "--name-status",
             "-z",
             "--find-renames",
-            turn_tree,
-            &current,
+            base,
+            target,
             "--",
         ],
         2 * 1024 * 1024,
@@ -1317,13 +1387,62 @@ pub async fn capture_turn_diff(
             "--numstat",
             "-z",
             "--find-renames",
-            turn_tree,
-            &current,
+            base,
+            target,
             "--",
         ],
         2 * 1024 * 1024,
     )
     .await?;
+    let mut files = parse_name_status(&names.stdout);
+    apply_numstat(&mut files, &nums.stdout);
+    Ok((files, names.truncated || nums.truncated))
+}
+
+/// A settled round's changes: its start tree against a fresh snapshot of the
+/// checkout. `None` when the round changed nothing.
+async fn round_changes(start: &TurnSnapshot) -> Result<Option<TurnChanges>, EngineError> {
+    let head = snapshot_tree(&start.root).await?;
+    if head == start.tree {
+        return Ok(None);
+    }
+    let (mut files, _) = tree_files(&start.root, &start.tree, &head).await?;
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let file_count = u32::try_from(files.len()).unwrap_or(u32::MAX);
+    let additions = files.iter().map(|f| f.additions).sum();
+    let deletions = files.iter().map(|f| f.deletions).sum();
+    files.truncate(TurnChanges::MAX_FILES);
+    Ok(Some(TurnChanges {
+        cwd: start.root.to_string_lossy().to_string(),
+        base: start.tree.clone(),
+        head,
+        files,
+        file_count,
+        additions,
+        deletions,
+    }))
+}
+
+/// Tree-to-tree capture: the "Latest turn" diff and a recorded round's
+/// (`trees` mode). Both trees carry untracked (unignored) files.
+pub async fn capture_tree_diff(
+    repos: &Repos,
+    root: &Path,
+    base: &str,
+    target: &str,
+) -> Result<DiffSnapshot, EngineError> {
+    let head = capture_git(root, &["rev-parse", "--verify", "HEAD"], 256)
+        .await
+        .map(|c| String::from_utf8_lossy(&c.stdout).trim().to_string())
+        .unwrap_or_default();
+    let branch = repos
+        .current_branch(root)
+        .await
+        .unwrap_or_else(|_| "HEAD".into());
+
+    let (files, list_truncated) = tree_files(root, base, target).await?;
     let tracked = capture_git(
         root,
         &[
@@ -1332,18 +1451,16 @@ pub async fn capture_turn_diff(
             "--no-color",
             "--find-renames",
             "--unified=3",
-            turn_tree,
-            &current,
+            base,
+            target,
             "--",
         ],
         MAX_PATCH_BYTES,
     )
     .await?;
 
-    let mut files = parse_name_status(&names.stdout);
-    apply_numstat(&mut files, &nums.stdout);
     let mut patch = String::from_utf8_lossy(&tracked.stdout).to_string();
-    let truncated = tracked.truncated || names.truncated || nums.truncated;
+    let truncated = tracked.truncated || list_truncated;
     if tracked.truncated {
         let boundary = patch.rfind('\n').unwrap_or(0);
         patch.truncate(boundary);

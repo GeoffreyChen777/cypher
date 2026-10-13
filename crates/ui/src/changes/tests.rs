@@ -386,6 +386,14 @@ fn scope_labels_and_clean_messages() {
         clean_message(DiffScope::LatestTurn, None),
         "No changes this turn"
     );
+    assert_eq!(
+        scope_label(DiffScope::Turn, 1, None),
+        "1 Changed file in this turn"
+    );
+    assert_eq!(
+        clean_message(DiffScope::Turn, None),
+        "No changes in this turn"
+    );
 }
 
 #[test]
@@ -433,6 +441,9 @@ fn scope_modes_are_wire_stable() {
     assert_eq!(DiffScope::WorkingTree.mode(), "workingTree");
     assert_eq!(DiffScope::Branch.mode(), "branch");
     assert_eq!(DiffScope::LatestTurn.mode(), "turn");
+    assert_eq!(DiffScope::Turn.mode(), "trees");
+    // A round's pane is pinned: never offered in the scope menu.
+    assert!(!DiffScope::ALL.contains(&DiffScope::Turn));
     assert_eq!(DiffScope::default(), DiffScope::WorkingTree);
 }
 

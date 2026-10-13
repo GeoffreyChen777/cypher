@@ -248,7 +248,9 @@ impl Changes {
     pub(super) fn active_diff(&self, cx: &App) -> Option<CheckoutDiff> {
         match self.scope {
             DiffScope::WorkingTree => self.resolved(cx),
-            DiffScope::Branch | DiffScope::LatestTurn | DiffScope::Commit => self.scoped.clone(),
+            DiffScope::Branch | DiffScope::LatestTurn | DiffScope::Commit | DiffScope::Turn => {
+                self.scoped.clone()
+            }
             DiffScope::History => None,
         }
     }
@@ -264,6 +266,13 @@ impl Changes {
             DiffScope::Commit => format!(
                 "commit:{}",
                 self.commit.as_ref().map(|c| c.sha.as_str()).unwrap_or("")
+            ),
+            DiffScope::Turn => format!(
+                "trees:{}",
+                self.turn
+                    .as_ref()
+                    .map(|turn| format!("{}..{}", turn.base, turn.head))
+                    .unwrap_or_default()
             ),
         }
     }
@@ -358,7 +367,19 @@ impl Changes {
         else {
             return;
         };
-        let Some(cwd) = self.scoped_cwd(cx) else {
+        // A round's checkout is the one it was recorded in.
+        let turn = match self.scope {
+            DiffScope::Turn => match self.turn.clone() {
+                Some(turn) => Some(turn),
+                None => return, // a turn pane without its pin never fetches
+            },
+            _ => None,
+        };
+        let Some(cwd) = turn
+            .as_ref()
+            .map(|turn| turn.cwd.clone())
+            .or_else(|| self.scoped_cwd(cx))
+        else {
             return;
         };
         let base = match self.scope {
@@ -377,15 +398,22 @@ impl Changes {
         };
         let target = self.desired_target(cx);
         let context = format!(
-            "{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}",
             target.as_deref().unwrap_or("local"),
             chat_id,
             cwd,
             self.scope.mode(),
             base.as_deref().unwrap_or(""),
-            commit_sha.as_deref().unwrap_or("")
+            commit_sha.as_deref().unwrap_or(""),
+            self.scope_key()
         );
-        let watch_sum = self.resolved(cx).map(|d| d.checksum).unwrap_or_default();
+        // A recorded round never changes: the working tree moving on is no
+        // reason to fetch it again.
+        let watch_sum = if turn.is_some() {
+            String::new()
+        } else {
+            self.resolved(cx).map(|d| d.checksum).unwrap_or_default()
+        };
         let key = format!("{context}|{watch_sum}");
         if self.scoped_for.as_deref() == Some(key.as_str())
             || self.scoped_inflight.as_deref() == Some(key.as_str())
@@ -415,6 +443,16 @@ impl Changes {
             }
             if let Some(sha) = commit_sha {
                 params.insert("commitSha".into(), serde_json::Value::String(sha));
+            }
+            if let Some(turn) = turn {
+                params.insert(
+                    "baseTree".into(),
+                    serde_json::Value::String(turn.base.clone()),
+                );
+                params.insert(
+                    "targetTree".into(),
+                    serde_json::Value::String(turn.head.clone()),
+                );
             }
             if let Some(target) = target {
                 params.insert("targetDeviceId".into(), serde_json::Value::String(target));
@@ -544,7 +582,7 @@ impl Changes {
                 .update(cx, |history, cx| history.ensure_loaded(cx));
             return;
         }
-        if self.scope != DiffScope::Commit {
+        if !matches!(self.scope, DiffScope::Commit | DiffScope::Turn) {
             self.ensure_branches(cx);
         }
         self.ensure_scoped(cx);
@@ -630,6 +668,7 @@ impl Changes {
                     file_count,
                     files: Arc::new(files),
                 });
+                changes.apply_focus(cx);
                 cx.notify();
             })
             .ok();
@@ -978,6 +1017,9 @@ impl Changes {
         let commit_sha = (self.scope == DiffScope::Commit)
             .then(|| self.commit.as_ref().map(|commit| commit.sha.clone()))
             .flatten();
+        let turn = (self.scope == DiffScope::Turn)
+            .then(|| self.turn.clone())
+            .flatten();
         let fetch_file = file.clone();
         let fetch_path = path.clone();
         let fetch_task = match (active, engine) {
@@ -990,6 +1032,8 @@ impl Changes {
                     base_ref,
                     chat_id,
                     commit_sha,
+                    base_tree: turn.as_ref().map(|turn| turn.base.clone()),
+                    target_tree: turn.as_ref().map(|turn| turn.head.clone()),
                     diff_checksum: diff.checksum,
                 };
                 let mut params = serde_json::to_value(request)

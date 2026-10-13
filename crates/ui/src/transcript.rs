@@ -67,6 +67,7 @@ mod render;
 mod scroll;
 use render::*;
 mod comments;
+mod turn_changes;
 
 /// Key context of a transcript holding focus (a click into the chat history).
 pub const KEY_CONTEXT: &str = "Transcript";

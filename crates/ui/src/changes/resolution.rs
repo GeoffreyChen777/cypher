@@ -66,6 +66,10 @@ pub enum DiffScope {
     /// History row click opens. Never listed in the scope menu
     /// ([`Self::ALL`]); a commit-pinned pane is born this way and stays.
     Commit,
+    /// One recorded round's changes (its start tree vs its end tree) — the
+    /// tab a transcript's changed-files card opens. Pinned like
+    /// [`Self::Commit`].
+    Turn,
 }
 
 impl DiffScope {
@@ -83,6 +87,7 @@ impl DiffScope {
             Self::LatestTurn => "Latest turn",
             Self::History => "History",
             Self::Commit => "Commit",
+            Self::Turn => "Turn changes",
         }
     }
 
@@ -94,6 +99,7 @@ impl DiffScope {
             Self::LatestTurn => "turn",
             Self::History => "history",
             Self::Commit => "commit",
+            Self::Turn => "trees",
         }
     }
 }
@@ -110,6 +116,7 @@ pub fn scope_label(scope: DiffScope, count: usize, base: Option<&str>) -> String
         DiffScope::LatestTurn => format!("{count} Changed {files} this turn"),
         DiffScope::History => "History".to_string(),
         DiffScope::Commit => format!("{count} Changed {files} in this commit"),
+        DiffScope::Turn => format!("{count} Changed {files} in this turn"),
     }
 }
 
@@ -145,6 +152,7 @@ pub fn clean_message(scope: DiffScope, base: Option<&str>) -> String {
         DiffScope::LatestTurn => "No changes this turn".to_string(),
         DiffScope::History => "No commits found".to_string(),
         DiffScope::Commit => "Empty commit".to_string(),
+        DiffScope::Turn => "No changes in this turn".to_string(),
     }
 }
 

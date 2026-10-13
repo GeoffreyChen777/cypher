@@ -17,6 +17,7 @@ fn entry(id: &str, text: &str) -> SessionMessageEntry {
         completed_at: None,
         comments: Vec::new(),
         models: Vec::new(),
+        turn_changes: None,
     }
 }
 
@@ -204,6 +205,7 @@ fn transcript_context_serializes_safe_visible_content_only() {
             completed_at: None,
             comments: Vec::new(),
             models: Vec::new(),
+            turn_changes: None,
         },
     ];
     let out = bounded_transcript_context(&entries, None).unwrap();

@@ -49,6 +49,7 @@ impl<'a> SegmentWriter<'a> {
                 completed_at: None,
                 comments: Vec::new(),
                 models: Vec::new(),
+                turn_changes: None,
             },
         )?;
         map.insert_container("parts", LoroList::new())?;

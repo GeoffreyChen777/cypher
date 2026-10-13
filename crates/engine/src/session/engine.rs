@@ -171,9 +171,10 @@ struct Inner {
     harness_sessions: Mutex<HashMap<String, HarnessSessionRef>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
     titles: OnceLock<crate::session::titles::TitleGenerator>,
-    /// Fired with `(chat_id, cwd)` when a user prompt starts a turn (fresh
-    /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
-    /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
+    /// Fired when a user prompt starts a turn (fresh dispatch or accepted
+    /// steer) and when a working round settles — the diff sync snapshots the
+    /// checkout tree for the Changes pane's "Latest turn" scope and records
+    /// each round's changed files. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
     /// Temporary Side Chat ids: in-memory status + harness-session
     /// continuity ONLY. Everything that would make a chat observable or durable
@@ -252,8 +253,19 @@ pub struct LocalChildChannel {
 /// of child starts can never grow the map unboundedly).
 const MAX_LOCAL_CHILD_CHANNELS: usize = 256;
 
-/// Turn-start hook: called with `(chat_id, cwd)`.
-pub type TurnListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
+/// What a [`TurnListener`] hears about a chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnEvent<'a> {
+    /// A user prompt starts a turn in `cwd`. `opens_round`: the chat was not
+    /// already working, so this turn starts a new round — a steer into a
+    /// working round extends it instead.
+    Start { cwd: &'a str, opens_round: bool },
+    /// The chat's working round settled (Idle or Errored).
+    End,
+}
+
+/// Turn hook: called with the chat id and what happened.
+pub type TurnListener = Arc<dyn Fn(&str, TurnEvent<'_>) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct SessionsEngine {
@@ -318,7 +330,7 @@ impl SessionsEngine {
         let _ = self.inner.quiesce.set(windows);
     }
 
-    /// Wire the turn-start listener (called once at engine assembly).
+    /// Wire the turn listener (called once at engine assembly).
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
     }
@@ -440,7 +452,13 @@ impl SessionsEngine {
             return; // temporary Side Chat: no checkout snapshot for the diff pane
         }
         if let Some(listener) = self.inner.turn_listener.get() {
-            listener(chat_id, cwd);
+            let opens_round = !lock(&self.inner.statuses).get(chat_id).is_some_and(|s| {
+                matches!(
+                    s.status,
+                    SessionStatus::Working | SessionStatus::AwaitingInput
+                )
+            });
+            listener(chat_id, TurnEvent::Start { cwd, opens_round });
         }
     }
 
@@ -1237,7 +1255,7 @@ impl Inner {
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         let now = Utc::now();
         let seed = self.durable_context_usage(chat_id);
-        let (session, entered_attention) = {
+        let (session, entered_attention, settled) = {
             let mut statuses = lock(&self.statuses);
             // A run that starts waiting on the user or fails is new activity
             // even when no message text lands (a question, a crash): the
@@ -1285,7 +1303,9 @@ impl Inner {
                     entry.throughput = None;
                 }
             }
-            (entry.clone(), entered_attention)
+            let settled =
+                was_active && matches!(status, SessionStatus::Idle | SessionStatus::Errored);
+            (entry.clone(), entered_attention, settled)
         };
         // Statuses guard released before publish (publish re-locks it).
         self.publish_session(chat_id, &session);
@@ -1296,6 +1316,14 @@ impl Inner {
             && let Some(ws) = self.workspace()
         {
             ws.touch_chat_activity(chat_id);
+        }
+        // AFTER the run finalized its answer (the run task settles the
+        // segment before the status): the round's last entry is in the doc.
+        if settled
+            && !self.is_ephemeral(chat_id)
+            && let Some(listener) = self.turn_listener.get()
+        {
+            listener(chat_id, TurnEvent::End);
         }
     }
 

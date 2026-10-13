@@ -126,6 +126,11 @@ pub enum RowKind {
         /// The thought's first line, markup stripped.
         preview: SharedString,
     },
+    /// The files a settled round changed, closing the round's last answer:
+    /// a card listing them, each opening the round's diff at that file.
+    TurnChanges {
+        changes: Arc<cypher_proto::TurnChanges>,
+    },
     /// One top-level markdown block of a reasoning part, painted muted.
     /// `live` blocks fade in like [`RowKind::LiveMarkdown`].
     ThoughtBlock {
@@ -261,6 +266,7 @@ pub(super) fn row_match_count(row: &Row, query: &str) -> u32 {
         | RowKind::Activity { .. }
         | RowKind::RunOverflow { .. }
         | RowKind::Worked { .. }
+        | RowKind::TurnChanges { .. }
         | RowKind::InputChip { .. }
         | RowKind::ErrorChip { .. }
         | RowKind::TranslationOriginal { .. }
@@ -319,6 +325,12 @@ pub enum TranscriptEvent {
     RewindRequested {
         chat_id: String,
         anchor_message_id: String,
+    },
+    /// A round's changed-files card was clicked: open the round's diff,
+    /// scrolled to `path` (the whole round when `None`).
+    OpenTurnDiff {
+        changes: Arc<cypher_proto::TurnChanges>,
+        path: Option<String>,
     },
 }
 
@@ -722,6 +734,20 @@ pub fn rows_for_entry(
         );
     }
 
+    // The round's changed files close its last answer; the hover strip
+    // rides under them.
+    if !cx.streaming
+        && let Some(changes) = &entry.turn_changes
+    {
+        rows.push(cx.row(
+            format!("{}#changes", entry.id),
+            turn_changes_version(changes),
+            RowKind::TurnChanges {
+                changes: Arc::new(changes.clone()),
+            },
+        ));
+    }
+
     if let Some(first) = rows.first_mut() {
         first.turn_start = true;
     }
@@ -743,6 +769,11 @@ pub fn rows_for_entry(
         }
     }
     rows
+}
+
+/// A round's card version: its tree pair names its content.
+pub(super) fn turn_changes_version(changes: &cypher_proto::TurnChanges) -> u64 {
+    fnv1a(format!("{}:{}:{}", changes.base, changes.head, changes.file_count).as_bytes())
 }
 
 /// The single row of a user entry.

@@ -72,5 +72,6 @@ pub fn entry() -> SessionMessageEntry {
         completed_at: None,
         comments: Vec::new(),
         models: Vec::new(),
+        turn_changes: None,
     }
 }

@@ -1496,3 +1496,78 @@ async fn rpc_terminals_open_in_the_chat_checkout() {
 
     core.shutdown().await;
 }
+
+/// A recorded round's tree pair (`trees` mode): the round's diff and its
+/// source pair read back from immutable trees, whatever the checkout does
+/// after; anything but full object ids never reaches git.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trees_mode_reads_a_recorded_round() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    init_repo(&repo_dir).await;
+    let base = snapshot_tree(&repo_dir).await.expect("base tree");
+    std::fs::write(repo_dir.join("a.txt"), "one\ntwo\nround edit\n").expect("round edit");
+    let head = snapshot_tree(&repo_dir).await.expect("head tree");
+    std::fs::write(repo_dir.join("a.txt"), "after the round\n").expect("later edit");
+
+    let core = common::assemble_mock(&tmp.path().join("data"));
+    let identity = core
+        .repos
+        .checkout_identity(&repo_dir)
+        .await
+        .expect("checkout identity");
+    let client = cypher_rpc::memory_client(core.rpc_service());
+
+    let diff = client
+        .call(
+            methods::GET_CHECKOUT_DIFF,
+            serde_json::json!({
+                "cwd": repo_dir,
+                "mode": "trees",
+                "baseTree": base,
+                "targetTree": head,
+            }),
+        )
+        .await
+        .expect("GetCheckoutDiff trees");
+    let diff: cypher_proto::CheckoutDiff = serde_json::from_value(diff).expect("typed diff");
+    assert!(diff.patch.contains("+round edit"), "{}", diff.patch);
+    assert!(!diff.patch.contains("after the round"), "{}", diff.patch);
+
+    let text = client
+        .call(
+            methods::GET_CHECKOUT_FILE_DIFF_TEXT,
+            serde_json::json!({
+                "checkoutId": identity.id,
+                "cwd": repo_dir,
+                "path": "a.txt",
+                "mode": "trees",
+                "baseTree": base,
+                "targetTree": head,
+                "diffChecksum": diff.checksum,
+            }),
+        )
+        .await
+        .expect("GetCheckoutFileDiffText trees");
+    let text: cypher_proto::CheckoutFileDiffText =
+        serde_json::from_value(text).expect("typed response");
+    assert_eq!(text.old_text.as_deref(), Some("one\ntwo\n"));
+    assert_eq!(text.new_text.as_deref(), Some("one\ntwo\nround edit\n"));
+    assert!(!text.stale);
+
+    for (base, target) in [("HEAD", head.as_str()), ("--output=/tmp/x", head.as_str())] {
+        let rejected = client
+            .call(
+                methods::GET_CHECKOUT_DIFF,
+                serde_json::json!({
+                    "cwd": repo_dir,
+                    "mode": "trees",
+                    "baseTree": base,
+                    "targetTree": target,
+                }),
+            )
+            .await;
+        assert!(rejected.is_err(), "{base} must be rejected");
+    }
+    core.shutdown().await;
+}

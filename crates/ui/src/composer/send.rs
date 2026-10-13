@@ -1332,6 +1332,7 @@ fn echo_entry(
         completed_at: None,
         comments,
         models: Vec::new(),
+        turn_changes: None,
     }
 }
 

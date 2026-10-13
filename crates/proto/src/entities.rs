@@ -523,7 +523,7 @@ pub struct WorkspaceFileWritten {
     pub bytes: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffFileSummary {
     pub path: String,
@@ -535,6 +535,32 @@ pub struct DiffFileSummary {
     pub deletions: u32,
     #[serde(default)]
     pub binary: bool,
+}
+
+/// The files one round of a conversation changed — from the prompt that set
+/// the agent working to the moment it settled — recorded by the chat's host
+/// on the round's last assistant entry. `base` and `head` are `git write-tree`
+/// snapshots of the checkout (tracked + untracked, unignored) taken at the
+/// round's start and end, so the round's diff stays readable after later
+/// rounds moved the tree on (until `git gc` prunes the unreferenced trees).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnChanges {
+    /// Canonical checkout root on the host device.
+    pub cwd: String,
+    pub base: String,
+    pub head: String,
+    /// At most [`TurnChanges::MAX_FILES`] files, in git's path order.
+    pub files: Vec<DiffFileSummary>,
+    /// Every changed file, including any `files` leaves out.
+    pub file_count: u32,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+impl TurnChanges {
+    /// The per-file list a doc entry carries; the totals still cover the rest.
+    pub const MAX_FILES: usize = 100;
 }
 
 /// Working-tree diff for a checkout — latest-only sidecar, 3MiB patch cap.
@@ -571,6 +597,12 @@ pub struct GetCheckoutFileDiffTextRequest {
     /// the live working tree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_sha: Option<String>,
+    /// The tree pair of a recorded round ([`TurnChanges`]) for the `trees`
+    /// mode: both sources are immutable Git blobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_tree: Option<String>,
     pub diff_checksum: String,
 }
 
@@ -657,12 +689,16 @@ mod tests {
             base_ref: Some("main".into()),
             chat_id: None,
             commit_sha: Some("deadbeef".into()),
+            base_tree: Some("1111".into()),
+            target_tree: Some("2222".into()),
             diff_checksum: "abc".into(),
         };
         let value = serde_json::to_value(&request).unwrap();
         assert_eq!(value["checkoutId"], "checkout");
         assert_eq!(value["diffChecksum"], "abc");
         assert_eq!(value["commitSha"], "deadbeef");
+        assert_eq!(value["baseTree"], "1111");
+        assert_eq!(value["targetTree"], "2222");
         assert_eq!(
             serde_json::from_value::<GetCheckoutFileDiffTextRequest>(value).unwrap(),
             request

@@ -488,6 +488,9 @@ impl Transcript {
             } => input_chip(header.clone(), *resolved, *permission, theme),
             RowKind::ErrorChip { message } => error_chip(message.clone(), theme),
             RowKind::Worked { label } => worked_rule(label.clone(), theme),
+            RowKind::TurnChanges { changes } => {
+                self.render_turn_changes(&row.id, changes, theme, cx)
+            }
             RowKind::TranslationOriginal { .. } => {
                 let open = toggle_open(row, &self.toggle_pins);
                 let label = if open {
@@ -1804,6 +1807,11 @@ pub(super) fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u
         if let MessagePart::Input { resolved, .. } = part {
             acc.push(0x10 | *resolved as u8);
         }
+    }
+    // A round's changes land on its settled answer after the fact.
+    if let Some(changes) = &entry.turn_changes {
+        acc.push(0x20);
+        acc.extend_from_slice(&turn_changes_version(changes).to_le_bytes());
     }
     fnv1a(&acc)
 }

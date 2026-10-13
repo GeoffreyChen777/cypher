@@ -33,8 +33,8 @@ pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
 pub use core::EngineCore;
 pub use error::EngineError;
 pub use git::diff_sync::{
-    CheckoutDiffSync, capture_commit_diff, capture_diff, capture_diff_against, capture_turn_diff,
-    merge_base, read_diff_file_text, snapshot_tree, working_diff_base,
+    CheckoutDiffSync, capture_commit_diff, capture_diff, capture_diff_against, capture_tree_diff,
+    capture_turn_diff, merge_base, read_diff_file_text, snapshot_tree, working_diff_base,
 };
 pub use git::repos::{Repos, worktree_branch_from_title};
 pub use host::doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
@@ -46,7 +46,7 @@ pub use registry::{
     HarnessDescriptor, HarnessRegistry, default_registry, default_registry_with_bridge,
 };
 pub use runtime::{Engine, EngineConfig, EngineRuntime, serve_ipc, shutdown_signal};
-pub use session::engine::{QuiesceWindows, SessionsEngine, SteerOutcome};
+pub use session::engine::{QuiesceWindows, SessionsEngine, SteerOutcome, TurnEvent};
 pub use session::forks::SessionForks;
 pub use session::journal::RunJournal;
 pub use session::side_chats::bounded_transcript_context;

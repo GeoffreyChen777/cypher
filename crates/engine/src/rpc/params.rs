@@ -422,6 +422,9 @@ pub(super) struct CheckoutDiffParams {
     pub(super) base_ref: Option<String>,
     pub(super) chat_id: Option<String>,
     pub(super) commit_sha: Option<String>,
+    /// A recorded round's tree pair (`trees` mode).
+    pub(super) base_tree: Option<String>,
+    pub(super) target_tree: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

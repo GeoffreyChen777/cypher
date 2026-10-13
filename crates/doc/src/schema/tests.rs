@@ -18,6 +18,7 @@ fn user_entry(id: &str, text: &str) -> SessionMessageEntry {
         completed_at: None,
         comments: Vec::new(),
         models: Vec::new(),
+        turn_changes: None,
     }
 }
 
@@ -103,6 +104,7 @@ fn resolve_input_stamps_the_part_in_place() {
         completed_at: None,
         comments: Vec::new(),
         models: Vec::new(),
+        turn_changes: None,
     })
     .unwrap();
     assert!(!doc.resolve_input("nope").unwrap());
@@ -584,6 +586,7 @@ fn pre_strip_doc_parts_still_round_trip() {
         completed_at: None,
         comments: Vec::new(),
         models: Vec::new(),
+        turn_changes: None,
     })
     .unwrap();
     let entries = doc.read_entries().unwrap();
@@ -948,4 +951,78 @@ fn a_tool_result_keeps_how_permission_control_treated_it() {
         } => assert_eq!(read.as_ref(), Some(&permission)),
         other => panic!("unexpected {other:?}"),
     }
+}
+
+fn round_changes(path: &str) -> TurnChanges {
+    TurnChanges {
+        cwd: "/repo".into(),
+        base: "a".repeat(40),
+        head: "b".repeat(40),
+        files: vec![cypher_proto::DiffFileSummary {
+            path: path.into(),
+            old_path: None,
+            status: "modified".into(),
+            additions: 3,
+            deletions: 1,
+            binary: false,
+        }],
+        file_count: 1,
+        additions: 3,
+        deletions: 1,
+    }
+}
+
+fn assistant_entry(id: &str, continuation_of: Option<&str>) -> SessionMessageEntry {
+    SessionMessageEntry {
+        role: MessageRole::Assistant,
+        continuation_of: continuation_of.map(Into::into),
+        ..user_entry(id, "answer")
+    }
+}
+
+/// A settled round's changes land on the entry that closed it, the last
+/// assistant entry is found from the tail alone, and a round recorded on a
+/// continuation surfaces on the joined entry.
+#[test]
+fn turn_changes_stamp_the_rounds_last_answer() {
+    let doc = SessionDoc::init("chat-1").unwrap();
+    doc.push_message(&user_entry("u1", "go")).unwrap();
+    assert_eq!(doc.last_assistant_entry_id(), None);
+    doc.push_message(&assistant_entry("a1", None)).unwrap();
+    doc.push_message(&assistant_entry("a1-cont", Some("a1")))
+        .unwrap();
+    assert_eq!(doc.last_assistant_entry_id().as_deref(), Some("a1-cont"));
+
+    let changes = round_changes("src/lib.rs");
+    assert!(doc.set_turn_changes("a1-cont", &changes).unwrap());
+    assert!(!doc.set_turn_changes("missing", &changes).unwrap());
+    let entries = doc.read_entries().unwrap();
+    assert_eq!(entries[2].turn_changes.as_ref(), Some(&changes));
+    assert_eq!(entries[1].turn_changes, None);
+    let joined = join_continuation_entries(entries);
+    assert_eq!(joined.len(), 2);
+    assert_eq!(joined[1].turn_changes.as_ref(), Some(&changes));
+
+    // A whole entry written with its changes round-trips too.
+    let mut whole = assistant_entry("a2", None);
+    whole.turn_changes = Some(round_changes("README.md"));
+    doc.push_message(&whole).unwrap();
+    assert_eq!(doc.read_entries().unwrap()[3], whole);
+}
+
+/// A `turnChanges` shape this reader does not understand costs only itself.
+#[test]
+fn malformed_turn_changes_keep_the_entry() {
+    let doc = SessionDoc::init("chat-1").unwrap();
+    doc.push_message(&assistant_entry("a1", None)).unwrap();
+    let messages = doc.doc().get_list("messages");
+    let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) = messages.get(0) else {
+        panic!("entry map");
+    };
+    map.insert("turnChanges", "not an object").unwrap();
+    doc.doc().commit();
+    let entries = doc.read_entries().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "a1");
+    assert_eq!(entries[0].turn_changes, None);
 }

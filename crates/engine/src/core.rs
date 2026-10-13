@@ -217,10 +217,37 @@ impl EngineCore {
                 .with_settings(title_settings.clone()),
         );
         let diff_sync = CheckoutDiffSync::start(repos.clone(), workspace.clone(), &device_id);
-        // Turn starts snapshot the checkout tree — the "Latest turn" diff base.
+        // Turn starts snapshot the checkout tree — the "Latest turn" diff base
+        // and the start of each round; a settled round records the files it
+        // changed on its last answer.
         let turn_diff = diff_sync.clone();
-        sessions.set_turn_listener(Arc::new(move |chat_id, cwd| {
-            turn_diff.note_turn_start(chat_id, cwd);
+        let turn_docs = doc_host.clone();
+        sessions.set_turn_listener(Arc::new(move |chat_id, event| match event {
+            session::engine::TurnEvent::Start { cwd, opens_round } => {
+                turn_diff.note_turn_start(chat_id, cwd, opens_round);
+            }
+            session::engine::TurnEvent::End => {
+                // Read the round's last answer NOW: the next round's prompt
+                // may land before its diff does.
+                let target = turn_docs.open(chat_id).ok().and_then(|handle| {
+                    let entry_id = handle.doc().last_assistant_entry_id()?;
+                    Some((handle, entry_id))
+                });
+                let Some((handle, entry_id)) = target else {
+                    turn_diff.drop_round(chat_id);
+                    return;
+                };
+                let docs = turn_docs.clone();
+                let chat = chat_id.to_string();
+                turn_diff.note_turn_end(chat_id, move |changes| {
+                    match handle.doc().set_turn_changes(&entry_id, &changes) {
+                        Ok(true) => docs.flush_chat_sync(&chat),
+                        Ok(false) => {}
+                        Err(err) => tracing::warn!(chat = %chat, error = %err,
+                            "recording round changes failed"),
+                    }
+                });
+            }
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         Ok(Self {

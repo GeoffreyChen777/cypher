@@ -352,6 +352,57 @@ impl Changes {
                 )
                 .into_any_element();
         }
+        // Turn-pinned pane: the same fixed shape — what the round changed
+        // in place of the scope dropdown.
+        if let Some(turn) = self.turn.clone() {
+            let count = turn.file_count.max(turn.files.len() as u32);
+            let summary = if count == 1 {
+                "1 file changed".to_string()
+            } else {
+                format!("{count} files changed")
+            };
+            return div()
+                .size_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(22.0))
+                        .px(px(6.0))
+                        .rounded(px(5.0))
+                        .flex()
+                        .items_center()
+                        .bg(crate::kit::theme::ink(0.05))
+                        .text_size(px(10.5))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from("Turn")),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.0))
+                        .text_color(theme.text)
+                        .child(SharedString::from(summary)),
+                )
+                .child(self.layout_picker(&theme, cx))
+                .child(
+                    Self::header_button(
+                        "changes-fold-all",
+                        crate::kit::icons::FOLD_VERTICAL,
+                        &theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_collapse_all(cx);
+                    })),
+                )
+                .into_any_element();
+        }
         let scope = self.scope;
         let history_count = (scope == DiffScope::History).then(|| self.history_count(cx));
         let history_fetch_button =
@@ -1155,6 +1206,18 @@ fn render_file_body_upto(
         .into_any_element()
 }
 
+/// Git's complaint about an object it does not have.
+fn is_missing_object(message: &str) -> bool {
+    [
+        "bad object",
+        "invalid object",
+        "not a tree object",
+        "unknown revision",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
 impl Render for Changes {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.scope == DiffScope::History {
@@ -1192,6 +1255,13 @@ impl Render for Changes {
                 if message.contains("no turn recorded") {
                     (
                         SharedString::from("No turn recorded yet — send a message first"),
+                        false,
+                    )
+                } else if scope == DiffScope::Turn && is_missing_object(&message) {
+                    // Git prunes the unreferenced snapshots a round is
+                    // recorded against (`git gc`, two weeks by default).
+                    (
+                        SharedString::from("This turn's snapshot is no longer in the repository"),
                         false,
                     )
                 } else if message.contains("unknown method") {

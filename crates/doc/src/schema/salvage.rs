@@ -23,6 +23,8 @@ pub(super) fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntr
         comments: Vec<MessageComment>,
         #[serde(default)]
         models: Vec<AnsweredModel>,
+        #[serde(default)]
+        turn_changes: Option<serde_json::Value>,
     }
     match serde_json::from_value::<RawEntry>(v.clone()) {
         Ok(raw) => Ok(SessionMessageEntry {
@@ -36,6 +38,7 @@ pub(super) fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntr
             completed_at: raw.completed_at,
             comments: raw.comments,
             models: raw.models,
+            turn_changes: raw.turn_changes.and_then(turn_changes_from_json),
         }),
         // A missing field must cost AT MOST what the field carried — never
         // the entry, never the transcript. Rooms merge writes from every
@@ -107,7 +110,16 @@ fn salvage_entry(
             .get("models")
             .and_then(|m| serde_json::from_value(m.clone()).ok())
             .unwrap_or_default(),
+        turn_changes: obj
+            .get("turnChanges")
+            .and_then(|c| turn_changes_from_json(c.clone())),
     })
+}
+
+/// A round's changes cost only themselves when malformed (a newer writer's
+/// shape), never the entry they ride.
+fn turn_changes_from_json(value: serde_json::Value) -> Option<TurnChanges> {
+    serde_json::from_value(value).ok()
 }
 
 /// Salvage one part whose strict `DocPartJson` parse failed: infer the kind
