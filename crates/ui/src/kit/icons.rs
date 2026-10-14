@@ -188,6 +188,19 @@ icon_assets![
     // favorited state and the picker's favorites rail tab.
     (STAR, "star"),
     (STAR_BOLD, "star-bold"),
+    // Agent bot faces, hand-drawn in the Solar Linear style for bot avatars.
+    (BOT, "bot"),
+    (BOT_ROUND, "bot-round"),
+    (BOT_VISOR, "bot-visor"),
+    (BOT_SQUARE, "bot-square"),
+    (BOT_HAPPY, "bot-happy"),
+    (BOT_CYCLOPS, "bot-cyclops"),
+    (BOT_CAT, "bot-cat"),
+    (BOT_GHOST, "bot-ghost"),
+    (BOT_CHIP, "bot-chip"),
+    (BOT_HELMET, "bot-helmet"),
+    (BOT_TV, "bot-tv"),
+    (BOT_SLEEPY, "bot-sleepy"),
     // Harness brand marks (icons.tsx).
     (CLAUDE_MARK, "claude-mark"),
     (OPENAI_MARK, "openai-mark"),

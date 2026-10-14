@@ -125,7 +125,7 @@ impl Shell {
                         this.open_bot_dialog(Some(edit_id.clone()), cx);
                     }))
                     .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
-                    .child(SharedString::from("Edit…")),
+                    .child(SharedString::from("Settings…")),
             )
             .child(popover::menu_separator())
             .child(

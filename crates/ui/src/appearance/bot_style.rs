@@ -1,4 +1,5 @@
-//! Agent bot avatars: a glyph (or the name's initial) on a tinted square.
+//! Agent bot avatars: a robot face, a symbol or the name's initial on a
+//! tinted square.
 //!
 //! Like a project's style, a bot stores short KEYS (`Bot::icon`,
 //! `Bot::color`); colours share the project palette, and an unknown key
@@ -9,21 +10,43 @@ use gpui::{Div, Hsla, SharedString, div, prelude::*, px};
 use crate::kit::icons::{self, icon};
 use crate::kit::theme::Theme;
 
-/// The pickable glyphs: (key, asset). `None` (the default) is the initial.
-pub const BOT_ICONS: &[(&str, &str)] = &[
+/// Robot faces: (key, asset). The picker leads with these, and a new bot
+/// starts on one.
+pub const BOT_FACES: &[(&str, &str)] = &[
+    ("bot", icons::BOT),
+    ("bot-round", icons::BOT_ROUND),
+    ("bot-visor", icons::BOT_VISOR),
+    ("bot-square", icons::BOT_SQUARE),
+    ("bot-happy", icons::BOT_HAPPY),
+    ("bot-cyclops", icons::BOT_CYCLOPS),
+    ("bot-helmet", icons::BOT_HELMET),
+    ("bot-tv", icons::BOT_TV),
+    ("bot-chip", icons::BOT_CHIP),
+    ("bot-cat", icons::BOT_CAT),
+    ("bot-ghost", icons::BOT_GHOST),
+    ("bot-sleepy", icons::BOT_SLEEPY),
+];
+
+/// Symbols for a bot named after what it does: (key, asset). `None` (the
+/// fallback) is the name's initial.
+pub const BOT_SYMBOLS: &[(&str, &str)] = &[
     ("bolt", icons::BOLT),
     ("lightbulb", icons::LIGHTBULB),
     ("code", icons::CODE),
     ("terminal", icons::TERMINAL),
-    ("users", icons::USERS),
-    ("pulse", icons::PULSE),
     ("book", icons::BOOK),
     ("chat", icons::CHAT_ROUND_LINE),
     ("checklist", icons::CHECKLIST),
+    ("star", icons::STAR),
+];
+
+/// Earlier picker keys, still drawn when a row carries one.
+const RETIRED: &[(&str, &str)] = &[
+    ("users", icons::USERS),
+    ("pulse", icons::PULSE),
     ("flag", icons::FLAG),
     ("hierarchy", icons::HIERARCHY),
     ("branch", icons::GIT_BRANCH),
-    ("star", icons::STAR),
     ("globe", icons::GLOBAL),
     ("cloud", icons::CLOUD),
     ("key", icons::KEY_MINIMALISTIC),
@@ -33,8 +56,10 @@ pub const BOT_ICONS: &[(&str, &str)] = &[
 /// The glyph asset for a stored key; `None` means "show the initial".
 pub fn bot_icon(key: Option<&str>) -> Option<&'static str> {
     let key = key?;
-    BOT_ICONS
+    BOT_FACES
         .iter()
+        .chain(BOT_SYMBOLS)
+        .chain(RETIRED)
         .find(|(k, _)| *k == key)
         .map(|(_, asset)| *asset)
 }
@@ -89,12 +114,24 @@ mod tests {
         assert_eq!(bot_icon(None), None);
         assert_eq!(bot_icon(Some("nope")), None);
         assert_eq!(bot_icon(Some("code")), Some(icons::CODE));
+        assert_eq!(bot_icon(Some("bot-tv")), Some(icons::BOT_TV));
+        assert_eq!(
+            bot_icon(Some("widget")),
+            Some(icons::WIDGET),
+            "retired keys still draw"
+        );
         assert_eq!(initial("  release bot"), "R");
         assert_eq!(initial("构建机器人"), "构");
         assert_eq!(initial("--"), "·");
-        let mut keys: Vec<&str> = BOT_ICONS.iter().map(|(k, _)| *k).collect();
+        let all: Vec<&str> = BOT_FACES
+            .iter()
+            .chain(BOT_SYMBOLS)
+            .chain(RETIRED)
+            .map(|(k, _)| *k)
+            .collect();
+        let mut keys = all.clone();
         keys.sort();
         keys.dedup();
-        assert_eq!(keys.len(), BOT_ICONS.len());
+        assert_eq!(keys.len(), all.len());
     }
 }
