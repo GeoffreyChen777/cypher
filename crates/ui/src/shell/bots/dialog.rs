@@ -8,6 +8,8 @@ use super::*;
 const PAD: f32 = 22.0;
 const HEADER_H: f32 = 78.0;
 const FOOTER_H: f32 = 64.0;
+/// Backdrop blur under the glass bars.
+const GLASS_BLUR: f32 = 20.0;
 /// [`popover::dialog_card`]'s rounding, which the glass bars follow.
 const CARD_RADIUS: f32 = 16.0;
 
@@ -908,9 +910,9 @@ impl Shell {
             });
 
         // Header and footer: glass over the body, so rows scrolling beneath
-        // read through them, blurred. Tinted with the card's own surface so
-        // at rest they are indistinguishable from it.
-        let glass = theme.surface_dialog.opacity(0.72);
+        // read through them, blurred. A thin tint of the card's own surface
+        // and a lighter blur than a menu's keep the rows visible under it.
+        let glass = theme.surface_dialog.opacity(0.4);
         let header = div()
             .absolute()
             .top_0()
@@ -924,7 +926,7 @@ impl Shell {
                     bottom_left: px(0.0),
                     bottom_right: px(0.0),
                 },
-                crate::kit::frost::MENU_BLUR,
+                GLASS_BLUR,
                 div()
                     .size_full()
                     .occlude()
@@ -964,7 +966,7 @@ impl Shell {
                     bottom_left: px(CARD_RADIUS),
                     bottom_right: px(CARD_RADIUS),
                 },
-                crate::kit::frost::MENU_BLUR,
+                GLASS_BLUR,
                 div()
                     .size_full()
                     .occlude()
