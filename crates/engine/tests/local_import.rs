@@ -57,6 +57,7 @@ async fn seed_local(data_dir: &std::path::Path) -> (String, String, String) {
         comments: Vec::new(),
         models: Vec::new(),
         turn_changes: None,
+        recovery: None,
     })
     .expect("push message");
     let bytes = doc.export_snapshot().expect("snapshot");

@@ -1994,6 +1994,7 @@ fn pending_input_detection() {
             comments: Vec::new(),
             models: Vec::new(),
             turn_changes: None,
+            recovery: None,
         },
     ];
     assert!(pending_input_request(&t).is_none());
@@ -2031,6 +2032,7 @@ fn pending_input_detection() {
         comments: Vec::new(),
         models: Vec::new(),
         turn_changes: None,
+        recovery: None,
     };
     let t = vec![
         entry(Some(MessageStatus::Streaming), vec![input_part.clone()]),

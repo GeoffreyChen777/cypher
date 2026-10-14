@@ -4,7 +4,7 @@
 //! - `meta`:     LoroMap  { chatId: string, schemaVersion: number }         (host-only writer)
 //! - `messages`: LoroList of LoroMap {
 //!   id, role, parts: LoroList<part map>, createdAt, deviceId, status?, continuationOf?,
-//!   completedAt?, comments?: json, models?: json, turnChanges?: json }
+//!   completedAt?, comments?: json, models?: json, turnChanges?: json, recovery?: json }
 //! - `commands`: LoroList of LoroMap {
 //!   id, kind, payload(json), issuedBy, issuedAt, basedOn?, expiresAt?, status, resolution? }
 //!
@@ -15,7 +15,7 @@
 use loro::{ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use cypher_proto::{AnsweredModel, TurnChanges};
+use cypher_proto::{AnsweredModel, ContextRecovery, TurnChanges};
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::SESSION_SCHEMA_VERSION;
@@ -84,6 +84,12 @@ pub struct SessionMessageEntry {
     /// old writers, and rounds that changed nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_changes: Option<TurnChanges>,
+    /// A prompt the host sent again after a failed turn, with the
+    /// supplementary context the agent received ahead of it (context
+    /// recovery). Additive: absent on old rows, old writers, and every
+    /// prompt the user sent themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<ContextRecovery>,
 }
 
 /// One comment sent with a user prompt: the quote as the user selected it
@@ -869,6 +875,12 @@ fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Resu
         map.insert(
             "turnChanges",
             loro_value_from_json(&serde_json::to_value(changes)?),
+        )?;
+    }
+    if let Some(recovery) = &entry.recovery {
+        map.insert(
+            "recovery",
+            loro_value_from_json(&serde_json::to_value(recovery)?),
         )?;
     }
     Ok(())

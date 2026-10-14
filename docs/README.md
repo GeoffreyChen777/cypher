@@ -10,6 +10,7 @@ how it works. Everything else is grouped here by who reads it.
 - [Appearance colors](features/appearance-colors.md) — app themes and Terminal, Git and Sidebar color overrides.
 - [Git diff layouts](features/git-diff.md) — unified and side-by-side diffs in the Git pane.
 - [Turn changes](features/turn-changes.md) — the files each round of a conversation changed, and their diffs.
+- [Context recovery](features/context-recovery.md) — restarting a failed turn with supplementary context a model writes.
 - [MCP settings](features/mcp-settings.md) — adding MCP servers to a device's Pi runtime.
 - [iOS Files / Changes](features/ios-workspace-browser.md) — the iPhone's read-only file and change browser.
 

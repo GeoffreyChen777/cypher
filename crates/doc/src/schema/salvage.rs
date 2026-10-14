@@ -25,6 +25,8 @@ pub(super) fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntr
         models: Vec<AnsweredModel>,
         #[serde(default)]
         turn_changes: Option<serde_json::Value>,
+        #[serde(default)]
+        recovery: Option<serde_json::Value>,
     }
     match serde_json::from_value::<RawEntry>(v.clone()) {
         Ok(raw) => Ok(SessionMessageEntry {
@@ -39,6 +41,7 @@ pub(super) fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntr
             comments: raw.comments,
             models: raw.models,
             turn_changes: raw.turn_changes.and_then(turn_changes_from_json),
+            recovery: raw.recovery.and_then(recovery_from_json),
         }),
         // A missing field must cost AT MOST what the field carried — never
         // the entry, never the transcript. Rooms merge writes from every
@@ -113,7 +116,16 @@ fn salvage_entry(
         turn_changes: obj
             .get("turnChanges")
             .and_then(|c| turn_changes_from_json(c.clone())),
+        recovery: obj
+            .get("recovery")
+            .and_then(|r| recovery_from_json(r.clone())),
     })
+}
+
+/// A recovery record costs only itself when malformed, like a round's
+/// changes: the prompt it rides still renders.
+fn recovery_from_json(value: serde_json::Value) -> Option<ContextRecovery> {
+    serde_json::from_value(value).ok()
 }
 
 /// A round's changes cost only themselves when malformed (a newer writer's

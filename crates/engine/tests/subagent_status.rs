@@ -757,6 +757,7 @@ async fn boot_recovery_terminalizes_local_but_not_remote_rows() {
         subagents: vec![run("r-local")],
         context_usage: None,
         throughput: None,
+        recovery: None,
     };
     let remote = Session {
         chat_id: "chat-remote".into(),
@@ -767,6 +768,7 @@ async fn boot_recovery_terminalizes_local_but_not_remote_rows() {
         subagents: vec![run("r-remote")],
         context_usage: None,
         throughput: None,
+        recovery: None,
     };
     rig.core.workspace.record_session(&local);
     rig.core.workspace.record_session(&remote);

@@ -1333,6 +1333,7 @@ fn echo_entry(
         comments,
         models: Vec::new(),
         turn_changes: None,
+        recovery: None,
     }
 }
 

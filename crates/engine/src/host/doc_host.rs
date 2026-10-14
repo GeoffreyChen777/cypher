@@ -369,6 +369,7 @@ impl ChatDocHandle {
             comments: comments.to_vec(),
             models: Vec::new(),
             turn_changes: None,
+            recovery: None,
         })
     }
 

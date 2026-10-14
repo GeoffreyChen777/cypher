@@ -302,6 +302,11 @@ pub struct Session {
     /// trail the host's. A settled or newly started turn drops it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub throughput: Option<Throughput>,
+    /// A context recovery under way (the transcript's recovery spinner).
+    /// Written to the registry row when it starts, moves on and ends, so other
+    /// devices see it too; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<crate::RecoveryProgress>,
 }
 
 /// One output-throughput reading: an ESTIMATE made from the streamed deltas

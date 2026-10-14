@@ -118,6 +118,50 @@ impl Transcript {
         )
     }
 
+    /// The recovery loader, in the working trailer's place and shape: shown
+    /// while the chat's host writes supplementary context for a failed turn
+    /// and restarts it, under the failed reply — until the prompt goes out
+    /// again and the working trailer takes over. A recovery left behind by a
+    /// host that died mid-way stops showing once it is stale.
+    fn render_recovery_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let chat_id = self.chat_id.clone()?;
+        let now = chrono::Utc::now();
+        let (word, tail) = {
+            let state = self.state.read(cx);
+            let progress = state
+                .session_for(&chat_id)
+                .and_then(|s| s.recovery.as_ref())
+                .filter(|progress| progress.is_live(now))?;
+            super::recovery::recovery_trailer_text(progress, now)
+        };
+        self.schedule_trailer_tick(cx);
+        let theme = Theme::of(cx).clone();
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(Theme::SPACE_SM))
+                .pt(px(10.0))
+                .text_size(px(11.0))
+                .child(crate::kit::loaders::gradient_spinner(2.5, cx.entity_id()))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(format!("{word}\u{2026}"))),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(tail)),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Re-render in a second, once at a time: the trailer's elapsed label
     /// (and its state's staleness) moves with the clock, not with any
     /// notification.
@@ -266,7 +310,10 @@ impl Transcript {
         // Live-run loader rides under the LAST row's content (above its
         // clearance pad), so it sits right beneath the working reply.
         let trailer = (ix + 1 == self.rows.len())
-            .then(|| self.render_working_trailer(cx))
+            .then(|| {
+                self.render_working_trailer(cx)
+                    .or_else(|| self.render_recovery_trailer(cx))
+            })
             .flatten();
 
         let inner = self.render_row_body(&row, wide, &theme, window, cx);
@@ -416,6 +463,7 @@ impl Transcript {
                 mentions,
                 attachments,
                 comments,
+                recovery,
                 pending,
                 steer,
             } => {
@@ -424,6 +472,7 @@ impl Transcript {
                     mentions,
                     attachments,
                     comments,
+                    recovery: recovery.clone(),
                     pending: *pending,
                     steer: *steer,
                 };
@@ -565,6 +614,13 @@ impl Transcript {
         let mut column = div().w_full().flex().flex_col();
         if steer {
             column = column.child(steer_caption(pending, theme));
+        }
+        // A prompt sent again after a failed turn is captioned in the same
+        // place and voice as a steer.
+        if let Some(record) = user.recovery.clone() {
+            column = column.child(super::recovery::recovery_caption(
+                &row.id, record, pending, theme,
+            ));
         }
         if !attachments.is_empty() {
             column = column.child(self.render_user_attachments(&row.id, &attachments, cx));
@@ -1041,6 +1097,7 @@ struct UserRowView<'a> {
     mentions: &'a Arc<Vec<crate::composer::SentMentionSpan>>,
     attachments: &'a Arc<Vec<crate::attachments::UserAttachment>>,
     comments: &'a [MessageComment],
+    recovery: Option<Arc<cypher_proto::ContextRecovery>>,
     pending: bool,
     steer: bool,
 }

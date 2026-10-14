@@ -18,6 +18,7 @@ fn user(id: &str, text: &str) -> SessionMessageEntry {
         comments: Vec::new(),
         models: Vec::new(),
         turn_changes: None,
+        recovery: None,
     }
 }
 
@@ -38,6 +39,7 @@ fn assistant(id: &str, text: &str) -> SessionMessageEntry {
         comments: Vec::new(),
         models: Vec::new(),
         turn_changes: None,
+        recovery: None,
     }
 }
 

@@ -9,6 +9,7 @@ use cypher_engine::pi::packages::PiPackagesSnapshot;
 use cypher_engine::pi::runtime::PiRuntimeStatus;
 use cypher_rpc::methods;
 
+use super::context_recovery::ContextRecoveryControl;
 use super::device_target::DeviceTarget;
 use super::titles::TitlesPage;
 use super::translation::TranslationControl;
@@ -21,6 +22,7 @@ pub struct HarnessesPage {
     state: Entity<AppState>,
     titles: Entity<TitlesPage>,
     translation: Entity<TranslationControl>,
+    recovery: Entity<ContextRecoveryControl>,
     packages: Loadable<PiPackagesSnapshot>,
     target: Entity<DeviceTarget>,
     generation: u64,
@@ -57,10 +59,12 @@ impl HarnessesPage {
         });
         let titles = cx.new(|cx| TitlesPage::new_embedded(state.clone(), target.clone(), cx));
         let translation = cx.new(|cx| TranslationControl::new(state.clone(), target.clone(), cx));
+        let recovery = cx.new(|cx| ContextRecoveryControl::new(state.clone(), target.clone(), cx));
         let mut page = Self {
             state,
             titles,
             translation,
+            recovery,
             packages: Loadable::Idle,
             target,
             generation,
@@ -352,6 +356,7 @@ impl Render for HarnessesPage {
                     })
                     .child(body)
                     .child(self.translation.clone())
+                    .child(self.recovery.clone())
                     .child(div().mt(px(24.0)).child(self.titles.clone())),
             )
     }

@@ -40,6 +40,8 @@ fn engine_identity_is_not_forwardable() {
     assert!(forwardable(methods::WRITE_WORKSPACE_FILE));
     assert!(forwardable(methods::GET_TITLE_MODEL_SETTINGS));
     assert!(forwardable(methods::SET_TITLE_MODEL_SETTINGS));
+    assert!(forwardable(methods::GET_CONTEXT_RECOVERY_SETTINGS));
+    assert!(forwardable(methods::SET_CONTEXT_RECOVERY_SETTINGS));
     assert!(forwardable(methods::GET_WEB_SEARCH_FALLBACK));
     assert!(forwardable(methods::SET_WEB_SEARCH_FALLBACK));
     assert!(forwardable(methods::FETCH_ALL));
