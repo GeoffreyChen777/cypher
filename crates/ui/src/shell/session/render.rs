@@ -32,6 +32,7 @@ impl Shell {
         // column's bottom (last frame's — see `bottom_stack`).
         let measured = slot.bottom_stack.clone();
         let stack_h = measured.get();
+        let ripples = slot.ripples.clone();
         // Canvas content centers in the room ABOVE that stack (never behind
         // the composer); short tiles shed the helper line, then the
         // wordmark.
@@ -82,6 +83,7 @@ impl Shell {
             let pickers = composer.read(cx).pickers().clone();
             let selectors = pickers.update(cx, |p, cx| p.render_target_selectors(cx));
             new_chat_canvas(
+                ripples,
                 selectors,
                 helper,
                 stack_h,
@@ -445,8 +447,9 @@ fn onboarding_canvas(stack_h: f32, theme: &Theme, cx: &mut Context<Shell>) -> An
 
 /// New-chat canvas: the Cypher wordmark over the target selectors (device +
 /// project) and the helper line; short tiles shed the helper, then the
-/// wordmark.
+/// wordmark. Behind it, still water of text the pointer ripples.
 fn new_chat_canvas(
+    ripples: Rc<std::cell::RefCell<crate::kit::ripples::Ripples>>,
     selectors: AnyElement,
     helper: SharedString,
     stack_h: f32,
@@ -462,6 +465,15 @@ fn new_chat_canvas(
         .flex_col()
         .items_center()
         .justify_center()
+        .relative()
+        // Under the whole column, composer included (it floats in glass over
+        // the bottom `stack_h`, where the pointer types rather than stirs).
+        .child(crate::kit::ripples::field(
+            ripples,
+            theme.text,
+            theme.font_mono.clone(),
+            stack_h,
+        ))
         .child(motion::fade_in(
             "new-chat-canvas",
             div()

@@ -108,6 +108,9 @@ pub(super) struct SessionSlot {
     /// the transcript's bottom clearance, and the jump pill's anchor (the
     /// same one-frame lag every fade here rides).
     pub(super) bottom_stack: Rc<Cell<f32>>,
+    /// The new-session canvas's text ripples (still until the pointer
+    /// stirs them).
+    pub(super) ripples: Rc<std::cell::RefCell<crate::kit::ripples::Ripples>>,
     /// The session area's window bounds (below the tile header), measured at
     /// paint like `bottom_stack`: sizes the docks and drives their drags.
     pub(super) area: Rc<Cell<gpui::Bounds<Pixels>>>,
