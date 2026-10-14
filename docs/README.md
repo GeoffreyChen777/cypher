@@ -23,6 +23,7 @@ how it works. Everything else is grouped here by who reads it.
 - [Notifications](design/notifications.md) — session-targeted mobile notifications.
 - [Pi RPC harness](design/pi-rpc.md) — how the engine drives Pi over its native RPC protocol.
 - [Permission control](design/permission-control.md) — zones, the Landstrip bash sandbox and elevation approval.
+- [Agent bots](design/agent-bots.md) — scoped bots over a user's sessions (local bots built; cross-user network designed).
 
 ## Development — working on the code
 

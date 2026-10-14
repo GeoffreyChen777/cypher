@@ -167,7 +167,8 @@ Modules follow the `foo.rs` + `foo/` layout; a folder groups one feature.
   (doc host and its chat2 sync, workspace registry host, local import, spaces, viewport
   activity, notification events), `git/` (repos and worktrees, checkout diffs, GitHub,
   workspace files), `rpc/` (the dispatcher plus one module per method group), `mcp/`,
-  `auth/`; at the root `core.rs` (assembly), `runtime.rs` (process lifecycle, IPC serving),
+  `auth/`, `bots/` (agent bots: creation and the scope-enforced bot tools,
+  [Agent bots](design/agent-bots.md)); at the root `core.rs` (assembly), `runtime.rs` (process lifecycle, IPC serving),
   `headless.rs` (the `cypher headless` loop), `error.rs`, `util.rs` (`lock`, `now_ms`,
   `off_runtime`), plus registry, terminals, uploads, profile and device identity.
 - **`cypher-ui`**: `kit/` (theme, motion, icons, popovers, loaders and other primitives;
