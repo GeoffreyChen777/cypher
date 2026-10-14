@@ -4,6 +4,13 @@
 
 use super::*;
 
+/// The dialog's inset, and the heights of its glass header and footer.
+const PAD: f32 = 22.0;
+const HEADER_H: f32 = 78.0;
+const FOOTER_H: f32 = 64.0;
+/// [`popover::dialog_card`]'s rounding, which the glass bars follow.
+const CARD_RADIUS: f32 = 16.0;
+
 /// Which projects the bot is granted (the dialog's three-way pick).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Grant {
@@ -767,10 +774,8 @@ impl Shell {
         // ── Footer ──────────────────────────────────────────────────────────
         let busy = dialog.busy;
         let mut footer = div()
-            .mt(px(20.0))
-            .pt(px(14.0))
-            .border_t_1()
-            .border_color(hairline)
+            .size_full()
+            .px(px(PAD))
             .flex()
             .flex_row()
             .items_center()
@@ -831,12 +836,15 @@ impl Shell {
             52.0,
             theme,
         );
+        // The body scrolls the card's full height, under both glass bars;
+        // its padding keeps every row clear of them at either end.
         let body = div()
             .id("bot-dialog-body")
-            .max_h(px((f32::from(viewport.height) - 220.0).max(240.0)))
+            .max_h(px((f32::from(viewport.height) - 96.0).max(320.0)))
             .overflow_y_scroll()
-            // Room for the selection rings at the scroll edge.
-            .px(px(2.0))
+            .pt(px(HEADER_H - 4.0))
+            .pb(px(FOOTER_H + 16.0))
+            .px(px(PAD))
             .flex()
             .flex_col()
             .child(
@@ -899,16 +907,33 @@ impl Shell {
                 )
             });
 
-        let card = popover::dialog_card(theme)
-            .w(px(480.0))
-            .p(px(22.0))
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
-                if ev.keystroke.key == "escape" {
-                    this.close_bot_dialog(cx);
-                }
-            }))
-            .child(
+        // Header and footer: glass over the body, so rows scrolling beneath
+        // read through them, blurred. Tinted with the card's own surface so
+        // at rest they are indistinguishable from it.
+        let glass = theme.surface_dialog.opacity(0.72);
+        let header = div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(HEADER_H))
+            .child(crate::kit::frost::frosted_bar(
+                gpui::Corners {
+                    top_left: px(CARD_RADIUS),
+                    top_right: px(CARD_RADIUS),
+                    bottom_left: px(0.0),
+                    bottom_right: px(0.0),
+                },
+                crate::kit::frost::MENU_BLUR,
                 div()
+                    .size_full()
+                    .occlude()
+                    .rounded_t(px(CARD_RADIUS))
+                    .bg(glass)
+                    .border_b_1()
+                    .border_color(hairline)
+                    .px(px(PAD))
+                    .pt(px(20.0))
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
@@ -920,13 +945,46 @@ impl Shell {
                         div()
                             .text_size(px(12.5))
                             .text_color(theme.text_muted)
+                            .truncate()
                             .child(SharedString::from(
-                                "Answers questions about your work, using only the sessions \
-                                 you give it access to.",
+                                "Answers questions using only the sessions you allow.",
                             )),
                     ),
-            )
+            ));
+        let footer = div()
+            .absolute()
+            .bottom_0()
+            .left_0()
+            .right_0()
+            .h(px(FOOTER_H))
+            .child(crate::kit::frost::frosted_bar(
+                gpui::Corners {
+                    top_left: px(0.0),
+                    top_right: px(0.0),
+                    bottom_left: px(CARD_RADIUS),
+                    bottom_right: px(CARD_RADIUS),
+                },
+                crate::kit::frost::MENU_BLUR,
+                div()
+                    .size_full()
+                    .occlude()
+                    .rounded_b(px(CARD_RADIUS))
+                    .bg(glass)
+                    .border_t_1()
+                    .border_color(hairline)
+                    .child(footer),
+            ));
+        let card = popover::dialog_card(theme)
+            .w(px(480.0))
+            .p(px(0.0))
+            .relative()
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" {
+                    this.close_bot_dialog(cx);
+                }
+            }))
             .child(body)
+            .child(header)
             .child(footer)
             .into_any_element();
         Some(popover::modal("bot-dialog", viewport, card))

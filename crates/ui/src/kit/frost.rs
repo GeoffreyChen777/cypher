@@ -33,7 +33,7 @@ pub fn composer_accessory(child: impl IntoElement) -> Frosted {
 /// opaque platforms. `corner_radius` must match the card's rounding.
 pub fn frosted(corner_radius: f32, blur_radius: f32, child: impl IntoElement) -> Frosted {
     Frosted {
-        corner_radius,
+        corners: Corners::all(px(corner_radius)),
         blur_radius,
         always: false,
         child: child.into_any_element(),
@@ -44,8 +44,15 @@ pub fn frosted(corner_radius: f32, blur_radius: f32, child: impl IntoElement) ->
 /// whose blur is part of its look, not a platform material. A zero radius
 /// paints `child` alone.
 pub fn frosted_always(corner_radius: f32, blur_radius: f32, child: impl IntoElement) -> Frosted {
+    frosted_bar(Corners::all(px(corner_radius)), blur_radius, child)
+}
+
+/// [`frosted_always`] with its own corners: a glass bar pinned to one edge
+/// of a card (a dialog's header or footer over its scrolling body), rounded
+/// only where the card is.
+pub fn frosted_bar(corners: Corners<Pixels>, blur_radius: f32, child: impl IntoElement) -> Frosted {
     Frosted {
-        corner_radius,
+        corners,
         blur_radius,
         always: true,
         child: child.into_any_element(),
@@ -53,7 +60,7 @@ pub fn frosted_always(corner_radius: f32, blur_radius: f32, child: impl IntoElem
 }
 
 pub struct Frosted {
-    corner_radius: f32,
+    corners: Corners<Pixels>,
     blur_radius: f32,
     /// Blur even off glass ([`frosted_always`]).
     always: bool,
@@ -111,11 +118,7 @@ impl Element for Frosted {
         };
         if blur {
             window.paint_layer(bounds, |window| {
-                window.paint_backdrop_blur(
-                    bounds,
-                    Corners::all(px(self.corner_radius)),
-                    px(self.blur_radius),
-                );
+                window.paint_backdrop_blur(bounds, self.corners, px(self.blur_radius));
                 self.child.paint(window, cx);
             });
         } else {
