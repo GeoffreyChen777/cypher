@@ -33,7 +33,7 @@ use cypher_doc::{
     TranscriptDesync, TranscriptFrame,
 };
 use cypher_proto::{
-    AuthState, Chat, ChatIndicator, Device, Session, SideChatStatus, Space, WorkspaceScope,
+    AuthState, Bot, Chat, ChatIndicator, Device, Session, SideChatStatus, Space, WorkspaceScope,
 };
 use cypher_rpc::methods;
 
@@ -269,6 +269,8 @@ pub struct AppState {
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     pub sessions: Vec<Session>,
+    /// Agent bots, oldest first (the sidebar's bot strip order).
+    pub bots: Vec<Bot>,
     /// The project the new-session canvas mints into. Healed by
     /// [`Self::apply_spaces`] when the row vanishes; selecting a chat implies
     /// its project.
@@ -510,6 +512,7 @@ impl AppState {
             spaces: Vec::new(),
             chats: Vec::new(),
             sessions: Vec::new(),
+            bots: Vec::new(),
             selected_space: None,
             no_project: false,
             scratch_pending: false,

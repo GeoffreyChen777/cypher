@@ -64,6 +64,7 @@ use crate::transcript::rail;
 use crate::transcript::{self, Transcript};
 use crate::widgets::text_input::{TextInput, TextInputEvent};
 
+mod bots;
 #[cfg(feature = "dev-capture")]
 mod dev_capture;
 mod dock;
@@ -1091,6 +1092,8 @@ struct ShellMenus {
     sidebar_view: popover::Popup<Point<Pixels>>,
     /// Project glyph/colour picker: (space id, window position).
     space_style: popover::Popup<(String, Point<Pixels>)>,
+    /// Bot tile context menu: (bot id, window position).
+    bot: popover::Popup<(String, Point<Pixels>)>,
     user: popover::Popup<()>,
 }
 
@@ -1136,6 +1139,10 @@ struct ShellDialogs {
     /// The add-space palette (⌘K-style; device tabs + folder search), `Some`
     /// while open.
     add_space: Option<AddSpaceFlow>,
+    /// The bot create/edit dialog.
+    bot: Option<bots::BotDialog>,
+    /// Bot id awaiting delete confirmation.
+    delete_bot: Option<String>,
 }
 
 /// In-app update state: the bundle update's progress, the About dialog,
@@ -1372,6 +1379,8 @@ pub struct Shell {
     /// The local→synced account lifecycle and runtime switches.
     sync: SyncUi,
     mutate_task: Option<Task<()>>,
+    /// The bot dialog's in-flight `CreateBot`.
+    bot_task: Option<Task<()>>,
     delete_worktree_task: Option<Task<()>>,
     /// Kept for the failed-gate "Retry" action.
     boot: EngineBootConfig,
@@ -1638,6 +1647,7 @@ impl Shell {
                 import_current: None,
             },
             mutate_task: None,
+            bot_task: None,
             delete_worktree_task: None,
             boot,
             data_dir,

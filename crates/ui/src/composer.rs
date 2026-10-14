@@ -515,7 +515,7 @@ fn session_candidates(
     let query = query.trim().to_lowercase();
     let mut candidates: Vec<(&Chat, String)> = Vec::new();
     for chat in chats {
-        if chat.is_child() || current_chat == Some(chat.id.as_str()) {
+        if chat.is_child() || chat.is_bot() || current_chat == Some(chat.id.as_str()) {
             continue;
         }
         if chat.archived && query.is_empty() {

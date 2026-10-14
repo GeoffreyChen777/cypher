@@ -921,6 +921,7 @@ impl Shell {
         );
 
         let top_chrome = SIDEBAR_TITLEBAR_BAND + SIDEBAR_HEADER_HEIGHT;
+        let bot_strip = self.render_bot_strip(theme, cx);
         // Update strips — app-wide chrome, the main window's alone — sit
         // under the list with the sidebar's bottom gutter.
         let update_strips: Vec<AnyElement> = [
@@ -964,6 +965,9 @@ impl Shell {
                                 // the list is the whole column; a little
                                 // air stands in.
                                 .pt(px(top_chrome + 4.0))
+                                // The bot strip leads the list, above the
+                                // project cards.
+                                .children(bot_strip)
                                 .child(if !list_items.is_empty() {
                                     div()
                                         .relative()

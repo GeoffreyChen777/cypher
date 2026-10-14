@@ -6,7 +6,7 @@ impl AppState {
     /// Non-archived, NON-CHILD chats in sidebar order. Cypher child subagent
     /// chats (engine-owned `child: Some(..)` rows) are hidden from the root
     /// sidebar/session overview — they are reached only through the parent's
-    /// Subagents inspector. [`Self::selected_chat_row`] and transcript
+    /// Subagents inspector. Bot chats live in the bot strip instead. [`Self::selected_chat_row`] and transcript
     /// subscriptions still work for a selected child (navigation selects it
     /// directly).
     ///
@@ -14,7 +14,7 @@ impl AppState {
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
         self.chats
             .iter()
-            .filter(|c| !c.archived && !c.is_child() && self.scope.chat_visible(c))
+            .filter(|c| !c.archived && !c.is_child() && !c.is_bot() && self.scope.chat_visible(c))
     }
 
     pub fn selected_space_row(&self) -> Option<&Space> {

@@ -81,6 +81,12 @@ impl AppState {
                 methods::WATCH_SPACES,
                 AppState::apply_spaces,
             ),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_BOTS,
+                AppState::apply_bots,
+            ),
             // Auth frames parse tolerantly — engine and proto tags differ today.
             spawn_watch(
                 cx,
