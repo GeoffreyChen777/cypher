@@ -396,15 +396,18 @@ It needs no new routes, only opaque `text` fields.
 Desktop:
 
 - **Bot strip** (P0): a row of avatar squares between the sidebar header and the project
-  cards, one per bot, then a `+` square. A click opens the bot chat as a session tab, a
-  right-click opens Open / Edit… / Delete…, a hover shows the name, and a corner dot
+  cards, one per bot; empty, it is not shown. A click opens the bot chat as a session tab,
+  a right-click opens Open / Settings… / Delete…, a hover shows the name, and a corner dot
   carries the chat's status (working, waiting, errored, finished unseen). Project windows
-  have no strip.
-- **Bot dialog** (P0, create and edit): name; avatar (the initial or a glyph, and a
-  colour); host device (only Mac and Linux engines that are online and new enough;
-  fixed after creation); what it can see (choose projects, all projects or nothing, plus
-  "Read message text" and "Include archived sessions") with a live count of the sessions
-  that grants; instructions; Delete… when editing.
+  have no strip. Bots are created from the sidebar header's `+`, which now opens a menu:
+  New project… / New bot….
+- **Bot palette** (P0, create and edit), drawn like the Quick Chat and Add project
+  palettes: a header band and a key-hint footer, frosted so the form reads through them
+  as it scrolls, and a "Run on device" rail on the right (Mac and Linux engines that are
+  online and new enough; fixed after creation). The form holds the name, the avatar (a
+  robot face, a symbol or the initial, and a colour), Permissions (project access
+  Selected / All / None, Read conversations, Archived sessions) with a live access count,
+  and instructions. Enter creates or saves; Delete is in the footer when editing.
 - **Bot dock tab** (P2+, right dock of a bot chat) with four panes:
   - *Scope*: project tree grouped by device with checkboxes, per-session overrides,
     capability toggles, and a live "this bot can see N sessions in M projects" summary.

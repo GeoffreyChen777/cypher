@@ -1,5 +1,6 @@
-//! The bot strip: one avatar square per bot, then a `+` square that creates
-//! one. A click opens the bot's conversation; a right-click opens its menu.
+//! The bot strip: one avatar square per bot (bots are created from the
+//! sidebar header's `+` menu). A click opens the bot's conversation; a
+//! right-click opens its menu.
 //! A dot in the corner carries the conversation's status, like a session
 //! row's.
 
@@ -10,8 +11,8 @@ const TILE: f32 = 34.0;
 const GAP: f32 = 6.0;
 
 impl Shell {
-    /// `None` in a project window (bots belong to the main window, like
-    /// quick chats).
+    /// `None` with no bots, and in a project window (bots belong to the main
+    /// window, like quick chats).
     pub(in crate::shell) fn render_bot_strip(
         &mut self,
         theme: &Theme,
@@ -38,37 +39,9 @@ impl Shell {
         .map(|(bot, status, selected)| self.render_bot_tile(bot, status, selected, theme, cx))
         .collect();
 
-        let add = div()
-            .id("bot-strip-add")
-            .size(px(TILE))
-            .flex_none()
-            .rounded(px((TILE * 0.27).round()))
-            .border_1()
-            .border_color(crate::kit::theme::hairline(0.12))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .bg(motion::hover_blend(
-                "bot-strip-add",
-                crate::kit::theme::wash(0.0),
-                crate::kit::theme::wash(0.12),
-            ))
-            .on_hover(motion::hover_listener("bot-strip-add"))
-            .tooltip(|_, cx| {
-                cx.new(|_| super::session::FindTooltip("New bot".into()))
-                    .into()
-            })
-            .on_click(cx.listener(|this, _, _, cx| this.open_bot_dialog(None, cx)))
-            .child(
-                icon(icons::PLUS)
-                    .size(px(14.0))
-                    .text_color(motion::hover_blend(
-                        "bot-strip-add",
-                        theme.text_muted.opacity(0.8),
-                        theme.text,
-                    )),
-            );
+        if tiles.is_empty() {
+            return None;
+        }
         Some(
             div()
                 .id("bot-strip")
@@ -80,7 +53,6 @@ impl Shell {
                 .px(px(6.0))
                 .pb(px(10.0))
                 .children(tiles)
-                .child(add)
                 .into_any_element(),
         )
     }

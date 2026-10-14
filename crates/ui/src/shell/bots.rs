@@ -87,6 +87,7 @@ impl Shell {
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).clone();
         [
+            self.render_new_item_menu(&theme, cx),
             self.render_bot_menu(&theme, cx),
             self.render_bot_dialog(viewport, &theme, window, cx),
             self.render_delete_bot_dialog(viewport, &theme, cx),
@@ -94,6 +95,48 @@ impl Shell {
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    pub(super) fn close_new_item_menu(&mut self, cx: &mut Context<Self>) {
+        if self.menus.new_item.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.menus.new_item);
+            cx.notify();
+        }
+    }
+
+    /// The sidebar header's `+` menu: a new project or a new bot.
+    fn render_new_item_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let position = *self.menus.new_item.get()?;
+        let closing = self.menus.new_item.closing_since();
+        let row = |id: &'static str, glyph: &'static str, label: &'static str| {
+            popover::menu_row(theme, false, id)
+                .id(id)
+                .child(icon(glyph).size(px(16.0)).text_color(theme.text_muted))
+                .child(SharedString::from(label))
+        };
+        let menu = popover::popover_card(theme)
+            .w(px(170.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_new_item_menu(cx)))
+            .flex()
+            .flex_col()
+            .child(
+                row("new-item-project", icons::FOLDER, "New project…").on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.close_new_item_menu(cx);
+                        this.open_add_space(cx);
+                    },
+                )),
+            )
+            .child(
+                row("new-item-bot", icons::BOT, "New bot…").on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.close_new_item_menu(cx);
+                        this.open_bot_dialog(None, cx);
+                    },
+                )),
+            )
+            .into_any_element();
+        Some(popover::menu_at("new-item-menu", position, menu, closing))
     }
 
     /// A bot tile's context menu: open, edit, delete.

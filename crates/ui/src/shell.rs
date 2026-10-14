@@ -1094,6 +1094,8 @@ struct ShellMenus {
     space_style: popover::Popup<(String, Point<Pixels>)>,
     /// Bot tile context menu: (bot id, window position).
     bot: popover::Popup<(String, Point<Pixels>)>,
+    /// The sidebar header's `+` menu (new project / new bot): position.
+    new_item: popover::Popup<Point<Pixels>>,
     user: popover::Popup<()>,
 }
 

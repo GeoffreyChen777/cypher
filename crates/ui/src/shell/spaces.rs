@@ -243,7 +243,7 @@ impl Shell {
     // ---- sidebar sections ----
 
     /// The fixed sidebar header over the project-card list: product identity
-    /// on the left, the view / quick chat / Add project actions and the
+    /// on the left, the view / quick chat / new (project or bot) actions and the
     /// `account` button on the right. New sessions are created from
     /// project/checkout hover actions (or ⌘N). Exactly
     /// [`SIDEBAR_HEADER_HEIGHT`] tall — the list pads past it.
@@ -273,7 +273,20 @@ impl Shell {
                 crate::kit::theme::wash(0.14),
             ))
             .on_hover(motion::hover_listener("sidebar-add-project"))
-            .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx)))
+            // A press toggles the New project / New bot menu. Mounted (open
+            // or closing) counts as open, so the press that dismissed it
+            // through the menu's click-out never reopens it.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    if this.menus.new_item.get().is_some() {
+                        this.close_new_item_menu(cx);
+                    } else {
+                        this.menus.new_item.open(event.position);
+                        cx.notify();
+                    }
+                }),
+            )
             .child(
                 icon(icons::PLUS)
                     .size(px(14.0))
