@@ -260,7 +260,8 @@ final class WorkspaceStore: WorkspaceData {
                 startedAt: f["startedAt"]?.int64Value,
                 updatedAt: f["updatedAt"]?.int64Value ?? 0,
                 subagents: SubagentProjection.snapshot(f["subagents"]),
-                contextUsage: ContextUsage(f["contextUsage"]))
+                contextUsage: ContextUsage(f["contextUsage"]),
+                recovery: RecoveryProgress(f["recovery"]))
         }
         sessions = rows
     }

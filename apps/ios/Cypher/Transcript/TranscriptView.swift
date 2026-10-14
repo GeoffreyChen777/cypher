@@ -658,10 +658,10 @@ struct TranscriptView: View {
     private func rowContent(_ row: TranscriptRow) -> some View {
         Group {
             switch row.kind {
-            case .user(let text, let isSteer):
+            case .user(let text, let isSteer, let recovery):
                 UserBubble(
                     text: text, pending: row.timestamp == nil,
-                    isSteer: isSteer,
+                    isSteer: isSteer, recovery: recovery,
                     deviceId: store.hostDeviceId ?? "")
 
             case .prose(let blocks, let streaming):

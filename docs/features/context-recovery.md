@@ -75,5 +75,13 @@ The resent message stores its record on the user entry as an additive
 with the transcript. A recovery under way rides the chat's session-status row
 (`recovery`, a `RecoveryProgress`), so other desktops show the spinner too; a
 row still claiming one after five minutes was left by an engine that stopped
-mid-recovery and shows nothing. Older apps and the iPhone app show neither. The settings live in the engine's data directory as
+mid-recovery and shows nothing. Older apps show neither. The settings live in the engine's data directory as
 `context-recovery.json`.
+
+## On iPhone
+
+The iPhone app shows both. The caption sits above the resent message's bubble
+like on the desktop; tap it (there is no hover) for the same card in a
+popover. A recovery under way shows in the chat's status strip above the
+composer, with the same words, elapsed time, phrase and attempt, unless a run
+is working. The settings are only on the desktop.

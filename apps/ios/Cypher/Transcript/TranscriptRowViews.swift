@@ -10,6 +10,8 @@ struct UserBubble: View {
     let text: String
     var pending = false
     var isSteer = false
+    /// Sent again by the host after a failed turn (context recovery).
+    var recovery: ContextRecovery? = nil
     /// The chat's host device — where attachment files live (read-back key).
     var deviceId = ""
 
@@ -30,6 +32,11 @@ struct UserBubble: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Steer")
                     .accessibilityIdentifier("steer-label")
+            }
+            // A prompt sent again after a failed turn is captioned in the
+            // same place and voice as a steer.
+            if let recovery {
+                RecoveryCaption(record: recovery)
             }
             VStack(alignment: .trailing, spacing: 8) {
                 if !parsed.attachments.isEmpty, !deviceId.isEmpty {
@@ -61,6 +68,106 @@ struct UserBubble: View {
         }
         .opacity(pending ? 0.65 : 1)
         .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+}
+
+// MARK: - Context recovery caption (transcript/recovery.rs)
+
+/// "Restarted with context" over a recovered prompt's bubble: the muted
+/// restart glyph and label, inset to the bubble's text like the steer label.
+/// Where the desktop opens its card on hover, tapping opens it here.
+struct RecoveryCaption: View {
+    let record: ContextRecovery
+    @State private var showing = false
+
+    var body: some View {
+        Button {
+            showing = true
+        } label: {
+            HStack(spacing: 4) {
+                LineIconView(.restart, size: 12, color: Theme.textMuted)
+                Text(record.captionLabel)
+                    .font(Theme.sans(11, weight: .medium))
+                    .foregroundStyle(Theme.textMuted)
+            }
+            .padding(.trailing, 12)
+            .frame(minHeight: 22)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(record.captionLabel)
+        .accessibilityHint("Shows the context added to this message")
+        .accessibilityIdentifier("recovery-caption")
+        .popover(isPresented: $showing) {
+            RecoveryCard(record: record)
+        }
+    }
+}
+
+/// The caption's card: where the conversation restarted, what set the
+/// recovery off, and the context the agent received (scrollable when long).
+struct RecoveryCard: View {
+    let record: ContextRecovery
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            section("Restarted from") { value(record.restartLabel) }
+            section("Triggered by") {
+                VStack(alignment: .leading, spacing: 3) {
+                    value(record.triggerLabel)
+                    if !record.excerpt.isEmpty {
+                        Text(record.excerpt)
+                            .font(Theme.sans(12.5, relativeTo: .footnote))
+                            .foregroundStyle(Theme.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            section("Added context") {
+                ScrollView {
+                    value(record.context)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(maxHeight: 220)
+                .fixedSize(horizontal: false, vertical: true)
+                .background(whiteAlpha(0.04), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(whiteAlpha(0.06), lineWidth: 1)
+                        .allowsHitTesting(false))
+            }
+            if let model = record.model {
+                Text("Written by \(model)")
+                    .font(Theme.sans(12, relativeTo: .caption))
+                    .foregroundStyle(Theme.textFaint)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(14)
+        .frame(width: 320, alignment: .leading)
+        .presentationCompactAdaptation(.popover)
+        .accessibilityIdentifier("recovery-card")
+    }
+
+    private func section(_ label: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(Theme.sans(11.5, weight: .medium, relativeTo: .caption))
+                .foregroundStyle(Theme.textFaint)
+            content()
+        }
+    }
+
+    private func value(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.sans(14, relativeTo: .subheadline))
+            .foregroundStyle(Theme.text)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

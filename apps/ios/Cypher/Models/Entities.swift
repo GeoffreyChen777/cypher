@@ -101,6 +101,9 @@ struct SessionRow: Hashable {
     /// Rides the row's next write while a turn runs, so it can trail a live
     /// turn by ~20s; settles immediately.
     var contextUsage: ContextUsage? = nil
+    /// A context recovery under way (entities.rs `recovery`): the host is
+    /// writing supplementary context for a failed turn, or restarting it.
+    var recovery: RecoveryProgress? = nil
 }
 
 /// entities.rs `ContextUsage`: tokens in the context window, of its size.
@@ -311,6 +314,141 @@ struct MessageEntry: Identifiable, Hashable {
     /// schema.rs `models`: the models that answered an assistant entry,
     /// distinct and in the order they first answered. Only Pi writes it.
     var models: [AnsweredModel] = []
+    /// schema.rs `recovery`: a prompt the host sent again after a failed
+    /// turn, with the context the agent received ahead of it.
+    var recovery: ContextRecovery? = nil
+}
+
+// MARK: - Context recovery (proto context_recovery.rs)
+
+/// Where a recovery's trigger matched.
+enum RecoveryTriggerSource: String, Codable, Hashable {
+    /// The text the model wrote.
+    case response
+    /// An error the turn ended with or reported.
+    case error
+}
+
+/// `ContextRecovery`: what a recovered prompt carries in the transcript.
+struct ContextRecovery: Codable, Hashable {
+    /// The supplementary context, as the agent received it.
+    var context: String
+    /// The configured trigger that matched.
+    var trigger: String
+    var matchedIn: RecoveryTriggerSource
+    /// The failed answer or error around the match.
+    var excerpt: String
+    /// The entry the conversation restarted after; nil when it restarted
+    /// from the beginning of the chat.
+    var restartAfter: String?
+    /// That entry's opening words.
+    var restartPreview: String?
+    /// 1 for the first recovery of a request, counting up while recovered
+    /// prompts keep failing.
+    var attempt: UInt32
+    /// The model that wrote `context`.
+    var model: String?
+
+    /// recovery.rs `caption_label`: what happened, and which attempt it was.
+    var captionLabel: String {
+        attempt > 1 ? "Restarted with context · attempt \(attempt)" : "Restarted with context"
+    }
+
+    /// recovery.rs `restart_label`: where the conversation restarted.
+    var restartLabel: String {
+        guard restartAfter != nil else { return "The beginning of the chat" }
+        if let restartPreview { return "After \u{201c}\(restartPreview)\u{201d}" }
+        return "After the previous answer"
+    }
+
+    /// recovery.rs `trigger_label`: what set the recovery off.
+    var triggerLabel: String {
+        let place = matchedIn == .response ? "the agent\u{2019}s answer" : "an error"
+        return "\u{201c}\(trigger)\u{201d} in \(place)"
+    }
+}
+
+/// `RecoveryStage`: how far a recovery under way has got.
+enum RecoveryStage: String, Hashable {
+    /// The recovery model is writing the supplementary context.
+    case writingContext
+    /// The chat is being rewound and the prompt sent again.
+    case restarting
+}
+
+/// `RecoveryProgress`: a recovery under way, on the chat's session row.
+struct RecoveryProgress: Hashable {
+    var stage: RecoveryStage
+    var trigger: String
+    var matchedIn: RecoveryTriggerSource
+    var attempt: UInt32
+    /// Unix ms.
+    var startedAt: Int64
+
+    /// `STALE_AFTER_SECS`: a row still claiming a recovery past this was left
+    /// by an engine that stopped mid-recovery, and shows nothing.
+    static let staleAfterMs: Int64 = 5 * 60 * 1000
+
+    func isLive(now: Int64) -> Bool {
+        now - startedAt < Self.staleAfterMs
+    }
+
+    /// recovery.rs `recovery_trailer_text`: the strip's word and its faint
+    /// tail (elapsed time, the matched phrase, the attempt).
+    func trailerText(now: Int64) -> (word: String, tail: String) {
+        let word =
+            switch stage {
+            case .writingContext: "Writing context to retry"
+            case .restarting: "Restarting with added context"
+            }
+        var tail = "\(Motion.formatElapsed(max(0, (now - startedAt) / 1000))) · matched \u{201c}\(trigger)\u{201d}"
+        if attempt > 1 { tail += " · attempt \(attempt)" }
+        return (word, tail)
+    }
+
+    init(
+        stage: RecoveryStage, trigger: String, matchedIn: RecoveryTriggerSource,
+        attempt: UInt32, startedAt: Int64
+    ) {
+        self.stage = stage
+        self.trigger = trigger
+        self.matchedIn = matchedIn
+        self.attempt = attempt
+        self.startedAt = startedAt
+    }
+
+    /// rows.rs: lenient — a malformed value drops the recovery, never the
+    /// row. `startedAt` is chrono's RFC 3339 (`…T21:39:44.123456789Z`).
+    init?(_ value: JSONValue?) {
+        guard let object = value?.objectValue,
+            let stage = object["stage"]?.stringValue.flatMap(RecoveryStage.init(rawValue:)),
+            let trigger = object["trigger"]?.stringValue,
+            let matchedIn = object["matchedIn"]?.stringValue.flatMap(RecoveryTriggerSource.init(rawValue:)),
+            let attempt = object["attempt"]?.int64Value, attempt >= 0, attempt <= Int64(UInt32.max),
+            let startedAt = object["startedAt"]?.stringValue.flatMap(Self.rfc3339Ms)
+        else { return nil }
+        self.init(
+            stage: stage, trigger: trigger, matchedIn: matchedIn,
+            attempt: UInt32(attempt), startedAt: startedAt)
+    }
+
+    /// RFC 3339 to Unix ms. Foundation's ISO 8601 parser takes at most
+    /// millisecond fractions, and chrono writes up to nanoseconds, so the
+    /// fraction is read here.
+    static func rfc3339Ms(_ text: String) -> Int64? {
+        var text = text
+        var fraction = 0.0
+        if let dot = text.firstIndex(of: ".") {
+            let digits = text[text.index(after: dot)...].prefix { $0.isASCII && $0.isNumber }
+            guard !digits.isEmpty else { return nil }
+            fraction = Double("0." + digits) ?? 0
+            text.removeSubrange(dot..<text.index(dot, offsetBy: digits.count + 1))
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        guard let date = formatter.date(from: text) else { return nil }
+        return Int64(((date.timeIntervalSince1970 + fraction) * 1000).rounded(.down))
+    }
 }
 
 /// proto agent.rs `AnsweredModel`: a model that answered (part of) a turn,

@@ -57,6 +57,8 @@ final class DemoDataset {
     ])
     private var stores: [String: SessionStore] = [:]
     private var streamTask: Task<Void, Never>?
+    /// The context recovery replay (DemoDataset+ContextRecovery.swift).
+    @ObservationIgnored var recoveryTask: Task<Void, Never>?
 
     static let dummyConfig = AppConfig(
         edgeURL: URL(string: "http://localhost:8787")!, mode: .dev,
@@ -211,8 +213,12 @@ final class DemoDataset {
         sessions["chat-permissions-card"] = SessionRow(
             chatId: "chat-permissions-card", deviceId: "dev-mac",
             status: .awaitingInput, startedAt: now - 70_000, updatedAt: now - 60_000)
+        // Context recovery: a project of its own, one session per state.
+        let (recoverySpace, recoveryChats, recoverySessions) = recoveryShowcase(now: now, config: claude)
+        chats += recoveryChats
+        sessions.merge(recoverySessions) { _, new in new }
         return DemoDataset(
-            devices: [mac, vps], spaces: [cypher, edge, webapp],
+            devices: [mac, vps], spaces: [cypher, edge, webapp, recoverySpace],
             chats: chats, sessions: sessions)
     }
 
@@ -392,9 +398,22 @@ final class DemoDataset {
         store.setEntries(Self.transcript(for: chatId))
         store.demoResponder = { [weak self, weak store] prompt, isSteer in
             guard let self, let store else { return }
-            self.simulateTurn(store: store, chatId: chatId, prompt: prompt, isSteer: isSteer)
+            if chatId == Self.recoveryReplayChatId {
+                self.playRecoveryStory(store: store, chatId: chatId, prompt: prompt)
+            } else {
+                self.simulateTurn(store: store, chatId: chatId, prompt: prompt, isSteer: isSteer)
+            }
         }
         stores[chatId] = store
+        refreshRecoveryShowcase(chatId)
+        if chatId == Self.recoveryReplayChatId {
+            // Plays once the session has opened and settled.
+            recoveryTask = Task { [weak self, weak store] in
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                guard let self, let store, !Task.isCancelled else { return }
+                self.playRecoveryStory(store: store, chatId: chatId, prompt: "Deploy the preview build to staging.")
+            }
+        }
         return store
     }
 
@@ -671,7 +690,8 @@ final class DemoDataset {
         case "chat-permissions-card":
             return permissionCard(now: now)
         default:
-            return []  // freshly minted chats start empty
+            // The context recovery showcase, or a freshly minted chat (empty).
+            return recoveryTranscript(for: chatId, now: now) ?? []
         }
     }
 
