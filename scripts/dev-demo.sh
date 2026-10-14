@@ -27,12 +27,22 @@
 #                                 # renamed; one round with more files than the
 #                                 # card lists, one that changed nothing); click
 #                                 # a file for the round's diff
+#   scripts/dev-demo.sh --translation
+#                                 # translation while the agent works: under
+#                                 # "Translation demo", a Chinese request worked
+#                                 # in English — each step between tool calls
+#                                 # translates in the background as the next
+#                                 # tools run, then the answer. One chat appends
+#                                 # translations, one replaces. Paced like
+#                                 # --slow; every message typed into the demo
+#                                 # plays the same run (CYPHER_MOCK_TRANSLATION)
 #
-# The flags combine (--permissions, --diffs or --changes takes the place of
-# the default seed).
+# The flags combine (--permissions, --diffs, --changes or --translation takes
+# the place of the default seed).
 # Everything lives under /tmp/cypher-demo-* (--work: /tmp/cypher-demo-work-*,
 # --permissions: /tmp/cypher-demo-permissions-*, --diffs:
-# /tmp/cypher-demo-diffs-*, --changes: /tmp/cypher-demo-changes-*); re-runs
+# /tmp/cypher-demo-diffs-*, --changes: /tmp/cypher-demo-changes-*,
+# --translation: /tmp/cypher-demo-translation-*); re-runs
 # reuse it (delete
 # those directories to reseed). Quitting the app stops the engine.
 set -euo pipefail
@@ -43,6 +53,7 @@ DELAY=""
 PERMS=""
 DIFFS=""
 CHANGES=""
+TRANSLATION=""
 for arg in "$@"; do
   case "$arg" in
     --work) WORK=1 ;;
@@ -50,10 +61,13 @@ for arg in "$@"; do
     --permissions) PERMS=1 ;;
     --diffs) DIFFS=1 ;;
     --changes) CHANGES=1 ;;
-    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs] [--changes]' >&2; exit 2 ;;
+    --translation) TRANSLATION=1 ;;
+    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs] [--changes] [--translation]' >&2; exit 2 ;;
   esac
 done
-DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}${CHANGES:+-changes}
+# Translation is about what happens while the agent works, so it is paced.
+[[ -n "$TRANSLATION" ]] && DELAY="${DELAY:-250}"
+DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}${CHANGES:+-changes}${TRANSLATION:+-translation}
 DAEMON_DIR=$DEMO_DIR-daemon
 UI_DIR=$DEMO_DIR-ui
 
@@ -67,7 +81,8 @@ cargo build -p cypher-rpc --example rpc_probe -q
 
 echo "▸ starting the mock engine with private Unix IPC"
 env CYPHER_DATA_DIR="$DAEMON_DIR" CYPHER_HARNESS=mock \
-  ${WORK:+CYPHER_MOCK_WORK=1} ${DELAY:+CYPHER_MOCK_DELAY_MS=$DELAY} RUST_LOG=warn \
+  ${WORK:+CYPHER_MOCK_WORK=1} ${DELAY:+CYPHER_MOCK_DELAY_MS=$DELAY} \
+  ${TRANSLATION:+CYPHER_MOCK_TRANSLATION=1} RUST_LOG=warn \
   ./target/debug/cypher headless &
 DAEMON_PID=$!
 trap 'kill $DAEMON_PID 2>/dev/null || true' EXIT
@@ -170,6 +185,34 @@ JSON
       run_prompt "$chat" "$project" "$prompt" "$prompt [mock:changes:$n]"
       wait_round "$chat" "$n" "$([[ $n -lt 4 ]] && echo recorded)"
     done
+  elif [[ -n "$TRANSLATION" ]]; then
+    # The prompt is the one the mock run translates (TRANSLATION_PROMPT in
+    # crates/harness/src/mock/translation.rs), so the transcript keeps it as
+    # typed with the agent's English stamped on.
+    prompt="服务器限流的时候，同步客户端重试得太快了。帮我查一下原因并修好。"
+    project="$DEMO_DIR-projects/sync-client"
+    mkdir -p "$project"
+    space=$(new_id) append=$(new_id) replace=$(new_id)
+    create_space "$space" "$project" '"name":"Translation demo"'
+    create_chat "$replace" "$space" "限流重试（替换原文）"
+    run_prompt "$replace" "$project" "$prompt" "$prompt [mock:translation:replace]"
+    sleep 1
+    create_chat "$append" "$space" "限流重试（附在原文后）"
+    run_prompt "$append" "$project" "$prompt" "$prompt [mock:translation]"
+    # Settings → Agents → Translation, as a session translated this way has it.
+    mkdir -p "$DAEMON_DIR/pi-runtime/agent"
+    cat >"$DAEMON_DIR/pi-runtime/agent/translation.json" <<JSON
+{
+  "sourceLanguage": "Chinese",
+  "targetLanguage": "English",
+  "translationModel": "mock/mock-fable-5",
+  "enabledModels": ["mock/mock-fable-5"],
+  "outputMode": "append",
+  "translateUserMessages": true,
+  "translateFinalResponses": true,
+  "translateIntermediateResponses": true
+}
+JSON
   elif [[ -n "$DIFFS" ]]; then
     space=$(new_id) chat=$(new_id)
     create_space "$space" "$PWD" '"name":"Diff fence demo","gitDetected":true'
