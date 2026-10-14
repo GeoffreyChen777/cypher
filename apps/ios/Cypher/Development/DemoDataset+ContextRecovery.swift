@@ -100,7 +100,8 @@ extension DemoDataset {
                         .error(
                             id: "e1",
                             message:
-                                "429 Too Many Requests: API rate limit exceeded for this token. Retry after 60 seconds."),
+                                "429 Too Many Requests: API rate limit exceeded for this token. Retry after 60 seconds."
+                        ),
                     ], at: now - 20_000),
             ]
         case "chat-recovery-done":
@@ -148,7 +149,10 @@ extension DemoDataset {
                 user("m1", "Find out why `sync_roundtrip` is flaky.", at: now - 3_600_000),
                 answer(
                     "m2",
-                    [.text(id: "t0", text: "It fails about 1 run in 30. I'll look at the timing around the reconnect.")],
+                    [
+                        .text(
+                            id: "t0", text: "It fails about 1 run in 30. I'll look at the timing around the reconnect.")
+                    ],
                     at: now - 3_550_000),
                 user(
                     "m3", "Read the last 200 CI logs and find the common cause.", at: now - 1_300_000,
@@ -201,7 +205,8 @@ extension DemoDataset {
                         `SELECT count(*)` on `messages` and `sessions` before and after.
                         """,
                     trigger: "I can't access", matchedIn: .response,
-                    excerpt: "…Sorry, I can't access the staging database from this sandbox, so I can't run the migrations…",
+                    excerpt:
+                        "…Sorry, I can't access the staging database from this sandbox, so I can't run the migrations…",
                     restartAfter: "m2",
                     restartPreview: "Three: 0042_add_turn_changes, 0043_recovery_field and…",
                     attempt: 1, model: "anthropic/claude-haiku-4-5")),
@@ -210,7 +215,8 @@ extension DemoDataset {
                 [
                     .text(
                         id: "t0",
-                        text: "I can't access the staging database: the tunnel on 127.0.0.1:6543 refused the connection.")
+                        text:
+                            "I can't access the staging database: the tunnel on 127.0.0.1:6543 refused the connection.")
                 ], at: now - 12_000),
         ]
     }
@@ -286,7 +292,9 @@ extension DemoDataset {
             let deploy = RenderToolCall(
                 tag: "exec", fields: ["command": "make deploy-preview PR=482 ENV=staging"])
             guard await Self.pause(500) else { return }
-            Self.update(answerId, of: store) { $0.parts = [.tool(id: "x1", call: deploy, isError: false, resolved: false)] }
+            Self.update(answerId, of: store) {
+                $0.parts = [.tool(id: "x1", call: deploy, isError: false, resolved: false)]
+            }
             guard await Self.pause(1_800) else { return }
             let tools: [MessagePart] = [.tool(id: "x1", call: deploy, isError: false, resolved: true)]
             let success = """
