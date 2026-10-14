@@ -14,10 +14,15 @@ use crate::{Harness, HarnessError, RunControls};
 mod changes;
 mod diffs;
 mod permissions;
+mod translation;
 
 pub use changes::{MARKER as CHANGES_MARKER, ROUNDS as CHANGES_ROUNDS};
 pub use diffs::MARKER as DIFFS_MARKER;
 pub use permissions::{CARD_MARKER as PERMISSION_CARD_MARKER, STORY_MARKER as PERMISSIONS_MARKER};
+pub use translation::{
+    MARKER as TRANSLATION_MARKER, Mode as TranslationMode, PROMPT as TRANSLATION_PROMPT,
+    REPLACE_MARKER as TRANSLATION_REPLACE_MARKER, settled as translation_settled,
+};
 
 /// Prompt marker: the run asks one question through the engine's input bridge
 /// (the session sits in awaiting-input) and replays its script once answered.
@@ -267,16 +272,35 @@ impl Harness for MockHarness {
                 delay,
             ));
         }
-        // Diff fence showcase ([`DIFFS_MARKER`]): its reply replaces the
-        // script's text and tools.
-        let diffs_reply;
-        let body = if request.prompt.contains(DIFFS_MARKER) {
-            diffs_reply = body[..lead]
+        // Diff fence and translation showcases ([`DIFFS_MARKER`],
+        // [`TRANSLATION_MARKER`]): their reply replaces the script's text and
+        // tools. `CYPHER_MOCK_TRANSLATION=1` (or `replace`) answers every
+        // prompt with the translation showcase, so a message typed into the
+        // demo translates too.
+        let translation_mode = translation::mode_of(&request.prompt).or_else(|| {
+            cypher_env::var("MOCK_TRANSLATION")
+                .filter(|v| !v.is_empty() && v != "0")
+                .map(|v| {
+                    if v == "replace" {
+                        TranslationMode::Replace
+                    } else {
+                        TranslationMode::Append
+                    }
+                })
+        });
+        let showcase = if request.prompt.contains(DIFFS_MARKER) {
+            Some(diffs::reply())
+        } else {
+            translation_mode.map(translation::reply)
+        };
+        let showcase_reply;
+        let body = if let Some(reply) = showcase {
+            showcase_reply = body[..lead]
                 .iter()
                 .cloned()
-                .chain(diffs::reply())
+                .chain(reply)
                 .collect::<Vec<_>>();
-            &diffs_reply[..]
+            &showcase_reply[..]
         } else {
             body
         };

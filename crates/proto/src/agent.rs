@@ -546,9 +546,15 @@ pub enum AgentEvent {
         /// fold tails it again before anything persists.
         output: String,
     },
-    /// Render-only translation for the final assistant statement, streamed.
-    /// Pi keeps its original assistant message/context; Cypher applies this
-    /// side-band event to the displayed transcript.
+    /// Render-only translation of an assistant statement, streamed. Pi keeps
+    /// its original assistant message/context; Cypher applies this side-band
+    /// event to the displayed transcript.
+    ///
+    /// Without `source` the frame rewrites the turn's LAST text part — the
+    /// final answer, translated while the turn waits for it. With `source` it
+    /// rewrites the text part the model wrote as `source`: a statement made
+    /// alongside a tool call, translated in the background while the turn
+    /// moves on, so by the time its frames land it is no longer the last one.
     ///
     /// `text` is the WHOLE replacement for the message's rendered text, not a
     /// delta and not just the translation: the publisher has already applied
@@ -565,6 +571,9 @@ pub enum AgentEvent {
     #[serde(rename_all = "camelCase")]
     Translation {
         text: String,
+        /// The statement as the model wrote it, naming the part to rewrite.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
     },
     /// The translation the agent received in place of a user's prompt. The
     /// transcript keeps showing the prompt as typed; the engine stamps this

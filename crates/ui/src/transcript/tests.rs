@@ -863,8 +863,15 @@ fn thinking_alone_is_not_a_work_log() {
     assert_eq!(rows[at + 1].id.as_ref(), "m1#t3.0");
 }
 
+fn shown_ids(rows: &[Row], originals: &[&str]) -> Vec<String> {
+    let mut rows = rows.to_vec();
+    let originals = originals.iter().map(|id| SharedString::from(*id)).collect();
+    show_translation_side(&mut rows, &originals);
+    rows.iter().map(|r| r.id.to_string()).collect()
+}
+
 #[test]
-fn append_translation_folds_its_original_behind_a_toggle() {
+fn an_append_translation_shows_one_version_at_a_time() {
     let original = "The answer.\n\n- one\n- two";
     let translated = "答案。\n\n- 一\n- 二";
     let part = MessagePart::Text {
@@ -874,55 +881,95 @@ fn append_translation_folds_its_original_behind_a_toggle() {
     };
     let entry = assistant("m1", MessageStatus::Complete, vec![part]);
     let rows = rows_for_entry(&entry, false, &mut parse);
+    // The original's two blocks and the translation's two, with no control
+    // and no separator rule; block ids are the rendering's (quotes map back
+    // through them).
     let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
-    // Toggle, the original's two blocks, the rule, the translation's two.
+    assert_eq!(ids, ["m1#t0.0", "m1#t0.1", "m1#t0.3", "m1#t0.4"]);
+    let sides: Vec<_> = rows.iter().map(|r| r.translation).collect();
+    use TranslationSide::{Original, Translation};
     assert_eq!(
-        ids,
+        sides,
         [
-            "m1#t0.original",
-            "m1#t0.0",
-            "m1#t0.1",
-            "m1#t0.2",
-            "m1#t0.3",
-            "m1#t0.4"
+            Some(Original),
+            Some(Original),
+            Some(Translation),
+            Some(Translation)
         ]
     );
-    assert!(matches!(
-        rows[0].kind,
-        RowKind::TranslationOriginal { blocks: 3 }
-    ));
-    assert!(rows[0].turn_start);
 
-    // Collapsed by default: the translation keeps its block ids (quotes
-    // map back through them), everything before it is folded away.
-    let mut folded = rows.clone();
-    fold_closed_toggles(&mut folded, &Default::default());
-    let ids: Vec<&str> = folded.iter().map(|r| r.id.as_ref()).collect();
-    assert_eq!(ids, ["m1#t0.original", "m1#t0.3", "m1#t0.4"]);
-    assert!(folded.last().unwrap().timestamp.is_some());
-
-    let mut open = rows.clone();
-    fold_closed_toggles(&mut open, &[("m1#t0.original".into(), true)].into());
-    assert_eq!(open.len(), rows.len());
+    // The translation by default; the original once Shift-clicked. Either
+    // way the message keeps its turn gap and its timestamp strip.
+    for (originals, expected) in [
+        (&[][..], ["m1#t0.3", "m1#t0.4"]),
+        (&["m1"][..], ["m1#t0.0", "m1#t0.1"]),
+    ] {
+        let mut shown = rows.clone();
+        let originals = originals.iter().map(|id| SharedString::from(*id)).collect();
+        show_translation_side(&mut shown, &originals);
+        let ids: Vec<&str> = shown.iter().map(|r| r.id.as_ref()).collect();
+        assert_eq!(ids, expected);
+        assert!(shown[0].turn_start);
+        assert!(shown.last().unwrap().timestamp.is_some());
+    }
 }
 
 #[test]
-fn append_translation_shows_whole_until_the_translation_starts() {
+fn a_replace_translation_keeps_its_original_to_switch_to() {
+    let part = MessagePart::Text {
+        id: "t0".into(),
+        text: "答案。\n\n第二段。".into(),
+        agent_text: Some("The answer.\n\nSecond paragraph.".into()),
+    };
+    let entry = assistant("m1", MessageStatus::Complete, vec![part]);
+    let rows = rows_for_entry(&entry, false, &mut parse);
+    assert_eq!(shown_ids(&rows, &[]), ["m1#t0.0", "m1#t0.1"]);
+    // The original's rows sit outside the part's key: a quote from them is
+    // the agent's own text and stands as selected.
+    assert_eq!(
+        shown_ids(&rows, &["m1"]),
+        ["m1#t0~original.0", "m1#t0~original.1"]
+    );
+}
+
+#[test]
+fn a_message_turns_as_a_whole_and_alone() {
+    let step = MessagePart::Text {
+        id: "t0".into(),
+        text: "我看看。".into(),
+        agent_text: Some("Let me look.".into()),
+    };
+    let answer = MessagePart::Text {
+        id: "t1".into(),
+        text: "Done.\n\n---\n\n完成。".into(),
+        agent_text: Some("Done.".into()),
+    };
+    let first = assistant("m1", MessageStatus::Complete, vec![step, answer.clone()]);
+    let second = assistant("m2", MessageStatus::Complete, vec![answer]);
+    let mut rows = rows_for_entry(&first, false, &mut parse);
+    rows.extend(rows_for_entry(&second, false, &mut parse));
+    assert_eq!(
+        shown_ids(&rows, &["m1"]),
+        ["m1#t0~original.0", "m1#t1.0", "m2#t1.2"]
+    );
+}
+
+#[test]
+fn a_translation_shows_whole_until_it_starts() {
     let original = "The answer.";
-    // Replace mode, and an append rendering whose translation is empty.
-    for text in ["答案。".to_string(), format!("{original}\n\n---\n\n")] {
+    // An append rendering whose translation is empty, and untranslated text.
+    for (text, agent) in [
+        (format!("{original}\n\n---\n\n"), Some(original)),
+        (original.to_string(), None),
+    ] {
         let part = MessagePart::Text {
             id: "t0".into(),
             text,
-            agent_text: Some(original.into()),
+            agent_text: agent.map(Into::into),
         };
         let entry = assistant("m1", MessageStatus::Streaming, vec![part]);
         let rows = rows_for_entry(&entry, false, &mut parse);
-        assert!(
-            !rows
-                .iter()
-                .any(|r| matches!(r.kind, RowKind::TranslationOriginal { .. }))
-        );
+        assert!(rows.iter().all(|r| r.translation.is_none()));
     }
 }
 

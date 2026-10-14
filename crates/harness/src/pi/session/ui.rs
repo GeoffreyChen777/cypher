@@ -127,9 +127,8 @@ fn status_event(key: &str, text: &str) -> Option<AgentEvent> {
         SUBAGENTS_STATUS_KEY => {
             parse_subagent_status(text).map(|runs| AgentEvent::SubagentStatus { runs })
         }
-        TRANSLATION_STATUS_KEY => {
-            parse_translation_status(text).map(|text| AgentEvent::Translation { text })
-        }
+        TRANSLATION_STATUS_KEY => parse_translation_status(text)
+            .map(|(text, source)| AgentEvent::Translation { text, source }),
         INPUT_TRANSLATION_STATUS_KEY => parse_input_translation_status(text)
             .map(|(source, text)| AgentEvent::InputTranslation { source, text }),
         _ => None,

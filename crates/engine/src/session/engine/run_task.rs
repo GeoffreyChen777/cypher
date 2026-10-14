@@ -290,7 +290,9 @@ struct RunLoop<'r> {
     journal_open: bool,
     /// The last translation frame folded, so the keepalive repeats that keep
     /// a slow translation's stream alive are not each journaled in full.
-    last_translation: Option<String>,
+    /// Keyed by the statement too: a background step translation and the
+    /// final answer's can interleave, and each keeps its own part alive.
+    last_translation: Option<(String, Option<String>)>,
     /// Kept whole for the startup-crash retry (same user entry; dispatch
     /// re-injects the stored resume id), taken when the retry fires. Carries
     /// the VISIBLE prompt — the retry re-derives the effective override from
@@ -713,12 +715,17 @@ impl<'r> RunLoop<'r> {
         // UNBROKEN repeat is dropped, so a later turn whose answer happens to
         // translate identically still renders.
         match event {
-            AgentEvent::Translation { text }
-                if self.last_translation.as_deref() == Some(text.as_str()) =>
+            AgentEvent::Translation { text, source }
+                if self
+                    .last_translation
+                    .as_ref()
+                    .is_some_and(|(t, s)| t == text && s == source) =>
             {
                 return true;
             }
-            AgentEvent::Translation { text } => self.last_translation = Some(text.clone()),
+            AgentEvent::Translation { text, source } => {
+                self.last_translation = Some((text.clone(), source.clone()));
+            }
             _ => self.last_translation = None,
         }
         stale_tool_echo(event, &self.seg.folded, &mut self.seen_tools)

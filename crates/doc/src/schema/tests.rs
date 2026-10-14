@@ -325,7 +325,13 @@ fn segment_writer_keeps_the_original_under_a_translation() {
     );
     writer.sync(&folded).unwrap();
     for frame in ["The answer.", "答", "答案。"] {
-        fold_event_into_parts(&mut folded, &AgentEvent::Translation { text: frame.into() });
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::Translation {
+                text: frame.into(),
+                source: None,
+            },
+        );
         writer.sync(&folded).unwrap();
     }
     writer.finish(&folded, MessageStatus::Complete).unwrap();
@@ -348,6 +354,7 @@ fn segment_writer_stamps_the_original_on_an_append_mode_growth() {
         &mut folded,
         &AgentEvent::Translation {
             text: "Hi.\n\n---\n\n你好。".into(),
+            source: None,
         },
     );
     writer.sync(&folded).unwrap();
@@ -372,13 +379,20 @@ fn a_restored_original_clears_the_agent_version() {
         },
     );
     writer.sync(&folded).unwrap();
-    fold_event_into_parts(&mut folded, &AgentEvent::Translation { text: "答".into() });
+    fold_event_into_parts(
+        &mut folded,
+        &AgentEvent::Translation {
+            text: "答".into(),
+            source: None,
+        },
+    );
     writer.sync(&folded).unwrap();
     assert_eq!(agent_text_of(&doc).1.as_deref(), Some("Answer"));
     fold_event_into_parts(
         &mut folded,
         &AgentEvent::Translation {
             text: "Answer".into(),
+            source: None,
         },
     );
     writer.finish(&folded, MessageStatus::Complete).unwrap();

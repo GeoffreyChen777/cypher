@@ -50,6 +50,7 @@ pub struct TranslationControl {
     translation_model: String,
     enabled_models: Vec<String>,
     output_mode: TranslationOutputMode,
+    intermediate: bool,
     pending_save: Arc<Mutex<Option<PiTranslationSettings>>>,
     translation_menu_open: bool,
     session_menu_open: bool,
@@ -120,6 +121,7 @@ impl TranslationControl {
             translation_model: String::new(),
             enabled_models: Vec::new(),
             output_mode: TranslationOutputMode::default(),
+            intermediate: false,
             pending_save: Arc::default(),
             translation_menu_open: false,
             session_menu_open: false,
@@ -217,6 +219,7 @@ impl TranslationControl {
         self.translation_model = settings.translation_model.clone();
         self.enabled_models = settings.enabled_models.clone();
         self.output_mode = settings.output_mode;
+        self.intermediate = settings.translate_intermediate_responses;
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
@@ -235,6 +238,7 @@ impl TranslationControl {
             output_mode: self.output_mode,
             translate_user_messages: current.translate_user_messages,
             translate_final_responses: current.translate_final_responses,
+            translate_intermediate_responses: self.intermediate,
         };
         self.call_set(settings, cx);
     }
@@ -244,6 +248,14 @@ impl TranslationControl {
             return;
         }
         self.output_mode = mode;
+        self.save(cx);
+    }
+
+    fn toggle_intermediate(&mut self, cx: &mut Context<Self>) {
+        if !self.target.read(cx).can_write(cx) {
+            return;
+        }
+        self.intermediate = !self.intermediate;
         self.save(cx);
     }
 
@@ -862,6 +874,7 @@ impl Render for TranslationControl {
                         cx,
                     ))
                     .child(self.final_response_row(&theme, cx))
+                    .child(self.intermediate_row(writable, &theme, cx))
                     .children(
                         self.error
                             .clone()
@@ -1035,6 +1048,26 @@ impl TranslationControl {
                         })),
                     ),
             )
+    }
+}
+
+impl TranslationControl {
+    /// Steps between tool calls: off by default, since every step costs a
+    /// translation request.
+    fn intermediate_row(&self, writable: bool, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        settings_row(
+            theme,
+            "Steps between tool calls",
+            Some("Also translate what the agent says while it works, in the background.".into()),
+        )
+        .child(
+            widgets::toggle_switch(theme, self.intermediate)
+                .id("translation-intermediate-toggle")
+                .flex_none()
+                .when(writable, |el| el.cursor_pointer())
+                .when(!writable, |el| el.opacity(0.45))
+                .on_click(cx.listener(|page, _, _, cx| page.toggle_intermediate(cx))),
+        )
     }
 }
 

@@ -358,7 +358,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 }
             }
         }
-        AgentEvent::Translation { text } => {
+        AgentEvent::Translation { text, source } => {
             // Assignment, not accumulation: the publisher sends the whole
             // rendering it wants (already carrying its append/replace mode),
             // so a stream of frames grows the answer in place and any one of
@@ -374,14 +374,27 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             // `agent_text` the first time a frame changes it. A last frame
             // that restores the original (a failed or unchanged translation)
             // leaves nothing translated, so nothing is kept.
+            //
+            // A frame naming its `source` is a statement made alongside a tool
+            // call, translated in the background: it rewrites the text part
+            // the model wrote as `source` — kept in `agent_text` once a frame
+            // has landed — wherever that part now sits. One that matches
+            // nothing (the fold was reset since) is dropped.
+            let target = out.iter_mut().rev().find(|part| match part {
+                MessagePart::Text {
+                    text: current,
+                    agent_text,
+                    ..
+                } => source.as_deref().is_none_or(|source| {
+                    agent_text.as_deref().unwrap_or(current).trim() == source.trim()
+                }),
+                _ => false,
+            });
             if let Some(MessagePart::Text {
                 text: current,
                 agent_text,
                 ..
-            }) = out
-                .iter_mut()
-                .rev()
-                .find(|part| matches!(part, MessagePart::Text { .. }))
+            }) = target
             {
                 if agent_text.is_none() && current != text {
                     *agent_text = Some(current.clone());

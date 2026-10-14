@@ -117,7 +117,11 @@ Tests per platform:
   `[mock:permission-card]` markers); `--diffs` seeds an answer with chat-style and
   git-patch ```` ```diff ```` fences (the `[mock:diffs]` marker); `--changes` seeds four
   rounds on a small Git project (`scripts/demo/tasks-app`), each answer listing the files
-  its round changed (the `[mock:changes:N]` markers).
+  its round changed (the `[mock:changes:N]` markers); `--translation` seeds a Chinese
+  request worked in English, each step between tool calls translating in the background
+  while the next tools run, then the answer — one chat appending translations, one
+  replacing them (the `[mock:translation]` and `[mock:translation:replace]` markers;
+  paced, and every typed message plays the same run).
 - `scripts/dev-ios.sh` runs the iOS Dev bundle against a local Edge.
 - `dev` mode syncs through a local Edge: [Local Edge development](local-edge.md).
 - `scripts/e2e-smoke.sh` runs two headless engines against a local Edge.

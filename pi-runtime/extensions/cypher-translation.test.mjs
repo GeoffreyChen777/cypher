@@ -26,6 +26,7 @@ import extension, {
   noThinkingOptions,
   referenceBlock,
   renderTranslation,
+  stepTranslationStatus,
   TRANSLATION_INPUT_ENTRY,
   translationInputRecord,
   translationDecision,
@@ -574,7 +575,7 @@ test("a prompt translation is reported as the request pair", () => {
 /** The extension wired to fakes: settings on disk, a translation model that
  *  answers translations from `dictionary` and alignments through `align`,
  *  and a record of every request it received. */
-function harness(dictionary, { align, enabledModels = ["p/coder"] } = {}) {
+function harness(dictionary, { align, enabledModels = ["p/coder"], intermediate = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "cypher-translation-"));
   writeFileSync(
     join(dir, "translation.json"),
@@ -585,6 +586,7 @@ function harness(dictionary, { align, enabledModels = ["p/coder"] } = {}) {
       enabledModels,
       translateUserMessages: true,
       translateFinalResponses: true,
+      translateIntermediateResponses: intermediate,
     }),
   );
   const handlers = {};
@@ -592,6 +594,7 @@ function harness(dictionary, { align, enabledModels = ["p/coder"] } = {}) {
   const statuses = [];
   const requested = [];
   const aligned = [];
+  const notices = [];
   extension({
     on: (name, handler) => (handlers[name] = handler),
     appendEntry: (type, data) => entries.push({ type, data }),
@@ -601,7 +604,7 @@ function harness(dictionary, { align, enabledModels = ["p/coder"] } = {}) {
     model: { provider: "p", id: "coder" },
     sessionManager: { getSessionId: () => "session-1" },
     ui: {
-      notify: () => {},
+      notify: (message) => notices.push(message),
       setStatus: (key, text) => statuses.push({ key, value: JSON.parse(text) }),
     },
     modelRegistry: {
@@ -651,7 +654,21 @@ function harness(dictionary, { align, enabledModels = ["p/coder"] } = {}) {
   const toolCall = (event) => withEnv(() => handlers.tool_call({ type: "tool_call", ...event }, ctx));
   const toolResult = (event) =>
     withEnv(() => handlers.tool_result({ type: "tool_result", isError: false, ...event }, ctx));
-  return { input, toolCall, toolResult, entries, statuses, requested, aligned };
+  const messageEnd = (message) =>
+    withEnv(() => handlers.message_end({ type: "message_end", message }, ctx));
+  const agentEnd = (messages) => withEnv(() => handlers.agent_end({ type: "agent_end", messages }, ctx));
+  return {
+    input,
+    toolCall,
+    toolResult,
+    messageEnd,
+    agentEnd,
+    entries,
+    statuses,
+    notices,
+    requested,
+    aligned,
+  };
 }
 
 const alignedReply = () =>
@@ -906,4 +923,64 @@ test("a question is not translated where the session is not", async () => {
   await toolCall({ toolName: "ask_user", toolCallId: "d", input });
   assert.equal(input.question, "Q?");
   assert.deepEqual(requested, []);
+});
+
+const step = (text, stopReason = "toolUse") => ({
+  role: "assistant",
+  stopReason,
+  content: [
+    { type: "text", text },
+    { type: "toolCall", id: "call-1", name: "bash", arguments: { command: "ls" } },
+  ],
+});
+
+test("a step frame names the statement it replaces", () => {
+  assert.deepEqual(stepTranslationStatus("  Let me look.\n", "我看看。"), {
+    version: 2,
+    source: "Let me look.",
+    text: "我看看。",
+  });
+});
+
+test("a step is translated in the background and settled before the run ends", async () => {
+  const { messageEnd, agentEnd, statuses, requested } = harness(
+    { "Let me look.": "我看看。" },
+    { intermediate: true },
+  );
+  // The tool is never held up: the handler returns without the translation.
+  assert.equal(await messageEnd(step("Let me look.")), undefined);
+  await agentEnd([step("Let me look.")]);
+  assert.deepEqual(requested, ["Let me look."]);
+  const frames = statuses.filter(({ key }) => key === "cypher.translation.v1");
+  assert.deepEqual(frames.at(-1).value, {
+    version: 2,
+    source: "Let me look.",
+    text: "Let me look.\n\n---\n\n我看看。",
+  });
+  assert.ok(frames.every(({ value }) => value.version === 2 && value.source === "Let me look."));
+});
+
+test("steps stay as written unless the settings ask for them", async () => {
+  const { messageEnd, agentEnd, statuses, requested } = harness({ "Let me look.": "我看看。" });
+  await messageEnd(step("Let me look."));
+  await agentEnd([step("Let me look.")]);
+  assert.deepEqual(requested, []);
+  assert.deepEqual(statuses, []);
+});
+
+test("a failed step translation puts the statement back without a notice", async () => {
+  // `undefined` in the dictionary makes the fake model fail the request.
+  const { messageEnd, agentEnd, statuses, notices } = harness(
+    { "Let me look.": undefined },
+    { intermediate: true },
+  );
+  await messageEnd(step("Let me look."));
+  await agentEnd([step("Let me look.")]);
+  const frames = statuses.filter(({ key }) => key === "cypher.translation.v1");
+  assert.deepEqual(frames.at(-1).value, {
+    version: 2,
+    source: "Let me look.",
+    text: "Let me look.",
+  });
+  assert.deepEqual(notices, []);
 });

@@ -2,7 +2,7 @@
 //! under their parent, the open/closed toggle state, and capping long runs
 //! behind an overflow row.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cypher_doc::SessionMessageEntry;
 use gpui::SharedString;
@@ -10,7 +10,7 @@ use gpui::SharedString;
 use crate::markdown::parser::{Block, BlockTree};
 use crate::transcript::{hidden_tool_count, single_line};
 
-use super::{Row, RowKind, ToolItem, fnv1a, is_nested};
+use super::{Row, RowKind, ToolItem, TranslationSide, fnv1a, is_nested};
 
 /// Fold a closed work run — `rows[start..]`, opened by part `first_part` —
 /// behind one [`RowKind::Activity`] row when it mixed tool calls with
@@ -62,6 +62,7 @@ pub(super) fn fold_work_run(
             role: entry.role,
             timestamp: None,
             answered: None,
+            translation: None,
         },
     );
 }
@@ -136,7 +137,7 @@ pub(in crate::transcript) fn nest_tool_calls(items: Vec<(String, ToolItem)>) -> 
 }
 
 /// How many top-level blocks of an append-mode translation's `tree` belong to
-/// the folded original: the original's own blocks plus the separator rule.
+/// the original: the original's own blocks plus the separator rule.
 /// `None` unless `text` is `agent`, the separator and a translation that has
 /// begun — until then (and whenever the rendering doesn't parse as expected,
 /// e.g. an original ending inside an open code fence) the text shows whole.
@@ -150,18 +151,47 @@ pub(super) fn appended_original_blocks(text: &str, agent: &str, tree: &BlockTree
         .then_some(rule + 1)
 }
 
-/// The rows a toggle covers and whether it starts open: a translation's
-/// original and a thought start closed, a work run only while it streams.
+/// The rows a toggle covers and whether it starts open: a thought starts
+/// closed, a work run open only while it streams.
 fn toggle_span(kind: &RowKind) -> Option<(usize, bool)> {
     match kind {
-        RowKind::TranslationOriginal { blocks } | RowKind::Thought { blocks, .. } => {
-            Some((*blocks, false))
-        }
+        RowKind::Thought { blocks, .. } => Some((*blocks, false)),
         RowKind::Activity {
             rows, auto_open, ..
         } => Some((*rows, *auto_open)),
         _ => None,
     }
+}
+
+/// Keep one version of each translated text part in an entry's `rows`: the
+/// original when the entry is in `originals` (the user Shift-clicked it),
+/// else the translation. The entry's turn gap moves onto its first row left
+/// and its timestamp strip onto its last, as a folded toggle's does.
+pub fn show_translation_side(rows: &mut Vec<Row>, originals: &HashSet<SharedString>) {
+    let mut turn_start = false;
+    let mut kept: Vec<Row> = Vec::with_capacity(rows.len());
+    for mut row in rows.drain(..) {
+        let shown = row.translation.is_none_or(|side| {
+            (side == TranslationSide::Original) == originals.contains(&row.entry_id)
+        });
+        if !shown {
+            turn_start |= row.turn_start;
+            if let Some(stamp) = row.timestamp
+                && let Some(last) = kept.last_mut()
+            {
+                last.timestamp = Some(stamp);
+                last.answered = row.answered.take().or(last.answered.take());
+                last.version ^= 1 << 60;
+            }
+            continue;
+        }
+        if std::mem::take(&mut turn_start) && !row.turn_start {
+            row.turn_start = true;
+            row.version ^= 1 << 59;
+        }
+        kept.push(row);
+    }
+    *rows = kept;
 }
 
 /// Whether the toggle `row` is open: the user's click (`pins`, by row id)
@@ -279,6 +309,7 @@ pub fn cap_work_runs(
             role: rows[ix].role,
             timestamp: None,
             answered: None,
+            translation: None,
         };
         rows.splice(start..cut, [overflow]);
         ix = end - (cut - start) + 1;

@@ -949,6 +949,8 @@ impl Transcript {
         self.folds.clear();
         self.tool_overflow.clear();
         self.toggle_pins.clear();
+        self.show_original.clear();
+        self.shift_cue.clear();
         self.veils.clear();
         self.render_cache.borrow_mut().clear();
         self.highlights.entries.clear();
@@ -984,6 +986,7 @@ impl Transcript {
                 rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
             }
             rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id));
+            show_translation_side(&mut rows, &self.show_original);
             fold_closed_toggles(&mut rows, &self.toggle_pins);
             cap_work_runs(&mut rows, tool_call_limit, &self.tool_overflow);
             new_rows.extend(rows);
@@ -997,6 +1000,7 @@ impl Transcript {
                 rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
             }
             rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id));
+            show_translation_side(&mut rows, &self.show_original);
             new_rows.extend(rows);
         }
 

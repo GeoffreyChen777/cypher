@@ -253,13 +253,10 @@ pub fn worked_label(created_at: i64, completed_at: Option<i64>) -> Option<Shared
 /// text. `None` when the turn ended on a tool/chip (no answer to separate) or
 /// never left the text (a plain reply is not a work log).
 pub(super) fn worked_rule_at(rows: &[Row]) -> Option<usize> {
-    // A folded original is part of the answer, not work before it.
     let is_md = |r: &Row| {
         matches!(
             r.kind,
-            RowKind::Markdown { .. }
-                | RowKind::LiveMarkdown { .. }
-                | RowKind::TranslationOriginal { .. }
+            RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. }
         )
     };
     if !rows.last().is_some_and(is_md) {

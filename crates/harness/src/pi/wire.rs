@@ -12,7 +12,7 @@ use crate::{OUTPUT_CAP, cap_text};
 /// publishes `setStatus("cypher.subagents.v1", JSON.stringify({version:1,
 /// runs:[…]}))`. Every other key stays ignored transient TUI furniture.
 pub const SUBAGENTS_STATUS_KEY: &str = "cypher.subagents.v1";
-/// Final-answer translation emitted by the Cypher translation extension.
+/// Assistant-statement translation emitted by the Cypher translation extension.
 pub const TRANSLATION_STATUS_KEY: &str = "cypher.translation.v1";
 /// Prompt translation emitted by the same extension: the user's own words and
 /// the translation the agent received instead, so the transcript can keep the
@@ -98,15 +98,19 @@ pub(super) fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
     Some(out)
 }
 
-/// Parse a `cypher.translation.v1` `statusText` into the rendered replacement.
+/// Parse a `cypher.translation.v1` `statusText` into the rendered replacement
+/// and, for a version-2 frame, the statement it replaces.
 ///
 /// One frame of a streaming translation: `text` is the whole replacement for
 /// the message's rendered text, already carrying the publisher's append/replace
-/// mode. The whole-snapshot byte cap is the only size bound — a translation is
+/// mode. A version-1 frame targets the final answer; a version-2 frame
+/// (`{version:2, source, text}`) targets the statement written as `source`,
+/// one made alongside a tool call and translated in the background. The
+/// whole-snapshot byte cap is the only size bound — a translation is
 /// routinely longer than its source (CJK expands severalfold into English), so
 /// a second cap measured against the extension's *source* limit would reject
 /// well-formed frames.
-pub(super) fn parse_translation_status(text: &str) -> Option<String> {
+pub(super) fn parse_translation_status(text: &str) -> Option<(String, Option<String>)> {
     if text.len() > TRANSLATION_STATUS_MAX_BYTES {
         tracing::warn!(
             bytes = text.len(),
@@ -115,14 +119,22 @@ pub(super) fn parse_translation_status(text: &str) -> Option<String> {
         return None;
     }
     let value: Value = serde_json::from_str(text).ok()?;
-    if value.get("version").and_then(Value::as_u64) != Some(1) {
-        return None;
-    }
+    let source = match value.get("version").and_then(Value::as_u64) {
+        Some(1) => None,
+        Some(2) => {
+            let source = value.get("source").and_then(Value::as_str)?.trim();
+            if source.is_empty() {
+                return None;
+            }
+            Some(source.to_owned())
+        }
+        _ => return None,
+    };
     let translated = value.get("text").and_then(Value::as_str)?.trim();
     if translated.is_empty() {
         return None;
     }
-    Some(translated.to_owned())
+    Some((translated.to_owned(), source))
 }
 
 /// Parse a `cypher.translation.input.v1` `statusText` into `(source, text)`:

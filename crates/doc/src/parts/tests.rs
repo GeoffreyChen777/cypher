@@ -478,7 +478,13 @@ fn translation_updates_only_the_latest_rendered_text_part() {
             text: "final".into(),
         },
     );
-    fold_event_into_parts(&mut parts, &AgentEvent::Translation { text: "译".into() });
+    fold_event_into_parts(
+        &mut parts,
+        &AgentEvent::Translation {
+            text: "译".into(),
+            source: None,
+        },
+    );
     // Only the message's own text is rewritten: an earlier text part
     // belongs to a statement that was already settled before a tool ran.
     assert!(matches!(
@@ -488,6 +494,75 @@ fn translation_updates_only_the_latest_rendered_text_part() {
     assert!(matches!(
         &parts[2],
         MessagePart::Text { text, .. } if text == "译"
+    ));
+}
+
+/// A step's translation runs in the background, so its frames land after
+/// the turn has moved on: they rewrite the statement they name, wherever it
+/// sits, and leave the text written since alone.
+#[test]
+fn a_targeted_translation_rewrites_the_statement_it_names() {
+    let mut parts = Vec::new();
+    let text = |parts: &mut Vec<MessagePart>, value: &str| {
+        fold_event_into_parts(parts, &AgentEvent::TextDelta { text: value.into() });
+    };
+    let tool = |parts: &mut Vec<MessagePart>, id: &str| {
+        fold_event_into_parts(
+            parts,
+            &AgentEvent::ToolCall {
+                id: id.into(),
+                call: ToolCall::Exec {
+                    command: "true".into(),
+                },
+            },
+        );
+    };
+    let frame = |parts: &mut Vec<MessagePart>, value: &str, source: &str| {
+        fold_event_into_parts(
+            parts,
+            &AgentEvent::Translation {
+                text: value.into(),
+                source: Some(source.into()),
+            },
+        );
+    };
+    text(&mut parts, "Let me look.\n");
+    tool(&mut parts, "a");
+    text(&mut parts, "Now the tests.");
+    tool(&mut parts, "b");
+    text(&mut parts, "final");
+
+    // Streams in, and keeps matching once the part no longer reads as its
+    // source: the original is held in `agent_text` from the first frame.
+    frame(&mut parts, "我", "Let me look.");
+    frame(&mut parts, "我看看。", "Let me look.");
+    frame(&mut parts, "现在看测试。", "Now the tests.");
+    // Nothing wrote this, so nothing is rewritten.
+    frame(&mut parts, "无", "Never said.");
+
+    let texts: Vec<_> = parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text {
+                text, agent_text, ..
+            } => Some((text.as_str(), agent_text.as_deref())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            ("我看看。", Some("Let me look.\n")),
+            ("现在看测试。", Some("Now the tests.")),
+            ("final", None),
+        ]
+    );
+
+    // A failed translation's last frame restores the statement as written.
+    frame(&mut parts, "Let me look.\n", "Let me look.");
+    assert!(matches!(
+        &parts[0],
+        MessagePart::Text { text, agent_text: None, .. } if text == "Let me look.\n"
     ));
 }
 
@@ -505,7 +580,13 @@ fn translation_frames_converge_on_the_last_one() {
         },
     );
     for frame in ["译", "译文", "译文。", "译文。", "译文。"] {
-        fold_event_into_parts(&mut parts, &AgentEvent::Translation { text: frame.into() });
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::Translation {
+                text: frame.into(),
+                source: None,
+            },
+        );
     }
     assert_eq!(parts.len(), 1);
     assert!(matches!(
@@ -521,6 +602,7 @@ fn translation_frames_converge_on_the_last_one() {
             &mut parts,
             &AgentEvent::Translation {
                 text: appended.into(),
+                source: None,
             },
         );
     }
@@ -540,6 +622,7 @@ fn a_translation_with_nothing_to_rewrite_is_dropped() {
         &mut parts,
         &AgentEvent::Translation {
             text: "译文".into(),
+            source: None,
         },
     );
     assert!(parts.is_empty());
