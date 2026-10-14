@@ -514,9 +514,10 @@ struct SessionView: View {
     }
 
     /// Reserved 24pt status strip (shell.rs render_status_strip) — Working
-    /// shows the sunrise spinner + rotating flavour word + elapsed; Errored
-    /// shows "Run failed"; the strip always reserves its height so the
-    /// composer never shifts.
+    /// shows the sunrise spinner + rotating flavour word + elapsed; a context
+    /// recovery under way (render.rs `render_recovery_trailer`) shows the
+    /// spinner + what it is doing; Errored shows "Run failed"; the strip
+    /// always reserves its height so the composer never shifts.
     private func statusStrip(chat: Chat, store: SessionStore, status: SessionStatus?) -> some View {
         let transportReady =
             model.demo != nil || (model.connected && model.deviceOnline(chat.deviceId) && store.connected)
@@ -527,21 +528,39 @@ struct SessionView: View {
             catalogLoading: catalog.loading,
             catalogError: catalog.error,
             modelAvailable: catalog.models(for: chat.deviceId).contains { $0.id == chat.config?.model })
-        // Every state but a quiet, connected session draws something here.
-        let showing = connection != .ready || status == .working || status == .errored
         return TimelineView(.periodic(from: .now, by: 1)) { _ in
+            let now = nowMs()
+            // The working strip wins, as the desktop's working trailer does;
+            // a recovery an engine left behind stops showing once stale.
+            let recovery =
+                status == .working
+                ? nil : sessionRow(chat: chat)?.recovery.flatMap { $0.isLive(now: now) ? $0 : nil }
+            // Every state but a quiet, connected session draws something here.
+            let showing = connection != .ready || status == .working || status == .errored || recovery != nil
             HStack(spacing: 6) {
                 if connection != .ready {
                     SessionConnectionIndicator(phase: connection, retryRevision: connectionRetry) {
                         connectionRetry += 1
                         model.foregrounded()
                     }
+                } else if let recovery {
+                    let text = recovery.trailerText(now: now)
+                    WorkingSpinner()
+                    Text("\(text.word)…")
+                        .font(Theme.sans(12))
+                        .foregroundStyle(Theme.textMuted)
+                        .layoutPriority(1)
+                    Text(text.tail)
+                        .font(Theme.sans(11))
+                        .foregroundStyle(Theme.textFaint)
+                        .monospacedDigit()
+                        .truncationMode(.tail)
                 } else {
                     switch status {
                     case .working:
                         WorkingSpinner()
                         let startedAt = sessionStartedAt(chat: chat)
-                        let elapsed = (nowMs() - startedAt) / 1000
+                        let elapsed = (now - startedAt) / 1000
                         Text("\(Motion.flavourWord(seed: Motion.flavourSeed(chat.id), elapsedSecs: elapsed))…")
                             .font(Theme.sans(12))
                             .foregroundStyle(Theme.textMuted)
@@ -564,8 +583,12 @@ struct SessionView: View {
         }
     }
 
+    private func sessionRow(chat: Chat) -> SessionRow? {
+        model.demo?.sessions[chat.id] ?? model.workspace?.sessions[chat.id]
+    }
+
     private func sessionStartedAt(chat: Chat) -> Int64 {
-        let row = model.demo?.sessions[chat.id] ?? model.workspace?.sessions[chat.id]
+        let row = sessionRow(chat: chat)
         return row?.startedAt ?? row?.updatedAt ?? nowMs()
     }
 }

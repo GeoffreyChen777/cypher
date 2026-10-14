@@ -18,7 +18,7 @@ struct TranscriptRound: Equatable {
 
     static func rounds(in rows: [TranscriptRow]) -> [TranscriptRound] {
         rows.indices.compactMap { ix in
-            guard case .user(let text, let isSteer) = rows[ix].kind, !isSteer else { return nil }
+            guard case .user(let text, let isSteer, _) = rows[ix].kind, !isSteer else { return nil }
             return TranscriptRound(rowId: rows[ix].id, rowIndex: ix, preview: previewLine(text))
         }
     }
