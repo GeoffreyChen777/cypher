@@ -92,6 +92,8 @@ pub struct EngineRpc {
     provider_logins: std::sync::Arc<crate::pi::providers::Logins>,
     local_import: Option<crate::host::local_import::LocalImporter>,
     title_settings: Option<crate::session::title_settings::TitleSettingsStore>,
+    context_recovery_settings:
+        Option<crate::session::context_recovery::ContextRecoverySettingsStore>,
     github: Option<crate::git::github::Github>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
@@ -149,6 +151,7 @@ impl EngineRpc {
             provider_logins: Default::default(),
             local_import: None,
             title_settings: None,
+            context_recovery_settings: None,
             github: None,
             engine_info,
             start_subagent_lock: Mutex::new(()),
@@ -161,6 +164,15 @@ impl EngineRpc {
         settings: crate::session::title_settings::TitleSettingsStore,
     ) -> Self {
         self.title_settings = Some(settings);
+        self
+    }
+
+    /// Share the device's context recovery settings with the recovery service.
+    pub fn with_context_recovery_settings(
+        mut self,
+        settings: crate::session::context_recovery::ContextRecoverySettingsStore,
+    ) -> Self {
+        self.context_recovery_settings = Some(settings);
         self
     }
 
@@ -668,6 +680,10 @@ impl RpcService for EngineRpc {
             methods::GET_TITLE_MODEL_SETTINGS => settings::get_title_model_settings(self),
             methods::SET_TITLE_MODEL_SETTINGS => {
                 settings::set_title_model_settings(self, params).await
+            }
+            methods::GET_CONTEXT_RECOVERY_SETTINGS => settings::get_context_recovery_settings(self),
+            methods::SET_CONTEXT_RECOVERY_SETTINGS => {
+                settings::set_context_recovery_settings(self, params).await
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;

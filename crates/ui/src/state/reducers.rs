@@ -54,6 +54,7 @@ impl AppState {
             subagents: Vec::new(),
             context_usage: None,
             throughput: None,
+            recovery: None,
         };
         if let Some(existing) = self
             .sessions

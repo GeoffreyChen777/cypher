@@ -102,6 +102,10 @@ pub mod methods {
     pub const LIST_MODELS: &str = "ListModels";
     pub const GET_TITLE_MODEL_SETTINGS: &str = "GetTitleModelSettings";
     pub const SET_TITLE_MODEL_SETTINGS: &str = "SetTitleModelSettings";
+    /// The target device's context recovery settings (Settings → Agents).
+    pub const GET_CONTEXT_RECOVERY_SETTINGS: &str = "GetContextRecoverySettings";
+    /// Save them; replies with the saved settings.
+    pub const SET_CONTEXT_RECOVERY_SETTINGS: &str = "SetContextRecoverySettings";
     pub const GET_WEB_SEARCH_FALLBACK: &str = "GetWebSearchFallback";
     pub const SET_WEB_SEARCH_FALLBACK: &str = "SetWebSearchFallback";
     pub const LIST_COMMANDS: &str = "ListCommands";
@@ -394,6 +398,8 @@ pub mod methods {
         MethodSpec::unary(LIST_MODELS).forwardable(),
         MethodSpec::unary(GET_TITLE_MODEL_SETTINGS).forwardable(),
         MethodSpec::unary(SET_TITLE_MODEL_SETTINGS).forwardable(),
+        MethodSpec::unary(GET_CONTEXT_RECOVERY_SETTINGS).forwardable(),
+        MethodSpec::unary(SET_CONTEXT_RECOVERY_SETTINGS).forwardable(),
         MethodSpec::unary(GET_WEB_SEARCH_FALLBACK).forwardable(),
         MethodSpec::unary(SET_WEB_SEARCH_FALLBACK).forwardable(),
         MethodSpec::unary(LIST_COMMANDS).forwardable(),

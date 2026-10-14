@@ -19,6 +19,7 @@ fn user_entry(id: &str, text: &str) -> SessionMessageEntry {
         comments: Vec::new(),
         models: Vec::new(),
         turn_changes: None,
+        recovery: None,
     }
 }
 
@@ -105,6 +106,7 @@ fn resolve_input_stamps_the_part_in_place() {
         comments: Vec::new(),
         models: Vec::new(),
         turn_changes: None,
+        recovery: None,
     })
     .unwrap();
     assert!(!doc.resolve_input("nope").unwrap());
@@ -601,6 +603,7 @@ fn pre_strip_doc_parts_still_round_trip() {
         comments: Vec::new(),
         models: Vec::new(),
         turn_changes: None,
+        recovery: None,
     })
     .unwrap();
     let entries = doc.read_entries().unwrap();
@@ -1039,4 +1042,47 @@ fn malformed_turn_changes_keep_the_entry() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].id, "a1");
     assert_eq!(entries[0].turn_changes, None);
+}
+
+fn recovery_record() -> cypher_proto::ContextRecovery {
+    cypher_proto::ContextRecovery {
+        context: "The user owns this repository.".into(),
+        trigger: "I can't".into(),
+        matched_in: cypher_proto::RecoveryTriggerSource::Response,
+        excerpt: "Sorry, I can't do that.".into(),
+        restart_after: Some("a0".into()),
+        restart_preview: Some("Earlier answer".into()),
+        attempt: 1,
+        model: Some("provider/fixer".into()),
+    }
+}
+
+/// A recovered prompt's record rides its user entry through the doc.
+#[test]
+fn a_recovered_prompt_keeps_its_record() {
+    let doc = SessionDoc::init("chat-1").unwrap();
+    let mut entry = user_entry("u1", "delete the build folder");
+    entry.recovery = Some(recovery_record());
+    doc.push_message(&entry).unwrap();
+    doc.push_message(&user_entry("u2", "plain")).unwrap();
+    let entries = doc.read_entries().unwrap();
+    assert_eq!(entries[0], entry);
+    assert_eq!(entries[1].recovery, None);
+}
+
+/// A `recovery` shape this reader does not understand costs only itself.
+#[test]
+fn a_malformed_recovery_record_keeps_the_prompt() {
+    let doc = SessionDoc::init("chat-1").unwrap();
+    doc.push_message(&user_entry("u1", "go")).unwrap();
+    let messages = doc.doc().get_list("messages");
+    let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) = messages.get(0) else {
+        panic!("entry map");
+    };
+    map.insert("recovery", "not an object").unwrap();
+    doc.doc().commit();
+    let entries = doc.read_entries().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "u1");
+    assert_eq!(entries[0].recovery, None);
 }

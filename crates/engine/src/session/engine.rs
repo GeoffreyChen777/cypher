@@ -1020,6 +1020,14 @@ impl SessionsEngine {
         self.inner.set_status(chat_id, status, fresh_start);
     }
 
+    /// Context recovery's progress on the chat's session row: `Some` while a
+    /// recovery is under way (the transcript's recovery spinner), `None` once
+    /// the prompt is sent again or the recovery gives up. A chat without a
+    /// row has no settled round to recover, so nothing is written for it.
+    pub fn set_recovery(&self, chat_id: &str, recovery: Option<cypher_proto::RecoveryProgress>) {
+        self.inner.set_recovery(chat_id, recovery);
+    }
+
     /// Session Fork (v1): is `chat_id` a temporary Side Chat (host-memory
     /// only, no durable workspace row)? Forks of a temporary chat are refused
     /// — the source must be a durable root chat whose transcript and Pi
@@ -1184,6 +1192,7 @@ impl Inner {
                     subagents: Vec::new(),
                     context_usage: seed,
                     throughput: None,
+                    recovery: None,
                 });
             if entry.context_usage == Some(usage) {
                 return;
@@ -1206,6 +1215,24 @@ impl Inner {
     /// snapshot, a transition), and the settle write clears it. No
     /// `updated_at` bump: it is not a liveness signal, and a missing row is
     /// never created for it.
+    /// See [`SessionsEngine::set_recovery`]. Each change is a registry write
+    /// — a recovery makes a handful — so other devices show it too.
+    fn set_recovery(&self, chat_id: &str, recovery: Option<cypher_proto::RecoveryProgress>) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.recovery == recovery {
+                return;
+            }
+            entry.recovery = recovery;
+            entry.updated_at = Utc::now();
+            entry.clone()
+        };
+        self.publish_session(chat_id, &session);
+    }
+
     fn set_throughput(&self, chat_id: &str, throughput: Option<Throughput>) {
         let session = {
             let mut statuses = lock(&self.statuses);
@@ -1244,6 +1271,7 @@ impl Inner {
                     subagents: Vec::new(),
                     context_usage: seed,
                     throughput: None,
+                    recovery: None,
                 });
             entry.subagents = runs;
             entry.updated_at = now;
@@ -1276,6 +1304,7 @@ impl Inner {
                     subagents: Vec::new(),
                     context_usage: seed,
                     throughput: None,
+                    recovery: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always

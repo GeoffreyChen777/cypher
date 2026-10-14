@@ -212,6 +212,10 @@ pub(crate) struct RawSession {
     /// old rows, and old writers. Parsed leniently like `context_usage`.
     #[serde(default)]
     throughput: Option<serde_json::Value>,
+    /// A context recovery under way; absent otherwise and on old writers.
+    /// Parsed leniently like `context_usage`.
+    #[serde(default)]
+    recovery: Option<serde_json::Value>,
 }
 
 impl From<RawSession> for Session {
@@ -228,6 +232,9 @@ impl From<RawSession> for Session {
                 .and_then(|value| serde_json::from_value(value).ok()),
             throughput: raw
                 .throughput
+                .and_then(|value| serde_json::from_value(value).ok()),
+            recovery: raw
+                .recovery
                 .and_then(|value| serde_json::from_value(value).ok()),
         }
     }

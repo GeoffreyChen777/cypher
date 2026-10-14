@@ -281,8 +281,9 @@ fn clean_title(raw: &str) -> String {
 }
 
 /// Drive one titling run through the harness: no steering, questions resolved
-/// empty immediately (a titling prompt must never block on input).
-async fn collect_text(
+/// empty immediately (a titling prompt must never block on input). Context
+/// recovery writes its supplementary context through the same one-shot run.
+pub(crate) async fn collect_text(
     harness: &dyn cypher_harness::Harness,
     request: RunRequest,
 ) -> Result<String, EngineError> {

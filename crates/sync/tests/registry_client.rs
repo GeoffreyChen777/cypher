@@ -79,6 +79,7 @@ async fn two_clients_converge_and_stream_live_updates() {
             subagents: Vec::new(),
             context_usage: None,
             throughput: None,
+            recovery: None,
         })
         .unwrap();
     }
@@ -393,6 +394,7 @@ async fn churn_stays_bounded_no_history_growth() {
                 subagents: Vec::new(),
                 context_usage: None,
                 throughput: None,
+                recovery: None,
             })
             .unwrap();
         }

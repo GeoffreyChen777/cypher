@@ -40,6 +40,7 @@ fn entry(id: &str) -> SessionMessageEntry {
         comments: Vec::new(),
         models: Vec::new(),
         turn_changes: None,
+        recovery: None,
     }
 }
 fn contains(doc: &SessionDoc) -> bool {

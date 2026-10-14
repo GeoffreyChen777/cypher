@@ -13,6 +13,7 @@
 mod agent;
 pub mod agent_prompt;
 pub mod attachment_refs;
+mod context_recovery;
 mod entities;
 mod github;
 pub mod motion;
@@ -23,6 +24,7 @@ pub mod view;
 mod workspace;
 
 pub use agent::*;
+pub use context_recovery::*;
 pub use entities::*;
 pub use github::*;
 pub use session_fork::*;

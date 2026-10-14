@@ -329,6 +329,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         subagents: Vec::new(),
         context_usage: None,
         throughput: None,
+        recovery: None,
     }
 }
 
@@ -501,6 +502,47 @@ fn session_throughput_syncs_and_clears_with_the_turn() {
     let row = &b.read_sessions().unwrap()[0];
     assert_eq!(row.status, SessionStatus::Idle);
     assert_eq!(row.throughput, None);
+}
+
+/// A context recovery under way rides the host's row to its peers (the
+/// transcript spinner on every device), and a row without one ends it; a
+/// malformed one reads as none without costing the row.
+#[test]
+fn session_recovery_syncs_and_clears() {
+    let progress = cypher_proto::RecoveryProgress {
+        stage: cypher_proto::RecoveryStage::WritingContext,
+        trigger: "can't help".into(),
+        matched_in: cypher_proto::RecoveryTriggerSource::Response,
+        attempt: 1,
+        started_at: ts(3_400),
+    };
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let (mut server, mut seq) = (HashMap::new(), 0);
+    let mut idle = session("chat-1", "dev-a", SessionStatus::Idle);
+    idle.recovery = Some(progress.clone());
+    a.upsert_session(&idle).unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].recovery, Some(progress));
+
+    a.upsert_session(&session("chat-1", "dev-a", SessionStatus::Working))
+        .unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].recovery, None);
+
+    let raw: super::rows::RawSession = serde_json::from_value(json!({
+        "chatId": "chat-1",
+        "deviceId": "dev-a",
+        "status": "idle",
+        "updatedAt": 3_500,
+        "recovery": {"stage": "someday"},
+    }))
+    .unwrap();
+    let row = Session::from(raw);
+    assert_eq!(row.status, SessionStatus::Idle);
+    assert_eq!(row.recovery, None);
 }
 
 /// A malformed gauge (another writer's shape) reads as no reading; the

@@ -57,6 +57,7 @@ pub fn session() -> Session {
         subagents: Vec::new(),
         context_usage: None,
         throughput: None,
+        recovery: None,
     }
 }
 
@@ -73,5 +74,6 @@ pub fn entry() -> SessionMessageEntry {
         comments: Vec::new(),
         models: Vec::new(),
         turn_changes: None,
+        recovery: None,
     }
 }

@@ -85,6 +85,7 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
         || prev.completed_at != next.completed_at
         || prev.models != next.models
         || prev.turn_changes != next.turn_changes
+        || prev.recovery != next.recovery
         || prev.parts.len() != next.parts.len()
     {
         return None;
@@ -293,6 +294,7 @@ mod tests {
             comments: Vec::new(),
             models: Vec::new(),
             turn_changes: None,
+            recovery: None,
         }
     }
 

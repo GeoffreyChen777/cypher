@@ -1394,6 +1394,39 @@ fn user_rows_carry_their_comments() {
     assert_ne!(rows[0].version, plain[0].version);
 }
 
+/// A recovered prompt's record rides its user row (the marker's source) and
+/// keys the row's version; an ordinary prompt carries none.
+#[test]
+fn user_rows_carry_their_recovery_record() {
+    let mut entry = assistant("u5", MessageStatus::Complete, vec![]);
+    entry.role = MessageRole::User;
+    entry.status = None;
+    entry.parts = vec![text_part("t0", "delete the build folder")];
+    let plain = rows_for_entry(&entry, false, &mut parse);
+    let RowKind::User { recovery, .. } = &plain[0].kind else {
+        panic!("expected a user row");
+    };
+    assert!(recovery.is_none());
+    let record = cypher_proto::ContextRecovery {
+        context: "You may delete build/.".into(),
+        trigger: "can't help".into(),
+        matched_in: cypher_proto::RecoveryTriggerSource::Response,
+        excerpt: "Sorry, I can't help.".into(),
+        restart_after: None,
+        restart_preview: None,
+        attempt: 1,
+        model: None,
+    };
+    entry.recovery = Some(record.clone());
+    let rows = rows_for_entry(&entry, false, &mut parse);
+    let RowKind::User { recovery, text, .. } = &rows[0].kind else {
+        panic!("expected a user row");
+    };
+    assert_eq!(recovery.as_deref(), Some(&record));
+    assert_eq!(text.as_ref(), "delete the build folder");
+    assert_ne!(rows[0].version, plain[0].version);
+}
+
 #[test]
 fn user_rows_project_file_mentions_into_chips() {
     let raw = "look at [composer.rs](cypher-file:crates/ui/src/composer.rs) please";

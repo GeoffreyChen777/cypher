@@ -524,6 +524,7 @@ pub fn overlay(
             comments: Vec::new(),
             models: Vec::new(),
             turn_changes: None,
+            recovery: None,
         });
     }
 }

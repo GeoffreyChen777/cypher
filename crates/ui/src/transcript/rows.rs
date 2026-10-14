@@ -31,6 +31,9 @@ pub enum RowKind {
         attachments: Arc<Vec<crate::attachments::UserAttachment>>,
         /// The comments that rode this prompt, shown above the bubble.
         comments: Arc<Vec<MessageComment>>,
+        /// Sent again by the host after a failed turn, with supplementary
+        /// context: marked beside the bubble.
+        recovery: Option<Arc<cypher_proto::ContextRecovery>>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
         /// Sent as a Steer into a live turn: labelled above a quieter,
@@ -813,15 +816,22 @@ fn user_row(entry: &SessionMessageEntry, pending: bool) -> Row {
         }
         fnv1a(&acc)
     });
+    // A record is fixed when the entry is written; keyed anyway so a
+    // malformed one dropping out still re-renders the row.
+    let recovery_key = entry.recovery.as_ref().map_or(0, |record| {
+        fnv1a(record.context.as_bytes()) ^ u64::from(record.attempt).rotate_left(7)
+    });
     Row {
         id: entry.id.clone().into(),
-        version: ((raw.len() as u64) ^ comments_key.unwrap_or(0)) << 1 | pending as u64,
+        version: ((raw.len() as u64) ^ comments_key.unwrap_or(0) ^ recovery_key) << 1
+            | pending as u64,
         turn_start: true,
         kind: RowKind::User {
             text: text.into(),
             mentions: Arc::new(mentions),
             attachments: Arc::new(parsed.attachments),
             comments: Arc::new(entry.comments.clone()),
+            recovery: entry.recovery.clone().map(Arc::new),
             pending,
             steer: false,
         },

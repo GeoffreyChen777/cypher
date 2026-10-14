@@ -425,6 +425,7 @@ pub fn message_entry(
         comments: Vec::new(),
         models: Vec::new(),
         turn_changes: None,
+        recovery: None,
     }
 }
 

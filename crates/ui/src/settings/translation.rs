@@ -674,7 +674,11 @@ impl TranslationControl {
 /// One settings row: label (+ optional caption) on the left, control on the right.
 /// Rows are built through this helper so every row keeps the same rhythm and the
 /// control can never escape the column's padding.
-fn settings_row(theme: &Theme, label: &'static str, caption: Option<SharedString>) -> gpui::Div {
+pub(super) fn settings_row(
+    theme: &Theme,
+    label: &'static str,
+    caption: Option<SharedString>,
+) -> gpui::Div {
     div()
         .flex()
         .flex_row()
@@ -699,7 +703,7 @@ fn settings_row(theme: &Theme, label: &'static str, caption: Option<SharedString
 /// A fixed-width dropdown trigger. `flex_none` keeps it at its declared width so a
 /// long label on the left can never squeeze or push it past the card edge. The
 /// caller adds `.on_click(..)` and the anchored popup.
-fn dropdown_trigger(
+pub(super) fn dropdown_trigger(
     theme: &Theme,
     id: &'static str,
     focus: &FocusHandle,
@@ -738,8 +742,9 @@ fn dropdown_trigger(
         )
 }
 
-/// One segment of the Replace/Append control. The caller adds `.on_click(..)`.
-fn mode_button(
+/// One segment of a segmented control (Replace/Append). The caller adds
+/// `.on_click(..)`.
+pub(super) fn mode_button(
     theme: &Theme,
     id: &'static str,
     label: &'static str,

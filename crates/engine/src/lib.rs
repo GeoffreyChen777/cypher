@@ -46,6 +46,7 @@ pub use registry::{
     HarnessDescriptor, HarnessRegistry, default_registry, default_registry_with_bridge,
 };
 pub use runtime::{Engine, EngineConfig, EngineRuntime, serve_ipc, shutdown_signal};
+pub use session::context_recovery::{ContextRecoveryService, ContextRecoverySettingsStore};
 pub use session::engine::{QuiesceWindows, SessionsEngine, SteerOutcome, TurnEvent};
 pub use session::forks::SessionForks;
 pub use session::journal::RunJournal;
