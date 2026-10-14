@@ -176,6 +176,71 @@ fn engine_bridge_url_is_injected_into_children() {
     );
 }
 
+/// A bot run gets the bot tools and nothing else: the exact allowlist, the
+/// embedded extension, its appended prompt and `CYPHER_BOT_ID`. A plain run
+/// clears an inherited bot id so no other run registers the bot tools.
+#[test]
+fn bot_runs_are_limited_to_the_bot_tools() {
+    let harness = harness();
+    let prompt = std::env::temp_dir().join("cypher-bot-prompt-fixture.md");
+    let host = RunHostContext {
+        chat_id: Some("bot-chat".into()),
+        child: None,
+        bot: Some(cypher_harness::BotRunEnv {
+            bot_id: "bot-1".into(),
+            system_prompt: "You are a bot.".into(),
+        }),
+    };
+    let cmd = harness
+        .spawn_command(None, &host, Some(&prompt))
+        .expect("command builds");
+    let args: Vec<String> = cmd
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let after = |flag: &str| {
+        args.windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+    };
+    assert_eq!(
+        after("--tools").as_deref(),
+        Some(cypher_proto::BOT_TOOLS.join(",").as_str()),
+        "{args:?}"
+    );
+    let extension = after("-e").expect("the bot tools extension is loaded");
+    assert!(extension.ends_with("cypher-bot-tools.ts"), "{extension}");
+    let source = std::fs::read_to_string(&extension).expect("the extension is written");
+    for tool in cypher_proto::BOT_TOOLS {
+        assert!(
+            source.contains(&format!("name: \"{tool}\"")),
+            "the extension registers {tool}"
+        );
+    }
+    assert_eq!(
+        after("--append-system-prompt").as_deref(),
+        Some(prompt.to_string_lossy().as_ref())
+    );
+    assert!(
+        cmd.as_std()
+            .get_envs()
+            .any(|(k, v)| k == "CYPHER_BOT_ID" && v == Some(std::ffi::OsStr::new("bot-1")))
+    );
+
+    let plain = harness
+        .spawn_command(None, &RunHostContext::default(), None)
+        .expect("command builds");
+    assert!(
+        plain
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "CYPHER_BOT_ID" && v.is_none()),
+        "other runs clear an inherited bot id"
+    );
+    assert!(!plain.as_std().get_args().any(|arg| arg == "--tools"));
+}
+
 #[test]
 fn requested_model_and_thinking_are_applied_at_process_launch() {
     let harness = harness();

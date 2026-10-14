@@ -370,6 +370,24 @@ pub(super) enum MutateParams {
     /// and continues in local-only mode. Refused for THIS device.
     #[serde(rename_all = "camelCase")]
     DeleteDevice { device_id: String },
+    /// LWW bot edit from any device: the bot settings form writes every
+    /// editable field at once (`null` clears an optional one).
+    #[serde(rename_all = "camelCase")]
+    UpdateBot {
+        bot_id: String,
+        name: String,
+        #[serde(default)]
+        icon: Option<String>,
+        #[serde(default)]
+        color: Option<String>,
+        #[serde(default)]
+        instructions: Option<String>,
+        scope: cypher_proto::BotScope,
+    },
+    /// Tombstone a bot with its chat. Its host stops its run and removes its
+    /// folder.
+    #[serde(rename_all = "camelCase")]
+    DeleteBot { bot_id: String },
     /// Synced seen marker (LWW + monotonic guard): clears the "completed"
     /// badge on every device. `at` is epoch ms; default = now.
     #[serde(rename_all = "camelCase")]

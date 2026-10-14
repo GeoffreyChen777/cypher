@@ -445,6 +445,48 @@ impl WorkspaceHost {
             .collect())
     }
 
+    // ── agent bots ──────────────────────────────────────────────────────────
+
+    /// Write a new bot and its chat in one batch (the bot's host device).
+    pub fn create_bot(&self, bot: &Bot, chat: &Chat) -> Result<(), EngineError> {
+        self.mutate(|doc| {
+            doc.upsert_chat(chat)?;
+            doc.upsert_bot(bot)
+        })?;
+        Ok(())
+    }
+
+    pub fn bot(&self, bot_id: &str) -> Result<Option<Bot>, EngineError> {
+        Ok(self.read(|doc| doc.bot(bot_id))?)
+    }
+
+    pub fn read_bots(&self) -> Result<Vec<Bot>, EngineError> {
+        Ok(self.read(|doc| doc.read_bots())?)
+    }
+
+    /// LWW edit from any device. A rename also retitles the bot's chat, so
+    /// its tab reads the bot's name. `false` when no such bot.
+    pub fn update_bot(
+        &self,
+        bot_id: &str,
+        update: &cypher_doc::BotUpdate,
+    ) -> Result<bool, EngineError> {
+        let Some(bot) = self.bot(bot_id)? else {
+            return Ok(false);
+        };
+        Ok(self.mutate(|doc| {
+            if let Some(name) = &update.name {
+                doc.rename_chat(&bot.chat_id, name)?;
+            }
+            doc.update_bot(bot_id, update)
+        })?)
+    }
+
+    /// Tombstone the bot with its chat; the chat id when the bot existed.
+    pub fn delete_bot(&self, bot_id: &str) -> Result<Option<String>, EngineError> {
+        Ok(self.mutate(|doc| doc.delete_bot(bot_id))?)
+    }
+
     pub fn rename_device(&self, device_id: &str, name: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.rename_device(device_id, name))?)
     }

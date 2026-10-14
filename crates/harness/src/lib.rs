@@ -57,6 +57,19 @@ pub struct RunHostContext {
     /// Cypher child-subagent env (present only for child chats): the persisted
     /// agent profile plus the messaging-channel identity for the initial run.
     pub child: Option<ChildRunEnv>,
+    /// Agent-bot env (present only for a bot's own chat): the run is limited
+    /// to the bot tools and gets the bot's system prompt.
+    pub bot: Option<BotRunEnv>,
+}
+
+/// The agent-bot runtime env the engine derives from the chat's bot row
+/// (docs/design/agent-bots.md §6). The pi harness loads the bot tools
+/// extension, allows ONLY [`cypher_proto::BOT_TOOLS`], and appends
+/// `system_prompt`.
+#[derive(Debug, Clone)]
+pub struct BotRunEnv {
+    pub bot_id: String,
+    pub system_prompt: String,
 }
 
 /// The child-subagent runtime env the engine derives from the chat row's

@@ -9,6 +9,7 @@
 //! (`pi::packages`, `session::forks`, `host::local_import`, …).
 
 mod auth;
+pub mod bots;
 mod core;
 mod device_identity;
 mod error;

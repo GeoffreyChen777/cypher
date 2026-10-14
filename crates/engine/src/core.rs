@@ -45,6 +45,8 @@ pub struct EngineCore {
     /// Session Fork (v1): clone a settled transcript prefix into a NEW
     /// durable root Pi chat on the source chat's host device.
     pub session_forks: SessionForks,
+    /// Agent bots hosted here: creation and the bot tool surface.
+    pub bots: crate::bots::Bots,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<host::local_import::LocalImporter>,
@@ -163,6 +165,11 @@ impl EngineCore {
             registry.clone(),
             profile.store_root().join("agent-sessions"),
         );
+        let bots = crate::bots::Bots::new(
+            workspace.clone(),
+            doc_host.clone(),
+            profile.store_root().join("bots"),
+        );
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
@@ -266,6 +273,7 @@ impl EngineCore {
             provider_logins: Arc::new(Default::default()),
             side_chats,
             session_forks,
+            bots,
             device_id,
             local_import,
             workspace_scope: profile.scope(),
@@ -400,7 +408,8 @@ impl EngineCore {
         .with_mcp_logins(self.mcp_logins.clone())
         .with_provider_logins(self.provider_logins.clone())
         .with_title_settings(self.title_settings.clone())
-        .with_github(self.github.clone());
+        .with_github(self.github.clone())
+        .with_bots(self.bots.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }

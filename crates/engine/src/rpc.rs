@@ -42,6 +42,7 @@ use crate::session::side_chats::SideChats;
 use crate::terminals::Terminals;
 use crate::uploads::Uploads;
 
+mod bots;
 mod chats;
 mod diffs;
 mod docs;
@@ -93,6 +94,7 @@ pub struct EngineRpc {
     local_import: Option<crate::host::local_import::LocalImporter>,
     title_settings: Option<crate::session::title_settings::TitleSettingsStore>,
     github: Option<crate::git::github::Github>,
+    bots: Option<crate::bots::Bots>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
     /// so concurrent starts of the same `(parentChatId, runId)` cannot race the
@@ -150,6 +152,7 @@ impl EngineRpc {
             local_import: None,
             title_settings: None,
             github: None,
+            bots: None,
             engine_info,
             start_subagent_lock: Mutex::new(()),
         }
@@ -168,6 +171,18 @@ impl EngineRpc {
     pub fn with_github(mut self, github: crate::git::github::Github) -> Self {
         self.github = Some(github);
         self
+    }
+
+    /// The bots hosted on this engine.
+    pub fn with_bots(mut self, bots: crate::bots::Bots) -> Self {
+        self.bots = Some(bots);
+        self
+    }
+
+    fn bots(&self) -> Result<&crate::bots::Bots, RpcError> {
+        self.bots
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("Agent bots aren't available on this engine".into()))
     }
 
     fn github(&self) -> Result<&crate::git::github::Github, RpcError> {
@@ -821,6 +836,9 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&reply)
             }
             methods::WATCH_AGENT_EVENTS => chats::watch_agent_events(self, params),
+            methods::CREATE_BOT => bots::create_bot(self, params),
+            methods::WATCH_BOTS => Ok(RpcReply::Stream(watch_stream(self.workspace.watch_bots()))),
+            methods::BOT_TOOL => bots::bot_tool(self, params).await,
             other => Err(RpcError::UnknownMethod(other.to_string())),
         }
     }

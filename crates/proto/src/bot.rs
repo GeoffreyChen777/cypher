@@ -21,6 +21,16 @@ pub const BOT_INSTRUCTIONS_MAX_CHARS: usize = 8 * 1024;
 /// Session ids one scope may list in `includeSessions` / `excludeSessions`.
 pub const BOT_SCOPE_MAX_SESSIONS: usize = 2_000;
 
+/// The tools a bot run may call — the whole allowlist its Pi process gets.
+/// The engine's bot tools extension registers exactly these, and the engine
+/// answers each one through the `BotTool` RPC.
+pub const BOT_TOOLS: [&str; 4] = [
+    "list_projects",
+    "list_sessions",
+    "search_sessions",
+    "read_session",
+];
+
 /// One bot definition (a registry `bots` row).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,7 +110,7 @@ pub enum ProjectGrant {
 /// future ones; `excludeSessions` removes single sessions and
 /// `includeSessions` adds single sessions from ungranted projects. Subagent
 /// child chats follow their parent.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotScope {
     #[serde(default)]
@@ -121,6 +131,20 @@ pub struct BotScope {
 
 fn yes() -> bool {
     true
+}
+
+/// Matches the serde defaults: no projects, message text readable once
+/// something is granted.
+impl Default for BotScope {
+    fn default() -> Self {
+        Self {
+            projects: ProjectGrant::None,
+            include_sessions: Vec::new(),
+            exclude_sessions: Vec::new(),
+            include_archived: false,
+            transcripts: true,
+        }
+    }
 }
 
 impl BotScope {
@@ -358,6 +382,7 @@ mod tests {
     #[test]
     fn scope_round_trips_with_defaults() {
         let parsed: BotScope = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(parsed, BotScope::default(), "serde and Rust defaults agree");
         assert_eq!(parsed.projects, ProjectGrant::None);
         assert!(parsed.transcripts);
         let selected = BotScope {

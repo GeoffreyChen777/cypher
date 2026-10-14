@@ -176,6 +176,62 @@ impl EngineRpc {
                     last_seen_at.and_then(chrono::DateTime::from_timestamp_millis),
                 )
                 .map_err(failed),
+            MutateParams::UpdateBot {
+                bot_id,
+                name,
+                icon,
+                color,
+                instructions,
+                scope,
+            } => {
+                let name = name.trim().to_string();
+                cypher_proto::validate_name(&name).map_err(RpcError::BadParams)?;
+                scope.validate().map_err(RpcError::BadParams)?;
+                let instructions = instructions
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                if instructions
+                    .as_deref()
+                    .is_some_and(|s| s.chars().count() > cypher_proto::BOT_INSTRUCTIONS_MAX_CHARS)
+                {
+                    return Err(RpcError::BadParams("The instructions are too long.".into()));
+                }
+                let update = cypher_doc::BotUpdate {
+                    name: Some(name),
+                    icon: Some(icon.filter(|s| !s.is_empty())),
+                    color: Some(color.filter(|s| !s.is_empty())),
+                    instructions: Some(instructions),
+                    scope: Some(scope),
+                };
+                if !self
+                    .workspace
+                    .update_bot(&bot_id, &update)
+                    .map_err(failed)?
+                {
+                    return Err(RpcError::Failed("No such bot.".into()));
+                }
+                Ok(())
+            }
+            MutateParams::DeleteBot { bot_id } => {
+                let bot = self.workspace.bot(&bot_id).map_err(failed)?;
+                let Some(chat_id) = self.workspace.delete_bot(&bot_id).map_err(failed)? else {
+                    return Ok(());
+                };
+                self.doc_host.purge_chat(&chat_id);
+                if bot.is_some_and(|b| b.host_device_id == self.doc_host.device_id()) {
+                    let sessions = self.sessions.clone();
+                    let bots = self.bots.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = sessions.interrupt(&chat_id).await {
+                            tracing::debug!(chat = %chat_id, error = %err, "bot interrupt skipped");
+                        }
+                        if let Some(bots) = bots {
+                            bots.remove_folder(&bot_id);
+                        }
+                    });
+                }
+                Ok(())
+            }
             MutateParams::MarkChatSeen { chat_id, at } => {
                 let at = at
                     .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)

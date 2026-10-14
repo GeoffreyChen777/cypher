@@ -587,6 +587,36 @@ impl DocHost {
         &self.inner.config.device_id
     }
 
+    /// A chat's joined transcript without opening it: the live handle when
+    /// one is open, else the stored snapshot. Joins no room, starts no task
+    /// and leaves the warm-doc cache alone, so a bot can scan many chats.
+    /// `None` when this device has never stored the chat (or holds only a
+    /// pre-chat2 doc). Blocking: callers run it off the runtime.
+    pub fn read_transcript(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<Vec<SessionMessageEntry>>, EngineError> {
+        let open = lock(&self.inner.handles).get(chat_id).cloned();
+        let entries = match open {
+            Some(handle) => handle.doc().read_entries()?,
+            None => {
+                let Some((bytes, _cursor, epoch)) =
+                    self.inner.store.load_snapshot_with_cursor(chat_id)?
+                else {
+                    return Ok(None);
+                };
+                if epoch < crate::host::chat2_host::CHAT2_DOC_EPOCH {
+                    return Ok(None);
+                }
+                let raw = loro::LoroDoc::new();
+                raw.import(&bytes)
+                    .map_err(|e| EngineError::Other(format!("snapshot import failed: {e}")))?;
+                SessionDoc::from_doc(raw).read_entries()?
+            }
+        };
+        Ok(Some(cypher_doc::join_continuation_entries(entries)))
+    }
+
     /// Watcher-count helper for the stale reaper: how many live transcript-
     /// watch receivers this chat's doc has. A Side Chat panel holds one while
     /// open; the count drops to zero once the tab closes (or the watch RPC

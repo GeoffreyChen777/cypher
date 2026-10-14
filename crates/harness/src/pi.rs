@@ -407,18 +407,22 @@ impl Harness for PiHarness {
         // Child-subagent runs append the persisted system prompt from a temp
         // file (`--append-system-prompt` takes a path); owned by the run task
         // so it is cleaned up when the run ends (even on early error).
+        // Bot runs append the bot's prompt the same way.
         let mut temp_prompt: Option<PathBuf> = None;
-        if let Some(child) = controls.host.child.as_ref()
-            && !child.system_prompt.trim().is_empty()
+        let appended = match (controls.host.child.as_ref(), controls.host.bot.as_ref()) {
+            (Some(child), _) => Some((child.agent.as_str(), child.system_prompt.as_str())),
+            (None, Some(bot)) => Some(("bot", bot.system_prompt.as_str())),
+            (None, None) => None,
+        };
+        if let Some((name, prompt)) = appended
+            && !prompt.trim().is_empty()
         {
-            temp_prompt = Some(
-                match write_temp_prompt(&child.agent, &child.system_prompt) {
-                    Ok(path) => path,
-                    Err(err) => {
-                        return Err(HarnessError::Io(err));
-                    }
-                },
-            );
+            temp_prompt = Some(match write_temp_prompt(name, prompt) {
+                Ok(path) => path,
+                Err(err) => {
+                    return Err(HarnessError::Io(err));
+                }
+            });
         }
         let spawn = self
             .spawn_child(

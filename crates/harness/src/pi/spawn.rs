@@ -34,6 +34,11 @@ const ENV_AGENT_DIR: &str = "PI_CODING_AGENT_DIR";
 /// which then use the extension's configured default.
 const ENV_PERMISSION_LEVEL: &str = "CYPHER_PERMISSION_LEVEL";
 const ENV_PACKAGE_DIR: &str = "PI_PACKAGE_DIR";
+/// Set only in agent-bot runs; the bot tools extension registers its tools
+/// only when it sees this.
+const ENV_CYPHER_BOT_ID: &str = "CYPHER_BOT_ID";
+/// The bot tools extension, written beside the engine client.
+const BOT_TOOLS_EXTENSION: &str = "cypher-bot-tools.ts";
 
 /// The messaging tools every child gets regardless of its allowlist (the
 /// extension's `spawn.ts` appends the same trio).
@@ -58,8 +63,8 @@ pub(super) fn write_temp_prompt(agent: &str, prompt: &str) -> std::io::Result<Pa
     Ok(path)
 }
 
-/// Private files every Cypher-spawned Pi loads: the engine client module the
-/// bundled extensions import.
+/// Private files Cypher-spawned Pi processes load: the engine client module
+/// the bundled extensions import, and the bot tools extension bot runs load.
 fn private_support_dir() -> std::io::Result<&'static std::path::Path> {
     static DIRECTORY: std::sync::OnceLock<Result<tempfile::TempDir, String>> =
         std::sync::OnceLock::new();
@@ -70,14 +75,19 @@ fn private_support_dir() -> std::io::Result<&'static std::path::Path> {
             .map_err(|e| e.to_string())?;
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(dir.path().join("engine-client.mjs"))
-            .map_err(|e| e.to_string())?;
-        file.write_all(include_str!("engine-client.mjs").as_bytes())
-            .map_err(|e| e.to_string())?;
+        for (name, contents) in [
+            ("engine-client.mjs", include_str!("engine-client.mjs")),
+            (BOT_TOOLS_EXTENSION, include_str!("bot-tools.ts")),
+        ] {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(dir.path().join(name))
+                .map_err(|e| e.to_string())?;
+            file.write_all(contents.as_bytes())
+                .map_err(|e| e.to_string())?;
+        }
         Ok(dir)
     });
     directory
@@ -224,6 +234,26 @@ impl PiHarness {
                 args.push(path.display().to_string());
             }
         }
+        if let Some(bot) = &host.bot {
+            // Bot runs see only the bot tools: no shell, no file access, no
+            // MCP or subagents. The engine enforces the bot's scope inside
+            // each tool, so this list is what keeps the run inside it.
+            args.push("--tools".into());
+            args.push(cypher_proto::BOT_TOOLS.join(","));
+            args.push("-e".into());
+            args.push(
+                private_support_dir()?
+                    .join(BOT_TOOLS_EXTENSION)
+                    .display()
+                    .to_string(),
+            );
+            if let Some(path) = append_prompt
+                && !bot.system_prompt.trim().is_empty()
+            {
+                args.push("--append-system-prompt".into());
+                args.push(path.display().to_string());
+            }
+        }
         if let Some(model) = launch_model {
             args.push("--model".into());
             args.push(model.into());
@@ -263,6 +293,10 @@ impl PiHarness {
         if let Some(url) = self.engine_socket.as_deref().filter(|s| !s.is_empty()) {
             cmd.env(ENV_CYPHER_ENGINE_SOCKET, url);
             cmd.env(ENV_CYPHER_SUBAGENT_BRIDGE, SUBAGENT_BRIDGE_VERSION);
+        }
+        cmd.env_remove(ENV_CYPHER_BOT_ID);
+        if let Some(bot) = &host.bot {
+            cmd.env(ENV_CYPHER_BOT_ID, &bot.bot_id);
         }
         if let Some(child) = &host.child {
             cmd.env(ENV_ROLE, ROLE_CHILD);

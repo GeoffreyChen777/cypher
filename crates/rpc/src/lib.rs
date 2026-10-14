@@ -273,6 +273,17 @@ pub mod methods {
     /// transcript at a settled anchor and re-point the SAME chat at a
     /// freshly materialized, truncated Pi session. Pi-only, like the fork.
     pub const REWIND_SESSION: &str = "RewindSession";
+    // Agent bots (docs/design/agent-bots.md). Edits and deletes ride `Mutate`
+    // (`updateBot`, `deleteBot`) like other registry rows.
+    /// Create a bot hosted on the target device (unary): its private folder,
+    /// its chat and its registry row; replies with the `Bot`.
+    pub const CREATE_BOT: &str = "CreateBot";
+    /// The registry's bot rows (stream).
+    pub const WATCH_BOTS: &str = "WatchBots";
+    /// One bot tool call from a bot run's extension (unary, host-local):
+    /// `{chatId, tool, args}` → `{text}`. The engine resolves the bot from
+    /// `chatId` and enforces its scope.
+    pub const BOT_TOOL: &str = "BotTool";
 
     /// How one method is answered and routed. The engine derives its routing
     /// predicates from [`SPECS`], so adding a method means adding its constant
@@ -487,6 +498,10 @@ pub mod methods {
         // session there too.
         MethodSpec::unary(FORK_SESSION).forwardable(),
         MethodSpec::unary(REWIND_SESSION).forwardable(),
+        // A bot is created on its host; its tools answer only there.
+        MethodSpec::unary(CREATE_BOT).forwardable(),
+        MethodSpec::stream(WATCH_BOTS),
+        MethodSpec::unary(BOT_TOOL),
     ];
 
     /// The spec for `name`, or `None` for an unknown method.
