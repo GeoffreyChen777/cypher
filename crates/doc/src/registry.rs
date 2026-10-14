@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use cypher_proto::{Chat, ChatConfig, Device, Session, Space};
+use cypher_proto::{Bot, Chat, ChatConfig, Device, Session, Space};
 
 use crate::schema::DocError;
 
@@ -29,11 +29,29 @@ pub(crate) use core::{HlcClock, row_to_seed_op};
 pub use core::{OpKind, RegistryRow, RowOp, apply_op};
 pub use rows::{DeletedDevice, DeletedSpace, WorkspaceState};
 
-/// Row kinds — the four sidebar tables.
+/// A partial bot edit ([`RegistryDoc::update_bot`]): `None` leaves a field
+/// alone; `Some(None)` clears an optional one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<cypher_proto::BotScope>,
+}
+
+/// Row kinds — the four sidebar tables, plus agent-bot definitions.
 pub(crate) const KIND_DEVICES: &str = "devices";
 pub(crate) const KIND_SPACES: &str = "spaces";
 pub(crate) const KIND_CHATS: &str = "chats";
 pub(crate) const KIND_SESSIONS: &str = "sessions";
+pub(crate) const KIND_BOTS: &str = "bots";
 
 /// Snapshot row id in the local `DocsStore` for the persisted registry state.
 pub const REGISTRY_DOC_ID: &str = "registry1";
@@ -720,6 +738,13 @@ impl RegistryDoc {
                     .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
                     .unwrap_or(Value::Null),
             ),
+            (
+                "bot",
+                chat.bot
+                    .as_ref()
+                    .map(|b| serde_json::to_value(b).unwrap_or(Value::Null))
+                    .unwrap_or(Value::Null),
+            ),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1003,6 +1028,85 @@ impl RegistryDoc {
         Ok(sessions)
     }
 
+    // ── bots ────────────────────────────────────────────────────────────────
+
+    /// Upsert a full bot row (creation, on the bot's host device).
+    pub fn upsert_bot(&mut self, bot: &Bot) -> Result<(), DocError> {
+        let set = fields([
+            ("id", json!(bot.id)),
+            ("name", json!(bot.name)),
+            ("icon", opt_str(bot.icon.as_deref())),
+            ("color", opt_str(bot.color.as_deref())),
+            ("hostDeviceId", json!(bot.host_device_id)),
+            ("chatId", json!(bot.chat_id)),
+            ("instructions", opt_str(bot.instructions.as_deref())),
+            ("scope", serde_json::to_value(&bot.scope)?),
+            ("createdAt", json!(bot.created_at.timestamp_millis())),
+        ]);
+        self.write(KIND_BOTS, &bot.id.clone(), OpKind::Upsert, set);
+        Ok(())
+    }
+
+    /// LWW edit from any device: each `Some` field is written, `None` fields
+    /// are left alone. `false` when no such row.
+    pub fn update_bot(&mut self, bot_id: &str, update: &BotUpdate) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_BOTS, bot_id) {
+            return Ok(false);
+        }
+        let mut set = BTreeMap::new();
+        if let Some(name) = &update.name {
+            set.insert("name".into(), json!(name));
+        }
+        if let Some(icon) = &update.icon {
+            set.insert("icon".into(), opt_str(icon.as_deref()));
+        }
+        if let Some(color) = &update.color {
+            set.insert("color".into(), opt_str(color.as_deref()));
+        }
+        if let Some(instructions) = &update.instructions {
+            set.insert("instructions".into(), opt_str(instructions.as_deref()));
+        }
+        if let Some(scope) = &update.scope {
+            set.insert("scope".into(), serde_json::to_value(scope)?);
+        }
+        if set.is_empty() {
+            return Ok(true);
+        }
+        self.write(KIND_BOTS, bot_id, OpKind::Update, set);
+        Ok(true)
+    }
+
+    pub fn bot(&self, bot_id: &str) -> Result<Option<Bot>, DocError> {
+        Ok(self
+            .overlay_row(KIND_BOTS, bot_id)
+            .and_then(|row| row_to::<rows::RawBot>(&row))
+            .map(Bot::from))
+    }
+
+    pub fn read_bots(&self) -> Result<Vec<Bot>, DocError> {
+        let mut bots: Vec<Bot> = self
+            .read_kind::<rows::RawBot>(KIND_BOTS)
+            .into_iter()
+            .map(Bot::from)
+            .collect();
+        bots.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        Ok(bots)
+    }
+
+    /// Tombstone the bot together with its chat and that chat's status row,
+    /// in one batch. Returns the bot's chat id when the bot existed.
+    pub fn delete_bot(&mut self, bot_id: &str) -> Result<Option<String>, DocError> {
+        let Some(bot) = self.bot(bot_id)? else {
+            return Ok(None);
+        };
+        self.delete_row_ops(&[
+            (KIND_BOTS, bot_id),
+            (KIND_CHATS, &bot.chat_id),
+            (KIND_SESSIONS, &bot.chat_id),
+        ]);
+        Ok(Some(bot.chat_id))
+    }
+
     // ── whole-doc read ──────────────────────────────────────────────────────
 
     pub fn read_all(&self) -> Result<WorkspaceState, DocError> {
@@ -1011,6 +1115,7 @@ impl RegistryDoc {
             spaces: self.read_spaces()?,
             chats: self.read_chats()?,
             sessions: self.read_sessions()?,
+            bots: self.read_bots()?,
         })
     }
 }

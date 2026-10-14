@@ -64,6 +64,7 @@ impl WorkspaceHost {
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 child: None,
+                bot: None,
             })
         })?;
         Ok(())
@@ -293,6 +294,7 @@ impl WorkspaceHost {
                 space_id: parent.space_id.clone(),
                 last_seen_at: None,
                 child: None,
+                bot: None,
             })
         })?;
         Ok(true)
@@ -349,6 +351,7 @@ impl WorkspaceHost {
                 // it must never flash a "completed (unseen)" badge.
                 last_seen_at: Some(now),
                 child: None,
+                bot: None,
             })
         })?;
         Ok(())
@@ -427,6 +430,7 @@ impl WorkspaceHost {
                     tool_call_id,
                     profile,
                 }),
+                bot: None,
             })
         })?;
         Ok(ChildChatOutcome::Created(chat_id))

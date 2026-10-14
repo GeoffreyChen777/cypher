@@ -300,6 +300,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         last_seen_at: None,
         room_gen: None,
         child: None,
+        bot: None,
     }
 }
 
@@ -992,4 +993,83 @@ fn pins_survive_overlay_read_all_and_snapshot() {
     assert!(doc.set_space_appearance("s1", None, None).unwrap());
     let plain = doc.space("s1").unwrap().unwrap();
     assert_eq!((plain.icon, plain.color), (None, None));
+}
+
+fn bot(id: &str, chat_id: &str) -> Bot {
+    Bot {
+        id: id.into(),
+        name: "Billing bot".into(),
+        icon: Some("rocket".into()),
+        color: None,
+        host_device_id: "dev-a".into(),
+        chat_id: chat_id.into(),
+        instructions: None,
+        scope: cypher_proto::BotScope {
+            projects: cypher_proto::ProjectGrant::Selected {
+                space_ids: vec!["s1".into()],
+            },
+            ..Default::default()
+        },
+        created_at: ts(4_000),
+    }
+}
+
+#[test]
+fn bots_round_trip_update_and_survive_a_snapshot() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_bot(&bot("b1", "c1")).unwrap();
+    assert_eq!(doc.read_all().unwrap().bots, vec![bot("b1", "c1")]);
+    let update = BotUpdate {
+        name: Some("Release bot".into()),
+        icon: Some(None),
+        scope: Some(cypher_proto::BotScope {
+            projects: cypher_proto::ProjectGrant::All,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(doc.update_bot("b1", &update).unwrap());
+    assert!(!doc.update_bot("missing", &update).unwrap());
+    let again = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "dev-a").unwrap();
+    let edited = again.bot("b1").unwrap().unwrap();
+    assert_eq!(edited.name, "Release bot");
+    assert_eq!(edited.icon, None);
+    assert_eq!(edited.scope.projects, cypher_proto::ProjectGrant::All);
+    assert_eq!(edited.chat_id, "c1", "untouched fields keep their values");
+}
+
+#[test]
+fn deleting_a_bot_removes_its_chat() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut own = chat("c1", "dev-a");
+    own.bot = Some(cypher_proto::BotChat {
+        bot_id: "b1".into(),
+    });
+    doc.upsert_chat(&own).unwrap();
+    doc.upsert_chat(&chat("other", "dev-a")).unwrap();
+    doc.upsert_bot(&bot("b1", "c1")).unwrap();
+    assert_eq!(
+        doc.chat("c1").unwrap().unwrap().bot.unwrap().bot_id,
+        "b1",
+        "the chat marker round-trips"
+    );
+    assert_eq!(doc.delete_bot("b1").unwrap().as_deref(), Some("c1"));
+    assert_eq!(doc.delete_bot("b1").unwrap(), None);
+    let all = doc.read_all().unwrap();
+    assert!(all.bots.is_empty());
+    assert_eq!(
+        all.chats.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        ["other"]
+    );
+}
+
+#[test]
+fn an_unreadable_bot_scope_reads_as_empty() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_bot(&bot("b1", "c1")).unwrap();
+    let mut set = BTreeMap::new();
+    set.insert("scope".into(), json!({"projects": {"mode": "everything"}}));
+    doc.write(KIND_BOTS, "b1", OpKind::Update, set);
+    let read = doc.bot("b1").unwrap().unwrap();
+    assert_eq!(read.scope, cypher_proto::BotScope::default());
 }

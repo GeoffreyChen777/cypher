@@ -28,6 +28,7 @@ pub fn chat() -> Chat {
         last_seen_at: None,
         room_gen: None,
         child: None,
+        bot: None,
     }
 }
 
