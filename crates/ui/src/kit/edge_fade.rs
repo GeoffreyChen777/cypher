@@ -5,10 +5,24 @@
 //! fade: over a see-through blurred backdrop no painted overlay can fade
 //! content out, because "what is behind the window" is not a paintable color.
 
+use std::cell::RefCell;
+
 use gpui::{
     AnyElement, App, Bounds, EdgeFade, Element, GlobalElementId, InspectorElementId, IntoElement,
     LayoutId, Pixels, ScrollHandle, Window, px,
 };
+
+thread_local! {
+    /// The fades of the [`EdgeFaded`] wrappers painting right now, innermost
+    /// last (gpui applies only the innermost).
+    static PAINTING: RefCell<Vec<EdgeFade>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The fade applied to whatever paints right now, for painters that replay
+/// it later (a [`LiveLayer`](crate::kit::live_layer::LiveLayer)).
+pub fn current() -> Option<EdgeFade> {
+    PAINTING.with(|painting| painting.borrow().last().copied())
+}
 
 /// Fade the child's content at its own edges: `top`/`bottom` select which
 /// edges (pass the "is there hidden overflow" flags), `band` is the ramp
@@ -141,7 +155,13 @@ impl Element for EdgeFaded {
             left,
             right,
         });
-        window.with_edge_fade(fade, |window| self.child.paint(window, cx));
+        let Some(fade) = fade else {
+            self.child.paint(window, cx);
+            return;
+        };
+        PAINTING.with(|painting| painting.borrow_mut().push(fade));
+        window.with_edge_fade(Some(fade), |window| self.child.paint(window, cx));
+        PAINTING.with(|painting| painting.borrow_mut().pop());
     }
 }
 

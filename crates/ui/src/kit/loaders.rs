@@ -1,18 +1,23 @@
-//! Loaders: the gradient matrix spinner and the boot splash content. All
-//! motion routes through `crate::kit::motion` pure helpers, so the math is
-//! unit-tested and these elements are testable-by-compile.
+//! Loaders: the gradient matrix spinners, the running-tool arc, the pulsing
+//! loading wash and the boot splash content. All motion routes through
+//! `crate::kit::motion` pure helpers, so the math is unit-tested.
 //!
-//! Rendering pattern: every cell reads the one shared pulse clock
-//! ([`motion::pulse_delta`]) and derives its own phase from it, so all cells
-//! stay phase-locked. Cells animate inside fixed-size slots — opacity and
-//! inner size are paint-local and never move surrounding layout.
+//! Rendering pattern: a loader is a fixed-size element that paints its frame
+//! at paint time from the one shared pulse clock ([`motion::pulse_delta`]),
+//! deriving each cell's phase from it, so all loaders stay phase-locked and
+//! never move surrounding layout. Inside a cached view's
+//! [`LiveLayer`](crate::kit::live_layer::LiveLayer) a loader only records its
+//! slot, and the layer paints its frames over the replayed view instead.
+
+use std::f32::consts::TAU;
 
 use gpui::{
-    AnyElement, App, EntityId, IntoElement, ParentElement, Pixels, SharedString, Styled, Window,
-    div, px,
+    AnyElement, Bounds, EntityId, IntoElement, ParentElement, Pixels, SharedString, Styled,
+    TransformationMatrix, Window, canvas, div, px,
 };
 
-use crate::kit::motion::{self, GRADIENT_SPIN, SPLASH_OUT};
+use crate::kit::live_layer;
+use crate::kit::motion::{self, CYPHER_PULSE, GRADIENT_SPIN, MotionSpec, SPLASH_OUT, STATUS_SPIN};
 use crate::kit::theme::{Appearance, MonoStyled, Theme, oklch};
 use gpui::Hsla;
 
@@ -43,44 +48,123 @@ fn mini_row_tints(appearance: Appearance) -> [Hsla; 3] {
     }
 }
 
-/// The gradient matrix spinner (WorkingIndicator), ported from zeron's
-/// gradient-spin.tsx: a 3×3 grid of round cells tinted per row from the
-/// sunrise gradient. Each cell pulses opacity once per 750ms period; the
-/// per-cell phase follows the "arrow-up" pattern (the pulse enters at the
-/// bottom edge and converges toward the top-center cell), so the wave reads
-/// as travelling upward.
-pub fn gradient_spinner(
-    _id: &'static str,
-    _theme: &Theme,
-    cell_px: f32,
-    view: EntityId,
-    cx: &mut App,
-) -> impl IntoElement {
+/// One loader's look: what its element paints, and what a
+/// [`LiveLayer`](crate::kit::live_layer::LiveLayer) slot replays.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Loader {
+    /// [`gradient_spinner`]: the 3×3 matrix with `cell_px` cells.
+    Matrix { cell_px: f32 },
+    /// [`mini_gradient_spinner`]: the 2×3 ring with `cell_px` cells.
+    Mini { cell_px: f32 },
+    /// [`status_arc`]: the running tool's rotating arc glyph.
+    Arc { color: Hsla },
+    /// [`pulse_wash`]: a rounded wash with a hairline border, its opacity
+    /// pulsing (a loading thumbnail).
+    Wash { bg: Hsla, border: Hsla, radius: f32 },
+}
+
+impl Loader {
+    /// The repeating spec whose phase drives this loader.
+    pub fn spec(&self) -> &'static MotionSpec {
+        match self {
+            Loader::Matrix { .. } | Loader::Mini { .. } => &GRADIENT_SPIN,
+            Loader::Arc { .. } => &STATUS_SPIN,
+            Loader::Wash { .. } => &CYPHER_PULSE,
+        }
+    }
+
+    /// Paint this loader's frame at phase `delta` into `bounds`.
+    pub fn paint(&self, bounds: Bounds<Pixels>, delta: f32, window: &mut Window, cx: &gpui::App) {
+        match *self {
+            Loader::Matrix { cell_px } => {
+                for (offset, color) in matrix_cells(cell_px, delta) {
+                    paint_cell(bounds.origin + offset, cell_px, color, window);
+                }
+            }
+            Loader::Mini { cell_px } => paint_mini_spinner(bounds.origin, cell_px, delta, window),
+            Loader::Arc { color } => {
+                // `Transformation::rotate` about the glyph's center, built
+                // here because the element-side conversion is private.
+                let (center, scale) = (bounds.center(), window.scale_factor());
+                let turn = TransformationMatrix::unit()
+                    .translate(center.scale(scale))
+                    .rotate(gpui::radians(delta * TAU))
+                    .translate(center.scale(-scale));
+                window
+                    .paint_svg(bounds, ARC_GLYPH.into(), None, turn, color, cx)
+                    .ok();
+            }
+            Loader::Wash { bg, border, radius } => {
+                let opacity = 0.35 + 0.4 * motion::pulse_wave(delta);
+                window.paint_quad(gpui::quad(
+                    bounds,
+                    px(radius),
+                    bg.opacity(opacity),
+                    px(1.0),
+                    border.opacity(opacity),
+                    gpui::BorderStyle::Solid,
+                ));
+            }
+        }
+    }
+}
+
+/// The glyph [`Loader::Arc`] rotates.
+const ARC_GLYPH: &str = crate::kit::icons::SPINNER;
+
+/// A loader element (the caller sizes it): paints `loader`'s frame, leasing
+/// the pulse clock for `view`, or records its slot inside a live layer.
+fn loader_element(loader: Loader, view: EntityId) -> gpui::Canvas<()> {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, cx| live_layer::paint_loader(loader, bounds, view, window, cx),
+    )
+}
+
+fn paint_cell(origin: gpui::Point<Pixels>, cell_px: f32, color: Hsla, window: &mut Window) {
+    let cell = Bounds::new(origin, gpui::size(px(cell_px), px(cell_px)));
+    window.paint_quad(gpui::fill(cell, color).corner_radii(px(cell_px / 2.0)));
+}
+
+/// Side length of a run of `cells` cells `cell_px` wide, half a cell apart.
+fn span(cells: usize, cell_px: f32) -> Pixels {
+    px(cells as f32 * cell_px + (cells - 1) as f32 * cell_px / 2.0)
+}
+
+/// Every cell of the matrix at pulse `delta`: its offset from the grid's
+/// top-left and its color. The per-cell phase follows the "arrow-up" pattern
+/// (the pulse enters at the bottom edge and converges toward the top-center
+/// cell), so the wave reads as travelling upward.
+fn matrix_cells(cell_px: f32, delta: f32) -> impl Iterator<Item = (gpui::Point<Pixels>, Hsla)> {
     let center = (MATRIX_SIDE as f32 - 1.0) / 2.0;
     let max = MATRIX_SIDE as f32 - 1.0 + center;
-    let delta = motion::pulse_delta(&GRADIENT_SPIN, view, cx);
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(cell_px / 2.0))
-        .children((0..MATRIX_SIDE).map(move |row| {
-            let tint: gpui::Hsla = gpui::rgb(GSPIN_ROW_TINTS[row]).into();
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(cell_px / 2.0))
-                .children((0..MATRIX_SIDE).map(move |col| {
-                    // Distance of this cell from the wave origin, normalized
-                    // into a phase offset (gradient-spin's `--gspin-phase`).
-                    let d = MATRIX_SIDE as f32 - 1.0 - row as f32 + (col as f32 - center).abs();
-                    let phase = if max == 0.0 { 0.0 } else { d / (max + 1.0) };
-                    div()
-                        .size(px(cell_px))
-                        .rounded(px(cell_px / 2.0))
-                        .bg(tint)
-                        .opacity(motion::gspin_opacity(delta + phase, GSPIN_DIM))
-                }))
-        }))
+    let pitch = cell_px * 1.5;
+    (0..MATRIX_SIDE).flat_map(move |row| {
+        let tint: Hsla = gpui::rgb(GSPIN_ROW_TINTS[row]).into();
+        (0..MATRIX_SIDE).map(move |col| {
+            // Distance of this cell from the wave origin, normalized into a
+            // phase offset (gradient-spin's `--gspin-phase`).
+            let d = MATRIX_SIDE as f32 - 1.0 - row as f32 + (col as f32 - center).abs();
+            let phase = if max == 0.0 { 0.0 } else { d / (max + 1.0) };
+            (
+                gpui::point(px(col as f32 * pitch), px(row as f32 * pitch)),
+                tint.opacity(motion::gspin_opacity(delta + phase, GSPIN_DIM)),
+            )
+        })
+    })
+}
+
+/// The gradient matrix spinner (WorkingIndicator), ported from zeron's
+/// gradient-spin.tsx: a 3×3 grid of round `cell_px` cells tinted per row
+/// from the sunrise gradient, each pulsing opacity once per 750ms period in
+/// a wave travelling upward. Outside a live layer it leases the pulse clock
+/// for `view`.
+pub fn gradient_spinner(cell_px: f32, view: EntityId) -> impl IntoElement {
+    let side = span(MATRIX_SIDE, cell_px);
+    loader_element(Loader::Matrix { cell_px }, view)
+        .flex_none()
+        .w(side)
+        .h(side)
 }
 
 const MINI_COLS: usize = 2;
@@ -90,8 +174,7 @@ const MINI_ROWS: usize = 3;
 const MINI_RING: [[usize; MINI_COLS]; MINI_ROWS] = [[0, 1], [5, 2], [4, 3]];
 
 /// Every cell of a mini spinner at pulse `delta`: its offset from the grid's
-/// top-left and its color (the row tint at the cell's pulse opacity). Shared
-/// by the element and [`paint_mini_spinner`], so both draw the same frames.
+/// top-left and its color (the row tint at the cell's pulse opacity).
 fn mini_spinner_cells(
     cell_px: f32,
     delta: f32,
@@ -117,13 +200,11 @@ fn mini_spinner_cells(
 
 /// The footprint of a [`mini_gradient_spinner`] with `cell_px` cells.
 pub fn mini_spinner_size(cell_px: f32) -> gpui::Size<Pixels> {
-    let span = |cells: usize| px(cells as f32 * cell_px + (cells - 1) as f32 * cell_px / 2.0);
-    gpui::size(span(MINI_COLS), span(MINI_ROWS))
+    gpui::size(span(MINI_COLS, cell_px), span(MINI_ROWS, cell_px))
 }
 
 /// Paint a [`mini_gradient_spinner`]'s frame at pulse `delta` straight into
-/// the scene, its grid's top-left at `origin` — for a spinner whose host view
-/// is cached and replays instead of re-rendering on each pulse.
+/// the scene, its grid's top-left at `origin`.
 pub fn paint_mini_spinner(
     origin: gpui::Point<Pixels>,
     cell_px: f32,
@@ -131,8 +212,7 @@ pub fn paint_mini_spinner(
     window: &mut Window,
 ) {
     for (offset, color) in mini_spinner_cells(cell_px, delta) {
-        let cell = gpui::Bounds::new(origin + offset, gpui::size(px(cell_px), px(cell_px)));
-        window.paint_quad(gpui::fill(cell, color).corner_radii(px(cell_px / 2.0)));
+        paint_cell(origin + offset, cell_px, color, window);
     }
 }
 
@@ -142,29 +222,27 @@ pub fn paint_mini_spinner(
 /// on the ring) instead of sweeping as a vertical wave — a tiny radial chase.
 /// ~6×10px footprint at the default 2.5px cells. Light mode deepens the tints
 /// and rests the cells brighter ([`mini_row_tints`], [`GSPIN_DIM_LIGHT`]).
-pub fn mini_gradient_spinner(
-    key: impl Into<SharedString>,
-    cell_px: f32,
-    view: EntityId,
-    cx: &mut App,
-) -> impl IntoElement {
-    let _key = key.into();
-    let delta = motion::pulse_delta(&GRADIENT_SPIN, view, cx);
+pub fn mini_gradient_spinner(cell_px: f32, view: EntityId) -> impl IntoElement {
     let size = mini_spinner_size(cell_px);
-    div()
-        .relative()
+    loader_element(Loader::Mini { cell_px }, view)
         .flex_none()
         .w(size.width)
         .h(size.height)
-        .children(mini_spinner_cells(cell_px, delta).map(|(offset, color)| {
-            div()
-                .absolute()
-                .left(offset.x)
-                .top(offset.y)
-                .size(px(cell_px))
-                .rounded(px(cell_px / 2.0))
-                .bg(color)
-        }))
+}
+
+/// The running tool's status glyph: the spinner arc in `color`, turning once
+/// per [`STATUS_SPIN`] period; `size` square. Under reduced motion the arc
+/// holds still.
+pub fn status_arc(color: Hsla, size: f32, view: EntityId) -> impl IntoElement {
+    loader_element(Loader::Arc { color }, view)
+        .flex_none()
+        .size(px(size))
+}
+
+/// A loading wash for a slot its parent sizes: `bg` filled, rounded
+/// `radius`, with a 1px `border`, its opacity pulsing over [`CYPHER_PULSE`].
+pub fn pulse_wash(bg: Hsla, border: Hsla, radius: f32, view: EntityId) -> impl IntoElement {
+    loader_element(Loader::Wash { bg, border, radius }, view).size_full()
 }
 
 /// Full-window boot splash: a compact ASCII cypher wordmark over an opaque
@@ -242,21 +320,43 @@ const _: () = {
 mod tests {
     use super::*;
 
-    #[test]
-    fn mini_spinner_cells_fill_their_footprint() {
-        // The shell paints sidebar marks into slots sized by
-        // `mini_spinner_size`: every cell must land inside it, and the grid
-        // must reach its far edges.
-        let cell = 2.0;
-        let size = mini_spinner_size(cell);
-        let cells: Vec<_> = mini_spinner_cells(cell, 0.3).collect();
-        assert_eq!(cells.len(), MINI_COLS * MINI_ROWS);
-        for (offset, _) in &cells {
+    /// Every cell lands inside `size`, and the grid reaches its far edges.
+    fn assert_fills(cells: &[(gpui::Point<Pixels>, Hsla)], cell: f32, size: gpui::Size<Pixels>) {
+        for (offset, _) in cells {
             assert!(offset.x >= px(0.0) && offset.x + px(cell) <= size.width);
             assert!(offset.y >= px(0.0) && offset.y + px(cell) <= size.height);
         }
         let right = cells.iter().map(|(o, _)| o.x + px(cell)).max().unwrap();
         let bottom = cells.iter().map(|(o, _)| o.y + px(cell)).max().unwrap();
         assert_eq!((right, bottom), (size.width, size.height));
+    }
+
+    #[test]
+    fn mini_spinner_cells_fill_their_footprint() {
+        // The element is sized by `mini_spinner_size` and paints its cells
+        // (or a live layer does) at these offsets.
+        let cell = 2.0;
+        let cells: Vec<_> = mini_spinner_cells(cell, 0.3).collect();
+        assert_eq!(cells.len(), MINI_COLS * MINI_ROWS);
+        assert_fills(&cells, cell, mini_spinner_size(cell));
+    }
+
+    #[test]
+    fn matrix_cells_fill_their_footprint() {
+        let cell = 2.5;
+        let cells: Vec<_> = matrix_cells(cell, 0.3).collect();
+        assert_eq!(cells.len(), MATRIX_SIDE * MATRIX_SIDE);
+        let side = span(MATRIX_SIDE, cell);
+        assert_fills(&cells, cell, gpui::size(side, side));
+    }
+
+    #[test]
+    fn the_matrix_wave_rises_from_the_bottom_edge() {
+        // At the cycle start the bottom-center cell is at full opacity and
+        // the top-center one (the wave's far end) is still dim.
+        let cells: Vec<_> = matrix_cells(2.0, 0.0).collect();
+        let at = |row: usize, col: usize| cells[row * MATRIX_SIDE + col].1.a;
+        assert_eq!(at(MATRIX_SIDE - 1, 1), 1.0);
+        assert!(at(0, 1) < at(MATRIX_SIDE - 1, 1));
     }
 }

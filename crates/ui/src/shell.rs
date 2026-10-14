@@ -31,6 +31,7 @@ use crate::changes::{Changes, ChangesEvent};
 use crate::composer::{Composer, ComposerEvent};
 use crate::files::FilesPanel;
 use crate::kit::icons::{self, cypher_app_icon, icon};
+use crate::kit::live_layer::LiveLayer;
 use crate::kit::loaders;
 use crate::kit::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
 use crate::kit::popover::{self, Loadable};
@@ -1209,9 +1210,9 @@ struct SidebarUi {
     focus_tween: Option<WidthTween>,
     /// The one floating plate under the focused card, gliding between cards.
     plate: spaces::CardPlate,
-    /// Working marks and hover fades carried through the frames that replay
-    /// the cached sidebar (see [`sidebar_pane`]).
-    replay: sidebar_pane::SidebarReplay,
+    /// The cached sidebar's working marks and hover fades, carried through
+    /// the frames that replay it (see [`sidebar_pane`]).
+    live: LiveLayer,
     /// The view menu's typed "last active" window; dropped once the menu is
     /// gone so its focus doesn't outlive it.
     time_input: Option<(Entity<TextInput>, Subscription)>,
@@ -1616,7 +1617,7 @@ impl Shell {
                 focus_from: None,
                 focus_tween: None,
                 plate: Default::default(),
-                replay: sidebar_pane::SidebarReplay::default(),
+                live: LiveLayer::default(),
                 time_input: None,
                 time_track: Default::default(),
                 time_pressed: false,

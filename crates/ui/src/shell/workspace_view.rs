@@ -1107,10 +1107,8 @@ impl Shell {
                 div()
                     .flex_none()
                     .child(loaders::mini_gradient_spinner(
-                        format!("tile-tab-working-{}-{index}", group.0),
                         2.0,
                         self.pulse_ticker.entity_id(),
-                        cx,
                     ))
                     .into_any_element(),
             ),

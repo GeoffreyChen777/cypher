@@ -8,7 +8,11 @@
 //! touching the shape's inside. Paint it after the shape's own backdrop blur:
 //! nothing of it lies where the blur samples.
 
-use gpui::{Bounds, FillOptions, Hsla, PathBuilder, PathStyle, Pixels, Window, canvas, point, px};
+use std::cell::RefCell;
+
+use gpui::{
+    Bounds, FillOptions, Hsla, Path, PathBuilder, PathStyle, Pixels, Window, canvas, point, px,
+};
 
 /// How far the shadow reaches past the shape on each side.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -83,6 +87,80 @@ fn grown(bounds: Bounds<Pixels>, by: Reach) -> Bounds<Pixels> {
     }
 }
 
+/// One shadow's tessellated bands, with each band's opacity share.
+type BandPaths = Vec<(Path<Pixels>, f32)>;
+
+/// What a tessellation depends on: the shape, its rounding and the reach.
+#[derive(Clone, Copy, PartialEq)]
+struct ShapeKey {
+    shape: Bounds<Pixels>,
+    radius: f32,
+    reach: Reach,
+}
+
+/// How many recent shapes keep their tessellation (one per visible
+/// composer pill, with room to spare).
+const MEMO_SHAPES: usize = 8;
+
+thread_local! {
+    /// Recent shapes' bands, most recent last. A shadow repaints on every
+    /// frame its host renders — ~30 a second while a loader runs — and
+    /// tessellating its dozen-odd rings each time was a tenth of the frame;
+    /// the shape itself only changes on a resize or a composer grow.
+    static MEMO: RefCell<Vec<(ShapeKey, BandPaths)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The bands of `key`'s shadow, tessellated once per shape.
+fn band_paths(key: ShapeKey) -> BandPaths {
+    MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if let Some(ix) = memo.iter().position(|(k, _)| *k == key) {
+            let entry = memo.remove(ix);
+            let paths = entry.1.clone();
+            memo.push(entry);
+            return paths;
+        }
+        let paths = tessellate(key);
+        if memo.len() == MEMO_SHAPES {
+            memo.remove(0);
+        }
+        memo.push((key, paths.clone()));
+        paths
+    })
+}
+
+fn tessellate(key: ShapeKey) -> BandPaths {
+    let ShapeKey {
+        shape,
+        radius,
+        reach,
+    } = key;
+    let mut inner = Reach {
+        top: 0.0,
+        side: 0.0,
+        bottom: 0.0,
+    };
+    let mut paths = Vec::new();
+    for band in bands(reach) {
+        // Corners grow with the band, so every outline stays the
+        // shape's own rounding pushed outward.
+        let mut builder = PathBuilder::fill().with_style(PathStyle::Fill(FillOptions::even_odd()));
+        builder.add_polygon(
+            &rounded_rect(grown(shape, band.outer), radius + band.outer.side),
+            true,
+        );
+        builder.add_polygon(
+            &rounded_rect(grown(shape, inner), radius + inner.side),
+            true,
+        );
+        if let Ok(path) = builder.build() {
+            paths.push((path, band.opacity));
+        }
+        inner = band.outer;
+    }
+    paths
+}
+
 /// The shadow for a shape rounded with `radius`, in `color` at its densest.
 /// Position the canvas over the shape grown by `reach` on each side (negative
 /// insets on an absolute canvas beside it); the shape is that box shrunk back.
@@ -103,28 +181,13 @@ pub fn outside_shadow(radius: f32, reach: Reach, color: Hsla) -> gpui::Canvas<()
             if shape.size.width <= px(0.0) || shape.size.height <= px(0.0) {
                 return;
             }
-            let mut inner = Reach {
-                top: 0.0,
-                side: 0.0,
-                bottom: 0.0,
+            let key = ShapeKey {
+                shape,
+                radius,
+                reach,
             };
-            for band in bands(reach) {
-                // Corners grow with the band, so every outline stays the
-                // shape's own rounding pushed outward.
-                let mut builder =
-                    PathBuilder::fill().with_style(PathStyle::Fill(FillOptions::even_odd()));
-                builder.add_polygon(
-                    &rounded_rect(grown(shape, band.outer), radius + band.outer.side),
-                    true,
-                );
-                builder.add_polygon(
-                    &rounded_rect(grown(shape, inner), radius + inner.side),
-                    true,
-                );
-                if let Ok(path) = builder.build() {
-                    window.paint_path(path, color.opacity(color.a * band.opacity));
-                }
-                inner = band.outer;
+            for (path, opacity) in band_paths(key) {
+                window.paint_path(path, color.opacity(color.a * opacity));
             }
         },
     )
@@ -157,6 +220,39 @@ mod tests {
         assert!(bands.last().unwrap().opacity < 0.01);
         // It always reaches further below than above: a lift, not a halo.
         assert!(bands.iter().all(|b| b.outer.bottom > b.outer.top));
+    }
+
+    #[test]
+    fn shapes_tessellate_once_and_stay_bounded() {
+        let key = |width: f32| ShapeKey {
+            shape: Bounds {
+                origin: point(px(0.0), px(0.0)),
+                size: gpui::size(px(width), px(48.0)),
+            },
+            radius: 24.0,
+            reach: Reach {
+                top: 4.0,
+                side: 8.0,
+                bottom: 14.0,
+            },
+        };
+        let first = band_paths(key(300.0));
+        assert_eq!(first.len(), 14, "one path per band");
+        let again = band_paths(key(300.0));
+        assert_eq!(
+            first
+                .iter()
+                .map(|(p, o)| (p.bounds, *o))
+                .collect::<Vec<_>>(),
+            again
+                .iter()
+                .map(|(p, o)| (p.bounds, *o))
+                .collect::<Vec<_>>(),
+        );
+        for width in 0..20 {
+            band_paths(key(100.0 + width as f32));
+        }
+        MEMO.with(|memo| assert_eq!(memo.borrow().len(), MEMO_SHAPES));
     }
 
     #[test]

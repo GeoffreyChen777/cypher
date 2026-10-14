@@ -1300,13 +1300,7 @@ impl Render for Changes {
                     .items_center()
                     .justify_center()
                     .gap(px(Theme::SPACE_SM))
-                    .child(crate::kit::loaders::gradient_spinner(
-                        "changes-preparing",
-                        &theme,
-                        3.0,
-                        cx.entity_id(),
-                        cx,
-                    ))
+                    .child(crate::kit::loaders::gradient_spinner(3.0, cx.entity_id()))
                     .child(
                         div()
                             .text_size(px(12.0))
@@ -1368,13 +1362,7 @@ impl Render for Changes {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(crate::kit::loaders::gradient_spinner(
-                                "changes-parsing",
-                                &theme,
-                                3.0,
-                                cx.entity_id(),
-                                cx,
-                            ))
+                            .child(crate::kit::loaders::gradient_spinner(3.0, cx.entity_id()))
                             .into_any_element()
                     }
                 }

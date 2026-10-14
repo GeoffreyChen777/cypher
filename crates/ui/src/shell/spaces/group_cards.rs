@@ -338,7 +338,7 @@ impl Shell {
             .then(|| {
                 render_status_summary(
                     status_summary(group.chats.iter().map(|(status, _)| status)),
-                    &self.sidebar.replay,
+                    self.pulse_ticker.entity_id(),
                     theme,
                 )
             })
@@ -485,7 +485,7 @@ impl Shell {
                             .iter()
                             .flat_map(|g| g.chats.iter().map(|(status, _)| status)),
                     ),
-                    &self.sidebar.replay,
+                    self.pulse_ticker.entity_id(),
                     theme,
                 )
             })
@@ -707,7 +707,7 @@ impl Shell {
 /// unseen `✓ n` (green) — most urgent first. `None` when nothing shows.
 fn render_status_summary(
     summary: StatusSummary,
-    replay: &super::sidebar_pane::SidebarReplay,
+    ticker: gpui::EntityId,
     theme: &Theme,
 ) -> Option<AnyElement> {
     if summary.is_empty() {
@@ -731,15 +731,15 @@ fn render_status_summary(
             )
     };
     let awaiting = (summary.awaiting > 0).then(|| {
-        let mark = super::render::status_mark(ChatIndicator::AwaitingInput, replay, theme);
+        let mark = super::render::status_mark(ChatIndicator::AwaitingInput, ticker, theme);
         counted(mark, summary.awaiting, theme.warning)
     });
     let working = summary
         .working
-        .then(|| super::render::status_mark(ChatIndicator::Working, replay, theme))
+        .then(|| super::render::status_mark(ChatIndicator::Working, ticker, theme))
         .flatten();
     let completed = (summary.completed > 0).then(|| {
-        let mark = super::render::status_mark(ChatIndicator::Completed, replay, theme);
+        let mark = super::render::status_mark(ChatIndicator::Completed, ticker, theme);
         counted(mark, summary.completed, theme.success.opacity(0.9))
     });
     Some(

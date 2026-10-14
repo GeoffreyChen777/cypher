@@ -11,7 +11,8 @@
 //! `capture NAME` · `wait MS` · `move X Y` · `click X Y [cmd|shift|alt|ctrl]…`
 //! · `rclick X Y` · `mclick X Y` · `dclick X Y` · `drag X1 Y1 X2 Y2`
 //! · `scroll X Y DY` · `key COMBO` (e.g. `cmd-\`) · `type TEXT` · `action NAME` (e.g.
-//! `shell::SplitRight`) · `size W H`.
+//! `shell::SplitRight`) · `size W H` · `frames MS` (frame rate and draw time over
+//! the next MS, logged).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -72,6 +73,22 @@ fn log(dir: &std::path::Path, line: &str, result: anyhow::Result<()>) {
     {
         let _ = file.write_all(entry.as_bytes());
     }
+}
+
+/// `frames N/s · draw mean X ms · p95 Y ms` over a `ms`-long window.
+fn frame_stats(frames: &[gpui::FrameTiming], ms: u64) -> String {
+    let mut draws: Vec<f64> = frames
+        .iter()
+        .map(|frame| frame.draw_duration().as_secs_f64() * 1000.0)
+        .collect();
+    draws.sort_by(f64::total_cmp);
+    let mean = draws.iter().sum::<f64>() / draws.len().max(1) as f64;
+    let p95 = draws
+        .get((draws.len() * 95 / 100).min(draws.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or(0.0);
+    let rate = frames.len() as f64 * 1000.0 / ms.max(1) as f64;
+    format!("frames {rate:.1}/s · draw mean {mean:.2} ms · p95 {p95:.2} ms")
 }
 
 fn num(parts: &[&str], ix: usize) -> anyhow::Result<f32> {
@@ -168,6 +185,15 @@ async fn run(
     let parts: Vec<&str> = line.split_whitespace().collect();
     match parts[0] {
         "wait" => pause(cx, num(&parts, 1)? as u64).await,
+        "frames" => {
+            let ms = num(&parts, 1)? as u64;
+            gpui::set_frame_trace_enabled(true);
+            let mut collector = gpui::FrameTimingCollector::new();
+            pause(cx, ms).await;
+            let frames = collector.collect_unseen();
+            gpui::set_frame_trace_enabled(false);
+            log(dir, &frame_stats(&frames, ms), Ok(()));
+        }
         "capture" => {
             let name = parts.get(1).copied().unwrap_or("capture");
             // A fresh frame first: the capture reads the last rendered scene.

@@ -5,13 +5,17 @@ use super::*;
 
 use cypher_proto::{PermissionOutcome, PermissionScope, ToolPermission};
 
+/// How often a showing working trailer re-renders for its elapsed label.
+const TRAILER_TICK: Duration = Duration::from_secs(1);
+
 impl Transcript {
     /// The working loader, INSIDE the conversation flow: appended under the
     /// last row while the run is live (moved out of the shell's status strip
     /// — user request), so it reads as part of the streaming reply and
-    /// scrolls away with it. The spinner drives this entity's frames, which
-    /// keeps the elapsed timer ticking through delta-quiet tool runs.
-    fn render_working_trailer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// scrolls away with it. While it shows, the transcript re-renders as
+    /// its elapsed label turns over, which keeps the timer ticking through
+    /// delta-quiet tool runs.
+    fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat_id = self.chat_id.clone()?;
         let now = chrono::Utc::now();
         let (sending, elapsed_secs, upload_percent, throughput) = {
@@ -74,6 +78,7 @@ impl Transcript {
                 throughput,
             )
         };
+        self.schedule_trailer_tick(cx);
         let word = if let Some(percent) = upload_percent {
             format!("Uploading {percent}%")
         } else if sending {
@@ -90,13 +95,7 @@ impl Transcript {
                 .gap(px(Theme::SPACE_SM))
                 .pt(px(10.0))
                 .text_size(px(11.0))
-                .child(crate::kit::loaders::gradient_spinner(
-                    "working-indicator",
-                    &theme,
-                    2.5,
-                    cx.entity_id(),
-                    cx,
-                ))
+                .child(crate::kit::loaders::gradient_spinner(2.5, cx.entity_id()))
                 .child(
                     div()
                         .text_size(px(12.0))
@@ -117,6 +116,23 @@ impl Transcript {
                 })
                 .into_any_element(),
         )
+    }
+
+    /// Re-render in a second, once at a time: the trailer's elapsed label
+    /// (and its state's staleness) moves with the clock, not with any
+    /// notification.
+    fn schedule_trailer_tick(&mut self, cx: &mut Context<Self>) {
+        if self.trailer_tick.is_some() {
+            return;
+        }
+        self.trailer_tick = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TRAILER_TICK).await;
+            this.update(cx, |this, cx| {
+                this.trailer_tick = None;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Session Fork (v1): the affordance gate for THIS chat, from live
@@ -714,14 +730,8 @@ impl Transcript {
                     .items_center()
                     .justify_center()
                     .child(if fork_pending {
-                        crate::kit::loaders::gradient_spinner(
-                            "fork-spinner",
-                            theme,
-                            2.5,
-                            cx.entity_id(),
-                            cx,
-                        )
-                        .into_any_element()
+                        crate::kit::loaders::gradient_spinner(2.5, cx.entity_id())
+                            .into_any_element()
                     } else {
                         crate::kit::icons::icon(crate::kit::icons::GIT_BRANCH)
                             .size(px(10.0))
@@ -807,14 +817,8 @@ impl Transcript {
                     .items_center()
                     .justify_center()
                     .child(if rewind_pending {
-                        crate::kit::loaders::gradient_spinner(
-                            "rewind-spinner",
-                            theme,
-                            2.5,
-                            cx.entity_id(),
-                            cx,
-                        )
-                        .into_any_element()
+                        crate::kit::loaders::gradient_spinner(2.5, cx.entity_id())
+                            .into_any_element()
                     } else {
                         crate::kit::icons::icon(crate::kit::icons::RESTART)
                             .size(px(10.0))
@@ -1505,7 +1509,6 @@ fn chip_header_row(
     chevron: Option<bool>,
     theme: &Theme,
     view: EntityId,
-    cx: &mut App,
 ) -> gpui::Div {
     let (label, parameter) = tool_row_text(tool);
     // A call permission control held back did not fail: it reads calm, and
@@ -1569,7 +1572,7 @@ fn chip_header_row(
                 .as_ref()
                 .map(|permission| permission_badge(permission, theme)),
         )
-        .child(tool_status_icon(ToolStatus::of(tool), theme, view, cx))
+        .child(tool_status_icon(ToolStatus::of(tool), theme, view))
         .when_some(chevron, |row, open| {
             // Output/diff affordance: a bare chevron in the tile's former
             // 18px box, flipped while the detail body is open.
@@ -1693,22 +1696,11 @@ impl ToolStatus {
     }
 }
 
-/// One spinner turn, on the shared ~30fps pulse clock: a per-chip repeating
-/// `with_animation` redrew the whole window every display frame for as long
-/// as a tool ran. Only the period is read; the rotation stays linear so the
-/// arc never appears to stall.
-const STATUS_SPIN: motion::MotionSpec = motion::MotionSpec::new(900, motion::EASE);
-
 /// The chip's status: a check once the call completed, a cross when it
-/// failed, and a rotating arc while it runs (`view` re-renders on the pulse
-/// clock; under reduced motion the arc holds still). Same 18px slot as the
-/// other icons.
-pub(super) fn tool_status_icon(
-    status: ToolStatus,
-    theme: &Theme,
-    view: EntityId,
-    cx: &mut App,
-) -> AnyElement {
+/// failed, and a rotating arc while it runs (on the pulse clock, leased for
+/// `view` unless a live layer paints it; under reduced motion the arc holds
+/// still). Same 18px slot as the other icons.
+pub(super) fn tool_status_icon(status: ToolStatus, theme: &Theme, view: EntityId) -> AnyElement {
     let slot = div()
         .size(px(18.0))
         .flex_none()
@@ -1722,36 +1714,22 @@ pub(super) fn tool_status_icon(
         }
         ToolStatus::Failed => slot.child(icon(crate::kit::icons::CROSS).text_color(theme.danger)),
         ToolStatus::Held => slot.child(icon(crate::kit::icons::CROSS).text_color(theme.text_muted)),
-        ToolStatus::Running => {
-            let turn = motion::pulse_delta(&STATUS_SPIN, view, cx);
-            slot.child(
-                icon(crate::kit::icons::SPINNER)
-                    .text_color(theme.text_muted)
-                    .with_transformation(gpui::Transformation::rotate(gpui::percentage(turn))),
-            )
-        }
+        ToolStatus::Running => slot.child(crate::kit::loaders::status_arc(
+            theme.text_muted,
+            12.0,
+            view,
+        )),
     }
     .into_any_element()
 }
 
 /// The header row of an expandable chip card.
-pub(super) fn chip_header(
-    tool: &ToolItem,
-    open: bool,
-    theme: &Theme,
-    view: EntityId,
-    cx: &mut App,
-) -> gpui::Div {
-    chip_header_row(tool, Some(open), theme, view, cx)
+pub(super) fn chip_header(tool: &ToolItem, open: bool, theme: &Theme, view: EntityId) -> gpui::Div {
+    chip_header_row(tool, Some(open), theme, view)
 }
 
 /// A plain (non-expandable) chip: guide rail + bordered card.
-pub(super) fn tool_chip(
-    tool: &ToolItem,
-    theme: &Theme,
-    view: EntityId,
-    cx: &mut App,
-) -> AnyElement {
+pub(super) fn tool_chip(tool: &ToolItem, theme: &Theme, view: EntityId) -> AnyElement {
     div()
         .h(px(CHIP_HEIGHT))
         .w_full()
@@ -1780,7 +1758,7 @@ pub(super) fn tool_chip(
                 .border_1()
                 .border_color(crate::kit::theme::hairline(0.07))
                 .bg(crate::kit::theme::ink(0.03))
-                .child(chip_header_row(tool, None, theme, view, cx)),
+                .child(chip_header_row(tool, None, theme, view)),
         )
         .into_any_element()
 }
@@ -1818,6 +1796,15 @@ pub(super) fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match self.live.clone() {
+            Some(live) => live.scope(|| self.render_content(window, cx)),
+            None => self.render_content(window, cx),
+        }
+    }
+}
+
+impl Transcript {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Release gpui-side decoded copies of any images the attachment LRU
         // evicted since the last frame (no-op when nothing was evicted).
         crate::attachments::flush_evicted(Some(window), cx);
@@ -1902,19 +1889,21 @@ impl Render for Transcript {
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
             let weak = cx.weak_entity();
-            return root.child(crate::attachments::lightbox(
-                window.viewport_size(),
-                &preview,
-                &self.attachment_preview_focus,
-                move |_, cx| {
-                    weak.update(cx, |this, cx| {
-                        this.attachment_preview = None;
-                        cx.notify();
-                    })
-                    .ok();
-                },
-            ));
+            return root
+                .child(crate::attachments::lightbox(
+                    window.viewport_size(),
+                    &preview,
+                    &self.attachment_preview_focus,
+                    move |_, cx| {
+                        weak.update(cx, |this, cx| {
+                            this.attachment_preview = None;
+                            cx.notify();
+                        })
+                        .ok();
+                    },
+                ))
+                .into_any_element();
         }
-        root
+        root.into_any_element()
     }
 }

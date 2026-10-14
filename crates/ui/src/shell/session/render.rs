@@ -50,7 +50,19 @@ impl Shell {
         // → the onboarding card. The composer sits below the first two
         // (new-chat mode mints the chat id on first send).
         let outlet: AnyElement = if has_selection {
-            transcript.clone().into_any_element()
+            // Cached, so loader pulses replay the transcript instead of
+            // rebuilding its rows; its live layer paints their frames over
+            // it, inside the same edge fade.
+            let live = transcript.update(cx, |transcript, _| transcript.live_layer());
+            div()
+                .size_full()
+                .child(
+                    transcript
+                        .clone()
+                        .cached(gpui::StyleRefinement::default().size_full()),
+                )
+                .child(live.overlay(transcript.entity_id(), self.pulse_ticker.entity_id()))
+                .into_any_element()
         } else if !has_spaces {
             // Onboarding (first boot / after the destructive wipe / a
             // project-less opt-out with nothing to work in): no folders to
@@ -347,11 +359,8 @@ impl Shell {
                         .items_center()
                         .gap(px(Theme::SPACE_SM))
                         .child(loaders::gradient_spinner(
-                            "sending-indicator",
-                            &theme,
                             2.5,
                             self.pulse_ticker.entity_id(),
-                            cx,
                         ))
                         .child(
                             div()

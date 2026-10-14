@@ -9,6 +9,7 @@
 //! - `splash-out` 0.5s opacity + translateY −6, 0.15s delay
 //! - `cypher-pulse` 2.4s staggered cell opacity 0.08→1, scale 0.9→1 (loaders)
 //! - `gradient-spin-pulse` 750ms per-cell phase wave (working indicator)
+//! - `status-spin` 900ms linear arc turn (running tool)
 //! - 200ms ease-out width/height transitions (sidebar/panes)
 //!
 //! Custom easing is a closure over gpui's `Fn(f32) -> f32` easing shape; CSS
@@ -45,7 +46,9 @@ pub use gpui::AnimationExt;
 /// clock instead of per-element repeating animations (which redraw every
 /// display frame) is visually equivalent for these chunky cell waves at a
 /// quarter of the redraws, and a window with no spinner mounted schedules
-/// nothing at all.
+/// nothing at all. Loaders inside cached views tick through a
+/// [`LiveLayer`](crate::kit::live_layer::LiveLayer), which repaints them
+/// without rebuilding their view.
 const PULSE_TICK: Duration = Duration::from_millis(33);
 
 /// How long a view stays on the tick list after its last spinner paint. One
@@ -299,6 +302,9 @@ pub const HOVER_FADE: MotionSpec = MotionSpec::new(150, EASE_TAILWIND);
 pub const CYPHER_PULSE: MotionSpec = MotionSpec::new(2400, EASE);
 /// Gradient matrix spinner wave period: 750ms.
 pub const GRADIENT_SPIN: MotionSpec = MotionSpec::new(750, EASE);
+/// Running-tool arc: one turn per 900ms. Only the period is read; the
+/// rotation stays linear so the arc never appears to stall.
+pub const STATUS_SPIN: MotionSpec = MotionSpec::new(900, EASE);
 
 // ---------------------------------------------------------------------------
 // Element helpers (paint-layer entrances/exits)
@@ -521,6 +527,17 @@ impl HoverFades {
         }
     }
 
+    /// Whether any of `keys` is mid-fade at `now` (its frames must come from
+    /// a render, not a replay).
+    pub fn in_flight_at(&self, keys: &[String], now: Instant) -> bool {
+        let duration = Self::duration();
+        keys.iter().any(|key| {
+            self.entries
+                .get(key)
+                .is_some_and(|entry| !entry.settled(now, duration))
+        })
+    }
+
     /// Once-per-frame bookkeeping: advance the frame counter, prune entries
     /// that settled back to rest or went a full frame unread (unmounted), and
     /// report whether any fade is still mid-flight (→ keep frames coming).
@@ -603,6 +620,11 @@ pub fn capture_hover_reads<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
 /// replays them (see [`HoverFades::keep_alive`]).
 pub fn keep_hover_alive(keys: &[String]) {
     HOVER_FADES.with(|fades| fades.borrow_mut().keep_alive(keys));
+}
+
+/// Whether any of `keys` (a cached view's last reads) is mid-fade.
+pub fn hover_in_flight(keys: &[String]) -> bool {
+    HOVER_FADES.with(|fades| fades.borrow().in_flight_at(keys, Instant::now()))
 }
 
 /// Frame-drive hook: call ONCE per window frame (the shell render tail); true
@@ -903,6 +925,18 @@ mod tests {
         }
         assert_eq!(fades.value_at("row", ms(200)), 1.0, "still hovered");
         assert!(!fades.entries.contains_key("gone"), "unread entry evicted");
+    }
+
+    #[test]
+    fn in_flight_covers_only_mid_fade_keys() {
+        let mut fades = HoverFades::default();
+        let t0 = Instant::now();
+        let ms = |m: u64| t0 + Duration::from_millis(m);
+        fades.set_at("row", true, false, t0);
+        let keys = ["row".to_string()];
+        assert!(fades.in_flight_at(&keys, ms(50)));
+        assert!(!fades.in_flight_at(&keys, ms(200)), "settled hovered");
+        assert!(!fades.in_flight_at(&["other".to_string()], ms(50)));
     }
 
     #[test]

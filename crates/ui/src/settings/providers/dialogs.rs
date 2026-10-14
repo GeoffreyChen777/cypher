@@ -326,10 +326,8 @@ impl ProvidersPage {
                         .track_focus(&self.submit_focus)
                         .when(busy, |el| {
                             el.child(crate::kit::loaders::mini_gradient_spinner(
-                                "provider-saving",
                                 2.0,
                                 cx.entity_id(),
-                                cx,
                             ))
                         })
                         .when(!busy && self.target.read(cx).can_write(cx), |el| {

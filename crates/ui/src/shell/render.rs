@@ -335,24 +335,21 @@ impl Shell {
     }
 
     /// The sidebar column: the animated-width container around the cached
-    /// [`sidebar_pane::SidebarPane`], with the working marks painted over it
-    /// on every frame (see [`sidebar_pane`]).
+    /// [`sidebar_pane::SidebarPane`], with its live layer painting the
+    /// working marks over it on every frame (see [`sidebar_pane`]).
     fn render_sidebar(&self) -> AnyElement {
         let target = self.sidebar_target();
-        let replay = self.sidebar.replay.clone();
+        let live = self.sidebar.live.clone();
         let pane = self.sidebar_pane.clone();
-        let ticker = self.pulse_ticker.entity_id();
-        let marks = gpui::canvas(
+        let marks = live.overlay(pane.entity_id(), self.pulse_ticker.entity_id());
+        let refresh = gpui::canvas(
             |_, _, _| (),
-            move |_, _, window, cx| {
-                replay.paint(ticker, window, cx);
-                if replay.has_marks() {
+            move |_, _, _, cx| {
+                if live.has_loaders() {
                     pane.update(cx, |pane, cx| pane.schedule_refresh(cx));
                 }
             },
-        )
-        .absolute()
-        .size_full();
+        );
         self.pane_container(
             self.motion.sidebar_tween,
             target,
@@ -365,6 +362,7 @@ impl Shell {
                         .cached(gpui::StyleRefinement::default().size_full()),
                 )
                 .child(marks)
+                .child(refresh)
                 .into_any_element(),
         )
     }
@@ -607,7 +605,7 @@ impl Shell {
             pinned,
             nested,
         } = row;
-        let corner = chat_row_corner(time_ago, status, &self.sidebar.replay, theme);
+        let corner = chat_row_corner(time_ago, status, self.pulse_ticker.entity_id(), theme);
         let (hover, text) = (
             crate::appearance::surface_style::sidebar_hover(theme),
             theme.text,
@@ -953,39 +951,35 @@ impl Shell {
                         top_chrome,
                         true,
                         false,
-                        div()
-                            .size_full()
-                            .relative()
-                            .child(self.sidebar.replay.fade_probe(top_chrome))
-                            .child(
-                                div()
-                                    .id("sidebar-lists")
-                                    .size_full()
-                                    .overflow_y_scroll()
-                                    .track_scroll(&self.sidebar.scroll)
-                                    .px(px(Theme::SPACE_SM))
-                                    .flex()
-                                    .flex_col()
-                                    // No "Sessions" header (user request) —
-                                    // the list is the whole column; a little
-                                    // air stands in.
-                                    .pt(px(top_chrome + 4.0))
-                                    .child(if !list_items.is_empty() {
-                                        div()
-                                            .relative()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(GROUP_CARD_GAP))
-                                            .pb(px(Theme::SPACE_SM))
-                                            // First, so it paints under every
-                                            // card after they all prepainted.
-                                            .child(plate)
-                                            .children(list_items)
-                                            .into_any_element()
-                                    } else {
-                                        self.render_sidebar_empty(theme, cx)
-                                    }),
-                            ),
+                        div().size_full().relative().child(
+                            div()
+                                .id("sidebar-lists")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.sidebar.scroll)
+                                .px(px(Theme::SPACE_SM))
+                                .flex()
+                                .flex_col()
+                                // No "Sessions" header (user request) —
+                                // the list is the whole column; a little
+                                // air stands in.
+                                .pt(px(top_chrome + 4.0))
+                                .child(if !list_items.is_empty() {
+                                    div()
+                                        .relative()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(GROUP_CARD_GAP))
+                                        .pb(px(Theme::SPACE_SM))
+                                        // First, so it paints under every
+                                        // card after they all prepainted.
+                                        .child(plate)
+                                        .children(list_items)
+                                        .into_any_element()
+                                } else {
+                                    self.render_sidebar_empty(theme, cx)
+                                }),
+                        ),
                     )),
             )
             .when(!update_strips.is_empty(), |el| {
@@ -1025,15 +1019,14 @@ impl Shell {
 /// A chat row's status corner. It shares the relative-time slot so the
 /// compact row's width stays stable: spinner while working, amber question
 /// mark while the agent waits on the user, emerald check for an unseen
-/// finished turn ("ready for you"), time otherwise. The shell paints the
-/// spinner over the cached sidebar ([`status_mark`]).
+/// finished turn ("ready for you"), time otherwise ([`status_mark`]).
 fn chat_row_corner(
     time_ago: SharedString,
     status: ChatIndicator,
-    replay: &sidebar_pane::SidebarReplay,
+    ticker: gpui::EntityId,
     theme: &Theme,
 ) -> AnyElement {
-    status_mark(status, replay, theme).unwrap_or_else(|| {
+    status_mark(status, ticker, theme).unwrap_or_else(|| {
         div()
             .flex_none()
             .text_size(px(10.0))
@@ -1046,15 +1039,17 @@ fn chat_row_corner(
 /// The sidebar's session status mark — a session row's corner, and the marks
 /// in the status summary a collapsed project or checkout header shows for the
 /// sessions it hides. `None` for statuses without a mark (idle, errored).
-/// Working is the mini spinner, painted by the shell over the cached sidebar
-/// ([`sidebar_pane::SidebarReplay::mark`]).
+/// Working is the mini spinner, which the sidebar's live layer paints over
+/// the cached sidebar, leasing the pulse clock for `ticker`.
 pub(super) fn status_mark(
     status: ChatIndicator,
-    replay: &sidebar_pane::SidebarReplay,
+    ticker: gpui::EntityId,
     theme: &Theme,
 ) -> Option<AnyElement> {
     match status {
-        ChatIndicator::Working => Some(replay.mark()),
+        ChatIndicator::Working => {
+            Some(loaders::mini_gradient_spinner(sidebar_pane::MARK_CELL, ticker).into_any_element())
+        }
         // The turn is parked on a question, so the spinner has stopped —
         // without a corner of its own the row fell back to the relative
         // time and read exactly like an idle session (user report). Amber

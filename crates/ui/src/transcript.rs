@@ -43,6 +43,7 @@ use cypher_doc::{MessageComment, MessagePart, MessageRole, MessageStatus, Sessio
 use cypher_proto::view::Indicator;
 use cypher_proto::{AnsweredModel, ToolCall};
 
+use crate::kit::live_layer::LiveLayer;
 use crate::kit::motion::{self, AnimationExt as _, RESIZE};
 use crate::kit::theme::{MonoStyled, Theme};
 use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
@@ -342,6 +343,12 @@ pub struct Transcript {
     /// renders the bar from this, so the two can never disagree about
     /// whether find is open.
     find: Option<FindState>,
+    /// Set once the shell embeds this transcript as a cached view: its
+    /// loaders then paint from the shell's frames through this layer.
+    live: Option<LiveLayer>,
+    /// The next re-render that turns the working trailer's elapsed label
+    /// over (one at a time): a cached transcript otherwise holds it.
+    trailer_tick: Option<Task<()>>,
     _style_observe: Subscription,
     _observe: Subscription,
 }
@@ -447,7 +454,13 @@ impl Transcript {
             })
             .ok();
         });
-        let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
+        // Rows only rebuild behind `sync`'s revision gate, but the working
+        // trailer and the fork/rewind gates read live state on every render,
+        // and a cached transcript renders only when notified.
+        let observe = cx.observe(&state, |this: &mut Self, _, cx| {
+            this.sync(cx);
+            cx.notify();
+        });
         let style_observe = cx
             .observe_global::<crate::appearance::chat_style::ChatAppearanceState>(
                 |this: &mut Self, cx| {
@@ -522,11 +535,20 @@ impl Transcript {
             rewind_armed: None,
             rewind_disarm: None,
             find: None,
+            live: None,
+            trailer_tick: None,
             _style_observe: style_observe,
             _observe: observe,
         };
         this.sync(cx);
         this
+    }
+
+    /// The live layer for embedding this transcript as a cached view: its
+    /// loaders record their slots there, for the embedder to paint every
+    /// frame with [`LiveLayer::overlay`].
+    pub fn live_layer(&mut self) -> LiveLayer {
+        self.live.get_or_insert_with(LiveLayer::default).clone()
     }
 }
 

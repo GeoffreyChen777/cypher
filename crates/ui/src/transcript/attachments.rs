@@ -230,17 +230,12 @@ impl Transcript {
                     .into_any_element(),
                 // Loading: the pulsing skeleton (same wash as popover skeletons).
                 AttachmentSnapshot::Loading => frame
-                    .border_1()
-                    .border_color(crate::kit::theme::hairline(0.08))
-                    .bg(crate::kit::theme::ink(0.055))
-                    .opacity(
-                        0.35 + 0.4
-                            * motion::pulse_wave(motion::pulse_delta(
-                                &motion::CYPHER_PULSE,
-                                cx.entity_id(),
-                                cx,
-                            )),
-                    )
+                    .child(crate::kit::loaders::pulse_wash(
+                        crate::kit::theme::ink(0.055),
+                        crate::kit::theme::hairline(0.08),
+                        8.0,
+                        cx.entity_id(),
+                    ))
                     .into_any_element(),
             };
             strip = strip.child(thumb);

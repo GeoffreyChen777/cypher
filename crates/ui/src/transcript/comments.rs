@@ -420,12 +420,7 @@ impl Transcript {
                     .child(preview),
             )
             .when(live, |row| {
-                row.child(tool_status_icon(
-                    ToolStatus::Running,
-                    theme,
-                    cx.entity_id(),
-                    cx,
-                ))
+                row.child(tool_status_icon(ToolStatus::Running, theme, cx.entity_id()))
             })
             .child(
                 div()
@@ -806,7 +801,7 @@ impl Transcript {
         let invocation = paint.invocation;
         let key = SharedString::from(format!("{row_id}#d{ix}"));
         if detail.is_none() && invocation.is_none() {
-            return tool_chip(tool, theme, cx.entity_id(), cx);
+            return tool_chip(tool, theme, cx.entity_id());
         }
         let affordance = paint.affordance;
         let affordance_h = if affordance.is_some() {
@@ -881,7 +876,7 @@ impl Transcript {
                         group.toggled_at = Some(Instant::now());
                         cx.notify();
                     }))
-                    .child(chip_header(tool, open, theme, cx.entity_id(), cx)),
+                    .child(chip_header(tool, open, theme, cx.entity_id())),
             );
         // The body stays mounted while the close tween shrinks over it.
         // Invocation first (what was asked), then output/diff (what
