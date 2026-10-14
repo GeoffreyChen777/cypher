@@ -174,17 +174,7 @@ impl Shell {
         // it) and the chat column's size (a tile resize re-anchors the list).
         let chat_width = (f32::from(size.width) - self.dock_width_now(slot)).max(0.0);
         let term_h = self.eval_tween(slot.terminal_tween, self.terminal_target(slot));
-        // A bot's conversation carries its header above the chat column.
-        let bot_header = self.render_bot_header(sid, cx);
-        let header_h = if bot_header.is_some() {
-            super::bots::BOT_HEADER_H
-        } else {
-            0.0
-        };
-        let Some(slot) = self.tiles.slots.get(&sid) else {
-            return Empty.into_any_element();
-        };
-        let chat_height = (f32::from(size.height) - term_h - header_h).max(0.0);
+        let chat_height = (f32::from(size.height) - term_h).max(0.0);
         let stack_h = slot.bottom_stack.get();
         slot.transcript.update(cx, |t, cx| {
             t.set_rail_enabled(rail::rail_visible(chat_width), cx);
@@ -215,18 +205,7 @@ impl Shell {
                     .w_full()
                     .flex()
                     .flex_row()
-                    .child(match bot_header {
-                        Some(header) => div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .child(header)
-                            .child(div().flex_1().min_h_0().w_full().flex().child(chat))
-                            .into_any_element(),
-                        None => chat,
-                    })
+                    .child(chat)
                     .children(dock),
             )
             .child(terminal)

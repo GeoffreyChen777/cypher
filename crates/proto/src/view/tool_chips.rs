@@ -166,7 +166,12 @@ fn bot_chip_content(
                     format!("last {}h", hours.ceil() as u64)
                 });
             }
-            ("List sessions", in_project(filters.join(", ")))
+            let filters = if filters.is_empty() && arg("project").is_none() {
+                "all".to_string()
+            } else {
+                filters.join(", ")
+            };
+            ("List sessions", in_project(filters))
         }
         BotToolKind::SearchSessions => (
             "Search sessions",
@@ -415,6 +420,14 @@ mod tests {
         assert_eq!(
             chip("list_sessions", serde_json::json!({"since_hours": 0.5})),
             ("List sessions", "last 1h".to_string())
+        );
+        assert_eq!(
+            chip("list_sessions", serde_json::json!({})),
+            ("List sessions", "all".to_string())
+        );
+        assert_eq!(
+            chip("list_sessions", serde_json::json!({"project": "Web"})),
+            ("List sessions", "in Web".to_string())
         );
         assert_eq!(
             chip("search_sessions", serde_json::json!({"query": " invoice "})),

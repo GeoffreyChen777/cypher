@@ -965,9 +965,8 @@ impl Shell {
         let rows = self.dock_surface_rows(slot, cx);
         let count = rows.len();
         let dock_open = slot.dock.open;
-        // A bot's conversation has no checkout to show and no terminal; its
-        // rail offers the bot's settings instead.
-        let bot = self.slot_bot(sid, cx).map(|b| b.id);
+        // A bot's conversation has no checkout to show and no terminal (its
+        // settings open from the access note over its composer).
         let bot_chat = self.slot_is_bot_chat(sid, cx);
         // No dock on the new-session canvas (nothing to host yet).
         let has_dock = slot.tab.chat_id().is_some() && !bot_chat;
@@ -1008,7 +1007,6 @@ impl Shell {
             RailActions {
                 terminal_open,
                 terminal: !bot_chat,
-                bot,
                 has_dock,
                 dock_open,
                 group,
@@ -1422,8 +1420,6 @@ struct RailActions {
     terminal_open: bool,
     /// The terminal button shows (not in a bot's conversation).
     terminal: bool,
-    /// The bot whose conversation this is: its settings button shows.
-    bot: Option<String>,
     has_dock: bool,
     dock_open: bool,
     group: Option<crate::workspace::GroupId>,
@@ -1441,7 +1437,6 @@ fn render_rail_actions(
     let RailActions {
         terminal_open,
         terminal,
-        bot,
         has_dock,
         dock_open,
         group,
@@ -1459,16 +1454,7 @@ fn render_rail_actions(
             cx.listener(move |this, _, window, cx| this.toggle_terminal(sid, window, cx)),
         ));
     }
-    if let Some(bot_id) = bot {
-        actions = actions.child(rail_button(
-            format!("rail-bot-settings-{sid}").into(),
-            icons::TUNING,
-            false,
-            "Bot settings",
-            tone,
-            cx.listener(move |this, _, _, cx| this.open_bot_dialog(Some(bot_id.clone()), cx)),
-        ));
-    }
+
     if has_dock {
         actions = actions.child(rail_button(
             format!("rail-dock-{sid}").into(),

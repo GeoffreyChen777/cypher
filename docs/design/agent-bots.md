@@ -394,28 +394,30 @@ It needs no new routes, only opaque `text` fields.
 
 Desktop:
 
-- **Bot strip** (P0): a row of avatar squares between the sidebar header and the project
-  cards, one per bot; empty, it is not shown. A click opens the bot chat as a session tab,
-  a right-click opens Open / Settings… / Delete…, a hover shows the name, and a corner dot
-  carries the chat's status (working, waiting, errored, finished unseen). Project windows
-  have no strip. Bots are created from the sidebar header's `+`, which now opens a menu:
-  New project… / New bot….
+- **Bot strip** (P0): a row of 30px avatar squares between the sidebar header and the
+  project cards, one per bot, their edge lined up with the project glyphs; empty, it is
+  not shown. The open bot is ringed in its own colour, a corner dot carries the chat's
+  status, a hover shows the name, and a right-click opens Open / Settings… / Delete….
+  Project windows have no strip. Bots are created from the sidebar header's `+`, which
+  opens a menu: New project… / New bot….
 - **Bot palette** (P0, create and edit), drawn like the Quick Chat and Add project
-  palettes: a header band and a key-hint footer, frosted so the form reads through them
-  as it scrolls, and a "Run on device" rail on the right (Mac and Linux engines that are
-  online and new enough; fixed after creation). The form holds the name, the avatar (a
-  robot face, a symbol or the initial, and a colour), Permissions (project access
-  Selected / All / None, Read conversations, Archived sessions) with a live access count,
-  and instructions. Enter creates or saves; Delete is in the footer when editing.
-- **Bot conversation** (P0): the tab wears the bot's avatar. A header over the chat names
-  the bot, its host and a one-line access summary ("Billing · reads conversations"),
-  with a Settings button. A new bot opens on a start screen (who it is, what it can see,
-  and suggested questions a click asks). Bot tool calls read as what they did ("Search
+  palettes: a frosted header band, the form on the left and a "Run on device" rail on
+  the right (two-line rows: the device name, then This device / Online / Offline / the
+  version it needs; fixed after creation), and a Cancel / Save footer with Delete on the
+  left when editing. The form holds the name beside a live avatar, the avatar picker
+  (twelve robot faces, a few symbols or the initial, neutral until picked, and a colour),
+  Permissions (project access Selected / All / None, Read conversations, Archived
+  sessions) with a live access count, and instructions.
+- **Bot conversation** (P0): an ordinary session tab, with these differences. The tab
+  wears the bot's avatar. The status strip over the composer carries a quiet access note
+  ("All projects · reads conversations") that opens the bot's settings. A new bot opens
+  on a start screen: its avatar, name and host, and a 2×2 grid of suggested questions a
+  click asks. Bot tool calls read as what they did ("List sessions · all", "Search
   sessions · "invoice"", "Read session · <title>"; "Looked over your work · read 2
   sessions"), and the bot cites sessions as `cypher://session/<id>` links that open in
-  the app. The rail has no terminal and no dock, only the bot's settings; the composer
-  asks "Ask <bot>…" and leaves out Attach files, `/permissions` and the commands the
-  engine refuses in a bot chat (`/scripts`, `/orchestrate`, `/goal`).
+  the app. The rail has no terminal and no dock; the composer asks "Ask <bot>…" and
+  leaves out Attach files, `/permissions` and the commands the engine refuses in a bot
+  chat (`/scripts`, `/orchestrate`, `/goal`).
 - **Bot dock tab** (P2+, right dock of a bot chat) with four panes:
   - *Scope*: project tree grouped by device with checkboxes, per-session overrides,
     capability toggles, and a live "this bot can see N sessions in M projects" summary.

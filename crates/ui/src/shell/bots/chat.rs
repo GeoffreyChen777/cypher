@@ -1,14 +1,11 @@
-//! A bot's conversation tab: the header that says who you're talking to and
-//! what it can see, and the start screen a new bot opens on. The tab's other
-//! differences live where they apply (the rail drops the terminal and the
-//! dock, the composer asks "Ask <bot>…", the transcript names bot tool
-//! calls).
+//! A bot's conversation tab: the note over the composer saying what the bot
+//! can see, and the start screen a new bot opens on. The tab's other
+//! differences live where they apply (the tab wears the bot's avatar, the
+//! rail drops the terminal and the dock, the composer asks "Ask <bot>…", the
+//! transcript names bot tool calls).
 
 use super::super::session::SlotId;
 use super::*;
-
-/// The bot header's height, taken from the top of the chat column.
-pub(in crate::shell) const BOT_HEADER_H: f32 = 52.0;
 
 /// What `bot` can see, in a few words: "Billing · reads conversations".
 pub(in crate::shell) fn access_summary(bot: &Bot, state: &crate::state::AppState) -> String {
@@ -45,11 +42,15 @@ pub(in crate::shell) fn access_summary(bot: &Bot, state: &crate::state::AppState
     format!("{reach} · {depth}")
 }
 
-/// Questions a new bot offers, fitted to what it can see.
-fn suggestions(bot: &Bot, state: &crate::state::AppState) -> Vec<String> {
+/// Questions a new bot offers, fitted to what it can see, each with its
+/// glyph.
+fn suggestions(bot: &Bot, state: &crate::state::AppState) -> Vec<(&'static str, String)> {
     let mut out = vec![
-        "What did I work on today?".to_string(),
-        "Which sessions are waiting on me?".to_string(),
+        (icons::PULSE, "What did I work on today?".to_string()),
+        (
+            icons::QUESTION_CIRCLE,
+            "Which sessions are waiting on me?".to_string(),
+        ),
     ];
     let first_project = state
         .spaces_sorted()
@@ -57,9 +58,15 @@ fn suggestions(bot: &Bot, state: &crate::state::AppState) -> Vec<String> {
         .find(|s| bot.scope.sees_space(&s.id))
         .map(|s| s.display_name().to_string());
     if let Some(project) = first_project {
-        out.push(format!("Where do things stand in {project}?"));
+        out.push((
+            icons::FOLDER,
+            format!("Where do things stand in {project}?"),
+        ));
     }
-    out.push("What's still unfinished across my projects?".to_string());
+    out.push((
+        icons::CHECKLIST,
+        "What's still unfinished across my projects?".to_string(),
+    ));
     out
 }
 
@@ -87,142 +94,43 @@ impl Shell {
             .any(|c| c.id == chat_id && c.is_bot())
     }
 
-    /// The bar over a bot's conversation: avatar, name, host, what it can
-    /// see, and its settings.
-    pub(in crate::shell) fn render_bot_header(
-        &mut self,
+    /// The status strip's note in a bot's conversation: what the bot can
+    /// see, in a few words; a click opens its settings.
+    pub(in crate::shell) fn render_bot_access(
+        &self,
         sid: SlotId,
+        theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let bot = self.slot_bot(sid, cx)?;
-        let theme = crate::appearance::chat_style::theme(cx);
-        let (host, access) = {
-            let state = self.tiles.slots.get(&sid)?.state.read(cx);
-            (
-                state
-                    .device_name(&bot.host_device_id)
-                    .unwrap_or("an unknown device")
-                    .to_string(),
-                access_summary(&bot, state),
-            )
-        };
-        let avatar = crate::appearance::bot_style::bot_avatar(
-            &bot.name,
-            bot.icon.as_deref(),
-            bot.color.as_deref(),
-            30.0,
-            &theme,
-        );
-        let settings_key = format!("bot-header-settings-{sid}");
-        let bot_id = bot.id.clone();
+        let access = access_summary(&bot, self.tiles.slots.get(&sid)?.state.read(cx));
+        let key = format!("bot-access-{sid}");
+        let tint = motion::hover_blend(&key, theme.text_muted.opacity(0.75), theme.text);
         Some(
             div()
-                .id(("bot-header", sid))
-                .h(px(BOT_HEADER_H))
-                .flex_none()
-                .w_full()
-                .pl(px(16.0))
-                // Clear of the session rail, which floats over the column's
-                // top-right corner.
-                .pr(px(super::super::dock::RAIL_WIDTH + 6.0))
+                .id(SharedString::from(key.clone()))
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(10.0))
-                .border_b_1()
-                .border_color(crate::kit::theme::hairline(0.06))
-                .child(avatar)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(px(13.5))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(theme.text)
-                                        .child(SharedString::from(bot.name.clone())),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .px(px(5.0))
-                                        .rounded(px(4.0))
-                                        .bg(crate::kit::theme::ink(0.06))
-                                        .text_size(px(10.0))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.text_muted)
-                                        .child(SharedString::from("BOT")),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(5.0))
-                                .min_w_0()
-                                .text_size(px(11.5))
-                                .text_color(theme.text_muted)
-                                .child(
-                                    icon(icons::SHIELD_CHECK)
-                                        .size(px(12.0))
-                                        .flex_none()
-                                        .text_color(theme.text_muted.opacity(0.8)),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(SharedString::from(format!("{access} · on {host}"))),
-                                ),
-                        ),
+                .gap(px(5.0))
+                .px(px(6.0))
+                .py(px(2.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .text_size(px(11.5))
+                .text_color(tint)
+                .on_hover(motion::hover_listener(key.clone()))
+                .tooltip(|_, cx| {
+                    cx.new(|_| super::super::session::FindTooltip("Bot permissions".into()))
+                        .into()
+                })
+                .on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.open_bot_dialog(Some(bot.id.clone()), cx)
+                    }),
                 )
-                .child(
-                    div()
-                        .id(SharedString::from(settings_key.clone()))
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(9.0))
-                        .py(px(5.0))
-                        .rounded(px(8.0))
-                        .cursor_pointer()
-                        .text_size(px(12.0))
-                        .text_color(motion::hover_blend(
-                            &settings_key,
-                            theme.text_muted,
-                            theme.text,
-                        ))
-                        .bg(motion::hover_blend(
-                            &settings_key,
-                            crate::kit::theme::wash(0.0),
-                            crate::kit::theme::wash(0.10),
-                        ))
-                        .on_hover(motion::hover_listener(settings_key.clone()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_bot_dialog(Some(bot_id.clone()), cx)
-                        }))
-                        .child(
-                            icon(icons::TUNING)
-                                .size(px(13.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(SharedString::from("Settings")),
-                )
+                .child(icon(icons::SHIELD_CHECK).size(px(12.0)).text_color(tint))
+                .child(SharedString::from(access))
                 .into_any_element(),
         )
     }
@@ -254,12 +162,11 @@ impl Shell {
     ) -> Option<AnyElement> {
         let bot = self.slot_bot(sid, cx)?;
         let theme = crate::appearance::chat_style::theme(cx);
-        let (access, host, questions, has_access) = {
+        let (host, questions, has_access) = {
             let state = self.tiles.slots.get(&sid)?.state.read(cx);
             let has_access = !matches!(bot.scope.projects, ProjectGrant::None)
                 || !bot.scope.include_sessions.is_empty();
             (
-                access_summary(&bot, state),
                 state
                     .device_name(&bot.host_device_id)
                     .unwrap_or("an unknown device")
@@ -275,9 +182,8 @@ impl Shell {
             64.0,
             &theme,
         );
-        let hairline = crate::kit::theme::hairline(0.08);
         let mut column = div()
-            .w(px(440.0))
+            .w(px(520.0))
             .max_w_full()
             .px(px(12.0))
             .flex()
@@ -300,90 +206,67 @@ impl Shell {
                     .child(SharedString::from(format!(
                         "Answers questions about your work · runs on {host}"
                     ))),
-            )
-            .child(
-                div()
-                    .mt(px(12.0))
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(hairline)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .child(
-                        icon(icons::SHIELD_CHECK)
-                            .size(px(13.0))
-                            .text_color(theme.text_muted),
-                    )
-                    .child(SharedString::from(format!("{access} · read-only"))),
             );
         if has_access {
-            let rows = questions.into_iter().enumerate().map(|(ix, question)| {
-                let key = format!("bot-start-q-{sid}-{ix}");
-                let ask = question.clone();
-                div()
-                    .id(SharedString::from(key.clone()))
-                    .w_full()
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(hairline)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.0))
-                    .cursor_pointer()
-                    .bg(motion::hover_blend(
-                        &key,
-                        crate::kit::theme::wash(0.0),
-                        crate::kit::theme::wash(0.08),
-                    ))
-                    .on_hover(motion::hover_listener(key.clone()))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(composer) =
-                            this.tiles.slots.get(&sid).map(|s| s.composer.clone())
-                        {
-                            composer.update(cx, |c, cx| c.send_text(&ask, window, cx));
-                        }
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(13.5))
-                            .text_color(theme.text)
-                            .child(SharedString::from(question)),
-                    )
-                    .child(
-                        icon(icons::ARROW_RIGHT)
-                            .size(px(13.0))
-                            .text_color(theme.text_faint),
-                    )
-            });
-            column = column
-                .child(
+            // Suggested prompts: a 2×2 grid of soft cards (the familiar
+            // empty-chat pattern); a click asks one.
+            let cards: Vec<_> = questions
+                .into_iter()
+                .enumerate()
+                .map(|(ix, (glyph, question))| {
+                    let key = format!("bot-start-q-{sid}-{ix}");
+                    let ask = question.clone();
                     div()
-                        .mt(px(28.0))
-                        .mb(px(8.0))
-                        .w_full()
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_muted.opacity(0.7))
-                        .child(SharedString::from("Try asking")),
-                )
-                .child(div().w_full().flex().flex_col().gap(px(6.0)).children(rows));
+                        .id(SharedString::from(key.clone()))
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(76.0))
+                        .p(px(12.0))
+                        .rounded(px(12.0))
+                        .flex()
+                        .flex_col()
+                        .justify_between()
+                        .cursor_pointer()
+                        .bg(motion::hover_blend(
+                            &key,
+                            crate::kit::theme::ink(0.035),
+                            crate::kit::theme::ink(0.07),
+                        ))
+                        .on_hover(motion::hover_listener(key.clone()))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if let Some(composer) =
+                                this.tiles.slots.get(&sid).map(|s| s.composer.clone())
+                            {
+                                composer.update(cx, |c, cx| c.send_text(&ask, window, cx));
+                            }
+                        }))
+                        .child(icon(glyph).size(px(15.0)).text_color(theme.text_muted))
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .line_height(px(17.0))
+                                .text_color(theme.text)
+                                .child(SharedString::from(question)),
+                        )
+                })
+                .collect();
+            let mut grid = div().mt(px(28.0)).w_full().flex().flex_col().gap(px(8.0));
+            let mut cards = cards.into_iter();
+            while let Some(first) = cards.next() {
+                let mut row = div().w_full().flex().flex_row().gap(px(8.0)).child(first);
+                row = match cards.next() {
+                    Some(second) => row.child(second),
+                    None => row.child(div().flex_1()),
+                };
+                grid = grid.child(row);
+            }
+            column = column.child(grid);
         } else {
             let bot_id = bot.id.clone();
             column = column
                 .child(
                     div()
-                        .mt(px(24.0))
+                        .mt(px(20.0))
                         .text_size(px(13.0))
                         .text_color(theme.text_muted)
                         .child(SharedString::from("It can't see any of your sessions yet.")),
@@ -500,8 +383,11 @@ mod tests {
             }),
             &state,
         );
-        assert!(asks.contains(&"Where do things stand in Web?".to_string()));
+        assert!(
+            asks.iter()
+                .any(|(_, q)| q == "Where do things stand in Web?")
+        );
         let asks = suggestions(&bot(BotScope::default()), &state);
-        assert!(asks.iter().all(|q| !q.contains("stand in")));
+        assert!(asks.iter().all(|(_, q)| !q.contains("stand in")));
     }
 }

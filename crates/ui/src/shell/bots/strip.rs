@@ -6,9 +6,11 @@
 
 use super::*;
 
-/// Avatar square size and the gap between squares.
-const TILE: f32 = 34.0;
-const GAP: f32 = 6.0;
+/// Avatar square size, the selection ring around it (ring width + its gap
+/// to the square), and the gap between tiles.
+const TILE: f32 = 30.0;
+const RING: f32 = 3.0;
+const GAP: f32 = 4.0;
 
 impl Shell {
     /// `None` with no bots, and in a project window (bots belong to the main
@@ -49,9 +51,10 @@ impl Shell {
                 .flex_row()
                 .flex_wrap()
                 .gap(px(GAP))
-                // Line the first square up with the project cards' glyphs.
-                .px(px(6.0))
-                .pb(px(10.0))
+                // The first square's edge lines up with the project glyphs
+                // below (the ring sits in the padding).
+                .px(px(8.0))
+                .pb(px(12.0))
                 .children(tiles)
                 .into_any_element(),
         )
@@ -82,17 +85,25 @@ impl Shell {
         );
         let name: SharedString = bot.name.clone().into();
         let (open_id, menu_id) = (bot.id.clone(), bot.id.clone());
+        // The open bot is ringed (the workspace-switcher convention): a
+        // 1.5px outline 1.5px off the square, in the bot's own colour.
+        let ring = crate::appearance::space_style::space_color(bot.color.as_deref(), theme)
+            .unwrap_or(theme.text_muted);
         div()
             .id(SharedString::from(key.clone()))
             .relative()
             .flex_none()
-            .size(px(TILE))
-            .rounded(px((TILE * 0.27).round() + 2.0))
-            .cursor_pointer()
-            .when(selected, |el| {
-                el.shadow(crate::kit::theme::card_selected_shadows())
+            .size(px(TILE + 2.0 * RING))
+            .p(px(RING - 1.5))
+            .rounded(px((TILE * 0.27).round() + RING))
+            .border(px(1.5))
+            .border_color(if selected {
+                ring.opacity(0.55)
+            } else {
+                gpui::transparent_black()
             })
-            .hover(|s| s.opacity(0.88))
+            .cursor_pointer()
+            .when(!selected, |el| el.hover(|s| s.opacity(0.85)))
             .tooltip(move |_, cx| cx.new(|_| super::session::FindTooltip(name.clone())).into())
             .on_click(cx.listener(move |this, _, _, cx| this.open_bot(&open_id, cx)))
             .on_mouse_down(
@@ -107,8 +118,8 @@ impl Shell {
                 el.child(
                     div()
                         .absolute()
-                        .top(px(-2.0))
-                        .right(px(-2.0))
+                        .top(px(0.0))
+                        .right(px(0.0))
                         .size(px(9.0))
                         .rounded_full()
                         .border_2()

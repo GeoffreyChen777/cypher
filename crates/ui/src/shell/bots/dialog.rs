@@ -20,7 +20,7 @@ const GLASS_BLUR: f32 = 20.0;
 /// bands follow.
 const CARD_RADIUS: f32 = 14.0;
 const CARD_W: f32 = 760.0;
-const RAIL_W: f32 = 212.0;
+const RAIL_W: f32 = 228.0;
 
 /// Which projects the bot is granted (the dialog's three-way pick).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,21 +322,21 @@ impl Shell {
         let section = |text: &str| div().mt(px(18.0)).mb(px(8.0)).child(label(text));
 
         // ── Avatar: robot faces, then symbols and the initial; colours ──────
+        // Glyphs rest neutral; the pick wears the bot's colour, as the
+        // avatar will.
         let cell = |id: String, on: bool| {
             div()
                 .id(SharedString::from(id))
                 .size(px(32.0))
-                .rounded(px(9.0))
+                .rounded(px(8.0))
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .when(on, |el| {
-                    el.bg(crate::kit::theme::card_selected_bg())
-                        .shadow(crate::kit::theme::card_selected_shadows())
-                })
+                .when(on, |el| el.bg(tint.opacity(0.16)))
                 .when(!on, |el| el.hover(|s| s.bg(theme.element_hover)))
         };
+        let glyph_tint = |on: bool| if on { tint } else { theme.text_muted };
         let pick_icon = |key: Option<&'static str>| {
             move |this: &mut Shell,
                   _: &gpui::ClickEvent,
@@ -352,12 +352,10 @@ impl Shell {
             crate::appearance::bot_style::BOT_FACES
                 .iter()
                 .map(|(key, asset)| {
-                    cell(
-                        format!("bot-face-{key}"),
-                        dialog.icon.as_deref() == Some(*key),
-                    )
-                    .on_click(cx.listener(pick_icon(Some(key))))
-                    .child(icon(asset).size(px(19.0)).text_color(tint))
+                    let on = dialog.icon.as_deref() == Some(*key);
+                    cell(format!("bot-face-{key}"), on)
+                        .on_click(cx.listener(pick_icon(Some(key))))
+                        .child(icon(asset).size(px(19.0)).text_color(glyph_tint(on)))
                 }),
         );
         let symbols = div()
@@ -370,7 +368,7 @@ impl Shell {
                 cell("bot-symbol-initial".into(), dialog.icon.is_none())
                     .text_size(px(13.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(tint)
+                    .text_color(glyph_tint(dialog.icon.is_none()))
                     .on_click(cx.listener(pick_icon(None)))
                     .child(SharedString::from(crate::appearance::bot_style::initial(
                         &shown_name,
@@ -380,12 +378,10 @@ impl Shell {
                 crate::appearance::bot_style::BOT_SYMBOLS
                     .iter()
                     .map(|(key, asset)| {
-                        cell(
-                            format!("bot-symbol-{key}"),
-                            dialog.icon.as_deref() == Some(*key),
-                        )
-                        .on_click(cx.listener(pick_icon(Some(key))))
-                        .child(icon(asset).size(px(15.0)).text_color(tint))
+                        let on = dialog.icon.as_deref() == Some(*key);
+                        cell(format!("bot-symbol-{key}"), on)
+                            .on_click(cx.listener(pick_icon(Some(key))))
+                            .child(icon(asset).size(px(15.0)).text_color(glyph_tint(on)))
                     }),
             );
         let swatch = |id: String, on: bool| {
@@ -724,23 +720,26 @@ impl Shell {
         // ── The devices rail: where the bot runs, fixed once created ────────
         let host_row = |ix: usize, host: &BotHost, active: bool, pickable: bool| {
             let pick = host.id.clone();
+            let caption = match (host.local, host.online, host.ok) {
+                (true, _, _) => "This device",
+                (false, false, _) => "Offline",
+                (false, true, false) => "Needs Cypher 0.3.53 or newer",
+                (false, true, true) => "Online",
+            };
             div()
                 .id(("bot-host", ix))
-                .h(px(28.0))
                 .px(px(8.0))
+                .py(px(6.0))
                 .rounded(px(8.0))
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(8.0))
-                .text_size(px(12.5))
+                .gap(px(9.0))
                 .when(!host.ok && !active, |el| el.opacity(0.55))
                 .when(active, |el| {
                     el.bg(crate::kit::theme::card_selected_bg())
                         .shadow(crate::kit::theme::card_selected_shadows())
-                        .text_color(theme.text)
                 })
-                .when(!active, |el| el.text_color(theme.text_muted.opacity(0.7)))
                 .when(pickable && !active, |el| {
                     el.hover(|s| s.bg(theme.element_hover))
                 })
@@ -759,42 +758,45 @@ impl Shell {
                     } else {
                         icons::MONITOR
                     })
-                    .size(px(14.0))
+                    .size(px(15.0))
                     .flex_none()
-                    .text_color(theme.text_muted.opacity(0.8)),
+                    .text_color(if active {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    }),
                 )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
-                        .child(SharedString::from(host.name.clone())),
-                )
-                .when(host.local, |el| {
-                    el.child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from("this device")),
-                    )
-                })
-                .child(
-                    div()
-                        .size(px(5.0))
-                        .rounded_full()
-                        .flex_none()
-                        .when(host.online, |el| {
-                            let emerald = theme.success;
-                            el.bg(emerald.opacity(0.9)).shadow(vec![gpui::BoxShadow {
-                                color: emerald.opacity(0.55),
-                                offset: gpui::point(px(0.0), px(0.0)),
-                                blur_radius: px(6.0),
-                                spread_radius: px(0.0),
-                                inset: false,
-                            }])
-                        })
-                        .when(!host.online, |el| el.bg(crate::kit::theme::ink(0.22))),
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(12.5))
+                                .text_color(if active { theme.text } else { theme.text_muted })
+                                .child(SharedString::from(host.name.clone())),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(5.0))
+                                .text_size(px(11.0))
+                                .text_color(theme.text_faint)
+                                .when(host.online, |el| {
+                                    el.child(
+                                        div()
+                                            .size(px(5.0))
+                                            .rounded_full()
+                                            .bg(theme.success.opacity(0.9)),
+                                    )
+                                })
+                                .child(SharedString::from(caption)),
+                        ),
                 )
         };
         let rail = div()
@@ -939,27 +941,11 @@ impl Shell {
         let busy = dialog.busy;
         let mut footer = div()
             .size_full()
-            .pl(px(12.0))
-            .pr(px(10.0))
+            .px(px(12.0))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(12.0))
-            .child(popover::key_hint(
-                theme,
-                icons::RETURN,
-                if editing { "Save" } else { "Create" },
-            ))
-            .child(popover::key_hint_text(theme, "esc", "Cancel"))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(11.5))
-                    .text_color(theme.danger)
-                    .children(dialog.error.clone()),
-            );
+            .gap(px(8.0));
         if let Some(bot_id) = dialog.bot_id.clone() {
             footer = footer.child(
                 div()
@@ -988,20 +974,35 @@ impl Shell {
                     .child(SharedString::from("Delete")),
             );
         }
-        footer = footer.child(
-            popover::btn_primary(
-                theme,
-                match (editing, busy) {
-                    (true, _) => "Save",
-                    (false, false) => "Create bot",
-                    (false, true) => "Creating…",
-                },
+        footer = footer
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.5))
+                    .text_color(theme.danger)
+                    .children(dialog.error.clone()),
             )
-            .id("bot-dialog-submit")
-            .py(px(5.0))
-            .when(busy, |el| el.opacity(0.6))
-            .on_click(cx.listener(|this, _, _, cx| this.submit_bot_dialog(cx))),
-        );
+            .child(
+                popover::btn_ghost(theme, "Cancel", "bot-dialog-cancel")
+                    .id("bot-dialog-cancel")
+                    .on_click(cx.listener(|this, _, _, cx| this.close_bot_dialog(cx))),
+            )
+            .child(
+                popover::btn_primary(
+                    theme,
+                    match (editing, busy) {
+                        (true, _) => "Save",
+                        (false, false) => "Create bot",
+                        (false, true) => "Creating…",
+                    },
+                )
+                .id("bot-dialog-submit")
+                .py(px(5.0))
+                .when(busy, |el| el.opacity(0.6))
+                .on_click(cx.listener(|this, _, _, cx| this.submit_bot_dialog(cx))),
+            );
 
         // FIXED height, like the palettes: a longer project list scrolls
         // instead of growing the card.

@@ -10,7 +10,6 @@ mod chat;
 mod dialog;
 mod strip;
 
-pub(super) use chat::BOT_HEADER_H;
 pub(super) use dialog::BotDialog;
 
 /// Hosts older than this answer `CreateBot` with an unknown-method error, so
