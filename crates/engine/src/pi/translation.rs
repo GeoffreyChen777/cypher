@@ -19,8 +19,8 @@ pub enum TranslationOutputMode {
     /// Replace the original final response once translation is complete.
     Replace,
     /// Keep the original response and append the translated response below it.
-    /// The transcript folds the original away behind a collapsed toggle, so
-    /// this reads like `Replace` with the original one click away.
+    /// The transcript shows one at a time — the translation, or the original
+    /// once the message is Shift-clicked — so this reads like `Replace`.
     #[default]
     Append,
 }

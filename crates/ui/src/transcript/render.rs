@@ -254,6 +254,7 @@ impl Transcript {
             .flatten();
 
         let inner = self.render_row_body(&row, wide, &theme, window, cx);
+        let inner = self.swap_entrance(&row, inner);
         // A work run's rows keep its rail unbroken: the gap above each one is
         // drawn inside the row, rail and all, instead of as bare padding.
         let (top_gap, inner) = if is_nested(&row.kind) && top_gap > 0.0 {
@@ -272,9 +273,28 @@ impl Transcript {
         let strip = self.render_timestamp_strip(&row, &theme, cx);
         let entry_id = row.entry_id.clone();
         let row_id = row.id.clone();
+        let translated = row.translation.is_some();
+        let toggled_entry = row.entry_id.clone();
         div()
             .id(row.id.clone())
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            // Shift-click a translated message to read it as the model wrote
+            // it, and again to go back. The whole message turns at once.
+            .when(translated, |el| {
+                el.on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                    let modifiers = event.modifiers();
+                    if modifiers.shift
+                        && !modifiers.platform
+                        && !modifiers.control
+                        && !modifiers.alt
+                    {
+                        this.toggle_original(&toggled_entry, cx);
+                    }
+                }))
+            })
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                if *hovered && translated {
+                    this.watch_shift(window, cx);
+                }
                 if *hovered {
                     let next = Some((row_id.clone(), entry_id.clone()));
                     if this.hovered_entry != next {
@@ -491,15 +511,6 @@ impl Transcript {
             RowKind::TurnChanges { changes } => {
                 self.render_turn_changes(&row.id, changes, theme, cx)
             }
-            RowKind::TranslationOriginal { .. } => {
-                let open = toggle_open(row, &self.toggle_pins);
-                let label = if open {
-                    "Hide original"
-                } else {
-                    "Show original"
-                };
-                self.render_fold_toggle(&row.id, open, label.into(), theme, cx)
-            }
             RowKind::Thought {
                 live,
                 nested,
@@ -631,6 +642,27 @@ impl Transcript {
         let fork_button = self.fork_affordance(row, theme, cx);
         let rewind_button = self.rewind_affordance(row, theme, cx);
         let copy_button = self.copy_affordance(row, hovered, theme, cx);
+        // Which version a translated message shows, and how to switch: the
+        // gesture has no control of its own on screen.
+        let translation_label = row.translation.map(|_| {
+            let original = self.show_original.contains(&row.entry_id);
+            div()
+                .id(SharedString::from(format!("{}-translation-label", row.id)))
+                .child(SharedString::from(if original {
+                    "Original"
+                } else {
+                    "Translated"
+                }))
+                .tooltip(move |_, cx| {
+                    let tip = if original {
+                        "Shift-click the message to show the translation"
+                    } else {
+                        "Shift-click the message to show the original"
+                    };
+                    cx.new(|_| MessageActionTooltip { text: tip.into() }).into()
+                })
+                .tooltip_show_delay(Duration::from_millis(350))
+        });
         row.timestamp.map(|ms| {
             div()
                 .h(px(if is_user_row { 16.0 } else { 20.0 }))
@@ -659,6 +691,9 @@ impl Transcript {
                             .when_some(row.answered.clone(), |el, label| {
                                 el.child(SharedString::from("·"))
                                     .child(answered_model_label(row.id.clone(), label, theme))
+                            })
+                            .when_some(translation_label, |el, label| {
+                                el.child(SharedString::from("·")).child(label)
                             })
                             .when_some(fork_button, |el, button| el.child(button))
                             .when_some(rewind_button, |el, button| el.child(button))
@@ -1893,7 +1928,8 @@ impl Render for Transcript {
                     .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
             )
             .child(self.wheel_observer())
-            .child(rail);
+            .child(rail)
+            .children(self.translation_button(window, cx));
         // The shared Comment pill/editor lives in the SHELL's deferred layer
         // (paints above every clipped surface). The transcript only guards
         // liveness: a doc commit that replaced the offer's head row drops it.

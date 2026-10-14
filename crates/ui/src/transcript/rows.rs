@@ -105,14 +105,6 @@ pub enum RowKind {
     ErrorChip {
         message: SharedString,
     },
-    /// The toggle over an append-mode translation's original answer. The
-    /// `blocks` rows that follow it — the original's blocks and the separator
-    /// rule — are dropped from the list while the toggle is closed (the
-    /// default, see [`fold_closed_toggles`]), so the answer reads like
-    /// a replace-mode translation with the original one click away.
-    TranslationOriginal {
-        blocks: usize,
-    },
     /// The toggle over a reasoning part: "Thinking…" while it streams,
     /// "Thought" once it settled. The `blocks` [`RowKind::ThoughtBlock`] rows
     /// that follow are dropped while it is closed, the default (see
@@ -183,6 +175,20 @@ pub struct Row {
     /// the same hover strip. Travels with `timestamp`; set only on settled
     /// assistant entries whose harness reported the model (pi).
     pub answered: Option<AnsweredLabel>,
+    /// Which version of a translated text part this row shows. A message
+    /// shows one side at a time — the translation unless the user
+    /// Shift-clicked it to read the original — and the other side's rows are
+    /// dropped ([`show_translation_side`]). `None` for everything else.
+    pub translation: Option<TranslationSide>,
+}
+
+/// One version of a translated text part ([`Row::translation`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranslationSide {
+    /// The text as the model wrote it.
+    Original,
+    /// The text as the user reads it.
+    Translation,
 }
 
 /// What a settled answer's strip says about the model(s) that wrote it.
@@ -269,7 +275,6 @@ pub(super) fn row_match_count(row: &Row, query: &str) -> u32 {
         | RowKind::TurnChanges { .. }
         | RowKind::InputChip { .. }
         | RowKind::ErrorChip { .. }
-        | RowKind::TranslationOriginal { .. }
         | RowKind::Thought { .. }
         | RowKind::ThoughtBlock { .. } => 0,
     };
@@ -826,6 +831,7 @@ fn user_row(entry: &SessionMessageEntry, pending: bool) -> Row {
         // `createdAt` exists — the optimistic echo included).
         timestamp: Some(entry.created_at),
         answered: None,
+        translation: None,
     }
 }
 
@@ -1053,6 +1059,7 @@ impl EntryRows<'_> {
             role: self.entry.role,
             timestamp: None,
             answered: None,
+            translation: None,
         }
     }
 
@@ -1120,23 +1127,11 @@ impl EntryRows<'_> {
     ) {
         let key = format!("{}#{}", self.entry.id, part_id);
         let tree = parse(&key, text);
-        // Block rows keep their ids either way (quotes map
-        // back through them), so the toggle only ever hides
-        // or shows rows — see `fold_closed_toggles`.
-        if let Some(blocks) =
-            agent_text.and_then(|agent| appended_original_blocks(text, agent, &tree))
-        {
-            rows.push(self.row(
-                format!("{key}.original"),
-                (blocks as u64) << 1,
-                RowKind::TranslationOriginal { blocks },
-            ));
-        }
-        // Live and completed parts split identically — one row per
-        // top-level block, same ids, so the live→complete handoff never
-        // changes row identity.
         let streaming = self.streaming;
-        self.push_block_rows(rows, &key, &tree, text, streaming, |block_ix| {
+        let markdown = |tree: &Arc<BlockTree>, block_ix| {
+            // Live and completed parts split identically — one row per
+            // top-level block, same ids, so the live→complete handoff
+            // never changes row identity.
             if streaming {
                 RowKind::LiveMarkdown {
                     tree: tree.clone(),
@@ -1148,7 +1143,53 @@ impl EntryRows<'_> {
                     block_ix,
                 }
             }
-        });
+        };
+        let start = rows.len();
+        self.push_block_rows(rows, &key, &tree, text, streaming, |ix| markdown(&tree, ix));
+        let Some(agent) = agent_text else {
+            return;
+        };
+        if let Some(blocks) = appended_original_blocks(text, agent, &tree) {
+            // Append mode already holds both versions: the original's blocks,
+            // the separator rule and the translation's. They keep their block
+            // ids either way (quotes map back through them); the rule only
+            // ever separated the two, and a message shows one at a time.
+            let rule = start + blocks - 1;
+            rows.remove(rule);
+            for (ix, row) in rows[start..].iter_mut().enumerate() {
+                row.translation = Some(if start + ix < rule {
+                    TranslationSide::Original
+                } else {
+                    TranslationSide::Translation
+                });
+            }
+        } else if crate::quote_origin::appended_translation(text, agent).is_none() {
+            // Replace mode: the original's own rows go first, under their own
+            // key — a quote from them is the agent's text and stands as
+            // selected, which is what a key outside the part's gives it.
+            for row in &mut rows[start..] {
+                row.translation = Some(TranslationSide::Translation);
+            }
+            let original_key = format!("{key}~original");
+            let original = parse(&original_key, agent);
+            let mut original_rows = Vec::new();
+            self.push_block_rows(
+                &mut original_rows,
+                &original_key,
+                &original,
+                agent,
+                false,
+                |ix| RowKind::Markdown {
+                    tree: original.clone(),
+                    block_ix: ix,
+                },
+            );
+            for row in &mut original_rows {
+                row.translation = Some(TranslationSide::Original);
+            }
+            rows.splice(start..start, original_rows);
+        }
+        // An append rendering whose translation has not begun shows whole.
     }
 
     fn push_thought_rows(

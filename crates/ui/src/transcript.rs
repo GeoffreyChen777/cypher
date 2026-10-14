@@ -67,6 +67,7 @@ mod render;
 mod scroll;
 use render::*;
 mod comments;
+mod translation_cue;
 mod turn_changes;
 
 /// Key context of a transcript holding focus (a click into the chat history).
@@ -197,11 +198,16 @@ pub struct Transcript {
     /// cap itself is a setting (`chat_style::tool_call_limit`); this is the
     /// per-row override, render-local like `folds`.
     tool_overflow: std::collections::HashSet<SharedString>,
-    /// Toggles the user clicked (an append-mode translation's original, a
-    /// thought, a work run) and the state they left them in, by row id;
-    /// every other one keeps its default ([`fold_closed_toggles`]).
-    /// Render-local like `folds`.
+    /// Toggles the user clicked (a thought, a work run) and the state they
+    /// left them in, by row id; every other one keeps its default
+    /// ([`fold_closed_toggles`]). Render-local like `folds`.
     toggle_pins: HashMap<SharedString, bool>,
+    /// Translated messages the user Shift-clicked to read as the model wrote
+    /// them, by entry id; every other one shows its translation
+    /// ([`show_translation_side`]). Render-local like `folds`.
+    show_original: std::collections::HashSet<SharedString>,
+    /// Shift held over a translated message, and the switch's entrance.
+    shift_cue: translation_cue::ShiftCue,
     /// Streaming fade veils, one per live markdown row (dropped on completion).
     veils: HashMap<SharedString, Rc<RefCell<RowVeil>>>,
     /// Live rows present in the transcript's REPLAY after (re)attaching to a
@@ -477,6 +483,8 @@ impl Transcript {
             tool_details: HashMap::new(),
             tool_overflow: std::collections::HashSet::new(),
             toggle_pins: HashMap::new(),
+            show_original: std::collections::HashSet::new(),
+            shift_cue: translation_cue::ShiftCue::new(cx),
             veils: HashMap::new(),
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,
