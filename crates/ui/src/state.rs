@@ -572,6 +572,7 @@ impl AppState {
         seed.spaces = m.spaces.clone();
         seed.chats = m.chats.clone();
         seed.sessions = m.sessions.clone();
+        seed.bots = m.bots.clone();
         seed.chats_synced = m.chats_synced;
         seed.spaces_synced = m.spaces_synced;
         seed.update = m.update.clone();
@@ -686,6 +687,7 @@ impl AppState {
             spaces,
             chats,
             sessions,
+            bots,
             local_device_id,
             data_dir,
             update,
