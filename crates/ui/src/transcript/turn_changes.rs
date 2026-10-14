@@ -143,7 +143,7 @@ impl Transcript {
             .id(SharedString::from(format!("{row_id}-hdr")))
             .h(px(HEADER_HEIGHT))
             .w_full()
-            .px(px(4.0))
+            .pr(px(4.0))
             .flex()
             .flex_row()
             .items_center()
@@ -156,19 +156,7 @@ impl Transcript {
                 this.toggle_fold(toggle_id.clone(), 0.0, true);
                 cx.notify();
             }))
-            .child(
-                div()
-                    .size(px(18.0))
-                    .flex_none()
-                    .rounded(px(5.0))
-                    .bg(crate::kit::theme::ink(0.06))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(10.0))
-                    .text_color(theme.text_muted.opacity(0.7))
-                    .child(SharedString::from(if open { "▾" } else { "▸" })),
-            )
+            .child(fold_chevron(open, theme.text_muted.opacity(0.7)))
             .child(
                 div()
                     .flex_none()

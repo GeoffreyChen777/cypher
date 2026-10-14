@@ -332,7 +332,7 @@ impl Transcript {
                     .flex_row()
                     .items_center()
                     .gap(px(8.0))
-                    .px(px(4.0))
+                    .pr(px(4.0))
                     .h(px(26.0))
                     .cursor_pointer()
                     .text_size(px(12.0))
@@ -346,19 +346,7 @@ impl Transcript {
                         this.sync(cx);
                         cx.notify();
                     }))
-                    .child(
-                        div()
-                            .size(px(18.0))
-                            .flex_none()
-                            .rounded(px(5.0))
-                            .bg(crate::kit::theme::ink(0.06))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(px(10.0))
-                            .text_color(theme.text_muted.opacity(0.7))
-                            .child(SharedString::from(if open { "▾" } else { "▸" })),
-                    )
+                    .child(fold_chevron(open, theme.text_muted.opacity(0.7)))
                     .child(div().min_w_0().truncate().child(label)),
             )
             .into_any_element()
@@ -930,13 +918,7 @@ impl Transcript {
             .flex_row()
             // Guide rail: no fixed height — stretches to the card,
             // detail included.
-            .child(
-                div()
-                    .ml(px(12.0))
-                    .w(px(1.0))
-                    .flex_none()
-                    .bg(crate::kit::theme::ink(0.08)),
-            )
+            .child(guide_rail())
             .children(nested_rails(tool.depth))
             .child(card)
             .into_any_element()
@@ -1035,7 +1017,7 @@ fn tool_group_header(
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .px(px(4.0))
+        .pr(px(4.0))
         .h(px(26.0))
         .cursor_pointer()
         .text_size(px(12.0))
@@ -1051,20 +1033,9 @@ fn tool_group_header(
             cx.notify();
         }))
         .child(
-            // The group header keeps its chevron TILE (the chips' icons
-            // and their own chevrons are bare): it is the row's only
-            // affordance, and the tile centers the guide rail below it.
-            div()
-                .size(px(18.0))
-                .flex_none()
-                .rounded(px(5.0))
-                .bg(crate::kit::theme::ink(0.06))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(10.0))
-                .text_color(theme.text_muted.opacity(0.7))
-                .child(SharedString::from(if open { "▾" } else { "▸" })),
+            // Flush with the text's left edge; the guide rail below hangs
+            // under it.
+            fold_chevron(open, theme.text_muted.opacity(0.7)),
         )
         .child(
             div()
@@ -1124,14 +1095,7 @@ fn tool_overflow_row(
         }))
         // The guide rail runs through this row like it does through
         // the chips, so the fold reads as part of the same stack.
-        .child(
-            div()
-                .ml(px(12.0))
-                .h_full()
-                .w(px(1.0))
-                .flex_none()
-                .bg(crate::kit::theme::ink(0.08)),
-        )
+        .child(guide_rail().h_full())
         .child(
             div()
                 .ml(px(12.0))

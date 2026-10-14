@@ -1406,11 +1406,29 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
     }
 }
 
+/// The box a fold toggle's chevron sits in, flush with the text column's
+/// left edge so the chevron lines up with the text around it.
+pub(super) const CHEVRON_BOX: f32 = 8.0;
+
+/// A fold toggle's bare chevron (▸/▾), first in its header row.
+pub(super) fn fold_chevron(open: bool, color: gpui::Hsla) -> gpui::Div {
+    div()
+        .w(px(CHEVRON_BOX))
+        .h(px(18.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(10.0))
+        .text_color(color)
+        .child(SharedString::from(if open { "▾" } else { "▸" }))
+}
+
 /// The hairline a tool group's chips hang off, centered under its header's
-/// chevron tile. Unsized: it stretches to its row in a flex row.
+/// chevron. Unsized: it stretches to its row in a flex row.
 pub(super) fn guide_rail() -> gpui::Div {
     div()
-        .ml(px(12.0))
+        .ml(px(CHEVRON_BOX / 2.0 - 0.5))
         .w(px(1.0))
         .flex_none()
         .bg(crate::kit::theme::ink(0.08))
@@ -1794,15 +1812,8 @@ pub(super) fn tool_chip(
         .flex()
         .flex_row()
         .items_center()
-        // Guide rail: hairline centered under the header's chevron tile.
-        .child(
-            div()
-                .ml(px(12.0))
-                .h_full()
-                .w(px(1.0))
-                .flex_none()
-                .bg(crate::kit::theme::ink(0.08)),
-        )
+        // Guide rail: hairline centered under the header's chevron.
+        .child(guide_rail().h_full())
         .children(nested_rails(tool.depth).map(|rail| rail.h_full()))
         .child(
             div()
