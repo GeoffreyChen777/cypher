@@ -38,6 +38,10 @@ pub struct PiTranslationSettings {
     pub output_mode: TranslationOutputMode,
     pub translate_user_messages: bool,
     pub translate_final_responses: bool,
+    /// Also translate what the model writes alongside a tool call ("Let me
+    /// check the config first"). Done in the background, so the agent never
+    /// waits for it; only Cypher's transcript shows the result.
+    pub translate_intermediate_responses: bool,
 }
 
 impl Default for PiTranslationSettings {
@@ -50,6 +54,7 @@ impl Default for PiTranslationSettings {
             output_mode: TranslationOutputMode::Append,
             translate_user_messages: true,
             translate_final_responses: true,
+            translate_intermediate_responses: false,
         }
     }
 }
@@ -244,6 +249,7 @@ mod tests {
             translation_model: "openai/gpt-4o-mini".into(),
             enabled_models: vec!["openai/gpt-5".into()],
             output_mode: TranslationOutputMode::Replace,
+            translate_intermediate_responses: true,
             ..Default::default()
         };
         save(&paths, settings.clone()).unwrap();

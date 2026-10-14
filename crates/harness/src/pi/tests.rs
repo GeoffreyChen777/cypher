@@ -646,22 +646,48 @@ fn ui_question_shapes_match_the_bridge() {
 fn parse_translation_status_accepts_the_v1_frame() {
     let text = parse_translation_status(&json!({ "version": 1, "text": "  译文  " }).to_string())
         .expect("valid frame");
-    assert_eq!(text, "译文", "surrounding whitespace is trimmed");
+    assert_eq!(
+        text,
+        ("译文".to_owned(), None),
+        "surrounding whitespace is trimmed"
+    );
     // A `mode` from the pre-streaming publisher is ignored rather than
     // rejected: the frame now carries the rendering it asked for.
     assert_eq!(
         parse_translation_status(
             &json!({ "version": 1, "text": "hi", "mode": "append" }).to_string()
         )
+        .map(|(text, _)| text)
         .as_deref(),
         Some("hi")
     );
 }
 
 #[test]
-fn parse_translation_status_rejects_wrong_versions_junk_and_empty_text() {
+fn parse_translation_status_reads_the_statement_a_v2_frame_targets() {
+    assert_eq!(
+        parse_translation_status(
+            &json!({ "version": 2, "source": " Let me look. ", "text": " 我看看。 " }).to_string()
+        ),
+        Some(("我看看。".to_owned(), Some("Let me look.".to_owned())))
+    );
+    // A v2 frame without its statement would land on the final answer.
     for bad in [
         json!({ "version": 2, "text": "hi" }).to_string(),
+        json!({ "version": 2, "source": "  ", "text": "hi" }).to_string(),
+        json!({ "version": 2, "source": 7, "text": "hi" }).to_string(),
+    ] {
+        assert!(
+            parse_translation_status(&bad).is_none(),
+            "must reject {bad}"
+        );
+    }
+}
+
+#[test]
+fn parse_translation_status_rejects_wrong_versions_junk_and_empty_text() {
+    for bad in [
+        json!({ "version": 3, "text": "hi" }).to_string(),
         json!({ "text": "hi" }).to_string(),
         json!({ "version": 1 }).to_string(),
         json!({ "version": 1, "text": 7 }).to_string(),
@@ -716,7 +742,7 @@ fn parse_translation_status_bounds_only_on_the_snapshot_byte_cap() {
         frame.len()
     );
     assert_eq!(
-        parse_translation_status(&frame).map(|text| text.chars().count()),
+        parse_translation_status(&frame).map(|(text, _)| text.chars().count()),
         Some(48_007)
     );
 

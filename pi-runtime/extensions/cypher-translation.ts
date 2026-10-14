@@ -23,12 +23,20 @@
  * sign of it. Publishing frames as the translation arrives keeps the stream
  * audible, which is what makes the feature reliable; rendering progressively is
  * the part you can see.
+ *
+ * What the model says alongside a tool call ("Let me check the config first")
+ * is translated too when the settings ask for it, but in the BACKGROUND: the
+ * tool runs while its statement is translated, so the agent never waits. Those
+ * frames name the statement they replace, because by the time they land it is
+ * no longer the last thing in the transcript. Only Cypher's transcript can take
+ * a frame that late, so everywhere else steps stay as written.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, AssistantMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model, TextContent } from "@earendil-works/pi-ai";
 import type {
+  AgentEndEvent,
   ExtensionAPI,
   ExtensionContext,
   InputEvent,
@@ -46,6 +54,7 @@ interface TranslationSettings {
   outputMode: OutputMode;
   translateUserMessages: boolean;
   translateFinalResponses: boolean;
+  translateIntermediateResponses: boolean;
 }
 
 const DEFAULTS: TranslationSettings = {
@@ -56,6 +65,7 @@ const DEFAULTS: TranslationSettings = {
   outputMode: "append",
   translateUserMessages: true,
   translateFinalResponses: true,
+  translateIntermediateResponses: false,
 };
 
 const SETTINGS_FILE = "translation.json";
@@ -551,6 +561,17 @@ function publishTranslation(ctx: ExtensionContext, text: string): void {
   ctx.ui.setStatus(TRANSLATION_STATUS_KEY, JSON.stringify({ version: 1, text }));
 }
 
+/** A frame for a statement made alongside a tool call (`{version:2, source,
+ *  text}`). `source` names the part to rewrite: the statement as the model
+ *  wrote it, which the turn has long since moved past when the frame lands. */
+function publishStepTranslation(ctx: ExtensionContext, source: string, text: string): void {
+  ctx.ui.setStatus(TRANSLATION_STATUS_KEY, JSON.stringify(stepTranslationStatus(source, text)));
+}
+
+export function stepTranslationStatus(source: string, text: string) {
+  return { version: 2, source: source.trim(), text };
+}
+
 /** Only Cypher's transcript has a prompt entry to keep the pair beside; in the
  *  TUI a status is footer text, and this one would print the whole prompt. */
 function publishInputTranslation(ctx: ExtensionContext, source: string, text: string): void {
@@ -599,6 +620,15 @@ function hasToolCall(message: AssistantMessage): boolean {
   return message.content.some((part) => part?.type === "toolCall");
 }
 
+interface TranslateOptions {
+  /** Fail without a word. In Cypher a notice is transcript text, so one from a
+   *  background translation would land in the middle of whatever is streaming
+   *  at the time; the frame that restores the original says enough. */
+  quiet?: boolean;
+  /** Abandons the request, as a timeout would. */
+  signal?: AbortSignal;
+}
+
 /** Translate `value`, feeding `onPartial` the translation so far as it
  *  arrives. Resolves with the finished translation, or `undefined` when there
  *  is nothing to apply — no model, a failed request, or an answer that came
@@ -611,13 +641,14 @@ async function translate(
   config: TranslationSettings,
   onPartial?: (translated: string) => void,
   onIdle?: () => void,
+  { quiet = false, signal }: TranslateOptions = {},
 ): Promise<string | undefined> {
   const source = value.trim();
   if (!source || source.length > MAX_TRANSLATION_CHARS || !pair.toName) return undefined;
   const configured = config.translationModel.trim();
   const model = configuredModel(ctx, configured);
   if (!model) {
-    if (warnedModel !== configured) {
+    if (!quiet && warnedModel !== configured) {
       warnedModel = configured;
       ctx.ui.notify(`Translation model "${configured}" is not available.`, "warning");
     }
@@ -638,6 +669,9 @@ async function translate(
   const controller = new AbortController();
   const deadline = setTimeout(() => controller.abort(), TRANSLATION_TIMEOUT_MS);
   deadline.unref?.();
+  const cancel = () => controller.abort();
+  if (signal?.aborted) cancel();
+  signal?.addEventListener("abort", cancel);
   try {
     const stream = ctx.modelRegistry.stream(
       model,
@@ -659,7 +693,7 @@ async function translate(
     // rejection would otherwise disable translation with no sign of it.
     if (result.stopReason === "error") {
       const detail = result.errorMessage ?? "the translation request failed";
-      if (warnedError !== detail) {
+      if (!quiet && warnedError !== detail) {
         warnedError = detail;
         ctx.ui.notify(`Translation failed: ${detail}`, "warning");
       }
@@ -681,9 +715,10 @@ async function translate(
       : error instanceof Error
         ? error.message
         : String(error);
-    ctx.ui.notify(`Translation skipped: ${detail}`, "warning");
+    if (!quiet) ctx.ui.notify(`Translation skipped: ${detail}`, "warning");
     return undefined;
   } finally {
+    signal?.removeEventListener("abort", cancel);
     clearTimeout(deadline);
     if (idle) clearInterval(idle);
   }
@@ -1199,9 +1234,12 @@ async function transformFinalMessage(
   config: TranslationSettings,
 ): Promise<MessageEndEventResult | undefined> {
   const message = event.message as AgentMessage;
+  if (!enabledForSession(ctx, config) || message.role !== "assistant") return undefined;
   // An intermediate message with a tool call is not the answer: only the final
   // text, after the tool calling and the thinking, is translated or recorded.
-  if (!enabledForSession(ctx, config) || message.role !== "assistant" || hasToolCall(message)) {
+  // What it says can still be translated, off to the side.
+  if (hasToolCall(message as AssistantMessage)) {
+    translateStep(message as AssistantMessage, ctx, config);
     return undefined;
   }
   const assistant = message as AssistantMessage;
@@ -1264,6 +1302,62 @@ async function transformFinalMessage(
     };
   });
   return { message: { ...assistant, content } };
+}
+
+/** Step translations still running, each with the means to abandon it. */
+const steps = new Map<Promise<void>, AbortController>();
+
+/** Translate what the model said alongside a tool call, without holding the
+ *  tool up: Pi withholds the call until `message_end` returns, so this only
+ *  starts the work, and `settleSteps` collects it before the run ends. */
+function translateStep(
+  message: AssistantMessage,
+  ctx: ExtensionContext,
+  config: TranslationSettings,
+): void {
+  // Cypher's transcript is the only place a late frame can land; in the TUI
+  // the message has been printed by the time a translation could be ready.
+  const live = Boolean(process.env.CYPHER_ENGINE_SOCKET && process.env.CYPHER_CHAT_ID);
+  if (!live || !config.translateIntermediateResponses || !config.translationModel.trim()) return;
+  const original = responseText(message);
+  if (!original.trim()) return;
+  const pair = outputPair(config, lastUserLanguage);
+  const controller = new AbortController();
+  const work = (async () => {
+    if (!translationDecision(await detectLanguage(original), pair)) return;
+    if (controller.signal.aborted) return;
+    const pump = new FramePump((text) => publishStepTranslation(ctx, original, text));
+    // Re-states the statement unchanged. It starts the keepalive, which
+    // matters once the run is over and waiting on this at `agent_end`.
+    pump.flush(original);
+    const translated = await translate(
+      original,
+      "output",
+      pair,
+      ctx,
+      config,
+      (partial) => pump.offer(renderTranslation(original, partial, config.outputMode)),
+      () => pump.tick(),
+      { quiet: true, signal: controller.signal },
+    );
+    pump.flush(
+      translated ? renderTranslation(original, translated, config.outputMode) : original,
+    );
+  })().catch(() => undefined);
+  steps.set(work, controller);
+  void work.finally(() => steps.delete(work));
+}
+
+/** Wait for every step translation before the run is reported finished: a
+ *  frame that arrives after that is dropped, and its statement would be left
+ *  half-translated. A run the user stopped does not wait — its translations
+ *  are abandoned, and each one's last frame puts its statement back. */
+async function settleSteps(event: AgentEndEvent): Promise<void> {
+  const last = event.messages[event.messages.length - 1] as AgentMessage | undefined;
+  if (last?.role === "assistant" && (last as AssistantMessage).stopReason === "aborted") {
+    for (const controller of steps.values()) controller.abort();
+  }
+  await Promise.all(steps.keys());
 }
 
 /** pi-ask-user's tool. A question it puts to the user is model output the
@@ -1618,6 +1712,7 @@ async function translateAskResult(
 export default function (pi: ExtensionAPI) {
   pi.on("input", (event, ctx) => transformInput(pi, event, ctx, settings()));
   pi.on("message_end", (event, ctx) => transformFinalMessage(event, ctx, settings()));
+  pi.on("agent_end", (event) => settleSteps(event));
   pi.on("tool_call", (event, ctx) => translateAsk(event, ctx, settings()));
   pi.on("tool_result", (event, ctx) => translateAskResult(event, ctx, settings()));
 }
