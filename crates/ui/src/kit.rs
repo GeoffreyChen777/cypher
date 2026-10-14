@@ -1,6 +1,6 @@
 //! The UI kit: the theme and the app-agnostic primitives every surface builds
 //! on — icons, popovers, motion, frost, loaders and their live layers,
-//! sounds, shadows, edge fades, the syntax highlight cache and atomic file
+//! sounds, shadows, edge fades, text ripples, the syntax highlight cache and atomic file
 //! writes. Nothing here knows about app state, settings or any surface;
 //! modules outside the kit depend on it, never the other way round.
 
@@ -12,6 +12,7 @@ pub mod live_layer;
 pub mod loaders;
 pub mod motion;
 pub mod popover;
+pub mod ripples;
 pub mod soft_shadow;
 pub mod sound;
 pub mod syntax_cache;
