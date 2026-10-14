@@ -49,7 +49,13 @@ impl Shell {
         // "Send a message to start" canvas with a watermark; no spaces at all
         // → the onboarding card. The composer sits below the first two
         // (new-chat mode mints the chat id on first send).
-        let outlet: AnyElement = if has_selection {
+        let bot_start = (has_selection && self.bot_chat_is_fresh(sid, cx))
+            .then(|| self.render_bot_start(sid, stack_h, cx))
+            .flatten();
+        let outlet: AnyElement = if let Some(start) = bot_start {
+            // A new bot's start screen stands in for its empty transcript.
+            start
+        } else if has_selection {
             // Cached, so loader pulses replay the transcript instead of
             // rebuilding its rows; its live layer paints their frames over
             // it, inside the same edge fade.

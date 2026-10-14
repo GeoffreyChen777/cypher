@@ -546,8 +546,9 @@ impl Composer {
             match (state.engine().cloned(), state.selected_chat.clone()) {
                 (Some(engine), Some(chat_id)) => (engine, chat_id),
                 _ => {
+                    let placeholder = self.idle_placeholder(cx);
                     self.input
-                        .update(cx, |input, cx| input.set_placeholder("Do anything…", cx));
+                        .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
                     cx.notify();
                     return;
                 }
@@ -556,10 +557,11 @@ impl Composer {
         self.answered_requests.insert(request_id.clone());
         self.answered_at = Some(Instant::now());
         self.input_swap_instant = true;
+        let placeholder = self.idle_placeholder(cx);
         self.input.update(cx, |input, cx| {
             input.set_text("", cx);
             // The panel borrowed the composer input; hand back its identity.
-            input.set_placeholder("Do anything…", cx);
+            input.set_placeholder(placeholder, cx);
         });
         // RPC transport branch: main answers through `QueueCommand`
         // `RespondInput`; a temporary side chat through `RespondSideChatInput`.

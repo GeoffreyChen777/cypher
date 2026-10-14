@@ -87,7 +87,9 @@ pub(super) fn system_prompt(bot: &Bot, spaces: &[Space], devices: &[Device]) -> 
         "- Those tools are all you have: you cannot run commands, read files or change \
          anything."
             .to_string(),
-        "- Name the sessions an answer draws on (title and id).".to_string(),
+        "- Cite every session an answer draws on as a markdown link to it: \
+         [its title](cypher://session/<session id>). The app opens these."
+            .to_string(),
         "- When something is outside what you can see, say so plainly instead of speculating."
             .to_string(),
         "- Tool output shows times in UTC.".to_string(),

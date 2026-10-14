@@ -2922,3 +2922,19 @@ fn round_changes_card_labels() {
     assert_eq!(changed_label(&changes), "500 files changed");
     assert_eq!(hidden_files(&changes), 500 - CARD_FILES as u32);
 }
+
+#[test]
+fn a_bot_session_read_takes_its_title_from_the_result() {
+    use super::render::read_session_title;
+    assert_eq!(
+        read_session_title(
+            "Session c1 · \"Fix the invoice migration\" · Billing on Studio · idle · 2026-10-14 09:00 UTC (1h ago) · 12 message(s)"
+        )
+        .as_deref(),
+        Some("Fix the invoice migration")
+    );
+    assert_eq!(
+        read_session_title("No session \"x\" that you can see."),
+        None
+    );
+}

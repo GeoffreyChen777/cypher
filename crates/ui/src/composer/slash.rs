@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Runtime commands a bot chat refuses (`cypher_engine::bots::REFUSED_COMMANDS`).
+const BOT_REFUSED_COMMANDS: [&str; 3] = ["scripts", "orchestrate", "goal"];
+
 impl Composer {
     fn command_target(&self, cx: &App) -> Option<String> {
         if let ComposerTransport::SideChat(side) = &self.transport {
@@ -88,16 +91,31 @@ impl Composer {
             && harness.unwrap_or(HarnessId::Pi) == HarnessId::Pi
     }
 
-    /// The composer's own `/` actions this composer offers.
+    /// The composer's own `/` actions this composer offers. A bot reads
+    /// sessions, not files, and runs read-only: it gets neither.
     fn slash_actions(
         &self,
         harness: Option<HarnessId>,
+        cx: &App,
     ) -> Vec<crate::composer::slash_menu::Action> {
         use crate::composer::slash_menu::Action;
+        if self.in_bot_chat(cx) {
+            return Vec::new();
+        }
         Action::ALL
             .into_iter()
             .filter(|action| *action != Action::Permissions || self.offers_permissions(harness))
             .collect()
+    }
+
+    /// Whether this composer writes into a bot's conversation.
+    pub(super) fn in_bot_chat(&self, cx: &App) -> bool {
+        matches!(self.transport, ComposerTransport::Main)
+            && self
+                .state
+                .read(cx)
+                .selected_chat_row()
+                .is_some_and(|chat| chat.is_bot())
     }
 
     /// `/permissions <level>` typed in full: apply it here, never send it.
@@ -325,10 +343,16 @@ impl Composer {
                     .and_then(|h| self.slash_cache.get(&h))
                     .map(Vec::as_slice)
                     .unwrap_or_default();
+                // A bot chat refuses the commands that would widen its
+                // tools (the engine says so too), so they are not offered.
+                let bot = self.in_bot_chat(cx);
                 crate::composer::slash_menu::command_level(
-                    &self.slash_actions(self.slash.harness),
+                    &self.slash_actions(self.slash.harness, cx),
                     commands,
-                    |name| crate::prefs::slash_commands::shows_in_app(cx, name),
+                    |name| {
+                        !(bot && BOT_REFUSED_COMMANDS.contains(&name))
+                            && crate::prefs::slash_commands::shows_in_app(cx, name)
+                    },
                     &query,
                 )
             }

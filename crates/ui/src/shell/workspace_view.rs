@@ -1063,17 +1063,32 @@ impl Shell {
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
-        let (title, harness, status, target): (
+        let (title, harness, status, target, bot): (
             SharedString,
             Option<cypher_proto::HarnessId>,
             ChatIndicator,
             Option<SharedString>,
+            Option<cypher_proto::Bot>,
         ) = {
             let state = self.state.read(cx);
             match tab
                 .chat_id()
                 .and_then(|id| state.chats.iter().find(|c| c.id == id))
             {
+                // A bot's conversation wears the bot's avatar, not a model
+                // brand.
+                Some(chat) if let Some(bot) = state.bot_for_chat(&chat.id) => {
+                    let device = state
+                        .device_name(&bot.host_device_id)
+                        .unwrap_or("Unknown device");
+                    (
+                        transcript::single_line(&bot.name).into(),
+                        chat.config.as_ref().map(|c| c.harness),
+                        state.display_status_for(chat, now),
+                        Some(format!("Bot @ {device}").into()),
+                        Some(bot.clone()),
+                    )
+                }
                 Some(chat) => {
                     let folder = chat
                         .space_id
@@ -1092,11 +1107,13 @@ impl Shell {
                         chat.config.as_ref().map(|c| c.harness),
                         state.display_status_for(chat, now),
                         Some(format!("{folder} @ {device}").into()),
+                        None,
                     )
                 }
-                None => ("New session".into(), None, ChatIndicator::Idle, None),
+                None => ("New session".into(), None, ChatIndicator::Idle, None, None),
             }
         };
+        let bot_tab = bot.is_some();
         let drag = TabDrag::new(tab.clone(), title.clone(), harness);
         let accent = theme.accent;
         let hover_group: SharedString = format!("tile-tab-{}-{index}", group.0).into();
@@ -1177,8 +1194,19 @@ impl Shell {
                 MouseButton::Middle,
                 cx.listener(move |this, _, _, cx| this.close_tab(&middle_tab, cx)),
             )
+            .when_some(bot, |el, bot| {
+                el.child(crate::appearance::bot_style::bot_avatar(
+                    &bot.name,
+                    bot.icon.as_deref(),
+                    bot.color.as_deref(),
+                    16.0,
+                    &theme,
+                ))
+            })
             .when_some(
-                harness.map(crate::pickers::harness_brand_icon),
+                harness
+                    .filter(|_| !bot_tab)
+                    .map(crate::pickers::harness_brand_icon),
                 |el, (path, tint)| {
                     el.child(
                         icon(path)

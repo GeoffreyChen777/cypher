@@ -175,6 +175,28 @@ pub fn run_env(workspace: &WorkspaceHost, chat: &Chat) -> Option<BotRunEnv> {
     })
 }
 
+/// Runtime slash commands a bot chat refuses: each would change the run's
+/// tools or modes behind the bot tool allowlist.
+pub const REFUSED_COMMANDS: [&str; 3] = ["scripts", "orchestrate", "goal"];
+
+/// Refuse a bot chat's prompt that is one of [`REFUSED_COMMANDS`].
+pub fn refuse_widening_command(chat: &Chat, prompt: &str) -> Result<(), EngineError> {
+    if chat.bot.is_none() {
+        return Ok(());
+    }
+    let command = prompt
+        .trim_start()
+        .strip_prefix('/')
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_default();
+    if REFUSED_COMMANDS.contains(&command) {
+        return Err(EngineError::Other(format!(
+            "/{command} isn't available in a bot chat."
+        )));
+    }
+    Ok(())
+}
+
 /// Recreate a bot chat's folder before a run spawns in it (a restored or
 /// moved data directory may have lost it). Only a path that IS this bot's
 /// folder (`…/bots/<bot id>`) is created.

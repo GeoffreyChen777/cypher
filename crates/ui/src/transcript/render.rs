@@ -1391,6 +1391,15 @@ fn input_chip(header: SharedString, resolved: bool, permission: bool, theme: &Th
 /// quiet monochrome character keeps the tile without shipping SVGs).
 /// The glyph for a tool call (zeron tool-chip.tsx `toolIcon`, Solar set).
 fn tool_icon_path(call: &ToolCall) -> &'static str {
+    if let Some(kind) = cypher_proto::view::bot_tool_kind(call) {
+        use cypher_proto::view::BotToolKind;
+        return match kind {
+            BotToolKind::ListProjects => crate::kit::icons::FOLDER,
+            BotToolKind::ListSessions => crate::kit::icons::CHECKLIST,
+            BotToolKind::SearchSessions => crate::kit::icons::MAGNIFER,
+            BotToolKind::ReadSession => crate::kit::icons::CHAT_ROUND_LINE,
+        };
+    }
     match call {
         ToolCall::Exec { .. } => crate::kit::icons::COMMAND,
         ToolCall::ReadFile { .. } | ToolCall::ApplyPatch { .. } => crate::kit::icons::DOCUMENT,
@@ -1649,12 +1658,30 @@ fn chip_header_row(
 /// extension tool has no kind of its own, so its name is the label.
 pub(super) fn tool_row_text(tool: &ToolItem) -> (String, String) {
     let (label, parameter) = tool_chip_content(&tool.call);
-    let parameter = parameter.trim().to_owned();
+    let mut parameter = parameter.trim().to_owned();
+    // A bot's session read names its session by id; its result opens with
+    // the session's title, which reads better.
+    if cypher_proto::view::bot_tool_kind(&tool.call)
+        == Some(cypher_proto::view::BotToolKind::ReadSession)
+        && let Some(ToolDetail::Output { lines, .. }) = tool.detail.as_deref()
+        && let Some(title) = lines.first().and_then(|line| read_session_title(line))
+    {
+        parameter = title;
+    }
     if label == "Tool" {
         (parameter, String::new())
     } else {
         (label.to_owned(), parameter)
     }
+}
+
+/// The title in a bot `read_session` result's first line:
+/// `Session <id> · "<title>" · <place> · …`.
+pub(super) fn read_session_title(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("Session ")?;
+    let (_, after) = rest.split_once(" · \"")?;
+    let (title, _) = after.split_once("\" · ")?;
+    (!title.trim().is_empty()).then(|| title.trim().to_owned())
 }
 
 /// Whether permission control held the call back (the sandbox blocked it,

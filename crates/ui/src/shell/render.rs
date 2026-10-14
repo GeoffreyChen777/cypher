@@ -1630,6 +1630,18 @@ impl Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            // A `cypher://session/<id>` link in an answer (a bot's
+            // citation) opens that session here.
+            .on_action(cx.listener(
+                |this, _: &crate::markdown::session_link::OpenSessionLink, _, cx| {
+                    let Some(chat_id) = crate::markdown::session_link::take_pending(cx) else {
+                        return;
+                    };
+                    if this.state.read(cx).chats.iter().any(|c| c.id == chat_id) {
+                        this.open_chat(chat_id, cx);
+                    }
+                },
+            ))
             // New session works from anywhere — `open_new_session` routes back
             // to chat itself, so Settings is not a dead spot.
             .on_action(cx.listener(|this, _: &NewSession, _, cx| this.open_new_session(cx)))

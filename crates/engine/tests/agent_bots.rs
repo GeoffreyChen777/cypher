@@ -356,3 +356,43 @@ async fn a_bot_chat_runs_locked_down() {
         .expect("the plain run reached the harness");
     assert!(env.is_none());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bot_chat_refuses_commands_that_widen_its_tools() {
+    let tmp = tempfile::tempdir().unwrap();
+    let harness = common::TestHarness::new(HarnessId::Pi, "Echo", |request, _| {
+        common::reply(HarnessId::Pi, &request, "sess", "ok")
+    });
+    let core = common::engine_at(&tmp.path().join("data"), harness);
+    seed(&core, tmp.path());
+    let bot = create_bot(&core, billing_only()).await;
+    let cwd = core
+        .workspace
+        .chat(&bot.chat_id)
+        .unwrap()
+        .unwrap()
+        .cwd
+        .unwrap();
+    let run = |prompt: &str| RunRequest {
+        cwd: cwd.clone(),
+        ..run_request(prompt)
+    };
+    for prompt in ["/scripts on", "  /goal ship it", "/orchestrate"] {
+        let refused = core
+            .sessions
+            .dispatch(&bot.chat_id, HarnessId::Pi, run(prompt), None)
+            .await;
+        assert!(
+            refused.is_err_and(|e| e.to_string().contains("isn't available in a bot chat")),
+            "{prompt} must be refused"
+        );
+    }
+    // Other prompts, and the same command in an ordinary chat, still run.
+    core.sessions
+        .dispatch(&bot.chat_id, HarnessId::Pi, run("/compact"), None)
+        .await
+        .expect("an ordinary command runs");
+    let plain = core.workspace.chat("chat-billing").unwrap().unwrap();
+    cypher_engine::bots::refuse_widening_command(&plain, "/scripts on")
+        .expect("ordinary chats are unaffected");
+}

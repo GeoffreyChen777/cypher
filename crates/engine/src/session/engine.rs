@@ -653,12 +653,15 @@ impl SessionsEngine {
         // A quick chat's scratch folder lives under the host's temp dir,
         // which a reboot may have emptied: recreate it so the run spawns.
         crate::session::scratch::ensure_for_run(chat_id, &request.cwd);
-        // A bot's folder lives under the profile store; recreate it the same way.
+        // A bot's folder lives under the profile store; recreate it the same
+        // way. A bot also refuses the Runtime commands that would widen its
+        // tools (`/scripts` turns codemode back on under `--tools`).
         if let Some(chat) = self
             .inner
             .workspace()
             .and_then(|ws| ws.chat(chat_id).ok().flatten())
         {
+            crate::bots::refuse_widening_command(&chat, &request.prompt)?;
             crate::bots::ensure_folder_for_run(&chat, &request.cwd);
         }
         // Visible prompt = the doc/user entry truth; the harness gets the

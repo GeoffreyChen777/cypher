@@ -637,6 +637,8 @@ pub struct Composer {
     slash_modes_task: Option<Task<()>>,
     slash_modes_request: u64,
     current_key: String,
+    /// The resting placeholder last put in the input ([`Self::idle_placeholder`]).
+    shown_placeholder: SharedString,
     sending: bool,
     failure: Option<SharedString>,
     wizard: Option<Wizard>,
@@ -939,6 +941,7 @@ impl Composer {
             slash_modes_request: 0,
             slash_generation: 0,
             current_key,
+            shown_placeholder: "Do anything…".into(),
             sending: false,
             failure: None,
             wizard: None,
@@ -976,6 +979,13 @@ impl Composer {
             _input_events: input_events,
         };
         composer.prefetch_slash_commands(cx);
+        let placeholder = composer.idle_placeholder(cx);
+        if placeholder != composer.shown_placeholder {
+            composer.shown_placeholder = placeholder.clone();
+            composer
+                .input
+                .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+        }
         composer
     }
 
@@ -988,6 +998,24 @@ impl Composer {
 
     pub fn is_sending(&self) -> bool {
         self.sending
+    }
+
+    /// The empty input's prompt: "Ask <bot>…" in a bot's conversation.
+    pub(super) fn idle_placeholder(&self, cx: &App) -> SharedString {
+        match self.state.read(cx).selected_bot() {
+            Some(bot) if matches!(self.transport, ComposerTransport::Main) => {
+                format!("Ask {}…", bot.name).into()
+            }
+            _ => "Do anything…".into(),
+        }
+    }
+
+    /// Send `text` as if typed (a suggested question on a bot's start
+    /// screen). A draft already in the input is replaced.
+    pub fn send_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+        self.on_submit(cx);
+        window.focus(&self.input.focus_handle(cx), cx);
     }
 
     #[cfg(test)]

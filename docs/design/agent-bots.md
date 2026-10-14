@@ -193,10 +193,9 @@ Scope is enforced in the engine, not the prompt:
    except through scoped tools. Permission control is therefore irrelevant to bot runs.
    Claude models keep to the list too: the Claude Code bridge's provider path starts
    Claude Code with no built-in tools and passes it only Pi's.
-   One gap to close before peer threads (P2): the Runtime's codemode extension honours a
-   `/scripts` typed in the chat even under `--tools`, which would re-enable codemode for
-   that run. Harmless while only the owner can type into a bot chat; peer threads must not
-   accept slash commands, and codemode should ignore runs that carry `CYPHER_BOT_ID`.
+   The Runtime's codemode extension honours a `/scripts` typed in the chat even under
+   `--tools`, so the engine refuses `/scripts`, `/orchestrate` and `/goal` in a bot chat
+   before the prompt reaches Pi. Peer threads (P2) must accept no slash commands at all.
 2. **Engine-side checks.** Each bot tool is a thin extension wrapper over a bot RPC that
    carries the calling chat id. The engine maps the chat id to (bot, role, connection),
    computes the effective scope, and filters results. An id outside the scope answers
@@ -408,6 +407,15 @@ Desktop:
   robot face, a symbol or the initial, and a colour), Permissions (project access
   Selected / All / None, Read conversations, Archived sessions) with a live access count,
   and instructions. Enter creates or saves; Delete is in the footer when editing.
+- **Bot conversation** (P0): the tab wears the bot's avatar. A header over the chat names
+  the bot, its host and a one-line access summary ("Billing · reads conversations"),
+  with a Settings button. A new bot opens on a start screen (who it is, what it can see,
+  and suggested questions a click asks). Bot tool calls read as what they did ("Search
+  sessions · "invoice"", "Read session · <title>"; "Looked over your work · read 2
+  sessions"), and the bot cites sessions as `cypher://session/<id>` links that open in
+  the app. The rail has no terminal and no dock, only the bot's settings; the composer
+  asks "Ask <bot>…" and leaves out Attach files, `/permissions` and the commands the
+  engine refuses in a bot chat (`/scripts`, `/orchestrate`, `/goal`).
 - **Bot dock tab** (P2+, right dock of a bot chat) with four panes:
   - *Scope*: project tree grouped by device with checkboxes, per-session overrides,
     capability toggles, and a live "this bot can see N sessions in M projects" summary.

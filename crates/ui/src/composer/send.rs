@@ -140,10 +140,21 @@ impl Composer {
                     if released {
                         self.wizard = None;
                         self.advance_task = None;
+                        let placeholder = self.idle_placeholder(cx);
                         self.input
-                            .update(cx, |input, cx| input.set_placeholder("Do anything…", cx));
+                            .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
                     }
                 }
+            }
+        }
+        // The resting prompt follows the chat ("Ask <bot>…"), which can name
+        // a bot only once its row has arrived; a card's own prompt wins.
+        if self.wizard.is_none() {
+            let placeholder = self.idle_placeholder(cx);
+            if placeholder != self.shown_placeholder {
+                self.shown_placeholder = placeholder.clone();
+                self.input
+                    .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
             }
         }
         if self.slash.token.is_some() {

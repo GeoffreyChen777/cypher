@@ -105,6 +105,81 @@ fn script_summary(code: &str) -> String {
         .to_owned()
 }
 
+/// An agent bot's read tools (`crate::BOT_TOOLS`), by what they do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BotToolKind {
+    ListProjects,
+    ListSessions,
+    SearchSessions,
+    ReadSession,
+}
+
+/// The bot tool a call is, when it is one.
+pub fn bot_tool_kind(call: &crate::ToolCall) -> Option<BotToolKind> {
+    let crate::ToolCall::Unknown { name, .. } = call else {
+        return None;
+    };
+    Some(match name.as_str() {
+        "list_projects" => BotToolKind::ListProjects,
+        "list_sessions" => BotToolKind::ListSessions,
+        "search_sessions" => BotToolKind::SearchSessions,
+        "read_session" => BotToolKind::ReadSession,
+        _ => return None,
+    })
+}
+
+/// A bot tool chip's label and detail: "Search sessions" · `"invoice" in
+/// Billing`. A read names the session by id; viewports that know the title
+/// show that instead.
+fn bot_chip_content(
+    kind: BotToolKind,
+    input: Option<&serde_json::Value>,
+) -> (&'static str, String) {
+    let arg = |key: &str| {
+        input
+            .and_then(|input| input.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let in_project = |text: String| match arg("project") {
+        Some(project) if text.is_empty() => format!("in {project}"),
+        Some(project) => format!("{text} in {project}"),
+        None => text,
+    };
+    match kind {
+        BotToolKind::ListProjects => ("List projects", String::new()),
+        BotToolKind::ListSessions => {
+            let mut filters: Vec<String> = Vec::new();
+            if arg("status").as_deref() == Some("active") {
+                filters.push("active".into());
+            }
+            if let Some(hours) = input
+                .and_then(|input| input.get("since_hours"))
+                .and_then(serde_json::Value::as_f64)
+                .filter(|h| h.is_finite() && *h > 0.0)
+            {
+                filters.push(if hours >= 24.0 && hours % 24.0 == 0.0 {
+                    format!("last {}d", (hours / 24.0) as u64)
+                } else {
+                    format!("last {}h", hours.ceil() as u64)
+                });
+            }
+            ("List sessions", in_project(filters.join(", ")))
+        }
+        BotToolKind::SearchSessions => (
+            "Search sessions",
+            in_project(
+                arg("query")
+                    .map(|query| format!("\"{query}\""))
+                    .unwrap_or_default(),
+            ),
+        ),
+        BotToolKind::ReadSession => ("Read session", arg("session_id").unwrap_or_default()),
+    }
+}
+
 /// Per-kind chip label + one-line detail. Labels match zeron's `describeTool`
 /// (tool-chip.tsx) exactly, so the two viewports name a tool identically.
 pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
@@ -114,6 +189,9 @@ pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
 
 fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
     use crate::ToolCall;
+    if let (Some(kind), ToolCall::Unknown { input, .. }) = (bot_tool_kind(call), call) {
+        return bot_chip_content(kind, input.as_ref());
+    }
     match call {
         ToolCall::Exec { command } => ("Run", command.clone()),
         ToolCall::ReadFile { path } => ("Read", path.clone()),
@@ -214,6 +292,8 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
     let mut fetches = 0usize;
     let mut todos = 0usize;
     let mut scripts = 0usize;
+    let mut listings = 0usize;
+    let mut sessions_read = 0usize;
     let mut other = 0usize;
     let mut failed = 0usize;
     for (call, is_error) in tools {
@@ -241,6 +321,11 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
             ToolCall::Todo { .. } => todos += 1,
             ToolCall::Unknown { name, .. } if name == CODEMODE_TOOL => scripts += 1,
             ToolCall::Unknown { name, .. } if name == TOOL_SEARCH_TOOL => searches += 1,
+            ToolCall::Unknown { .. } if let Some(kind) = bot_tool_kind(call) => match kind {
+                BotToolKind::SearchSessions => searches += 1,
+                BotToolKind::ReadSession => sessions_read += 1,
+                BotToolKind::ListProjects | BotToolKind::ListSessions => listings += 1,
+            },
             ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => other += 1,
         }
     }
@@ -259,8 +344,17 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
     if !edited.is_empty() {
         segments.push(format!("edited {}", plural(edited.len(), "file", "files")));
     }
+    if listings > 0 {
+        segments.push("looked over your work".to_string());
+    }
     if reads > 0 {
         segments.push(format!("read {}", plural(reads, "file", "files")));
+    }
+    if sessions_read > 0 {
+        segments.push(format!(
+            "read {}",
+            plural(sessions_read, "session", "sessions")
+        ));
     }
     if searches > 0 {
         segments.push(format!("searched {}", plural(searches, "time", "times")));
@@ -296,6 +390,51 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
 mod tests {
     use super::*;
     use crate::ToolCall;
+
+    fn bot_call(name: &str, input: serde_json::Value) -> ToolCall {
+        ToolCall::Unknown {
+            name: name.into(),
+            input: Some(input),
+        }
+    }
+
+    #[test]
+    fn bot_tools_read_as_what_they_do() {
+        let chip = |name, input| tool_chip_content(&bot_call(name, input));
+        assert_eq!(
+            chip("list_projects", serde_json::json!({})),
+            ("List projects", String::new())
+        );
+        assert_eq!(
+            chip(
+                "list_sessions",
+                serde_json::json!({"project": "Billing", "status": "active", "since_hours": 48})
+            ),
+            ("List sessions", "active, last 2d in Billing".to_string())
+        );
+        assert_eq!(
+            chip("list_sessions", serde_json::json!({"since_hours": 0.5})),
+            ("List sessions", "last 1h".to_string())
+        );
+        assert_eq!(
+            chip("search_sessions", serde_json::json!({"query": " invoice "})),
+            ("Search sessions", "\"invoice\"".to_string())
+        );
+        assert_eq!(
+            chip("read_session", serde_json::json!({"session_id": "c1"})),
+            ("Read session", "c1".to_string())
+        );
+        let summary = tool_group_summary(&[
+            (bot_call("list_sessions", serde_json::json!({})), false),
+            (bot_call("search_sessions", serde_json::json!({})), false),
+            (bot_call("read_session", serde_json::json!({})), false),
+            (bot_call("read_session", serde_json::json!({})), true),
+        ]);
+        assert_eq!(
+            summary,
+            "Looked over your work · read 2 sessions · searched 1 time · 1 failed"
+        );
+    }
 
     #[test]
     fn subagent_chips_use_the_generic_tool_label() {

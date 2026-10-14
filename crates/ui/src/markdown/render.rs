@@ -832,9 +832,9 @@ fn flat_text_element(
         let (ranges, urls): (Vec<_>, Vec<_>) = flat.links.iter().cloned().unzip();
         let id: SharedString = format!("{}-t{ix}", opts.row_key).into();
         InteractiveText::new(id, styled)
-            .on_click(ranges, move |clicked_ix, _window, cx| {
+            .on_click(ranges, move |clicked_ix, window, cx| {
                 if let Some(url) = urls.get(clicked_ix) {
-                    cx.open_url(url);
+                    crate::markdown::session_link::open_link(url, window, cx);
                 }
             })
             .into_any_element()

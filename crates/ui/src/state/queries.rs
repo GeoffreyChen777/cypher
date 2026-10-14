@@ -434,6 +434,18 @@ impl AppState {
         self.chats.iter().find(|c| c.id == id)
     }
 
+    /// The bot whose conversation `chat_id` is.
+    pub fn bot_for_chat(&self, chat_id: &str) -> Option<&cypher_proto::Bot> {
+        let chat = self.chats.iter().find(|c| c.id == chat_id)?;
+        let marker = chat.bot.as_ref()?;
+        self.bots.iter().find(|b| b.id == marker.bot_id)
+    }
+
+    /// The bot whose conversation is selected.
+    pub fn selected_bot(&self) -> Option<&cypher_proto::Bot> {
+        self.bot_for_chat(self.selected_chat.as_deref()?)
+    }
+
     pub fn gate(&self) -> GatePhase {
         gate_phase(&self.connection, self.workspace_scope, self.auth.as_ref())
     }
