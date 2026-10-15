@@ -190,7 +190,7 @@ test("a command that needs more fails in the sandbox; escalated and approved, it
   assert.match(dialogs[0].title, /^Run this command outside the sandbox\?\n\nContext:\nPurpose: Update the other repo\n/);
   assert.equal(results[1].isError, false, results[1].text);
   assert.match(results[1].text, /PRIVATE KEY/);
-  assert.match(results[1].text, /Ran outside the sandbox \(approved once; it could not be allowed for the chat, because it writes ~\/Developer\/other\/outside\.txt, which commands in the sandbox can't\)\./);
+  assert.match(results[1].text, /Ran outside the sandbox \(approved once; it could not be allowed for the chat, because it writes ~\/Developer\/other\/outside\.txt, which commands in the sandbox can't\. Next time, escalate only the command that needs it and do the rest in the sandbox\)\./);
   assert.equal(readFileSync(join(other, "outside.txt"), "utf8"), "outside\n");
 });
 

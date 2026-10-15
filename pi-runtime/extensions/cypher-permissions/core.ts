@@ -36,7 +36,7 @@ import { decide, describe } from "./policy.ts";
 import type { Verdict } from "./policy.ts";
 import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs } from "./sandbox.ts";
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
-import { categoryPattern, describePattern, fileSha256, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch } from "./commands.ts";
+import { categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
 import { parseShell, UNKNOWN } from "./shell.ts";
 import type { ParsedLine, SimpleCommand } from "./shell.ts";
@@ -57,7 +57,7 @@ export interface RequestContext {
   ui: UiLike;
   signal?: AbortSignal;
   branch(): readonly Entry[];
-  /** One completion from the judge model; undefined on any failure. */
+  /** One completion from the judge model; undefined when it gives none, or it throws with why. */
   complete?(system: string, prompt: string, signal: AbortSignal): Promise<string | undefined>;
   abort?(): void;
   /** The tool call a dialog gates, so Cypher files the dialog under it. */
@@ -529,19 +529,29 @@ export class Permissions {
     const { userMessages, recentToolCalls } = conversationContext(ctx.branch());
     const judgeRequest: JudgeRequest = { ...request, level: this.level, workspaceRoots: this.roots, userMessages, recentToolCalls };
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.config.judge.timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.config.judge.timeoutMs);
     const onAbort = () => controller.abort();
     ctx.signal?.addEventListener("abort", onAbort, { once: true });
     let text: string | undefined;
+    let failure: string | undefined;
     try {
       text = await ctx.complete(JUDGE_SYSTEM_PROMPT, judgePrompt(judgeRequest), controller.signal);
-    } catch {
+    } catch (error) {
       text = undefined;
+      failure = error instanceof Error ? error.message.trim() : undefined;
     } finally {
       clearTimeout(timer);
       ctx.signal?.removeEventListener("abort", onAbort);
     }
-    if (text === undefined) return { decision: "ask-user", reason: "The reviewing model did not answer (it failed or timed out)." };
+    if (text === undefined) {
+      if (timedOut) return { decision: "ask-user", reason: `The reviewing model did not answer within ${Math.round(this.config.judge.timeoutMs / 1000)} seconds.` };
+      const why = failure ? `: ${failure.length > 200 ? `${failure.slice(0, 200)}…` : failure}` : ".";
+      return { decision: "ask-user", reason: `The reviewing model failed${why}` };
+    }
     return parseVerdict(text, this.config.judge.minConfidence);
   }
 
@@ -736,13 +746,29 @@ export class Permissions {
     const movesInLoop = commands.some((command) => command.loop && moves(command));
     for (const command of commands) {
       if (command.loop && movesInLoop) here = undefined;
-      out.push({ ...command, cwd: here, inert: isInert(command.words) });
+      out.push({ ...command, cwd: here, inert: isInert(command.words) || this.harmlessFilter(command.words, here) });
       if (!moves(command)) continue;
       const [program, target, ...rest] = command.words;
       const certain = program === "cd" && target !== undefined && target !== UNKNOWN && target !== "-" && rest.length === 0 && !command.scoped && !process.env.CDPATH;
       here = certain && here !== undefined ? resolvePath(here, target) : undefined;
     }
     return out;
+  }
+
+  /**
+   * Whether a command is a filter that needs no leave ([`filterInputs`]):
+   * the system's program, not one in a place the agent can write, reading
+   * only its input and files commands in the sandbox may read.
+   */
+  private harmlessFilter(words: readonly string[], cwd: string | undefined): boolean {
+    const inputs = filterInputs(words);
+    if (inputs === undefined) return false;
+    const resolved = this.resolveIn(words[0], cwd);
+    if (!resolved || this.writableRoots().some((root) => isUnder(resolved, root))) return false;
+    return inputs.every((path) => {
+      if (cwd === undefined && !isAbsolute(path)) return false;
+      return this.verdict("read", this.classify(path, cwd)).kind === "allow";
+    });
   }
 
   /**
@@ -834,7 +860,8 @@ export class Permissions {
       for (const pattern of proposal.patterns ?? []) {
         const error = patternError(pattern);
         if (error) return { ok: false, reason: `Invalid pattern ${JSON.stringify(pattern)}: ${error}` };
-        const matched = pending.find((item) => patternMatches(pattern, item.words));
+        // A filter needs no pattern, but the agent may still propose one for it.
+        const matched = commands.find((item) => patternMatches(pattern, item.words));
         if (!matched) return { ok: false, reason: `The pattern \`${describePattern(pattern)}\` does not match this command; propose patterns that cover it.` };
         const pin = pinned(matched.words[0], matched.cwd);
         if (!pin) return { ok: false, reason: `\`${matched.words[0]}\` was not found.` };
