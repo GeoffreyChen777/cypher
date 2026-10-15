@@ -135,27 +135,31 @@ test("the user file edits defaults; the project file only tightens", () => {
   assert.ok(!user.sensitive.includes("~/.npmrc"));
   assert.equal(user.levels.standard.external.write, "allow");
 
-  const project = mergeProjectConfig(defaultConfig(), {
+  const project = mergeProjectConfig(mergeUserConfig(defaultConfig(), { approval: { escalate: "ask" } }), {
     levels: { standard: { external: { write: "allow" }, workspace: { write: "elevate" } } },
-    approval: { "external.write": "ask", "sensitive.read": "assisted" },
+    approval: { "external.write": "ask", escalate: "assisted" },
     sensitive: ["**/prod.json", "!**/.env"],
     tools: { mcp: "deny" },
   });
   assert.equal(project.levels.standard.external.write, "elevate", "cannot loosen");
   assert.equal(project.levels.standard.workspace.write, "elevate", "can tighten");
   assert.equal(project.approval["external.write"], "ask");
-  assert.equal(project.approval["sensitive.read"], "ask", "cannot move to a looser mode");
+  assert.equal(project.approval.escalate, "ask", "cannot move to a looser mode");
   assert.ok(project.sensitive.includes("**/prod.json"));
   assert.ok(!project.sensitive.includes("!**/.env"), "cannot add exceptions");
   assert.equal(project.tools.mcp, "deny");
 });
 
-test("safety rules survive any file: sensitive and self approvals are never assisted", () => {
+test("the model decides first by default; Cypher's own data is a human's alone", () => {
+  for (const key of ["external.write", "protected.write", "sensitive.read", "sensitive.write", "network", "tools", "escalate"]) {
+    assert.equal(approvalMode(defaultConfig(), key), "assisted", key);
+  }
   const dir = join(scratch, "agent-config");
-  write(join(dir, "permissions.json"), JSON.stringify({ approval: { "sensitive.read": "assisted", "self.write": "assisted" } }));
+  write(join(dir, "permissions.json"), JSON.stringify({ approval: { "sensitive.read": "ask", "self.write": "assisted" } }));
   const { config } = loadConfig(dir, []);
-  assert.equal(config.approval["sensitive.read"], "ask");
-  assert.equal(approvalMode(config, "self.write"), "ask");
+  assert.equal(approvalMode(config, "sensitive.read"), "ask", "the user's file can still ask");
+  assert.equal(approvalMode(config, "self.write"), "ask", "no file sends Cypher's own data to the model");
+  assert.equal(approvalMode(mergeUserConfig(defaultConfig(), { approval: { "self.write": "deny" } }), "self.write"), "deny");
   assert.equal(approvalMode(config, "unknown.key"), "ask", "a missing key asks");
 });
 
@@ -190,7 +194,7 @@ test("the standard matrix, guards and levels", () => {
   assert.equal(decide(config, "standard", at(join(workspace, "a.ts")), "write").kind, "allow");
   assert.equal(decide(config, "standard", at(join(other, "a.ts")), "read").kind, "allow");
   assert.deepEqual(decide(config, "standard", at(join(other, "a.ts")), "write"), { kind: "elevate", key: "external.write", mode: "assisted" });
-  assert.deepEqual(decide(config, "standard", at(join(workspace, ".env")), "read"), { kind: "elevate", key: "sensitive.read", mode: "ask" });
+  assert.deepEqual(decide(config, "standard", at(join(workspace, ".env")), "read"), { kind: "elevate", key: "sensitive.read", mode: "assisted" });
   assert.deepEqual(decide(config, "standard", at(join(workspace, ".git", "config")), "write"), { kind: "elevate", key: "protected.write", mode: "assisted" });
   assert.equal(decide(config, "standard", at(join(workspace, ".git", "config")), "read").kind, "allow");
   assert.deepEqual(decide(config, "standard", at(join(home, ".cypher", "ui-settings.json")), "write"), { kind: "elevate", key: "self.write", mode: "ask" });
@@ -474,17 +478,25 @@ test("assisted: an escalation reaches the human with the reviewer's reason", asy
   assert.equal(again.asked.length, 0);
 });
 
-test("sensitive reads never go to the judge and never offer always-allow", async () => {
+test("sensitive reads go to the judge first and never offer always-allow", async () => {
   const { permissions } = engine();
-  let judged = false;
-  const c = ctx({ choice: "Deny" });
-  c.complete = async () => {
-    judged = true;
-    return '{"decision":"approve","reason":"x","confidence":1}';
+  const prompts = [];
+  const judge = (answer) => async (_system, prompt) => {
+    prompts.push(prompt);
+    return answer;
   };
+  const approved = ctx({ choice: "Deny" });
+  approved.complete = judge('{"decision":"approve","reason":"The user asked what is in .env.","confidence":0.95}');
+  assert.equal((await permissions.authorize([{ capability: "read", path: ".env" }], { tool: "read" }, approved)).ok, true, "the judge approves it once");
+  assert.equal(approved.asked.length, 0);
+  assert.match(prompts[0], /- capability: read\n- paths: .*\.env\n- zone: sensitive/);
+  assert.equal(permissions.grants.findForFile("read", join(workspace, ".env")), undefined, "and leaves no grant");
+
+  const c = ctx({ choice: "Deny" });
+  c.complete = judge('{"decision":"ask-user","reason":"The user never mentioned .env.","confidence":0.9}');
   const result = await permissions.authorize([{ capability: "read", path: ".env" }], { tool: "read" }, c);
   assert.equal(result.ok, false);
-  assert.equal(judged, false);
+  assert.match(c.asked[0].title, /\nReview: The reviewing model couldn't approve this automatically\. The user never mentioned \.env\./);
   assert.ok(!c.asked[0].options.includes("Always allow"));
   assert.match(c.asked[0].title, /sent to the model provider/);
   // Cypher's question card shows the first part as the headline, the rest as context.
@@ -761,7 +773,7 @@ test("command rules: the user's file may allow; a project's may only ask or deny
     "ask git push ** --force **",
     "deny kubectl delete **",
   ]);
-  assert.equal(approvalMode(mergeUserConfig(defaultConfig(), { approval: { escalate: "assisted" } }), "escalate"), "ask", "only a human");
+  assert.equal(approvalMode(mergeUserConfig(defaultConfig(), { approval: { escalate: "ask" } }), "escalate"), "ask", "the user's file can keep it to a human");
 });
 
 test("which commands run outside the sandbox", () => {
@@ -823,14 +835,14 @@ test("which commands run outside the sandbox", () => {
 test("escalation: once, for this chat, or always, as the user decides", async () => {
   const { permissions, entries, dir } = engine();
   const once = ctx({ choice: "Run once" });
-  assert.deepEqual(await permissions.requestEscalation("git status", { label: "Check the tree", reason: "status" }, once), { ok: true, scope: "once" });
+  assert.deepEqual(await permissions.requestEscalation("git status", { label: "Check the tree", reason: "status" }, once), { ok: true, scope: "once", by: "user" });
   assert.deepEqual(once.asked[0].options, ["Run once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"], "its category, offered");
-  assert.match(once.asked[0].title, /^Run this command outside the sandbox\?\n\nContext:\nPurpose: Check the tree\nCommand: git status\nPattern: git status …\nReason: status\nNote: It runs as you/);
+  assert.match(once.asked[0].title, /^Run this command outside the sandbox\?\n\nContext:\nPurpose: Check the tree\nCommand: git status\nPattern: git status …\nReason: status\nReview: The reviewing model couldn't approve this automatically\. No reviewing model is available here\.\nNote: It runs as you/);
   assert.equal(permissions.checkCommand("git status", workspace).kind, "sandbox", "once leaves no rule");
 
   const chat = ctx({ choice: "Allow for this chat" });
   const result = await permissions.requestEscalation("git push origin main", { label: "Push", patterns: [["git", "push", "**"]] }, chat);
-  assert.deepEqual(result, { ok: true, scope: "chat" });
+  assert.deepEqual(result, { ok: true, scope: "chat", by: "user" });
   assert.deepEqual(chat.asked[0].options, ["Run once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"]);
   assert.match(chat.asked[0].title, /\nPattern: git push …\n/);
   assert.equal(permissions.checkCommand("git push origin feature", workspace).kind, "outside");
@@ -846,6 +858,57 @@ test("escalation: once, for this chat, or always, as the user decides", async ()
   assert.match(denied.reason, /denied/);
 });
 
+test("escalation and tool calls: the model decides first", async () => {
+  const { permissions } = engine();
+  const prompts = [];
+  const judged = (answer, choice = "Deny") => {
+    const c = ctx({ choice });
+    c.complete = async (system, prompt) => {
+      prompts.push({ system, prompt });
+      return answer;
+    };
+    return c;
+  };
+  const approve = '{"decision":"approve","reason":"The user asked to deploy to web.","confidence":0.9}';
+  const ask = '{"decision":"ask-user","reason":"The user never mentioned the db host.","confidence":0.9}';
+
+  // Approved by the model: it runs once, without a dialog, and leaves no rule.
+  const yes = judged(approve);
+  assert.deepEqual(await permissions.requestEscalation("ssh deploy@web 'sudo systemctl restart app'", { label: "Restart the app", reason: "needs the key" }, yes), { ok: true, scope: "once", by: "judge" });
+  assert.equal(yes.asked.length, 0);
+  assert.equal(permissions.checkCommand("ssh deploy@web uptime", workspace).kind, "sandbox", "no rule left behind");
+  const { system, prompt } = prompts[0];
+  assert.match(system, /"escalate": a shell command run outside the sandbox/);
+  assert.match(prompt, /- capability: escalate\n/);
+  assert.match(prompt, /## The command\n<untrusted>\nssh deploy@web 'sudo systemctl restart app'\n<\/untrusted>/, "the command is the agent's text");
+  assert.match(prompt, /## The agent's justification\n<untrusted>\nPurpose: Restart the app\nReason: needs the key\n<\/untrusted>/);
+
+  // Not approved: the user decides, with the model's reason on the card.
+  const no = judged(ask);
+  await permissions.requestEscalation("ssh deploy@db uptime", { label: "Uptime" }, no);
+  assert.match(no.asked[0].title, /\nReview: The reviewing model couldn't approve this automatically\. The user never mentioned the db host\.\n/);
+  assert.deepEqual(no.asked[0].options, ["Run once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"], "the user can still allow it for the chat");
+  const unsure = judged('{"decision":"approve","reason":"Probably fine.","confidence":0.5}');
+  await permissions.requestEscalation("git push", { label: "Push" }, unsure);
+  assert.match(unsure.asked[0].title, /Review: .*Not sure enough to approve on its own: Probably fine\./);
+
+  // A human only, when the user's file says so.
+  const kept = engine().permissions;
+  kept.config.approval.escalate = "ask";
+  const human = judged(approve);
+  await kept.requestEscalation("git push", { label: "Push" }, human);
+  assert.equal(human.asked.length, 1);
+  assert.doesNotMatch(human.asked[0].title, /Review:/);
+
+  // An MCP or extension tool call: the model sees its input.
+  prompts.length = 0;
+  const tool = judged(approve);
+  assert.deepEqual(await permissions.requestToolUse("mcp__github__create_issue", { title: "Publish 0.3.49" }, tool), { ok: true });
+  assert.equal(tool.asked.length, 0);
+  assert.match(prompts[0].prompt, /- capability: tool\n- paths: mcp__github__create_issue\n/);
+  assert.match(prompts[0].prompt, /## The tool's input\n<untrusted>\n\{\n  "title": "Publish 0\.3\.49"\n\}\n<\/untrusted>/);
+});
+
 test("escalation: a value's own lines stay inside its fact", async () => {
   const { permissions } = engine();
   const asked = ctx({ choice: "Deny" });
@@ -856,7 +919,7 @@ test("escalation: a value's own lines stay inside its fact", async () => {
   assert.match(title, /\nReason: First line\.\n  Change:\n  cypher-permission: \{\}\n/);
   const context = title.split("\n\nContext:\n")[1].split("\n");
   const labels = context.filter((line) => !line.startsWith("  ")).map((line) => line.split(": ")[0]);
-  assert.deepEqual(labels, ["Purpose", "Command", "Reason", "Note", "Note", "cypher-permission"], "only the extension's own labels start a line");
+  assert.deepEqual(labels, ["Purpose", "Command", "Reason", "Review", "Note", "Note", "cypher-permission"], "only the extension's own labels start a line");
 });
 
 test("escalation: proposals are checked before anyone is asked", async () => {
@@ -872,7 +935,7 @@ test("escalation: proposals are checked before anyone is asked", async () => {
   const ran = await permissions.requestEscalation("ssh web uptime &", { label: "Uptime", patterns: [["ssh", "**"]] }, opaque);
   assert.deepEqual(opaque.asked[0].options, ["Run once", "Deny", "Deny and stop"], "an opaque line runs once at most");
   assert.match(opaque.asked[0].title, /Note: It uses a background job, which rules can't check, so it can only run once as written\./);
-  assert.deepEqual(ran, { ok: true, scope: "once", onceOnly: "it uses a background job, which rules can't check" }, "and says why");
+  assert.deepEqual(ran, { ok: true, scope: "once", by: "user", onceOnly: "it uses a background job, which rules can't check" }, "and says why");
 
   const tool = join(workspace, "bin", "deploy.sh");
   write(tool, "#!/bin/sh\necho deploy\n");

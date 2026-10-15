@@ -159,7 +159,7 @@ const DOMAIN_ONCE = "Allow for this command";
 const RUN_ONCE = "Run once";
 
 const ESCALATE_HINT =
-  "If the command needs what the sandbox withholds (files outside the workspace, credentials, keys, the keychain, other processes, system services), run it again with `escalate`: the user decides whether it runs outside the sandbox.";
+  "If the command needs what the sandbox withholds (files outside the workspace, credentials, keys, the keychain, other processes, system services), run it again with `escalate`: a reviewing model or the user decides whether it runs outside the sandbox.";
 
 /** What command rules say about one bash call. */
 export type CommandCheck =
@@ -516,6 +516,35 @@ export class Permissions {
     this.appendEntry?.(ROOT_ENTRY, { path, action: "remove", chatId: this.chatId });
   }
 
+  /**
+   * Ask the reviewing model about one request. It approves, or says why it
+   * could not; a model that cannot run (none here, an error, a timeout)
+   * never approves.
+   */
+  private async review(
+    request: Omit<JudgeRequest, "level" | "workspaceRoots" | "userMessages" | "recentToolCalls">,
+    ctx: RequestContext,
+  ): Promise<{ decision: "approve" | "ask-user"; reason: string }> {
+    if (!ctx.complete) return { decision: "ask-user", reason: "No reviewing model is available here." };
+    const { userMessages, recentToolCalls } = conversationContext(ctx.branch());
+    const judgeRequest: JudgeRequest = { ...request, level: this.level, workspaceRoots: this.roots, userMessages, recentToolCalls };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.config.judge.timeoutMs);
+    const onAbort = () => controller.abort();
+    ctx.signal?.addEventListener("abort", onAbort, { once: true });
+    let text: string | undefined;
+    try {
+      text = await ctx.complete(JUDGE_SYSTEM_PROMPT, judgePrompt(judgeRequest), controller.signal);
+    } catch {
+      text = undefined;
+    } finally {
+      clearTimeout(timer);
+      ctx.signal?.removeEventListener("abort", onAbort);
+    }
+    if (text === undefined) return { decision: "ask-user", reason: "The reviewing model did not answer (it failed or timed out)." };
+    return parseVerdict(text, this.config.judge.minConfidence);
+  }
+
   private async elevate(
     request: {
       capability: Capability;
@@ -547,48 +576,26 @@ export class Permissions {
       paths,
     };
     // Model first: the judge either approves automatically or puts the
-    // question to the user with its reason. It never rejects, and a judge
-    // that cannot run (no model, an error, a timeout) also asks the user.
+    // question to the user with its reason.
     let judgeNote: string | undefined;
-    if (request.mode === "assisted" && !sensitive && !ctx.complete) {
-      judgeNote = "No reviewing model is available here.";
-    }
-    if (request.mode === "assisted" && !sensitive && ctx.complete) {
-      // A domain request reads as "network" to the judge, with the domain as its path.
-      const { userMessages, recentToolCalls } = conversationContext(ctx.branch());
+    if (request.mode === "assisted") {
       const first = request.classifications[0];
-      const judgeRequest: JudgeRequest = {
-        capability: request.domain !== undefined ? "network" : request.capability,
-        paths: request.domain !== undefined ? [request.domain] : paths,
-        zone: first?.zone ?? "external",
-        guard: first?.guard,
-        guardReason: first?.guard ? `matches ${first.match}` : undefined,
-        command: request.command,
-        tool: request.tool,
-        level: this.level,
-        workspaceRoots: this.roots,
-        diff: request.diff,
-        justification: request.justification,
-        userMessages,
-        recentToolCalls,
-      };
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.config.judge.timeoutMs);
-      const onAbort = () => controller.abort();
-      ctx.signal?.addEventListener("abort", onAbort, { once: true });
-      let text: string | undefined;
-      try {
-        text = await ctx.complete(JUDGE_SYSTEM_PROMPT, judgePrompt(judgeRequest), controller.signal);
-      } catch {
-        text = undefined;
-      } finally {
-        clearTimeout(timer);
-        ctx.signal?.removeEventListener("abort", onAbort);
-      }
-      const verdict =
-        text === undefined
-          ? { decision: "ask-user" as const, reason: "The reviewing model did not answer (it failed or timed out).", confidence: 0 }
-          : parseVerdict(text, this.config.judge.minConfidence);
+      const verdict = await this.review(
+        {
+          // A domain reads as "network" with the domain as its path; a tool call as "tool".
+          capability: request.domain !== undefined ? "network" : request.toolInput !== undefined ? "tool" : request.capability,
+          paths: request.domain !== undefined ? [request.domain] : request.toolInput !== undefined ? [request.tool] : paths,
+          zone: first?.zone ?? "external",
+          guard: first?.guard,
+          guardReason: first?.guard ? `matches ${first.match}` : undefined,
+          command: request.command,
+          tool: request.tool,
+          diff: request.diff,
+          input: request.toolInput,
+          justification: request.justification,
+        },
+        ctx,
+      );
       if (verdict.decision === "approve") {
         this.audit.write({ ...base, decision: "allow", decidedBy: "judge", reason: verdict.reason, scope: "once" });
         return { allowed: true, scope: "once", by: "judge" };
@@ -799,7 +806,7 @@ export class Permissions {
     command: string,
     proposal: EscalationProposal,
     ctx: RequestContext,
-  ): Promise<{ ok: true; scope: GrantScope; onceOnly?: string } | { ok: false; reason: string; abort?: boolean }> {
+  ): Promise<{ ok: true; scope: GrantScope; by: "judge" | "user"; onceOnly?: string } | { ok: false; reason: string; abort?: boolean }> {
     const mode = approvalModeFor(this.config, "escalate");
     const audit: AuditRecord = { tool: "bash", command, capability: "escalate", decision: "deny", decidedBy: "policy" };
     if (mode === "deny") {
@@ -858,6 +865,18 @@ export class Permissions {
       }
     }
     if (onceOnly) patterns.length = 0;
+    // Model first: it may run the command once; otherwise the user decides, with its reason.
+    let review: string | undefined;
+    if (mode === "assisted") {
+      const purpose = [proposal.label && `Purpose: ${proposal.label}`, proposal.reason && `Reason: ${proposal.reason}`].filter(Boolean).join("\n");
+      const verdict = await this.review({ capability: "escalate", paths: [], zone: "outside the sandbox", command, tool: "bash", justification: purpose || undefined }, ctx);
+      if (verdict.decision === "approve") {
+        this.audit.write({ ...audit, decision: "allow", decidedBy: "judge", reason: verdict.reason, scope: "once" });
+        return { ok: true, scope: "once", by: "judge", ...(onceOnly ? { onceOnly } : {}) };
+      }
+      review = verdict.reason;
+      audit.reviewer = review;
+    }
     if (!ctx.hasUI) {
       const reason = "Permission denied: running outside the sandbox needs approval and no one is here to approve it.";
       this.audit.write({ ...audit, reason });
@@ -868,6 +887,7 @@ export class Permissions {
     lines.push(fact("Command", command));
     for (const pattern of patterns) lines.push(fact("Pattern", describePattern(pattern.match)));
     if (proposal.reason) lines.push(fact("Reason", proposal.reason));
+    if (review) lines.push(fact("Review", `The reviewing model couldn't approve this automatically. ${review}`));
     lines.push("Note: It runs as you, with your files, keys, keychain and network.");
     if (patterns.some((pattern) => pattern.sha256)) lines.push("Note: A program here is in a writable place; approval covers its current contents only.");
     if (onceOnly) lines.push(fact("Note", `${onceOnly[0].toUpperCase()}${onceOnly.slice(1)}, so it can only run once as written.`));
@@ -878,7 +898,7 @@ export class Permissions {
     switch (choice) {
       case RUN_ONCE:
         this.audit.write({ ...audit, decision: "allow", decidedBy: "user", scope: "once" });
-        return { ok: true, scope: "once", ...(onceOnly ? { onceOnly } : {}) };
+        return { ok: true, scope: "once", by: "user", ...(onceOnly ? { onceOnly } : {}) };
       case HUMAN.chat:
         for (const pattern of patterns) {
           const grant = newGrant({ capability: "read", paths: [], pattern: pattern.match, label, sha256: pattern.sha256, scope: "chat", approvedBy: "user", chatId: this.chatId });
@@ -886,7 +906,7 @@ export class Permissions {
           this.appendEntry?.(GRANT_ENTRY, grant);
         }
         this.audit.write({ ...audit, decision: "allow", decidedBy: "user", scope: "chat" });
-        return { ok: true, scope: "chat" };
+        return { ok: true, scope: "chat", by: "user" };
       case HUMAN.always:
         for (const pattern of patterns) {
           const rule: CommandRule = { match: pattern.match, decision: "allow", label, sha256: pattern.sha256, createdAt: new Date().toISOString() };
@@ -894,7 +914,7 @@ export class Permissions {
           this.config.commands.push(rule);
         }
         this.audit.write({ ...audit, decision: "allow", decidedBy: "user", scope: "always" });
-        return { ok: true, scope: "always" };
+        return { ok: true, scope: "always", by: "user" };
       case HUMAN.stop:
         this.audit.write({ ...audit, decision: "abort", decidedBy: "user" });
         ctx.abort?.();

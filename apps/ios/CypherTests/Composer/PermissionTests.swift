@@ -137,6 +137,7 @@ final class PermissionTests: XCTestCase {
         XCTAssertNotNil(params["futureField"], "a field this app does not know survives a save")
         XCTAssertEqual((params["approval"] as? [String: Any])?["escalate"] as? String, "deny")
         XCTAssertEqual((params["approval"] as? [String: Any])?["externalWrite"] as? String, "assisted")
+        XCTAssertEqual(settings.approval("sensitiveRead"), "assisted", "a mode not set is the model's")
         XCTAssertEqual((params["commands"] as? [Any])?.count, 1)
     }
 }

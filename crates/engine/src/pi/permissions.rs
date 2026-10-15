@@ -148,26 +148,28 @@ pub struct PermissionApprovals {
     /// command.
     pub network: ApprovalMode,
     pub tools: ApprovalMode,
-    /// Running a command outside the sandbox: `ask` or `deny`, never the
-    /// judge.
-    #[serde(default = "ask")]
+    /// Running a command outside the sandbox.
+    #[serde(default = "assisted")]
     pub escalate: ApprovalMode,
 }
 
-fn ask() -> ApprovalMode {
-    ApprovalMode::Ask
+fn assisted() -> ApprovalMode {
+    ApprovalMode::Assisted
 }
 
+/// Model first everywhere, as the extension's `DEFAULT_APPROVAL`: the judge
+/// approves what plainly serves the user's request and asks them about the
+/// rest. Writes to Cypher's own data have no setting: always a human.
 impl Default for PermissionApprovals {
     fn default() -> Self {
         Self {
             external_write: ApprovalMode::Assisted,
             protected_write: ApprovalMode::Assisted,
-            sensitive_read: ApprovalMode::Ask,
-            sensitive_write: ApprovalMode::Ask,
+            sensitive_read: ApprovalMode::Assisted,
+            sensitive_write: ApprovalMode::Assisted,
             network: ApprovalMode::Assisted,
-            tools: ApprovalMode::Ask,
-            escalate: ApprovalMode::Ask,
+            tools: ApprovalMode::Assisted,
+            escalate: ApprovalMode::Assisted,
         }
     }
 }
@@ -400,7 +402,6 @@ pub fn from_json(root: &Value) -> PiPermissionSettings {
             }
         }
     }
-    settings.approval = clamp_sensitive(settings.approval);
     if let Some(model) = root
         .get("judge")
         .and_then(|judge| judge.get("model"))
@@ -451,30 +452,8 @@ pub fn from_json(root: &Value) -> PiPermissionSettings {
     settings
 }
 
-/// Sensitive requests and commands leaving the sandbox never go to the judge.
-fn clamp_sensitive(mut approvals: PermissionApprovals) -> PermissionApprovals {
-    for mode in [
-        &mut approvals.sensitive_read,
-        &mut approvals.sensitive_write,
-        &mut approvals.escalate,
-    ] {
-        if *mode == ApprovalMode::Assisted {
-            *mode = ApprovalMode::Ask;
-        }
-    }
-    approvals
-}
-
 impl PiPermissionSettings {
     pub fn validate(&self) -> Result<(), String> {
-        if self.approval.sensitive_read == ApprovalMode::Assisted
-            || self.approval.sensitive_write == ApprovalMode::Assisted
-        {
-            return Err("Sensitive requests cannot be model-assisted.".into());
-        }
-        if self.approval.escalate == ApprovalMode::Assisted {
-            return Err("Running outside the sandbox cannot be model-assisted.".into());
-        }
         if self.commands.len() > 4096 {
             return Err("Too many command rules.".into());
         }
@@ -820,17 +799,18 @@ mod tests {
               "levels": { "standard": { "external": { "write": "deny" } } },
               "sensitive": { "add": ["**/a.yaml"], "remove": ["~/.npmrc"] },
               "protected": ["<root>/Makefile"],
-              "approval": { "external.write": "ask", "sensitive.read": "assisted" },
+              "approval": { "external.write": "ask", "sensitive.read": "ask" },
               "custom": 1
             }"#,
         )
         .unwrap();
         let mut settings = load(&paths).settings;
         assert_eq!(settings.approval.external_write, ApprovalMode::Ask);
+        assert_eq!(settings.approval.sensitive_read, ApprovalMode::Ask);
         assert_eq!(
-            settings.approval.sensitive_read,
-            ApprovalMode::Ask,
-            "never assisted"
+            settings.approval.escalate,
+            ApprovalMode::Assisted,
+            "a key the file leaves out is the model's"
         );
         assert_eq!(settings.sensitive, vec!["**/a.yaml".to_string()]);
         assert_eq!(settings.protected, vec!["<root>/Makefile".to_string()]);
@@ -874,9 +854,7 @@ mod tests {
 
     #[test]
     fn invalid_settings_are_rejected() {
-        let mut settings = PiPermissionSettings::default();
-        settings.approval.sensitive_write = ApprovalMode::Assisted;
-        assert!(settings.validate().is_err());
+        assert!(PiPermissionSettings::default().validate().is_ok());
         let mut settings = PiPermissionSettings::default();
         settings.sensitive.push("!**/.env".into());
         assert!(settings.validate().is_err());
@@ -906,7 +884,7 @@ mod tests {
                 { "match": ["source", "**"], "decision": "allow" },
                 { "match": ["kubectl", "delete", "**"], "decision": "deny" }
               ],
-              "approval": { "escalate": "assisted" }
+              "approval": { "escalate": "ask" }
             }"#,
         )
         .unwrap();
@@ -923,7 +901,7 @@ mod tests {
         assert_eq!(
             settings.approval.escalate,
             ApprovalMode::Ask,
-            "never assisted"
+            "the user's file can keep it to a human"
         );
         settings.commands.remove(1);
         save(&paths, settings).unwrap();
@@ -952,9 +930,6 @@ mod tests {
             });
             assert!(settings.validate().is_err(), "{pattern:?}");
         }
-        let mut settings = PiPermissionSettings::default();
-        settings.approval.escalate = ApprovalMode::Assisted;
-        assert!(settings.validate().is_err());
     }
 
     #[test]

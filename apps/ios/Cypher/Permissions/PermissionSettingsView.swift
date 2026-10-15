@@ -155,12 +155,6 @@ struct PermissionSettingsView: View {
         ("tools", "Tools set to Ask", "MCP and extension tools whose setting below is Ask."),
     ]
 
-    /// Sensitive requests and commands leaving the sandbox never go to the
-    /// reviewing model.
-    private static func allowsModel(_ key: String) -> Bool {
-        !["sensitiveRead", "sensitiveWrite", "escalate"].contains(key)
-    }
-
     private func approvalsSection(_ settings: PermissionSettings) -> some View {
         Section {
             ForEach(Self.approvalRows, id: \.key) { row in
@@ -170,7 +164,7 @@ struct PermissionSettingsView: View {
                         set: { mode in save { $0.setApproval(row.key, mode) } })
                 ) {
                     Text("Ask me").tag("ask")
-                    if Self.allowsModel(row.key) { Text("Model first").tag("assisted") }
+                    Text("Model first").tag("assisted")
                     Text("Deny").tag("deny")
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {

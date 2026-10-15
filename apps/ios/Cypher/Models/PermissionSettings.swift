@@ -51,10 +51,10 @@ struct PermissionSettings: Codable, Equatable, Sendable {
         set { raw["enabled"] = .bool(newValue) }
     }
 
-    /// `deny`, `ask` or `assisted`.
+    /// `deny`, `ask` or `assisted`; the model first unless set (the
+    /// engine's `PermissionApprovals` default).
     func approval(_ key: String) -> String {
-        raw["approval"]?.objectValue?[key]?.stringValue
-            ?? (key == "externalWrite" || key == "protectedWrite" || key == "network" ? "assisted" : "ask")
+        raw["approval"]?.objectValue?[key]?.stringValue ?? "assisted"
     }
 
     mutating func setApproval(_ key: String, _ mode: String) {

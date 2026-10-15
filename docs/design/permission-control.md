@@ -190,10 +190,11 @@ the file is self-guarded). Every field is optional; lists take `{ "add": [], "re
   "approval": {
     "external.write": "assisted",
     "protected.write": "assisted",
-    "sensitive.read": "ask",
-    "sensitive.write": "ask",
+    "sensitive.read": "assisted",
+    "sensitive.write": "assisted",
     "network": "assisted",
-    "tools": "ask"
+    "tools": "assisted",
+    "escalate": "assisted"
   },
   "judge": { "model": null, "timeoutMs": 20000, "minConfidence": 0.8 },
   "ask": { "timeoutMs": null },
@@ -208,7 +209,8 @@ the file is self-guarded). Every field is optional; lists take `{ "add": [], "re
 ```
 
 - Approval modes are keyed `<zone>.<capability>`, `protected.write`, `self.write`,
-  `network`, `tools`. A missing key means `ask`.
+  `network`, `tools`, `escalate`. Every kind defaults to `assisted` (the model first);
+  a key with no default (`workspace.write` at the read-only level) means `ask`.
 - `rules` holds "always allow" grants (§7.5); `tool:<name>` rules allow a tool,
   `net:<domain>` rules a domain.
 - `tools.mcp` is the default for MCP and other extension tools; `overrides` set one tool
@@ -219,8 +221,8 @@ protected patterns (not exceptions), make level decisions and approval modes str
 tighten tool decisions. Nothing else is read: the agent can write the project, and the
 project itself may be hostile.
 
-**Safety rules no file can change**: sensitive and self approvals are never `assisted`
-(`assisted` reads as `ask`); `self.write` is `ask` unless set to `deny`.
+**Safety rule no file can change**: `self.write` is `ask` unless set to `deny`; the model
+never approves a write to Cypher's own data.
 
 ### 5.2 Levels and Cypher's per-chat sandbox setting
 
@@ -432,8 +434,9 @@ rules (`commands.ts`, in `permissions.json`'s `commands`, a project's
   unknown words; a word could turn it into a command a `deny` or `ask` rule names; an ssh
   option rules never vouch for; a redirection the sandbox would not allow. The agent's
   result says the same (`approved once; it could not be allowed for the chat, because
-  …`). Always a human (`approval.escalate`: `ask` or `deny`; never the judge). Without a
-  UI it is denied.
+  …`). The model first (`approval.escalate`, `assisted` by default): it may run the
+  command once, with no dialog and no rule left behind; otherwise the dialog shows its
+  `Review` and the user decides. Without a UI, what the model does not approve is denied.
 - **What an approval leaves behind**: Run once, nothing. Allow for this chat, one chat
   grant per pattern (§7.5). Always allow, one `allow` rule per pattern in
   `permissions.json`.
@@ -485,14 +488,18 @@ is unavailable on this device: …"). `/perm` shows the error.
 
 Safety rules:
 
-1. Sensitive and self requests never use the judge.
+1. Writes to Cypher's own data never use the judge. Everything else, sensitive files and
+   commands outside the sandbox included, is `assisted` by default (2026-10-15: the model
+   judges first, so the user is asked only about what it cannot approve); the user's file
+   or Settings can set any kind back to `ask` or `deny`.
 2. The judge never rejects. Its only answers are `approve` and `ask-user`; anything but a
    confident `approve` (unsure, low confidence, any other word, unreadable output, an
    error, a timeout, no model available) asks the user, and the dialog says *"The
    reviewing model could not approve this automatically: <reason>"*. The reason is also
    recorded in the audit log (`reviewer`).
-3. Judge approvals are `once`. Only a human creates `chat` or `always` grants.
-4. Running a command outside the sandbox always goes to a human.
+3. Judge approvals are `once`. Only a human creates `chat` or `always` grants or command
+   rules; a command the judge ran outside the sandbox leaves none, and its result says
+   `approved once by the reviewing model`.
 
 When several paths are requested together, the strictest mode wins.
 
@@ -501,10 +508,20 @@ When several paths are requested together, the strictest mode wins.
 - **Model**: `judge.model` (`provider/id`), else the chat's current model, through Pi's
   model registry with the user's existing credentials (any provider, including the Claude
   bridge).
-- **Trusted input**: the user's last six messages, the request (capability, paths, zone,
-  guard and why, tool, command, level, workspace roots).
-- **Untrusted input**, fenced in `<untrusted>` (nested tags stripped): the agent's
-  justification, its last eight tool calls, and the change for writes.
+- **Trusted input**: the user's last six messages, the request (capability: `read`,
+  `write`, `network`, `tool` or `escalate`; paths, zone, guard and why, tool, level,
+  workspace roots).
+- **Untrusted input**, fenced in `<untrusted>` (nested tags stripped): the command, a tool
+  call's input, the agent's justification (for a command, its purpose and reason), its
+  last eight tool calls, and the change for writes.
+- **What it asks the user about** (beyond anything the user did not ask for or that
+  reaches further than needed): a protected write that could run code later; sending data
+  off the machine; a sensitive file the user did not ask about by name or by what it
+  holds; a destructive or hard-to-undo command or tool call (deleting, overwriting,
+  force-pushing, publishing, deploying, sending messages, paying, killing processes,
+  changing system settings) the user did not ask for exactly; a host, account, repository
+  or service the user did not mention; downloading and running code; changing the
+  permission setup.
 - **Never sent**: contents of files being read.
 - **Output**: `{"decision": "approve" | "ask-user", "reason", "confidence"}`. It approves
   only on `approve` with confidence ≥ `judge.minConfidence` (0.8); a less confident
@@ -577,7 +594,7 @@ edits the part of `permissions.json` it shows through `GetPiPermissionSettings` 
 `SetPiPermissionSettings` (`crates/engine/src/pi/permissions.rs`, forwardable to any
 device) and keeps everything else in the file as written. It shows whether the device can
 sandbox (the engine runs the Runtime's `landstrip doctor`), the approval mode per request
-kind (sensitive rows offer no "Model first"; Cypher's own data is always "Ask me"), the
+kind (every row offers "Model first", the default; Cypher's own data is always "Ask me"), the
 reviewing model (the chat's model or any catalog model), the MCP/extension tool default
 and a per-server override for each configured MCP server, the network mode, local servers,
 the extra sensitive / protected / writable / allowed-domain / Unix-socket lists, the
@@ -756,6 +773,9 @@ Decided (2026-10-11):
   system services) are reached by running the command outside the sandbox with the
   user's approval, by command patterns the agent proposes, not by widening the sandbox
   piece by piece. The sandbox never hands a command a secret.
+- **D10.** (2026-10-15) The model judges first for every kind of request except writes to
+  Cypher's own data: sensitive files, commands outside the sandbox and MCP/extension tools
+  included. Its approvals stay one-off; the user is asked about the rest.
 
 Open:
 
