@@ -24,7 +24,7 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use cypher_engine::session::forks::PiForkBackend;
-use cypher_engine::{EngineCore, SessionForks};
+use cypher_engine::{EngineCore, EngineProfile, SessionForks};
 use cypher_harness::{Harness, HarnessError, RunControls};
 use cypher_proto::{
     AgentEvent, ChatConfig, ChildAgentProfile, DoneStatus, HarnessId, Model, PiForkBoundary,
@@ -172,15 +172,19 @@ struct Rig {
 fn assemble() -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let registry = cypher_engine::HarnessRegistry::new();
-    let harness = RecordingHarness::new(dir.path().join("agent-sessions"));
+    // The fake writes into the profile's managed pi store, the root the
+    // engine's session deletes are guarded to.
+    let profile = EngineProfile::development(dir.path(), "org-forks", "user-forks");
+    let pi_sessions_root = profile.store_root().join("agent-sessions");
+    let harness = RecordingHarness::new(pi_sessions_root.clone());
     let fork_requests = harness.fork_requests.clone();
     registry.register(Arc::new(harness));
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None)
+    let core = EngineCore::assemble_with_profile(profile, Arc::new(registry), HarnessId::Pi, None)
         .expect("engine core assembles");
     Rig {
         core,
         fork_requests,
-        pi_sessions_root: dir.path().join("agent-sessions"),
+        pi_sessions_root,
         _dir: dir,
     }
 }
@@ -1397,6 +1401,92 @@ async fn repeated_rewind_at_the_same_anchor_is_unavailable() {
         vec!["m1", first_assistant.as_str()],
         "the transcript stays where the first rewind left it"
     );
+}
+
+/// Point the seeded source chat at a real session file under the managed
+/// root (the fake runs stamp a bare `hs-source` id).
+fn seed_session_file(rig: &Rig, name: &str) -> PathBuf {
+    std::fs::create_dir_all(&rig.pi_sessions_root).unwrap();
+    let path = rig.pi_sessions_root.join(name);
+    std::fs::write(&path, b"{}").unwrap();
+    rig.core
+        .sessions
+        .rebind_harness_session(SOURCE, Some(path.to_str().unwrap()), "/tmp/repo");
+    path
+}
+
+async fn delete_chat(core: &EngineCore, chat_id: &str) {
+    rpc(
+        core,
+        methods::MUTATE,
+        serde_json::json!({ "op": "deleteChat", "chatId": chat_id }),
+    )
+    .await
+    .expect("delete chat");
+}
+
+/// Each rewind deletes the session it replaced, so restarts leave only the
+/// session the chat points at.
+#[tokio::test(flavor = "multi_thread")]
+async fn rewind_deletes_the_replaced_session_file() {
+    let rig = assemble();
+    seed_source(&rig.core).await;
+    let original = seed_session_file(&rig, "source.jsonl");
+    let first_assistant = source_entry_id(&rig.core, 1);
+
+    assert!(matches!(
+        rewind(&rig.core, "m2").await,
+        SessionRewindResponse::Rewound(_)
+    ));
+    assert!(!original.exists(), "the pre-rewind session is deleted");
+    let first = rig.core.workspace.chat(SOURCE).unwrap().unwrap();
+    let first = PathBuf::from(first.harness_session_id.unwrap());
+    assert!(first.is_file(), "the rewound session stays");
+
+    assert!(matches!(
+        rewind(&rig.core, &first_assistant).await,
+        SessionRewindResponse::Unavailable(_)
+    ));
+    assert!(first.is_file(), "a refused rewind deletes nothing");
+
+    assert!(matches!(
+        rewind(&rig.core, "m1").await,
+        SessionRewindResponse::Rewound(_)
+    ));
+    assert!(
+        !first.exists(),
+        "a second rewind deletes the first one's session"
+    );
+}
+
+/// Deleting a chat deletes its session file on its host.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_chat_deletes_its_session_file() {
+    let rig = assemble();
+    seed_source(&rig.core).await;
+    let path = seed_session_file(&rig, "source.jsonl");
+
+    delete_chat(&rig.core, SOURCE).await;
+    common::wait_blocking(|| !path.exists(), "the session file to be deleted");
+}
+
+/// A session file another chat row still names survives the delete.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_chat_keeps_a_session_file_another_chat_names() {
+    let rig = assemble();
+    seed_source(&rig.core).await;
+    let path = seed_session_file(&rig, "source.jsonl");
+    create_source_chat(&rig.core, "chat-twin", &rig.core.device_id, HarnessId::Pi);
+    rig.core
+        .workspace
+        .set_chat_harness_session("chat-twin", path.to_str().unwrap(), "/tmp/repo");
+
+    delete_chat(&rig.core, SOURCE).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(path.exists(), "the twin still names the file");
+
+    delete_chat(&rig.core, "chat-twin").await;
+    common::wait_blocking(|| !path.exists(), "the last chat's session file to go");
 }
 
 /// A live turn owns the transcript tail and the session: refuse.

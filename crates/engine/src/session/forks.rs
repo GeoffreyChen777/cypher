@@ -248,7 +248,7 @@ impl SessionForks {
             .inner
             .backend
             .fork_session(PiSessionForkRequest {
-                source_session_path: source_session,
+                source_session_path: source_session.clone(),
                 visible_user_prompts: visible_prompts,
                 boundary: plan.pi_boundary,
             })
@@ -273,7 +273,7 @@ impl SessionForks {
         // returning the existing chat.
         let _mutation = self.inner.mutation_lock.lock().await;
         if let Some(existing) = self.inner.workspace.chat(&request.request_id)? {
-            self.delete_new_fork_session(new_session_path.as_deref());
+            self.delete_managed_session(new_session_path.as_deref());
             if let Err(unavail) = self.validate_existing_target(&existing, &source, &plan) {
                 return Ok(unavail);
             }
@@ -295,7 +295,7 @@ impl SessionForks {
                 .zip(&raw)
                 .any(|(now, before)| now.id != before.id)
         {
-            self.delete_new_fork_session(new_session_path.as_deref());
+            self.delete_managed_session(new_session_path.as_deref());
             return Ok(unavailable(
                 SessionForkUnavailableReason::BoundaryUnavailable,
                 "The transcript changed while the fork was being prepared. Try again.",
@@ -340,7 +340,7 @@ impl SessionForks {
             // (guarded to the managed session root; never the source; a no-op
             // when the fork never materialized a file).
             self.inner.doc_host.purge_chat(&target_id);
-            self.delete_new_fork_session(new_session_path.as_deref());
+            self.delete_managed_session(new_session_path.as_deref());
             return Err(err);
         }
         let chat =
@@ -365,7 +365,8 @@ impl SessionForks {
     ///    chat's own doc in ONE commit (watchers see one truncation);
     /// 3. the SAME chat row is re-pointed at the truncated session — the
     ///    chat id, tab, sidebar row and doc lineage are untouched, so the
-    ///    user stays exactly where they were.
+    ///    user stays exactly where they were;
+    /// 4. the pre-rewind session file is deleted.
     ///
     /// A USER anchor removes that message too and hands its text back as
     /// `composer_text`; an ASSISTANT anchor keeps the reply and removes what
@@ -433,8 +434,9 @@ impl SessionForks {
 
         // The pi side: a separate `--no-extensions` helper builds the
         // truncated session from a byte snapshot of the source file. Slow, so
-        // it runs OUTSIDE the mutation lock; the source file stays intact and
-        // becomes the pre-rewind copy on disk.
+        // it runs OUTSIDE the mutation lock; the source file stays intact
+        // until the chat is re-pointed below, so every refusal on the way
+        // leaves the chat exactly as it was.
         let source_session = chat
             .harness_session_id
             .as_deref()
@@ -444,7 +446,7 @@ impl SessionForks {
             .inner
             .backend
             .fork_session(PiSessionForkRequest {
-                source_session_path: source_session,
+                source_session_path: source_session.clone(),
                 visible_user_prompts: visible_prompts,
                 boundary: plan.pi_boundary,
             })
@@ -473,7 +475,7 @@ impl SessionForks {
                 .zip(&raw)
                 .any(|(now, before)| now.id != before.id)
         {
-            self.delete_new_fork_session(new_session_path.as_deref());
+            self.delete_managed_session(new_session_path.as_deref());
             return Ok(rewind_unavailable(
                 SessionForkUnavailableReason::BoundaryUnavailable,
                 "The transcript changed while the restart was being prepared. \
@@ -505,6 +507,12 @@ impl SessionForks {
             new_session_path.as_deref(),
             &session_cwd,
         );
+        // Nothing resumes the pre-rewind session any more (its parked run was
+        // quiesced above, and the new session is self-contained), so it
+        // goes rather than piling up on every restart.
+        if !source_session.is_empty() && new_session_path.as_deref() != Some(&source_session) {
+            self.delete_managed_session(Some(&source_session));
+        }
 
         // The sidebar's endpoint preview now ends at the new last entry (empty
         // when the rewind emptied the chat).
@@ -592,12 +600,37 @@ impl SessionForks {
         Ok(Ok(chat))
     }
 
-    /// Best-effort delete of a freshly created fork session file, guarded to
-    /// the MANAGED session root by CANONICAL containment (symlinks and `..`
-    /// resolved — never deletes the source or anything outside cypher's own
-    /// pi store). An already-deleted file is quiet; `None` (an empty-context
-    /// first-user fork, which pi never persisted) is a no-op.
-    fn delete_new_fork_session(&self, path: Option<&str>) {
+    /// A deleted chat's pi session file goes with it. Only the chat's host
+    /// holds the file; the caller has already stopped any run on it (a live
+    /// pi child would recreate the file on its next append). A file another
+    /// row still names is kept.
+    pub fn delete_chat_session(&self, chat: &Chat) {
+        if chat.device_id != self.inner.workspace.device_id() {
+            return;
+        }
+        let Some(path) = chat.harness_session_id.as_deref().filter(|p| !p.is_empty()) else {
+            return;
+        };
+        match self.inner.workspace.read_chats() {
+            Ok(rows)
+                if !rows.iter().any(|row| {
+                    row.id != chat.id && row.harness_session_id.as_deref() == Some(path)
+                }) => {}
+            Ok(_) => return,
+            Err(err) => {
+                tracing::warn!(chat = %chat.id, error = %err, "pi session delete skipped: chat rows unreadable");
+                return;
+            }
+        }
+        self.delete_managed_session(Some(path));
+    }
+
+    /// Best-effort delete of a pi session file, guarded to the MANAGED session
+    /// root by CANONICAL containment (symlinks and `..` resolved — never
+    /// anything outside cypher's own pi store). An already-deleted file is
+    /// quiet; `None` (an empty-context first-user fork, which pi never
+    /// persisted) is a no-op.
+    fn delete_managed_session(&self, path: Option<&str>) {
         let Some(path) = path else { return };
         let Some(canonical) =
             canonicalize_under_root(&PathBuf::from(path), &self.inner.pi_sessions_root)
@@ -605,7 +638,7 @@ impl SessionForks {
             tracing::warn!(
                 session = %path,
                 root = %self.inner.pi_sessions_root.display(),
-                "fork cleanup refused: session path outside managed root"
+                "pi session delete refused: session path outside managed root"
             );
             return;
         };
@@ -615,7 +648,7 @@ impl SessionForks {
                 // Already gone — quiet.
             }
             Err(err) => {
-                tracing::warn!(session = %canonical.display(), error = %err, "fork cleanup delete failed");
+                tracing::warn!(session = %canonical.display(), error = %err, "pi session delete failed");
             }
         }
     }

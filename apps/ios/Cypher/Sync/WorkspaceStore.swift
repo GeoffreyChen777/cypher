@@ -380,8 +380,8 @@ final class WorkspaceStore: WorkspaceData {
     /// chat's subagent children — it finds them by looking up rows our
     /// tombstones would already have removed. Then the tombstones land here
     /// regardless (an offline host still loses the rows), children included,
-    /// and a quick chat's scratch folder is removed. The chat's own run is
-    /// not interrupted, as on the desktop.
+    /// and a quick chat's scratch folder is removed. The host also stops the
+    /// chat's own run and deletes its pi session file, as on the desktop.
     ///
     /// Returns a notice for a partial failure, nil when all went through.
     func deleteChat(_ chat: Chat, hostOnline: Bool) async -> String? {
