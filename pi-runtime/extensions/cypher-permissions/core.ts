@@ -85,6 +85,17 @@ export interface PermissionRecord {
  */
 const PROMPT_MARK = "cypher-permission: ";
 
+/**
+ * One `Label: value` line of a permission dialog's context. The value's own
+ * line breaks (a multi-line command, an agent's reason) are indented, so the
+ * fact stays one fact and nothing inside it can pass for a label, a
+ * `Change:` block or the prompt line (`crates/ui/src/composer/permission_card.rs`
+ * `parse`).
+ */
+export function fact(label: string, value: string): string {
+  return `${label}: ${value.replace(/\r\n?/g, "\n").split("\n").join("\n  ")}`;
+}
+
 function promptLine(kind: "escalate" | "access" | "network" | "tool", toolCallId: string | undefined): string {
   return `\n${PROMPT_MARK}${JSON.stringify({ kind, ...(toolCallId ? { toolCallId } : {}) })}`;
 }
@@ -753,13 +764,13 @@ export class Permissions {
       return { ok: false, reason };
     }
     const lines: string[] = [];
-    if (proposal.label) lines.push(`Purpose: ${proposal.label}`);
-    lines.push(`Command: ${command}`);
-    for (const pattern of patterns) lines.push(`Pattern: ${describePattern(pattern.match)}`);
-    if (proposal.reason) lines.push(`Reason: ${proposal.reason}`);
+    if (proposal.label) lines.push(fact("Purpose", proposal.label));
+    lines.push(fact("Command", command));
+    for (const pattern of patterns) lines.push(fact("Pattern", describePattern(pattern.match)));
+    if (proposal.reason) lines.push(fact("Reason", proposal.reason));
     lines.push("Note: It runs as you, with your files, keys, keychain and network.");
     if (patterns.some((pattern) => pattern.sha256)) lines.push("Note: A program here is in a writable place; approval covers its current contents only.");
-    if (parsed.kind === "opaque") lines.push(`Note: It uses ${parsed.reason}, which rules can't check, so it can only run once as written.`);
+    if (parsed.kind === "opaque") lines.push(fact("Note", `It uses ${parsed.reason}, which rules can't check, so it can only run once as written.`));
     const title = `Run this command outside the sandbox?\n\nContext:\n${lines.join("\n")}${promptLine("escalate", ctx.toolCallId)}`;
     const options = patterns.length ? [RUN_ONCE, HUMAN.chat, HUMAN.always, HUMAN.deny, HUMAN.stop] : [RUN_ONCE, HUMAN.deny, HUMAN.stop];
     const choice = await this.serialized(() => ctx.ui.select(title, options, { signal: ctx.signal, timeout: this.config.ask.timeoutMs ?? undefined }));
@@ -1065,17 +1076,17 @@ function approvalTitle(
 ): string {
   const lines: string[] = [];
   const review = () => {
-    if (judgeNote) lines.push(`Review: The reviewing model couldn't approve this automatically. ${judgeNote}`);
+    if (judgeNote) lines.push(fact("Review", `The reviewing model couldn't approve this automatically. ${judgeNote}`));
   };
   if (request.domain !== undefined) {
-    lines.push(`Domain: ${request.domain}`);
-    if (request.command) lines.push(`Command: ${request.command}`);
+    lines.push(fact("Domain", request.domain));
+    if (request.command) lines.push(fact("Command", request.command));
     lines.push("Note: Commands reach the network only through the filter; other domains still ask.");
     review();
     return `Allow the agent to reach ${request.domain}?\n\nContext:\n${lines.join("\n")}`;
   }
   if (request.toolInput !== undefined) {
-    lines.push(`Tool: ${request.tool}`);
+    lines.push(fact("Tool", request.tool));
     review();
     lines.push("Input:", request.toolInput);
     return `Allow the agent to use ${request.tool}?\n\nContext:\n${lines.join("\n")}`;
@@ -1089,11 +1100,11 @@ function approvalTitle(
         : first?.guard === "protected"
           ? "write a protected file"
           : `${request.capability} outside the workspace`;
-  for (const item of request.classifications) lines.push(`Path: ${displayPath(item.path, home)}`);
+  for (const item of request.classifications) lines.push(fact("Path", displayPath(item.path, home)));
   const matches = [...new Set(request.classifications.map((item) => item.match).filter((match): match is string => Boolean(match)))];
-  if (matches.length) lines.push(`Matches: ${matches.join(", ")}`);
-  if (request.tool !== "request_permission") lines.push(`Tool: ${request.tool}`);
-  if (request.justification) lines.push(`Reason: ${request.justification}`);
+  if (matches.length) lines.push(fact("Matches", matches.join(", ")));
+  if (request.tool !== "request_permission") lines.push(fact("Tool", request.tool));
+  if (request.justification) lines.push(fact("Reason", request.justification));
   const sensitive = request.classifications.some((item) => item.zone === "sensitive");
   if (sensitive && request.capability === "read") lines.push("Note: The contents will be sent to the model provider.");
   if (request.tool === "request_permission") lines.push("Note: For the agent's file tools only; commands such as ssh never get it.");

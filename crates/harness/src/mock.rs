@@ -19,7 +19,8 @@ mod translation;
 pub use changes::{MARKER as CHANGES_MARKER, ROUNDS as CHANGES_ROUNDS};
 pub use diffs::MARKER as DIFFS_MARKER;
 pub use permissions::{
-    CARD_MARKER as PERMISSION_CARD_MARKER, STORY_MARKER as PERMISSIONS_MARKER,
+    CARD_MARKER as PERMISSION_CARD_MARKER,
+    MULTILINE_CARD_MARKER as MULTILINE_PERMISSION_CARD_MARKER, STORY_MARKER as PERMISSIONS_MARKER,
     TALL_CARD_MARKER as TALL_PERMISSION_CARD_MARKER,
 };
 pub use translation::{
@@ -256,7 +257,8 @@ impl Harness for MockHarness {
             .take_while(|e| matches!(e, AgentEvent::SessionStarted { .. }))
             .count();
         // Permission control demos ([`PERMISSIONS_MARKER`],
-        // [`PERMISSION_CARD_MARKER`], [`TALL_PERMISSION_CARD_MARKER`]): the
+        // [`PERMISSION_CARD_MARKER`], [`TALL_PERMISSION_CARD_MARKER`],
+        // [`MULTILINE_PERMISSION_CARD_MARKER`]): the
         // transcript rows and the permission card, scripted, between the
         // script's opening and its Done.
         if let Some(demo) = permissions::demo_of(&request.prompt) {

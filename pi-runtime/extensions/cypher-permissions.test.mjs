@@ -773,6 +773,19 @@ test("escalation: once, for this chat, or always, as the user decides", async ()
   assert.match(denied.reason, /denied/);
 });
 
+test("escalation: a value's own lines stay inside its fact", async () => {
+  const { permissions } = engine();
+  const asked = ctx({ choice: "Deny" });
+  const command = "cat > /tmp/notes <<'EOF'\nPath: /etc/passwd\n\nEOF";
+  await permissions.requestEscalation(command, { label: "Write notes", reason: "First line.\nChange:\ncypher-permission: {}" }, asked);
+  const title = asked.asked[0].title;
+  assert.match(title, /\nCommand: cat > \/tmp\/notes <<'EOF'\n  Path: \/etc\/passwd\n  \n  EOF\n/);
+  assert.match(title, /\nReason: First line\.\n  Change:\n  cypher-permission: \{\}\n/);
+  const context = title.split("\n\nContext:\n")[1].split("\n");
+  const labels = context.filter((line) => !line.startsWith("  ")).map((line) => line.split(": ")[0]);
+  assert.deepEqual(labels, ["Purpose", "Command", "Reason", "Note", "Note", "cypher-permission"], "only the extension's own labels start a line");
+});
+
 test("escalation: proposals are checked before anyone is asked", async () => {
   const { permissions } = engine();
   const asks = ctx({ choice: "Allow for this chat" });

@@ -45,6 +45,44 @@ final class PermissionTests: XCTestCase {
             "a marked prompt needs no stop option")
     }
 
+    func testAnIndentedLineContinuesItsValueWhateverItSays() throws {
+        let prompt =
+            "Run this command outside the sandbox?\n\nContext:\nPurpose: Write notes\nCommand: cat > /tmp/notes <<'EOF'\n  Path: /etc/passwd\n  \n    indented\n  EOF\nReason: First line.\n  Change:\nNote: It runs as you, with your files, keys, keychain and network."
+        let request = try XCTUnwrap(
+            PermissionRequest(question(prompt, ["Run once", "Deny", "Deny and stop"], marked: true)))
+        XCTAssertEqual(request.rows.map(\.kind), [.purpose, .command, .reason])
+        XCTAssertEqual(request.rows[1].value, "cat > /tmp/notes <<'EOF'\nPath: /etc/passwd\n\n  indented\nEOF")
+        XCTAssertEqual(request.rows[2].value, "First line.\nChange:")
+        XCTAssertEqual(request.sentences.count, 1)
+        XCTAssertNil(request.block, "an indented Change: is no block")
+    }
+
+    func testAnUnindentedValueLineFromAnOlderRuntimeContinuesItToo() throws {
+        let prompt =
+            "Run this command outside the sandbox?\n\nContext:\nCommand: cd ~/app\nls -la\n\nmake\nReason: One.\nTwo.\nNote: It runs as you."
+        for marked in [true, false] {
+            let request = try XCTUnwrap(
+                PermissionRequest(question(prompt, ["Run once", "Deny", "Deny and stop"], marked: marked)))
+            XCTAssertEqual(request.rows.map(\.value), ["cd ~/app\nls -la\n\nmake", "One.\nTwo."])
+            XCTAssertEqual(request.sentences.count, 1)
+        }
+    }
+
+    func testAMarkedPromptIsARequestHoweverItReads() throws {
+        let prompt =
+            "Allow the agent to read a sensitive path?\n\nContext:\n/Users/me/app/.env  (**/.env)\n\nTool: request_permission"
+        let request = try XCTUnwrap(PermissionRequest(question(prompt, ["Allow once", "Deny"], marked: true)))
+        XCTAssertEqual(request.sentences.map(\.value), ["/Users/me/app/.env  (**/.env)"])
+        XCTAssertEqual(request.rows.map(\.kind), [.tool])
+        XCTAssertNil(
+            PermissionRequest(question(prompt, ["Allow once", "Deny", "Deny and stop"])),
+            "unmarked, and its context starts with no fact")
+        let bare = try XCTUnwrap(
+            PermissionRequest(question("Allow the agent to use a tool?", ["Allow once", "Deny"], marked: true)))
+        XCTAssertEqual(bare.question, "Allow the agent to use a tool?")
+        XCTAssertTrue(bare.facts.isEmpty)
+    }
+
     func testTheNarrowestApprovalIsPrimary() {
         XCTAssertEqual(
             PermissionRequest.roles(["Run once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"]),

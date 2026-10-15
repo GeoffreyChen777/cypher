@@ -845,19 +845,12 @@ fn user_row(entry: &SessionMessageEntry, pending: bool) -> Row {
     }
 }
 
-/// The "Deny and stop" option a permission prompt from a Runtime that does
-/// not mark its prompts is recognised by (`composer::permission_card`).
-const PERMISSION_STOP_OPTION: &str = "Deny and stop";
-
-/// Whether a question is a permission prompt rather than one the agent asks.
+/// Whether a question is a permission prompt rather than one the agent asks
+/// — the same test the composer's card makes.
 fn is_permission_prompt(questions: &[cypher_proto::UserInputQuestion]) -> bool {
-    questions.first().is_some_and(|question| {
-        question.permission.is_some()
-            || question
-                .options
-                .iter()
-                .any(|option| option == PERMISSION_STOP_OPTION)
-    })
+    questions
+        .first()
+        .is_some_and(crate::composer::permission_card::is_permission_prompt)
 }
 
 /// How an entry's permission prompts and sandbox retries fold into its tool

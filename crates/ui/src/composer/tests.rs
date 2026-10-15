@@ -153,6 +153,31 @@ fn slash_command_label_reads_the_leading_token() {
 }
 
 #[test]
+fn a_permission_prompt_in_a_slash_turn_stays_a_permission_prompt() {
+    let asked = vec![question("Pick a goal", &["a", "b"], false)];
+    assert_eq!(question_slash_owner(&asked, "/goal ship it"), Some("/goal"));
+    assert_eq!(question_slash_owner(&asked, "ship it"), None);
+    let marked = vec![cypher_proto::UserInputQuestion {
+        permission: Some(cypher_proto::PermissionPrompt {
+            kind: cypher_proto::PermissionPromptKind::Escalate,
+            tool_call_id: None,
+        }),
+        ..question(
+            "Run this command outside the sandbox?",
+            &["Run once", "Deny"],
+            false,
+        )
+    }];
+    assert_eq!(question_slash_owner(&marked, "/goal ship it"), None);
+    let unmarked = vec![question(
+        "Allow the agent to read a sensitive file?",
+        &["Allow once", "Deny", "Deny and stop"],
+        false,
+    )];
+    assert_eq!(question_slash_owner(&unmarked, "/goal ship it"), None);
+}
+
+#[test]
 fn comment_restore_merges_deduped_restored_first() {
     let a = comment("a", "q1", "c1");
     let b = comment("b", "q2", "c2");

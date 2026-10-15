@@ -11,6 +11,8 @@
 //!   the sandbox?" card and finishes by the answer.
 //! - [`TALL_CARD_MARKER`]: the same card for a command long enough to make
 //!   it taller than a short chat column.
+//! - [`MULTILINE_CARD_MARKER`]: the same card for a command and a reason
+//!   that run over several lines.
 //!
 //! The prompts in the settled run are asked through the engine's input
 //! bridge and withdrawn at once: the engine records them answered, as an
@@ -36,6 +38,8 @@ pub const STORY_MARKER: &str = "[mock:permissions]";
 pub const CARD_MARKER: &str = "[mock:permission-card]";
 /// Prompt marker: stop on a live permission card for a very long command.
 pub const TALL_CARD_MARKER: &str = "[mock:permission-card:tall]";
+/// Prompt marker: stop on a live permission card for a multi-line command.
+pub const MULTILINE_CARD_MARKER: &str = "[mock:permission-card:multiline]";
 
 /// Which permission demo a prompt asks for, if any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +47,7 @@ pub(super) enum Demo {
     Story,
     Card,
     TallCard,
+    MultilineCard,
 }
 
 pub(super) fn demo_of(prompt: &str) -> Option<Demo> {
@@ -50,6 +55,8 @@ pub(super) fn demo_of(prompt: &str) -> Option<Demo> {
         Some(Demo::Story)
     } else if prompt.contains(TALL_CARD_MARKER) {
         Some(Demo::TallCard)
+    } else if prompt.contains(MULTILINE_CARD_MARKER) {
+        Some(Demo::MultilineCard)
     } else if prompt.contains(CARD_MARKER) {
         Some(Demo::Card)
     } else {
@@ -64,6 +71,10 @@ const PURPOSE: &str = "Check the app on the server web";
 /// One command that checks a whole deploy at once: wraps to many lines.
 const TALL_COMMAND: &str = "ssh -o ConnectTimeout=15 deploy@web 'date; echo ---ping; ping -c 2 -W 2 10.20.0.17 | tail -2; for p in 22 8080 9333 9334 18080; do timeout 3 bash -c \"echo > /dev/tcp/10.20.0.17/$p\" 2>/dev/null && echo \"port $p open\" || echo \"port $p closed\"; done; echo ---lookup; for v in 360 611 688 757 808 888 955; do echo -n \"vid $v: \"; curl -s -m 5 \"http://10.20.0.12:9333/dir/lookup?volumeId=$v\"; echo; done; echo ---app events since yesterday; journalctl -u app --since \"2026-10-14 07:30\" --no-pager | grep \"10.20.0.17\" | grep -vE \"crowded\" | cut -c1-220 | tail -15; echo ---worker errors by hour; zcat -f /var/log/app/worker.log.1 /var/log/app/worker.log 2>/dev/null | grep -E \"fail to read|<ERROR>\" | cut -c1-13 | uniq -c | tail -15; echo ---proxy misses last 2h; journalctl -u app-proxy --since \"2 hours ago\" --no-pager | grep -c \"urls not found\"' 2>&1";
 const TALL_PURPOSE: &str = "Check whether the storage node and its volumes on web recovered";
+/// A heredoc: a command of several lines, one of them shaped like a fact.
+const MULTILINE_COMMAND: &str = "ssh deploy@web 'bash -s' <<'EOF'\nsystemctl status app --no-pager\nPath: /etc/app/config.toml\n\n  journalctl -u app -n 20 --no-pager\nEOF";
+const MULTILINE_REASON: &str =
+    "The sandbox hides the SSH key.\nThe task needs the server's status and its last log lines.";
 
 /// The run's events, in order; `lead` are the script's opening events
 /// (`SessionStarted`) and `done` its closing ones.
@@ -95,8 +106,7 @@ pub(super) fn run(
                 script.story().await;
                 true
             }
-            Demo::Card => script.card(false).await,
-            Demo::TallCard => script.card(true).await,
+            Demo::Card | Demo::TallCard | Demo::MultilineCard => script.card(demo).await,
         };
         if finished {
             for event in done {
@@ -171,6 +181,12 @@ const ACCESS_OPTIONS: [&str; 5] = [
     "Deny and stop",
 ];
 
+/// A value as the extension writes it into a dialog (`core.ts` `fact`): its
+/// lines after the first indented.
+fn fact_value(value: &str) -> String {
+    value.replace('\n', "\n  ")
+}
+
 fn escalate_prompt(
     call: &str,
     command: &str,
@@ -178,6 +194,7 @@ fn escalate_prompt(
     pattern: &str,
     reason: &str,
 ) -> UserInputQuestion {
+    let (command, reason) = (fact_value(command), fact_value(reason));
     prompt(
         &format!("prompt-{call}"),
         &format!(
@@ -443,17 +460,24 @@ impl Script {
             .await;
     }
 
-    /// Stop on a live card (for [`TALL_COMMAND`] when `tall`); finish by
-    /// the answer. False when the turn stopped there.
-    async fn card(&self, tall: bool) -> bool {
-        let (command, purpose, pattern) = if tall {
-            (
+    /// Stop on a live card for the demo's command; finish by the answer.
+    /// False when the turn stopped there.
+    async fn card(&self, demo: Demo) -> bool {
+        const REASON: &str = "The sandbox hides the SSH key; the task needs the server.";
+        let (command, purpose, pattern, reason) = match demo {
+            Demo::TallCard => (
                 TALL_COMMAND,
                 TALL_PURPOSE,
                 "ssh -o ConnectTimeout=* deploy@web …",
-            )
-        } else {
-            (SSH_STATUS, PURPOSE, "ssh deploy@web …")
+                REASON,
+            ),
+            Demo::MultilineCard => (
+                MULTILINE_COMMAND,
+                PURPOSE,
+                "ssh deploy@web …",
+                MULTILINE_REASON,
+            ),
+            _ => (SSH_STATUS, PURPOSE, "ssh deploy@web …", REASON),
         };
         self.text("Let me check the app on **web**.\n\n").await;
         self.exec(
@@ -473,11 +497,7 @@ impl Script {
         .await;
         tokio::time::sleep(Duration::from_millis(80)).await;
         let answer = (self.request_input)(vec![escalate_prompt(
-            "card-2",
-            command,
-            purpose,
-            pattern,
-            "The sandbox hides the SSH key; the task needs the server.",
+            "card-2", command, purpose, pattern, reason,
         )]);
         let answers = tokio::select! {
             answers = answer => answers.unwrap_or_default(),

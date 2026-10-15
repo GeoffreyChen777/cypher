@@ -292,6 +292,22 @@ pub fn slash_command_label(text: &str) -> Option<&str> {
     (cmd.len() >= 2).then_some(cmd)
 }
 
+/// The slash command a question belongs to: the one that started the turn
+/// (`last_user_text`), unless the question is a permission prompt — that one
+/// is the permission extension's, whatever the turn is running.
+pub fn question_slash_owner<'a>(
+    questions: &[cypher_proto::UserInputQuestion],
+    last_user_text: &'a str,
+) -> Option<&'a str> {
+    if questions
+        .first()
+        .is_some_and(permission_card::is_permission_prompt)
+    {
+        return None;
+    }
+    slash_command_label(last_user_text)
+}
+
 /// Slash-command completion state: like [`MentionState`] but the
 /// candidate list is fetched once per harness (`ListCommands`) and filtered
 /// locally per keystroke — no RPC, debounce, or skeleton churn while typing.

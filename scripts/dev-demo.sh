@@ -136,7 +136,7 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
     printf '#!/bin/sh\nrsync -az dist/ deploy@web:/srv/app/\n' >"$project/scripts/deploy.sh"
     chmod +x "$project/scripts/deploy.sh"
     space=$(new_id) story=$(new_id) card=$(new_id) ask=$(new_id)
-    tall_card=$(new_id) tall_ask=$(new_id)
+    tall_card=$(new_id) tall_ask=$(new_id) multiline_card=$(new_id)
     create_space "$space" "$project" '"name":"Permission control demo"'
     # Oldest first: the settled story ends up on top.
     create_chat "$ask" "$space" "Tidy up the config loader"
@@ -144,6 +144,10 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
     sleep 1
     create_chat "$tall_ask" "$space" "Plan the settings migration"
     run_prompt "$tall_ask" "$project" "Plan the settings migration." "Plan the settings migration. [mock:ask:tall]"
+    sleep 1
+    create_chat "$multiline_card" "$space" "Check the app's recent logs"
+    run_prompt "$multiline_card" "$project" "Check the app's recent logs on web." \
+      "Check the app's recent logs on web. [mock:permission-card:multiline]"
     sleep 1
     create_chat "$tall_card" "$space" "Did the storage node recover?"
     run_prompt "$tall_card" "$project" "Did the storage node on web recover?" \
