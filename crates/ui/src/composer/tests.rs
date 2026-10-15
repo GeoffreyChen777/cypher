@@ -2071,3 +2071,22 @@ fn pending_input_detection() {
     assert!(input_request_resolved(&t, "r1"));
     assert!(!input_request_resolved(&t, "other"));
 }
+
+#[test]
+fn a_question_card_yields_to_a_short_column() {
+    assert_eq!(
+        wizard_content_max_height(None, 120.0),
+        WIZARD_CONTENT_MAX_HEIGHT
+    );
+    assert_eq!(
+        wizard_content_max_height(Some(900.0), 120.0),
+        WIZARD_CONTENT_MAX_HEIGHT,
+        "a tall column keeps the usual cap"
+    );
+    assert_eq!(wizard_content_max_height(Some(400.0), 150.0), 250.0);
+    assert_eq!(
+        wizard_content_max_height(Some(100.0), 150.0),
+        WIZARD_CONTENT_MIN_HEIGHT,
+        "never below a couple of lines"
+    );
+}

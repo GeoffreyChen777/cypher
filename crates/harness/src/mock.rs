@@ -18,7 +18,10 @@ mod translation;
 
 pub use changes::{MARKER as CHANGES_MARKER, ROUNDS as CHANGES_ROUNDS};
 pub use diffs::MARKER as DIFFS_MARKER;
-pub use permissions::{CARD_MARKER as PERMISSION_CARD_MARKER, STORY_MARKER as PERMISSIONS_MARKER};
+pub use permissions::{
+    CARD_MARKER as PERMISSION_CARD_MARKER, STORY_MARKER as PERMISSIONS_MARKER,
+    TALL_CARD_MARKER as TALL_PERMISSION_CARD_MARKER,
+};
 pub use translation::{
     MARKER as TRANSLATION_MARKER, Mode as TranslationMode, PROMPT as TRANSLATION_PROMPT,
     REPLACE_MARKER as TRANSLATION_REPLACE_MARKER, settled as translation_settled,
@@ -27,6 +30,9 @@ pub use translation::{
 /// Prompt marker: the run asks one question through the engine's input bridge
 /// (the session sits in awaiting-input) and replays its script once answered.
 pub const ASK_MARKER: &str = "[mock:ask]";
+/// Prompt marker: as [`ASK_MARKER`], with a question whose context and
+/// options make its card taller than a short chat column.
+pub const TALL_ASK_MARKER: &str = "[mock:ask:tall]";
 /// Prompt marker: the run streams its opening, starts a command that never
 /// finishes and keeps working until interrupted (Stop), ending
 /// `Done { status: Interrupted }`. The open command is what keeps it live:
@@ -40,7 +46,8 @@ pub const HOLD_TOOL_ID: &str = "mock-hold-tool";
 /// One step of a marked run: a scripted event, or a pause on the controls.
 enum Step {
     Event(AgentEvent),
-    Ask,
+    /// Wait on a question: the tall one when true.
+    Ask(bool),
     Hold,
 }
 
@@ -249,16 +256,16 @@ impl Harness for MockHarness {
             .take_while(|e| matches!(e, AgentEvent::SessionStarted { .. }))
             .count();
         // Permission control demos ([`PERMISSIONS_MARKER`],
-        // [`PERMISSION_CARD_MARKER`]): the transcript rows and the permission
-        // card, scripted, between the script's opening and its Done.
-        let story = request.prompt.contains(PERMISSIONS_MARKER);
-        if story || request.prompt.contains(PERMISSION_CARD_MARKER) {
+        // [`PERMISSION_CARD_MARKER`], [`TALL_PERMISSION_CARD_MARKER`]): the
+        // transcript rows and the permission card, scripted, between the
+        // script's opening and its Done.
+        if let Some(demo) = permissions::demo_of(&request.prompt) {
             return Ok(permissions::run(
                 body[..lead].to_vec(),
                 tail.to_vec(),
                 controls,
                 delay,
-                !story,
+                demo,
             ));
         }
         // Turn changes demo ([`CHANGES_MARKER`]): round N edits the run's
@@ -304,10 +311,12 @@ impl Harness for MockHarness {
         } else {
             body
         };
-        // Dev/demo prompt markers ([`ASK_MARKER`], [`HOLD_MARKER`]): the
+        // Dev/demo prompt markers ([`ASK_MARKER`], [`TALL_ASK_MARKER`],
+        // [`HOLD_MARKER`]): the
         // data-side way to put live awaiting-input and working sessions on
         // screen, e.g. when seeding a demo sidebar.
-        let ask = request.prompt.contains(ASK_MARKER);
+        let tall_ask = request.prompt.contains(TALL_ASK_MARKER);
+        let ask = tall_ask || request.prompt.contains(ASK_MARKER);
         let hold = request.prompt.contains(HOLD_MARKER);
         if ask || hold {
             let rest = think_events
@@ -315,7 +324,7 @@ impl Harness for MockHarness {
                 .chain(body[lead..].iter().cloned());
             let mut steps: Vec<Step> = body[..lead].iter().cloned().map(Step::Event).collect();
             if ask {
-                steps.push(Step::Ask);
+                steps.push(Step::Ask(tall_ask));
             }
             if hold {
                 steps.extend(rest.take(1).map(Step::Event));
@@ -352,6 +361,47 @@ impl Harness for MockHarness {
     }
 }
 
+/// The [`TALL_ASK_MARKER`] question: a long context and many options.
+fn tall_question() -> UserInputQuestion {
+    let context = [
+        "The settings store has three writers today, and they disagree on the file format:",
+        "- The app writes settings.json with a version field and atomic renames.",
+        "- The CLI writes the same file in place, without a version, so a crash mid-write truncates it.",
+        "- The sync worker writes settings.remote.json and merges it on the next launch, last write wins.",
+        "",
+        "What I found while reading the code:",
+        "- crates/settings/src/store.rs: load() silently falls back to defaults on a parse error, which is how two users lost their model choice last week.",
+        "- crates/cli/src/config.rs: set() rewrites the whole file and drops keys it doesn't know (theme, wide, translation).",
+        "- crates/sync/src/merge.rs: merge() compares wall-clock timestamps across devices, so a device with a fast clock always wins.",
+        "- There are no tests that run two writers against one file.",
+        "",
+        "Constraints you mentioned:",
+        "- Existing settings files must keep working without a manual step.",
+        "- The CLI must keep working when the app isn't running.",
+        "- Sync must not lose a change made offline on one device.",
+        "",
+        "Each option below is a complete plan; I'll write it up as a checklist before touching code.",
+    ]
+    .join("\n");
+    UserInputQuestion {
+        id: "mock-question".into(),
+        header: "Migration plan".into(),
+        question: format!(
+            "Which migration plan should I follow for the settings store?\n\nContext:\n{context}"
+        ),
+        options: vec![
+            "One writer: the app owns the file; the CLI and sync send it changes over IPC".into(),
+            "Shared library: every writer goes through one store crate with atomic renames and versioning".into(),
+            "Per-key records: replace the JSON file with a small SQLite table keyed by setting".into(),
+            "Minimal fix: atomic renames in the CLI and a parse-error backup, nothing else".into(),
+            "Logical clocks for sync, on top of whichever plan you pick".into(),
+            "Stop here: write the findings up as an issue first".into(),
+        ],
+        multi_select: false,
+        permission: None,
+    }
+}
+
 /// Replay a marked run's steps: scripted events (paced by `delay`), the
 /// question an `Ask` step waits on, and the interrupt a `Hold` step waits
 /// for. An interrupt during either pause ends the run `Interrupted`.
@@ -377,14 +427,21 @@ fn marked_run(
                         }
                         return Some((Ok(event), (steps, Some((request_input, interrupt)))));
                     }
-                    Step::Ask => {
-                        let answer = (request_input)(vec![UserInputQuestion {
-                            id: "mock-question".into(),
-                            header: "Approach".into(),
-                            question: "Which approach should I take?".into(),
-                            options: vec!["Patch it in place".into(), "Rewrite the module".into()],
-                            multi_select: false,
-                            permission: None,
+                    Step::Ask(tall) => {
+                        let answer = (request_input)(vec![if tall {
+                            tall_question()
+                        } else {
+                            UserInputQuestion {
+                                id: "mock-question".into(),
+                                header: "Approach".into(),
+                                question: "Which approach should I take?".into(),
+                                options: vec![
+                                    "Patch it in place".into(),
+                                    "Rewrite the module".into(),
+                                ],
+                                multi_select: false,
+                                permission: None,
+                            }
                         }]);
                         tokio::select! {
                             _ = answer => {}

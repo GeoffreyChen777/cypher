@@ -241,7 +241,9 @@ impl Composer {
             Some(copy) => (copy.question.clone(), copy.context.clone()),
             None => split_question_context(&frame.prompt),
         };
-        let mut body = scroll_body().child(Self::wizard_question(frame, question_text));
+        let mut body = self
+            .scroll_body()
+            .child(Self::wizard_question(frame, question_text));
         if let Some(context) = context {
             body = body.child(wizard_context_block(
                 &context,
@@ -528,7 +530,9 @@ impl Composer {
     ) -> gpui::Stateful<gpui::Div> {
         let theme = &frame.theme;
         let scope = frame.scope;
-        let mut body = scroll_body().child(Self::wizard_question(frame, request.question.clone()));
+        let mut body = self
+            .scroll_body()
+            .child(Self::wizard_question(frame, request.question.clone()));
         let rows: Vec<gpui::Div> = request
             .rows()
             .enumerate()
@@ -660,6 +664,22 @@ impl Composer {
         body
     }
 
+    /// The scrolling body every card shares, capped so the transcript stays
+    /// in view above it and the whole card fits the column it sits in.
+    fn scroll_body(&self) -> gpui::Stateful<gpui::Div> {
+        let chrome = self.wizard_total_height.get() - self.wizard_body_height.get();
+        let measured = self.wizard_body_height.clone();
+        div()
+            .id("wizard-scroll")
+            .relative()
+            .min_w_0()
+            .max_h(px(wizard_content_max_height(self.available_height, chrome)))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .child(measure_height(measured))
+    }
+
     /// The answers as buttons, weighted by what they grant: Deny and Deny and
     /// stop on the left, broader approvals then the narrowest (filled) on the
     /// right. Number keys still pick them in the order the request lists them.
@@ -776,18 +796,6 @@ impl Composer {
             .children(broader)
             .children(primary)
     }
-}
-
-/// The scrolling body every card shares, capped so the transcript stays in
-/// view above it.
-fn scroll_body() -> gpui::Stateful<gpui::Div> {
-    div()
-        .id("wizard-scroll")
-        .min_w_0()
-        .max_h(px(WIZARD_CONTENT_MAX_HEIGHT))
-        .overflow_y_scroll()
-        .flex()
-        .flex_col()
 }
 
 /// The question card's per-frame snapshot, shared by its sections.
@@ -910,4 +918,21 @@ fn wizard_picked_answers(frame: &WizardFrame, copy: &OptionalCommentCopy) -> gpu
                     )
             }),
         ))
+}
+
+/// A layer that records its parent's laid-out height, re-rendering when it
+/// changes so the card's caps follow.
+pub(super) fn measure_height(cell: Rc<std::cell::Cell<f32>>) -> gpui::Canvas<()> {
+    gpui::canvas(
+        move |bounds, window, _| {
+            let height = f32::from(bounds.size.height);
+            if (height - cell.get()).abs() > 0.5 {
+                cell.set(height);
+                window.refresh();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
 }
