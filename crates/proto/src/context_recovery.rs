@@ -161,6 +161,22 @@ pub struct ContextRecovery {
     /// The model that wrote `context`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The request's earlier attempts, oldest first: each was sent with its
+    /// own context and failed. The model that wrote `context` read them all,
+    /// and the next attempt's record carries them on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_attempts: Vec<FailedRecoveryAttempt>,
+}
+
+/// One earlier attempt at a recovered request that failed too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedRecoveryAttempt {
+    pub attempt: u32,
+    /// The supplementary context it was sent with.
+    pub context: String,
+    /// Its failed answer or error around the trigger, whitespace collapsed.
+    pub excerpt: String,
 }
 
 /// How far a recovery under way has got.
@@ -399,6 +415,7 @@ mod tests {
             restart_preview: None,
             attempt: 1,
             model: None,
+            failed_attempts: Vec::new(),
         };
         let json = serde_json::to_string(&record).unwrap();
         assert_eq!(

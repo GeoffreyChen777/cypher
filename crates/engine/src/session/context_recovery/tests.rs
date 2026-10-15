@@ -44,6 +44,7 @@ fn record(attempt: u32) -> ContextRecovery {
         restart_preview: None,
         attempt,
         model: None,
+        failed_attempts: Vec::new(),
     }
 }
 
@@ -155,10 +156,56 @@ fn the_supplement_prompt_quotes_the_failed_exchange() {
     );
     assert!(prompt.contains("<user_message>\nlook at this\n</user_message>"));
     assert!(!prompt.contains("/tmp/a.png"));
-    assert!(prompt.contains("<previous_context>\nearlier context\n</previous_context>"));
+    assert!(prompt.contains("every attempt failed. Rewrite the context"));
+    assert!(prompt.contains(
+        "<failed_attempt number=\"1\">\n<context>\nearlier context\n</context>\n\
+         <failure>\nI refuse to look.\n</failure>\n</failed_attempt>"
+    ));
     assert!(prompt.contains("<agent_response>\nI refuse to look.\n</agent_response>"));
     assert!(!prompt.contains("<error>"));
     assert!(prompt.ends_with("because the agent's response contains \"refuse\"."));
+}
+
+/// A third attempt shows the model both failed contexts, oldest first, and
+/// its record carries them on.
+#[test]
+fn every_failed_attempt_reaches_the_next_one() {
+    let mut second = record(2);
+    second.context = "second context".into();
+    second.failed_attempts = vec![FailedRecoveryAttempt {
+        attempt: 1,
+        context: "first context".into(),
+        excerpt: "I refuse, first".into(),
+    }];
+    let mut prompt_entry = user("u1", "do it");
+    prompt_entry.recovery = Some(second);
+    let entries = vec![prompt_entry, answer("a1", "I refuse, second")];
+    let plan = plan(&entries, &["refuse"], 3).unwrap();
+    assert_eq!(plan.attempt, 3);
+
+    let attempts = failed_attempts(&plan);
+    assert_eq!(
+        attempts
+            .iter()
+            .map(|a| (a.attempt, a.context.as_str(), a.excerpt.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, "first context", "I refuse, first"),
+            (2, "second context", "I refuse, second"),
+        ]
+    );
+    let prompt = supplement_prompt("Explain.", &plan);
+    let first = prompt.find("<failed_attempt number=\"1\">").unwrap();
+    let second = prompt.find("<failed_attempt number=\"2\">").unwrap();
+    assert!(first < second);
+    assert!(
+        prompt.contains(
+            "<context>\nfirst context\n</context>\n<failure>\nI refuse, first\n</failure>"
+        )
+    );
+    assert!(prompt.contains(
+        "<context>\nsecond context\n</context>\n<failure>\nI refuse, second\n</failure>"
+    ));
 }
 
 #[test]

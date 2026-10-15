@@ -22,8 +22,10 @@ its recovery.
   own words, or their translation) or error message contains one, in any
   letter case, counts as failed.
 - **Context instruction**: what the model is asked to write. It always also
-  receives your message, the agent's answer, any error, the matched phrase,
-  and, on a second attempt, the context that did not help.
+  receives your message, the agent's answer, any error, and the matched
+  phrase. From the second attempt on, it also receives every earlier
+  attempt's context with how that attempt failed, is told they all failed,
+  and is asked to rewrite the context rather than repeat them.
 
 The pickers and the attempt count save as they change. The two text fields
 save with their **Save** button.
@@ -59,7 +61,9 @@ style as a steer's caption. Hover the caption to see:
 - the model that wrote it.
 
 If a recovered message fails again, it is recovered again from your original
-words (contexts never stack) until the attempt limit. Nothing changes when the
+words (contexts never stack) until the attempt limit; the resent message's
+record keeps the earlier attempts, so each new context is written knowing all
+of them. Nothing changes when the
 recovery cannot go ahead: the model gives no answer within three minutes, the
 chat cannot be rewound (it is not a Pi chat, has no stored session, or is
 hosted elsewhere), or you sent something while the context was being written.

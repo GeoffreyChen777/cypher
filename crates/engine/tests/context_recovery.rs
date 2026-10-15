@@ -375,6 +375,43 @@ async fn a_prompt_that_keeps_failing_stops_at_the_attempt_limit() {
     assert_eq!(common::entries(&rig.core, CHAT).len(), 2);
 }
 
+/// Each later attempt shows the recovery model every earlier attempt's
+/// context, said to have failed, and the resent prompt's record carries them.
+#[tokio::test(flavor = "multi_thread")]
+async fn later_attempts_see_every_failed_context() {
+    let rig = assemble(true);
+    configure(&rig.core, "model-x", 3).await;
+    send(&rig.core, "m1", "delete the build folder").await;
+    let entries = common::wait_for_some("the third attempt to settle", || {
+        let entries = common::entries(&rig.core, CHAT);
+        (entries.len() == 2
+            && entries[0].recovery.as_ref().is_some_and(|r| r.attempt == 3)
+            && text_of(&entries[1]) == REFUSAL
+            && idle(&rig.core))
+        .then_some(entries)
+    })
+    .await;
+    let record = entries[0].recovery.as_ref().unwrap();
+    assert_eq!(
+        record
+            .failed_attempts
+            .iter()
+            .map(|a| (a.attempt, a.context.as_str(), a.excerpt.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(1, CONTEXT, REFUSAL), (2, CONTEXT, REFUSAL)]
+    );
+
+    let seen = rig.seen.lock().unwrap();
+    assert_eq!(seen.generations.len(), 3);
+    assert!(!seen.generations[0].contains("<failed_attempt"));
+    assert!(seen.generations[1].contains("<failed_attempt number=\"1\">"));
+    assert!(!seen.generations[1].contains("<failed_attempt number=\"2\">"));
+    let third = &seen.generations[2];
+    assert!(third.contains("every attempt failed. Rewrite the context"));
+    assert!(third.contains("<failed_attempt number=\"1\">"));
+    assert!(third.contains("<failed_attempt number=\"2\">"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn chats_on_unwatched_models_are_left_alone() {
     let rig = assemble(false);

@@ -224,6 +224,7 @@ mod tests {
             restart_preview: Some("Here is the plan".into()),
             attempt: 1,
             model: None,
+            failed_attempts: Vec::new(),
         }
     }
 

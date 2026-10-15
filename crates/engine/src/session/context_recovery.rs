@@ -39,9 +39,9 @@ use cypher_doc::{
 };
 use cypher_proto::agent_prompt::{PromptComment, comments_block, recovery_block, wrap};
 use cypher_proto::{
-    ContextRecovery, HarnessId, RecoveryProgress, RecoveryStage, RunRequest, SandboxLevel,
-    SessionRewindRequest, SessionRewindResponse, SessionStatus, TriggerMatch, attachment_refs,
-    find_trigger,
+    ContextRecovery, FailedRecoveryAttempt, HarnessId, RecoveryProgress, RecoveryStage, RunRequest,
+    SandboxLevel, SessionRewindRequest, SessionRewindResponse, SessionStatus, TriggerMatch,
+    attachment_refs, find_trigger,
 };
 
 use crate::EngineError;
@@ -240,13 +240,23 @@ pub(crate) fn supplement_prompt(instruction: &str, plan: &RecoveryPlan) -> Strin
     out.push_str("\n<user_message>\n");
     out.push_str(&clip_middle(request.trim(), MAX_PROMPT_CHARS));
     out.push_str("\n</user_message>\n");
-    if let Some(previous) = &plan.user.recovery {
+    let attempts = failed_attempts(plan);
+    if !attempts.is_empty() {
         out.push_str(
-            "\nThis message was already sent again once with the context below, and it \
-             failed again; write something that works better.\n<previous_context>\n",
+            "\nThis message was already sent again with supplementary context, once per \
+             attempt below, and every attempt failed. Rewrite the context: do not repeat \
+             what failed; write something that works better.\n",
         );
-        out.push_str(&clip_middle(previous.context.trim(), MAX_CONTEXT_CHARS));
-        out.push_str("\n</previous_context>\n");
+        for attempt in &attempts {
+            out.push_str(&format!(
+                "<failed_attempt number=\"{}\">\n<context>\n",
+                attempt.attempt
+            ));
+            out.push_str(&clip_middle(attempt.context.trim(), MAX_CONTEXT_CHARS));
+            out.push_str("\n</context>\n<failure>\n");
+            out.push_str(attempt.excerpt.trim());
+            out.push_str("\n</failure>\n</failed_attempt>\n");
+        }
     }
     if !plan.response.trim().is_empty() {
         out.push_str("\n<agent_response>\n");
@@ -267,6 +277,22 @@ pub(crate) fn supplement_prompt(instruction: &str, plan: &RecoveryPlan) -> Strin
         plan.found.trigger
     ));
     out
+}
+
+/// Every earlier attempt at the plan's request, oldest first: those its
+/// record already carries, then the one that just failed — its context, and
+/// the failure this plan matched. Empty for a first recovery.
+pub(crate) fn failed_attempts(plan: &RecoveryPlan) -> Vec<FailedRecoveryAttempt> {
+    let Some(previous) = &plan.user.recovery else {
+        return Vec::new();
+    };
+    let mut attempts = previous.failed_attempts.clone();
+    attempts.push(FailedRecoveryAttempt {
+        attempt: previous.attempt,
+        context: previous.context.clone(),
+        excerpt: plan.found.excerpt.clone(),
+    });
+    attempts
 }
 
 /// The model's reply as context: trimmed, a fence wrapping the whole reply
@@ -718,6 +744,7 @@ impl ContextRecoveryService {
         request.worktree = None;
         request.prompt = raw.clone();
         let agent_prompt = resend_prompt(&context, &plan.user.comments, &raw);
+        let failed = failed_attempts(&plan);
         let message_id = new_id();
         // Written here rather than by dispatch so the entry is born with its
         // record; dispatch finds the id and leaves the entry alone.
@@ -746,6 +773,7 @@ impl ContextRecoveryService {
                 restart_preview: plan.restart_preview,
                 attempt: plan.attempt,
                 model: Some(model.to_owned()),
+                failed_attempts: failed,
             }),
         })?;
         inner.doc_host.flush_chat_sync(chat_id);
