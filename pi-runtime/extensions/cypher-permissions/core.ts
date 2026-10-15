@@ -57,7 +57,7 @@ export interface RequestContext {
   ui: UiLike;
   signal?: AbortSignal;
   branch(): readonly Entry[];
-  /** One completion from the judge model; undefined on any failure. */
+  /** One completion from the judge model; undefined when it gives none, or it throws with why. */
   complete?(system: string, prompt: string, signal: AbortSignal): Promise<string | undefined>;
   abort?(): void;
   /** The tool call a dialog gates, so Cypher files the dialog under it. */
@@ -529,19 +529,29 @@ export class Permissions {
     const { userMessages, recentToolCalls } = conversationContext(ctx.branch());
     const judgeRequest: JudgeRequest = { ...request, level: this.level, workspaceRoots: this.roots, userMessages, recentToolCalls };
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.config.judge.timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.config.judge.timeoutMs);
     const onAbort = () => controller.abort();
     ctx.signal?.addEventListener("abort", onAbort, { once: true });
     let text: string | undefined;
+    let failure: string | undefined;
     try {
       text = await ctx.complete(JUDGE_SYSTEM_PROMPT, judgePrompt(judgeRequest), controller.signal);
-    } catch {
+    } catch (error) {
       text = undefined;
+      failure = error instanceof Error ? error.message.trim() : undefined;
     } finally {
       clearTimeout(timer);
       ctx.signal?.removeEventListener("abort", onAbort);
     }
-    if (text === undefined) return { decision: "ask-user", reason: "The reviewing model did not answer (it failed or timed out)." };
+    if (text === undefined) {
+      if (timedOut) return { decision: "ask-user", reason: `The reviewing model did not answer within ${Math.round(this.config.judge.timeoutMs / 1000)} seconds.` };
+      const why = failure ? `: ${failure.length > 200 ? `${failure.slice(0, 200)}…` : failure}` : ".";
+      return { decision: "ask-user", reason: `The reviewing model failed${why}` };
+    }
     return parseVerdict(text, this.config.judge.minConfidence);
   }
 

@@ -520,7 +520,11 @@ When several paths are requested together, the strictest mode wins.
 
 - **Model**: `judge.model` (`provider/id`), else the chat's current model, through Pi's
   model registry with the user's existing credentials (any provider, including the Claude
-  bridge).
+  bridge). The call is marked one-off (`cacheRetention: "none"`): the Claude bridge
+  serves it in a separate Claude Code process with the judge's own system prompt and no
+  tools, where it would otherwise refuse a system prompt the chat never recorded. A judge
+  that fails says why in the dialog's Review row (the provider's error, or that it did
+  not answer in time).
 - **Trusted input**: the user's last six messages, the request (capability: `read`,
   `write`, `network`, `tool` or `escalate`; paths, zone, guard and why, tool, level,
   workspace roots).

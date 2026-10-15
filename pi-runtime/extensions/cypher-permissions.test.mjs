@@ -382,6 +382,7 @@ test("a judge that fails or is missing asks the user instead of rejecting", asyn
     assert.equal(result.ok, true, "the user approved it");
     assert.equal(c.asked.length, 1, "the user was asked");
     assert.match(c.asked[0].title, /couldn't approve this automatically/);
+    if (failing?.toString().includes("provider down")) assert.match(c.asked[0].title, /The reviewing model failed: provider down/, "the dialog says why");
     const audit = readFileSync(join(permissions.agentDir, "permission-audit.jsonl"), "utf8");
     assert.doesNotMatch(audit, /"decision":"deny"/);
   }

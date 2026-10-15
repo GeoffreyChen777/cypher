@@ -93,24 +93,24 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
         if (slash > 0) model = ctx.modelRegistry.find(configured.slice(0, slash), configured.slice(slash + 1)) ?? model;
       }
       if (!model) return undefined;
-      try {
-        const stream = ctx.modelRegistry.stream(
-          model,
-          { systemPrompt: system, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
-          { signal: completionSignal },
-        );
-        for await (const _event of stream) {
-          // Drained for the result.
-        }
-        const result = await stream.result();
-        if (result.stopReason === "error" || result.stopReason === "aborted") return undefined;
-        return result.content
-          .filter((part: { type: string }) => part.type === "text")
-          .map((part: { type: string; text?: string }) => part.text ?? "")
-          .join("");
-      } catch {
-        return undefined;
+      const stream = ctx.modelRegistry.stream(
+        model,
+        { systemPrompt: system, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
+        // A one-off call: claude-bridge serves it in a separate Claude Code
+        // process with this system prompt, instead of refusing a prompt the
+        // chat's session never recorded.
+        { signal: completionSignal, cacheRetention: "none" },
+      );
+      for await (const _event of stream) {
+        // Drained for the result.
       }
+      const result = await stream.result();
+      if (result.stopReason === "aborted") return undefined;
+      if (result.stopReason === "error") throw new Error(result.errorMessage || "The model stopped with an error.");
+      return result.content
+        .filter((part: { type: string }) => part.type === "text")
+        .map((part: { type: string; text?: string }) => part.text ?? "")
+        .join("");
     },
   });
 
