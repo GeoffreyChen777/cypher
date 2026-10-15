@@ -25,7 +25,8 @@ const MAX_PATTERNS: usize = 256;
 const MAX_PATTERN_CHARS: usize = 512;
 const MAX_COMMAND_WORDS: usize = 32;
 /// Programs a command rule cannot start with: each can run any other
-/// command. Kept in step with `cypher-permissions/commands.ts`.
+/// command, or (the builtins) change the variables and lookups of the
+/// commands after it. Kept in step with `cypher-permissions/commands.ts`.
 const BANNED_PROGRAMS: &[&str] = &[
     "sh",
     "bash",
@@ -78,10 +79,30 @@ const BANNED_PROGRAMS: &[&str] = &[
     "gawk",
     "sed",
     "find",
+    "source",
+    ".",
+    "trap",
+    "export",
+    "declare",
+    "typeset",
+    "readonly",
+    "local",
+    "unset",
+    "set",
+    "shopt",
+    "enable",
+    "hash",
+    "alias",
+    "read",
+    "mapfile",
+    "readarray",
+    "let",
+    "getopts",
 ];
 /// Builtins that never need to leave the sandbox.
 const INERT_PROGRAMS: &[&str] = &[
-    "cd", "pushd", "popd", "pwd", "true", "false", ":", "echo", "printf", "sleep",
+    "cd", "pushd", "popd", "pwd", "true", "false", ":", "echo", "printf", "sleep", "test", "[",
+    "exit", "return", "break", "continue", "wait", "shift",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -882,6 +903,7 @@ mod tests {
               "commands": [
                 { "match": ["git", "push", "**"], "decision": "allow", "label": "Push", "createdAt": "t" },
                 { "match": ["bash", "-c", "**"], "decision": "allow" },
+                { "match": ["source", "**"], "decision": "allow" },
                 { "match": ["kubectl", "delete", "**"], "decision": "deny" }
               ],
               "approval": { "escalate": "assisted" }
@@ -896,7 +918,7 @@ mod tests {
                 .map(|rule| rule.pattern[0].as_str())
                 .collect::<Vec<_>>(),
             ["git", "kubectl"],
-            "a rule on a shell is dropped"
+            "a rule on a shell, or a builtin that runs scripts, is dropped"
         );
         assert_eq!(
             settings.approval.escalate,

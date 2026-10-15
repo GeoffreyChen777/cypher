@@ -10,7 +10,7 @@ import { randomBytes } from "node:crypto";
 import { constants, realpathSync, statSync } from "node:fs";
 import { open, mkdir, access as fsAccess, stat as fsStat, readdir as fsReaddir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { basename, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { AuditLog } from "./audit.ts";
 import type { AuditRecord } from "./audit.ts";
 import { appendCommandRule, appendRule, approvalMode as approvalModeFor, loadConfig, resolveLevel } from "./config.ts";
@@ -36,9 +36,10 @@ import { decide, describe } from "./policy.ts";
 import type { Verdict } from "./policy.ts";
 import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs } from "./sandbox.ts";
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
-import { describePattern, fileSha256, INERT_PROGRAMS, patternError, patternMatches, resolveProgram } from "./commands.ts";
+import { categoryPattern, describePattern, fileSha256, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
-import { parseShell } from "./shell.ts";
+import { parseShell, UNKNOWN } from "./shell.ts";
+import type { ParsedLine, SimpleCommand } from "./shell.ts";
 
 export const UNAVAILABLE_ENTRY = "cypher-permissions.unavailable";
 
@@ -169,6 +170,18 @@ export type CommandCheck =
   /** It runs in the sandbox unless an escalation is approved. */
   | { kind: "sandbox" };
 
+/** One command of a bash line, with the directory it runs in (undefined: not known). */
+interface LineCommand extends SimpleCommand {
+  cwd: string | undefined;
+  inert: boolean;
+}
+
+const DIRECTORY_BUILTINS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
+
+/** Variables bash itself reads: a line that assigns one changes how what follows runs. */
+const SHELL_VARIABLES =
+  /^(BASH\w*|LC_\w+|HIST\w*|COMP\w*|READLINE_\w+|EPOCH\w+|PATH|IFS|CDPATH|HOME|PWD|OLDPWD|ENV|GLOBIGNORE|EXECIGNORE|FIGNORE|PS[0-4]|PROMPT_COMMAND|TMPDIR|POSIXLY_CORRECT|SHELLOPTS|LANG|TIMEFORMAT|OPTIND|OPTERR|OPTARG|FUNCNEST|MAIL|MAILPATH|MAILCHECK|TMOUT|SHELL|UID|EUID|PPID|RANDOM|SRANDOM|SECONDS|LINENO|GROUPS|DIRSTACK|PIPESTATUS|HOSTNAME|HOSTTYPE|OSTYPE|MACHTYPE|COLUMNS|LINES|REPLY|INPUTRC|auto_resume|histchars)$/;
+
 /** What the agent proposes when it asks to leave the sandbox. */
 export interface EscalationProposal {
   /** Patterns that later matching commands may run outside without asking. */
@@ -230,6 +243,8 @@ export class Permissions {
   level!: LevelName;
   paths!: PathContext;
   warnings: string[] = [];
+  /** A command prefix from the settings runs before every command (it may export variables). */
+  shellPrefix = false;
   private readonly levelEnv: string | undefined;
   private cwd: string;
   private extraRoots: string[] = [];
@@ -674,47 +689,100 @@ export class Permissions {
    * exists, and one in a writable place still has the contents the rule
    * pinned.
    */
-  private programTrusted(program: string, cwd: string, rule: CommandRule): boolean {
-    const resolved = resolveProgram(program, cwd);
+  private programTrusted(program: string, cwd: string | undefined, rule: CommandRule): boolean {
+    const resolved = this.resolveIn(program, cwd);
     if (!resolved) return false;
     if (!this.writableRoots().some((root) => isUnder(resolved, root))) return true;
     return rule.sha256 !== undefined && fileSha256(resolved) === rule.sha256;
   }
 
-  /** The simple commands of a line that need the sandbox's leave, with the directory each runs in. */
-  private commandsOf(words: string[][], cwd: string): { words: string[]; cwd: string }[] {
-    const out: { words: string[]; cwd: string }[] = [];
-    let here = cwd;
-    for (const command of words) {
-      if (INERT_PROGRAMS.has(command[0])) {
-        if (command[0] === "cd" && command.length === 2) here = resolvePath(here, command[1]);
-        continue;
-      }
-      out.push({ words: command, cwd: here });
+  /** A program as bash would find it from `cwd`; a relative path from a directory not known is not found. */
+  private resolveIn(program: string, cwd: string | undefined): string | undefined {
+    if (cwd === undefined && program.includes("/") && !isAbsolute(program)) return undefined;
+    return resolveProgram(program, cwd ?? this.cwd);
+  }
+
+  /**
+   * Whether a variable a line assigns stays in its shell, unseen by the
+   * programs it runs: not one the environment exports (bash runs with the
+   * engine's), not one bash itself reads, and not when a command prefix
+   * from the settings could export more.
+   */
+  private assignable(name: string): boolean {
+    return !this.shellPrefix && !Object.hasOwn(process.env, name) && !SHELL_VARIABLES.test(name) && !/proxy/i.test(name);
+  }
+
+  private parse(command: string): ParsedLine {
+    return parseShell(command, this.home, { assignable: (name) => this.assignable(name) });
+  }
+
+  /**
+   * A line's commands, each with the directory it runs in: undefined after a
+   * `cd` that may or may not have run (after `&&` or `||`, in a pipeline,
+   * `if`, loop or substitution), or that goes somewhere not known.
+   */
+  private commandsOf(commands: readonly SimpleCommand[], cwd: string): LineCommand[] {
+    const out: LineCommand[] = [];
+    let here: string | undefined = cwd;
+    const moves = (command: SimpleCommand) => DIRECTORY_BUILTINS.has(command.words[0] ?? "");
+    // A `cd` in a loop moves every command of the loop, before it too.
+    const movesInLoop = commands.some((command) => command.loop && moves(command));
+    for (const command of commands) {
+      if (command.loop && movesInLoop) here = undefined;
+      out.push({ ...command, cwd: here, inert: isInert(command.words) });
+      if (!moves(command)) continue;
+      const [program, target, ...rest] = command.words;
+      const certain = program === "cd" && target !== undefined && target !== UNKNOWN && target !== "-" && rest.length === 0 && !command.scoped && !process.env.CDPATH;
+      here = certain && here !== undefined ? resolvePath(here, target) : undefined;
     }
     return out;
   }
 
-  /** What the rules say about a bash call, before it runs. */
+  /**
+   * Why a command's redirections keep a rule from vouching for it: a file
+   * that commands in the sandbox may not read or write without asking.
+   */
+  private redirectProblem(item: LineCommand): string | undefined {
+    for (const [capability, paths] of [["read", item.reads], ["write", item.writes]] as const) {
+      const verb = capability === "read" ? "reads" : "writes";
+      for (const path of paths) {
+        if (item.cwd === undefined && !isAbsolute(path)) return `it ${verb} ${path} in a directory known only when it runs`;
+        const classification = this.classify(path, item.cwd);
+        if (this.verdict(capability, classification).kind !== "allow") return `it ${verb} ${displayPath(classification.path, this.home)}, which commands in the sandbox can't`;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * What the rules say about a bash call, before it runs. Every command the
+   * line can run is checked, in `$(…)` and loops too, inert builtins
+   * skipped: a `deny` that matches anywhere refuses the line; it runs
+   * outside only if every command matches an `allow` whose program is
+   * trusted, none could turn out to match a `deny` or `ask` (a word known
+   * only when it runs could be what they name), and its redirections reach
+   * only files the sandbox allows.
+   */
   checkCommand(command: string, cwd: string): CommandCheck {
     if (!this.enforcing) return { kind: "sandbox" };
-    const parsed = parseShell(command, this.home);
+    const parsed = this.parse(command);
     // A line the parser cannot read cannot match a rule: it runs in the
     // sandbox unless it is approved as written.
     if (parsed.kind === "opaque") return { kind: "sandbox" };
     const rules = this.commandRules();
     const commands = this.commandsOf(parsed.commands, cwd);
     const used: CommandRule[] = [];
-    let outside = commands.length > 0;
+    let outside = commands.some((item) => !item.inert);
     for (const item of commands) {
-      const matching = rules.filter((rule) => patternMatches(rule.match, item.words));
-      const deny = matching.find((rule) => rule.decision === "deny");
+      if (this.redirectProblem(item)) outside = false;
+      if (item.inert) continue;
+      const deny = rules.find((rule) => rule.decision === "deny" && patternMatches(rule.match, item.words));
       if (deny) return { kind: "deny", reason: `Permission denied: \`${describePattern(deny.match)}\` is set to never run.` };
-      if (matching.some((rule) => rule.decision === "ask")) {
+      if (ruleCannotVouch(item.words) || rules.some((rule) => rule.decision !== "allow" && patternMatches(rule.match, item.words, true))) {
         outside = false;
         continue;
       }
-      const allow = matching.find((rule) => rule.decision === "allow" && this.programTrusted(item.words[0], item.cwd, rule));
+      const allow = rules.find((rule) => rule.decision === "allow" && patternMatches(rule.match, item.words) && this.programTrusted(item.words[0], item.cwd, rule));
       if (allow) used.push(allow);
       else outside = false;
     }
@@ -722,15 +790,16 @@ export class Permissions {
   }
 
   /**
-   * The agent asks to run a bash call outside the sandbox, proposing
-   * patterns for later calls. A human decides: once, for this chat or always
-   * (the patterns), or no.
+   * The agent asks to run a bash call outside the sandbox. A human decides:
+   * once, or for this chat or always by patterns for similar commands (the
+   * agent's, then each other command's category), or no. `onceOnly` says
+   * why no pattern could be offered.
    */
   async requestEscalation(
     command: string,
     proposal: EscalationProposal,
     ctx: RequestContext,
-  ): Promise<{ ok: true; scope: GrantScope } | { ok: false; reason: string; abort?: boolean }> {
+  ): Promise<{ ok: true; scope: GrantScope; onceOnly?: string } | { ok: false; reason: string; abort?: boolean }> {
     const mode = approvalModeFor(this.config, "escalate");
     const audit: AuditRecord = { tool: "bash", command, capability: "escalate", decision: "deny", decidedBy: "policy" };
     if (mode === "deny") {
@@ -740,24 +809,55 @@ export class Permissions {
     }
     const check = this.checkCommand(command, ctx.cwd);
     if (check.kind === "deny") return { ok: false, reason: check.reason };
-    const parsed = parseShell(command, this.home);
+    const parsed = this.parse(command);
     // Patterns, each with the pin for a program in a writable place.
     const patterns: { match: string[]; sha256?: string }[] = [];
-    if (parsed.kind === "simple" && proposal.patterns?.length) {
+    const pinned = (program: string, cwd: string | undefined): { sha256?: string } | undefined => {
+      const resolved = this.resolveIn(program, cwd);
+      if (!resolved) return undefined;
+      return { sha256: this.writableRoots().some((root) => isUnder(resolved, root)) ? fileSha256(resolved) : undefined };
+    };
+    /** Why only this run can be approved. */
+    let onceOnly: string | undefined;
+    if (parsed.kind === "opaque") {
+      onceOnly = `it uses ${parsed.reason}, which rules can't check`;
+    } else {
       const commands = this.commandsOf(parsed.commands, ctx.cwd);
-      for (const pattern of proposal.patterns) {
+      const pending = commands.filter((item) => !item.inert);
+      for (const pattern of proposal.patterns ?? []) {
         const error = patternError(pattern);
         if (error) return { ok: false, reason: `Invalid pattern ${JSON.stringify(pattern)}: ${error}` };
-        const matched = commands.find((item) => patternMatches(pattern, item.words));
+        const matched = pending.find((item) => patternMatches(pattern, item.words));
         if (!matched) return { ok: false, reason: `The pattern \`${describePattern(pattern)}\` does not match this command; propose patterns that cover it.` };
-        const resolved = resolveProgram(matched.words[0], matched.cwd);
-        if (!resolved) return { ok: false, reason: `\`${matched.words[0]}\` was not found.` };
-        const pin = this.writableRoots().some((root) => isUnder(resolved, root)) ? fileSha256(resolved) : undefined;
-        patterns.push({ match: pattern, sha256: pin });
+        const pin = pinned(matched.words[0], matched.cwd);
+        if (!pin) return { ok: false, reason: `\`${matched.words[0]}\` was not found.` };
+        patterns.push({ match: pattern, ...pin });
       }
-      const uncovered = commands.find((item) => !proposal.patterns!.some((pattern) => patternMatches(pattern, item.words)));
-      if (uncovered) return { ok: false, reason: `No proposed pattern covers \`${uncovered.words.join(" ")}\`; propose one for every command in the line, or none to run it once.` };
+      const rules = this.commandRules();
+      onceOnly = commands.map((item) => this.redirectProblem(item)).find(Boolean);
+      for (const item of pending) {
+        if (onceOnly) break;
+        onceOnly = ruleCannotVouch(item.words);
+        const held = rules.find((rule) => rule.decision !== "allow" && patternMatches(rule.match, item.words, true));
+        if (held) onceOnly ??= held.decision === "deny" ? `it could turn out to be \`${describePattern(held.match)}\`, which is set to never run` : `\`${describePattern(held.match)}\` is set to always ask`;
+        if (onceOnly) break;
+        // Covered: by a proposal, or already allowed.
+        if (patterns.some((pattern) => patternMatches(pattern.match, item.words))) continue;
+        if (rules.some((rule) => rule.decision === "allow" && patternMatches(rule.match, item.words) && this.programTrusted(item.words[0], item.cwd, rule))) continue;
+        const category = categoryPattern(item.words);
+        if (typeof category === "string" || patternError(category)) {
+          onceOnly = typeof category === "string" ? category : patternError(category)!.replace(/\.$/, "");
+          break;
+        }
+        const pin = pinned(item.words[0], item.cwd);
+        if (!pin) {
+          onceOnly = `\`${basename(item.words[0])}\` was not found`;
+          break;
+        }
+        if (!patterns.some((pattern) => JSON.stringify(pattern.match) === JSON.stringify(category))) patterns.push({ match: category, ...pin });
+      }
     }
+    if (onceOnly) patterns.length = 0;
     if (!ctx.hasUI) {
       const reason = "Permission denied: running outside the sandbox needs approval and no one is here to approve it.";
       this.audit.write({ ...audit, reason });
@@ -770,7 +870,7 @@ export class Permissions {
     if (proposal.reason) lines.push(fact("Reason", proposal.reason));
     lines.push("Note: It runs as you, with your files, keys, keychain and network.");
     if (patterns.some((pattern) => pattern.sha256)) lines.push("Note: A program here is in a writable place; approval covers its current contents only.");
-    if (parsed.kind === "opaque") lines.push(fact("Note", `It uses ${parsed.reason}, which rules can't check, so it can only run once as written.`));
+    if (onceOnly) lines.push(fact("Note", `${onceOnly[0].toUpperCase()}${onceOnly.slice(1)}, so it can only run once as written.`));
     const title = `Run this command outside the sandbox?\n\nContext:\n${lines.join("\n")}${promptLine("escalate", ctx.toolCallId)}`;
     const options = patterns.length ? [RUN_ONCE, HUMAN.chat, HUMAN.always, HUMAN.deny, HUMAN.stop] : [RUN_ONCE, HUMAN.deny, HUMAN.stop];
     const choice = await this.serialized(() => ctx.ui.select(title, options, { signal: ctx.signal, timeout: this.config.ask.timeoutMs ?? undefined }));
@@ -778,7 +878,7 @@ export class Permissions {
     switch (choice) {
       case RUN_ONCE:
         this.audit.write({ ...audit, decision: "allow", decidedBy: "user", scope: "once" });
-        return { ok: true, scope: "once" };
+        return { ok: true, scope: "once", ...(onceOnly ? { onceOnly } : {}) };
       case HUMAN.chat:
         for (const pattern of patterns) {
           const grant = newGrant({ capability: "read", paths: [], pattern: pattern.match, label, sha256: pattern.sha256, scope: "chat", approvedBy: "user", chatId: this.chatId });

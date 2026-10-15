@@ -361,9 +361,10 @@ extension does not need to understand the program; the user approves the command
 optionally, a pattern for similar ones).
 
 The bash tool takes an optional `escalate: { label, reason, patterns? }`. `label` says what
-the command is for in plain words, `patterns` are command rules the agent proposes for
-later commands. Command rules (`commands.ts`, in `permissions.json`'s `commands`, a
-project's `.pi/permissions.json`, or the chat's grants):
+the command is for in plain words, `patterns` are command rules the agent may propose for
+later commands; each command it leaves uncovered gets its **category** (below). Command
+rules (`commands.ts`, in `permissions.json`'s `commands`, a project's
+`.pi/permissions.json`, or the chat's grants):
 
 ```jsonc
 { "match": ["git", "push", "**"], "decision": "allow", "label": "Push to GitHub" }
@@ -377,31 +378,62 @@ project's `.pi/permissions.json`, or the chat's grants):
   `/usr/bin/git`); a pattern naming a path matches that path as written.
 - Shells, interpreters and wrappers cannot start a pattern (`sh`, `bash`, `env`, `sudo`,
   `xargs`, `python`, `node`, `npx`, `awk`, `sed`, `find`, …): a rule on them would cover
-  any command. `cd`, `echo` and other inert builtins never need to leave.
-- **Reading the line** (`shell.ts`): words, quotes, `~`, comments, and `&&`, `||`, `;`,
-  `|`, newlines between commands; `2>&1` and redirection to `/dev/null` are dropped.
-  Anything else (expansions, substitutions, other redirections, unquoted globs and braces,
-  subshells, background jobs, assignments, `if`/`for`/…) makes the line **opaque**: no rule
-  matches it, so it runs in the sandbox, or outside once if the user approves it as
-  written.
-- **Deciding**: every command in the line is checked (inert builtins skipped). A `deny`
-  anywhere blocks the line before it runs, escalated or not. If every command matches an
-  `allow` and none an `ask`, the line runs outside without asking, with a note in the
-  result (`[permissions] Ran outside the sandbox (allowed by …)`). Otherwise it runs in
-  the sandbox, unless the agent escalates and the user approves.
+  any command. Nor can the builtins that run scripts or change the shell's variables and
+  lookups (`source`, `.`, `trap`, `export`, `set`, `read`, `hash`, …). `cd`, `echo`,
+  `test` and other inert builtins never need to leave; neither does `set` with only
+  `-e`/`-u`/`-x`/`-o pipefail`, but `printf -v` (it sets a variable) does.
+- **Reading the line** (`shell.ts`) finds every command the line can run: words, quotes,
+  `~`, comments; `&&`, `||`, `;`, `|`, `|&` and newlines between commands; the commands
+  in `$(…)` and backticks, and in `if`/`while`/`until`/`for … in`, `!` and `[[ … ]]`
+  (each read as one that may run); redirections, with the files they read and write;
+  heredocs and here-strings (input, not commands; an unquoted heredoc holding a
+  substitution is opaque). A word known only when the line runs (`$x`, `$(…)`, an
+  unquoted glob or brace list, `~user`) is *unknown*. `name=value` alone is read when no
+  program can see it: not a variable the environment exports (bash runs with the
+  engine's), not one bash reads (`PATH`, `IFS`, `CDPATH`, `HOME`, `BASH_*`, …), and not
+  when the settings add a shell command prefix. Anything else (subshells, groups,
+  background jobs, `case`, functions, arithmetic, process substitution, `$'…'`, an
+  assignment in front of a command) makes the line **opaque**: no rule matches it, so it
+  runs in the sandbox, or outside once if the user approves it as written.
+- **Deciding**: every command in the line is checked (inert builtins skipped). An unknown
+  word matches only `**` in an `allow` rule, but anything a `deny` or `ask` rule names. A
+  `deny` that matches blocks the line before it runs, escalated or not. If every command
+  matches an `allow`, none could match a `deny` or `ask`, and every redirection reads or
+  writes a file the sandbox itself may without asking, the line runs outside without
+  asking, with a note in the result (`[permissions] Ran outside the sandbox (allowed by
+  …)`). Otherwise it runs in the sandbox, unless the agent escalates and the user approves.
+  No rule vouches for `ssh`, `scp` or `sftp` given an option that runs a command on this
+  computer (`ProxyCommand`, `LocalCommand`, `KnownHostsCommand`, `Match`, `Include`,
+  `-F`, `-S`), or options ssh reads straight after the host.
 - **The program must be the one approved**: it is resolved as bash would (a path against
   the working directory, else `PATH`). A program that does not exist is never trusted. A
   program inside a place sandboxed commands can write (the workspace, temp, the writable
   caches) is trusted only at the contents pinned when it was approved (`sha256`); a
-  changed file asks again. The agent cannot change `PATH` in the line (an assignment is
-  opaque).
+  changed file asks again. The agent cannot change `PATH` in the line. A `cd` moves the
+  directory only when it surely runs in the line's shell: one after `&&` or `||`, in a
+  pipeline, `if`, loop or substitution (or with `CDPATH` set) leaves it unknown, and a
+  program or redirection by relative path from an unknown directory is never trusted.
+- **Categories**: what Allow for this chat and Always allow cover for a command the agent
+  proposed no pattern for (`categoryPattern`). The program and what it does for CLIs whose
+  first word says it (`git push …`, `gh pr …`, `xcrun simctl …`, `kubectl get …`, with
+  the options before it as written: `git -C ../other push …`), and the script or tool it
+  runs (`npm run build …`, `uv run pytest …`); the host for ssh (`ssh deploy@web …`, with
+  its options as written); any use of a script named by its path (pinned); the command as
+  written for programs whose words are the risk (`rm`, `cp`, `mv`, `tee`, `cat`, `curl`,
+  `scp`, `rsync`, `kill`, `open`, `openssl`, `op`, …); any use of other
+  programs (`lsof …`). A command already allowed needs none.
 - **The request**: proposed patterns are checked before anyone is asked: each must be
-  valid, match a command in the line, and together they must cover every command. The
-  dialog reads *Run this command outside the sandbox?* with `Purpose`, `Command`, one
-  `Pattern` line each, `Reason`, and notes (it runs as the user; a pinned program; an
-  opaque line). Options: Run once, Allow for this chat, Always allow (patterns only),
-  Deny, Deny and stop. Always a human (`approval.escalate`: `ask` or `deny`; never the
-  judge). Without a UI it is denied.
+  valid and match a command in the line. The dialog reads *Run this command outside the
+  sandbox?* with `Purpose`, `Command`, one `Pattern` line each, `Reason`, and notes (it
+  runs as the user; a pinned program). Options: Run once, Allow for this chat, Always
+  allow, Deny, Deny and stop. When no pattern can cover the line, only Run once, Deny and
+  Deny and stop, and a note says why: it is opaque; a program can run any command
+  (`python3`) or is known only when it runs; a program allowed only as written is given
+  unknown words; a word could turn it into a command a `deny` or `ask` rule names; an ssh
+  option rules never vouch for; a redirection the sandbox would not allow. The agent's
+  result says the same (`approved once; it could not be allowed for the chat, because
+  …`). Always a human (`approval.escalate`: `ask` or `deny`; never the judge). Without a
+  UI it is denied.
 - **What an approval leaves behind**: Run once, nothing. Allow for this chat, one chat
   grant per pattern (§7.5). Always allow, one `allow` rule per pattern in
   `permissions.json`.
@@ -634,8 +666,8 @@ Commands:
 | `cypher-permissions/sandbox.ts` | Landstrip status, policy compiler, wrapper, env scrub, denial events |
 | `cypher-permissions/judge.ts` | Judge prompt and verdict parsing |
 | `cypher-permissions/audit.ts` | The audit log |
-| `cypher-permissions/shell.ts` | Reading a command line into simple commands, or opaque |
-| `cypher-permissions/commands.ts` | Command rules: patterns, validation, the banned programs, resolving a program |
+| `cypher-permissions/shell.ts` | Reading a command line into every command it can run and the files it redirects, or opaque |
+| `cypher-permissions/commands.ts` | Command rules: patterns, validation, the banned programs, categories, resolving a program |
 | `crates/engine/src/pi/permissions.rs` | The settings Settings → Permissions edits; `landstrip doctor` |
 | `crates/ui/src/settings/permissions.rs` | Settings → Permissions |
 | `crates/ui/src/composer/slash_menu.rs`, `slash.rs` | `/permissions` in the composer's `/` menu |

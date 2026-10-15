@@ -342,7 +342,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
             patterns: Type.Optional(
               Type.Array(Type.Array(Type.String()), {
                 description:
-                  "Patterns for later commands like this one, so the user can allow them for the chat or always: one per command in the line, each the program then its words; `*` matches within a word, `**` any number of words. Make them as narrow as the task allows, e.g. [\"ssh\", \"deploy@web\", \"**\"] or [\"git\", \"push\", \"**\"]. Omit to ask for this run only.",
+                  "Optional patterns for later commands like this one, which the user can allow for the chat or always: each the program then its words; `*` matches within a word, `**` any number of words. Commands you give none get Cypher's own: the program and its subcommand (`git push …`, `xcrun simctl …`), the host for ssh, a script by its path, or the command as written for programs like rm, cp, curl and cat. Propose one only to cover a different scope, e.g. [\"ssh\", \"deploy@web\", \"**\"].",
               }),
             ),
           },
@@ -356,7 +356,8 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
     promptGuidelines: [
       ...(baseBash.promptGuidelines ?? []),
       "bash runs in a sandbox: the workspace is writable, the rest of the machine is readable except sensitive files (.env, keys, ~/.ssh keys, credentials), and the network is open. Commands that need more (ssh, git push with credentials, gh, cloud CLIs, writing outside the workspace, the keychain, other processes, launchctl, simulators) fail in it.",
-      "When a command needs more than the sandbox gives, run it again with `escalate` (label, reason, and patterns for similar commands). The user decides whether it runs outside the sandbox. Commands the user already allowed run outside without asking. Do not work around the sandbox in other ways.",
+      "When a command needs more than the sandbox gives, run it again with `escalate` (label and reason). The user decides whether it runs outside the sandbox, and can allow similar commands for the chat. Commands the user already allowed run outside without asking. Do not work around the sandbox in other ways.",
+      "Commands that may leave the sandbox read best plainly: name programs directly, not through `bash -c`, `eval`, `env` or an interpreter, which no rule can allow, so each such run needs its own approval.",
     ],
     async execute(id, params, signal, onUpdate, ctx) {
       const st = state(ctx);
@@ -365,6 +366,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       const outside = () => createBashToolDefinition(ctx.cwd, { shellPath, commandPrefix });
       if (!st.enforcing) return outside().execute(id, bashParams, signal, onUpdate, ctx);
       const command = String(params.command ?? "");
+      st.shellPrefix = Boolean(commandPrefix);
       const check = st.checkCommand(command, ctx.cwd);
       const purpose = escalate?.label?.trim() || undefined;
       if (check.kind === "deny") {
@@ -385,7 +387,10 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
         const outcome = await st.requestEscalation(command, escalate, requestContext(ctx, signal, id));
         if (!outcome.ok) return refused(outcome.reason, { purpose }) as never;
         ranOutside = {
-          note: outcome.scope === "once" ? "approved once" : `approved ${outcome.scope === "chat" ? "for this chat" : "always"}`,
+          note:
+            outcome.scope === "once"
+              ? `approved once${outcome.onceOnly ? `; it could not be allowed for the chat, because ${outcome.onceOnly}` : ""}`
+              : `approved ${outcome.scope === "chat" ? "for this chat" : "always"}`,
           record: { outcome: "outside", scope: outcome.scope, purpose },
         };
       }
