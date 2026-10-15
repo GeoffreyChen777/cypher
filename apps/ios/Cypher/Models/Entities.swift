@@ -348,6 +348,9 @@ struct ContextRecovery: Codable, Hashable {
     var attempt: UInt32
     /// The model that wrote `context`.
     var model: String?
+    /// What the failed attempt had already done when it failed, as the agent
+    /// received it, in the chat's language. Nil when it did no tool work.
+    var alreadyDone: String?
 
     /// recovery.rs `caption_label`: what happened, and which attempt it was.
     var captionLabel: String {

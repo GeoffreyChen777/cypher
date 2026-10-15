@@ -19,20 +19,31 @@
 //! prompt, so contexts never stack. Every failure along the way — no model
 //! answer, a refused rewind, a chat that moved on — leaves the failed turn
 //! standing exactly as it was.
+//!
+//! Subagent child chats are recovered too. Their parent waits on the child's
+//! terminal `Done` (`WatchAgentEvents`), which is published before the round
+//! even ends, so each settled round gets a verdict keyed by its `Done`'s
+//! journal seq, and [`ContextRecoveryService::hold_done`] keeps that `Done`
+//! from the parent until the verdict is in: a restarted round's `Done` is
+//! never delivered, and the parent takes the retried round's instead.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
+
+use tokio::sync::watch;
 
 use cypher_doc::{
     MessageComment, MessagePart, MessageRole, MessageStatus, SessionMessageEntry,
     join_continuation_entries,
 };
-use cypher_proto::agent_prompt::{PromptComment, comments_block, recovery_block, wrap};
+use cypher_proto::agent_prompt::{
+    PromptComment, already_done_block, comments_block, recovery_block, wrap,
+};
 use cypher_proto::{
-    ContextRecovery, HarnessId, RecoveryProgress, RecoveryStage, RunRequest, SandboxLevel,
-    SessionRewindRequest, SessionRewindResponse, SessionStatus, TriggerMatch, attachment_refs,
-    find_trigger,
+    ContextRecovery, FailedRecoveryAttempt, HarnessId, RecoveryProgress, RecoveryStage, RunRequest,
+    SandboxLevel, SessionRewindRequest, SessionRewindResponse, SessionStatus, TriggerMatch,
+    attachment_refs, find_trigger,
 };
 
 use crate::EngineError;
@@ -52,11 +63,37 @@ pub use settings::ContextRecoverySettingsStore;
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(180);
 /// Bounds on what the recovery model is shown and what it may add.
 const MAX_PROMPT_CHARS: usize = 8_000;
+/// Bounds on the already-done summary: what the model may write, how many of
+/// the failed round's tool steps it is shown, and how much of one step's
+/// output.
+const MAX_ALREADY_DONE_CHARS: usize = 4_000;
+const MAX_TOOL_STEPS: usize = 60;
+const MAX_STEP_OUTPUT_CHARS: usize = 600;
 const MAX_RESPONSE_CHARS: usize = 6_000;
 const MAX_ERROR_CHARS: usize = 2_000;
 const MAX_CONTEXT_CHARS: usize = 8_000;
 /// The restart point's preview in the record.
 const PREVIEW_CHARS: usize = 80;
+/// Longest a `Done` is held for its round's verdict: the context generation
+/// plus the rewind, with room to spare. A verdict that never comes (an engine
+/// task that died) releases the `Done` as it was.
+const HOLD_CAP: Duration = Duration::from_secs(300);
+/// A `Done` whose round settled without a verdict being recorded (one from
+/// before this engine started) is released after this grace.
+const UNRECORDED_GRACE: Duration = Duration::from_secs(2);
+/// Verdicts kept per chat; only the newest rounds can still be waited on.
+const VERDICTS_PER_CHAT: usize = 32;
+
+/// What became of a settled round, as far as its terminal `Done` goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// The round ended; recovery has not decided yet.
+    Deciding,
+    /// The round's result stands.
+    Stands,
+    /// The round's prompt was sent again: its `Done` is not the result.
+    Restarted,
+}
 
 /// A failed round worth recovering, read off the joined transcript.
 #[derive(Debug, Clone, PartialEq)]
@@ -73,6 +110,66 @@ pub(crate) struct RecoveryPlan {
     pub attempt: u32,
     pub restart_after: Option<String>,
     pub restart_preview: Option<String>,
+    /// The tool work the failed round got through, in order. Its effects are
+    /// on disk and the rewind cannot undo them, so a round that did any is
+    /// restarted with a summary of it ahead of the prompt.
+    pub tool_steps: Vec<ToolStep>,
+}
+
+/// One tool call from a failed round, as the summary writer is shown it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ToolStep {
+    /// The chip's words for the call: "Run", "Edit", … and its detail.
+    pub label: &'static str,
+    pub detail: String,
+    /// `false` for a call still running when the round failed: it may have
+    /// half-happened.
+    pub resolved: bool,
+    pub is_error: bool,
+    /// The bounded output summary the doc kept.
+    pub output: Option<String>,
+    /// Files the call changed, with their line counts.
+    pub changed: Vec<String>,
+}
+
+/// Read the round's tool parts in order. Only the fold's bounded summaries
+/// are read — never a sidecar or the run journal.
+fn tool_steps(round: &[SessionMessageEntry]) -> Vec<ToolStep> {
+    let mut steps = Vec::new();
+    for part in round.iter().flat_map(|e| &e.parts) {
+        let MessagePart::Tool {
+            call,
+            is_error,
+            resolved,
+            output,
+            diff_stats,
+            ..
+        } = part
+        else {
+            continue;
+        };
+        if steps.len() >= MAX_TOOL_STEPS {
+            break;
+        }
+        let (label, detail) = cypher_proto::view::tool_chip_content(call);
+        steps.push(ToolStep {
+            label,
+            detail,
+            resolved: *resolved,
+            is_error: *is_error,
+            output: output
+                .as_deref()
+                .map(str::trim)
+                .filter(|output| !output.is_empty())
+                .map(|output| clip_middle(output, MAX_STEP_OUTPUT_CHARS)),
+            changed: diff_stats
+                .iter()
+                .flatten()
+                .map(|stat| format!("{} (+{} -{})", stat.path, stat.additions, stat.deletions))
+                .collect(),
+        });
+    }
+    steps
 }
 
 /// Plan a recovery for the round that ends the transcript, or `None` when
@@ -144,6 +241,7 @@ pub(crate) fn plan(
         attempt,
         restart_after: before.map(|e| e.id.clone()),
         restart_preview: before.and_then(preview_of),
+        tool_steps: tool_steps(round),
     })
 }
 
@@ -211,18 +309,41 @@ pub(crate) fn supplement_prompt(instruction: &str, plan: &RecoveryPlan) -> Strin
     out.push_str("\n<user_message>\n");
     out.push_str(&clip_middle(request.trim(), MAX_PROMPT_CHARS));
     out.push_str("\n</user_message>\n");
-    if let Some(previous) = &plan.user.recovery {
+    let attempts = failed_attempts(plan);
+    if !attempts.is_empty() {
         out.push_str(
-            "\nThis message was already sent again once with the context below, and it \
-             failed again; write something that works better.\n<previous_context>\n",
+            "\nThis message was already sent again with supplementary context, once per \
+             attempt below, and every attempt failed. Rewrite the context: do not repeat \
+             what failed; write something that works better.\n",
         );
-        out.push_str(&clip_middle(previous.context.trim(), MAX_CONTEXT_CHARS));
-        out.push_str("\n</previous_context>\n");
+        for attempt in &attempts {
+            out.push_str(&format!(
+                "<failed_attempt number=\"{}\">\n<context>\n",
+                attempt.attempt
+            ));
+            out.push_str(&clip_middle(attempt.context.trim(), MAX_CONTEXT_CHARS));
+            out.push_str("\n</context>\n<failure>\n");
+            out.push_str(attempt.excerpt.trim());
+            out.push_str("\n</failure>\n</failed_attempt>\n");
+        }
     }
     if !plan.response.trim().is_empty() {
         out.push_str("\n<agent_response>\n");
         out.push_str(&clip_middle(plan.response.trim(), MAX_RESPONSE_CHARS));
         out.push_str("\n</agent_response>\n");
+    }
+    if !plan.tool_steps.is_empty() {
+        out.push_str(&format!(
+            "\nThe attempt had already carried out {} tool {} before it went wrong; that \
+             work stands and the agent will be told about it separately, so write the \
+             context for an agent carrying on from it rather than starting over.\n",
+            plan.tool_steps.len(),
+            if plan.tool_steps.len() == 1 {
+                "call"
+            } else {
+                "calls"
+            }
+        ));
     }
     if !plan.errors.is_empty() {
         out.push_str("\n<error>\n");
@@ -240,6 +361,132 @@ pub(crate) fn supplement_prompt(instruction: &str, plan: &RecoveryPlan) -> Strin
     out
 }
 
+/// The failed round's tool work as quoted material for the summary writer.
+fn tool_steps_block(steps: &[ToolStep]) -> String {
+    let mut out = String::new();
+    for (ix, step) in steps.iter().enumerate() {
+        out.push_str(&format!(
+            "\n<step number=\"{}\" tool=\"{}\"{}>\n{}\n",
+            ix + 1,
+            step.label,
+            match (step.resolved, step.is_error) {
+                (false, _) => " outcome=\"never finished — it may have half-happened\"",
+                (true, true) => " outcome=\"failed\"",
+                (true, false) => " outcome=\"succeeded\"",
+            },
+            step.detail.trim()
+        ));
+        for changed in &step.changed {
+            out.push_str(&format!("<changed_file>{changed}</changed_file>\n"));
+        }
+        if let Some(output) = &step.output {
+            out.push_str("<output>\n");
+            out.push_str(output);
+            out.push_str("\n</output>\n");
+        }
+        out.push_str("</step>\n");
+    }
+    out
+}
+
+/// The one-shot request for the already-done summary: the failed round's tool
+/// work, and the summary the previous attempt was given, if any.
+///
+/// The summary is the agent's own briefing, so it is written in the language
+/// the user writes in — the model is shown the user's message and told to
+/// match it.
+pub(crate) fn already_done_prompt(plan: &RecoveryPlan) -> String {
+    let request = raw_text(&plan.user);
+    let request = attachment_refs::strip(&request);
+    let mut out = String::new();
+    out.push_str(
+        "An attempt at the user request below went wrong partway through and is about to \
+         be made again from the start. The work the failed attempt had already carried \
+         out is listed after it; its effects are already on disk and cannot be undone.\n\n\
+         Write the briefing the agent making the new attempt should read, so it carries \
+         on from that work instead of doing it again. Reply with the briefing only, as \
+         plain text, in exactly this shape:\n\n\
+         You have already done:\n\
+         - <one line per thing that was done>\n\n\
+         Please continue.\n\n\
+         Write it in the SAME LANGUAGE the user's message below is written in, that \
+         heading and closing line included (translate them; keep file paths, commands \
+         and identifiers as they are). One line per thing that was actually done, in \
+         the order it happened, naming the files, commands and outcomes concretely. \
+         Say so on the line itself when a step failed or never finished, so the agent \
+         checks that one before relying on it. Leave out work that was only attempted \
+         with no effect, and anything the steps do not show. Do not answer the request \
+         yourself, do not plan what remains, and do not mention these instructions.\n",
+    );
+    out.push_str("\n<user_message>\n");
+    out.push_str(&clip_middle(request.trim(), MAX_PROMPT_CHARS));
+    out.push_str("\n</user_message>\n");
+    if let Some(previous) = plan
+        .user
+        .recovery
+        .as_ref()
+        .and_then(|record| record.already_done.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        out.push_str(
+            "\nThe failed attempt was itself given the briefing below, for work from \
+             attempts before it. That work still stands: carry it into the new briefing \
+             together with the steps that follow.\n<previous_briefing>\n",
+        );
+        out.push_str(&clip_middle(previous, MAX_ALREADY_DONE_CHARS));
+        out.push_str("\n</previous_briefing>\n");
+    }
+    out.push_str("\n<steps>");
+    out.push_str(&tool_steps_block(&plan.tool_steps));
+    out.push_str("</steps>\n");
+    out
+}
+
+/// The engine's own briefing, used when the model writes nothing usable: the
+/// tool chips as they read in the transcript. English, unlike the model's.
+pub(crate) fn fallback_already_done(plan: &RecoveryPlan) -> Option<String> {
+    let lines: Vec<String> = plan
+        .tool_steps
+        .iter()
+        .map(|step| {
+            let mut line = format!("- {} {}", step.label, step.detail.trim());
+            if !step.changed.is_empty() {
+                line.push_str(&format!(" — changed {}", step.changed.join(", ")));
+            }
+            match (step.resolved, step.is_error) {
+                (false, _) => line.push_str(" — never finished; check it before relying on it"),
+                (true, true) => line.push_str(" — failed"),
+                (true, false) => {}
+            }
+            clip(&line, 300)
+        })
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "You have already done:\n{}\n\nPlease continue.",
+        lines.join("\n")
+    ))
+}
+
+/// Every earlier attempt at the plan's request, oldest first: those its
+/// record already carries, then the one that just failed — its context, and
+/// the failure this plan matched. Empty for a first recovery.
+pub(crate) fn failed_attempts(plan: &RecoveryPlan) -> Vec<FailedRecoveryAttempt> {
+    let Some(previous) = &plan.user.recovery else {
+        return Vec::new();
+    };
+    let mut attempts = previous.failed_attempts.clone();
+    attempts.push(FailedRecoveryAttempt {
+        attempt: previous.attempt,
+        context: previous.context.clone(),
+        excerpt: plan.found.excerpt.clone(),
+    });
+    attempts
+}
+
 /// The model's reply as context: trimmed, a fence wrapping the whole reply
 /// removed, bounded.
 pub(crate) fn clean_context(raw: &str) -> String {
@@ -253,10 +500,19 @@ pub(crate) fn clean_context(raw: &str) -> String {
     clip(unfenced, MAX_CONTEXT_CHARS)
 }
 
-/// The effective prompt the agent receives: the context block, the prompt's
+/// The effective prompt the agent receives: the context block, the briefing
+/// about work the failed attempt already did (when it did any), the prompt's
 /// comments again (they rode the original send), then the request as typed.
-pub(crate) fn resend_prompt(context: &str, comments: &[MessageComment], request: &str) -> String {
+pub(crate) fn resend_prompt(
+    context: &str,
+    already_done: Option<&str>,
+    comments: &[MessageComment],
+    request: &str,
+) -> String {
     let mut blocks = vec![recovery_block(context)];
+    if let Some(already_done) = already_done {
+        blocks.push(already_done_block(already_done));
+    }
     if !comments.is_empty() {
         let comments: Vec<PromptComment> = comments
             .iter()
@@ -277,6 +533,38 @@ struct Inner {
     /// Chats with a recovery under way: a round settling again meanwhile
     /// (the resent prompt's own) must not start a second one.
     in_flight: Mutex<HashSet<String>>,
+    /// chat_id → `Done` seq → verdict on that round.
+    verdicts: Mutex<HashMap<String, BTreeMap<u64, Verdict>>>,
+    /// Bumped on every verdict change; [`ContextRecoveryService::hold_done`]
+    /// waits on it.
+    verdicts_changed: watch::Sender<u64>,
+}
+
+impl Inner {
+    fn verdict(&self, chat_id: &str, seq: u64) -> Option<Verdict> {
+        lock(&self.verdicts).get(chat_id)?.get(&seq).copied()
+    }
+
+    /// Any verdict on a round after `seq`: the round at `seq` settled long
+    /// ago.
+    fn later_verdict(&self, chat_id: &str, seq: u64) -> bool {
+        lock(&self.verdicts)
+            .get(chat_id)
+            .is_some_and(|rounds| rounds.range(seq + 1..).next().is_some())
+    }
+
+    fn set_verdict(&self, chat_id: &str, seq: u64, verdict: Verdict) {
+        {
+            let mut verdicts = lock(&self.verdicts);
+            let rounds = verdicts.entry(chat_id.to_owned()).or_default();
+            rounds.insert(seq, verdict);
+            while rounds.len() > VERDICTS_PER_CHAT {
+                rounds.pop_first();
+            }
+        }
+        self.verdicts_changed
+            .send_modify(|n| *n = n.wrapping_add(1));
+    }
 }
 
 /// Context recovery for the chats this device hosts.
@@ -352,6 +640,8 @@ impl ContextRecoveryService {
                 registry,
                 settings,
                 in_flight: Mutex::new(HashSet::new()),
+                verdicts: Mutex::new(HashMap::new()),
+                verdicts_changed: watch::channel(0).0,
             }),
         }
     }
@@ -371,46 +661,142 @@ impl ContextRecoveryService {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
+        // The round's `Done` (when it published one this round, rather than
+        // an earlier round's) waits on this verdict.
+        let done = self
+            .inner
+            .sessions
+            .last_done_seq(chat_id)
+            .filter(|seq| self.inner.verdict(chat_id, *seq).is_none());
         if lock(&self.inner.in_flight).contains(chat_id) {
+            if let Some(seq) = done {
+                self.inner.set_verdict(chat_id, seq, Verdict::Stands);
+            }
             return;
+        }
+        if let Some(seq) = done {
+            self.inner.set_verdict(chat_id, seq, Verdict::Deciding);
         }
         let this = self.clone();
         let chat_id = chat_id.to_owned();
         runtime.spawn(async move {
-            if let Err(err) = this.recover(&chat_id).await {
-                tracing::warn!(chat = %chat_id, error = %err, "context recovery failed");
+            let restarted = match this.recover(&chat_id).await {
+                Ok(restarted) => restarted,
+                Err(err) => {
+                    tracing::warn!(chat = %chat_id, error = %err, "context recovery failed");
+                    false
+                }
+            };
+            if let Some(seq) = done {
+                let verdict = if restarted {
+                    Verdict::Restarted
+                } else {
+                    Verdict::Stands
+                };
+                this.inner.set_verdict(&chat_id, seq, verdict);
             }
         });
     }
 
-    /// Run one recovery to the end. `Ok` covers every "nothing to do".
-    pub async fn recover(&self, chat_id: &str) -> Result<(), EngineError> {
+    /// Hold a chat's terminal `Done` (journal seq `seq`) until its round's
+    /// verdict is in: true when the round was restarted, so the `Done` is not
+    /// the chat's result and must not be delivered. Returns at once for
+    /// chats recovery does not watch.
+    pub async fn hold_done(&self, chat_id: &str, seq: u64) -> bool {
+        let inner = &self.inner;
+        if seq == 0 || self.watched(chat_id).is_none() {
+            return false;
+        }
+        let mut changed = inner.verdicts_changed.subscribe();
+        let deadline = tokio::time::Instant::now() + HOLD_CAP;
+        let mut unrecorded_since: Option<tokio::time::Instant> = None;
+        loop {
+            match inner.verdict(chat_id, seq) {
+                Some(Verdict::Restarted) => return true,
+                Some(Verdict::Stands) => return false,
+                Some(Verdict::Deciding) => unrecorded_since = None,
+                None => {
+                    let later_done = inner
+                        .sessions
+                        .last_done_seq(chat_id)
+                        .is_some_and(|last| last > seq);
+                    if later_done || inner.later_verdict(chat_id, seq) {
+                        return false;
+                    }
+                    // A round still running gets its verdict when it ends;
+                    // one that ended without a verdict being recorded
+                    // predates this engine.
+                    let running = inner.sessions.session_status(chat_id).is_some_and(|s| {
+                        matches!(
+                            s.status,
+                            SessionStatus::Working | SessionStatus::AwaitingInput
+                        )
+                    });
+                    if running {
+                        unrecorded_since = None;
+                    } else {
+                        let since = *unrecorded_since.get_or_insert_with(tokio::time::Instant::now);
+                        if since.elapsed() >= UNRECORDED_GRACE {
+                            return false;
+                        }
+                    }
+                }
+            }
+            tokio::select! {
+                _ = changed.changed() => {}
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                _ = tokio::time::sleep_until(deadline) => {
+                    tracing::warn!(chat = %chat_id, seq, "context recovery: no verdict in time; releasing the result");
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// The chat and its config when recovery watches it: a durable Pi chat
+    /// hosted here, on a model the settings enable.
+    fn watched(
+        &self,
+        chat_id: &str,
+    ) -> Option<(
+        cypher_proto::Chat,
+        cypher_proto::ChatConfig,
+        cypher_proto::ContextRecoverySettings,
+    )> {
+        let inner = &self.inner;
+        if inner.sessions.is_ephemeral(chat_id) {
+            return None;
+        }
+        let settings = match inner.settings.load() {
+            Ok(settings) => settings,
+            Err(err) => {
+                tracing::warn!(chat = %chat_id, error = %err, "context recovery settings unreadable");
+                return None;
+            }
+        };
+        let chat = inner.workspace.chat(chat_id).ok()??;
+        let config = chat.config.clone()?;
+        (config.harness == HarnessId::Pi
+            && chat.device_id == inner.doc_host.device_id()
+            && settings.enabled_for(config.model.as_deref()))
+        .then_some((chat, config, settings))
+    }
+
+    /// Run one recovery to the end: `Ok(true)` when the prompt was sent
+    /// again, `Ok(false)` for every "nothing to do".
+    pub async fn recover(&self, chat_id: &str) -> Result<bool, EngineError> {
         let inner = &self.inner;
         if !lock(&inner.in_flight).insert(chat_id.to_owned()) {
-            return Ok(());
+            return Ok(false);
         }
         let guard = InFlight { inner, chat_id };
-        if inner.sessions.is_ephemeral(chat_id) {
-            return Ok(());
-        }
-        let settings = inner.settings.load()?;
-        let Some(chat) = inner.workspace.chat(chat_id)? else {
-            return Ok(());
+        let Some((chat, config, settings)) = self.watched(chat_id) else {
+            return Ok(false);
         };
-        let Some(config) = chat.config.clone() else {
-            return Ok(());
-        };
-        if chat.is_child()
-            || config.harness != HarnessId::Pi
-            || chat.device_id != inner.doc_host.device_id()
-            || !settings.enabled_for(config.model.as_deref())
-        {
-            return Ok(());
-        }
         let handle = inner.doc_host.open(chat_id)?;
         let entries = join_continuation_entries(handle.doc().read_entries()?);
         let Some(plan) = plan(&entries, &settings.active_triggers(), settings.max_attempts) else {
-            return Ok(());
+            return Ok(false);
         };
         tracing::info!(
             chat = %chat_id,
@@ -426,9 +812,14 @@ impl ContextRecoveryService {
             .map(crate::git::repos::expand_home)
             .filter(|cwd| std::path::Path::new(cwd).is_dir())
             .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
-        let context = self
-            .write_context(&settings.model, &settings.instruction, &plan, &cwd)
-            .await?;
+        // Both read the failed round and nothing else, so they run at once:
+        // a round that did tool work costs no more time than one that did
+        // not. The context decides the recovery; the briefing is best effort.
+        let (context, already_done) = tokio::join!(
+            self.write_context(&settings.model, &settings.instruction, &plan, &cwd),
+            self.write_already_done(&settings.model, &plan, &cwd),
+        );
+        let context = context?;
 
         // The user may have sent something, or started over, while the
         // context was being written: only the transcript this plan read may be
@@ -442,12 +833,12 @@ impl ContextRecoveryService {
         });
         if busy || now.last().map(|e| e.id.as_str()) != Some(plan.last_entry_id.as_str()) {
             tracing::info!(chat = %chat_id, "context recovery: the chat moved on; dropped");
-            return Ok(());
+            return Ok(false);
         }
         guard.progress(&plan, RecoveryStage::Restarting, started_at);
         match inner
             .forks
-            .rewind(SessionRewindRequest {
+            .rewind_for_recovery(SessionRewindRequest {
                 chat_id: chat_id.to_owned(),
                 anchor_message_id: plan.user.id.clone(),
             })
@@ -461,8 +852,13 @@ impl ContextRecoveryService {
                     message = %refusal.message,
                     "context recovery: the chat could not be restarted"
                 );
-                return Ok(());
+                return Ok(false);
             }
+        }
+        // A child's initial task answers its parent over the messaging
+        // channel StartSubagent registered; the retry gets it back.
+        if chat.is_child() && plan.restart_after.is_none() {
+            inner.sessions.restore_child_channel(chat_id);
         }
         self.resend(
             chat_id,
@@ -470,10 +866,12 @@ impl ContextRecoveryService {
             &handle,
             plan,
             context,
+            already_done,
             &settings.model,
             guard,
         )
-        .await
+        .await?;
+        Ok(true)
     }
 
     /// Ask the recovery model for the supplementary context.
@@ -484,9 +882,65 @@ impl ContextRecoveryService {
         plan: &RecoveryPlan,
         cwd: &str,
     ) -> Result<String, EngineError> {
+        let raw = self
+            .ask_model(model, supplement_prompt(instruction, plan), cwd)
+            .await?;
+        let context = clean_context(&raw);
+        if context.is_empty() {
+            return Err(EngineError::Other(
+                "the recovery model answered with no context".into(),
+            ));
+        }
+        Ok(context)
+    }
+
+    /// Ask the recovery model to brief the next attempt on the work the
+    /// failed one already did. The model writes it in the chat's language; a
+    /// model that answers with nothing usable falls back to the engine's own
+    /// English briefing rather than losing the work.
+    async fn write_already_done(
+        &self,
+        model: &str,
+        plan: &RecoveryPlan,
+        cwd: &str,
+    ) -> Option<String> {
+        if plan.tool_steps.is_empty() {
+            return None;
+        }
+        match self
+            .ask_model(model, already_done_prompt(plan), cwd)
+            .await
+            .map(|raw| clean_context(&raw))
+        {
+            Ok(summary) if !summary.is_empty() => Some(clip(&summary, MAX_ALREADY_DONE_CHARS)),
+            Ok(_) => {
+                tracing::warn!(
+                    "context recovery: no summary of the work already done; \
+                     briefing the agent from the transcript instead"
+                );
+                fallback_already_done(plan)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "context recovery: summarizing the work already done failed; \
+                     briefing the agent from the transcript instead"
+                );
+                fallback_already_done(plan)
+            }
+        }
+    }
+
+    /// One bounded one-shot run on the recovery model, like the auto-titler's.
+    async fn ask_model(
+        &self,
+        model: &str,
+        prompt: String,
+        cwd: &str,
+    ) -> Result<String, EngineError> {
         let harness = self.inner.registry.resolve(HarnessId::Pi)?;
         let request = RunRequest {
-            prompt: supplement_prompt(instruction, plan),
+            prompt,
             harness: Some(HarnessId::Pi),
             model: Some(model.to_owned()),
             reasoning: None,
@@ -510,13 +964,7 @@ impl ContextRecoveryService {
                 GENERATION_TIMEOUT.as_secs()
             ))
         })??;
-        let context = clean_context(&raw);
-        if context.is_empty() {
-            return Err(EngineError::Other(
-                "the recovery model answered with no context".into(),
-            ));
-        }
-        Ok(context)
+        Ok(raw)
     }
 
     /// Send the failed prompt again, as a new entry carrying its record, with
@@ -532,6 +980,7 @@ impl ContextRecoveryService {
         handle: &Arc<ChatDocHandle>,
         plan: RecoveryPlan,
         context: String,
+        already_done: Option<String>,
         model: &str,
         guard: InFlight<'_>,
     ) -> Result<(), EngineError> {
@@ -552,7 +1001,9 @@ impl ContextRecoveryService {
         request.resume = None;
         request.worktree = None;
         request.prompt = raw.clone();
-        let agent_prompt = resend_prompt(&context, &plan.user.comments, &raw);
+        let agent_prompt =
+            resend_prompt(&context, already_done.as_deref(), &plan.user.comments, &raw);
+        let failed = failed_attempts(&plan);
         let message_id = new_id();
         // Written here rather than by dispatch so the entry is born with its
         // record; dispatch finds the id and leaves the entry alone.
@@ -581,6 +1032,8 @@ impl ContextRecoveryService {
                 restart_preview: plan.restart_preview,
                 attempt: plan.attempt,
                 model: Some(model.to_owned()),
+                already_done,
+                failed_attempts: failed,
             }),
         })?;
         inner.doc_host.flush_chat_sync(chat_id);

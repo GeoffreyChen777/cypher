@@ -1416,6 +1416,8 @@ fn user_rows_carry_their_recovery_record() {
         restart_preview: None,
         attempt: 1,
         model: None,
+        already_done: None,
+        failed_attempts: Vec::new(),
     };
     entry.recovery = Some(record.clone());
     let rows = rows_for_entry(&entry, false, &mut parse);

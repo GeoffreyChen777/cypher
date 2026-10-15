@@ -176,6 +176,23 @@ impl Render for RecoveryCard {
                         )
                     }),
             ))
+            .when_some(record.already_done.clone(), |el, already_done| {
+                el.child(section(
+                    &theme,
+                    "Already done",
+                    div()
+                        .id("recovery-card-already-done")
+                        .max_h(px(CONTEXT_MAX_HEIGHT))
+                        .overflow_y_scroll()
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(crate::kit::theme::hairline(0.06))
+                        .bg(theme.ink(0.035))
+                        .child(body_text(already_done)),
+                ))
+            })
             .child(section(
                 &theme,
                 "Added context",
@@ -224,6 +241,8 @@ mod tests {
             restart_preview: Some("Here is the plan".into()),
             attempt: 1,
             model: None,
+            already_done: None,
+            failed_attempts: Vec::new(),
         }
     }
 

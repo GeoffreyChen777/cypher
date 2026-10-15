@@ -92,8 +92,7 @@ pub struct EngineRpc {
     provider_logins: std::sync::Arc<crate::pi::providers::Logins>,
     local_import: Option<crate::host::local_import::LocalImporter>,
     title_settings: Option<crate::session::title_settings::TitleSettingsStore>,
-    context_recovery_settings:
-        Option<crate::session::context_recovery::ContextRecoverySettingsStore>,
+    context_recovery: Option<crate::session::context_recovery::ContextRecoveryService>,
     github: Option<crate::git::github::Github>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
@@ -151,7 +150,7 @@ impl EngineRpc {
             provider_logins: Default::default(),
             local_import: None,
             title_settings: None,
-            context_recovery_settings: None,
+            context_recovery: None,
             github: None,
             engine_info,
             start_subagent_lock: Mutex::new(()),
@@ -167,12 +166,13 @@ impl EngineRpc {
         self
     }
 
-    /// Share the device's context recovery settings with the recovery service.
-    pub fn with_context_recovery_settings(
+    /// The device's context recovery: its settings, and the verdicts that
+    /// hold a recovered child's result back from its parent.
+    pub fn with_context_recovery(
         mut self,
-        settings: crate::session::context_recovery::ContextRecoverySettingsStore,
+        recovery: crate::session::context_recovery::ContextRecoveryService,
     ) -> Self {
-        self.context_recovery_settings = Some(settings);
+        self.context_recovery = Some(recovery);
         self
     }
 

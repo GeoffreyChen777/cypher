@@ -417,7 +417,7 @@ impl EngineCore {
         .with_mcp_logins(self.mcp_logins.clone())
         .with_provider_logins(self.provider_logins.clone())
         .with_title_settings(self.title_settings.clone())
-        .with_context_recovery_settings(self.context_recovery.settings().clone())
+        .with_context_recovery(self.context_recovery.clone())
         .with_github(self.github.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);

@@ -74,9 +74,12 @@ pub(super) async fn set_title_model_settings(
 fn context_recovery_store(
     rpc: &EngineRpc,
 ) -> Result<&crate::session::context_recovery::ContextRecoverySettingsStore, RpcError> {
-    rpc.context_recovery_settings.as_ref().ok_or_else(|| {
-        RpcError::Failed("Context recovery is unavailable; update this device's engine".into())
-    })
+    rpc.context_recovery
+        .as_ref()
+        .map(|r| r.settings())
+        .ok_or_else(|| {
+            RpcError::Failed("Context recovery is unavailable; update this device's engine".into())
+        })
 }
 
 pub(super) fn get_context_recovery_settings(rpc: &EngineRpc) -> Result<RpcReply, RpcError> {

@@ -1054,6 +1054,8 @@ fn recovery_record() -> cypher_proto::ContextRecovery {
         restart_preview: Some("Earlier answer".into()),
         attempt: 1,
         model: Some("provider/fixer".into()),
+        already_done: None,
+        failed_attempts: Vec::new(),
     }
 }
 
