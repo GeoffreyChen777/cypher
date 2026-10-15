@@ -190,7 +190,7 @@ test("a command that needs more fails in the sandbox; escalated and approved, it
   assert.match(dialogs[0].title, /^Run this command outside the sandbox\?\n\nContext:\nPurpose: Update the other repo\n/);
   assert.equal(results[1].isError, false, results[1].text);
   assert.match(results[1].text, /PRIVATE KEY/);
-  assert.match(results[1].text, /Ran outside the sandbox \(approved once\)/);
+  assert.match(results[1].text, /Ran outside the sandbox \(approved once; it could not be allowed for the chat, because it writes ~\/Developer\/other\/outside\.txt, which commands in the sandbox can't\)\./);
   assert.equal(readFileSync(join(other, "outside.txt"), "utf8"), "outside\n");
 });
 
@@ -266,6 +266,30 @@ test("assisted: the judge approves an external write without a dialog; protected
   assert.match(escalated.dialogs[0].title, /fsmonitor/);
   assert.equal(escalated.results[0].isError, true);
   assert.doesNotMatch(readFileSync(join(workspace, ".git", "config"), "utf8"), /fsmonitor/);
+});
+
+test("model first: the judge runs a command outside the sandbox once, and may read a sensitive file", { skip }, async () => {
+  const approve = '{"decision":"approve","reason":"the user asked for it","confidence":0.95}';
+  const outside = await turn(
+    [{ tool: "bash", args: { command: `cat ${join(home, ".ssh", "id_ed25519")}`, escalate: { label: "Show the key", reason: "the user asked" } } }],
+    { judge: approve },
+  );
+  assert.equal(outside.dialogs.length, 0, "no dialog");
+  assert.equal(outside.results[0].isError, false, outside.results[0].text);
+  assert.match(outside.results[0].text, /PRIVATE KEY/);
+  assert.match(outside.results[0].text, /Ran outside the sandbox \(approved once by the reviewing model/);
+
+  const secret = await turn([{ tool: "read", args: { path: ".env" } }], { judge: approve });
+  assert.equal(secret.dialogs.length, 0);
+  assert.match(secret.results[0].text, /hunter2/);
+
+  const held = await turn(
+    [{ tool: "bash", args: { command: `cat ${join(home, ".ssh", "id_ed25519")}`, escalate: { label: "Show the key", reason: "x" } } }],
+    { judge: '{"decision":"ask-user","reason":"the user never asked for the key","confidence":0.9}', answers: ["Deny"] },
+  );
+  assert.equal(held.dialogs.length, 1);
+  assert.match(held.dialogs[0].title, /\nReview: The reviewing model couldn't approve this automatically\. the user never asked for the key\n/);
+  assert.equal(held.results[0].isError, true);
 });
 
 test("grep never shows a sensitive file's lines", { skip }, async () => {

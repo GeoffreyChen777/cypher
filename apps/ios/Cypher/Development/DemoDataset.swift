@@ -17,9 +17,9 @@ final class DemoDataset {
     var demoPermissionSettings = PermissionSettings(raw: [
         "enabled": .bool(true),
         "approval": .object([
-            "escalate": .string("ask"), "externalWrite": .string("assisted"),
-            "protectedWrite": .string("assisted"), "sensitiveRead": .string("ask"),
-            "sensitiveWrite": .string("ask"), "network": .string("assisted"), "tools": .string("ask"),
+            "escalate": .string("assisted"), "externalWrite": .string("assisted"),
+            "protectedWrite": .string("assisted"), "sensitiveRead": .string("assisted"),
+            "sensitiveWrite": .string("assisted"), "network": .string("assisted"), "tools": .string("assisted"),
         ]),
         "judgeModel": .string(""),
         "toolsDefault": .string("allow"),

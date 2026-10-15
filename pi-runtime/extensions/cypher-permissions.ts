@@ -342,13 +342,13 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
             patterns: Type.Optional(
               Type.Array(Type.Array(Type.String()), {
                 description:
-                  "Patterns for later commands like this one, so the user can allow them for the chat or always: one per command in the line, each the program then its words; `*` matches within a word, `**` any number of words. Make them as narrow as the task allows, e.g. [\"ssh\", \"deploy@web\", \"**\"] or [\"git\", \"push\", \"**\"]. Omit to ask for this run only.",
+                  "Optional patterns for later commands like this one, which the user can allow for the chat or always: each the program then its words; `*` matches within a word, `**` any number of words. Commands you give none get Cypher's own: the program and its subcommand (`git push …`, `xcrun simctl …`), the host for ssh, a script by its path, or the command as written for programs like rm, cp, curl and cat. Propose one only to cover a different scope, e.g. [\"ssh\", \"deploy@web\", \"**\"].",
               }),
             ),
           },
           {
             description:
-              "Ask to run this command outside the sandbox, as the user: with their files, credentials, keys, keychain, network and processes. The user is asked first. Use it only when the command needs something the sandbox withholds.",
+              "Ask to run this command outside the sandbox, as the user: with their files, credentials, keys, keychain, network and processes. A reviewing model approves it when it plainly serves the user's request; otherwise the user is asked. Use it only when the command needs something the sandbox withholds.",
           },
         ),
       ),
@@ -356,7 +356,8 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
     promptGuidelines: [
       ...(baseBash.promptGuidelines ?? []),
       "bash runs in a sandbox: the workspace is writable, the rest of the machine is readable except sensitive files (.env, keys, ~/.ssh keys, credentials), and the network is open. Commands that need more (ssh, git push with credentials, gh, cloud CLIs, writing outside the workspace, the keychain, other processes, launchctl, simulators) fail in it.",
-      "When a command needs more than the sandbox gives, run it again with `escalate` (label, reason, and patterns for similar commands). The user decides whether it runs outside the sandbox. Commands the user already allowed run outside without asking. Do not work around the sandbox in other ways.",
+      "When a command needs more than the sandbox gives, run it again with `escalate` (label and reason). A reviewing model or the user decides whether it runs outside the sandbox; the user can allow similar commands for the chat. Make the label and reason say plainly how it serves what the user asked. Commands the user already allowed run outside without asking. Do not work around the sandbox in other ways.",
+      "Commands that may leave the sandbox read best plainly: name programs directly, not through `bash -c`, `eval`, `env` or an interpreter, which no rule can allow, so each such run needs its own approval.",
     ],
     async execute(id, params, signal, onUpdate, ctx) {
       const st = state(ctx);
@@ -365,6 +366,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       const outside = () => createBashToolDefinition(ctx.cwd, { shellPath, commandPrefix });
       if (!st.enforcing) return outside().execute(id, bashParams, signal, onUpdate, ctx);
       const command = String(params.command ?? "");
+      st.shellPrefix = Boolean(commandPrefix);
       const check = st.checkCommand(command, ctx.cwd);
       const purpose = escalate?.label?.trim() || undefined;
       if (check.kind === "deny") {
@@ -385,7 +387,10 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
         const outcome = await st.requestEscalation(command, escalate, requestContext(ctx, signal, id));
         if (!outcome.ok) return refused(outcome.reason, { purpose }) as never;
         ranOutside = {
-          note: outcome.scope === "once" ? "approved once" : `approved ${outcome.scope === "chat" ? "for this chat" : "always"}`,
+          note:
+            outcome.scope === "once"
+              ? `approved once${outcome.by === "judge" ? " by the reviewing model" : ""}${outcome.onceOnly ? `; it could not be allowed for the chat, because ${outcome.onceOnly}` : ""}`
+              : `approved ${outcome.scope === "chat" ? "for this chat" : "always"}`,
           record: { outcome: "outside", scope: outcome.scope, purpose },
         };
       }

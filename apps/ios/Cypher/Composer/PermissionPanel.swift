@@ -74,40 +74,77 @@ struct PermissionRequest: Equatable {
         return head.split(whereSeparator: \.isNewline).joined(separator: " ")
     }
 
-    /// nil unless `question` is a permission prompt that reads as one: it
-    /// says so (or offers "Deny and stop"), and every context line is a
-    /// known fact — otherwise it shows as an ordinary question.
+    /// nil unless `question` is a permission prompt: it says so (or offers
+    /// "Deny and stop"). A marked prompt always reads as one; an unmarked
+    /// one only when its context starts with a fact — otherwise it shows as
+    /// an ordinary question.
+    ///
+    /// A value runs over several lines (a multi-line command, a reason with
+    /// line breaks): the extension indents its lines after the first, and an
+    /// older extension leaves them as they are — any line that is not a
+    /// known `Label: value` continues the fact before it.
     init?(_ question: UserInputQuestion) {
         let permission = question.permission != nil || question.options.contains(Self.stopOption)
         guard permission, question.multiSelect != true else { return nil }
-        let prompt = question.question.isEmpty ? question.header : question.question
-        guard let split = prompt.range(of: "\n\nContext:\n") else { return nil }
-        let text = String(prompt[..<split.lowerBound])
+        let marked = question.permission != nil
+        let prompt = (question.question.isEmpty ? question.header : question.question)
+            .replacingOccurrences(of: "\r\n", with: "\n")
+        let split = prompt.range(of: "\n\nContext:\n")
+        let text = String(prompt[..<(split?.lowerBound ?? prompt.endIndex)])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = split.map { String(prompt[$0.upperBound...]) } ?? ""
         var facts: [Fact] = []
         var blockTitle: String?
         var blockLines: [String] = []
-        for raw in prompt[split.upperBound...].components(separatedBy: "\n") {
+        for raw in context.components(separatedBy: "\n") {
             if blockTitle != nil {
                 blockLines.append(raw)
                 continue
             }
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            if line == "Change:" || line == "Input:" {
-                blockTitle = String(line.dropLast())
-                continue
+            // Indented: always the value before going on.
+            let indented = raw.hasPrefix("  ")
+            if !indented {
+                let line = raw.trimmingCharacters(in: .whitespaces)
+                if line == "Change:" || line == "Input:" {
+                    blockTitle = String(line.dropLast())
+                    continue
+                }
+                if let colon = raw.range(of: ": "),
+                    let kind = FactKind(rawValue: String(raw[..<colon.lowerBound]))
+                {
+                    facts.append(
+                        Fact(kind: kind, value: String(raw[colon.upperBound...]).trimmingCharacters(in: .whitespaces)))
+                    continue
+                }
             }
-            if line.isEmpty { continue }
-            guard let colon = raw.range(of: ": "),
-                let kind = FactKind(rawValue: String(raw[..<colon.lowerBound]))
-            else { return nil }
-            facts.append(Fact(kind: kind, value: String(raw[colon.upperBound...]).trimmingCharacters(in: .whitespaces)))
+            let continued = indented ? String(raw.dropFirst(2)) : raw
+            if !facts.isEmpty {
+                facts[facts.count - 1].value += "\n" + Self.trimmingTrailingWhitespace(continued)
+            } else if raw.trimmingCharacters(in: .whitespaces).isEmpty {
+                continue
+            } else if marked {
+                // Text ahead of any fact: a sentence, on a prompt that says
+                // it is a permission request.
+                facts.append(Fact(kind: .note, value: raw.trimmingCharacters(in: .whitespaces)))
+            } else {
+                return nil
+            }
         }
-        guard !facts.isEmpty else { return nil }
+        for index in facts.indices {
+            facts[index].value = Self.trimmingTrailingWhitespace(facts[index].value)
+        }
+        guard marked || !facts.isEmpty else { return nil }
         self.question = text
         self.facts = facts
         self.block = blockTitle.map { ($0, blockLines.joined(separator: "\n").trimmingCharacters(in: .newlines)) }
         self.serious =
             text.contains("sensitive") || text.contains("Cypher's own") || text.contains("outside the sandbox")
+    }
+
+    private static func trimmingTrailingWhitespace(_ text: String) -> String {
+        var text = Substring(text)
+        while let last = text.last, last.isWhitespace { text = text.dropLast() }
+        return String(text)
     }
 
     /// permission_card.rs `OptionRole`: how much an option weighs on the
