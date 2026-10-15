@@ -6,7 +6,9 @@
 //! transcript and the agent's context), and the prompt is sent again — shown
 //! as typed, stamped with its recovery record, and delivered to the agent
 //! with the context ahead of it. Attempts stop at the configured limit, and
-//! chats on models that are not watched are left alone.
+//! chats on models that are not watched are left alone. A subagent's child
+//! chat recovers the same way, and its parent (watching `WatchAgentEvents`)
+//! gets the retried task's result, never the failed one's.
 
 mod common;
 
@@ -39,6 +41,9 @@ struct Seen {
     /// Every prompt a chat turn received, in order, with the session it
     /// resumed.
     turns: Vec<(String, Option<String>)>,
+    /// Each turn's subagent messaging channel (`None` outside child chats or
+    /// after the initial task).
+    channels: Vec<Option<String>>,
     /// Every prompt the recovery model received.
     generations: Vec<String>,
     forks: Vec<PiSessionForkRequest>,
@@ -93,7 +98,7 @@ impl Harness for RecoveryHarness {
     async fn run(
         &self,
         request: RunRequest,
-        _controls: RunControls,
+        controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let prompt = request.prompt;
         let resume = request.resume;
@@ -125,7 +130,11 @@ impl Harness for RecoveryHarness {
         } else {
             "Done."
         };
-        self.seen.lock().unwrap().turns.push((prompt, resume));
+        let channel = controls.host.child.and_then(|child| child.channel_root);
+        let mut seen = self.seen.lock().unwrap();
+        seen.turns.push((prompt, resume));
+        seen.channels.push(channel);
+        drop(seen);
         Ok(reply(vec![
             common::session_started(
                 HarnessId::Pi,
@@ -426,4 +435,128 @@ async fn the_session_shows_the_recovery_under_way_until_the_resend() {
         rig.core.sessions.session_status(CHAT).unwrap().recovery,
         None
     );
+}
+
+const MESSAGE_ROOT: &str = "/tmp/pi-subagents-messages/recovery";
+
+/// Start a subagent of [`CHAT`] on the watched model, as the parent's
+/// extension does; returns the child chat id.
+async fn start_subagent(core: &EngineCore, task: &str) -> String {
+    let reply = core
+        .rpc_service()
+        .handle(
+            methods::START_SUBAGENT,
+            serde_json::json!({
+                "parentChatId": CHAT,
+                "runId": "run-1",
+                "agent": "worker",
+                "task": task,
+                "mode": "sync",
+                "systemPrompt": "You are the worker.",
+                "tools": ["read"],
+                "model": "model-x",
+                "messageRoot": MESSAGE_ROOT,
+                "childIndex": 0,
+            }),
+        )
+        .await
+        .expect("StartSubagent");
+    let RpcReply::Value(value) = reply else {
+        panic!("StartSubagent must be unary");
+    };
+    value["childChatId"].as_str().unwrap().to_owned()
+}
+
+type Events = std::pin::Pin<Box<dyn futures::Stream<Item = serde_json::Value> + Send>>;
+
+/// The child's agent events, as the parent's extension watches them.
+async fn watch(core: &EngineCore, chat_id: &str) -> Events {
+    let reply = core
+        .rpc_service()
+        .handle(
+            methods::WATCH_AGENT_EVENTS,
+            serde_json::json!({ "chatId": chat_id }),
+        )
+        .await
+        .expect("WatchAgentEvents");
+    let RpcReply::Stream(stream) = reply else {
+        panic!("WatchAgentEvents must stream");
+    };
+    Box::pin(stream)
+}
+
+/// The text streamed before the first `done` the watcher is given.
+async fn text_before_done(events: &mut Events) -> Vec<String> {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut texts = Vec::new();
+        while let Some(event) = events.next().await {
+            match event["type"].as_str() {
+                Some("textDelta") => texts.push(event["text"].as_str().unwrap().to_owned()),
+                Some("done") => return texts,
+                _ => {}
+            }
+        }
+        panic!("the event stream ended before a done");
+    })
+    .await
+    .expect("a done within 20s")
+}
+
+/// A subagent's failed task restarts like any chat's, with the channel
+/// to its parent, and the parent is handed the retry's result: the failed
+/// round's `Done` is held until the restart and then never delivered, live
+/// or replayed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_subagent_task_restarts_and_its_parent_gets_the_retry() {
+    let rig = assemble(false);
+    configure(&rig.core, "model-x", 1).await;
+    let child = start_subagent(&rig.core, "delete the build folder").await;
+    let mut events = watch(&rig.core, &child).await;
+
+    let texts = text_before_done(&mut events).await;
+    assert_eq!(texts.last().map(String::as_str), Some("Done."));
+    {
+        let seen = rig.seen.lock().unwrap();
+        assert_eq!(
+            seen.turns.len(),
+            2,
+            "the task was retried before the parent saw a done"
+        );
+        assert_eq!(seen.turns[0].0, "Task: delete the build folder");
+        assert_eq!(
+            seen.turns[1].0,
+            wrap(&[recovery_block(CONTEXT)], "Task: delete the build folder")
+        );
+        assert_eq!(seen.channels, vec![Some(MESSAGE_ROOT.to_owned()); 2]);
+        assert_eq!(seen.forks.len(), 1);
+        assert_eq!(seen.forks[0].boundary, PiForkBoundary::BeforeUser(0));
+    }
+    let entries = common::entries(&rig.core, &child);
+    assert_eq!(entries.len(), 2);
+    assert!(entries[0].recovery.is_some());
+    assert_eq!(text_of(&entries[1]), "Done.");
+
+    // A parent that resubscribes replays the journal: the failed round's
+    // done is skipped there too.
+    let mut replay = watch(&rig.core, &child).await;
+    let texts = text_before_done(&mut replay).await;
+    assert_eq!(texts, vec![REFUSAL.to_owned(), "Done.".to_owned()]);
+}
+
+/// A subagent result that stands reaches the parent without waiting.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subagent_result_that_stands_is_delivered_at_once() {
+    let rig = assemble(false);
+    configure(&rig.core, "model-x", 1).await;
+    let child = start_subagent(&rig.core, "plan the panel").await;
+    let mut events = watch(&rig.core, &child).await;
+    let started = std::time::Instant::now();
+    assert_eq!(
+        text_before_done(&mut events).await,
+        vec!["Done.".to_owned()]
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let seen = rig.seen.lock().unwrap();
+    assert_eq!(seen.turns.len(), 1);
+    assert!(seen.generations.is_empty());
 }

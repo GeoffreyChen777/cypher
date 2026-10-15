@@ -168,7 +168,7 @@ impl SessionForks {
                 "The fork request id cannot equal the source chat id.",
             ));
         }
-        let source = match self.validate_source(&request.source_chat_id, Operation::Fork)? {
+        let source = match self.validate_source(&request.source_chat_id, Operation::Fork, false)? {
             Ok(chat) => chat,
             Err(unavail) => return Ok(SessionForkResponse::Unavailable(unavail)),
         };
@@ -380,7 +380,26 @@ impl SessionForks {
         &self,
         request: SessionRewindRequest,
     ) -> Result<SessionRewindResponse, EngineError> {
-        let chat = match self.validate_source(&request.chat_id, Operation::Rewind)? {
+        self.rewind_chat(request, false).await
+    }
+
+    /// [`Self::rewind`] for context recovery, which also restarts child
+    /// chats: the parent waits on the child's result, and the retried turn
+    /// answers it instead (see `ContextRecoveryService::hold_done`). A
+    /// person's Restart from here still refuses them.
+    pub async fn rewind_for_recovery(
+        &self,
+        request: SessionRewindRequest,
+    ) -> Result<SessionRewindResponse, EngineError> {
+        self.rewind_chat(request, true).await
+    }
+
+    async fn rewind_chat(
+        &self,
+        request: SessionRewindRequest,
+        allow_child: bool,
+    ) -> Result<SessionRewindResponse, EngineError> {
+        let chat = match self.validate_source(&request.chat_id, Operation::Rewind, allow_child)? {
             Ok(chat) => chat,
             Err(unavail) => return Ok(SessionRewindResponse::Unavailable(unavail)),
         };
@@ -536,11 +555,13 @@ impl SessionForks {
     /// Validate the source chat against every prerequisite shared by a fork
     /// and an in-place rewind (both drive the same pi helper against the same
     /// session store, so the gate is identical — only the wording differs).
+    /// `allow_child` admits child chats (recovery rewinds only).
     /// Returns the source [`Chat`] or a typed refusal.
     fn validate_source(
         &self,
         source_chat_id: &str,
         op: Operation,
+        allow_child: bool,
     ) -> Result<Result<Chat, SessionForkUnavailable>, EngineError> {
         let Some(chat) = self.inner.workspace.chat(source_chat_id)? else {
             return Ok(Err(unavail(
@@ -554,7 +575,7 @@ impl SessionForks {
                 &format!("Temporary Side Chats cannot be {}.", op.past()),
             )));
         }
-        if chat.is_child() {
+        if chat.is_child() && !allow_child {
             return Ok(Err(unavail(
                 SessionForkUnavailableReason::ChildChat,
                 &format!("Child chats cannot be {}.", op.past()),

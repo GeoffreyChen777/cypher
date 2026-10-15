@@ -68,6 +68,16 @@ In each case the failed turn stays as it was, and the engine log says why.
 Referenced sessions and GitHub issues attached to the original message are not
 sent again; only its text, comments and attachments are.
 
+## Subagents
+
+A subagent's chat is recovered too, when its model is one of the watched ones.
+Its parent waits for the subagent's result, so while the context is written
+the parent keeps waiting: it receives the answer of the restarted task, never
+the failed one. A subagent restarted from its first task keeps the message
+channel to its parent and its sibling subagents. When the recovery does not go
+ahead, the parent receives the failed result as it was. **Restart from here**
+stays unavailable in a subagent's chat.
+
 ## Storage and sync
 
 The resent message stores its record on the user entry as an additive
