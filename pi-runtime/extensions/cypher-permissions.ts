@@ -358,6 +358,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       "bash runs in a sandbox: the workspace is writable, the rest of the machine is readable except sensitive files (.env, keys, ~/.ssh keys, credentials), and the network is open. Commands that need more (ssh, git push with credentials, gh, cloud CLIs, writing outside the workspace, the keychain, other processes, launchctl, simulators) fail in it.",
       "When a command needs more than the sandbox gives, run it again with `escalate` (label and reason). A reviewing model or the user decides whether it runs outside the sandbox; the user can allow similar commands for the chat. Make the label and reason say plainly how it serves what the user asked. Commands the user already allowed run outside without asking. Do not work around the sandbox in other ways.",
       "Commands that may leave the sandbox read best plainly: name programs directly, not through `bash -c`, `eval`, `env` or an interpreter, which no rule can allow, so each such run needs its own approval.",
+      "Escalate only the part that needs it: write its output to a file in the workspace, or pipe it to plain filters (grep, sort, uniq, wc, cut, tr, head, tail, awk and sed programs that only print), and do other work in later commands in the sandbox. A line that also runs a script, an interpreter or other commands outside can only be approved once, so the user is asked again every time.",
     ],
     async execute(id, params, signal, onUpdate, ctx) {
       const st = state(ctx);
@@ -389,7 +390,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
         ranOutside = {
           note:
             outcome.scope === "once"
-              ? `approved once${outcome.by === "judge" ? " by the reviewing model" : ""}${outcome.onceOnly ? `; it could not be allowed for the chat, because ${outcome.onceOnly}` : ""}`
+              ? `approved once${outcome.by === "judge" ? " by the reviewing model" : ""}${outcome.onceOnly ? `; it could not be allowed for the chat, because ${outcome.onceOnly}. Next time, escalate only the command that needs it and do the rest in the sandbox` : ""}`
               : `approved ${outcome.scope === "chat" ? "for this chat" : "always"}`,
           record: { outcome: "outside", scope: outcome.scope, purpose },
         };

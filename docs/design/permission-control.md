@@ -384,6 +384,19 @@ rules (`commands.ts`, in `permissions.json`'s `commands`, a project's
   lookups (`source`, `.`, `trap`, `export`, `set`, `read`, `hash`, …). `cd`, `echo`,
   `test` and other inert builtins never need to leave; neither does `set` with only
   `-e`/`-u`/`-x`/`-o pipefail`, but `printf -v` (it sets a variable) does.
+- **Filters** need no rule either (`filterInputs`): `cat`, `head`, `tail`, `wc`, `sort`,
+  `uniq`, `cut`, `tr`, `grep` and `awk`/`sed` given a program that only prints, when all
+  they do is read their input or files the sandbox may read and write their output. So
+  `ssh web 'sinfo' | awk '{print $2}' | sort | uniq -c` needs a rule for `ssh` alone, and
+  can be allowed for the chat. Only listed options count (not `sort -o`, `sed -i`,
+  `grep -r`, `awk -f`, …), no word may be unknown, and the program must resolve outside
+  the places sandboxed commands can write. An awk program may not hold `system`,
+  `getline`, `ARGV`, `ARGC`, `ENVIRON`, `PROCINFO`, `SYMTAB`, `FUNCTAB` or `@` anywhere,
+  a pipe, or a `>` that redirects a `print`; a sed script holds only addresses,
+  `p d n N g G h H x l q Q z = { }`, `y` and `s` with flags `g p i I m M` and a number.
+  A regular expression whose delimiter stands inside a bracket expression (`/[/]/`) is
+  refused: implementations end it at different places. Options after an operand count as
+  operands too, the way BSD tools read them.
 - **Reading the line** (`shell.ts`) finds every command the line can run: words, quotes,
   `~`, comments; `&&`, `||`, `;`, `|`, `|&` and newlines between commands; the commands
   in `$(…)` and backticks, and in `if`/`while`/`until`/`for … in`, `!` and `[[ … ]]`
@@ -397,7 +410,7 @@ rules (`commands.ts`, in `permissions.json`'s `commands`, a project's
   background jobs, `case`, functions, arithmetic, process substitution, `$'…'`, an
   assignment in front of a command) makes the line **opaque**: no rule matches it, so it
   runs in the sandbox, or outside once if the user approves it as written.
-- **Deciding**: every command in the line is checked (inert builtins skipped). An unknown
+- **Deciding**: every command in the line is checked (inert builtins and filters skipped). An unknown
   word matches only `**` in an `allow` rule, but anything a `deny` or `ask` rule names. A
   `deny` that matches blocks the line before it runs, escalated or not. If every command
   matches an `allow`, none could match a `deny` or `ask`, and every redirection reads or

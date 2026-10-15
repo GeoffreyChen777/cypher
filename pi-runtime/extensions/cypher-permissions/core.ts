@@ -36,7 +36,7 @@ import { decide, describe } from "./policy.ts";
 import type { Verdict } from "./policy.ts";
 import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs } from "./sandbox.ts";
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
-import { categoryPattern, describePattern, fileSha256, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch } from "./commands.ts";
+import { categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
 import { parseShell, UNKNOWN } from "./shell.ts";
 import type { ParsedLine, SimpleCommand } from "./shell.ts";
@@ -736,13 +736,29 @@ export class Permissions {
     const movesInLoop = commands.some((command) => command.loop && moves(command));
     for (const command of commands) {
       if (command.loop && movesInLoop) here = undefined;
-      out.push({ ...command, cwd: here, inert: isInert(command.words) });
+      out.push({ ...command, cwd: here, inert: isInert(command.words) || this.harmlessFilter(command.words, here) });
       if (!moves(command)) continue;
       const [program, target, ...rest] = command.words;
       const certain = program === "cd" && target !== undefined && target !== UNKNOWN && target !== "-" && rest.length === 0 && !command.scoped && !process.env.CDPATH;
       here = certain && here !== undefined ? resolvePath(here, target) : undefined;
     }
     return out;
+  }
+
+  /**
+   * Whether a command is a filter that needs no leave ([`filterInputs`]):
+   * the system's program, not one in a place the agent can write, reading
+   * only its input and files commands in the sandbox may read.
+   */
+  private harmlessFilter(words: readonly string[], cwd: string | undefined): boolean {
+    const inputs = filterInputs(words);
+    if (inputs === undefined) return false;
+    const resolved = this.resolveIn(words[0], cwd);
+    if (!resolved || this.writableRoots().some((root) => isUnder(resolved, root))) return false;
+    return inputs.every((path) => {
+      if (cwd === undefined && !isAbsolute(path)) return false;
+      return this.verdict("read", this.classify(path, cwd)).kind === "allow";
+    });
   }
 
   /**
@@ -834,7 +850,8 @@ export class Permissions {
       for (const pattern of proposal.patterns ?? []) {
         const error = patternError(pattern);
         if (error) return { ok: false, reason: `Invalid pattern ${JSON.stringify(pattern)}: ${error}` };
-        const matched = pending.find((item) => patternMatches(pattern, item.words));
+        // A filter needs no pattern, but the agent may still propose one for it.
+        const matched = commands.find((item) => patternMatches(pattern, item.words));
         if (!matched) return { ok: false, reason: `The pattern \`${describePattern(pattern)}\` does not match this command; propose patterns that cover it.` };
         const pin = pinned(matched.words[0], matched.cwd);
         if (!pin) return { ok: false, reason: `\`${matched.words[0]}\` was not found.` };
