@@ -15,8 +15,11 @@
 #                                 # the sandbox, blocked, denied, approvals filed
 #                                 # under their calls), a chat waiting on a live
 #                                 # permission card, one waiting on an ordinary
-#                                 # question, and command rules in Settings →
-#                                 # Permissions
+#                                 # question, two whose cards are taller than a
+#                                 # short window (a long command, a long
+#                                 # question: shrink the window and the card
+#                                 # scrolls inside the column), and command
+#                                 # rules in Settings → Permissions
 #   scripts/dev-demo.sh --diffs   # "Diff fences" under "Diff fence demo": an
 #                                 # answer with chat-style and git-patch
 #                                 # ```diff blocks
@@ -133,10 +136,18 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
     printf '#!/bin/sh\nrsync -az dist/ deploy@web:/srv/app/\n' >"$project/scripts/deploy.sh"
     chmod +x "$project/scripts/deploy.sh"
     space=$(new_id) story=$(new_id) card=$(new_id) ask=$(new_id)
+    tall_card=$(new_id) tall_ask=$(new_id)
     create_space "$space" "$project" '"name":"Permission control demo"'
     # Oldest first: the settled story ends up on top.
     create_chat "$ask" "$space" "Tidy up the config loader"
     run_prompt "$ask" "$project" "Tidy up the config loader." "Tidy up the config loader. [mock:ask]"
+    sleep 1
+    create_chat "$tall_ask" "$space" "Plan the settings migration"
+    run_prompt "$tall_ask" "$project" "Plan the settings migration." "Plan the settings migration. [mock:ask:tall]"
+    sleep 1
+    create_chat "$tall_card" "$space" "Did the storage node recover?"
+    run_prompt "$tall_card" "$project" "Did the storage node on web recover?" \
+      "Did the storage node on web recover? [mock:permission-card:tall]"
     sleep 1
     create_chat "$card" "$space" "Is the app on web healthy?"
     run_prompt "$card" "$project" "Is the app on web healthy?" "Is the app on web healthy? [mock:permission-card]"

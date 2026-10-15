@@ -71,6 +71,20 @@ const _: () = assert!(WIZARD_STUCK_ANSWER_MS > WIZARD_HANDOFF_QUIET_MS);
 /// Keep a question panel with many options inside the composer instead of
 /// letting its content push past the bottom edge of the window.
 pub(super) const WIZARD_CONTENT_MAX_HEIGHT: f32 = 360.0;
+/// The least a question card's body shrinks to in a short column: a couple
+/// of lines, scrolling.
+pub(super) const WIZARD_CONTENT_MIN_HEIGHT: f32 = 72.0;
+
+/// The question card body's height cap: [`WIZARD_CONTENT_MAX_HEIGHT`], or
+/// what is left of `available` once the card's fixed `chrome` (header,
+/// buttons, padding, notices) is placed, so the whole card stays on screen.
+pub fn wizard_content_max_height(available: Option<f32>, chrome: f32) -> f32 {
+    match available {
+        Some(available) => (available - chrome.max(0.0))
+            .clamp(WIZARD_CONTENT_MIN_HEIGHT, WIZARD_CONTENT_MAX_HEIGHT),
+        None => WIZARD_CONTENT_MAX_HEIGHT,
+    }
+}
 /// Hysteresis slack for the expanded→compact flip: once expanded, the composer
 /// only collapses when the text is comfortably narrower than the compact
 /// capacity — expanding and collapsing share no boundary, so a width right at
