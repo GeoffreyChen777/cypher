@@ -65,8 +65,13 @@ You have already done:
 Please continue.
 ```
 
-and is written in the language of your message, that heading and closing line
-included. It rides the resent prompt as a second block (`Work already done
+and is written in the language of your message as the agent received it, that
+heading and closing line included. With Message translation on, that is the
+translation the agent got, not what you typed: the translation extension
+passes the briefing and the context to the agent untranslated, so both are
+written from the translated message and come out in the agent's language, like
+its request and its own steps. The **Already done** card then shows the
+briefing in that language too. It rides the resent prompt as a second block (`Work already done
 (JSON): …`). A turn that ran no tools is restarted with no briefing, as
 before. Later attempts carry the earlier ones' briefings on, so work from an
 attempt whose round has left the transcript is not lost. When the model

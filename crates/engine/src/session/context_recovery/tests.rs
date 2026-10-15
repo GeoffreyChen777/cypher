@@ -355,6 +355,51 @@ fn a_failed_round_plans_the_tool_work_it_got_through() {
     assert!(supplement_prompt("Explain.", &plan).contains("already carried out 2 tool calls"));
 }
 
+/// Under a translation, the briefing and the context are written from the
+/// prompt the agent received: a translation extension passes both blocks to
+/// the agent untranslated, so they must already be in its language.
+#[test]
+fn under_a_translation_the_recovery_model_reads_the_agents_prompt() {
+    let entries = vec![
+        entry(
+            "u1",
+            MessageRole::User,
+            vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "修复配置解析".into(),
+                agent_text: Some("Fix the config parsing".into()),
+            }],
+        ),
+        entry(
+            "a1",
+            MessageRole::Assistant,
+            vec![
+                tool_part(
+                    "t1",
+                    cypher_proto::ToolCall::EditFile {
+                        path: "src/config.rs".into(),
+                        old_string: None,
+                        new_string: None,
+                    },
+                    true,
+                ),
+                text("I refuse to continue."),
+            ],
+        ),
+    ];
+    let plan = plan(&entries, &["refuse"], 1).unwrap();
+    for prompt in [
+        already_done_prompt(&plan),
+        supplement_prompt("Explain.", &plan),
+    ] {
+        assert!(prompt.contains("<user_message>\nFix the config parsing\n</user_message>"));
+        assert!(!prompt.contains("修复配置解析"));
+    }
+    // The restart point is named as the transcript shows it.
+    assert_eq!(plan.restart_preview, None);
+    assert_eq!(preview_of(&entries[0]).as_deref(), Some("修复配置解析"));
+}
+
 /// A later attempt's briefing request carries the briefing the failed
 /// attempt was itself given: work from attempt 1 is not lost when attempt 2
 /// fails, even though the rewind took its round out of the transcript.
