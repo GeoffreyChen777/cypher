@@ -161,6 +161,12 @@ pub struct ContextRecovery {
     /// The model that wrote `context`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// What the failed round had already done when it failed, as the agent
+    /// received it ("You have already done: …"), in the chat's language.
+    /// `None` when the round did no tool work, so there was nothing to carry
+    /// over and the agent starts the request afresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub already_done: Option<String>,
     /// The request's earlier attempts, oldest first: each was sent with its
     /// own context and failed. The model that wrote `context` read them all,
     /// and the next attempt's record carries them on.
@@ -415,6 +421,7 @@ mod tests {
             restart_preview: None,
             attempt: 1,
             model: None,
+            already_done: None,
             failed_attempts: Vec::new(),
         };
         let json = serde_json::to_string(&record).unwrap();

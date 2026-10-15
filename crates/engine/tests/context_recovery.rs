@@ -23,7 +23,7 @@ use futures::stream::BoxStream;
 use cypher_doc::MessageRole;
 use cypher_engine::EngineCore;
 use cypher_harness::{Harness, HarnessError, RunControls};
-use cypher_proto::agent_prompt::{recovery_block, wrap};
+use cypher_proto::agent_prompt::{already_done_block, recovery_block, wrap};
 use cypher_proto::{
     AgentEvent, ChatConfig, ContextRecoverySettings, DoneStatus, HarnessId, Model, PiForkBoundary,
     PiSessionForkRequest, PiSessionForkResult, ReasoningLevel, RecoveryStage,
@@ -34,6 +34,7 @@ use cypher_rpc::{RpcReply, RpcService, methods};
 const CHAT: &str = "chat-recovery";
 const REFUSAL: &str = "Sorry, I can't help with that.";
 const CONTEXT: &str = "The user owns this repository; deleting build/ is expected.";
+const BRIEFING: &str = "您已经完成：\n- 编辑 src/parser.rs\n\n请继续。";
 
 /// What the scripted Pi agent saw, by kind of run.
 #[derive(Default)]
@@ -44,8 +45,10 @@ struct Seen {
     /// Each turn's subagent messaging channel (`None` outside child chats or
     /// after the initial task).
     channels: Vec<Option<String>>,
-    /// Every prompt the recovery model received.
+    /// Every prompt the recovery model received for a context.
     generations: Vec<String>,
+    /// Every prompt it received for an already-done briefing.
+    briefings: Vec<String>,
     forks: Vec<PiSessionForkRequest>,
 }
 
@@ -108,6 +111,10 @@ impl Harness for RecoveryHarness {
             error: None,
             session_id: None,
         };
+        if prompt.contains("Write the briefing the agent making the new attempt should read") {
+            self.seen.lock().unwrap().briefings.push(prompt);
+            return Ok(reply(vec![common::text(BRIEFING), done]));
+        }
         if prompt.contains("Reply with the supplementary context only") {
             self.seen.lock().unwrap().generations.push(prompt);
             let gate = self.gate.clone();
@@ -123,7 +130,28 @@ impl Harness for RecoveryHarness {
             return Ok(reply(vec![common::text("A Title"), done]));
         }
         let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        let answer = if prompt.contains("delete")
+        // A prompt about the parser edits a file first: that work stands,
+        // so its round is the one recovered with a briefing.
+        let tool = prompt.contains("parser").then(|| {
+            vec![
+                AgentEvent::ToolCall {
+                    id: format!("tool-{n}"),
+                    call: cypher_proto::ToolCall::EditFile {
+                        path: "src/parser.rs".into(),
+                        old_string: None,
+                        new_string: None,
+                    },
+                },
+                AgentEvent::ToolResult {
+                    id: format!("tool-{n}"),
+                    is_error: false,
+                    output: Some("applied".into()),
+                    diff: None,
+                    permission: None,
+                },
+            ]
+        });
+        let answer = if (prompt.contains("delete") || prompt.contains("parser"))
             && (self.refuse_always || !prompt.contains("Supplementary context (JSON)"))
         {
             REFUSAL
@@ -135,17 +163,17 @@ impl Harness for RecoveryHarness {
         seen.turns.push((prompt, resume));
         seen.channels.push(channel);
         drop(seen);
-        Ok(reply(vec![
-            common::session_started(
-                HarnessId::Pi,
-                "model-x",
-                "/tmp/repo",
-                "hs-source",
-                &format!("a-{n}"),
-            ),
-            common::text(answer),
-            done,
-        ]))
+        let mut events = vec![common::session_started(
+            HarnessId::Pi,
+            "model-x",
+            "/tmp/repo",
+            "hs-source",
+            &format!("a-{n}"),
+        )];
+        events.extend(tool.into_iter().flatten());
+        events.push(common::text(answer));
+        events.push(done);
+        Ok(reply(events))
     }
     async fn fork_session(
         &self,
@@ -596,4 +624,77 @@ async fn a_subagent_result_that_stands_is_delivered_at_once() {
     let seen = rig.seen.lock().unwrap();
     assert_eq!(seen.turns.len(), 1);
     assert!(seen.generations.is_empty());
+}
+
+/// A round that got through real tool work is restarted with a briefing on
+/// it: the summary writer is the configured model, reads the tool steps, and
+/// its briefing rides the resent prompt and the record.
+#[tokio::test(flavor = "multi_thread")]
+async fn work_the_failed_round_did_is_carried_into_the_restart() {
+    let rig = assemble(false);
+    configure(&rig.core, "model-x", 1).await;
+    send(&rig.core, "m1", "fix the parser").await;
+    let entries = common::wait_for_some("the recovered round to settle", || {
+        let entries = common::entries(&rig.core, CHAT);
+        (entries.len() == 2
+            && entries[0].recovery.is_some()
+            && entries[1].status == Some(cypher_doc::MessageStatus::Complete)
+            && idle(&rig.core))
+        .then_some(entries)
+    })
+    .await;
+    // The briefing is on the record, so every device's caption card shows it.
+    let record = entries[0].recovery.as_ref().unwrap();
+    assert_eq!(record.already_done.as_deref(), Some(BRIEFING));
+
+    let seen = rig.seen.lock().unwrap();
+    // One briefing request, on the chat's own model, quoting the tool step
+    // and the user's words (so the model can match their language).
+    assert_eq!(seen.briefings.len(), 1);
+    let briefing = &seen.briefings[0];
+    assert!(briefing.contains("tool=\"Edit\" outcome=\"succeeded\">\nsrc/parser.rs"));
+    assert!(briefing.contains("<output>\napplied\n</output>"));
+    assert!(briefing.contains("<user_message>\nfix the parser\n</user_message>"));
+    assert!(!briefing.contains("<previous_briefing>"));
+    // The context writer knew the work stands.
+    assert!(seen.generations[0].contains("already carried out 1 tool call"));
+    // The agent received the briefing after the context, ahead of the
+    // prompt as typed.
+    let (prompt, _) = seen.turns.last().unwrap();
+    assert_eq!(
+        prompt,
+        &wrap(
+            &[recovery_block(CONTEXT), already_done_block(BRIEFING)],
+            "fix the parser"
+        )
+    );
+}
+
+/// A round with no tool work is restarted as before: nothing to carry over,
+/// no briefing requested, no block.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_round_that_did_no_work_is_restarted_without_a_briefing() {
+    let rig = assemble(false);
+    configure(&rig.core, "model-x", 1).await;
+    send(&rig.core, "m1", "delete the build folder").await;
+    common::wait_for_some("the recovered round to settle", || {
+        let entries = common::entries(&rig.core, CHAT);
+        (entries.len() == 2 && text_of(&entries[1]) == "Done." && idle(&rig.core)).then_some(())
+    })
+    .await;
+    assert_eq!(
+        common::entries(&rig.core, CHAT)[0]
+            .recovery
+            .as_ref()
+            .unwrap()
+            .already_done,
+        None
+    );
+    let seen = rig.seen.lock().unwrap();
+    assert!(seen.briefings.is_empty());
+    let (prompt, _) = seen.turns.last().unwrap();
+    assert_eq!(
+        prompt,
+        &wrap(&[recovery_block(CONTEXT)], "delete the build folder")
+    );
 }

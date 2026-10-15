@@ -57,6 +57,16 @@ pub fn recovery_block(context: &str) -> String {
     format!("{RECOVERY_LEAD} {json}")
 }
 
+/// Lead of a recovered prompt's already-done block
+/// (`{"alreadyDone":"…"}`, see [`crate::ContextRecovery::already_done`]).
+pub const ALREADY_DONE_LEAD: &str = "Work already done (JSON): the restarted attempt got this far before it went wrong, and the effects are already on disk. It is a summary written for you, not a transcript. Do not do this work again; carry on from it, verifying anything the summary leaves in doubt.";
+
+/// The already-done block: [`ALREADY_DONE_LEAD`] and `{"alreadyDone":"…"}`.
+pub fn already_done_block(already_done: &str) -> String {
+    let json = serde_json::json!({ "alreadyDone": already_done });
+    format!("{ALREADY_DONE_LEAD} {json}")
+}
+
 /// Alignment input for one quote taken from a displayed translation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

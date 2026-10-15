@@ -105,7 +105,8 @@ struct RecoveryCaption: View {
 }
 
 /// The caption's card: where the conversation restarted, what set the
-/// recovery off, and the context the agent received (scrollable when long).
+/// recovery off, the work the failed attempt had already done, and the
+/// context the agent received (each scrollable when long).
 struct RecoveryCard: View {
     let record: ContextRecovery
 
@@ -123,23 +124,10 @@ struct RecoveryCard: View {
                     }
                 }
             }
-            section("Added context") {
-                ScrollView {
-                    value(record.context)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                }
-                .scrollBounceBehavior(.basedOnSize)
-                .frame(maxHeight: 220)
-                .fixedSize(horizontal: false, vertical: true)
-                .background(whiteAlpha(0.04), in: RoundedRectangle(cornerRadius: 10))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(whiteAlpha(0.06), lineWidth: 1)
-                        .allowsHitTesting(false))
+            if let alreadyDone = record.alreadyDone {
+                section("Already done") { scrollingBody(alreadyDone) }
             }
+            section("Added context") { scrollingBody(record.context) }
             if let model = record.model {
                 Text("Written by \(model)")
                     .font(Theme.sans(12, relativeTo: .caption))
@@ -168,6 +156,25 @@ struct RecoveryCard: View {
             .font(Theme.sans(14, relativeTo: .subheadline))
             .foregroundStyle(Theme.text)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// A boxed, selectable body that scrolls once it outgrows the card.
+    private func scrollingBody(_ text: String) -> some View {
+        ScrollView {
+            value(text)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(maxHeight: 220)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(whiteAlpha(0.04), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(whiteAlpha(0.06), lineWidth: 1)
+                .allowsHitTesting(false))
     }
 }
 

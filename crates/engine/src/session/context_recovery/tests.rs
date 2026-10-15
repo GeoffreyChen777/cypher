@@ -44,6 +44,7 @@ fn record(attempt: u32) -> ContextRecovery {
         restart_preview: None,
         attempt,
         model: None,
+        already_done: None,
         failed_attempts: Vec::new(),
     }
 }
@@ -238,7 +239,12 @@ fn the_resent_prompt_carries_the_context_and_the_comments_ahead_of_the_request()
         quote: "the parser".into(),
         comment: "this one".into(),
     }];
-    let prompt = resend_prompt("You may edit build/.", &comments, "delete the build folder");
+    let prompt = resend_prompt(
+        "You may edit build/.",
+        None,
+        &comments,
+        "delete the build folder",
+    );
     let (head, request) = prompt
         .split_once(cypher_proto::agent_prompt::REQUEST_MARKER)
         .unwrap();
@@ -250,7 +256,189 @@ fn the_resent_prompt_carries_the_context_and_the_comments_ahead_of_the_request()
     // The transcript reads the comments back off the effective prompt.
     assert_eq!(MessageComment::from_agent_prompt(&prompt), comments);
     // Without comments there is one block.
-    let bare = resend_prompt("ctx", &[], "go");
+    let bare = resend_prompt("ctx", None, &[], "go");
     assert_eq!(bare.split_once("\n\nUser request:\n").unwrap().1, "go");
     assert!(!bare.contains("Conversation annotations"));
+}
+
+/// The briefing rides its own one-line block between the context and the
+/// comments: a multi-line summary is carried as JSON, so the request marker
+/// is still the one that opens the request.
+#[test]
+fn the_resent_prompt_carries_the_already_done_briefing_as_one_block() {
+    let summary = "您已经完成：\n- 编辑 src/config.rs\n\n请继续。";
+    let prompt = resend_prompt("ctx", Some(summary), &[], "继续修复");
+    let (head, request) = prompt
+        .split_once(cypher_proto::agent_prompt::REQUEST_MARKER)
+        .unwrap();
+    assert_eq!(request, "继续修复");
+    let blocks: Vec<&str> = head.split("\n\n").collect();
+    assert_eq!(blocks.len(), 2, "one line each: {blocks:?}");
+    assert!(blocks[1].starts_with(cypher_proto::agent_prompt::ALREADY_DONE_LEAD));
+    assert!(blocks[1].contains("\\n- 编辑 src/config.rs"));
+    assert!(!blocks[1].contains('\n'));
+}
+
+fn tool_part(id: &str, call: cypher_proto::ToolCall, resolved: bool) -> MessagePart {
+    MessagePart::Tool {
+        id: id.into(),
+        call,
+        is_error: false,
+        resolved,
+        output: Some("2 passed".into()),
+        progress: None,
+        diff: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        permission: None,
+    }
+}
+
+/// A round that ran tools is planned with them in order, and the summary
+/// request quotes each one with how it ended and asks for the user's
+/// language.
+#[test]
+fn a_failed_round_plans_the_tool_work_it_got_through() {
+    let entries = vec![
+        user("u1", "修复配置解析"),
+        entry(
+            "a1",
+            MessageRole::Assistant,
+            vec![
+                tool_part(
+                    "t1",
+                    cypher_proto::ToolCall::EditFile {
+                        path: "src/config.rs".into(),
+                        old_string: None,
+                        new_string: None,
+                    },
+                    true,
+                ),
+                tool_part(
+                    "t2",
+                    cypher_proto::ToolCall::Exec {
+                        command: "cargo test".into(),
+                    },
+                    false,
+                ),
+                text("I refuse to continue."),
+            ],
+        ),
+    ];
+    let plan = plan(&entries, &["refuse"], 1).unwrap();
+    assert_eq!(
+        plan.tool_steps
+            .iter()
+            .map(|step| (step.label, step.detail.as_str(), step.resolved))
+            .collect::<Vec<_>>(),
+        vec![
+            ("Edit", "src/config.rs", true),
+            ("Run", "cargo test", false),
+        ]
+    );
+
+    let prompt = already_done_prompt(&plan);
+    assert!(prompt.contains("You have already done:"));
+    assert!(prompt.contains("SAME LANGUAGE"));
+    assert!(prompt.contains("<user_message>\n修复配置解析\n</user_message>"));
+    assert!(
+        prompt.contains("<step number=\"1\" tool=\"Edit\" outcome=\"succeeded\">\nsrc/config.rs")
+    );
+    assert!(prompt.contains(
+        "<step number=\"2\" tool=\"Run\" outcome=\"never finished — it may have half-happened\">"
+    ));
+    assert!(prompt.contains("<output>\n2 passed\n</output>"));
+    // The context writer is told the work stands, so it writes for an agent
+    // carrying on.
+    assert!(supplement_prompt("Explain.", &plan).contains("already carried out 2 tool calls"));
+}
+
+/// A later attempt's briefing request carries the briefing the failed
+/// attempt was itself given: work from attempt 1 is not lost when attempt 2
+/// fails, even though the rewind took its round out of the transcript.
+#[test]
+fn a_later_briefing_carries_the_one_the_failed_attempt_was_given() {
+    let mut earlier = record(1);
+    earlier.already_done =
+        Some("You have already done:\n- Read src/main.rs\n\nPlease continue.".into());
+    let mut prompt_entry = user("u1", "add the flag");
+    prompt_entry.recovery = Some(earlier);
+    let entries = vec![
+        prompt_entry,
+        entry(
+            "a1",
+            MessageRole::Assistant,
+            vec![
+                tool_part(
+                    "t1",
+                    cypher_proto::ToolCall::Exec {
+                        command: "cargo build".into(),
+                    },
+                    true,
+                ),
+                text("I refuse."),
+            ],
+        ),
+    ];
+    let plan = plan(&entries, &["refuse"], 2).unwrap();
+    let prompt = already_done_prompt(&plan);
+    assert!(prompt.contains(
+        "<previous_briefing>\nYou have already done:\n- Read src/main.rs\n\nPlease continue.\n</previous_briefing>"
+    ));
+    assert!(prompt.contains("carry it into the new briefing"));
+    assert!(prompt.contains("tool=\"Run\" outcome=\"succeeded\">\ncargo build"));
+}
+
+/// A round with no tool work asks for no briefing at all.
+#[test]
+fn a_round_with_no_tool_work_has_nothing_to_carry_over() {
+    let entries = vec![user("u1", "do it"), answer("a1", "I refuse.")];
+    let plan = plan(&entries, &["refuse"], 1).unwrap();
+    assert!(plan.tool_steps.is_empty());
+    assert_eq!(fallback_already_done(&plan), None);
+    assert!(!supplement_prompt("Explain.", &plan).contains("already carried out"));
+}
+
+/// The engine's own briefing, for a model that writes nothing usable: every
+/// step, with the ones that failed or never finished called out.
+#[test]
+fn the_fallback_briefing_lists_every_step() {
+    let mut running = tool_part(
+        "t2",
+        cypher_proto::ToolCall::Exec {
+            command: "npm install".into(),
+        },
+        false,
+    );
+    if let MessagePart::Tool { output, .. } = &mut running {
+        *output = None;
+    }
+    let entries = vec![
+        user("u1", "add the flag"),
+        entry(
+            "a1",
+            MessageRole::Assistant,
+            vec![
+                tool_part(
+                    "t1",
+                    cypher_proto::ToolCall::ReadFile {
+                        path: "src/main.rs".into(),
+                    },
+                    true,
+                ),
+                running,
+                text("I refuse."),
+            ],
+        ),
+    ];
+    let plan = plan(&entries, &["refuse"], 1).unwrap();
+    assert_eq!(
+        fallback_already_done(&plan).unwrap(),
+        "You have already done:\n\
+         - Read src/main.rs\n\
+         - Run npm install — never finished; check it before relying on it\n\n\
+         Please continue."
+    );
 }

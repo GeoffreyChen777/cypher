@@ -49,6 +49,30 @@ Then:
    rode the original message are sent again with it. Attachments are re-sent
    through the message's attachment refs.
 
+When the failed turn had already run tools, their effects are on disk and the
+rewind cannot undo them, so the agent is also briefed on that work and asked
+to carry on from it instead of doing it again. The same model that writes the
+context writes the briefing, from the turn's own tool steps — what each call
+did, whether it succeeded, failed or never finished, which files it changed,
+and its recorded output. It reads like
+
+```text
+You have already done:
+- Edited src/config.rs: added the --profile flag (+12 -3)
+- Ran cargo test: 2 failures in config::tests
+- Started npm install; it never finished, so check it before relying on it
+
+Please continue.
+```
+
+and is written in the language of your message, that heading and closing line
+included. It rides the resent prompt as a second block (`Work already done
+(JSON): …`). A turn that ran no tools is restarted with no briefing, as
+before. Later attempts carry the earlier ones' briefings on, so work from an
+attempt whose round has left the transcript is not lost. When the model
+answers with nothing usable, the briefing is written from the tool steps
+themselves (in English) rather than dropped.
+
 The resent message is captioned **Restarted with context** above its bubble
 (with the attempt number from the second attempt on), in the same place and
 style as a steer's caption. Hover the caption to see:
@@ -57,6 +81,8 @@ style as a steer's caption. Hover the caption to see:
   beginning of the chat;
 - **Triggered by**: the phrase, where it matched (answer or error), and the
   text around it;
+- **Already done**: the briefing about the work the failed turn had already
+  done, when there was any;
 - **Added context**: what the agent received, scrollable when long;
 - the model that wrote it.
 
@@ -86,7 +112,7 @@ stays unavailable in a subagent's chat.
 
 The resent message stores its record on the user entry as an additive
 `recovery` field (`ContextRecovery` in `cypher-proto`), so the caption syncs
-with the transcript. A recovery under way rides the chat's session-status row
+with the transcript; the briefing rides it as an additive `alreadyDone`. A recovery under way rides the chat's session-status row
 (`recovery`, a `RecoveryProgress`), so other desktops show the spinner too; a
 row still claiming one after five minutes was left by an engine that stopped
 mid-recovery and shows nothing. Older apps show neither. The settings live in the engine's data directory as
