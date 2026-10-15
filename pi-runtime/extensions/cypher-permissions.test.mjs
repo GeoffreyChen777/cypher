@@ -974,7 +974,10 @@ test("escalation: each command's category, for this chat", async () => {
   assert.deepEqual((await offered("git -C ../other push origin main")).patterns, ["git -C ../other push …"]);
   assert.deepEqual((await offered("git push origin $(git branch --show-current)")).patterns, ["git branch …", "git push …"]);
   assert.deepEqual((await offered("for h in web db; do git fetch $h; done")).patterns, ["git fetch …"]);
-  assert.deepEqual((await offered("xcrun simctl boot 'iPhone 17' && open -a Simulator")).patterns, ["xcrun simctl …", "open -a Simulator"]);
+  // xcrun and open exist only on macOS; elsewhere they are not found and run once.
+  if (process.platform === "darwin") {
+    assert.deepEqual((await offered("xcrun simctl boot 'iPhone 17' && open -a Simulator")).patterns, ["xcrun simctl …", "open -a Simulator"]);
+  }
   assert.deepEqual((await offered("npm run build && npm publish")).patterns, ["npm run build …", "npm publish …"]);
   assert.deepEqual((await offered("lsof -i :8080")).patterns, ["lsof …"]);
   assert.deepEqual((await offered("rm -rf ~/Library/Caches/app")).patterns, [`rm -rf ${home}/Library/Caches/app`], "rm only as written");
