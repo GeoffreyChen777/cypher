@@ -259,6 +259,24 @@ fn raw_text(entry: &SessionMessageEntry) -> String {
         .join("\n\n")
 }
 
+/// An entry's text parts as the AGENT has them: a user message's translation
+/// when one stood between what was typed and what the agent received, else
+/// the text as stored. What the recovery model writes for the agent is
+/// written from these, so it comes out in the agent's language.
+fn agent_words(entry: &SessionMessageEntry) -> String {
+    entry
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            MessagePart::Text {
+                text, agent_text, ..
+            } => Some(agent_text.as_deref().unwrap_or(text)),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// The opening words of an entry, for naming the restart point.
 fn preview_of(entry: &SessionMessageEntry) -> Option<String> {
     let raw = raw_text(entry);
@@ -294,9 +312,11 @@ fn clip_middle(text: &str, max: usize) -> String {
 }
 
 /// The one-shot request to the recovery model: the user's instruction, then
-/// the failed exchange as quoted material.
+/// the failed exchange as quoted material. The request is quoted as the
+/// agent received it ([`agent_words`]): the context is read by the agent,
+/// ahead of the request, and a translation extension passes it through as is.
 pub(crate) fn supplement_prompt(instruction: &str, plan: &RecoveryPlan) -> String {
-    let request = raw_text(&plan.user);
+    let request = agent_words(&plan.user);
     let request = attachment_refs::strip(&request);
     let mut out = String::new();
     out.push_str(instruction.trim());
@@ -393,10 +413,14 @@ fn tool_steps_block(steps: &[ToolStep]) -> String {
 /// work, and the summary the previous attempt was given, if any.
 ///
 /// The summary is the agent's own briefing, so it is written in the language
-/// the user writes in — the model is shown the user's message and told to
-/// match it.
+/// the agent works in — the model is shown the user's message as the agent
+/// received it ([`agent_words`]: its translation, when a translation
+/// extension stands between them) and told to match it. A translation
+/// extension passes the briefing through untranslated, so writing it in the
+/// language the user typed would hand the agent a different language from
+/// its request and its own steps.
 pub(crate) fn already_done_prompt(plan: &RecoveryPlan) -> String {
-    let request = raw_text(&plan.user);
+    let request = agent_words(&plan.user);
     let request = attachment_refs::strip(&request);
     let mut out = String::new();
     out.push_str(
@@ -444,7 +468,8 @@ pub(crate) fn already_done_prompt(plan: &RecoveryPlan) -> String {
 }
 
 /// The engine's own briefing, used when the model writes nothing usable: the
-/// tool chips as they read in the transcript. English, unlike the model's.
+/// tool chips as they read in the transcript. Always English, where the
+/// model's follows the agent's language.
 pub(crate) fn fallback_already_done(plan: &RecoveryPlan) -> Option<String> {
     let lines: Vec<String> = plan
         .tool_steps
@@ -895,7 +920,7 @@ impl ContextRecoveryService {
     }
 
     /// Ask the recovery model to brief the next attempt on the work the
-    /// failed one already did. The model writes it in the chat's language; a
+    /// failed one already did. The model writes it in the agent's language; a
     /// model that answers with nothing usable falls back to the engine's own
     /// English briefing rather than losing the work.
     async fn write_already_done(

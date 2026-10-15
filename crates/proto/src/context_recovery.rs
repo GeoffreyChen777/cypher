@@ -162,7 +162,9 @@ pub struct ContextRecovery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// What the failed round had already done when it failed, as the agent
-    /// received it ("You have already done: …"), in the chat's language.
+    /// received it ("You have already done: …"), in the agent's language: the
+    /// language of the prompt the agent received, which is a translation of
+    /// what the user typed when a translation extension stands between them.
     /// `None` when the round did no tool work, so there was nothing to carry
     /// over and the agent starts the request afresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
