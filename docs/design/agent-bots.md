@@ -537,12 +537,70 @@ Planned:
 - **Progress card:** each step's state and session link, elapsed time and Stop; it turns
   into a result card when the orchestration ends.
 - **Worker sessions:** "Started by <bot> · <task>" on their row and tab.
-- **Bot dock** (right dock of a bot chat): *Work* (running and recent orchestrations),
-  *Routines* (with last runs), *Notebook* (entries with their sources), *Permissions*,
-  and with the network *Connections*, *Activity* and *Review*.
+- **The bot workspace** (§13.1): the chat in the middle, a column of floating blocks on
+  the right, and a detail panel that slides in when a block's item is opened.
 - **Project tasks:** recurring tasks in a project's menu, with their last runs.
 - **iPhone:** the bot list, the bot chat, plan approvals and reviews, driven by push
   notifications.
+
+### 13.1 The bot workspace
+
+A bot's tab is laid out in three parts:
+
+```
+┌ sidebar ┐┌──────── chat ────────┐┌ blocks ┐        ┌ blocks ┐┌── detail ──┐
+│ bots    ││                      ││ status │  click │ status ││ Nightly    │
+│ projects││  conversation with   ││ needs  │ ─────► │ needs  ││ report     │
+│         ││  the bot, plan and   ││ work   │        │ work ◄─┼┤ steps, runs│
+│         ││  progress cards      ││ sched. │        │ sched. ││ actions    │
+│         ││  [ Ask Bob…        ] ││ …      │        │ …      ││        [×] │
+└─────────┘└──────────────────────┘└────────┘        └────────┘└────────────┘
+```
+
+- **Left: the app sidebar**, unchanged (bot strip, projects).
+- **Middle: the chat**, the bot conversation as built, with plan, progress and result
+  cards inline. It stays the place where the owner instructs the bot.
+- **Right: a column of floating blocks**, each a rounded card with its own header and a
+  few rows, showing the bot's live state at a glance. A block that has nothing to show
+  is not drawn, and the column scrolls on its own.
+- **Detail panel.** Clicking a block's row, or its header for the whole list, opens a
+  panel that slides in from the window's right edge beside the blocks column, the chat
+  narrowing to make room. It shows that one item in full, with its actions, and closes
+  with its × or Esc. Opening another row replaces its content. On a narrow window the
+  panel covers the blocks column instead of pushing the chat.
+
+The blocks, top to bottom:
+
+| Block | Shows | Opens in the detail panel |
+|---|---|---|
+| **Status** | Avatar, name, host and its online dot, one status line ("2 tasks running · 1 needs you"), and permission badges (*Reads 3 projects · Works directly · Can start sessions*), the ones that let it act in a distinct colour | The bot's settings palette |
+| **Needs you** | Plans awaiting approval, workers asking or failed on an approval, tainted actions awaiting approval, and later review drafts, each with its inline action | The item with its context: the plan, the question with the worker's recent messages, the action and why it needs approval |
+| **Work** | Running orchestrations with their current step, a step bar and elapsed time; the last few finished ones with a one-line result | The orchestration: every step with project, device, worker session link, state and duration; Stop; the result |
+| **Schedule** | Routines and its projects' recurring tasks, in order of next run: name, trigger, next run, last result; today's budget use | The routine or task: trigger, prompt, permissions, run history with links, pause, edit |
+| **Projects** | Each granted project with device, branch, running and waiting sessions, last activity, and "works directly" or "via sessions" | The project's sessions in scope, newest first, with status; the bot's worker sessions there |
+| **Notebook** | The latest few entries, bot-written ones marked | All entries with their sources, editable and deletable |
+| **Activity** | The last few things the bot did: sessions started or stopped, worktrees created, commands outside the sandbox, notes written | The full audit log, filterable by kind |
+| **Network** (P4) | Connections with reply mode and last exchange; pending invites | A connection: its scope, reply mode, rate limits, exchanges, revoke |
+
+Behaviour:
+
+- **Needs you** always sits right under Status and is the only block that animates in, so
+  attention items are never below the fold. Its count also shows on the bot's square in
+  the sidebar strip, in place of the status dot.
+- Blocks update live from the engine (`WatchBotWork`, the routine and notebook rows, the
+  audit log); they hold no state of their own.
+- The blocks column has a fixed width (about 280 px) and can be collapsed to a thin rail
+  of block icons with counts, remembered per bot. A read-only bot (no *Coordinate*, no
+  routines) shows only Status, Projects, Notebook and Activity.
+- Settings stay in the palette: the panel's Status block links there and never edits
+  permissions itself.
+- The bot tab keeps no terminal and no session dock; the detail panel takes the dock's
+  place on the right.
+- Usage meters and embedded transcripts are left out: rows link to the thread or session
+  instead.
+
+Phasing: Status, Needs you, Work and Projects arrive with the coordinator (P2); Schedule
+and Notebook with P3; Network with P4; Activity with the audit log in P2.
 
 ## 14. RPC
 
