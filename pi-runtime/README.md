@@ -91,6 +91,16 @@ does not open a Runtime-local browser callback for those hosts.
 Claude Code installed, Runtime points the bridge at that executable; otherwise
 Providers prompts to install it.
 
+The bridge mirrors each Pi session onto a Claude Code session file in
+`~/.claude/projects/<cwd>/`, but only in memory: a restarted Pi process
+rebuilds the conversation under a new session id. So the bridge deletes the
+session files it created when its process exits, and lists them in
+`agent/claude-bridge-sessions/<pid>.json` so the next bridge to load sweeps
+those of a process that was killed first
+(`patches/pi-claude-bridge-session-cleanup.mjs`). It deletes only what it
+recorded; your own Claude Code sessions in the same directory are untouched,
+and files left by Runtimes before this change stay.
+
 Claude Code has its own web search, but Cypher cannot drive it yet:
 `pi-claude-bridge` does not expose that builtin tool, and `pi-web-search`
 cannot call a `claude-bridge` API. The bundled
