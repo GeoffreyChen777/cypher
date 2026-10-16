@@ -1,146 +1,141 @@
 # Agent bots
 
-Status: **P0 implemented** (local bots: definition, scope, the bot chat and its read
-tools, the sidebar strip). P1–P5 are design; §12 is the build order. Where P0 differs from
-the full design, the section says so.
+Status: **P0 implemented** (local, read-only bots: definition, scope, the bot chat and its
+read tools, the sidebar strip and palette). Everything from P1 on is design; §16 is the
+build order. Where the built P0 differs from the full design, the section says so.
 
-An agent bot is a long-lived Pi session that answers questions about its owner's work. It
-runs on one of the owner's devices, sees the projects and sessions the owner grants it,
-and can be connected to other users' bots. Connected bots ask each other questions: "How
-far along is A with the billing migration?" goes from my bot to A's bot, A's bot searches
-the sessions A granted it, and the answer comes back to my bot.
+A bot is a **coordinator**: a long-lived agent responsible for everything in the projects
+it is given. Inward, it takes instructions from its owner and gets work done across those
+projects: it plans a task, works in a project itself or starts sessions to do the work,
+watches them, and reports back. Outward, it answers questions from the bots of the people
+its owner is connected to, from what the owner allows them to see.
+
+"Fix bug X in project A, then check that bringing A's change into project B breaks
+nothing" is one instruction to the bot. The bot plans it, hands it to an orchestration
+thread, and stays free for the next question while the thread creates a worktree in A,
+starts a session there to fix the bug, starts a session in B to run its tests against
+A's fix, and reports the outcome.
 
 ## 1. Goals and non-goals
 
 Goals:
 
-- **A global view for the owner.** One conversation that can see across every granted
-  project and session, on every device in the profile, instead of one session's cwd.
-- **Explicit, enforced scope.** The owner picks which projects and sessions a bot may see.
-  The engine enforces this on every tool call; the model cannot widen it.
+- **One agent over many projects.** A conversation that sees every granted project and
+  session, on every device in the profile, and can act across them.
+- **Work that runs on its own.** Large tasks run in their own threads, in parallel, while
+  the bot stays available. They survive restarts and run with no UI open.
+- **Permissions by origin.** What a thread may do depends on who started it: the owner,
+  an unattended routine, or another user's bot. The engine enforces it on every call; the
+  model cannot widen it (§4).
 - **Bot-to-bot questions across users and organizations.** Connections are made by invite,
   either side can revoke them, and each connection has its own policy.
 - **Execution stays on the owner's machines.** Bots run on an engine the owner picked. The
   Edge relays messages between bots and never runs a model or reads a session.
-- **Usable from every device.** A bot hosted on Mac A can be used from Mac B (and later
-  the iPhone) the same way a remote session is.
+- **Usable from every device.** A bot hosted on Mac A is used from Mac B (and later the
+  iPhone) the same way a remote session is.
 
-Non-goals for the phases in §12:
+Non-goals:
 
-- Bots that *change* anything for a peer: no writes, shell, or session control on another
-  user's behalf. Owner-only action tools are a later, separate decision (§13).
-- Reading another user's sessions directly. Only the owner's bot reads the owner's
-  sessions; peers receive text answers.
-- A public bot directory. Discovery is by invite only.
-- Hosting on iOS. The iPhone is a remote control, as it is for sessions.
+- **Work on a peer's behalf.** Another user's bot can ask questions; it can never start,
+  steer or change anything, directly or through the owner's bot.
+- **Reading another user's sessions.** Peers receive text answers, never transcripts.
+- **A public bot directory.** Discovery is by invite only.
+- **Hosting on iOS.** The iPhone is a remote control, as it is for sessions.
 
-## 2. Concepts
+## 2. Roles
+
+| Role | Is | Does |
+|---|---|---|
+| **Owner** | The user | Instructs the bot, approves plans, reviews results. |
+| **Coordinator** | A bot | Plans, coordinates and reports across its projects. Works directly in local projects when the owner allows it; delegates everything else to sessions. |
+| **Worker** | A session | One task in one checkout, with real tools under its sandbox. Usually short-lived. |
+| **Peer** | Another user's bot | Asks questions. Read-only, through the connection's narrower scope. |
+
+Sessions stay what they are today, and the interface keeps "session" and "bot" separate:
+a session is an agent working on one task, a bot is your assistant across your work.
+Root sessions do not talk to one another (subagents still message inside their own task
+tree); coordination between sessions goes through the bot.
+
+## 3. Concepts
 
 | Term | Meaning |
 |---|---|
-| **Bot** | A named agent owned by one user: definition, scope, host device, and its own conversation. A user may own many. |
-| **Host device** | The single Mac or Linux engine that runs the bot's Pi sessions, picked at creation and changeable later. iOS devices cannot host. |
-| **Bot chat** | The owner's conversation with their bot. A normal chat hosted on the host device, so every owner device can read and drive it. |
-| **Scope** | What the bot may read: granted projects (spaces), per-session overrides, and capability flags (§5). |
-| **Connection** | A mutual link between two bots of different users, created by an invite. Each side holds its own policy for it. |
-| **Connection policy** | Per side: reply mode (**Auto** or **Review**), an optional narrower scope, and rate limits. |
-| **Exchange** | One question from a peer bot and its answer. Exchanges are audited on the answering side. |
-| **Peer thread** | A hidden chat, one per connection, on the answering bot's host. Peer questions run there, never in the bot chat. |
-| **Group** | A named set of connections that `ask_group` fans a question out to (§9). |
+| **Bot** | A named agent owned by one user: definition, scope, capabilities, host device and its chats. A user may own many, one per area or audience. |
+| **Host device** | The Mac or Linux engine that runs the bot, picked at creation. iOS devices cannot host. |
+| **Thread** | One of the bot's chats. Every thread has an **origin** that fixes its permissions (§4). |
+| **Bot chat** | The owner's main conversation with the bot (origin *owner*). |
+| **Orchestration thread** | A hidden child chat of the bot chat that carries out one large task (origin *owner*), §6. |
+| **Routine thread** | A hidden chat in which one routine runs (origin *routine*), §8. |
+| **Peer thread** | A hidden chat per connection where a peer's questions run (origin *peer*), §11. |
+| **Scope** | Which projects and sessions the bot may read (§5). |
+| **Capabilities** | Independent switches for what the bot may do beyond reading (§4.2). |
+| **Notebook** | The bot's durable memory: notes it reads at the start of each owner turn (§7). |
+| **Routine** | A scheduled or event-triggered bot job whose output is a message (§8). |
+| **Recurring task** | A scheduled job on a project whose every run starts a fresh session (§8). |
+| **Connection** | A mutual link between two bots of different users, created by invite (§11). |
+| **Exchange** | One question from a peer bot and its answer. Audited on the answering side. |
 
-## 3. The end-to-end flow
+## 4. Origins and permissions
 
-```
-Me (any device)                 my host engine               Edge                    A's host engine
-   │ "How is A doing on X?"          │                         │                           │
-   ├── bot chat (chat2) ────────────►│ Pi run, tools:          │                           │
-   │                                 │ ask_bot(A's bot, q) ───►│ BotRoom(me) → BotRoom(A)  │
-   │                                 │                         ├── ask (queued if offline)►│
-   │                                 │                         │                           │ peer thread for (A-bot, my-bot)
-   │                                 │                         │                           │ Pi run with scope ∩ connection scope
-   │                                 │                         │                           │ search_sessions / read_session …
-   │                                 │                         │◄── answer (Auto) ─────────┤ (Review: waits for A's approval)
-   │                                 │◄── answer ──────────────┤                           │
-   │◄── bot replies, citing A's bot ─┤ tool result → model     │                           │
-```
+### 4.1 Origin decides what a thread may do
 
-1. I ask my bot in its bot chat. The bot chat is hosted on my bot's host device, so this
-   works from any of my devices through the existing chat2 sync and command plane.
-2. The model calls `ask_bot`. My engine sends the question through my bot's BotRoom, which
-   checks that I own the bot and that the connection is active, then hands it to A's
-   BotRoom.
-3. A's BotRoom queues it and delivers it to A's host engine when that engine is connected.
-4. A's engine appends the question to the peer thread for this connection and runs Pi with
-   the effective scope (A's bot scope ∩ the connection's scope).
-5. In **Auto** mode the final assistant text is sent back right away. In **Review** mode it
-   waits as a draft until A approves, edits, or declines it.
-6. My engine resolves the pending `ask_bot` call. If the answer took longer than the tool's
-   wait window, it arrives instead as a follow-up message in my bot chat, which starts a new
-   turn (§7.4).
+| Thread origin | Tools | Approvals |
+|---|---|---|
+| **Owner** (bot chat, orchestration threads) | Read tools; coordination tools if *Coordinate* is on; Pi's own tools (shell, files) in local projects if *Work directly* is on | The owner's permission control and sandbox, exactly as in a session, plus the taint rule (§4.3) |
+| **Routine** | What the owner granted when creating the routine, never more than an owner thread | Never waits: anything that would ask for approval fails the run and notifies the owner |
+| **Peer** | Read tools only, scope ∩ connection scope | None needed: nothing it can call acts |
 
-## 4. Data model
+The engine stamps a thread's origin when it creates the thread and stores it on the chat
+row's `bot` marker. Origin is never inferred from content and never changes: a peer's
+question always lands in its peer thread, nothing a peer sends can create or continue an
+owner thread, and an orchestration thread can only be started from an owner thread.
 
-### 4.1 Bot definitions: registry `bots` rows
+### 4.2 Capabilities
 
-Bot definitions are owner-private and sync across the owner's devices as a new registry row
-kind, `bots`. The RegistryRoom already accepts any kind that matches `KIND_RE`, so the Edge
-needs no change; `cypher-doc` gains a `KIND_BOTS` table and typed accessors.
+Capabilities are independent switches on the bot, not a ladder; turning one on implies
+nothing about the others.
 
-| Field | Type | Writer | Notes |
-|---|---|---|---|
-| `name` | string | any owner device | ≤ 40 characters; shown to peers (P2). |
-| `icon`, `color` | string? | any | Avatar keys: a glyph (`None` = the name's initial) and a project-palette colour. |
-| `instructions` | string? | any | Appended to the system prompt; ≤ 8 KiB. |
-| `hostDeviceId` | string | creator | A Mac or Linux engine; fixed at creation in P0. |
-| `chatId` | string | creator | The bot chat, minted with the row by `CreateBot` on the host. |
-| `scope` | JSON (§5) | any | A scope that does not parse reads as the empty scope. |
-| `createdAt` | ms | creator | Strip order. |
-| `network` | JSON? | host | `{botRoomId, publishedAt}` once the bot is on the Edge (P2). |
-| `paused` | bool | any | A paused bot answers nothing, including peers (P2). |
+| Capability | Lets owner threads | Default |
+|---|---|---|
+| **Observe** | Read projects and sessions in scope | Always on (scope decides what) |
+| **Work directly** | Use Pi's shell and file tools in the bot's local projects | On for new bots; off gives a read-only reporting bot |
+| **Coordinate: start** | Create worktrees and start sessions in its projects, on any owner device | Off; one switch |
+| **Coordinate: steer** | Steer, answer or stop sessions it did not start | Off; ships after *start* |
+| **Report** | Run routines (§8) | Per routine |
+| **Represent** | Answer connected peers (§11) | Per connection |
 
-The model and thinking level are not on the bot row: they are the bot chat's own config,
-picked in its composer like any session's.
+Memory (§7) is not a capability: every bot has a notebook.
 
-Writes are LWW per field, as with every registry row. The host device is the only enforcer:
-it re-reads the row on every change and applies it to the next tool call, never to a call
-already in flight.
+### 4.3 The taint rule
 
-Local-only profiles keep `bots` rows in the local registry, the same as other rows. A local
-bot works for the owner (§6) but cannot join the network, which needs a synced account.
+Origin controls who may instruct a thread, not what text reaches its model. Owner threads
+read worker transcripts, web output and, through `ask_bot`, other users' answers; any of
+these can carry injected instructions. So:
 
-### 4.2 Chats a bot owns
+- Tool results that carry such text are marked in the prompt as quoted data, never
+  instructions (§10.5).
+- Permission control stays on in owner threads. "Full tools" means the rules of a
+  session, not no rules.
+- A thread that has received a peer answer is **tainted** for the rest of its run: actions
+  that would otherwise run silently (commands outside the sandbox, writes outside its
+  projects, starting or steering sessions) require the owner's approval.
 
-- **Bot chat**: a chat row with `bot: {botId}` and no `spaceId`. The marker keeps it out of
-  project cards and the `@session` mention list; it shows in the sidebar's bot strip
-  instead. Its cwd is a private, empty per-bot folder on the host
-  (`<profile store>/bots/<botId>`, 0700), so Pi has a working directory, no project
-  checkout and no context files. A run recreates the folder if it is gone. Desktop builds
-  older than P0 list the bot chat under "No project"; the iPhone app hides project-less
-  chats.
-- **Peer threads** (P2): chat rows with `bot: {botId, role: "peer", connectionId}`, created
-  lazily on a connection's first question. They are synced to the owner's devices for the
-  audit view but never shown as ordinary sessions.
+### 4.4 Enforcement
 
-Every chat with a `bot` marker is **excluded from every bot's scope**, including its own.
-Otherwise one peer's question could surface another peer's exchange.
-
-### 4.3 Connections, invites and exchanges: Edge `BotRoom`
-
-Cross-user state cannot live in a per-user registry, so it gets one new Durable Object
-class, `BotRoom`, keyed `bot1/{botRoomId}` and bound as `BOT_ROOMS` (wrangler migration
-`new_sqlite_classes: ["BotRoom"]`). There is one room per networked bot. Its SQLite holds:
-
-| Table | Contents |
-|---|---|
-| `meta` | owner user id (claimed on publish, owner-only after), public profile `{name, ownerName}`, `paused` |
-| `invites` | `sha256(secret)`, created/expiry, max uses, uses |
-| `connections` | `connectionId`, peer `botRoomId`, peer profile, created, revoked, per-side rate counters |
-| `inbox` | exchanges addressed to this bot that the host has not acknowledged: `exchangeId`, `connectionId`, question, sentAt |
-| `outbox` | exchanges this bot asked, with their state and, once received, the answer, until the host acknowledges it |
-
-The DO stores message bodies only until the receiving host acknowledges them, plus a
-bounded retention for undelivered ones (default 7 days, then `expired`). It never keeps
-transcripts or answers beyond that.
+- **Spawn time** fixes what a run *can* call: the tool allowlist, the extensions, the
+  system prompt and the workspace roots, all derived from (bot, thread origin). A run
+  cannot gain a tool mid-run.
+- **Call time** decides whether a call is *allowed*: every bot tool re-reads the bot row
+  and checks scope and capabilities, so turning a switch off applies to the next call of
+  a running thread. Each coordination call is written to the bot's audit log.
+- **Workspace.** An owner thread with *Work directly* gets the checkouts of its scoped
+  projects **on its host** as permission control's workspace roots; its cwd stays the
+  bot's private folder. Projects on other devices are reachable only by starting a
+  session there (*Coordinate*). Peer and routine threads without *Work directly* keep the
+  empty folder and no Pi tools.
+- **Slash commands.** Today the engine refuses `/scripts`, `/orchestrate` and `/goal` in
+  bot chats, because codemode honours `/scripts` under `--tools`. Owner threads with
+  *Work directly* may lift this; peer and routine threads accept no slash commands.
 
 ## 5. Scope
 
@@ -156,78 +151,161 @@ transcripts or answers beyond that.
 }
 ```
 
-`cypher_proto::BotScope` holds the rule; the engine enforces it and the bot dialog previews
-it ("It can see 12 sessions in 3 projects").
+`cypher_proto::BotScope` holds the rule; the engine enforces it and the palette previews
+it ("Access to 12 sessions in 3 projects").
 
-- `projects.mode` is `"none"` (the default), `"selected"`, or `"all"`. `"all"` also covers
+- `projects.mode` is `"none"` (the default), `"selected"`, or `"all"`. `"all"` covers
   projects created later. `"selected"` names spaces, which are (device, folder) pairs, so a
-  project that exists on two devices is granted per device.
+  project on two devices is granted per device.
 - A granted project grants its sessions, including future ones. `excludeSessions` removes
-  single sessions; `includeSessions` grants single sessions in otherwise ungranted
-  projects. The P0 dialog edits projects and the two switches; it keeps the session lists
-  as they are.
-- Subagent child chats follow their root parent; a broken or cyclic parent chain hides the
-  chat.
-- `transcripts: false` limits the bot to titles, latest-message previews and status.
-- Later capabilities (P1+): `git` (branch, recent commits, diff stats through the device
-  relay) and `files` (read files in a granted checkout, off by default).
+  single sessions; `includeSessions` grants single sessions in ungranted projects. The P0
+  palette edits projects and the two switches and keeps the session lists as they are.
+- Subagent child chats follow their root parent; a broken or cyclic chain hides the chat.
+- `transcripts: false` limits reads to titles, latest-message previews and status.
+- Every chat with a `bot` marker is excluded from every bot's scope, including its own:
+  otherwise one peer's question could surface another peer's exchange.
+- Sessions a bot started belong to their project like any session, so they are in scope
+  exactly when their project is.
 
 ### 5.2 Effective scope
 
-| Caller | Effective scope |
-|---|---|
-| The owner, in the bot chat | bot scope |
-| A peer, in that connection's peer thread | bot scope ∩ connection scope |
+| Thread | Reads | Acts in |
+|---|---|---|
+| Owner | bot scope | bot scope (local checkouts directly, any device through sessions) |
+| Routine | bot scope ∩ routine scope | as granted to the routine |
+| Peer | bot scope ∩ connection scope | nothing |
 
-A connection's scope can only narrow the bot's scope. A new connection starts with the full
-bot scope and **Auto** replies. That default matches the intended use, a "project bot" whose
-scope the owner already chose, and the owner can tighten either one at any time.
+A routine's or connection's scope can only narrow the bot's. Anything outside the
+effective scope answers exactly like something missing, so the model cannot probe for it.
 
-### 5.3 Enforcement
+## 6. Orchestration
 
-Scope is enforced in the engine, not the prompt:
+### 6.1 Flow
 
-1. **Tool allowlist.** Bot runs start Pi with `--tools` restricted to the bot tools in §7
-   (the mechanism child subagent chats already use). There is no `bash`, `read`, `write`,
-   `edit`, `grep`, MCP server, or subagent spawn, so a bot cannot reach the file system
-   except through scoped tools. Permission control is therefore irrelevant to bot runs.
-   Claude models keep to the list too: the Claude Code bridge's provider path starts
-   Claude Code with no built-in tools and passes it only Pi's.
-   The Runtime's codemode extension honours a `/scripts` typed in the chat even under
-   `--tools`, so the engine refuses `/scripts`, `/orchestrate` and `/goal` in a bot chat
-   before the prompt reaches Pi. Peer threads (P2) must accept no slash commands at all.
-2. **Engine-side checks.** Each bot tool is a thin extension wrapper over a bot RPC that
-   carries the calling chat id. The engine maps the chat id to (bot, role, connection),
-   computes the effective scope, and filters results. An id outside the scope answers
-   "not found", the same as a missing id, so the model cannot probe for existence.
-3. **Peer isolation.** Each connection's questions run in that connection's own peer
-   thread, so context from one peer never reaches another peer's answers.
-4. **Untrusted input.** Peer questions are wrapped as quoted, attributed input ("Question
-   from <peer bot> (owner <name>)"), never as instructions. A prompt injection can at most
-   steer the bot within the effective scope, and Review mode exists for scopes where even
-   that is too much.
-5. **Outgoing scrub.** Before an answer leaves the host, a best-effort pass redacts strings
-   that look like secrets: private-key blocks, common token formats, and `.env`-style
-   `KEY=value` assignments. Permission control's sensitive patterns are path globs, so this
-   is a new content pattern set in `engine/bots/`. It is a safety net, not a guarantee, and
-   the doc and UI say so.
+```
+Owner: "Fix bug X in A, then check B against A's fix"
+  └─ bot chat ─ plans ─► plan card (approve / edit / cancel)
+                           └─ approve ─► orchestration thread (hidden child chat)
+                                          ├─ create worktree in A
+                                          ├─ start session in A ("fix bug X")  ─► worker 1
+                                          ├─ wait, read its result
+                                          ├─ start session in B ("run tests against A's branch") ─► worker 2
+                                          ├─ wait, read its result
+                                          └─ report ─► result card in the bot chat
+```
 
-## 6. Bot runtime on the host device
+1. The owner asks in the bot chat. For a task that needs more than a couple of steps the
+   bot writes a plan: steps, projects, devices, models, and how the steps depend on each
+   other (`propose_plan`).
+2. The plan shows as a card. In the first version every plan waits for the owner's
+   approval; auto-start becomes a per-bot setting later.
+3. On approval the engine creates an **orchestration thread**, a hidden child chat of the
+   bot chat with origin *owner*, and queues its first run. The bot chat is free again.
+4. The thread does the work: small steps directly in local projects (*Work directly*),
+   real changes and anything on another device in worker sessions (*Coordinate*).
+5. When it finishes, fails or is stopped, the result lands in the bot chat as a card, and
+   the bot can follow up.
+
+### 6.2 The thread starts from a brief
+
+The orchestration thread does not inherit the bot chat's history. It starts from a brief
+the engine assembles: the approved plan, the owner's instruction verbatim, the relevant
+notebook entries, and its permissions in plain words. Its context stays small, and nothing
+from unrelated conversations leaks into the work.
+
+### 6.3 Direct work or a session
+
+The bot's instructions give it this trade-off:
+
+- **Directly:** quick, small things in a local project: run a test, read a file, check
+  `git log`, a one-line fix.
+- **A session:** real changes that deserve their own transcript, diff and worktree; work on
+  another device; steps that run in parallel.
+
+Worker sessions are ordinary sessions in their project, marked with who started them
+(`startedBy: {botId, threadId}` on the chat row) and shown as "Started by Bob · <task>".
+The owner can open, steer or stop them like any session.
+
+### 6.4 Dependencies between projects
+
+"Test B against A's fix" needs B to see A's change. The plan must name one of:
+
+- a **path dependency** onto A's worktree, when A and B are on the same device;
+- a **git ref**: A's branch pushed to a remote B can fetch, across devices;
+- a **published version**, when the projects already depend on each other that way.
+
+A local path never crosses devices; the plan step says which mechanism it uses, and the
+worker's prompt carries it.
+
+### 6.5 Blocked workers
+
+Workers started by an orchestration run unattended by default: anything that would ask for
+approval fails the step instead of waiting. A worker that asks the user a question is
+surfaced to the orchestration thread, which answers from the plan or passes it to the
+owner. Nothing stalls silently.
+
+### 6.6 Control and limits
+
+- A live **progress card** in the bot chat: the plan, each step's state, links to its
+  sessions, and elapsed time.
+- **Stop** ends the thread and interrupts every session it started.
+- Limits per bot: concurrent orchestrations (3), sessions per orchestration (8), turns per
+  worker, and a total time budget, all configurable.
+- Orchestration threads survive engine restarts like any chat: their transcript and the
+  durable command queue carry the state.
+
+## 7. Memory
+
+- **The notebook** is a small file in the bot's private folder, read at the start of each
+  owner turn and edited with two tools (`read_notes`, `write_note`). Entries are short
+  facts and decisions: "the release is blocked on the migration", "Alice owns auth".
+- **Owner threads only.** Peer threads can neither read nor write the notebook, so it can
+  never bypass a connection's scope or carry a peer's injected text into an owner thread.
+  Routine threads read it, and write to it only when the routine says so.
+- **Provenance.** Every entry records where it came from: the owner, or the session or
+  thread whose content produced it. The notebook view shows the source and lets the owner
+  delete any entry.
+- **Phasing.** First the owner writes notes ("remember that…"); bot-written notes follow
+  once provenance and the notebook view exist.
+
+## 8. Routines and recurring tasks
+
+Two kinds of scheduled job, run by one engine scheduler on the host:
+
+| | Routine (bot) | Recurring task (project) |
+|---|---|---|
+| Example | "Every morning: what moved, what's stuck, what needs me" | "Every night: run the tests and fix anything flaky" |
+| Runs in | The routine's own hidden thread | A fresh session per run, ideally in a new worktree ("Nightly tests · Oct 15") |
+| Output | A message card in the bot chat, optionally a notification | Changes in a checkout, reviewed like any session |
+| Permissions | Granted per routine, never more than an owner thread; no `ask_bot` | The task's own model, sandbox and checkout settings |
+
+- **Triggers:** a schedule, and later events ("a session errors", "a session waits on you
+  for 10 minutes", "CI failed on main").
+- **Unattended:** a routine or recurring run never waits for approval. Permission prompts
+  are denied automatically and the run settles as failed, with a notification.
+- **Budgets:** turns per run and runs per day per routine, and the bot's `paused` flag as a
+  kill switch for all of its routines.
+- **Missed runs:** a device that slept through a schedule runs the job once on wake and
+  skips the rest.
+- **Delivery:** the scheduler queues a durable command, so jobs run with no UI open.
+- Hidden routine threads sync through chat2 like any chat; each run has the cost of one
+  agent turn or more.
+
+## 9. Bot runtime on the host device
 
 The engine module `crates/engine/src/bots/` serves the bots whose `hostDeviceId` is this
-device:
+device. P0, as built:
 
 - **Creation.** `CreateBot` runs on the chosen host (it is relay-forwardable): it makes the
-  bot's folder, then writes the bot chat and the bot row in one registry batch. Edits and
-  deletes are `Mutate` ops (`updateBot`, `deleteBot`) any owner device can make; a rename
-  retitles the bot chat, and a delete tombstones the bot with its chat, after which the
-  host stops the run and removes the folder.
-- **Runs** go through the normal sessions engine: a bot chat is a chat, so steering,
-  interrupts, queued sends, the run journal and crash resume apply unchanged, and the
-  owner's other devices drive it through chat2 and the command plane like any remote
-  session. The harness spawn path has a bot mode next to child-subagent mode
-  (`RunHostContext::bot`): tool allowlist, appended system prompt, `CYPHER_BOT_ID`. A bot
-  chat whose bot row is gone still runs locked down, seeing nothing.
+  bot's private folder (`<profile store>/bots/<botId>`, 0700), then writes the bot chat
+  and the bot row in one registry batch. Edits and deletes are `Mutate` ops (`updateBot`,
+  `deleteBot`) any owner device can make; a rename retitles the bot chat, and a delete
+  tombstones the bot with its chat, after which the host stops the run and removes the
+  folder.
+- **Runs** go through the normal sessions engine: steering, interrupts, queued sends, the
+  run journal and crash resume apply unchanged, and the owner's other devices drive a bot
+  chat through chat2 and the command plane like any remote session. A run recreates the
+  bot's folder if it is gone.
 - **Reading sessions.** `search_sessions` reads transcripts through
   `DocHost::read_transcript`: the open handle when there is one, else the stored snapshot.
   It joins no room, starts no task and leaves the warm-doc cache alone. `read_session`
@@ -236,132 +314,156 @@ device:
 - **Search (P0).** A bounded scan, newest first: titles and previews, plus message text
   for the 400 most recent sessions in scope that have a copy on this device. Sessions with
   no local copy are matched by title only, and the answer says how many.
-- **Search index (P1).** Scanning does not scale past a few hundred sessions, so the host keeps a
-  per-profile SQLite FTS5 index (`bots-index.sqlite`) of message text keyed by (chat id,
-  message id). It is updated incrementally from chat2 changes, rebuilt on demand, and holds
-  only chats that some bot on this host can see. Scope filtering happens at query time, so
-  narrowing a scope takes effect immediately.
-- **Git and status.** Session status, titles, and branches come from the registry. Git
-  facts for a space on another device go through the existing forwardable RPCs over the
-  device relay, so they need that device online; the tool says so when it is offline.
 
-## 7. Bot tools
+Planned:
 
-The extension is `crates/harness/src/pi/bot-tools.ts`, embedded in the engine binary like
-`engine-client.mjs`: the harness writes both into its private support folder and loads the
-extension with `-e` into bot runs only, so bot tools never appear in other sessions and
-need no Runtime release. Each tool is one `BotTool` call (`{chatId, tool, args}` →
-`{text}`) over the private socket; the engine resolves the bot from `CYPHER_CHAT_ID`,
-enforces the scope and formats the answer, so the extension decides nothing. Answers are
-plain text, bounded to 48 KiB. P0 ships the first four tools below.
+- **Run profiles.** P0 has two special cases on `RunHostContext`, `child` and `bot`, which
+  could in principle both be set: `--tools` would then be passed twice and the child's
+  prompt would silently win. They become one role-aware profile, derived from (chat,
+  bot, origin): tool allowlist, extensions, system prompt, env and workspace roots. Scope
+  and capabilities stay out of the profile, because they are checked per call (§4.4).
+  The persisted `ChildAgentProfile` keeps its synced shape; only the internal run struct
+  is shared. P0's `run_env` is origin-blind (a peer thread would get the owner prompt), so
+  this refactor comes before any second kind of thread.
+- **Search index.** The host keeps a per-profile SQLite FTS5 index (`bots-index.sqlite`)
+  of message text keyed by (chat id, message id), updated incrementally from chat2 changes
+  and holding only chats some bot on this host can see. Scope filtering happens at query
+  time, so narrowing a scope applies immediately.
+- **Git facts.** Git state for a space on another device goes through the existing
+  forwardable RPCs over the device relay, so it needs that device online; the tool says so
+  when it is offline.
 
-### 7.1 Read tools (owner and peer)
+## 10. Bot tools
 
-| Tool | Capability | Returns |
-|---|---|---|
-| `list_projects` | — | Granted projects: name, id, device, folder, git, session count, working count, last activity. |
-| `list_sessions` | — | Root sessions in scope, newest first, filterable by project (id or name), `active`, and `since_hours`; with status and latest-message preview. |
-| `search_sessions` | transcripts for text | Sessions whose title, preview or messages contain every word; up to three excerpts each, with message indexes. |
-| `read_session` | transcripts | Up to 60 messages of one session, the latest by default or from an index; tool calls as one-line summaries, thinking left out. |
-| `session_activity` (P1) | — | What changed recently: new sessions, finished runs and titles in a time window. |
-| `project_git` (P1) | git | Branch, ahead/behind, recent commits, working-tree diff stats for a granted space. |
+The extension `crates/harness/src/pi/bot-tools.ts` is embedded in the engine binary like
+`engine-client.mjs` and loaded with `-e` into bot runs only, so bot tools never appear in
+other sessions and need no Runtime release. Each tool is one `BotTool` call (`{chatId,
+tool, args}` → `{text}`) over the private socket; the engine resolves the bot and thread
+from the chat id, enforces scope, origin and capabilities, and formats the answer. Answers
+are plain text, bounded to 48 KiB.
 
-### 7.2 Network tools (owner only)
+### 10.1 Read tools (every origin; P0 ships the first four)
+
+| Tool | Returns |
+|---|---|
+| `list_projects` | Granted projects: name, id, device, folder, git, session count, working count, last activity. |
+| `list_sessions` | Root sessions in scope, newest first, filterable by project, `active` and `since_hours`, with status and latest-message preview. |
+| `search_sessions` | Sessions whose title, preview or messages contain every word; up to three excerpts each, with message indexes. |
+| `read_session` | Up to 60 messages of one session, latest by default or from an index; tool calls as one-line summaries, thinking left out. |
+| `session_activity` | What changed in a time window: new sessions, finished runs, titles. |
+| `project_git` | Branch, ahead/behind, recent commits, working-tree diff stats for a granted space. |
+
+### 10.2 Direct work (owner threads with *Work directly*)
+
+Pi's own tools (`bash`, `read`, `write`, `edit`, `grep`, `find`, `ls`) under permission
+control, with the bot's local scoped checkouts as workspace roots (§4.4).
+
+### 10.3 Coordination (owner threads with *Coordinate*)
 
 | Tool | Does |
 |---|---|
-| `list_connections` | Connected bots with name, owner name, groups, and reachability (host last seen). |
-| `ask_bot` | Sends a question to one connected bot and waits up to `wait_s` (default 120 s) for the answer. |
-| `ask_group` | Fans a question out to a group's bots and returns the answers received within the wait window, marking the others as pending. |
+| `propose_plan` | Puts a plan card in the bot chat; approval starts an orchestration thread. Bot chat only. |
+| `create_worktree` | A new worktree in a granted project, on that project's device. |
+| `start_session` | A session in a granted project or worktree, with a prompt, model and sandbox; returns its id. |
+| `wait_for_session` | Waits until a session settles or asks something, up to a timeout; returns its state and last answer. |
+| `answer_session` | Answers a question a session it started is asking. |
+| `steer_session`, `stop_session` | For sessions it started; for others only with *Coordinate: steer*. |
 
-Network tools are not available in peer threads, so a peer cannot use my bot to relay
+### 10.4 Memory and network
+
+| Tool | Threads | Does |
+|---|---|---|
+| `read_notes`, `write_note` | owner, routine (if granted) | The notebook (§7). |
+| `list_connections` | owner | Connected bots, owners, groups, reachability. |
+| `ask_bot` | owner | Asks one connected bot; waits up to `wait_s` (default 120 s). Taints the thread (§4.3). |
+| `ask_group` | owner | Fans a question out to a group; returns the answers received in the window. |
+
+Network tools never exist in peer threads, so a peer cannot use the bot to relay
 questions to third parties.
 
-### 7.3 Prompting
+### 10.5 Prompting
 
-The bot's system prompt states its role (an assistant over its owner's work), the effective
-scope in plain words, that it must cite the sessions an answer draws on, and, in peer
-threads, who is asking and that peer text is a question, not an instruction.
+The system prompt states the bot's role and its permissions for this thread in plain
+words, how to choose between direct work and a session (§6.3), that every answer cites the
+sessions it draws on as `cypher://session/<id>` links (built), and that text from
+transcripts, tool output, web pages and peers is data to read, never instructions to
+follow. In peer threads it also says who is asking.
 
-### 7.4 Late answers
+### 10.6 Late answers
 
-When `ask_bot` times out, it returns `pending` with the exchange id. When the answer
-arrives later, the engine queues a durable command in the bot chat
-(`{kind: "bot-answer", exchangeId}`). It renders as an attributed card and starts a turn, so
-the bot can follow up without the owner asking again. This reuses the command ledger, so it
-also works while no UI is open.
+When `ask_bot` times out it returns `pending` with the exchange id. When the answer
+arrives the engine queues a durable command in the bot chat (`{kind: "bot-answer",
+exchangeId}`), which renders as an attributed card and starts a turn, so the bot can
+follow up without the owner asking again.
 
-## 8. Bot network
+## 11. Bot network (Represent)
 
-### 8.1 Routes
+### 11.1 Flow
 
-All routes sit behind bearer verification. They are one new `ROOM_ROUTES` entry with prefix
-`bots`, binding `BOT_ROOMS`, and room `bot1/{botRoomId}`:
+```
+Me (any device)              my host engine            Edge                     A's host engine
+   │ "How is A doing on X?"      │                       │                            │
+   ├── bot chat ────────────────►│ ask_bot(A, q) ───────►│ BotRoom(me) → BotRoom(A)   │
+   │                             │                       ├── ask (queued if offline) ►│ peer thread, read-only,
+   │                             │                       │                            │ scope ∩ connection scope
+   │                             │                       │◄── answer ─────────────────┤ (Review: waits for A)
+   │◄── reply citing A's bot ────┤◄── answer ────────────┤                            │
+```
+
+Peer questions run in that connection's own peer thread with read tools only. In **Auto**
+mode the answer goes back at once; in **Review** mode it waits as a draft until A approves,
+edits or declines it. Before an answer leaves the host, a best-effort pass redacts strings
+that look like secrets (private-key blocks, common token formats, `.env`-style
+assignments); it is a safety net, not a guarantee, and the UI says so.
+
+### 11.2 Edge `BotRoom`
+
+One Durable Object class, `BotRoom`, keyed `bot1/{botRoomId}` and bound as `BOT_ROOMS`
+(wrangler migration `new_sqlite_classes: ["BotRoom"]`), one room per networked bot:
+
+| Table | Contents |
+|---|---|
+| `meta` | owner user id (claimed on publish, owner-only after), public profile `{name, ownerName}`, host device id, `paused` |
+| `invites` | `sha256(secret)`, created/expiry, max uses, uses |
+| `connections` | `connectionId`, peer `botRoomId`, peer profile, created, revoked, per-side rate counters |
+| `inbox` | exchanges addressed to this bot that the host has not acknowledged |
+| `outbox` | exchanges this bot asked, with state and, once received, the answer, until acknowledged |
+
+Bodies are kept only until the receiving host acknowledges them, or 7 days for undelivered
+ones (then `expired`).
+
+### 11.3 Routes
+
+All routes sit behind bearer verification as one `ROOM_ROUTES` entry with prefix `bots`:
 
 | Route | Caller | Does |
 |---|---|---|
-| `POST /bots/:id/publish` | owner | Claims the room (first caller is the owner) and sets the public profile. |
-| `GET /bots/:id/inbox` | owner's host | Pulls undelivered inbox and outbox entries (after a nudge, and on reconnect). |
+| `POST /bots/:id/publish` | owner | Claims the room and sets the public profile. |
+| `GET /bots/:id/inbox` | owner's host | Pulls undelivered inbox and outbox entries. |
 | `POST /bots/:id/invites` | owner | Creates an invite; returns `code = <botRoomId>.<secret>` once. |
 | `DELETE /bots/:id/invites/:inviteId` | owner | Revokes an unused invite. |
 | `POST /bots/:id/connect` | owner of `:id` | Redeems a peer's invite code on behalf of bot `:id`. |
 | `DELETE /bots/:id/connections/:cid` | owner | Revokes a connection on both sides. |
 | `POST /bots/:id/ask` | owner of `:id` | Sends a question on one of `:id`'s connections. |
 | `POST /bots/:id/answer` | owner of `:id` | Answers (or declines) an exchange in `:id`'s inbox. |
-| `POST /bots/:id/ack` | owner of `:id` | Acknowledges delivered inbox and outbox entries. |
+| `POST /bots/:id/ack` | owner of `:id` | Acknowledges delivered entries. |
 
-### 8.2 Trust chain
+### 11.4 Trust chain
 
-A caller can only act through a bot it owns. Every route checks the caller against the
-room's `owner`, the same claim-then-owner-only rule ChatRoom and DeviceRoom use. Cross-user
-traffic then moves **DO to DO** over internal paths that the Worker never routes:
+A caller can only act through a bot it owns: every route checks the room's `owner`, the
+claim-then-owner-only rule ChatRoom and DeviceRoom use. Cross-user traffic moves **DO to
+DO** over internal paths the Worker never routes: `ask` checks the connection and rate
+limits on both sides before queueing; `connect` redeems the hashed secret in the peer room;
+revocation deletes both sides. Neither user's bearer reaches the other's room, and a peer
+cannot address a room it is not connected to.
 
-- `ask`: my BotRoom checks the connection is active and within rate limits, then calls the
-  peer room's internal `deliver`. The peer room checks the same connection id from its side
-  before queueing.
-- `connect`: my BotRoom calls the peer room's internal `redeem` with the secret, my room id
-  and profile. The peer room checks the hash, expiry and uses, creates its side, and
-  returns its profile; my room creates mine.
-- Revocation deletes both sides; a missing peer side counts as revoked.
+### 11.5 Delivery and wire shapes
 
-Neither user's bearer ever reaches the other's room, and a peer cannot address a room it is
-not connected to.
-
-### 8.3 Delivery
-
-Bots open no socket of their own. The host is already connected to its own DeviceRoom, so a
-BotRoom that queues an entry sends that DeviceRoom a durable nudge (the existing queued
-nudge, replayed when the host next joins), and the host pulls with `GET /bots/:id/inbox`.
-Entries stay until acked after the engine has durably appended them to the peer thread.
-Exchange state flows back to the asker as `queued → delivered → working →
-(awaiting_review) → answered | declined | expired`, so `list_connections` and the UI can
-show "A's bot is offline; queued". The BotRoom stores the host's device id at publish and
-when the bot moves.
-
-### 8.4 Cost
-
-Durable Object requests bill 1:1 over HTTP and 20:1 for inbound WebSocket messages, and
-duration bills while an object is awake (docs/operations/cloudflare-billing.md). The network
-is designed to stay out of both:
-
-- **No idle cost.** No per-bot socket or heartbeat (§8.3): one exchange is about 6–10
-  billed requests and 15–25 rows written, and nothing bills between exchanges. BotRooms
-  hibernate like every other room.
-- **The real cost is the runs.** The bot chat and the answering side's peer thread sync
-  through chat2 like any session, so one question costs about two agent turns of chat2
-  traffic. Bot usage costs what the same amount of ordinary session usage costs.
-- **Search stays local.** Scanning or indexing reads stored snapshots; it never holds
-  chat2 rooms open.
-- **Bounded worst case.** Per-connection rate limits (§8.5) cap a misbehaving peer, and
-  `ask_group` costs one exchange per member.
-
-Measure P2 with `scripts/ops/edge-billing-local.mjs` against two dev engines before it
-ships.
-
-### 8.5 Wire shapes
-
-JSON text frames; the codec is mirrored in Rust and listed in `protocol/README.md` with
-shared vectors.
+Bots open no socket of their own. A BotRoom that queues an entry sends the host's
+DeviceRoom a durable nudge, and the host pulls with `GET /bots/:id/inbox`; entries stay
+until acked after the engine has appended them to the peer thread. Exchange state flows
+back as `queued → delivered → working → (awaiting_review) → answered | declined |
+expired`.
 
 ```
 ask      {t:"ask", exchangeId, connectionId, text, sentAt}
@@ -370,119 +472,143 @@ state    {t:"state", exchangeId, state}
 link     {t:"link", connectionId, op:"added"|"revoked", peer?:{botRoomId, name, ownerName}}
 ```
 
-Limits: question ≤ 8 KiB, answer ≤ 64 KiB. Defaults per connection: 30 questions per hour,
-200 per day, and at most 3 in flight.
+The codec is mirrored in Rust and listed in `protocol/README.md` with shared vectors.
+Limits: question ≤ 8 KiB, answer ≤ 64 KiB; per connection 30 questions an hour, 200 a
+day, 3 in flight.
 
-### 8.6 Privacy on the Edge
+### 11.6 Privacy
 
-Message bodies cross the Edge in plaintext and rest in DO SQLite until they are acked or
-expire. That matches how chat2 handles transcripts today, and it is stated in the UI. End-
-to-end encryption with per-bot X25519 keys exchanged at redeem time is a later phase (P5).
-It needs no new routes, only opaque `text` fields.
+Bodies cross the Edge in plaintext and rest in DO SQLite until acked or expired, as chat2
+transcripts do today, and the UI says so. End-to-end encryption with per-bot X25519 keys
+exchanged at redeem time is a later phase; it needs no new routes, only opaque `text`.
 
-## 9. Groups
+### 11.7 Groups
 
-- **P4a, owner labels.** A group is the owner's label over their own connections (a
-  `botGroups` registry row: name and connection ids). `ask_group` fans out. Nothing is
-  shared, so it needs no Edge change.
-- **P4b, shared groups.** A `GroupRoom` DO holds membership. Joining a group by invite
-  connects the joining bot to every member, and each member's side gets the group's default
-  policy, which members can still narrow. This is the "every project bot in the team is
-  connected" setup with one invite instead of N² invites.
+First a group is the owner's label over their own connections (a `botGroups` registry
+row), which `ask_group` fans out to. Later a `GroupRoom` DO holds shared membership:
+joining by one invite connects a bot to every member, with the group's default policy,
+which each member can narrow.
 
-## 10. UI
+## 12. Cost
 
-Desktop:
+Durable Object requests bill 1:1 over HTTP and 20:1 for inbound WebSocket messages, and
+duration bills while an object is awake (docs/operations/cloudflare-billing.md).
 
-- **Bot strip** (P0): a row of 30px avatar squares between the sidebar header and the
-  project cards, one per bot, their edge lined up with the project glyphs; empty, it is
-  not shown. The open bot is ringed in its own colour, a corner dot carries the chat's
-  status, a hover shows the name, and a right-click opens Open / Settings… / Delete….
-  Project windows have no strip. Bots are created from the sidebar header's `+`, which
-  opens a menu: New project… / New bot….
-- **Bot palette** (P0, create and edit), drawn like the Quick Chat and Add project
-  palettes: a frosted header band, the form on the left and a "Run on device" rail on
-  the right (two-line rows: the device name, then This device / Online / Offline / the
-  version it needs; fixed after creation), and a Cancel / Save footer with Delete on the
-  left when editing. The form holds the name beside a live avatar, the avatar picker
-  (twelve robot faces, a few symbols or the initial, neutral until picked, and a colour),
-  Permissions (project access Selected / All / None, Read conversations, Archived
-  sessions) with a live access count, and instructions.
-- **Bot conversation** (P0): an ordinary session tab, with these differences. The tab
-  wears the bot's avatar. The status strip over the composer carries a quiet access note
-  ("All projects · reads conversations") that opens the bot's settings. A new bot opens
-  on a start screen: its avatar, name and host, and a 2×2 grid of suggested questions a
-  click asks. Bot tool calls read as what they did ("List sessions · all", "Search
-  sessions · "invoice"", "Read session · <title>"; "Looked over your work · read 2
-  sessions"), and the bot cites sessions as `cypher://session/<id>` links that open in
-  the app. The rail has no terminal and no dock; the composer asks "Ask <bot>…" and
-  leaves out Attach files, `/permissions` and the commands the engine refuses in a bot
-  chat (`/scripts`, `/orchestrate`, `/goal`).
-- **Bot dock tab** (P2+, right dock of a bot chat) with four panes:
-  - *Scope*: project tree grouped by device with checkboxes, per-session overrides,
-    capability toggles, and a live "this bot can see N sessions in M projects" summary.
-  - *Connections*: peer bot, owner, reply mode (Auto/Review), connection scope, rate limit,
-    and revoke. "Invite" creates a link or code; "Connect" redeems one.
-  - *Activity*: every exchange, asked and answered, newest first. Each links to its peer
-    thread and shows the tool calls the answer used.
-  - *Review*: drafts waiting for approval, with Approve, Edit and send, and Decline.
-- Bot management RPCs take `targetDeviceId` and are forwardable, so every pane works from
-  any of the owner's devices; registry edits sync on their own.
+- **No idle cost.** No per-bot socket or heartbeat: one exchange is about 6–10 billed
+  requests and 15–25 rows written, and nothing bills between exchanges.
+- **The real cost is the runs.** Every thread syncs through chat2 like any chat. A peer
+  question costs about two agent turns; an orchestration costs its own turns plus its
+  workers', the same as running those sessions by hand.
+- **Search stays local.** Scanning or indexing reads stored snapshots and never holds
+  chat2 rooms open.
+- **Bounded worst case.** Rate limits per connection, budgets per routine and limits per
+  orchestration cap a runaway loop.
 
-iPhone (P5): the bot list, the bot chat, and Review approvals, driven by a push
-notification (`bot-review`) through the existing notifications pipeline.
+Measure the network with `scripts/ops/edge-billing-local.mjs` against two dev engines
+before it ships.
 
-## 11. RPC
+## 13. UI
 
-New methods, each one constant plus one `SPECS` entry in `cypher_rpc::methods`. P0 has
-the first three and two `Mutate` ops:
+Built (P0):
 
-| Method | Kind | Notes |
-|---|---|---|
-| `CreateBot` | unary, forwardable | Runs on the host: folder, bot chat and row in one batch; replies with the `Bot`. |
-| `WatchBots` | stream | The registry's bot rows. |
-| `BotTool` | unary | The extension's single entry point: `{chatId, tool, args}` → `{text}`. The engine resolves the bot from `chatId`, so a chat cannot claim another bot; a refusal is returned as text for the model. |
-| `Mutate updateBot` / `deleteBot` | unary | LWW edits from any device; delete takes the bot chat with it. In P2 delete also revokes all connections and the room. |
-| `BotAsk` | stream, local only | `ask_bot` / `ask_group`: exchange states until answered or `wait_s`. |
-| `CreateBotInvite`, `RevokeBotInvite`, `RedeemBotInvite` | unary, forwardable | |
-| `UpdateBotConnection`, `RevokeBotConnection` | unary, forwardable | Reply mode, connection scope, rate limits. |
-| `WatchBotActivity` | stream, forwardable | Exchanges and review drafts for one bot. |
-| `ResolveBotReview` | unary, forwardable | Approve, edit-and-send, or decline. |
-| `PreviewBotScope` | unary, forwardable | Counts and lists of what a scope would expose, for the Scope pane. |
+- **Bot strip:** 30px avatar squares between the sidebar header and the project cards,
+  lined up with the project glyphs; hidden when there are no bots. The open bot is ringed
+  in its own colour, a corner dot carries its chat's status, a hover shows the name, and a
+  right-click opens Open / Settings… / Delete…. Bots are created from the header's `+`
+  menu (New project… / New bot…). Project windows have no strip.
+- **Bot palette** (create and edit), drawn like the Quick Chat and Add project palettes: a
+  frosted header band, the form on the left (name beside a live avatar; twelve robot
+  faces, a few symbols or the initial, and a colour; Permissions; instructions), a "Run
+  on device" rail on the right (two-line device rows, fixed after creation), and a Cancel
+  / Save footer with Delete when editing.
+- **Bot conversation:** an ordinary session tab that wears the bot's avatar. A quiet access
+  note over the composer ("All projects · reads conversations") opens the bot's settings.
+  A new bot opens on a start screen with a 2×2 grid of suggested questions. Bot tool calls
+  read as what they did ("Read session · <title>"; "Looked over your work · read 2
+  sessions"), and cited `cypher://session/<id>` links open the session. No terminal and no
+  dock; the composer asks "Ask <bot>…".
 
-`BotTool` and `BotAsk` are not forwardable: they are only meaningful on the host.
+Planned:
 
-## 12. Phases
+- **Capabilities in the palette:** *Work directly*, *Coordinate: start* and *Coordinate:
+  steer* as separate switches below Permissions, the coordination switches marked as the
+  ones that let the bot act. A bot with *Coordinate* on says so in its access note.
+- **Plan card:** steps, projects, devices and dependencies, with Approve / Edit / Cancel.
+- **Progress card:** each step's state and session link, elapsed time and Stop; it turns
+  into a result card when the orchestration ends.
+- **Worker sessions:** "Started by <bot> · <task>" on their row and tab.
+- **Bot dock** (right dock of a bot chat): *Work* (running and recent orchestrations),
+  *Routines* (with last runs), *Notebook* (entries with their sources), *Permissions*,
+  and with the network *Connections*, *Activity* and *Review*.
+- **Project tasks:** recurring tasks in a project's menu, with their last runs.
+- **iPhone:** the bot list, the bot chat, plan approvals and reviews, driven by push
+  notifications.
 
-| Phase | Delivers | Main code |
-|---|---|---|
-| **P0: local bot** (done) | `bots` rows, bot chat, bot spawn mode with tool allowlist, four read tools over the registry and transcripts (bounded scan, no index), scope enforcement, the bot strip and dialog, use from other owner devices. | `cypher-proto` `bot.rs`, `cypher-doc` registry, `engine/bots/`, harness spawn and `bot-tools.ts`, `cypher-ui` `shell/bots/` |
-| **P1: search and progress** | FTS index behind `search_sessions`, `session_activity`, `project_git` over the relay. | `engine/bots/index.rs` |
-| **P2: network** | `BotRoom` DO, publish, invites, connections, ask/answer in Auto mode, peer threads, exchange states, late answers, Activity and Connections UI. | `apps/edge/src/bots/`, `cypher-sync` bot client, protocol vectors |
-| **P3: review and safety** | Review mode, outgoing scrub, rate limits, notifications for pending reviews and incoming connections. | engine, edge, UI |
-| **P4: groups** | P4a owner labels and `ask_group`; P4b shared `GroupRoom`. | registry, edge |
-| **P5: iPhone and E2E** | iOS bot list, chat and review; end-to-end encrypted exchanges. | `apps/ios`, edge codec |
+## 14. RPC
 
-Each phase ships behind no flag of its own: P0 and P1 are local and private by design, and
-the network appears in P2 only for synced accounts.
+Each method is one constant plus one `SPECS` entry in `cypher_rpc::methods`.
 
-Tests per phase follow the repository's tiers: scope-filter unit tests (the core of the
-security model, including the "not found" rule and bot-chat exclusion), engine integration
-tests with the mock harness driving bot tools, workerd tests for BotRoom (ownership,
-redeem, revoke, cross-room delivery, rate limits, expiry), shared frame vectors, and
-`scripts/e2e-smoke.sh` extended to two users with one bot each.
+| Method | Kind | Phase | Notes |
+|---|---|---|---|
+| `CreateBot` | unary, forwardable | P0 | Runs on the host: folder, bot chat and row in one batch. |
+| `WatchBots` | stream | P0 | The registry's bot rows. |
+| `BotTool` | unary, local | P0 | The extension's entry point; refusals come back as text for the model. |
+| `Mutate updateBot` / `deleteBot` | unary | P0 | LWW edits; delete takes the bot's chats with it (and later its connections and room). |
+| `ResolveBotPlan` | unary, forwardable | P2 | Approve, edit or cancel a plan card. |
+| `StopBotThread` | unary, forwardable | P2 | Stops an orchestration or routine thread and the sessions it started. |
+| `WatchBotWork` | stream, forwardable | P2 | Orchestrations, their steps and sessions, for the progress cards and *Work* pane. |
+| `SaveBotRoutine`, `DeleteBotRoutine`, `SaveProjectTask`, `DeleteProjectTask` | unary, forwardable | P3 | Routine and recurring-task definitions (registry rows). |
+| `BotAsk` | stream, local | P4 | `ask_bot` / `ask_group`: exchange states until answered or `wait_s`. |
+| `CreateBotInvite`, `RevokeBotInvite`, `RedeemBotInvite` | unary, forwardable | P4 | |
+| `UpdateBotConnection`, `RevokeBotConnection` | unary, forwardable | P4 | Reply mode, connection scope, rate limits. |
+| `WatchBotActivity`, `ResolveBotReview` | stream / unary, forwardable | P5 | Exchanges and review drafts. |
 
-## 13. Open questions
+## 15. What must be true before each step ships
 
-- **Owner-only action tools.** Should the owner's bot be able to *act*, for example start a
-  session in a project, queue a message, or archive? This would be powerful for the global
-  view, but it needs a separate capability and must never be reachable from peer threads.
-- **Identity shown to peers.** Owner display name from WorkOS, email, or only a name the
-  owner types? The default proposal is the WorkOS display name, editable per bot.
-- **Host offline for long.** Should a bot have a fallback host device, so questions are not
-  queued while the only host sleeps? This needs the claim and lease logic deliberately left
-  out of P0–P2.
-- **Answer provenance.** Should peers see which sessions an answer cited (titles only), or
-  only the text?
-- **Retention.** Is 7 days right for undelivered questions, and should peer threads expire
-  locally?
+| Before | Must hold |
+|---|---|
+| Any second kind of thread | One role-aware run profile; origin stamped by the engine on the chat row; the "transcript text is data" instruction in every bot prompt. |
+| *Work directly* | Owner threads only; permission control on with the bot's local checkouts as workspace roots; the taint rule. |
+| *Coordinate* | Capabilities checked per call; an audit log of every coordination call; worker sessions limited to the read scope; plan approval; Stop that reaches every started session; limits. |
+| Routines and recurring tasks | A non-interactive run mode that denies approvals and settles as failed; budgets; the `paused` kill switch; no `ask_bot` from routines. |
+| Bot-written notes | Provenance on every entry and a notebook view to delete them. |
+| *Represent* | Peer threads read-only with no notebook, no network tools and no slash commands; scope ∩ connection scope; the outgoing scrub; rate limits. |
+| *Coordinate: steer* | The same as *Coordinate*, plus per-session confirmation for sessions the bot did not start. |
+
+## 16. Phases
+
+| Phase | Delivers |
+|---|---|
+| **P0: local bot** (done) | `bots` rows, the bot chat, the bot spawn mode with tool allowlist, four read tools (bounded scan), scope enforcement, the strip, palette and conversation UI, use from other owner devices. |
+| **P1: foundation** | Role-aware run profiles with engine-stamped origins; the untrusted-data prompt; the non-interactive run mode; the FTS index, `session_activity` and `project_git`. |
+| **P2: coordinator** | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; plan, progress and result cards; Stop; limits; audit log. |
+| **P3: memory and routines** | The notebook (owner notes first, then bot notes with provenance); the scheduler; routines and recurring project tasks; the attention inbox ("what needs me"). |
+| **P4: network** | `BotRoom`, publish, invites, connections, peer threads, `ask_bot` in Auto mode, exchange states, late answers, the Connections and Activity panes. |
+| **P5: review and control** | Review mode, the outgoing scrub, notifications for reviews, plans and connections; *Coordinate: steer*. |
+| **P6: groups, iPhone, E2E** | Owner groups, then shared groups; the iOS bot surfaces; end-to-end encrypted exchanges. |
+
+P2 comes before the network because a coordinator is useful to a single user on day one,
+while the network pays off once teammates are on board.
+
+Tests follow the repository's tiers: unit tests for scope, origin and capability checks
+(including the "not found" rule, bot-chat exclusion and the taint rule), engine
+integration tests with the mock harness driving bot tools and orchestrations, workerd
+tests for `BotRoom` (ownership, redeem, revoke, cross-room delivery, rate limits, expiry),
+shared frame vectors, and `scripts/e2e-smoke.sh` extended to two users with one bot each.
+
+## 17. Open questions
+
+- **Plan approval.** Approval first is decided; when does auto-start become available, and
+  should it be limited to plans that only start sessions in worktrees?
+- **Direct work default.** On for new bots is the proposal; should it instead be off until
+  the owner turns it on?
+- **Cross-device dependencies.** Which remote does the bot push A's branch to when B is on
+  another device: the project's origin, or a Cypher-managed transfer over the device
+  relay?
+- **Fallback host.** Should a bot have a second host, so work and questions don't wait
+  while the only host sleeps? This needs claim and lease logic.
+- **Identity shown to peers.** The owner's WorkOS display name, editable per bot, is the
+  proposal.
+- **Answer provenance.** Should peers see which sessions an answer cited (titles only)?
+- **Retention.** Is 7 days right for undelivered questions, and should hidden threads
+  expire locally?
