@@ -427,7 +427,12 @@ pub(super) async fn pass(
             &workspace.read_bots()?,
             &workspace.read_chats()?,
         );
-        let saved = docs.snapshot_saved_times()?;
+        // Nothing to index (no reading bots here): only removals remain.
+        let saved = if targets.is_empty() {
+            HashMap::new()
+        } else {
+            docs.snapshot_saved_times()?
+        };
         index.sync(
             &targets,
             &saved,
