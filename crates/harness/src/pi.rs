@@ -92,7 +92,7 @@ use cypher_proto::{
 
 use crate::pi::client::{Incoming, PiClient};
 use crate::process::{Signal, crash_message, send_signal, shutdown_child};
-use crate::{Harness, HarnessError, RunControls, RunHostContext, parse_commands};
+use crate::{Harness, HarnessError, RunControls, RunHostContext, RunProfile, parse_commands};
 
 /// pi's thinking ladder in cypher terms (its extra "off" tier has no cypher
 /// equivalent and stays the agent default). Each model offers a subset of it
@@ -404,19 +404,12 @@ impl Harness for PiHarness {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         // The session store must exist before pi is pointed at it.
         std::fs::create_dir_all(&self.session_dir)?;
-        // Child-subagent runs append the persisted system prompt from a temp
-        // file (`--append-system-prompt` takes a path); owned by the run task
-        // so it is cleaned up when the run ends (even on early error).
-        // Bot runs append the bot's prompt the same way.
+        // Child-subagent and bot runs append their profile's system prompt
+        // from a temp file (`--append-system-prompt` takes a path); owned by
+        // the run task so it is cleaned up when the run ends (even on early
+        // error).
         let mut temp_prompt: Option<PathBuf> = None;
-        let appended = match (controls.host.child.as_ref(), controls.host.bot.as_ref()) {
-            (Some(child), _) => Some((child.agent.as_str(), child.system_prompt.as_str())),
-            (None, Some(bot)) => Some(("bot", bot.system_prompt.as_str())),
-            (None, None) => None,
-        };
-        if let Some((name, prompt)) = appended
-            && !prompt.trim().is_empty()
-        {
+        if let Some((name, prompt)) = controls.host.profile.appended_prompt() {
             temp_prompt = Some(match write_temp_prompt(name, prompt) {
                 Ok(path) => path,
                 Err(err) => {

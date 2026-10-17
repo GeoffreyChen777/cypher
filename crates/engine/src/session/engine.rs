@@ -18,7 +18,7 @@
 //! spawn failure, stream error, engine-restart recovery).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::Utc;
@@ -30,7 +30,7 @@ use cypher_doc::{
     SegmentWriter, SessionDoc, fold_event_into_parts, sanitize_tool_call,
 };
 use cypher_harness::{
-    CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, SteerMessage,
+    CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, RunProfile, SteerMessage,
 };
 use cypher_proto::{
     AgentEvent, AnsweredModel, ChatConfig, ContextUsage, DoneStatus, HarnessId, ReasoningLevel,
@@ -39,6 +39,7 @@ use cypher_proto::{
 };
 
 use crate::EngineError;
+use crate::bots::profile::UnattendedStop;
 use crate::host::doc_host::{ChatDocHandle, DocHost};
 use crate::registry::HarnessRegistry;
 use crate::session::journal::RunJournal;
@@ -183,6 +184,9 @@ struct Inner {
     /// checkout tree for the Changes pane's "Latest turn" scope and records
     /// each round's changed files. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Hears every unattended run the engine stopped for asking for input.
+    /// Absent until routines notify their owner (P3).
+    unattended_listener: OnceLock<UnattendedListener>,
     /// Temporary Side Chat ids: in-memory status + harness-session
     /// continuity ONLY. Everything that would make a chat observable or durable
     /// — the public `sessions_tx` watch, workspace session rows, the run
@@ -274,6 +278,13 @@ pub enum TurnEvent<'a> {
 /// Turn hook: called with the chat id and what happened.
 pub type TurnListener = Arc<dyn Fn(&str, TurnEvent<'_>) + Send + Sync>;
 
+/// Unattended-stop hook: called once per run the engine stopped.
+pub type UnattendedListener = Arc<dyn Fn(&UnattendedStop) + Send + Sync>;
+
+/// The input bridge a run asks its questions through.
+type InputBridge =
+    Box<dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct SessionsEngine {
     inner: Arc<Inner>,
@@ -303,6 +314,7 @@ impl SessionsEngine {
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                unattended_listener: OnceLock::new(),
                 ephemeral: Mutex::new(HashSet::new()),
                 ephemeral_tx: Mutex::new(HashMap::new()),
                 plugin_epoch: AtomicU64::new(0),
@@ -342,6 +354,11 @@ impl SessionsEngine {
     /// Wire the turn listener (called once at engine assembly).
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
+    }
+
+    /// Wire the unattended-stop listener (first set wins).
+    pub fn set_unattended_listener(&self, listener: UnattendedListener) {
+        let _ = self.inner.unattended_listener.set(listener);
     }
 
     // ── temporary Side Chat support ─────────────────────────────
@@ -811,9 +828,18 @@ impl SessionsEngine {
         let (engine_tx, engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let pending_inputs: PendingInputs = Arc::new(Mutex::new(HashMap::new()));
 
+        let interrupt_token = CancellationToken::new();
         // Input bridge: the harness asks questions; we mint the request id, park the
         // resolver for `respond_input`, and surface the event through the run pipeline.
-        let request_input = {
+        // Nobody answers an unattended run, so its bridge denies instead.
+        let request_input: InputBridge = if self.inner.is_unattended(chat_id) {
+            unattended_input(
+                &self.inner,
+                chat_id,
+                engine_tx.clone(),
+                interrupt_token.clone(),
+            )
+        } else {
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
             Box::new(move |questions: Vec<UserInputQuestion>| {
@@ -849,7 +875,6 @@ impl SessionsEngine {
                 answer_rx
             })
         };
-        let interrupt_token = CancellationToken::new();
         let controls = RunControls {
             request_input,
             steering: steer_rx,
@@ -1075,7 +1100,68 @@ impl SessionsEngine {
     }
 }
 
+/// The input bridge of an unattended run (docs/design/agent-bots.md §8).
+/// Nobody can answer, so every question and approval is denied on the spot
+/// (an empty answer list reads as cancelled to ask_user and as "no approval
+/// was given" to the permission extension) and none surfaces as a pending
+/// card. The first one a working turn asks stops the run as failed, with the
+/// reason in the transcript, and tells the unattended-stop listener. A parked
+/// session's post-turn noise is only denied, as the parked gate does for
+/// attended runs.
+fn unattended_input(
+    inner: &Arc<Inner>,
+    chat_id: &str,
+    engine_tx: mpsc::UnboundedSender<AgentEvent>,
+    interrupt: CancellationToken,
+) -> InputBridge {
+    let inner = Arc::downgrade(inner);
+    let chat_id = chat_id.to_string();
+    let stopped = AtomicBool::new(false);
+    Box::new(move |questions: Vec<UserInputQuestion>| {
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(Vec::new());
+        let Some(inner) = inner.upgrade() else {
+            return rx;
+        };
+        let working = lock(&inner.statuses)
+            .get(&chat_id)
+            .is_some_and(|s| s.status == SessionStatus::Working);
+        if !working || stopped.swap(true, Ordering::SeqCst) {
+            return rx;
+        }
+        let reason = crate::bots::profile::unattended_stop_reason(&questions);
+        tracing::warn!(chat = %chat_id, %reason, "unattended run asked for input; stopping it");
+        // The error part first: the run then has output, so its errored
+        // Done is never mistaken for a child that failed to start.
+        let _ = engine_tx.send(AgentEvent::Error {
+            message: reason.clone(),
+        });
+        let _ = engine_tx.send(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            result: None,
+            error: None,
+            session_id: None,
+        });
+        interrupt.cancel();
+        if let Some(listener) = inner.unattended_listener.get() {
+            listener(&UnattendedStop {
+                chat_id: chat_id.clone(),
+                reason,
+            });
+        }
+        rx
+    })
+}
+
 impl Inner {
+    /// Whether nobody watches this chat's runs
+    /// ([`crate::bots::profile::is_unattended`]).
+    fn is_unattended(&self, chat_id: &str) -> bool {
+        self.workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+            .is_some_and(|chat| crate::bots::profile::is_unattended(&chat))
+    }
+
     fn quiesce_windows(&self) -> QuiesceWindows {
         self.quiesce
             .get()
@@ -1406,58 +1492,60 @@ impl Inner {
         self.doc_host().and_then(|host| host.workspace().cloned())
     }
 
-    /// Host-side run context for one chat: its identity plus — for Cypher-hosted
-    /// child subagent chats — the persisted child env the pi harness applies
-    /// (system prompt/tools/model/thinking) and the host-LOCAL messaging
-    /// channel for the INITIAL run. A NON-serialized internal seam: the child
-    /// semantics come from the chat row, never from `RunRequest` (no arbitrary
-    /// persisted env maps on the wire), and the channel (an absolute host path)
-    /// is engine-local — consumed here so later child turns keep the profile
-    /// but have no channel (messaging tools then honestly report unavailable).
+    /// Host-side run context for one chat: its identity plus the run profile
+    /// the pi harness applies. A bot thread runs in its origin's bot profile
+    /// ([`crate::bots::profile::bot_env`]); a Cypher-hosted child subagent
+    /// chat runs in the persisted child env (system prompt/tools/model/
+    /// thinking) with the host-LOCAL messaging channel for the INITIAL run.
+    /// A NON-serialized internal seam: the profile comes from the chat row,
+    /// never from `RunRequest` (no arbitrary persisted env maps on the wire),
+    /// and the channel (an absolute host path) is engine-local — consumed
+    /// here so later child turns keep the profile but have no channel
+    /// (messaging tools then honestly report unavailable).
     fn host_context(&self, chat_id: &str) -> RunHostContext {
-        let mut ctx = RunHostContext {
-            chat_id: Some(chat_id.to_string()),
-            child: None,
-            bot: None,
-        };
+        let mut profile = RunProfile::Root;
         if let Some(ws) = self.workspace()
             && let Ok(Some(chat)) = ws.chat(chat_id)
-            && let Some(bot) = crate::bots::run_env(&ws, &chat)
         {
-            ctx.bot = Some(bot);
-            return ctx;
-        }
-        if let Some(ws) = self.workspace()
-            && let Ok(Some(chat)) = ws.chat(chat_id)
-            && let Some(child) = chat.child
-        {
-            let channel = lock(&self.child_channels).remove(chat_id);
-            if let Some(channel) = &channel {
-                let mut spent = lock(&self.spent_child_channels);
-                if spent.len() >= MAX_LOCAL_CHILD_CHANNELS
-                    && !spent.contains_key(chat_id)
-                    && let Some(oldest) = spent.keys().next().cloned()
-                {
-                    spent.remove(&oldest);
-                }
-                spent.insert(chat_id.to_string(), channel.clone());
+            if let Some(bot) = crate::bots::profile::bot_env(&ws, &chat) {
+                profile = RunProfile::Bot(bot);
+            } else if let Some(child) = chat.child {
+                profile = RunProfile::Child(self.child_env(chat_id, child));
             }
-            let (channel_root, child_index, address) = match channel {
-                Some(c) => (Some(c.channel_root), c.child_index, c.address),
-                None => (None, 0, None),
-            };
-            ctx.child = Some(ChildRunEnv {
-                system_prompt: child.profile.system_prompt,
-                tools: child.profile.tools,
-                model: child.profile.model,
-                thinking: child.profile.thinking,
-                channel_root,
-                run_id: child.parent_run_id,
-                agent: address.unwrap_or(child.agent),
-                child_index,
-            });
         }
-        ctx
+        RunHostContext {
+            chat_id: Some(chat_id.to_string()),
+            profile,
+        }
+    }
+
+    /// A child chat's run env, consuming its local messaging channel.
+    fn child_env(&self, chat_id: &str, child: cypher_proto::ChildChat) -> ChildRunEnv {
+        let channel = lock(&self.child_channels).remove(chat_id);
+        if let Some(channel) = &channel {
+            let mut spent = lock(&self.spent_child_channels);
+            if spent.len() >= MAX_LOCAL_CHILD_CHANNELS
+                && !spent.contains_key(chat_id)
+                && let Some(oldest) = spent.keys().next().cloned()
+            {
+                spent.remove(&oldest);
+            }
+            spent.insert(chat_id.to_string(), channel.clone());
+        }
+        let (channel_root, child_index, address) = match channel {
+            Some(c) => (Some(c.channel_root), c.child_index, c.address),
+            None => (None, 0, None),
+        };
+        ChildRunEnv {
+            system_prompt: child.profile.system_prompt,
+            tools: child.profile.tools,
+            model: child.profile.model,
+            thinking: child.profile.thinking,
+            channel_root,
+            run_id: child.parent_run_id,
+            agent: address.unwrap_or(child.agent),
+            child_index,
+        }
     }
 
     /// Sidebar freshness: push a message-persist preview into the chat's workspace row.

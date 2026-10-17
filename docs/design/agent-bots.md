@@ -1,8 +1,11 @@
 # Agent bots
 
 Status: **P0 implemented** (local, read-only bots: definition, scope, the bot chat and its
-read tools, the sidebar strip and palette). Everything from P1 on is design; §16 is the
-build order. Where the built P0 differs from the full design, the section says so.
+read tools, the sidebar strip and palette). **P1 in progress:** engine-stamped origins, the
+role-aware run profile, per-origin prompts with the untrusted-data rule, slash commands by
+origin and the unattended run mode are built; the FTS index, `session_activity` and
+`project_git` are not yet. The rest is design; §16 is the build order. Where the built code
+differs from the full design, the section says so.
 
 A bot is a **coordinator**: a long-lived agent responsible for everything in the projects
 it is given. Inward, it takes instructions from its owner and gets work done across those
@@ -133,9 +136,16 @@ these can carry injected instructions. So:
   bot's private folder. Projects on other devices are reachable only by starting a
   session there (*Coordinate*). Peer and routine threads without *Work directly* keep the
   empty folder and no Pi tools.
-- **Slash commands.** Today the engine refuses `/scripts`, `/orchestrate` and `/goal` in
-  bot chats, because codemode honours `/scripts` under `--tools`. Owner threads with
-  *Work directly* may lift this; peer and routine threads accept no slash commands.
+- **Slash commands.** The engine refuses `/scripts`, `/orchestrate` and `/goal` in owner
+  threads, because codemode honours `/scripts` under `--tools`; *Work directly* may lift
+  this. Peer and routine threads accept no slash commands at all (built).
+
+As built (P1): the origin rides the chat row's `bot` marker (`{botId, origin}`; a missing
+origin reads as owner, an unknown one as peer). Only the engine writes it: `CreateBot`
+stamps owner, and no `Mutate` op, `CreateChat`, fork or side-chat path takes or copies a
+marker. `bots/profile.rs` derives the run profile from (chat, bot row, origin). Every
+origin gets the read tools for now, and `workspace_roots` stays empty until *Work directly*
+ships.
 
 ## 5. Scope
 
@@ -294,7 +304,7 @@ Two kinds of scheduled job, run by one engine scheduler on the host:
 ## 9. Bot runtime on the host device
 
 The engine module `crates/engine/src/bots/` serves the bots whose `hostDeviceId` is this
-device. P0, as built:
+device. As built:
 
 - **Creation.** `CreateBot` runs on the chosen host (it is relay-forwardable): it makes the
   bot's private folder (`<profile store>/bots/<botId>`, 0700), then writes the bot chat
@@ -314,17 +324,25 @@ device. P0, as built:
 - **Search (P0).** A bounded scan, newest first: titles and previews, plus message text
   for the 400 most recent sessions in scope that have a copy on this device. Sessions with
   no local copy are matched by title only, and the answer says how many.
+- **Run profiles (built in P1).** `RunHostContext` carries one `RunProfile`: `Root`,
+  `Child(ChildRunEnv)` or `Bot(BotRunEnv)`, so a run can no longer be both a child and a
+  bot. `BotRunEnv` holds the bot id, origin, tool allowlist, system prompt and workspace
+  roots, derived from (chat, bot, origin) by `bots::profile::bot_env`. The pi harness turns
+  a profile into `--tools`, `-e`, `--append-system-prompt` and env in one place, and every
+  spawn first clears the env of the profiles it is not. Scope and capabilities stay out of
+  the profile, because they are checked per call (§4.4). The persisted
+  `ChildAgentProfile` keeps its synced shape.
+- **Unattended runs (built in P1).** `bots::profile::is_unattended` (routine threads for
+  now) switches a run's input bridge: every question and approval is answered at once
+  with an empty answer, which ask_user reads as cancelled and the permission extension
+  as "no approval was given", and none surfaces as a pending card. The first one a working
+  turn asks stops the run: the transcript gets "This run is unattended, so it couldn't ask
+  for approval to …. It stopped.", the status ends Errored, and the engine hands an
+  `UnattendedStop` (chat id, reason) to its unattended-stop listener, where the owner's
+  notification goes once routines exist (§8).
 
 Planned:
 
-- **Run profiles.** P0 has two special cases on `RunHostContext`, `child` and `bot`, which
-  could in principle both be set: `--tools` would then be passed twice and the child's
-  prompt would silently win. They become one role-aware profile, derived from (chat,
-  bot, origin): tool allowlist, extensions, system prompt, env and workspace roots. Scope
-  and capabilities stay out of the profile, because they are checked per call (§4.4).
-  The persisted `ChildAgentProfile` keeps its synced shape; only the internal run struct
-  is shared. P0's `run_env` is origin-blind (a peer thread would get the owner prompt), so
-  this refactor comes before any second kind of thread.
 - **Search index.** The host keeps a per-profile SQLite FTS5 index (`bots-index.sqlite`)
   of message text keyed by (chat id, message id), updated incrementally from chat2 changes
   and holding only chats some bot on this host can see. Scope filtering happens at query
