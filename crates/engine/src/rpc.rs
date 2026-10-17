@@ -860,7 +860,9 @@ impl RpcService for EngineRpc {
             methods::WATCH_AGENT_EVENTS => chats::watch_agent_events(self, params),
             methods::CREATE_BOT => bots::create_bot(self, params),
             methods::WATCH_BOTS => Ok(RpcReply::Stream(watch_stream(self.workspace.watch_bots()))),
-            methods::BOT_TOOL => bots::bot_tool(self, params).await,
+            // Boxed: `project_git` awaits three relay calls at once, and its
+            // future inlined here overflowed a default worker stack.
+            methods::BOT_TOOL => Box::pin(bots::bot_tool(self, params)).await,
             other => Err(RpcError::UnknownMethod(other.to_string())),
         }
     }

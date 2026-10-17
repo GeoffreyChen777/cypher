@@ -1678,9 +1678,7 @@ fn test_bot(id: &str) -> cypher_proto::Bot {
 
 fn test_bot_chat(bot_id: &str) -> cypher_proto::Chat {
     cypher_proto::Chat {
-        bot: Some(cypher_proto::BotChat {
-            bot_id: bot_id.into(),
-        }),
+        bot: Some(cypher_proto::BotChat::owner(bot_id)),
         ..test_chat(&format!("{bot_id}-chat"), false)
     }
 }

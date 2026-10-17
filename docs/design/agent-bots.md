@@ -1,11 +1,12 @@
 # Agent bots
 
-Status: **P0 implemented** (local, read-only bots: definition, scope, the bot chat and its
-read tools, the sidebar strip and palette). **P1 in progress:** engine-stamped origins, the
-role-aware run profile, per-origin prompts with the untrusted-data rule, slash commands by
-origin and the unattended run mode are built; the FTS index, `session_activity` and
-`project_git` are not yet. The rest is design; §16 is the build order. Where the built code
-differs from the full design, the section says so.
+Status: **P0 and P1 implemented.** P0: local, read-only bots (definition, scope, the bot
+chat and its read tools, the palette). P1: engine-stamped origins, the role-aware run
+profile, per-origin prompts with the untrusted-data rule, slash commands by origin, the
+unattended run mode, the search index, `session_activity` and `project_git`. The first
+Botboard slice (§13.1: mode switch, picker, Status and Projects cards, detail panel) is
+built. The rest is design; §16 is the build order. Where the built code differs from the
+full design, the section says so.
 
 A bot is a **coordinator**: a long-lived agent responsible for everything in the projects
 it is given. Inward, it takes instructions from its owner and gets work done across those
@@ -316,14 +317,39 @@ device. As built:
   run journal and crash resume apply unchanged, and the owner's other devices drive a bot
   chat through chat2 and the command plane like any remote session. A run recreates the
   bot's folder if it is gone.
-- **Reading sessions.** `search_sessions` reads transcripts through
+- **Reading sessions.** The search index and the search fallback read transcripts through
   `DocHost::read_transcript`: the open handle when there is one, else the stored snapshot.
   It joins no room, starts no task and leaves the warm-doc cache alone. `read_session`
   wants the freshest copy, so for a chat another device hosts it opens the doc (joining
   its chat2 room) and gives it a few seconds to catch up.
-- **Search (P0).** A bounded scan, newest first: titles and previews, plus message text
-  for the 400 most recent sessions in scope that have a copy on this device. Sessions with
-  no local copy are matched by title only, and the answer says how many.
+- **Search index.** `<profile store>/bots-index.sqlite` (beside `<store>/bots`) is a
+  SQLite FTS5 index of message text: `entries` rows keyed by (chat id, message index) with
+  the role, the text in an FTS5 table sharing their rowid, and one watermark row per chat
+  (row activity, snapshot save time, whether a copy existed). It holds only chats some bot
+  hosted here may read message text from (the union of their scopes; never bot chats).
+  `bots/index.rs` keeps it current in the background: at startup, after chat or bot row
+  changes (1.5 s debounce) and on a 2-minute tick (another device's chat can gain a fresher
+  snapshot with no row change), it re-reads at most 40 chats per pass whose watermark
+  moved, newest first, and drops chats that left every scope or were deleted. All
+  SQLite and transcript work runs off the runtime; a corrupt or outdated file is deleted
+  and rebuilt. Scope is filtered at query time against the caller's current view, so a
+  narrowed scope applies at once.
+- **Search.** `search_sessions` asks the index for messages containing every word (each a
+  prefix), ranks sessions by their best message's relevance (title matches first), then
+  recency, and still matches titles and previews from the rows. Sessions the index does
+  not hold yet are scanned directly, the newest 400 of them; the answer says how many
+  were not searched, and how many have no copy on this device (matched by title only).
+  With no index at all the scan still works.
+- **Activity.** `session_activity` reads only registry rows: chat rows give creation,
+  last activity and the latest preview, session rows give the current status, and a
+  settled row's `updatedAt` stands in for when its last run ended (shown only when that
+  run left a message inside the window). No run history is persisted for it.
+- **Git facts.** `project_git` reads a space on this device with git directly (branch,
+  `@{upstream}` ahead/behind, `git log`, the checkout diff snapshot). A space on another
+  device goes through that device's forwardable `ListRefs`, `ListGitHistory` and
+  `GetCheckoutDiff` over the device relay, within 10 s; offline, the tool says so. Those
+  RPCs carry no ahead/behind, so it is estimated from the 200-commit history page against
+  the `<remote>/<branch>` decoration and marked as an estimate.
 - **Run profiles (built in P1).** `RunHostContext` carries one `RunProfile`: `Root`,
   `Child(ChildRunEnv)` or `Bot(BotRunEnv)`, so a run can no longer be both a child and a
   bot. `BotRunEnv` holds the bot id, origin, tool allowlist, system prompt and workspace
@@ -341,16 +367,6 @@ device. As built:
   `UnattendedStop` (chat id, reason) to its unattended-stop listener, where the owner's
   notification goes once routines exist (§8).
 
-Planned:
-
-- **Search index.** The host keeps a per-profile SQLite FTS5 index (`bots-index.sqlite`)
-  of message text keyed by (chat id, message id), updated incrementally from chat2 changes
-  and holding only chats some bot on this host can see. Scope filtering happens at query
-  time, so narrowing a scope applies immediately.
-- **Git facts.** Git state for a space on another device goes through the existing
-  forwardable RPCs over the device relay, so it needs that device online; the tool says so
-  when it is offline.
-
 ## 10. Bot tools
 
 The extension `crates/harness/src/pi/bot-tools.ts` is embedded in the engine binary like
@@ -360,16 +376,16 @@ tool, args}` → `{text}`) over the private socket; the engine resolves the bot 
 from the chat id, enforces scope, origin and capabilities, and formats the answer. Answers
 are plain text, bounded to 48 KiB.
 
-### 10.1 Read tools (every origin; P0 ships the first four)
+### 10.1 Read tools (every origin; all six ship)
 
 | Tool | Returns |
 |---|---|
 | `list_projects` | Granted projects: name, id, device, folder, git, session count, working count, last activity. |
 | `list_sessions` | Root sessions in scope, newest first, filterable by project, `active` and `since_hours`, with status and latest-message preview. |
-| `search_sessions` | Sessions whose title, preview or messages contain every word; up to three excerpts each, with message indexes. |
+| `search_sessions` | Sessions whose title, preview or messages contain every word (prefixes), best match first; up to three excerpts each, with message indexes. |
 | `read_session` | Up to 60 messages of one session, latest by default or from an index; tool calls as one-line summaries, thinking left out. |
-| `session_activity` | What changed in a time window: new sessions, finished runs, titles. |
-| `project_git` | Branch, ahead/behind, recent commits, working-tree diff stats for a granted space. |
+| `session_activity` | What changed in the last `since_hours` (default 24, at most 336), optionally in one project: sessions started, sessions with new messages with their current status and latest preview, runs that ended; grouped by project, newest first, at most 60 sessions. |
+| `project_git` | One granted space: branch, ahead/behind its upstream, the last 10 commits (short sha, subject, author, time) and working-tree changes by file. Another device's space needs that device online. |
 
 ### 10.2 Direct work (owner threads with *Work directly*)
 

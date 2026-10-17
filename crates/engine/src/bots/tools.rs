@@ -1,4 +1,4 @@
-//! The `BotTool` RPC: the four read tools a bot's Pi run calls.
+//! The `BotTool` RPC: the read tools a bot's Pi run calls.
 //!
 //! Every call builds a [`View`] from the current registry: the calling chat
 //! must be a bot chat hosted here, and the bot row's scope decides which
@@ -23,8 +23,8 @@ use crate::util::off_runtime;
 /// Most sessions `list_sessions` returns.
 const LIST_MAX: usize = 200;
 const LIST_DEFAULT: usize = 50;
-/// Sessions `search_sessions` scans, newest first.
-const SEARCH_SCAN_MAX: usize = 400;
+/// Unindexed sessions `search_sessions` scans, newest first.
+pub(super) const SEARCH_SCAN_MAX: usize = 400;
 const SEARCH_DEFAULT: usize = 20;
 const SEARCH_MAX: usize = 50;
 /// Excerpts shown per matching session.
@@ -36,6 +36,10 @@ const READ_MAX: usize = 60;
 const MESSAGE_MAX_CHARS: usize = 6_000;
 const ANSWER_MAX_CHARS: usize = 48_000;
 const PREVIEW_MAX_CHARS: usize = 160;
+/// `session_activity`'s window, in hours, and the sessions it lists.
+const ACTIVITY_DEFAULT_HOURS: f64 = 24.0;
+const ACTIVITY_MAX_HOURS: f64 = 336.0;
+const ACTIVITY_MAX: usize = 60;
 /// How long `read_session` waits for another device's chat to catch up.
 const REMOTE_CATCH_UP: Duration = Duration::from_secs(8);
 
@@ -83,13 +87,13 @@ impl View {
         }
     }
 
-    fn device(&self, id: &str) -> &str {
+    pub(super) fn device(&self, id: &str) -> &str {
         self.devices
             .get(id)
             .map_or("an unknown device", String::as_str)
     }
 
-    fn space(&self, id: Option<&str>) -> Option<&Space> {
+    pub(super) fn space(&self, id: Option<&str>) -> Option<&Space> {
         let id = id?;
         self.spaces.iter().find(|s| s.id == id)
     }
@@ -128,7 +132,10 @@ impl View {
 
     /// The spaces a `project` argument names: an id, or a name (any case).
     /// An unknown name answers like an invisible one.
-    fn resolve_project(&self, project: Option<&str>) -> Result<Option<Vec<String>>, EngineError> {
+    pub(super) fn resolve_project(
+        &self,
+        project: Option<&str>,
+    ) -> Result<Option<Vec<String>>, EngineError> {
         let Some(project) = project.map(str::trim).filter(|p| !p.is_empty()) else {
             return Ok(None);
         };
@@ -218,6 +225,13 @@ pub(super) struct ListSessions {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
+pub(super) struct SessionActivity {
+    since_hours: Option<f64>,
+    project: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 struct SearchSessions {
     query: String,
     project: Option<String>,
@@ -251,6 +265,8 @@ impl Bots {
         match tool {
             "list_projects" => Ok(list_projects(&view)),
             "list_sessions" => list_sessions(&view, args(arguments)?),
+            "session_activity" => session_activity(&view, args(arguments)?),
+            "project_git" => self.project_git(&view, args(arguments)?).await,
             "search_sessions" => self.search_sessions(view, args(arguments)?).await,
             "read_session" => self.read_session(view, args(arguments)?).await,
             other => Err(EngineError::Other(format!("Unknown bot tool: {other}"))),
@@ -302,73 +318,34 @@ impl Bots {
             .chats
             .iter()
             .filter(|c| view.in_projects(c, &projects))
-            .take(SEARCH_SCAN_MAX)
             .cloned()
             .collect();
-        let skipped_scan = view
-            .chats
-            .iter()
-            .filter(|c| view.in_projects(c, &projects))
-            .count()
-            .saturating_sub(candidates.len());
         let transcripts = view.bot.scope.transcripts;
+        let index = self.inner.index.clone();
         let docs = self.inner.doc_host.clone();
-        let scan_words = words.clone();
-        let (hits, unstored) = off_runtime(move || {
-            let mut hits: Vec<(Chat, Vec<String>)> = Vec::new();
-            let mut unstored = 0usize;
-            for chat in candidates {
-                if hits.len() >= limit {
-                    break;
-                }
-                let mut excerpts = Vec::new();
-                let haystack = format!(
-                    "{} {}",
-                    chat.title.as_deref().unwrap_or(""),
-                    chat.last_message_preview.as_deref().unwrap_or("")
-                )
-                .to_lowercase();
-                let title_hit = scan_words.iter().all(|w| haystack.contains(w));
-                if transcripts {
-                    match docs.read_transcript(&chat.id) {
-                        Ok(Some(entries)) => {
-                            for (index, entry) in entries.iter().enumerate() {
-                                if excerpts.len() >= SEARCH_EXCERPTS {
-                                    break;
-                                }
-                                let text = entry_text(entry);
-                                let lower = text.to_lowercase();
-                                if scan_words.iter().all(|w| lower.contains(w)) {
-                                    excerpts.push(format!(
-                                        "#{index} {}: {}",
-                                        role(entry),
-                                        excerpt(&text, &lower, &scan_words[0])
-                                    ));
-                                }
-                            }
-                        }
-                        Ok(None) => unstored += 1,
-                        Err(err) => {
-                            tracing::debug!(chat = %chat.id, error = %err, "bot search skipped a chat");
-                            unstored += 1;
-                        }
-                    }
-                }
-                if title_hit || !excerpts.is_empty() {
-                    hits.push((chat, excerpts));
-                }
-            }
-            (hits, unstored)
+        let find_words = words.clone();
+        let found = off_runtime(move || {
+            find(
+                &candidates,
+                &find_words,
+                transcripts,
+                limit,
+                |words, ids| index.search(words, ids),
+                |id| docs.read_transcript(id),
+            )
         })
         .await
         .map_err(EngineError::Other)?;
 
-        let mut out = vec![if hits.is_empty() {
+        let mut out = vec![if found.hits.is_empty() {
             format!("No sessions match \"{}\".", words.join(" "))
         } else {
-            format!("Sessions matching \"{}\" (newest first):", words.join(" "))
+            format!(
+                "Sessions matching \"{}\" (best matches first):",
+                words.join(" ")
+            )
         }];
-        for (chat, excerpts) in &hits {
+        for (chat, excerpts) in &found.hits {
             out.push(format!("- {}", view.header(chat)));
             for line in excerpts {
                 out.push(format!("  {line}"));
@@ -380,14 +357,17 @@ impl Bots {
                     .into(),
             );
         }
-        if unstored > 0 {
+        if found.unstored > 0 {
             out.push(format!(
-                "{unstored} session(s) have no copy on this device yet and were matched by title only."
+                "{} session(s) have no copy on this device yet and were matched by title only.",
+                found.unstored
             ));
         }
-        if skipped_scan > 0 {
+        if found.not_searched > 0 {
             out.push(format!(
-                "Only the {SEARCH_SCAN_MAX} most recent sessions were searched; narrow with `project`."
+                "{} older session(s) are not indexed yet, so only their titles were searched; \
+                 try again shortly or narrow with `project`.",
+                found.not_searched
             ));
         }
         Ok(clip(&out.join("\n"), ANSWER_MAX_CHARS))
@@ -562,7 +542,280 @@ pub(super) fn list_sessions(view: &View, query: ListSessions) -> Result<String, 
     Ok(clip(&out.join("\n"), ANSWER_MAX_CHARS))
 }
 
-fn role(entry: &SessionMessageEntry) -> &'static str {
+/// What changed in the window: sessions started, sessions with new messages
+/// (with their status now and latest preview), and runs that ended. Grouped
+/// by project, the most recently active project first.
+pub(super) fn session_activity(view: &View, query: SessionActivity) -> Result<String, EngineError> {
+    let projects = view.resolve_project(query.project.as_deref())?;
+    let hours = query
+        .since_hours
+        .filter(|h| h.is_finite() && *h > 0.0)
+        .unwrap_or(ACTIVITY_DEFAULT_HOURS)
+        .min(ACTIVITY_MAX_HOURS);
+    let since = view.now - chrono::Duration::seconds((hours * 3_600.0) as i64);
+    let window = format!("the last {}", hours_label(hours));
+    let changed: Vec<&Chat> = view
+        .chats
+        .iter()
+        .filter(|c| !c.is_child() && view.in_projects(c, &projects))
+        .filter(|c| {
+            c.created_at >= since
+                || activity(c) >= since
+                || matches!(view.status(c), "working" | "waiting for input")
+                || (view.status(c) == "errored"
+                    && view
+                        .sessions
+                        .get(&c.id)
+                        .is_some_and(|s| s.updated_at >= since))
+        })
+        .collect();
+    if changed.is_empty() {
+        return Ok(format!(
+            "Nothing changed in {window} (since {}).",
+            since.format("%Y-%m-%d %H:%M UTC")
+        ));
+    }
+
+    // Groups keyed by the root's space; `view.chats` is newest first, so the
+    // first session seen in a group is its newest.
+    let mut groups: Vec<(Option<&str>, Vec<&Chat>)> = Vec::new();
+    for chat in &changed {
+        let key = view.space(chat.space_id.as_deref()).map(|s| s.id.as_str());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, chats)) => chats.push(chat),
+            None => groups.push((key, vec![chat])),
+        }
+    }
+    let count = |status: &str| changed.iter().filter(|c| view.status(c) == status).count();
+    let started = changed.iter().filter(|c| c.created_at >= since).count();
+    let mut out = vec![format!(
+        "Activity in {window} (since {}): {} session(s) in {} group(s) · {started} new · {} \
+         working · {} waiting for input · {} errored. Newest first:",
+        since.format("%Y-%m-%d %H:%M UTC"),
+        changed.len(),
+        groups.len(),
+        count("working"),
+        count("waiting for input"),
+        count("errored"),
+    )];
+    let mut shown = 0usize;
+    for (key, chats) in &groups {
+        if shown >= ACTIVITY_MAX {
+            break;
+        }
+        out.push(String::new());
+        out.push(match key.and_then(|id| view.space(Some(id))) {
+            Some(space) => format!(
+                "{} (id {}) on {}:",
+                space_name(space),
+                space.id,
+                view.device(&space.device_id)
+            ),
+            None => "Individually shared sessions:".to_string(),
+        });
+        for chat in chats.iter().take(ACTIVITY_MAX - shown) {
+            shown += 1;
+            let mut line = format!(
+                "- {} · \"{}\" · {} · last activity {}",
+                chat.id,
+                title(chat),
+                view.status(chat),
+                when(activity(chat), view.now)
+            );
+            if chat.created_at >= since {
+                line.push_str(&format!(
+                    " · new, started {}",
+                    when(chat.created_at, view.now)
+                ));
+            }
+            let subagents = view
+                .chats
+                .iter()
+                .filter(|c| c.parent_chat_id() == Some(chat.id.as_str()) && activity(c) >= since)
+                .count();
+            if subagents > 0 {
+                line.push_str(&format!(" · {subagents} active subagent chat(s)"));
+            }
+            out.push(line);
+            if let Some(preview) = chat
+                .last_message_preview
+                .as_deref()
+                .filter(|p| !p.trim().is_empty())
+            {
+                out.push(format!(
+                    "  latest: {}",
+                    one_line(preview, PREVIEW_MAX_CHARS)
+                ));
+            }
+            // A settled session row stamps when its last run ended; trust it
+            // only when the run left a message inside the window.
+            if let Some(session) = view.sessions.get(&chat.id)
+                && session.updated_at >= since
+                && activity(chat) >= since
+            {
+                match view.status(chat) {
+                    "idle" => out.push(format!(
+                        "  run finished {}",
+                        when(session.updated_at, view.now)
+                    )),
+                    "errored" => out.push(format!(
+                        "  run failed {}",
+                        when(session.updated_at, view.now)
+                    )),
+                    _ => {}
+                }
+            }
+        }
+    }
+    if changed.len() > shown {
+        out.push(String::new());
+        out.push(format!(
+            "{} more session(s) not shown; narrow with `project` or a shorter `since_hours`.",
+            changed.len() - shown
+        ));
+    }
+    Ok(clip(&out.join("\n"), ANSWER_MAX_CHARS))
+}
+
+/// `24 hours`, `1.5 hours`, `14 days`.
+fn hours_label(hours: f64) -> String {
+    if hours >= 48.0 && hours % 24.0 == 0.0 {
+        format!("{} days", (hours / 24.0) as u64)
+    } else if hours == 1.0 {
+        "hour".to_string()
+    } else if hours.fract() == 0.0 {
+        format!("{} hours", hours as u64)
+    } else {
+        format!("{hours:.1} hours")
+    }
+}
+
+/// What `search_sessions` found, best first, and what it could not search.
+pub(super) struct Found {
+    pub hits: Vec<(Chat, Vec<String>)>,
+    /// Sessions this device holds no transcript of.
+    pub unstored: usize,
+    /// Unindexed sessions past the scan bound: titles only.
+    pub not_searched: usize,
+}
+
+/// Match `candidates` (newest first) against `words`: titles and previews
+/// from the rows; message text from the index (`lookup`), and by scanning
+/// transcripts (`read`) for the newest [`SEARCH_SCAN_MAX`] candidates the
+/// index does not hold yet. Sessions with matching messages rank by their
+/// best message's relevance (title matches first), then by recency; the
+/// title-only ones follow, newest first. Blocking.
+pub(super) fn find(
+    candidates: &[Chat],
+    words: &[String],
+    transcripts: bool,
+    limit: usize,
+    lookup: impl FnOnce(&[String], &[String]) -> Result<super::index::Lookup, EngineError>,
+    mut read: impl FnMut(&str) -> Result<Option<Vec<SessionMessageEntry>>, EngineError>,
+) -> Found {
+    // chat id → (best score, excerpts by message index)
+    let mut matched: HashMap<String, (f64, Vec<(usize, String)>)> = HashMap::new();
+    let mut unstored = 0usize;
+    let mut not_searched = 0usize;
+    if transcripts {
+        let ids: Vec<String> = candidates.iter().map(|c| c.id.clone()).collect();
+        let lookup = lookup(words, &ids).unwrap_or_else(|err| {
+            tracing::debug!(error = %err, "bot search without the index");
+            Default::default()
+        });
+        let mut unindexed: Vec<&Chat> = Vec::new();
+        for chat in candidates {
+            match lookup.indexed.get(&chat.id) {
+                Some(true) => {}
+                Some(false) => unstored += 1,
+                None => unindexed.push(chat),
+            }
+        }
+        for hit in lookup.hits {
+            let (_, excerpts) = matched
+                .entry(hit.chat_id)
+                .or_insert_with(|| (hit.score, Vec::new()));
+            if excerpts.len() < SEARCH_EXCERPTS {
+                let lower = hit.text.to_lowercase();
+                excerpts.push((
+                    hit.index,
+                    format!(
+                        "#{} {}: {}",
+                        hit.index,
+                        hit.role,
+                        excerpt(&hit.text, &lower, &words[0])
+                    ),
+                ));
+            }
+        }
+        not_searched = unindexed.len().saturating_sub(SEARCH_SCAN_MAX);
+        for chat in unindexed.into_iter().take(SEARCH_SCAN_MAX) {
+            match read(&chat.id) {
+                Ok(Some(entries)) => {
+                    let mut excerpts = Vec::new();
+                    for (index, entry) in entries.iter().enumerate() {
+                        if excerpts.len() >= SEARCH_EXCERPTS {
+                            break;
+                        }
+                        let text = entry_text(entry);
+                        let lower = text.to_lowercase();
+                        if words.iter().all(|w| lower.contains(w)) {
+                            excerpts.push((
+                                index,
+                                format!(
+                                    "#{index} {}: {}",
+                                    role(entry),
+                                    excerpt(&text, &lower, &words[0])
+                                ),
+                            ));
+                        }
+                    }
+                    if !excerpts.is_empty() {
+                        // Unranked: after every indexed match of equal standing.
+                        matched.insert(chat.id.clone(), (0.0, excerpts));
+                    }
+                }
+                Ok(None) => unstored += 1,
+                Err(err) => {
+                    tracing::debug!(chat = %chat.id, error = %err, "bot search skipped a chat");
+                    unstored += 1;
+                }
+            }
+        }
+    }
+    let mut ranked: Vec<(u8, f64, usize, &Chat, Vec<String>)> = Vec::new();
+    for (position, chat) in candidates.iter().enumerate() {
+        let haystack = format!(
+            "{} {}",
+            chat.title.as_deref().unwrap_or(""),
+            chat.last_message_preview.as_deref().unwrap_or("")
+        )
+        .to_lowercase();
+        let title_hit = words.iter().all(|w| haystack.contains(w));
+        let (tier, score, excerpts) = match matched.remove(&chat.id) {
+            Some((score, mut excerpts)) => {
+                excerpts.sort_by_key(|(index, _)| *index);
+                let lines = excerpts.into_iter().map(|(_, line)| line).collect();
+                (if title_hit { 0 } else { 1 }, score, lines)
+            }
+            None if title_hit => (2, 0.0, Vec::new()),
+            None => continue,
+        };
+        ranked.push((tier, score, position, chat, excerpts));
+    }
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
+    Found {
+        hits: ranked
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, _, chat, excerpts)| (chat.clone(), excerpts))
+            .collect(),
+        unstored,
+        not_searched,
+    }
+}
+
+pub(super) fn role(entry: &SessionMessageEntry) -> &'static str {
     match entry.role {
         MessageRole::User => "user",
         MessageRole::Assistant => "agent",
@@ -571,7 +824,7 @@ fn role(entry: &SessionMessageEntry) -> &'static str {
 }
 
 /// The message's readable text: its text parts, in order.
-fn entry_text(entry: &SessionMessageEntry) -> String {
+pub(super) fn entry_text(entry: &SessionMessageEntry) -> String {
     entry
         .parts
         .iter()
@@ -724,4 +977,9 @@ pub(super) fn render_session(
 #[cfg(test)]
 pub(super) fn list_sessions_args(value: serde_json::Value) -> ListSessions {
     serde_json::from_value(value).expect("list_sessions arguments")
+}
+
+#[cfg(test)]
+pub(super) fn session_activity_args(value: serde_json::Value) -> SessionActivity {
+    serde_json::from_value(value).expect("session_activity arguments")
 }

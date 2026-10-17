@@ -10,7 +10,8 @@
 //!
 //! Each bot has a private, empty working folder under the profile store
 //! (`<store>/bots/<bot id>`): Pi needs a cwd, and an empty one loads no
-//! project context files.
+//! project context files. Beside it, `<store>/bots-index.sqlite` is the
+//! search index over what this device's bots may read ([`index`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,10 +24,13 @@ use cypher_proto::{
 };
 
 use crate::EngineError;
+use crate::git::repos::Repos;
 use crate::host::doc_host::DocHost;
 use crate::host::workspace_host::WorkspaceHost;
-use crate::util::new_id;
+use crate::util::{lock, new_id};
 
+mod git;
+mod index;
 pub mod profile;
 mod prompt;
 #[cfg(test)]
@@ -61,19 +65,86 @@ pub struct Bots {
 struct Inner {
     workspace: WorkspaceHost,
     doc_host: DocHost,
+    /// Git for spaces on this device (`project_git`).
+    repos: Repos,
+    /// Peer links for another device's git state; `None` offline.
+    links: std::sync::Mutex<Option<Arc<cypher_rpc::LinkCache>>>,
     /// `<store>/bots`: one private folder per bot hosted here.
     root: PathBuf,
+    /// `<store>/bots-index.sqlite`, kept current by the indexer task.
+    index: Arc<index::SearchIndex>,
+    indexer: std::sync::Mutex<Option<Indexer>>,
+}
+
+struct Indexer {
+    cancel: tokio_util::sync::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl Bots {
-    pub fn new(workspace: WorkspaceHost, doc_host: DocHost, root: PathBuf) -> Self {
+    pub fn new(workspace: WorkspaceHost, doc_host: DocHost, repos: Repos, root: PathBuf) -> Self {
+        let index = index::SearchIndex::new(root.with_file_name("bots-index.sqlite"));
         Self {
             inner: Arc::new(Inner {
                 workspace,
                 doc_host,
+                repos,
+                links: Default::default(),
                 root,
+                index: Arc::new(index),
+                indexer: Default::default(),
             }),
         }
+    }
+
+    /// Start keeping the search index current (needs a tokio runtime).
+    /// Idempotent.
+    pub fn start_indexer(&self) {
+        let mut slot = lock(&self.inner.indexer);
+        if slot.is_some() {
+            return;
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn(index::run(
+            self.inner.index.clone(),
+            self.inner.workspace.clone(),
+            self.inner.doc_host.clone(),
+            cancel.clone(),
+        ));
+        *slot = Some(Indexer { cancel, task });
+    }
+
+    /// Stop the indexer and wait for it (a pass in flight finishes first).
+    pub async fn shutdown(&self) {
+        let indexer = lock(&self.inner.indexer).take();
+        if let Some(indexer) = indexer {
+            indexer.cancel.cancel();
+            let _ = indexer.task.await;
+        }
+    }
+
+    /// Bring the search index up to date now (tests and callers that just
+    /// wrote rows). Returns the chats re-read.
+    pub async fn index_now(&self) -> Result<usize, EngineError> {
+        let mut total = 0;
+        loop {
+            let pass = index::pass(
+                &self.inner.index,
+                &self.inner.workspace,
+                &self.inner.doc_host,
+            )
+            .await?;
+            total += pass.indexed;
+            if pass.remaining == 0 {
+                return Ok(total);
+            }
+        }
+    }
+
+    /// Attach the peer link cache: `project_git` reads other devices' spaces
+    /// through it.
+    pub fn set_links(&self, links: Arc<cypher_rpc::LinkCache>) {
+        *lock(&self.inner.links) = Some(links);
     }
 
     fn device_id(&self) -> &str {

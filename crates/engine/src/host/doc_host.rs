@@ -618,6 +618,13 @@ impl DocHost {
         Ok(Some(cypher_doc::join_continuation_entries(entries)))
     }
 
+    /// When each stored doc snapshot was last saved (epoch ms), by doc id.
+    /// The bot search index uses it to notice that another device's chat
+    /// gained a fresher local copy. Blocking: callers run it off the runtime.
+    pub fn snapshot_saved_times(&self) -> Result<HashMap<String, i64>, EngineError> {
+        Ok(self.inner.store.snapshot_saved_times()?)
+    }
+
     /// Watcher-count helper for the stale reaper: how many live transcript-
     /// watch receivers this chat's doc has. A Side Chat panel holds one while
     /// open; the count drops to zero once the tab closes (or the watch RPC

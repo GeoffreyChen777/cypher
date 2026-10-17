@@ -110,8 +110,10 @@ fn script_summary(code: &str) -> String {
 pub enum BotToolKind {
     ListProjects,
     ListSessions,
+    SessionActivity,
     SearchSessions,
     ReadSession,
+    ProjectGit,
 }
 
 /// The bot tool a call is, when it is one.
@@ -122,8 +124,10 @@ pub fn bot_tool_kind(call: &crate::ToolCall) -> Option<BotToolKind> {
     Some(match name.as_str() {
         "list_projects" => BotToolKind::ListProjects,
         "list_sessions" => BotToolKind::ListSessions,
+        "session_activity" => BotToolKind::SessionActivity,
         "search_sessions" => BotToolKind::SearchSessions,
         "read_session" => BotToolKind::ReadSession,
+        "project_git" => BotToolKind::ProjectGit,
         _ => return None,
     })
 }
@@ -148,6 +152,17 @@ fn bot_chip_content(
         Some(project) => format!("{text} in {project}"),
         None => text,
     };
+    let since_hours = input
+        .and_then(|input| input.get("since_hours"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|h| h.is_finite() && *h > 0.0);
+    let last = |hours: f64| {
+        if hours >= 48.0 && hours % 24.0 == 0.0 {
+            format!("last {}d", (hours / 24.0) as u64)
+        } else {
+            format!("last {}h", hours.ceil() as u64)
+        }
+    };
     match kind {
         BotToolKind::ListProjects => ("List projects", String::new()),
         BotToolKind::ListSessions => {
@@ -155,16 +170,8 @@ fn bot_chip_content(
             if arg("status").as_deref() == Some("active") {
                 filters.push("active".into());
             }
-            if let Some(hours) = input
-                .and_then(|input| input.get("since_hours"))
-                .and_then(serde_json::Value::as_f64)
-                .filter(|h| h.is_finite() && *h > 0.0)
-            {
-                filters.push(if hours >= 24.0 && hours % 24.0 == 0.0 {
-                    format!("last {}d", (hours / 24.0) as u64)
-                } else {
-                    format!("last {}h", hours.ceil() as u64)
-                });
+            if let Some(hours) = since_hours {
+                filters.push(last(hours));
             }
             let filters = if filters.is_empty() && arg("project").is_none() {
                 "all".to_string()
@@ -181,7 +188,13 @@ fn bot_chip_content(
                     .unwrap_or_default(),
             ),
         ),
+        BotToolKind::SessionActivity => (
+            "Checked recent activity",
+            // The tool's default window is a day.
+            in_project(last(since_hours.unwrap_or(24.0).min(336.0))),
+        ),
         BotToolKind::ReadSession => ("Read session", arg("session_id").unwrap_or_default()),
+        BotToolKind::ProjectGit => ("Read git state", arg("project").unwrap_or_default()),
     }
 }
 
@@ -299,6 +312,7 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
     let mut scripts = 0usize;
     let mut listings = 0usize;
     let mut sessions_read = 0usize;
+    let mut git_reads = 0usize;
     let mut other = 0usize;
     let mut failed = 0usize;
     for (call, is_error) in tools {
@@ -329,7 +343,10 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
             ToolCall::Unknown { .. } if let Some(kind) = bot_tool_kind(call) => match kind {
                 BotToolKind::SearchSessions => searches += 1,
                 BotToolKind::ReadSession => sessions_read += 1,
-                BotToolKind::ListProjects | BotToolKind::ListSessions => listings += 1,
+                BotToolKind::ListProjects
+                | BotToolKind::ListSessions
+                | BotToolKind::SessionActivity => listings += 1,
+                BotToolKind::ProjectGit => git_reads += 1,
             },
             ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => other += 1,
         }
@@ -359,6 +376,12 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
         segments.push(format!(
             "read {}",
             plural(sessions_read, "session", "sessions")
+        ));
+    }
+    if git_reads > 0 {
+        segments.push(format!(
+            "read git state of {}",
+            plural(git_reads, "project", "projects")
         ));
     }
     if searches > 0 {
@@ -437,6 +460,21 @@ mod tests {
             chip("read_session", serde_json::json!({"session_id": "c1"})),
             ("Read session", "c1".to_string())
         );
+        assert_eq!(
+            chip("session_activity", serde_json::json!({})),
+            ("Checked recent activity", "last 24h".to_string())
+        );
+        assert_eq!(
+            chip(
+                "session_activity",
+                serde_json::json!({"since_hours": 72, "project": "Billing"})
+            ),
+            ("Checked recent activity", "last 3d in Billing".to_string())
+        );
+        assert_eq!(
+            chip("project_git", serde_json::json!({"project": " Billing "})),
+            ("Read git state", "Billing".to_string())
+        );
         let summary = tool_group_summary(&[
             (bot_call("list_sessions", serde_json::json!({})), false),
             (bot_call("search_sessions", serde_json::json!({})), false),
@@ -446,6 +484,14 @@ mod tests {
         assert_eq!(
             summary,
             "Looked over your work · read 2 sessions · searched 1 time · 1 failed"
+        );
+        let summary = tool_group_summary(&[
+            (bot_call("session_activity", serde_json::json!({})), false),
+            (bot_call("project_git", serde_json::json!({})), false),
+        ]);
+        assert_eq!(
+            summary,
+            "Looked over your work · read git state of 1 project"
         );
     }
 

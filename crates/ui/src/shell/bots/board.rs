@@ -659,7 +659,7 @@ mod tests {
         });
         let excluded = chat("b2", "b", 2);
         let mut bot_chat = chat("bot", "a", 5);
-        bot_chat.bot = Some(cypher_proto::BotChat { bot_id: "x".into() });
+        bot_chat.bot = Some(cypher_proto::BotChat::owner("x"));
         let chats = vec![
             chat("a1", "a", 1),
             chat("a2", "a", 2),

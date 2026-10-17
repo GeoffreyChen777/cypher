@@ -76,6 +76,18 @@ const TOOLS = [
     }),
   },
   {
+    name: "session_activity",
+    label: "Recent activity",
+    description:
+      "What changed recently: sessions started, sessions with new messages (with their status now — working, waiting for input, errored, idle — and latest message) and runs that finished, grouped by project. Use it for \"what happened today/this week\" or catch-up questions before reading single sessions.",
+    parameters: Type.Object({
+      since_hours: Type.Optional(
+        Type.Number({ minimum: 0, maximum: 336, description: "Window in hours (default 24, at most 336 = 14 days)" }),
+      ),
+      project: Type.Optional(Type.String({ description: "Project id or name to limit to" })),
+    }),
+  },
+  {
     name: "search_sessions",
     label: "Search sessions",
     description:
@@ -95,6 +107,15 @@ const TOOLS = [
       session_id: Type.String({ description: "Session id from list_sessions or search_sessions" }),
       from: Type.Optional(Type.Integer({ minimum: 0, description: "First message index to read" })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 60, description: "Default 20" })),
+    }),
+  },
+  {
+    name: "project_git",
+    label: "Read git state",
+    description:
+      "Read one project's git state: current branch, ahead/behind its upstream, the last 10 commits (sha, subject, author, time) and uncommitted working-tree changes. Use it for questions about code state — what was committed, what is unpushed or uncommitted — rather than what was said in sessions. A project on another device needs that device online.",
+    parameters: Type.Object({
+      project: Type.String({ description: "Project id or name (an id when the name is on several devices)" }),
     }),
   },
 ];
