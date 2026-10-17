@@ -537,70 +537,90 @@ Planned:
 - **Progress card:** each step's state and session link, elapsed time and Stop; it turns
   into a result card when the orchestration ends.
 - **Worker sessions:** "Started by <bot> · <task>" on their row and tab.
-- **The bot workspace** (§13.1): the chat in the middle, a column of floating blocks on
-  the right, and a detail panel that slides in when a block's item is opened.
+- **Botboard** (§13.1): bots move out of the project sidebar into a mode of their own.
+  The sidebar shows the current bot's cards, the chat stays in the middle, and a detail
+  panel slides in on the right when a card's item is opened. This replaces the built
+  strip and the header's New project / New bot menu.
 - **Project tasks:** recurring tasks in a project's menu, with their last runs.
 - **iPhone:** the bot list, the bot chat, plan approvals and reviews, driven by push
   notifications.
 
-### 13.1 The bot workspace
+### 13.1 Botboard
 
-A bot's tab is laid out in three parts:
+Bots and projects are two modes of the window, so project work and bot work never share
+the sidebar. The mode switch is the sidebar's logo:
 
-```
-┌ sidebar ┐┌──────── chat ────────┐┌ blocks ┐        ┌ blocks ┐┌── detail ──┐
-│ bots    ││                      ││ status │  click │ status ││ Nightly    │
-│ projects││  conversation with   ││ needs  │ ─────► │ needs  ││ report     │
-│         ││  the bot, plan and   ││ work   │        │ work ◄─┼┤ steps, runs│
-│         ││  progress cards      ││ sched. │        │ sched. ││ actions    │
-│         ││  [ Ask Bob…        ] ││ …      │        │ …      ││        [×] │
-└─────────┘└──────────────────────┘└────────┘        └────────┘└────────────┘
-```
-
-- **Left: the app sidebar**, unchanged (bot strip, projects).
-- **Middle: the chat**, the bot conversation as built, with plan, progress and result
-  cards inline. It stays the place where the owner instructs the bot.
-- **Right: a column of floating blocks**, each a rounded card with its own header and a
-  few rows, showing the bot's live state at a glance. A block that has nothing to show
-  is not drawn, and the column scrolls on its own.
-- **Detail panel.** Clicking a block's row, or its header for the whole list, opens a
-  panel that slides in from the window's right edge beside the blocks column, the chat
-  narrowing to make room. It shows that one item in full, with its actions, and closes
-  with its × or Esc. Opening another row replaces its content. On a narrow window the
-  panel covers the blocks column instead of pushing the chat.
-
-The blocks, top to bottom:
-
-| Block | Shows | Opens in the detail panel |
+| | Projects mode | Botboard mode |
 |---|---|---|
-| **Status** | Avatar, name, host and its online dot, one status line ("2 tasks running · 1 needs you"), and permission badges (*Reads 3 projects · Works directly · Can start sessions*), the ones that let it act in a distinct colour | The bot's settings palette |
-| **Needs you** | Plans awaiting approval, workers asking or failed on an approval, tainted actions awaiting approval, and later review drafts, each with its inline action | The item with its context: the plan, the question with the worker's recent messages, the action and why it needs approval |
+| Logo | **Cypher** ⇅ | **Cypher Botboard** ⇅ (the second word in the bot's accent) |
+| Sidebar | Project and session cards, as today; no bot strip | The bot picker, then the current bot's cards |
+| Middle | Session tabs | The bot's chat |
+| Right | The session dock | The detail panel |
+| Header `+` | New project | New bot |
+
+```
+Botboard mode
+┌ sidebar ───────────┐┌──────── chat ─────────┐┌── detail ──┐
+│ Cypher Botboard ⇅  ││                       ││ Fix invoice│
+│ [Bob][Rel][Team][+]││  conversation with    ││ rounding   │
+│ ┌ Status ────────┐ ││  the bot; plan,       ││ steps,     │
+│ ┌ Needs you (2) ─┐ ││  progress and result  ││ sessions,  │
+│ ┌ Work ──────────┐ ││  cards inline         ││ Stop       │
+│ ┌ Schedule ──────┐ ││                       ││            │
+│ ┌ Projects … ────┐ ││  [ Ask Bob…         ] ││        [×] │
+└────────────────────┘└───────────────────────┘└────────────┘
+```
+
+**Switching.** A click on the logo switches mode; its tooltip names the other one. Each
+mode keeps its own state: the bot that was open, the session tabs and their layout. In
+Projects mode the logo carries a small bot badge with the number of items that need the
+owner across all bots, so attention is visible without bringing bot content back into
+the project sidebar. Sessions a bot started stay in their projects, marked "by <bot>".
+Project windows have no Botboard.
+
+**The bot picker** heads the Botboard sidebar: a row of avatar squares, the current one
+ringed in its colour, each with its Needs-you count or status dot, then `+` for a new
+bot. A click switches the whole board to that bot; a right-click opens Open /
+Settings… / Delete…. With many bots, the row becomes the current bot with a dropdown
+(open question, §17).
+
+**The cards** below it describe the current bot, top to bottom:
+
+| Card | Shows | Opens in the detail panel |
+|---|---|---|
+| **Status** | Avatar, name, host and its online dot, one status line ("1 task running · 2 need you"), and permission badges (*Reads 3 projects · Works directly · Can start sessions*), the ones that let it act in a distinct colour; a settings button | The bot's settings palette |
+| **Needs you** | Plans awaiting approval, workers asking or failed on an approval, tainted actions awaiting approval, and later review drafts | The item with its context and actions: the plan to approve, the question with the worker's recent messages and the bot's suggested answer, the action and why it needs approval |
 | **Work** | Running orchestrations with their current step, a step bar and elapsed time; the last few finished ones with a one-line result | The orchestration: every step with project, device, worker session link, state and duration; Stop; the result |
-| **Schedule** | Routines and its projects' recurring tasks, in order of next run: name, trigger, next run, last result; today's budget use | The routine or task: trigger, prompt, permissions, run history with links, pause, edit |
-| **Projects** | Each granted project with device, branch, running and waiting sessions, last activity, and "works directly" or "via sessions" | The project's sessions in scope, newest first, with status; the bot's worker sessions there |
+| **Schedule** | Routines and its projects' recurring tasks, in order of next run: name, trigger, next run, last result; today's budget use | The routine or task: trigger, prompt, permissions, run history with links, pause, edit, run now |
+| **Projects** | Each granted project with device, running and waiting sessions, and "works directly" or "via sessions" | The project's sessions in scope with status, the bot's worker sessions there, git state |
 | **Notebook** | The latest few entries, bot-written ones marked | All entries with their sources, editable and deletable |
-| **Activity** | The last few things the bot did: sessions started or stopped, worktrees created, commands outside the sandbox, notes written | The full audit log, filterable by kind |
+| **Activity** | The last few things the bot did | The full audit log, filterable by kind |
 | **Network** (P4) | Connections with reply mode and last exchange; pending invites | A connection: its scope, reply mode, rate limits, exchanges, revoke |
+
+A card with nothing to show is not drawn; a read-only bot shows only Status, Projects,
+Notebook and Activity. **Needs you** always sits right under Status, so attention items
+are never below the fold. A card's header opens its whole list; a row opens that item.
+
+**The chat** is the bot conversation as built: the owner instructs the bot here, and
+plan, progress and result cards appear inline. Its access note over the composer opens
+the bot's settings. It has no terminal and no session dock.
+
+**The detail panel** slides in from the window's right edge and the chat narrows to make
+room. It shows one item in full with its actions, closes with × or Esc, and opening
+another row replaces its content; the opened row stays highlighted in the sidebar.
 
 Behaviour:
 
-- **Needs you** always sits right under Status and is the only block that animates in, so
-  attention items are never below the fold. Its count also shows on the bot's square in
-  the sidebar strip, in place of the status dot.
-- Blocks update live from the engine (`WatchBotWork`, the routine and notebook rows, the
-  audit log); they hold no state of their own.
-- The blocks column has a fixed width (about 280 px) and can be collapsed to a thin rail
-  of block icons with counts, remembered per bot. A read-only bot (no *Coordinate*, no
-  routines) shows only Status, Projects, Notebook and Activity.
-- Settings stay in the palette: the panel's Status block links there and never edits
-  permissions itself.
-- The bot tab keeps no terminal and no session dock; the detail panel takes the dock's
-  place on the right.
+- Cards update live from the engine (`WatchBotWork`, the routine and notebook rows, the
+  audit log); they hold no state of their own. Resolving an item anywhere updates every
+  count: the card, the Status line, the picker and the Projects-mode logo badge.
+- Settings stay in the palette; no card edits permissions itself.
 - Usage meters and embedded transcripts are left out: rows link to the thread or session
   instead.
 
-Phasing: Status, Needs you, Work and Projects arrive with the coordinator (P2); Schedule
-and Notebook with P3; Network with P4; Activity with the audit log in P2.
+Phasing: the mode switch, picker, Status and Projects cards replace the built strip
+first, since they need nothing new from the engine; Needs you, Work and Activity arrive
+with the coordinator (P2), Schedule and Notebook with P3, Network with P4.
 
 ## 14. RPC
 
@@ -663,6 +683,8 @@ shared frame vectors, and `scripts/e2e-smoke.sh` extended to two users with one 
 - **Cross-device dependencies.** Which remote does the bot push A's branch to when B is on
   another device: the project's origin, or a Cypher-managed transfer over the device
   relay?
+- **Many bots.** The Botboard picker is a row of avatars; past a handful of bots, should
+  it become the current bot with a dropdown?
 - **Fallback host.** Should a bot have a second host, so work and questions don't wait
   while the only host sleeps? This needs claim and lease logic.
 - **Identity shown to peers.** The owner's WorkOS display name, editable per bot, is the
