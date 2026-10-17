@@ -6,9 +6,15 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use cypher_doc::SessionCommandPayload;
+use futures::StreamExt;
+
+use cypher_doc::{MessagePart, MessageRole, SessionCommandPayload};
 use cypher_engine::EngineCore;
-use cypher_proto::{Bot, BotScope, HarnessId, ProjectGrant, RunRequest};
+use cypher_engine::bots::profile::UnattendedStop;
+use cypher_proto::{
+    Bot, BotChat, BotOrigin, BotScope, HarnessId, PermissionPrompt, PermissionPromptKind,
+    ProjectGrant, RunRequest, SessionStatus, UserInputAnswer, UserInputQuestion,
+};
 
 use common::{complete_assistant_count, run_request, wait_for};
 
@@ -398,4 +404,218 @@ async fn a_bot_chat_refuses_commands_that_widen_its_tools() {
     let plain = core.workspace.chat("chat-billing").unwrap().unwrap();
     cypher_engine::bots::refuse_widening_command(&plain, "/scripts on")
         .expect("ordinary chats are unaffected");
+}
+
+/// A thread of `bot` with `origin`, written the way the engine will when it
+/// starts one (routines and peer threads have no creation path yet).
+fn bot_thread(core: &EngineCore, bot: &Bot, id: &str, origin: BotOrigin) -> String {
+    let mut chat = core.workspace.chat(&bot.chat_id).unwrap().unwrap();
+    chat.id = id.into();
+    chat.bot = Some(BotChat::new(&bot.id, origin));
+    core.workspace.import_chat_row(&chat).unwrap();
+    chat.cwd.unwrap()
+}
+
+/// A stand-in Pi that asks to run a command outside the sandbox, records
+/// the answer when one is there at once, then finishes its turn once
+/// answered.
+fn asking_harness(answers: Arc<Mutex<Vec<Vec<UserInputAnswer>>>>) -> common::TestHarness {
+    common::TestHarness::new(HarnessId::Pi, "Asking", move |request, controls| {
+        let mut answer = (controls.request_input)(vec![UserInputQuestion {
+            id: "perm-1".into(),
+            header: "Approval".into(),
+            question: "Run this command outside the sandbox?".into(),
+            options: vec!["Run once".into(), "Deny".into()],
+            multi_select: false,
+            permission: Some(PermissionPrompt {
+                kind: PermissionPromptKind::Escalate,
+                tool_call_id: None,
+            }),
+        }]);
+        if let Ok(immediate) = answer.try_recv() {
+            answers.lock().unwrap().push(immediate);
+        }
+        let started = common::session_started(HarnessId::Pi, "mock-1", &request.cwd, "s", "a-1");
+        let rest = futures::stream::once(async move {
+            let _ = answer.await;
+            futures::stream::iter(
+                [common::text("Carried on without it."), common::done("s")].map(Ok),
+            )
+        })
+        .flatten();
+        Ok(futures::stream::iter([Ok(started)]).chain(rest).boxed())
+    })
+}
+
+fn status(core: &EngineCore, chat_id: &str) -> Option<SessionStatus> {
+    core.sessions.session_status(chat_id).map(|s| s.status)
+}
+
+/// A routine thread runs unattended: the approval it asks for is denied on
+/// the spot, never parked as a card, and the run settles failed with the
+/// reason in its transcript and on the unattended-stop hook.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unattended_run_that_asks_stops_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let answers = Arc::new(Mutex::new(Vec::new()));
+    let core = common::engine_at(&tmp.path().join("data"), asking_harness(answers.clone()));
+    let stops = Arc::new(Mutex::new(Vec::<UnattendedStop>::new()));
+    let heard = stops.clone();
+    core.sessions.set_unattended_listener(Arc::new(move |stop| {
+        heard.lock().unwrap().push(stop.clone())
+    }));
+    seed(&core, tmp.path());
+    let bot = create_bot(&core, billing_only()).await;
+    let cwd = bot_thread(&core, &bot, "routine-1", BotOrigin::Routine);
+
+    core.sessions
+        .dispatch(
+            "routine-1",
+            HarnessId::Pi,
+            RunRequest {
+                cwd,
+                ..run_request("Morning summary")
+            },
+            None,
+        )
+        .await
+        .expect("the routine run starts");
+    wait_for(
+        || status(&core, "routine-1") == Some(SessionStatus::Errored),
+        "the routine run to settle failed",
+    )
+    .await;
+
+    let expected = "This run is unattended, so it couldn't ask for approval to run a command \
+                    outside the sandbox. It stopped.";
+    assert_eq!(
+        answers.lock().unwrap().clone(),
+        vec![Vec::new()],
+        "denied at once"
+    );
+    assert_eq!(
+        stops.lock().unwrap().clone(),
+        vec![UnattendedStop {
+            chat_id: "routine-1".into(),
+            reason: expected.into(),
+        }]
+    );
+    let parts: Vec<MessagePart> = common::entries(&core, "routine-1")
+        .into_iter()
+        .filter(|e| e.role == MessageRole::Assistant)
+        .flat_map(|e| e.parts)
+        .collect();
+    assert!(
+        parts
+            .iter()
+            .any(|p| matches!(p, MessagePart::Error { message, .. } if message == expected)),
+        "{parts:?}"
+    );
+    assert!(
+        !parts.iter().any(|p| matches!(p, MessagePart::Input { .. })),
+        "no approval card: {parts:?}"
+    );
+    assert!(
+        !parts
+            .iter()
+            .any(|p| matches!(p, MessagePart::Text { text, .. } if text.contains("Carried on"))),
+        "the run stopped: {parts:?}"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(status(&core, "routine-1"), Some(SessionStatus::Errored));
+}
+
+/// Attended threads are unchanged: the owner's thread parks the approval
+/// for someone to answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_attended_bot_run_waits_for_its_approval() {
+    let tmp = tempfile::tempdir().unwrap();
+    let answers = Arc::new(Mutex::new(Vec::new()));
+    let core = common::engine_at(&tmp.path().join("data"), asking_harness(answers.clone()));
+    seed(&core, tmp.path());
+    let bot = create_bot(&core, billing_only()).await;
+    let cwd = core
+        .workspace
+        .chat(&bot.chat_id)
+        .unwrap()
+        .unwrap()
+        .cwd
+        .unwrap();
+
+    core.sessions
+        .dispatch(
+            &bot.chat_id,
+            HarnessId::Pi,
+            RunRequest {
+                cwd,
+                ..run_request("Clean up")
+            },
+            None,
+        )
+        .await
+        .expect("the owner run starts");
+    wait_for(
+        || status(&core, &bot.chat_id) == Some(SessionStatus::AwaitingInput),
+        "the owner run to wait on its approval",
+    )
+    .await;
+    assert!(answers.lock().unwrap().is_empty(), "nobody answered yet");
+    core.sessions.interrupt(&bot.chat_id).await.unwrap();
+}
+
+/// No client operation creates a bot thread or changes one's marker: the
+/// Mutate surface edits fields of a row and never its `bot` marker, an
+/// idempotent CreateChat leaves an existing thread alone, and a fork of a
+/// thread is an ordinary chat.
+#[tokio::test(flavor = "multi_thread")]
+async fn clients_cannot_forge_or_change_a_bot_marker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let core = common::assemble_mock(&tmp.path().join("data"));
+    seed(&core, tmp.path());
+    let bot = create_bot(&core, billing_only()).await;
+    bot_thread(&core, &bot, "peer-1", BotOrigin::Peer);
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    let mutate = |op: serde_json::Value| client.call(cypher_rpc::methods::MUTATE, op);
+    let forged = serde_json::json!({ "botId": bot.id, "origin": "owner" });
+
+    // A new chat with a smuggled marker is an ordinary chat.
+    mutate(serde_json::json!({
+        "op": "createChat",
+        "chatId": "forged",
+        "spaceId": "sp-billing",
+        "bot": forged,
+    }))
+    .await
+    .expect("createChat");
+    let chat = core.workspace.chat("forged").unwrap().expect("created");
+    assert_eq!(chat.bot, None);
+
+    // Every row edit keeps the thread's marker exactly as stamped.
+    for chat_id in [bot.chat_id.as_str(), "peer-1"] {
+        let before = core.workspace.chat(chat_id).unwrap().unwrap().bot;
+        for op in [
+            serde_json::json!({ "op": "createChat", "chatId": chat_id, "spaceId": "sp-billing", "bot": forged }),
+            serde_json::json!({ "op": "renameChat", "chatId": chat_id, "title": "Renamed" }),
+            serde_json::json!({ "op": "setChatActivity", "chatId": chat_id, "lastMessageAt": 5_000 }),
+            serde_json::json!({ "op": "setChatArchived", "chatId": chat_id, "archived": false }),
+            serde_json::json!({ "op": "setChatPinned", "chatId": chat_id, "pinned": true }),
+            serde_json::json!({ "op": "setChatCwd", "chatId": chat_id, "cwd": "/tmp", "bot": forged }),
+        ] {
+            mutate(op.clone()).await.expect("mutate");
+            let after = core.workspace.chat(chat_id).unwrap().unwrap();
+            assert_eq!(after.bot, before, "{op}");
+            assert_eq!(after.space_id, None, "{op}");
+        }
+    }
+    assert_eq!(
+        core.workspace.chat("peer-1").unwrap().unwrap().bot,
+        Some(BotChat::new(&bot.id, BotOrigin::Peer))
+    );
+
+    // A fork of a thread carries none of its marker.
+    let source = core.workspace.chat("peer-1").unwrap().unwrap();
+    core.workspace
+        .create_fork_chat("fork-1", &source, "Fork", None, None, None)
+        .unwrap();
+    assert_eq!(core.workspace.chat("fork-1").unwrap().unwrap().bot, None);
 }

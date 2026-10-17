@@ -7,7 +7,7 @@
 //! capabilities live in the profile.
 
 use cypher_harness::BotRunEnv;
-use cypher_proto::{Bot, BotOrigin, Chat};
+use cypher_proto::{Bot, BotOrigin, Chat, PermissionPromptKind, UserInputQuestion};
 
 use super::prompt;
 use crate::host::workspace_host::WorkspaceHost;
@@ -52,6 +52,45 @@ pub fn is_unattended(chat: &Chat) -> bool {
     chat.bot
         .as_ref()
         .is_some_and(|marker| marker.origin == BotOrigin::Routine)
+}
+
+/// An unattended run the engine stopped because it asked for input. The
+/// engine hands it to its unattended-stop listener, which is where the owner
+/// gets notified once routines exist (P3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnattendedStop {
+    pub chat_id: String,
+    /// The error the transcript shows, naming what the run tried to ask.
+    pub reason: String,
+}
+
+/// The transcript error for an unattended run stopped by `questions`.
+pub fn unattended_stop_reason(questions: &[UserInputQuestion]) -> String {
+    let asked = questions
+        .first()
+        .map(|question| match &question.permission {
+            Some(prompt) => format!(
+                "ask for approval to {}",
+                match prompt.kind {
+                    PermissionPromptKind::Escalate => "run a command outside the sandbox",
+                    PermissionPromptKind::Access => "reach files beyond its defaults",
+                    PermissionPromptKind::Network => "reach a domain the network filter blocks",
+                    PermissionPromptKind::Tool => "use a tool that asks first",
+                }
+            ),
+            None => {
+                let line = question.question.lines().next().unwrap_or_default().trim();
+                if line.is_empty() {
+                    "ask a question".to_string()
+                } else {
+                    format!("ask \"{line}\"")
+                }
+            }
+        });
+    format!(
+        "This run is unattended, so it couldn't {}. It stopped.",
+        asked.as_deref().unwrap_or("ask a question")
+    )
 }
 
 #[cfg(test)]
@@ -105,6 +144,37 @@ mod tests {
             "b1",
             BotOrigin::Routine
         )))));
+    }
+
+    #[test]
+    fn unattended_stops_name_what_the_run_asked() {
+        let question = |text: &str, kind: Option<PermissionPromptKind>| UserInputQuestion {
+            id: "q".into(),
+            header: "h".into(),
+            question: text.into(),
+            options: Vec::new(),
+            multi_select: false,
+            permission: kind.map(|kind| cypher_proto::PermissionPrompt {
+                kind,
+                tool_call_id: None,
+            }),
+        };
+        assert_eq!(
+            unattended_stop_reason(&[question(
+                "Run this command outside the sandbox?\n\nContext:",
+                Some(PermissionPromptKind::Escalate)
+            )]),
+            "This run is unattended, so it couldn't ask for approval to run a command \
+             outside the sandbox. It stopped."
+        );
+        assert_eq!(
+            unattended_stop_reason(&[question("Which approach?\nmore", None)]),
+            "This run is unattended, so it couldn't ask \"Which approach?\". It stopped."
+        );
+        assert_eq!(
+            unattended_stop_reason(&[]),
+            "This run is unattended, so it couldn't ask a question. It stopped."
+        );
     }
 
     #[test]
