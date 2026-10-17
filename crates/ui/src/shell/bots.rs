@@ -14,7 +14,7 @@ pub(super) use dialog::BotDialog;
 
 /// Hosts older than this answer `CreateBot` with an unknown-method error, so
 /// the dialog does not offer them.
-const BOTS_MIN_VERSION: (u64, u64, u64) = (0, 3, 53);
+const BOTS_MIN_VERSION: (u64, u64, u64) = (0, 3, 57);
 
 /// Whether a device can host a bot: a Mac or Linux engine, online, and new
 /// enough. The local engine always qualifies (it is running this code).
@@ -265,7 +265,7 @@ mod tests {
         let local = Some("mac");
         assert!(can_host(&device("mac", "macos", None), local, false));
         assert!(can_host(
-            &device("vps", "linux", Some("0.3.53")),
+            &device("vps", "linux", Some("0.3.57")),
             local,
             true
         ));
@@ -275,7 +275,7 @@ mod tests {
             true
         ));
         assert!(!can_host(
-            &device("vps", "linux", Some("0.3.52")),
+            &device("vps", "linux", Some("0.3.56")),
             local,
             true
         ));

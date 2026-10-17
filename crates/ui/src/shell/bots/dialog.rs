@@ -723,7 +723,7 @@ impl Shell {
             let caption = match (host.local, host.online, host.ok) {
                 (true, _, _) => "This device",
                 (false, false, _) => "Offline",
-                (false, true, false) => "Needs Cypher 0.3.53 or newer",
+                (false, true, false) => "Needs Cypher 0.3.57 or newer",
                 (false, true, true) => "Online",
             };
             div()
