@@ -17,6 +17,7 @@ pub mod providers;
 pub mod setup;
 pub mod shortcuts;
 pub mod subagents;
+pub mod system_prompt;
 pub mod titles;
 pub mod translation;
 pub mod web_search;

@@ -44,6 +44,8 @@ fn engine_identity_is_not_forwardable() {
     assert!(forwardable(methods::SET_CONTEXT_RECOVERY_SETTINGS));
     assert!(forwardable(methods::GET_WEB_SEARCH_FALLBACK));
     assert!(forwardable(methods::SET_WEB_SEARCH_FALLBACK));
+    assert!(forwardable(methods::GET_APPEND_SYSTEM_PROMPT));
+    assert!(forwardable(methods::SET_APPEND_SYSTEM_PROMPT));
     assert!(forwardable(methods::FETCH_ALL));
 }
 

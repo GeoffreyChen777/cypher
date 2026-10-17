@@ -11,6 +11,7 @@ use cypher_rpc::methods;
 
 use super::context_recovery::ContextRecoveryControl;
 use super::device_target::DeviceTarget;
+use super::system_prompt::SystemPromptControl;
 use super::titles::TitlesPage;
 use super::translation::TranslationControl;
 use crate::kit::popover::{self, Loadable};
@@ -23,6 +24,7 @@ pub struct HarnessesPage {
     titles: Entity<TitlesPage>,
     translation: Entity<TranslationControl>,
     recovery: Entity<ContextRecoveryControl>,
+    system_prompt: Entity<SystemPromptControl>,
     packages: Loadable<PiPackagesSnapshot>,
     target: Entity<DeviceTarget>,
     generation: u64,
@@ -60,11 +62,14 @@ impl HarnessesPage {
         let titles = cx.new(|cx| TitlesPage::new_embedded(state.clone(), target.clone(), cx));
         let translation = cx.new(|cx| TranslationControl::new(state.clone(), target.clone(), cx));
         let recovery = cx.new(|cx| ContextRecoveryControl::new(state.clone(), target.clone(), cx));
+        let system_prompt =
+            cx.new(|cx| SystemPromptControl::new(state.clone(), target.clone(), cx));
         let mut page = Self {
             state,
             titles,
             translation,
             recovery,
+            system_prompt,
             packages: Loadable::Idle,
             target,
             generation,
@@ -355,6 +360,7 @@ impl Render for HarnessesPage {
                         ))
                     })
                     .child(body)
+                    .child(self.system_prompt.clone())
                     .child(self.translation.clone())
                     .child(self.recovery.clone())
                     .child(div().mt(px(24.0)).child(self.titles.clone())),

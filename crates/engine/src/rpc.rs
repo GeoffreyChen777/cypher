@@ -677,6 +677,12 @@ impl RpcService for EngineRpc {
             methods::SET_WEB_SEARCH_FALLBACK => {
                 settings::set_web_search_fallback(self, params).await
             }
+            methods::GET_APPEND_SYSTEM_PROMPT => {
+                RpcReply::value(&crate::pi::system_prompt::load(self.pi_runtime()?.paths()))
+            }
+            methods::SET_APPEND_SYSTEM_PROMPT => {
+                settings::set_append_system_prompt(self, params).await
+            }
             methods::GET_TITLE_MODEL_SETTINGS => settings::get_title_model_settings(self),
             methods::SET_TITLE_MODEL_SETTINGS => {
                 settings::set_title_model_settings(self, params).await

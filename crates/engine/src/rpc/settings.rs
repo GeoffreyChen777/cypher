@@ -1,5 +1,5 @@
-//! Device settings that pin a Pi model: web-search fallback, titles and
-//! context recovery.
+//! Device settings that pin a Pi model (web-search fallback, titles and
+//! context recovery), and the appended system prompt.
 
 use serde_json::Value;
 
@@ -32,6 +32,20 @@ pub(super) async fn set_web_search_fallback(
     // and cached discovery must pick the change up.
     rpc.reload_pi_runtime().await;
     RpcReply::value(&settings)
+}
+
+pub(super) async fn set_append_system_prompt(
+    rpc: &EngineRpc,
+    params: Value,
+) -> Result<RpcReply, RpcError> {
+    let body = strip_target(params);
+    let request: crate::pi::system_prompt::SetAppendSystemPrompt = parse_params(body)?;
+    let saved = crate::pi::system_prompt::save(rpc.pi_runtime()?.paths(), request)
+        .map_err(RpcError::Failed)?;
+    // Pi reads the file at process start: drop parked children so each
+    // chat's next message picks it up. Running turns finish untouched.
+    rpc.sessions.recycle_idle_sessions().await;
+    RpcReply::value(&saved)
 }
 
 pub(super) fn get_title_model_settings(rpc: &EngineRpc) -> Result<RpcReply, RpcError> {

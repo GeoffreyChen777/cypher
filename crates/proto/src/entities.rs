@@ -504,6 +504,23 @@ pub struct WebSearchFallbackSettings {
     pub resolved: Option<String>,
 }
 
+/// Device-local instructions Pi appends to every chat's system prompt
+/// (Settings → Agents → System prompt): the agent dir's `APPEND_SYSTEM.md`.
+/// On Claude models pi-claude-bridge appends them to Claude Code's own prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AppendSystemPrompt {
+    /// Empty when the file is absent; saving empty text removes it.
+    pub text: String,
+    /// Where the file lives on the device — display only.
+    pub path: String,
+}
+
+impl AppendSystemPrompt {
+    /// Larger text is refused: it rides every turn of every chat.
+    pub const MAX_BYTES: usize = 64 * 1024;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDirectory {
