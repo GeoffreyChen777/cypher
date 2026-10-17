@@ -510,3 +510,102 @@ async fn activity_and_git_state_stay_in_scope() {
     .await;
     assert!(secret.contains("is not a git repository"), "{secret}");
 }
+
+/// The chats the bot search index holds a transcript of, from its file.
+fn indexed_chats(bot_folder: &str) -> Vec<String> {
+    let store = std::path::Path::new(bot_folder)
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap();
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        store.join("bots-index.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare("SELECT chat_id FROM chats WHERE stored = 1 ORDER BY chat_id")
+    else {
+        return Vec::new();
+    };
+    stmt.query_map([], |row| row.get(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn search_reads_the_index_and_filters_scope_at_query_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    let core = common::assemble_mock(&tmp.path().join("data"));
+    seed(&core, tmp.path());
+    let bot = create_bot(&core, billing_only()).await;
+    let folder = core
+        .workspace
+        .chat(&bot.chat_id)
+        .unwrap()
+        .unwrap()
+        .cwd
+        .unwrap();
+
+    // The background indexer picks up the new bot's scope, and only it.
+    wait_for(
+        || indexed_chats(&folder) == ["chat-billing"],
+        "the billing chat indexed",
+    )
+    .await;
+    let found = tool(
+        &core,
+        &bot.chat_id,
+        "search_sessions",
+        serde_json::json!({ "query": "invo tables" }),
+    )
+    .await;
+    assert!(
+        found.contains("#0 user: Migrate the invoice tables"),
+        "{found}"
+    );
+    assert!(!found.contains("not indexed"), "{found}");
+
+    // Scope applies at query time, before the index catches up.
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "updateBot", "botId": bot.id, "name": "Billing bot",
+                "scope": BotScope {
+                    projects: ProjectGrant::All,
+                    exclude_sessions: vec!["chat-billing".into()],
+                    ..Default::default()
+                },
+            }),
+        )
+        .await
+        .expect("updateBot");
+    let found = tool(
+        &core,
+        &bot.chat_id,
+        "search_sessions",
+        serde_json::json!({ "query": "invoice" }),
+    )
+    .await;
+    assert!(!found.contains("Migrate"), "{found}");
+    assert!(found.contains("Rotate the invoice signing key"), "{found}");
+
+    // The index follows: the excluded chat leaves, the newly granted one joins.
+    wait_for(
+        || indexed_chats(&folder) == ["chat-secret"],
+        "the index follows the scope",
+    )
+    .await;
+
+    // A deleted bot leaves nothing indexed.
+    client
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "deleteBot", "botId": bot.id }),
+        )
+        .await
+        .expect("deleteBot");
+    wait_for(|| indexed_chats(&folder).is_empty(), "the index emptied").await;
+    core.shutdown().await;
+}

@@ -1,6 +1,8 @@
 //! Rendering and paging of the bot tools' answers. Scope enforcement runs
 //! against a real engine in `tests/agent_bots.rs`.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 
 use cypher_doc::{MessagePart, MessageRole, SessionMessageEntry};
@@ -12,9 +14,10 @@ use cypher_proto::{
 use super::git::{
     Commit, DiffStats, GitFacts, Upstream, facts_from_history, render, resolve_space,
 };
+use super::index::{Hit, Lookup, Pass, SearchIndex, match_query, targets};
 use super::tools::{
-    View, list_projects, list_sessions, list_sessions_args, render_session, session_activity,
-    session_activity_args,
+    SEARCH_SCAN_MAX, View, find, list_projects, list_sessions, list_sessions_args, render_session,
+    session_activity, session_activity_args,
 };
 
 fn at(ms: i64) -> DateTime<Utc> {
@@ -466,4 +469,287 @@ fn a_remote_history_page_estimates_ahead_and_behind() {
         text.contains("Working tree: couldn't be read (offline diff)."),
         "{text}"
     );
+}
+
+// ── the search index ────────────────────────────────────────────────────────
+
+fn transcript(texts: &[&str]) -> Vec<SessionMessageEntry> {
+    texts
+        .iter()
+        .enumerate()
+        .map(|(i, text)| message(i, text))
+        .collect()
+}
+
+fn ids(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+fn words(query: &str) -> Vec<String> {
+    query.split_whitespace().map(str::to_lowercase).collect()
+}
+
+fn chats_hit(lookup: &Lookup) -> Vec<String> {
+    let mut chats: Vec<String> = lookup.hits.iter().map(|h| h.chat_id.clone()).collect();
+    chats.dedup();
+    chats
+}
+
+#[test]
+fn the_index_finds_every_word_by_prefix_within_the_asked_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = SearchIndex::new(dir.path().join("bots-index.sqlite"));
+    let chats = [chat("a", "s1", 2_000), chat("b", "s1", 1_000)];
+    let texts: HashMap<&str, Vec<SessionMessageEntry>> = HashMap::from([
+        ("a", transcript(&["Migrate the invoice tables", "done"])),
+        ("b", transcript(&["Rotate the invoice signing key"])),
+    ]);
+    let pass = index
+        .sync(&chats, &HashMap::new(), |id| Ok(texts.get(id).cloned()), 10)
+        .unwrap();
+    assert_eq!(
+        pass,
+        Pass {
+            indexed: 2,
+            removed: 0,
+            remaining: 0
+        }
+    );
+
+    let both = index.search(&words("INVO"), &ids(&["a", "b"])).unwrap();
+    assert_eq!(both.hits.len(), 2, "prefix, any case: {both:?}");
+    assert_eq!(
+        both.indexed,
+        HashMap::from([("a".into(), true), ("b".into(), true)])
+    );
+    let hit = both.hits.iter().find(|h| h.chat_id == "a").unwrap();
+    assert_eq!(
+        (hit.index, hit.role.as_str(), hit.text.as_str()),
+        (0, "user", "Migrate the invoice tables")
+    );
+
+    let all_words = index
+        .search(&words("invoice tab"), &ids(&["a", "b"]))
+        .unwrap();
+    assert_eq!(chats_hit(&all_words), ["a"]);
+    // Scope is the caller's: b's match is invisible to a query over a only.
+    let scoped = index.search(&words("signing"), &ids(&["a"])).unwrap();
+    assert!(scoped.hits.is_empty() && !scoped.indexed.contains_key("b"));
+    // Quotes and bare punctuation can't break the query.
+    assert_eq!(
+        match_query(&words("- \"key")).as_deref(),
+        Some("\"\"\"key\"*")
+    );
+    assert!(index.search(&words("\"key"), &ids(&["b"])).is_ok());
+    assert!(
+        index
+            .search(&words("--"), &ids(&["b"]))
+            .unwrap()
+            .hits
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_index_rereads_only_moved_chats_and_drops_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = SearchIndex::new(dir.path().join("bots-index.sqlite"));
+    let mut chats = vec![chat("a", "s1", 2_000), chat("b", "s1", 1_000)];
+    let mut texts: HashMap<String, Vec<SessionMessageEntry>> = HashMap::from([
+        ("a".to_string(), transcript(&["first draft"])),
+        ("b".to_string(), transcript(&["release notes"])),
+    ]);
+    let mut saved = HashMap::from([("b".to_string(), 50)]);
+    let reads = std::cell::RefCell::new(Vec::<String>::new());
+    let sync = |chats: &[Chat],
+                saved: &HashMap<String, i64>,
+                texts: &HashMap<String, Vec<SessionMessageEntry>>,
+                budget| {
+        reads.borrow_mut().clear();
+        index
+            .sync(
+                chats,
+                saved,
+                |id| {
+                    reads.borrow_mut().push(id.to_string());
+                    Ok(texts.get(id).cloned())
+                },
+                budget,
+            )
+            .unwrap()
+    };
+    // A bounded pass leaves the rest for the next one.
+    assert_eq!(sync(&chats, &saved, &texts, 1).remaining, 1);
+    assert_eq!(*reads.borrow(), ["a"], "newest first");
+    assert_eq!(sync(&chats, &saved, &texts, 10).indexed, 1);
+    assert_eq!(sync(&chats, &saved, &texts, 10).indexed, 0, "nothing moved");
+
+    // New activity re-reads that chat; its old text is replaced.
+    texts.insert("a".into(), transcript(&["final copy"]));
+    chats[0].last_message_at = Some(at(3_000));
+    sync(&chats, &saved, &texts, 10);
+    assert_eq!(*reads.borrow(), ["a"]);
+    assert!(
+        index
+            .search(&words("draft"), &ids(&["a"]))
+            .unwrap()
+            .hits
+            .is_empty()
+    );
+    assert_eq!(
+        chats_hit(&index.search(&words("final"), &ids(&["a"])).unwrap()),
+        ["a"]
+    );
+
+    // A fresher stored snapshot re-reads the chat even with no row change.
+    saved.insert("b".into(), 60);
+    sync(&chats, &saved, &texts, 10);
+    assert_eq!(*reads.borrow(), ["b"]);
+
+    // A chat that left every scope (or was deleted) is dropped.
+    let pass = sync(&chats[..1], &saved, &texts, 10);
+    assert_eq!(pass.removed, 1);
+    let gone = index.search(&words("release"), &ids(&["a", "b"])).unwrap();
+    assert!(gone.hits.is_empty() && !gone.indexed.contains_key("b"));
+
+    // No local copy: indexed as such, matched by title only.
+    texts.remove("a");
+    chats[0].last_message_at = Some(at(4_000));
+    sync(&chats[..1], &saved, &texts, 10);
+    assert!(!index.search(&words("final"), &ids(&["a"])).unwrap().indexed["a"]);
+}
+
+#[test]
+fn index_targets_are_the_union_of_this_devices_reading_bots() {
+    let bot = |id: &str, host: &str, scope: BotScope| Bot {
+        id: id.into(),
+        name: id.into(),
+        icon: None,
+        color: None,
+        host_device_id: host.into(),
+        chat_id: format!("{id}-chat"),
+        instructions: None,
+        scope,
+        created_at: at(0),
+    };
+    let grant = |space: &str| BotScope {
+        projects: ProjectGrant::Selected {
+            space_ids: vec![space.into()],
+        },
+        ..Default::default()
+    };
+    let mut bot_chat = chat("b1-chat", "s1", 9_000);
+    bot_chat.bot = Some(cypher_proto::BotChat {
+        bot_id: "b1".into(),
+    });
+    let chats = vec![
+        chat("one", "s1", 1_000),
+        chat("two", "s2", 2_000),
+        chat("three", "s3", 3_000),
+        chat("four", "s4", 4_000),
+        bot_chat,
+    ];
+    let bots = vec![
+        bot("b1", "dev", grant("s1")),
+        bot("b2", "dev", grant("s2")),
+        bot("b3", "other", grant("s3")),
+        bot(
+            "b4",
+            "dev",
+            BotScope {
+                transcripts: false,
+                ..grant("s4")
+            },
+        ),
+    ];
+    let ids: Vec<String> = targets("dev", &bots, &chats)
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(
+        ids,
+        ["two", "one"],
+        "newest first; no bot chats, other hosts or title-only bots"
+    );
+}
+
+#[test]
+fn a_corrupt_index_is_rebuilt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bots-index.sqlite");
+    std::fs::write(
+        &path,
+        b"this is not a database at all, not even close......",
+    )
+    .unwrap();
+    let index = SearchIndex::new(path);
+    let chats = [chat("a", "s1", 1_000)];
+    index
+        .sync(
+            &chats,
+            &HashMap::new(),
+            |_| Ok(Some(transcript(&["hello world"]))),
+            10,
+        )
+        .unwrap();
+    assert_eq!(
+        chats_hit(&index.search(&words("hello"), &ids(&["a"])).unwrap()),
+        ["a"]
+    );
+}
+
+#[test]
+fn search_falls_back_to_scanning_unindexed_chats() {
+    let candidates = vec![
+        chat("indexed", "s1", 5_000),
+        chat("fresh", "s1", 4_000),
+        chat("uncopied", "s1", 3_000),
+        chat("titled", "s1", 2_000),
+    ];
+    let mut candidates = candidates;
+    candidates[3].title = Some("Invoice cleanup".into());
+    let lookup = |_: &[String], _: &[String]| {
+        Ok(Lookup {
+            hits: vec![Hit {
+                chat_id: "indexed".into(),
+                index: 4,
+                role: "agent".into(),
+                text: "the invoice job is green".into(),
+                score: -2.0,
+            }],
+            indexed: HashMap::from([("indexed".into(), true), ("uncopied".into(), false)]),
+        })
+    };
+    let read = |id: &str| {
+        Ok(match id {
+            "fresh" => Some(transcript(&["no match", "invoice export broke"])),
+            "titled" => Some(transcript(&["unrelated"])),
+            other => panic!("{other} is indexed and must not be scanned"),
+        })
+    };
+    let found = find(&candidates, &words("invoice"), true, 20, lookup, read);
+    let order: Vec<&str> = found.hits.iter().map(|(c, _)| c.id.as_str()).collect();
+    assert_eq!(
+        order,
+        ["indexed", "fresh", "titled"],
+        "ranked, then scanned, then title-only"
+    );
+    assert_eq!(found.hits[0].1, ["#4 agent: the invoice job is green"]);
+    assert_eq!(found.hits[1].1, ["#1 agent: invoice export broke"]);
+    assert_eq!((found.unstored, found.not_searched), (1, 0));
+
+    // With no index every chat is scanned, up to the bound.
+    let many: Vec<Chat> = (0..SEARCH_SCAN_MAX + 2)
+        .map(|i| chat(&format!("c{i}"), "s1", 10_000 - i as i64))
+        .collect();
+    let found = find(
+        &many,
+        &words("invoice"),
+        true,
+        20,
+        |_, _| Err(crate::EngineError::Other("no index".into())),
+        |_| Ok(None),
+    );
+    assert_eq!((found.unstored, found.not_searched), (SEARCH_SCAN_MAX, 2));
+    assert!(found.hits.is_empty());
 }

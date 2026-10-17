@@ -274,6 +274,7 @@ impl EngineCore {
             }
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
+        bots.start_indexer();
         Ok(Self {
             sessions,
             doc_host,
@@ -494,6 +495,7 @@ impl EngineCore {
         }
         self.diff_sync.shutdown().await;
         self.spaces_sync.shutdown().await;
+        self.bots.shutdown().await;
         self.doc_host.shutdown_workers().await;
         self.doc_host.flush_all();
         self.workspace.shutdown();

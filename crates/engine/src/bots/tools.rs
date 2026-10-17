@@ -23,8 +23,8 @@ use crate::util::off_runtime;
 /// Most sessions `list_sessions` returns.
 const LIST_MAX: usize = 200;
 const LIST_DEFAULT: usize = 50;
-/// Sessions `search_sessions` scans, newest first.
-const SEARCH_SCAN_MAX: usize = 400;
+/// Unindexed sessions `search_sessions` scans, newest first.
+pub(super) const SEARCH_SCAN_MAX: usize = 400;
 const SEARCH_DEFAULT: usize = 20;
 const SEARCH_MAX: usize = 50;
 /// Excerpts shown per matching session.
@@ -318,73 +318,34 @@ impl Bots {
             .chats
             .iter()
             .filter(|c| view.in_projects(c, &projects))
-            .take(SEARCH_SCAN_MAX)
             .cloned()
             .collect();
-        let skipped_scan = view
-            .chats
-            .iter()
-            .filter(|c| view.in_projects(c, &projects))
-            .count()
-            .saturating_sub(candidates.len());
         let transcripts = view.bot.scope.transcripts;
+        let index = self.inner.index.clone();
         let docs = self.inner.doc_host.clone();
-        let scan_words = words.clone();
-        let (hits, unstored) = off_runtime(move || {
-            let mut hits: Vec<(Chat, Vec<String>)> = Vec::new();
-            let mut unstored = 0usize;
-            for chat in candidates {
-                if hits.len() >= limit {
-                    break;
-                }
-                let mut excerpts = Vec::new();
-                let haystack = format!(
-                    "{} {}",
-                    chat.title.as_deref().unwrap_or(""),
-                    chat.last_message_preview.as_deref().unwrap_or("")
-                )
-                .to_lowercase();
-                let title_hit = scan_words.iter().all(|w| haystack.contains(w));
-                if transcripts {
-                    match docs.read_transcript(&chat.id) {
-                        Ok(Some(entries)) => {
-                            for (index, entry) in entries.iter().enumerate() {
-                                if excerpts.len() >= SEARCH_EXCERPTS {
-                                    break;
-                                }
-                                let text = entry_text(entry);
-                                let lower = text.to_lowercase();
-                                if scan_words.iter().all(|w| lower.contains(w)) {
-                                    excerpts.push(format!(
-                                        "#{index} {}: {}",
-                                        role(entry),
-                                        excerpt(&text, &lower, &scan_words[0])
-                                    ));
-                                }
-                            }
-                        }
-                        Ok(None) => unstored += 1,
-                        Err(err) => {
-                            tracing::debug!(chat = %chat.id, error = %err, "bot search skipped a chat");
-                            unstored += 1;
-                        }
-                    }
-                }
-                if title_hit || !excerpts.is_empty() {
-                    hits.push((chat, excerpts));
-                }
-            }
-            (hits, unstored)
+        let find_words = words.clone();
+        let found = off_runtime(move || {
+            find(
+                &candidates,
+                &find_words,
+                transcripts,
+                limit,
+                |words, ids| index.search(words, ids),
+                |id| docs.read_transcript(id),
+            )
         })
         .await
         .map_err(EngineError::Other)?;
 
-        let mut out = vec![if hits.is_empty() {
+        let mut out = vec![if found.hits.is_empty() {
             format!("No sessions match \"{}\".", words.join(" "))
         } else {
-            format!("Sessions matching \"{}\" (newest first):", words.join(" "))
+            format!(
+                "Sessions matching \"{}\" (best matches first):",
+                words.join(" ")
+            )
         }];
-        for (chat, excerpts) in &hits {
+        for (chat, excerpts) in &found.hits {
             out.push(format!("- {}", view.header(chat)));
             for line in excerpts {
                 out.push(format!("  {line}"));
@@ -396,14 +357,17 @@ impl Bots {
                     .into(),
             );
         }
-        if unstored > 0 {
+        if found.unstored > 0 {
             out.push(format!(
-                "{unstored} session(s) have no copy on this device yet and were matched by title only."
+                "{} session(s) have no copy on this device yet and were matched by title only.",
+                found.unstored
             ));
         }
-        if skipped_scan > 0 {
+        if found.not_searched > 0 {
             out.push(format!(
-                "Only the {SEARCH_SCAN_MAX} most recent sessions were searched; narrow with `project`."
+                "{} older session(s) are not indexed yet, so only their titles were searched; \
+                 try again shortly or narrow with `project`.",
+                found.not_searched
             ));
         }
         Ok(clip(&out.join("\n"), ANSWER_MAX_CHARS))
@@ -726,7 +690,132 @@ fn hours_label(hours: f64) -> String {
     }
 }
 
-fn role(entry: &SessionMessageEntry) -> &'static str {
+/// What `search_sessions` found, best first, and what it could not search.
+pub(super) struct Found {
+    pub hits: Vec<(Chat, Vec<String>)>,
+    /// Sessions this device holds no transcript of.
+    pub unstored: usize,
+    /// Unindexed sessions past the scan bound: titles only.
+    pub not_searched: usize,
+}
+
+/// Match `candidates` (newest first) against `words`: titles and previews
+/// from the rows; message text from the index (`lookup`), and by scanning
+/// transcripts (`read`) for the newest [`SEARCH_SCAN_MAX`] candidates the
+/// index does not hold yet. Sessions with matching messages rank by their
+/// best message's relevance (title matches first), then by recency; the
+/// title-only ones follow, newest first. Blocking.
+pub(super) fn find(
+    candidates: &[Chat],
+    words: &[String],
+    transcripts: bool,
+    limit: usize,
+    lookup: impl FnOnce(&[String], &[String]) -> Result<super::index::Lookup, EngineError>,
+    mut read: impl FnMut(&str) -> Result<Option<Vec<SessionMessageEntry>>, EngineError>,
+) -> Found {
+    // chat id → (best score, excerpts by message index)
+    let mut matched: HashMap<String, (f64, Vec<(usize, String)>)> = HashMap::new();
+    let mut unstored = 0usize;
+    let mut not_searched = 0usize;
+    if transcripts {
+        let ids: Vec<String> = candidates.iter().map(|c| c.id.clone()).collect();
+        let lookup = lookup(words, &ids).unwrap_or_else(|err| {
+            tracing::debug!(error = %err, "bot search without the index");
+            Default::default()
+        });
+        let mut unindexed: Vec<&Chat> = Vec::new();
+        for chat in candidates {
+            match lookup.indexed.get(&chat.id) {
+                Some(true) => {}
+                Some(false) => unstored += 1,
+                None => unindexed.push(chat),
+            }
+        }
+        for hit in lookup.hits {
+            let (_, excerpts) = matched
+                .entry(hit.chat_id)
+                .or_insert_with(|| (hit.score, Vec::new()));
+            if excerpts.len() < SEARCH_EXCERPTS {
+                let lower = hit.text.to_lowercase();
+                excerpts.push((
+                    hit.index,
+                    format!(
+                        "#{} {}: {}",
+                        hit.index,
+                        hit.role,
+                        excerpt(&hit.text, &lower, &words[0])
+                    ),
+                ));
+            }
+        }
+        not_searched = unindexed.len().saturating_sub(SEARCH_SCAN_MAX);
+        for chat in unindexed.into_iter().take(SEARCH_SCAN_MAX) {
+            match read(&chat.id) {
+                Ok(Some(entries)) => {
+                    let mut excerpts = Vec::new();
+                    for (index, entry) in entries.iter().enumerate() {
+                        if excerpts.len() >= SEARCH_EXCERPTS {
+                            break;
+                        }
+                        let text = entry_text(entry);
+                        let lower = text.to_lowercase();
+                        if words.iter().all(|w| lower.contains(w)) {
+                            excerpts.push((
+                                index,
+                                format!(
+                                    "#{index} {}: {}",
+                                    role(entry),
+                                    excerpt(&text, &lower, &words[0])
+                                ),
+                            ));
+                        }
+                    }
+                    if !excerpts.is_empty() {
+                        // Unranked: after every indexed match of equal standing.
+                        matched.insert(chat.id.clone(), (0.0, excerpts));
+                    }
+                }
+                Ok(None) => unstored += 1,
+                Err(err) => {
+                    tracing::debug!(chat = %chat.id, error = %err, "bot search skipped a chat");
+                    unstored += 1;
+                }
+            }
+        }
+    }
+    let mut ranked: Vec<(u8, f64, usize, &Chat, Vec<String>)> = Vec::new();
+    for (position, chat) in candidates.iter().enumerate() {
+        let haystack = format!(
+            "{} {}",
+            chat.title.as_deref().unwrap_or(""),
+            chat.last_message_preview.as_deref().unwrap_or("")
+        )
+        .to_lowercase();
+        let title_hit = words.iter().all(|w| haystack.contains(w));
+        let (tier, score, excerpts) = match matched.remove(&chat.id) {
+            Some((score, mut excerpts)) => {
+                excerpts.sort_by_key(|(index, _)| *index);
+                let lines = excerpts.into_iter().map(|(_, line)| line).collect();
+                (if title_hit { 0 } else { 1 }, score, lines)
+            }
+            None if title_hit => (2, 0.0, Vec::new()),
+            None => continue,
+        };
+        ranked.push((tier, score, position, chat, excerpts));
+    }
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
+    Found {
+        hits: ranked
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, _, chat, excerpts)| (chat.clone(), excerpts))
+            .collect(),
+        unstored,
+        not_searched,
+    }
+}
+
+pub(super) fn role(entry: &SessionMessageEntry) -> &'static str {
     match entry.role {
         MessageRole::User => "user",
         MessageRole::Assistant => "agent",
@@ -735,7 +824,7 @@ fn role(entry: &SessionMessageEntry) -> &'static str {
 }
 
 /// The message's readable text: its text parts, in order.
-fn entry_text(entry: &SessionMessageEntry) -> String {
+pub(super) fn entry_text(entry: &SessionMessageEntry) -> String {
     entry
         .parts
         .iter()
