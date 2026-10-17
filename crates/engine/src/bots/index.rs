@@ -30,7 +30,7 @@ use crate::host::workspace_host::WorkspaceHost;
 use crate::util::{lock, off_runtime};
 
 /// Bumped when the schema changes; an older file is rebuilt.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 /// Chats re-read per pass; the task runs passes back to back until caught up.
 const CHATS_PER_PASS: usize = 40;
 /// Message text kept per message.
@@ -59,7 +59,7 @@ const SCHEMA: &str = "
         UNIQUE (chat_id, idx)
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS messages
-        USING fts5(text, tokenize = 'unicode61 remove_diacritics 2');
+        USING fts5(text, tokenize = 'trigram remove_diacritics 1');
 ";
 
 /// One matching message.
@@ -221,8 +221,8 @@ impl SearchIndex {
         })
     }
 
-    /// Messages containing every word (each a prefix), most relevant first,
-    /// among `chat_ids` only.
+    /// Messages containing every word (anywhere, any case, like the scan),
+    /// most relevant first, among `chat_ids` only.
     pub(super) fn search(
         &self,
         words: &[String],
@@ -254,14 +254,9 @@ impl SearchIndex {
             let hits = match &query {
                 None => Vec::new(),
                 Some(query) => {
-                    let mut stmt = tx.prepare(
-                        "SELECT e.chat_id, e.idx, e.role, messages.text, messages.rank
-                         FROM messages JOIN entries e ON e.id = messages.rowid
-                         WHERE messages MATCH ?1
-                           AND e.chat_id IN (SELECT chat_id FROM temp.scope)
-                         ORDER BY messages.rank LIMIT ?2",
-                    )?;
-                    stmt.query_map(params![query, QUERY_ROWS as i64], |row| {
+                    let (sql, values) = query.sql();
+                    let mut stmt = tx.prepare(&sql)?;
+                    stmt.query_map(rusqlite::params_from_iter(values), |row| {
                         Ok(Hit {
                             chat_id: row.get(0)?,
                             index: row.get::<_, i64>(1)? as usize,
@@ -333,15 +328,78 @@ fn activity_ms(chat: &Chat) -> i64 {
         .timestamp_millis()
 }
 
-/// `"word"* "other"*`: every word, each as a prefix. Words with nothing to
-/// match on (bare punctuation) are dropped; `None` when none remain.
-pub(super) fn match_query(words: &[String]) -> Option<String> {
-    let terms: Vec<String> = words
+/// A search over the trigram index. Words of three or more characters
+/// become one FTS5 MATCH of quoted substrings; shorter ones cannot be
+/// trigram-matched and filter the rows with `LIKE` instead. Substrings, not
+/// words: code is full of identifiers (`BotScope`, `invoice_total`), and the
+/// scan this replaced matched inside them too.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct MatchQuery {
+    pub fts: Option<String>,
+    /// `LIKE` patterns, `%` and `_` escaped with `\`.
+    pub short: Vec<String>,
+}
+
+impl MatchQuery {
+    /// The statement and its parameters, scoped to `temp.scope`.
+    fn sql(&self) -> (String, Vec<String>) {
+        let mut sql = String::from("SELECT e.chat_id, e.idx, e.role, messages.text, ");
+        let mut values = Vec::new();
+        sql.push_str(match self.fts {
+            Some(_) => "messages.rank",
+            None => "0.0",
+        });
+        sql.push_str(
+            " FROM messages JOIN entries e ON e.id = messages.rowid
+              WHERE e.chat_id IN (SELECT chat_id FROM temp.scope)",
+        );
+        if let Some(fts) = &self.fts {
+            values.push(fts.clone());
+            sql.push_str(&format!(" AND messages MATCH ?{}", values.len()));
+        }
+        for pattern in &self.short {
+            values.push(pattern.clone());
+            sql.push_str(&format!(
+                " AND messages.text LIKE ?{} ESCAPE '\\'",
+                values.len()
+            ));
+        }
+        sql.push_str(match self.fts {
+            Some(_) => " ORDER BY messages.rank",
+            None => " ORDER BY e.id DESC",
+        });
+        sql.push_str(&format!(" LIMIT {QUERY_ROWS}"));
+        (sql, values)
+    }
+}
+
+/// The query for `words`. Words with nothing to match on (bare punctuation)
+/// are dropped; `None` when none remain.
+pub(super) fn match_query(words: &[String]) -> Option<MatchQuery> {
+    let words: Vec<&String> = words
         .iter()
         .filter(|w| w.chars().any(char::is_alphanumeric))
-        .map(|w| format!("\"{}\"*", w.replace('"', "\"\"")))
         .collect();
-    (!terms.is_empty()).then(|| terms.join(" "))
+    let long: Vec<String> = words
+        .iter()
+        .filter(|w| w.chars().count() >= 3)
+        .map(|w| format!("\"{}\"", w.replace('"', "\"\"")))
+        .collect();
+    let short: Vec<String> = words
+        .iter()
+        .filter(|w| w.chars().count() < 3)
+        .map(|w| {
+            let escaped = w
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            format!("%{escaped}%")
+        })
+        .collect();
+    (!long.is_empty() || !short.is_empty()).then(|| MatchQuery {
+        fts: (!long.is_empty()).then(|| long.join(" ")),
+        short,
+    })
 }
 
 /// The chats worth indexing: what the bots hosted on `device_id` that may

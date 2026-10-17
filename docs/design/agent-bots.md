@@ -323,7 +323,7 @@ device. As built:
   wants the freshest copy, so for a chat another device hosts it opens the doc (joining
   its chat2 room) and gives it a few seconds to catch up.
 - **Search index.** `<profile store>/bots-index.sqlite` (beside `<store>/bots`) is a
-  SQLite FTS5 index of message text: `entries` rows keyed by (chat id, message index) with
+  SQLite FTS5 index of message text (trigram tokenizer): `entries` rows keyed by (chat id, message index) with
   the role, the text in an FTS5 table sharing their rowid, and one watermark row per chat
   (row activity, snapshot save time, whether a copy existed). It holds only chats some bot
   hosted here may read message text from (the union of their scopes; never bot chats).
@@ -334,8 +334,10 @@ device. As built:
   SQLite and transcript work runs off the runtime; a corrupt or outdated file is deleted
   and rebuilt. Scope is filtered at query time against the caller's current view, so a
   narrowed scope applies at once.
-- **Search.** `search_sessions` asks the index for messages containing every word (each a
-  prefix), ranks sessions by their best message's relevance (title matches first), then
+- **Search.** `search_sessions` asks the index for messages containing every word as a
+  substring, any case, as the P0 scan did, so a word matches inside identifiers like
+  `BotScope`; words under three characters, which trigrams can't match, filter with
+  `LIKE`. It ranks sessions by their best message's relevance (title matches first), then
   recency, and still matches titles and previews from the rows. Sessions the index does
   not hold yet are scanned directly, the newest 400 of them; the answer says how many
   were not searched, and how many have no copy on this device (matched by title only).
@@ -382,7 +384,7 @@ are plain text, bounded to 48 KiB.
 |---|---|
 | `list_projects` | Granted projects: name, id, device, folder, git, session count, working count, last activity. |
 | `list_sessions` | Root sessions in scope, newest first, filterable by project, `active` and `since_hours`, with status and latest-message preview. |
-| `search_sessions` | Sessions whose title, preview or messages contain every word (prefixes), best match first; up to three excerpts each, with message indexes. |
+| `search_sessions` | Sessions whose title, preview or messages contain every word (substrings), best match first; up to three excerpts each, with message indexes. |
 | `read_session` | Up to 60 messages of one session, latest by default or from an index; tool calls as one-line summaries, thinking left out. |
 | `session_activity` | What changed in the last `since_hours` (default 24, at most 336), optionally in one project: sessions started, sessions with new messages with their current status and latest preview, runs that ended; grouped by project, newest first, at most 60 sessions. |
 | `project_git` | One granted space: branch, ahead/behind its upstream, the last 10 commits (short sha, subject, author, time) and working-tree changes by file. Another device's space needs that device online. |

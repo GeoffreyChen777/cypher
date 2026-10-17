@@ -496,7 +496,7 @@ fn chats_hit(lookup: &Lookup) -> Vec<String> {
 }
 
 #[test]
-fn the_index_finds_every_word_by_prefix_within_the_asked_scope() {
+fn the_index_finds_every_word_as_a_substring_within_the_asked_scope() {
     let dir = tempfile::tempdir().unwrap();
     let index = SearchIndex::new(dir.path().join("bots-index.sqlite"));
     let chats = [chat("a", "s1", 2_000), chat("b", "s1", 1_000)];
@@ -517,7 +517,7 @@ fn the_index_finds_every_word_by_prefix_within_the_asked_scope() {
     );
 
     let both = index.search(&words("INVO"), &ids(&["a", "b"])).unwrap();
-    assert_eq!(both.hits.len(), 2, "prefix, any case: {both:?}");
+    assert_eq!(both.hits.len(), 2, "substring, any case: {both:?}");
     assert_eq!(
         both.indexed,
         HashMap::from([("a".into(), true), ("b".into(), true)])
@@ -535,10 +535,30 @@ fn the_index_finds_every_word_by_prefix_within_the_asked_scope() {
     // Scope is the caller's: b's match is invisible to a query over a only.
     let scoped = index.search(&words("signing"), &ids(&["a"])).unwrap();
     assert!(scoped.hits.is_empty() && !scoped.indexed.contains_key("b"));
-    // Quotes and bare punctuation can't break the query.
+    // Substrings match, as they did in the scan: inside identifiers too.
+    let inside = index.search(&words("igning"), &ids(&["a", "b"])).unwrap();
+    assert_eq!(chats_hit(&inside), ["b"]);
+    // Words too short for trigrams filter instead.
+    let short = index
+        .search(&words("ke invoice"), &ids(&["a", "b"]))
+        .unwrap();
+    assert_eq!(chats_hit(&short), ["b"]);
+    let only_short = index.search(&words("bl"), &ids(&["a", "b"])).unwrap();
+    assert_eq!(chats_hit(&only_short), ["a"]);
+    // Quotes, LIKE wildcards and bare punctuation can't break the query.
     assert_eq!(
-        match_query(&words("- \"key")).as_deref(),
-        Some("\"\"\"key\"*")
+        match_query(&words("- \"key a_ _%")),
+        Some(super::index::MatchQuery {
+            fts: Some("\"\"\"key\"".into()),
+            short: vec!["%a\\_%".into()],
+        })
+    );
+    assert!(
+        index
+            .search(&words("%"), &ids(&["b"]))
+            .unwrap()
+            .hits
+            .is_empty()
     );
     assert!(index.search(&words("\"key"), &ids(&["b"])).is_ok());
     assert!(
