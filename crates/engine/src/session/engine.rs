@@ -30,7 +30,7 @@ use cypher_doc::{
     SegmentWriter, SessionDoc, fold_event_into_parts, sanitize_tool_call,
 };
 use cypher_harness::{
-    CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, SteerMessage,
+    CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, RunProfile, SteerMessage,
 };
 use cypher_proto::{
     AgentEvent, AnsweredModel, ChatConfig, ContextUsage, DoneStatus, HarnessId, ReasoningLevel,
@@ -1406,58 +1406,60 @@ impl Inner {
         self.doc_host().and_then(|host| host.workspace().cloned())
     }
 
-    /// Host-side run context for one chat: its identity plus — for Cypher-hosted
-    /// child subagent chats — the persisted child env the pi harness applies
-    /// (system prompt/tools/model/thinking) and the host-LOCAL messaging
-    /// channel for the INITIAL run. A NON-serialized internal seam: the child
-    /// semantics come from the chat row, never from `RunRequest` (no arbitrary
-    /// persisted env maps on the wire), and the channel (an absolute host path)
-    /// is engine-local — consumed here so later child turns keep the profile
-    /// but have no channel (messaging tools then honestly report unavailable).
+    /// Host-side run context for one chat: its identity plus the run profile
+    /// the pi harness applies. A bot thread runs in its origin's bot profile
+    /// ([`crate::bots::profile::bot_env`]); a Cypher-hosted child subagent
+    /// chat runs in the persisted child env (system prompt/tools/model/
+    /// thinking) with the host-LOCAL messaging channel for the INITIAL run.
+    /// A NON-serialized internal seam: the profile comes from the chat row,
+    /// never from `RunRequest` (no arbitrary persisted env maps on the wire),
+    /// and the channel (an absolute host path) is engine-local — consumed
+    /// here so later child turns keep the profile but have no channel
+    /// (messaging tools then honestly report unavailable).
     fn host_context(&self, chat_id: &str) -> RunHostContext {
-        let mut ctx = RunHostContext {
-            chat_id: Some(chat_id.to_string()),
-            child: None,
-            bot: None,
-        };
+        let mut profile = RunProfile::Root;
         if let Some(ws) = self.workspace()
             && let Ok(Some(chat)) = ws.chat(chat_id)
-            && let Some(bot) = crate::bots::run_env(&ws, &chat)
         {
-            ctx.bot = Some(bot);
-            return ctx;
-        }
-        if let Some(ws) = self.workspace()
-            && let Ok(Some(chat)) = ws.chat(chat_id)
-            && let Some(child) = chat.child
-        {
-            let channel = lock(&self.child_channels).remove(chat_id);
-            if let Some(channel) = &channel {
-                let mut spent = lock(&self.spent_child_channels);
-                if spent.len() >= MAX_LOCAL_CHILD_CHANNELS
-                    && !spent.contains_key(chat_id)
-                    && let Some(oldest) = spent.keys().next().cloned()
-                {
-                    spent.remove(&oldest);
-                }
-                spent.insert(chat_id.to_string(), channel.clone());
+            if let Some(bot) = crate::bots::profile::bot_env(&ws, &chat) {
+                profile = RunProfile::Bot(bot);
+            } else if let Some(child) = chat.child {
+                profile = RunProfile::Child(self.child_env(chat_id, child));
             }
-            let (channel_root, child_index, address) = match channel {
-                Some(c) => (Some(c.channel_root), c.child_index, c.address),
-                None => (None, 0, None),
-            };
-            ctx.child = Some(ChildRunEnv {
-                system_prompt: child.profile.system_prompt,
-                tools: child.profile.tools,
-                model: child.profile.model,
-                thinking: child.profile.thinking,
-                channel_root,
-                run_id: child.parent_run_id,
-                agent: address.unwrap_or(child.agent),
-                child_index,
-            });
         }
-        ctx
+        RunHostContext {
+            chat_id: Some(chat_id.to_string()),
+            profile,
+        }
+    }
+
+    /// A child chat's run env, consuming its local messaging channel.
+    fn child_env(&self, chat_id: &str, child: cypher_proto::ChildChat) -> ChildRunEnv {
+        let channel = lock(&self.child_channels).remove(chat_id);
+        if let Some(channel) = &channel {
+            let mut spent = lock(&self.spent_child_channels);
+            if spent.len() >= MAX_LOCAL_CHILD_CHANNELS
+                && !spent.contains_key(chat_id)
+                && let Some(oldest) = spent.keys().next().cloned()
+            {
+                spent.remove(&oldest);
+            }
+            spent.insert(chat_id.to_string(), channel.clone());
+        }
+        let (channel_root, child_index, address) = match channel {
+            Some(c) => (Some(c.channel_root), c.child_index, c.address),
+            None => (None, 0, None),
+        };
+        ChildRunEnv {
+            system_prompt: child.profile.system_prompt,
+            tools: child.profile.tools,
+            model: child.profile.model,
+            thinking: child.profile.thinking,
+            channel_root,
+            run_id: child.parent_run_id,
+            agent: address.unwrap_or(child.agent),
+            child_index,
+        }
     }
 
     /// Sidebar freshness: push a message-persist preview into the chat's workspace row.

@@ -1,8 +1,9 @@
 //! Agent bots hosted on this engine (docs/design/agent-bots.md §6–7).
 //!
-//! A bot's chat runs through the normal sessions engine; what makes it a bot
-//! is the run env ([`run_env`]: the bot tools only, plus the bot's system
-//! prompt) and the `BotTool` RPC its tools call ([`Bots::tool`]). Every tool
+//! A bot's threads run through the normal sessions engine; what makes one a
+//! bot thread is its run profile ([`profile::bot_env`]: the tools its origin
+//! allows plus the system prompt for that origin) and the `BotTool` RPC its
+//! tools call ([`Bots::tool`]). Every tool
 //! call re-reads the bot row and resolves its scope against the current
 //! registry, so a scope edit applies to the next call, and anything outside
 //! the scope answers exactly like something that does not exist.
@@ -17,9 +18,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use serde::Deserialize;
 
-use cypher_harness::BotRunEnv;
 use cypher_proto::{
-    Bot, BotChat, BotScope, Chat, ChatConfig, HarnessId, ReasoningLevel, SandboxLevel,
+    Bot, BotChat, BotOrigin, BotScope, Chat, ChatConfig, HarnessId, ReasoningLevel, SandboxLevel,
 };
 
 use crate::EngineError;
@@ -27,6 +27,7 @@ use crate::host::doc_host::DocHost;
 use crate::host::workspace_host::WorkspaceHost;
 use crate::util::new_id;
 
+pub mod profile;
 mod prompt;
 #[cfg(test)]
 mod tests;
@@ -125,9 +126,7 @@ impl Bots {
             last_seen_at: Some(now),
             room_gen: Some(2),
             child: None,
-            bot: Some(BotChat {
-                bot_id: bot.id.clone(),
-            }),
+            bot: Some(BotChat::owner(&bot.id)),
         };
         self.inner.workspace.create_bot(&bot, &chat)?;
         tracing::info!(bot = %bot.id, chat = %bot.chat_id, "bot created");
@@ -158,43 +157,30 @@ fn create_private_dir(path: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// The locked-down run env for a bot's chat; `None` for every other chat.
-/// A bot chat whose bot row is gone still runs locked down, seeing nothing.
-pub fn run_env(workspace: &WorkspaceHost, chat: &Chat) -> Option<BotRunEnv> {
-    let marker = chat.bot.as_ref()?;
-    let bot = workspace.bot(&marker.bot_id).ok().flatten();
-    let spaces = workspace.read_spaces().unwrap_or_default();
-    let devices = workspace.read_devices().unwrap_or_default();
-    let system_prompt = match &bot {
-        Some(bot) => prompt::system_prompt(bot, &spaces, &devices),
-        None => prompt::orphan_prompt(),
-    };
-    Some(BotRunEnv {
-        bot_id: marker.bot_id.clone(),
-        system_prompt,
-    })
-}
-
-/// Runtime slash commands a bot chat refuses: each would change the run's
-/// tools or modes behind the bot tool allowlist.
+/// Runtime slash commands an owner thread refuses: each would change the
+/// run's tools or modes behind the bot tool allowlist.
 pub const REFUSED_COMMANDS: [&str; 3] = ["scripts", "orchestrate", "goal"];
 
-/// Refuse a bot chat's prompt that is one of [`REFUSED_COMMANDS`].
+/// Refuse a bot thread's prompt that is a slash command it may not run:
+/// one of [`REFUSED_COMMANDS`] in an owner thread, any command at all in a
+/// routine or peer thread (§4.4). Ordinary chats run every command.
 pub fn refuse_widening_command(chat: &Chat, prompt: &str) -> Result<(), EngineError> {
-    if chat.bot.is_none() {
+    let Some(marker) = &chat.bot else {
         return Ok(());
-    }
-    let command = prompt
-        .trim_start()
-        .strip_prefix('/')
-        .and_then(|rest| rest.split_whitespace().next())
-        .unwrap_or_default();
-    if REFUSED_COMMANDS.contains(&command) {
-        return Err(EngineError::Other(format!(
+    };
+    let Some(rest) = prompt.trim_start().strip_prefix('/') else {
+        return Ok(());
+    };
+    let command = rest.split_whitespace().next().unwrap_or_default();
+    match marker.origin {
+        BotOrigin::Owner if !REFUSED_COMMANDS.contains(&command) => Ok(()),
+        BotOrigin::Owner => Err(EngineError::Other(format!(
             "/{command} isn't available in a bot chat."
-        )));
+        ))),
+        BotOrigin::Routine | BotOrigin::Peer => Err(EngineError::Other(
+            "Slash commands aren't available in this bot thread.".into(),
+        )),
     }
-    Ok(())
 }
 
 /// Recreate a bot chat's folder before a run spawns in it (a restored or

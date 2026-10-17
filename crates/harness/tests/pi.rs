@@ -12,11 +12,12 @@ use tokio::sync::mpsc;
 use common::{dones, run_to_end};
 use cypher_harness::pi::PiHarness;
 use cypher_harness::{
-    CancellationToken, Harness, HarnessError, RunControls, RunHostContext, SteerMessage,
+    BotRunEnv, CancellationToken, ChildRunEnv, Harness, HarnessError, RunControls, RunHostContext,
+    RunProfile, SteerMessage,
 };
 use cypher_proto::{
-    AgentEvent, AnsweredModel, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SteeringMode,
-    ToolCall,
+    AgentEvent, AnsweredModel, BotOrigin, DoneStatus, HarnessId, ReasoningLevel, RunRequest,
+    SteeringMode, ToolCall,
 };
 
 /// The session file the fake pi reports by default: it now derives its
@@ -176,69 +177,166 @@ fn engine_bridge_url_is_injected_into_children() {
     );
 }
 
-/// A bot run gets the bot tools and nothing else: the exact allowlist, the
-/// embedded extension, its appended prompt and `CYPHER_BOT_ID`. A plain run
-/// clears an inherited bot id so no other run registers the bot tools.
+fn args_of(cmd: &tokio::process::Command) -> Vec<String> {
+    cmd.as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// The value `cmd` sets for `key`: `Some(None)` when it clears it, `None`
+/// when it leaves it alone.
+fn env_of(cmd: &tokio::process::Command, key: &str) -> Option<Option<String>> {
+    cmd.as_std()
+        .get_envs()
+        .find(|(k, _)| *k == key)
+        .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+}
+
+/// Each run profile becomes exactly its own flags and env: a root run adds
+/// nothing, a child run its allowlist plus the messaging tools, its prompt
+/// and its launch model, and a bot thread of every origin its allowlist, the
+/// embedded bot tools extension, its prompt and `CYPHER_BOT_ID`. Every run
+/// clears the env of the profiles it is not, so none inherits another's.
 #[test]
-fn bot_runs_are_limited_to_the_bot_tools() {
+fn run_profiles_spawn_exact_args() {
     let harness = harness();
-    let prompt = std::env::temp_dir().join("cypher-bot-prompt-fixture.md");
-    let host = RunHostContext {
-        chat_id: Some("bot-chat".into()),
-        child: None,
-        bot: Some(cypher_harness::BotRunEnv {
-            bot_id: "bot-1".into(),
-            system_prompt: "You are a bot.".into(),
+    let prompt = std::env::temp_dir().join("cypher-profile-prompt-fixture.md");
+    let prompt_arg = prompt.to_string_lossy().into_owned();
+    let base = vec![
+        "--mode".to_string(),
+        "rpc".into(),
+        "--session-dir".into(),
+        std::env::temp_dir()
+            .join("cypher-pi-test-sessions")
+            .display()
+            .to_string(),
+    ];
+    let profile_env = [
+        "PI_SUBAGENT_ROLE",
+        "PI_SUBAGENT_CHANNEL_ROOT",
+        "PI_SUBAGENT_RUN_ID",
+        "PI_SUBAGENT_AGENT",
+        "PI_SUBAGENT_CHILD_INDEX",
+        "CYPHER_BOT_ID",
+    ];
+
+    let root = harness
+        .spawn_command(None, &RunHostContext::default(), Some(&prompt))
+        .expect("command builds");
+    assert_eq!(args_of(&root), base);
+    for key in profile_env {
+        assert_eq!(env_of(&root, key), Some(None), "root clears {key}");
+    }
+
+    let child = RunHostContext {
+        chat_id: Some("child-chat".into()),
+        profile: RunProfile::Child(ChildRunEnv {
+            system_prompt: "You review code.".into(),
+            tools: vec!["read".into(), "send_message".into()],
+            model: Some("anthropic/claude-sonnet-4-20250514".into()),
+            thinking: Some("high".into()),
+            channel_root: Some("/tmp/channel".into()),
+            run_id: "run-1".into(),
+            agent: "reviewer".into(),
+            child_index: 2,
         }),
     };
     let cmd = harness
-        .spawn_command(None, &host, Some(&prompt))
+        .spawn_command(None, &child, Some(&prompt))
         .expect("command builds");
-    let args: Vec<String> = cmd
-        .as_std()
-        .get_args()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
-    let after = |flag: &str| {
-        args.windows(2)
-            .find(|pair| pair[0] == flag)
+    let mut expected = base.clone();
+    expected.extend(
+        [
+            "--tools",
+            "read,send_message,read_inbox,reply_message",
+            "--append-system-prompt",
+            &prompt_arg,
+            "--model",
+            "anthropic/claude-sonnet-4-20250514",
+            "--thinking",
+            "high",
+        ]
+        .map(String::from),
+    );
+    assert_eq!(args_of(&cmd), expected);
+    for (key, value) in [
+        ("PI_SUBAGENT_ROLE", Some("child")),
+        ("PI_SUBAGENT_CHANNEL_ROOT", Some("/tmp/channel")),
+        ("PI_SUBAGENT_RUN_ID", Some("run-1")),
+        ("PI_SUBAGENT_AGENT", Some("reviewer")),
+        ("PI_SUBAGENT_CHILD_INDEX", Some("2")),
+        ("CYPHER_BOT_ID", None),
+    ] {
+        assert_eq!(env_of(&cmd, key), Some(value.map(String::from)), "{key}");
+    }
+
+    for origin in [BotOrigin::Owner, BotOrigin::Routine, BotOrigin::Peer] {
+        let bot = RunHostContext {
+            chat_id: Some("bot-chat".into()),
+            profile: RunProfile::Bot(BotRunEnv {
+                bot_id: "bot-1".into(),
+                origin,
+                tools: cypher_proto::BOT_TOOLS.map(String::from).to_vec(),
+                system_prompt: "You are a bot.".into(),
+                workspace_roots: Vec::new(),
+            }),
+        };
+        let cmd = harness
+            .spawn_command(None, &bot, Some(&prompt))
+            .expect("command builds");
+        let args = args_of(&cmd);
+        let extension = args
+            .windows(2)
+            .find(|pair| pair[0] == "-e")
             .map(|pair| pair[1].clone())
+            .expect("the bot tools extension is loaded");
+        assert!(extension.ends_with("cypher-bot-tools.ts"), "{extension}");
+        let mut expected = base.clone();
+        expected.extend([
+            "--tools".to_string(),
+            cypher_proto::BOT_TOOLS.join(","),
+            "-e".into(),
+            extension.clone(),
+            "--append-system-prompt".into(),
+            prompt_arg.clone(),
+        ]);
+        assert_eq!(args, expected, "{origin:?}");
+        let source = std::fs::read_to_string(&extension).expect("the extension is written");
+        for tool in cypher_proto::BOT_TOOLS {
+            assert!(
+                source.contains(&format!("name: \"{tool}\"")),
+                "the extension registers {tool}"
+            );
+        }
+        for key in profile_env {
+            let value = (key == "CYPHER_BOT_ID").then(|| "bot-1".to_string());
+            assert_eq!(env_of(&cmd, key), Some(value), "{origin:?} {key}");
+        }
+    }
+
+    // A bot thread with no tools still passes `--tools`: without it Pi
+    // would hand the run every tool.
+    let empty = RunHostContext {
+        chat_id: Some("bot-chat".into()),
+        profile: RunProfile::Bot(BotRunEnv {
+            bot_id: "bot-1".into(),
+            origin: BotOrigin::Peer,
+            tools: Vec::new(),
+            system_prompt: String::new(),
+            workspace_roots: Vec::new(),
+        }),
     };
-    assert_eq!(
-        after("--tools").as_deref(),
-        Some(cypher_proto::BOT_TOOLS.join(",").as_str()),
+    let args = args_of(
+        &harness
+            .spawn_command(None, &empty, Some(&prompt))
+            .expect("command builds"),
+    );
+    assert!(
+        args.windows(2).any(|pair| pair == ["--tools", ""]),
         "{args:?}"
     );
-    let extension = after("-e").expect("the bot tools extension is loaded");
-    assert!(extension.ends_with("cypher-bot-tools.ts"), "{extension}");
-    let source = std::fs::read_to_string(&extension).expect("the extension is written");
-    for tool in cypher_proto::BOT_TOOLS {
-        assert!(
-            source.contains(&format!("name: \"{tool}\"")),
-            "the extension registers {tool}"
-        );
-    }
-    assert_eq!(
-        after("--append-system-prompt").as_deref(),
-        Some(prompt.to_string_lossy().as_ref())
-    );
-    assert!(
-        cmd.as_std()
-            .get_envs()
-            .any(|(k, v)| k == "CYPHER_BOT_ID" && v == Some(std::ffi::OsStr::new("bot-1")))
-    );
-
-    let plain = harness
-        .spawn_command(None, &RunHostContext::default(), None)
-        .expect("command builds");
-    assert!(
-        plain
-            .as_std()
-            .get_envs()
-            .any(|(k, v)| k == "CYPHER_BOT_ID" && v.is_none()),
-        "other runs clear an inherited bot id"
-    );
-    assert!(!plain.as_std().get_args().any(|arg| arg == "--tools"));
+    assert!(!args.iter().any(|arg| arg == "--append-system-prompt"));
 }
 
 #[test]

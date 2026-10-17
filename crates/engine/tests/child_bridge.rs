@@ -697,7 +697,11 @@ async fn child_runs_receive_child_env_via_host_context() {
     );
     let received = host.lock().unwrap().clone().expect("host captured");
     assert_eq!(received.chat_id.as_deref(), Some(child_id.as_str()));
-    let child_env = received.child.expect("child env present");
+    let child_env = received
+        .profile
+        .child()
+        .cloned()
+        .expect("child env present");
     assert_eq!(child_env.system_prompt, "You are the planner.");
     assert_eq!(child_env.tools, vec!["read", "bash"]);
     assert_eq!(
@@ -753,7 +757,7 @@ async fn child_run_messages_under_its_address_but_the_row_keeps_the_agent() {
         .lock()
         .unwrap()
         .clone()
-        .and_then(|h| h.child)
+        .and_then(|h| h.profile.child().cloned())
         .expect("child env");
     assert_eq!(child_env.agent, "planner#1a2b3c4d");
     let row = core.workspace.chat(&child_id).expect("read").expect("row");
@@ -830,7 +834,11 @@ async fn start_subagent_recovers_an_orphan_existing_child() {
         "recovered run to reach the harness",
     );
     let received = host.lock().unwrap().clone().expect("host captured");
-    let child_env = received.child.expect("child env present");
+    let child_env = received
+        .profile
+        .child()
+        .cloned()
+        .expect("child env present");
     assert_eq!(
         child_env.channel_root.as_deref(),
         Some("/tmp/pi-subagents-messages/abc")
@@ -927,13 +935,13 @@ async fn later_child_turn_has_no_messaging_channel() {
         "the follow-up run to reach the harness",
     );
     let recorded = hosts.lock().unwrap().clone();
-    let first = recorded[0].child.as_ref().expect("first run child env");
+    let first = recorded[0].profile.child().expect("first run child env");
     assert_eq!(
         first.channel_root.as_deref(),
         Some("/tmp/pi-subagents-messages/abc"),
         "the initial run carries the engine-local channel"
     );
-    let second = recorded[1].child.as_ref().expect("second run child env");
+    let second = recorded[1].profile.child().expect("second run child env");
     assert_eq!(
         second.channel_root, None,
         "a later child turn has NO messaging channel (profile only)"

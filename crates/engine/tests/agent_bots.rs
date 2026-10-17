@@ -285,7 +285,7 @@ async fn a_bot_chat_runs_locked_down() {
     let harness = common::TestHarness::new(HarnessId::Pi, "Recording", move |request, controls| {
         seen.lock()
             .unwrap()
-            .push((request.clone(), controls.host.bot.clone()));
+            .push((request.clone(), controls.host.profile.bot().cloned()));
         common::reply(HarnessId::Pi, &request, "sess-bot", "On it.")
     });
     let core = common::engine_at(&tmp.path().join("data"), harness);
@@ -321,6 +321,9 @@ async fn a_bot_chat_runs_locked_down() {
         .expect("the bot run reached the harness");
     let env = env.as_ref().expect("bot runs carry the bot env");
     assert_eq!(env.bot_id, bot.id);
+    assert_eq!(env.origin, cypher_proto::BotOrigin::Owner);
+    assert_eq!(env.tools, cypher_proto::BOT_TOOLS);
+    assert!(env.workspace_roots.is_empty());
     assert!(env.system_prompt.contains("\"Billing bot\""));
     assert!(
         env.system_prompt.contains("sp-billing"),

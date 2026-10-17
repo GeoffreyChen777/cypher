@@ -1084,9 +1084,7 @@ fn bots_round_trip_update_and_survive_a_snapshot() {
 fn deleting_a_bot_removes_its_chat() {
     let mut doc = RegistryDoc::new("dev-a");
     let mut own = chat("c1", "dev-a");
-    own.bot = Some(cypher_proto::BotChat {
-        bot_id: "b1".into(),
-    });
+    own.bot = Some(cypher_proto::BotChat::owner("b1"));
     doc.upsert_chat(&own).unwrap();
     doc.upsert_chat(&chat("other", "dev-a")).unwrap();
     doc.upsert_bot(&bot("b1", "c1")).unwrap();

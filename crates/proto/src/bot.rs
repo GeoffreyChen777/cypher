@@ -84,12 +84,52 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The marker on a bot's own chat row. Bot chats are never visible to any
+/// The marker on a bot thread's chat row. Bot chats are never visible to any
 /// bot, and the sidebar shows them in the bot strip instead of a project.
+///
+/// Only the host engine writes it, when it creates the thread: no client
+/// operation sets or changes it, so a thread's origin is whatever the engine
+/// stamped (docs/design/agent-bots.md §4.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotChat {
     pub bot_id: String,
+    /// Who the thread works for. Rows written before origins existed are the
+    /// bots' own chats, so a missing origin reads as the owner.
+    #[serde(default)]
+    pub origin: BotOrigin,
+}
+
+impl BotChat {
+    /// The marker of a thread the owner instructs (the bot chat).
+    pub fn owner(bot_id: impl Into<String>) -> Self {
+        Self::new(bot_id, BotOrigin::Owner)
+    }
+
+    pub fn new(bot_id: impl Into<String>, origin: BotOrigin) -> Self {
+        Self {
+            bot_id: bot_id.into(),
+            origin,
+        }
+    }
+}
+
+/// Who started a bot thread, which fixes what the thread may do
+/// (docs/design/agent-bots.md §4.1). It never changes for a thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BotOrigin {
+    /// The owner: the bot chat, and later its orchestration threads.
+    #[default]
+    Owner,
+    /// A routine running unattended: nobody watches it, so it never waits
+    /// for an answer or an approval.
+    Routine,
+    /// Another user's bot asking a question. An origin this engine does not
+    /// know also reads as a peer, the narrowest one, so a row from a newer
+    /// engine never runs with more than it was meant to.
+    #[serde(other)]
+    Peer,
 }
 
 /// Which projects a bot sees.
@@ -335,9 +375,7 @@ mod tests {
     #[test]
     fn bot_chats_are_never_visible() {
         let mut own = chat("bot-chat", Some("s1"));
-        own.bot = Some(BotChat {
-            bot_id: "b1".into(),
-        });
+        own.bot = Some(BotChat::owner("b1"));
         let scope = BotScope {
             projects: ProjectGrant::All,
             include_sessions: vec!["bot-chat".into()],
@@ -397,6 +435,26 @@ mod tests {
             serde_json::json!({"mode": "selected", "spaceIds": ["s1"]})
         );
         assert_eq!(serde_json::from_value::<BotScope>(value).unwrap(), selected);
+    }
+
+    #[test]
+    fn bot_markers_read_old_rows_as_owner_and_unknown_origins_as_peer() {
+        let old: BotChat = serde_json::from_value(serde_json::json!({"botId": "b1"})).unwrap();
+        assert_eq!(old, BotChat::owner("b1"));
+        for (origin, wire) in [
+            (BotOrigin::Owner, "owner"),
+            (BotOrigin::Routine, "routine"),
+            (BotOrigin::Peer, "peer"),
+        ] {
+            let marker = BotChat::new("b1", origin);
+            let value = serde_json::to_value(&marker).unwrap();
+            assert_eq!(value, serde_json::json!({"botId": "b1", "origin": wire}));
+            assert_eq!(serde_json::from_value::<BotChat>(value).unwrap(), marker);
+        }
+        let future: BotChat =
+            serde_json::from_value(serde_json::json!({"botId": "b1", "origin": "auditor"}))
+                .unwrap();
+        assert_eq!(future.origin, BotOrigin::Peer);
     }
 
     #[test]
