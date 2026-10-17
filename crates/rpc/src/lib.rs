@@ -291,6 +291,13 @@ pub mod methods {
     /// Every bot record (plans, notes, routines, tasks, activity, approvals,
     /// connections, invites, exchanges) as one frame per change.
     pub const WATCH_BOT_RECORDS: &str = "WatchBotRecords";
+    /// Create an invite to connect another user's bot (runs on the bot's
+    /// host, which publishes the bot's room first). Params `{botId}`; replies
+    /// `{inviteId, code, expiresAt}`. The code is shown once, never stored.
+    pub const CREATE_BOT_INVITE: &str = "CreateBotInvite";
+    /// Redeem another user's invite code for one of your bots (on its host).
+    /// Params `{botId, code}`; replies with the new connection record.
+    pub const REDEEM_BOT_INVITE: &str = "RedeemBotInvite";
     /// One bot tool call from a bot run's extension (unary, host-local):
     /// `{chatId, tool, args}` → `{text}`. The engine resolves the bot from
     /// `chatId` and enforces its scope.
@@ -517,6 +524,8 @@ pub mod methods {
         MethodSpec::unary(CREATE_BOT).forwardable(),
         MethodSpec::stream(WATCH_BOTS),
         MethodSpec::stream(WATCH_BOT_RECORDS),
+        MethodSpec::unary(CREATE_BOT_INVITE).forwardable(),
+        MethodSpec::unary(REDEEM_BOT_INVITE).forwardable(),
         MethodSpec::unary(BOT_TOOL),
     ];
 
