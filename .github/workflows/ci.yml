@@ -29,13 +29,7 @@ jobs:
       - run: bash scripts/check.sh workflows
       - run: bash scripts/check.sh scripts
       - name: installer regressions on release container Python 3.8
-        run: |
-          docker run --rm -v "$PWD:/repo:ro" -w /repo ubuntu:20.04 bash -ec '
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq
-            apt-get install -y -qq python3 curl ca-certificates
-            python3 scripts/tests/test-linux-cli.py
-          '
+        run: bash scripts/ci/installer-py38.sh
       - run: bash scripts/check.sh runtime
 
   edge:

@@ -70,8 +70,9 @@ bash scripts/check.sh runtime    # Pi runtime suites that need no staged runtime
 bash scripts/check.sh workflows  # actionlint + workflow policy (downloads actionlint)
 bash scripts/check.sh macos      # macOS: icon, workspace clippy, cypher-ui tests,
                                  # Rust/Swift preview vectors
-bash scripts/check.sh ios        # swift-format lint + iOS unit tests (Xcode 27)
+bash scripts/check.sh ios        # swift-format lint + iOS unit tests (pinned Xcode)
 bash scripts/check.sh all        # everything except ios; macos only on a Mac
+bash scripts/check-linux.sh      # CI's Linux checks in Docker, from a Mac (below)
 ```
 
 `lint` and `workflows` download pinned ShellCheck and actionlint binaries on
@@ -95,6 +96,17 @@ Tests per platform:
   [pi-runtime/README.md](../../pi-runtime/README.md#tests)).
 - **iOS**: `bash scripts/check.sh ios`, or Xcode; see
   [apps/ios/README.md](../../apps/ios/README.md).
+- **Same tools as CI**: Rust (`rust-toolchain.toml`), Node 24.19.0 and the iOS
+  Xcode (`.xcode-version`, matched by build number) are pinned for both. CI
+  fails when the runner lacks the pinned Xcode, so moving to a new Xcode is a
+  deliberate one-line change. Desktop macOS builds run on `macos-26`, the macOS
+  developers use, so releases link against the same SDK major.
+- **Linux from a Mac**: `bash scripts/check-linux.sh` runs the `scripts`,
+  `runtime` and `rust` stages in an `ubuntu:24.04` container with CI's Node,
+  Python and Rust, and the Python 3.8 installer regressions in `ubuntu:20.04`
+  (`scripts/ci/installer-py38.sh`, which CI runs too). It needs a running
+  Docker engine (for example `colima start`); the first run builds the headless
+  crates from scratch, later runs reuse the `cypher-linux-*` volumes.
 - **Cross-language vectors**: `protocol/vectors/*.json` (registry merge core, chat2
   frames, device-room frames, preview codec and reducer) are loaded by the Rust,
   TypeScript and Swift tests; [protocol/README.md](../../protocol/README.md) lists every
@@ -181,7 +193,7 @@ local suppression.
 - Tests are named for behaviour, in folders mirroring the app's; helpers live only in
   `TestSupport` (repo fixtures through `TestSupport.repoRoot()`).
 - Formatting is `swift-format` with `apps/ios/.swift-format` (lint runs in the `ios` check
-  stage, with the Xcode the iOS tests pin); every configuration builds with complete Swift concurrency checking.
+  stage, with the Xcode pinned in `.xcode-version`); every configuration builds with complete Swift concurrency checking.
 
 ### TypeScript (`apps/edge`, `pi-runtime`)
 
