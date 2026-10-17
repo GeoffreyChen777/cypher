@@ -1453,8 +1453,10 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         return match kind {
             BotToolKind::ListProjects => crate::kit::icons::FOLDER,
             BotToolKind::ListSessions => crate::kit::icons::CHECKLIST,
+            BotToolKind::SessionActivity => crate::kit::icons::PULSE,
             BotToolKind::SearchSessions => crate::kit::icons::MAGNIFER,
             BotToolKind::ReadSession => crate::kit::icons::CHAT_ROUND_LINE,
+            BotToolKind::ProjectGit => crate::kit::icons::GIT_BRANCH,
         };
     }
     match call {

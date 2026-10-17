@@ -169,11 +169,6 @@ impl EngineCore {
             registry.clone(),
             profile.store_root().join("agent-sessions"),
         );
-        let bots = crate::bots::Bots::new(
-            workspace.clone(),
-            doc_host.clone(),
-            profile.store_root().join("bots"),
-        );
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
@@ -189,6 +184,12 @@ impl EngineCore {
             tracing::error!(error = %err, "orphaned-subagent recovery failed");
         }
         let repos = Repos::new(data_dir, &device_id);
+        let bots = crate::bots::Bots::new(
+            workspace.clone(),
+            doc_host.clone(),
+            repos.clone(),
+            profile.store_root().join("bots"),
+        );
         // Worktree materialization for Run commands carrying a WorktreeSpec
         // happens on the HOST at drain time (see `DocHost::materialize_worktree`).
         doc_host.set_repos(repos.clone());
@@ -338,6 +339,7 @@ impl EngineCore {
 
     /// Attach the peer link cache — enables `targetDeviceId` routing.
     pub fn set_links(&self, links: Arc<cypher_rpc::LinkCache>) {
+        self.bots.set_links(links.clone());
         *lock(&self.links) = Some(links);
     }
 

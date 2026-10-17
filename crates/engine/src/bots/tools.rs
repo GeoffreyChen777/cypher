@@ -1,4 +1,4 @@
-//! The `BotTool` RPC: the four read tools a bot's Pi run calls.
+//! The `BotTool` RPC: the read tools a bot's Pi run calls.
 //!
 //! Every call builds a [`View`] from the current registry: the calling chat
 //! must be a bot chat hosted here, and the bot row's scope decides which
@@ -36,6 +36,10 @@ const READ_MAX: usize = 60;
 const MESSAGE_MAX_CHARS: usize = 6_000;
 const ANSWER_MAX_CHARS: usize = 48_000;
 const PREVIEW_MAX_CHARS: usize = 160;
+/// `session_activity`'s window, in hours, and the sessions it lists.
+const ACTIVITY_DEFAULT_HOURS: f64 = 24.0;
+const ACTIVITY_MAX_HOURS: f64 = 336.0;
+const ACTIVITY_MAX: usize = 60;
 /// How long `read_session` waits for another device's chat to catch up.
 const REMOTE_CATCH_UP: Duration = Duration::from_secs(8);
 
@@ -83,13 +87,13 @@ impl View {
         }
     }
 
-    fn device(&self, id: &str) -> &str {
+    pub(super) fn device(&self, id: &str) -> &str {
         self.devices
             .get(id)
             .map_or("an unknown device", String::as_str)
     }
 
-    fn space(&self, id: Option<&str>) -> Option<&Space> {
+    pub(super) fn space(&self, id: Option<&str>) -> Option<&Space> {
         let id = id?;
         self.spaces.iter().find(|s| s.id == id)
     }
@@ -128,7 +132,10 @@ impl View {
 
     /// The spaces a `project` argument names: an id, or a name (any case).
     /// An unknown name answers like an invisible one.
-    fn resolve_project(&self, project: Option<&str>) -> Result<Option<Vec<String>>, EngineError> {
+    pub(super) fn resolve_project(
+        &self,
+        project: Option<&str>,
+    ) -> Result<Option<Vec<String>>, EngineError> {
         let Some(project) = project.map(str::trim).filter(|p| !p.is_empty()) else {
             return Ok(None);
         };
@@ -218,6 +225,13 @@ pub(super) struct ListSessions {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
+pub(super) struct SessionActivity {
+    since_hours: Option<f64>,
+    project: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 struct SearchSessions {
     query: String,
     project: Option<String>,
@@ -251,6 +265,8 @@ impl Bots {
         match tool {
             "list_projects" => Ok(list_projects(&view)),
             "list_sessions" => list_sessions(&view, args(arguments)?),
+            "session_activity" => session_activity(&view, args(arguments)?),
+            "project_git" => self.project_git(&view, args(arguments)?).await,
             "search_sessions" => self.search_sessions(view, args(arguments)?).await,
             "read_session" => self.read_session(view, args(arguments)?).await,
             other => Err(EngineError::Other(format!("Unknown bot tool: {other}"))),
@@ -562,6 +578,154 @@ pub(super) fn list_sessions(view: &View, query: ListSessions) -> Result<String, 
     Ok(clip(&out.join("\n"), ANSWER_MAX_CHARS))
 }
 
+/// What changed in the window: sessions started, sessions with new messages
+/// (with their status now and latest preview), and runs that ended. Grouped
+/// by project, the most recently active project first.
+pub(super) fn session_activity(view: &View, query: SessionActivity) -> Result<String, EngineError> {
+    let projects = view.resolve_project(query.project.as_deref())?;
+    let hours = query
+        .since_hours
+        .filter(|h| h.is_finite() && *h > 0.0)
+        .unwrap_or(ACTIVITY_DEFAULT_HOURS)
+        .min(ACTIVITY_MAX_HOURS);
+    let since = view.now - chrono::Duration::seconds((hours * 3_600.0) as i64);
+    let window = format!("the last {}", hours_label(hours));
+    let changed: Vec<&Chat> = view
+        .chats
+        .iter()
+        .filter(|c| !c.is_child() && view.in_projects(c, &projects))
+        .filter(|c| {
+            c.created_at >= since
+                || activity(c) >= since
+                || matches!(view.status(c), "working" | "waiting for input")
+                || (view.status(c) == "errored"
+                    && view
+                        .sessions
+                        .get(&c.id)
+                        .is_some_and(|s| s.updated_at >= since))
+        })
+        .collect();
+    if changed.is_empty() {
+        return Ok(format!(
+            "Nothing changed in {window} (since {}).",
+            since.format("%Y-%m-%d %H:%M UTC")
+        ));
+    }
+
+    // Groups keyed by the root's space; `view.chats` is newest first, so the
+    // first session seen in a group is its newest.
+    let mut groups: Vec<(Option<&str>, Vec<&Chat>)> = Vec::new();
+    for chat in &changed {
+        let key = view.space(chat.space_id.as_deref()).map(|s| s.id.as_str());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, chats)) => chats.push(chat),
+            None => groups.push((key, vec![chat])),
+        }
+    }
+    let count = |status: &str| changed.iter().filter(|c| view.status(c) == status).count();
+    let started = changed.iter().filter(|c| c.created_at >= since).count();
+    let mut out = vec![format!(
+        "Activity in {window} (since {}): {} session(s) in {} group(s) · {started} new · {} \
+         working · {} waiting for input · {} errored. Newest first:",
+        since.format("%Y-%m-%d %H:%M UTC"),
+        changed.len(),
+        groups.len(),
+        count("working"),
+        count("waiting for input"),
+        count("errored"),
+    )];
+    let mut shown = 0usize;
+    for (key, chats) in &groups {
+        if shown >= ACTIVITY_MAX {
+            break;
+        }
+        out.push(String::new());
+        out.push(match key.and_then(|id| view.space(Some(id))) {
+            Some(space) => format!(
+                "{} (id {}) on {}:",
+                space_name(space),
+                space.id,
+                view.device(&space.device_id)
+            ),
+            None => "Individually shared sessions:".to_string(),
+        });
+        for chat in chats.iter().take(ACTIVITY_MAX - shown) {
+            shown += 1;
+            let mut line = format!(
+                "- {} · \"{}\" · {} · last activity {}",
+                chat.id,
+                title(chat),
+                view.status(chat),
+                when(activity(chat), view.now)
+            );
+            if chat.created_at >= since {
+                line.push_str(&format!(
+                    " · new, started {}",
+                    when(chat.created_at, view.now)
+                ));
+            }
+            let subagents = view
+                .chats
+                .iter()
+                .filter(|c| c.parent_chat_id() == Some(chat.id.as_str()) && activity(c) >= since)
+                .count();
+            if subagents > 0 {
+                line.push_str(&format!(" · {subagents} active subagent chat(s)"));
+            }
+            out.push(line);
+            if let Some(preview) = chat
+                .last_message_preview
+                .as_deref()
+                .filter(|p| !p.trim().is_empty())
+            {
+                out.push(format!(
+                    "  latest: {}",
+                    one_line(preview, PREVIEW_MAX_CHARS)
+                ));
+            }
+            // A settled session row stamps when its last run ended; trust it
+            // only when the run left a message inside the window.
+            if let Some(session) = view.sessions.get(&chat.id)
+                && session.updated_at >= since
+                && activity(chat) >= since
+            {
+                match view.status(chat) {
+                    "idle" => out.push(format!(
+                        "  run finished {}",
+                        when(session.updated_at, view.now)
+                    )),
+                    "errored" => out.push(format!(
+                        "  run failed {}",
+                        when(session.updated_at, view.now)
+                    )),
+                    _ => {}
+                }
+            }
+        }
+    }
+    if changed.len() > shown {
+        out.push(String::new());
+        out.push(format!(
+            "{} more session(s) not shown; narrow with `project` or a shorter `since_hours`.",
+            changed.len() - shown
+        ));
+    }
+    Ok(clip(&out.join("\n"), ANSWER_MAX_CHARS))
+}
+
+/// `24 hours`, `1.5 hours`, `14 days`.
+fn hours_label(hours: f64) -> String {
+    if hours >= 48.0 && hours % 24.0 == 0.0 {
+        format!("{} days", (hours / 24.0) as u64)
+    } else if hours == 1.0 {
+        "hour".to_string()
+    } else if hours.fract() == 0.0 {
+        format!("{} hours", hours as u64)
+    } else {
+        format!("{hours:.1} hours")
+    }
+}
+
 fn role(entry: &SessionMessageEntry) -> &'static str {
     match entry.role {
         MessageRole::User => "user",
@@ -724,4 +888,9 @@ pub(super) fn render_session(
 #[cfg(test)]
 pub(super) fn list_sessions_args(value: serde_json::Value) -> ListSessions {
     serde_json::from_value(value).expect("list_sessions arguments")
+}
+
+#[cfg(test)]
+pub(super) fn session_activity_args(value: serde_json::Value) -> SessionActivity {
+    serde_json::from_value(value).expect("session_activity arguments")
 }

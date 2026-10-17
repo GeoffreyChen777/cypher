@@ -396,3 +396,117 @@ async fn a_bot_chat_refuses_commands_that_widen_its_tools() {
     cypher_engine::bots::refuse_widening_command(&plain, "/scripts on")
         .expect("ordinary chats are unaffected");
 }
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "Ada")
+        .env("GIT_AUTHOR_EMAIL", "ada@example.com")
+        .env("GIT_COMMITTER_NAME", "Ada")
+        .env("GIT_COMMITTER_EMAIL", "ada@example.com")
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git {args:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn activity_and_git_state_stay_in_scope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let core = common::assemble_mock(&tmp.path().join("data"));
+    seed(&core, tmp.path());
+    let bot = create_bot(&core, billing_only()).await;
+
+    let activity = tool(
+        &core,
+        &bot.chat_id,
+        "session_activity",
+        serde_json::json!({}),
+    )
+    .await;
+    assert!(
+        activity.contains("Activity in the last 24 hours"),
+        "{activity}"
+    );
+    assert!(activity.contains("chat-billing"), "{activity}");
+    assert!(activity.contains("new, started"), "{activity}");
+    assert!(!activity.contains("chat-secret"), "{activity}");
+
+    // A local space reads git directly.
+    let repo = tmp.path().join("sp-billing");
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("invoice.rs"), "fn total() {}\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "Add invoice totals"]);
+    std::fs::write(repo.join("invoice.rs"), "fn total() -> u32 { 0 }\n").unwrap();
+    std::fs::write(repo.join("notes.md"), "todo\n").unwrap();
+    let state = tool(
+        &core,
+        &bot.chat_id,
+        "project_git",
+        serde_json::json!({ "project": "sp-billing" }),
+    )
+    .await;
+    assert!(
+        state.contains("Branch: main · no upstream branch"),
+        "{state}"
+    );
+    assert!(state.contains("Working tree: 2 file(s) changed"), "{state}");
+    assert!(state.contains("added notes.md"), "{state}");
+    assert!(state.contains("Add invoice totals — Ada"), "{state}");
+
+    let not_git = tool(
+        &core,
+        &bot.chat_id,
+        "project_git",
+        serde_json::json!({ "project": "sp-secret" }),
+    )
+    .await;
+    let unknown = tool(
+        &core,
+        &bot.chat_id,
+        "project_git",
+        serde_json::json!({ "project": "sp-nope" }),
+    )
+    .await;
+    assert_eq!(
+        not_git.replace("sp-secret", "ID"),
+        unknown.replace("sp-nope", "ID"),
+        "out of scope reads like unknown"
+    );
+
+    // Another device's space needs that device; with no relay it is offline.
+    core.workspace
+        .create_space("sp-remote", "dev-other", "/srv/billing", None, true)
+        .unwrap();
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "updateBot", "botId": bot.id, "name": "Billing bot",
+                "scope": BotScope { projects: ProjectGrant::All, ..Default::default() },
+            }),
+        )
+        .await
+        .expect("updateBot");
+    let remote = tool(
+        &core,
+        &bot.chat_id,
+        "project_git",
+        serde_json::json!({ "project": "sp-remote" }),
+    )
+    .await;
+    assert!(
+        remote.ends_with("is offline, so its git state can't be read right now."),
+        "{remote}"
+    );
+    let secret = tool(
+        &core,
+        &bot.chat_id,
+        "project_git",
+        serde_json::json!({ "project": "sp-secret" }),
+    )
+    .await;
+    assert!(secret.contains("is not a git repository"), "{secret}");
+}

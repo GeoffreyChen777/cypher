@@ -23,10 +23,12 @@ use cypher_proto::{
 };
 
 use crate::EngineError;
+use crate::git::repos::Repos;
 use crate::host::doc_host::DocHost;
 use crate::host::workspace_host::WorkspaceHost;
-use crate::util::new_id;
+use crate::util::{lock, new_id};
 
+mod git;
 mod prompt;
 #[cfg(test)]
 mod tests;
@@ -60,19 +62,31 @@ pub struct Bots {
 struct Inner {
     workspace: WorkspaceHost,
     doc_host: DocHost,
+    /// Git for spaces on this device (`project_git`).
+    repos: Repos,
+    /// Peer links for another device's git state; `None` offline.
+    links: std::sync::Mutex<Option<Arc<cypher_rpc::LinkCache>>>,
     /// `<store>/bots`: one private folder per bot hosted here.
     root: PathBuf,
 }
 
 impl Bots {
-    pub fn new(workspace: WorkspaceHost, doc_host: DocHost, root: PathBuf) -> Self {
+    pub fn new(workspace: WorkspaceHost, doc_host: DocHost, repos: Repos, root: PathBuf) -> Self {
         Self {
             inner: Arc::new(Inner {
                 workspace,
                 doc_host,
+                repos,
+                links: Default::default(),
                 root,
             }),
         }
+    }
+
+    /// Attach the peer link cache: `project_git` reads other devices' spaces
+    /// through it.
+    pub fn set_links(&self, links: Arc<cypher_rpc::LinkCache>) {
+        *lock(&self.inner.links) = Some(links);
     }
 
     fn device_id(&self) -> &str {

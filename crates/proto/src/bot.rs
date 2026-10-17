@@ -24,11 +24,13 @@ pub const BOT_SCOPE_MAX_SESSIONS: usize = 2_000;
 /// The tools a bot run may call — the whole allowlist its Pi process gets.
 /// The engine's bot tools extension registers exactly these, and the engine
 /// answers each one through the `BotTool` RPC.
-pub const BOT_TOOLS: [&str; 4] = [
+pub const BOT_TOOLS: [&str; 6] = [
     "list_projects",
     "list_sessions",
+    "session_activity",
     "search_sessions",
     "read_session",
+    "project_git",
 ];
 
 /// One bot definition (a registry `bots` row).
