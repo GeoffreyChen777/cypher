@@ -38,7 +38,7 @@ pub(super) struct BoardUi {
     /// first visit and kept through Projects mode.
     pub(super) slot: Option<SlotId>,
     /// What the detail panel shows; `None` while it is shut.
-    panel: Option<PanelItem>,
+    pub(super) panel: Option<PanelItem>,
     /// What it showed as it slides shut (rendered until the tween ends).
     panel_last: Option<PanelItem>,
     /// The panel's width tween (0 ↔ [`column::PANEL_SPAN`]).

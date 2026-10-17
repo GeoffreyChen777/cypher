@@ -87,9 +87,8 @@ impl Shell {
                 .flex_row()
                 .flex_wrap()
                 .gap(px(GAP))
-                // The first square's edge lines up with the cards' insets
-                // below (the ring sits in the padding).
-                .px(px(4.0))
+                // The first tile's ring lines up with the cards' edges
+                // below.
                 .pb(px(4.0))
                 .children(tiles)
                 .child(add)

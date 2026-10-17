@@ -1422,6 +1422,17 @@ impl Render for Shell {
                     cx.notify();
                 }
             }))
+            // The Botboard's detail panel closes on Esc wherever focus is
+            // (a click in the sidebar leaves it outside the board).
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                let keys = &event.keystroke;
+                if keys.key == "escape"
+                    && !keys.modifiers.modified()
+                    && this.close_panel_on_escape(cx)
+                {
+                    cx.stop_propagation();
+                }
+            }))
             .track_focus(&self.focus.root);
         let root = self.bind_shell_actions(root, cx);
 

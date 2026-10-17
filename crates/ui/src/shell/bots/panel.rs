@@ -26,7 +26,7 @@ struct PanelHead {
 
 impl Shell {
     /// Open `item`; a second click on the open row closes it.
-    pub(super) fn open_panel(&mut self, item: PanelItem, cx: &mut Context<Self>) {
+    pub(in crate::shell) fn open_panel(&mut self, item: PanelItem, cx: &mut Context<Self>) {
         if self.board.panel.as_ref() == Some(&item) {
             return self.close_panel(cx);
         }
@@ -47,6 +47,21 @@ impl Shell {
         self.board.panel_tween = Some(WidthTween::new(from, 0.0));
         self.board.panel_last = Some(item);
         cx.notify();
+    }
+
+    /// Esc anywhere in the window closes an open panel, unless a bot dialog
+    /// over it takes the key. Returns whether it did.
+    pub(in crate::shell) fn close_panel_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        let shown = self.botboard() && matches!(self.route, Route::Chat);
+        if !shown
+            || self.board.panel.is_none()
+            || self.dialogs.bot.is_some()
+            || self.dialogs.delete_bot.is_some()
+        {
+            return false;
+        }
+        self.close_panel(cx);
+        true
     }
 
     /// Shut at once (the bot changed under it).
@@ -238,8 +253,9 @@ impl Shell {
                 .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
                 .child(two_lines(
                     space.display_name().to_string(),
+                    device,
                     format!(
-                        "{device} · {sessions} session{}",
+                        "· {sessions} session{}",
                         if sessions == 1 { "" } else { "s" }
                     ),
                     theme,

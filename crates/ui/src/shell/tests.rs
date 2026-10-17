@@ -1878,6 +1878,56 @@ fn the_botboard_survives_its_bot_being_deleted(cx: &mut gpui::TestAppContext) {
     });
 }
 
+#[gpui::test]
+fn the_detail_panel_opens_replaces_and_closes(cx: &mut gpui::TestAppContext) {
+    use crate::prefs::WindowMode;
+    use bots::PanelItem;
+    let (shell, state) = test_shell(cx);
+    set_bots(&state, &["bob", "ann"], cx);
+    set_chats(
+        &state,
+        vec![
+            test_chat("a", false),
+            test_bot_chat("bob"),
+            test_bot_chat("ann"),
+        ],
+        cx,
+    );
+    let panel = |cx: &mut gpui::TestAppContext| shell.read_with(cx, |s, _| s.board.panel.clone());
+    shell.update(cx, |shell, cx| {
+        shell.open_bot("bob", cx);
+        shell.open_panel(PanelItem::Projects, cx);
+    });
+    assert_eq!(panel(cx), Some(PanelItem::Projects));
+    // Another row replaces it; the open row again closes it.
+    let project = PanelItem::Project("sp".into());
+    shell.update(cx, |shell, cx| shell.open_panel(project.clone(), cx));
+    assert_eq!(panel(cx), Some(project.clone()));
+    shell.update(cx, |shell, cx| shell.open_panel(project.clone(), cx));
+    assert_eq!(panel(cx), None);
+    // Esc closes it, unless a bot dialog over it takes the key.
+    shell.update(cx, |shell, cx| {
+        shell.open_panel(PanelItem::Projects, cx);
+        shell.dialogs.delete_bot = Some("bob".into());
+        assert!(!shell.close_panel_on_escape(cx));
+        shell.dialogs.delete_bot = None;
+        assert!(shell.close_panel_on_escape(cx));
+        assert!(!shell.close_panel_on_escape(cx), "nothing left to close");
+    });
+    assert_eq!(panel(cx), None);
+    // Switching bots shuts it at once; so does Projects mode for Esc.
+    shell.update(cx, |shell, cx| {
+        shell.open_panel(PanelItem::Projects, cx);
+        shell.open_bot("ann", cx);
+    });
+    assert_eq!(panel(cx), None);
+    shell.update(cx, |shell, cx| {
+        shell.open_panel(PanelItem::Projects, cx);
+        shell.set_window_mode(WindowMode::Projects, cx);
+        assert!(!shell.close_panel_on_escape(cx), "the board is not shown");
+    });
+}
+
 #[test]
 fn header_buttons_follow_the_mode() {
     use crate::prefs::WindowMode;

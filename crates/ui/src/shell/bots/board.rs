@@ -239,10 +239,20 @@ impl Shell {
                         theme.text_faint
                     }),
             )
-            .child(div().min_w_0().truncate().child(SharedString::from(format!(
-                "{host} · {}",
-                if online { "online" } else { "offline" }
-            ))));
+            // A long device name truncates; the presence word stays.
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .gap(px(3.0))
+                    .child(div().min_w_0().truncate().child(SharedString::from(host)))
+                    .child(div().flex_none().child(SharedString::from(if online {
+                        "· online"
+                    } else {
+                        "· offline"
+                    }))),
+            );
         let (line, tone) = status_line(status);
         let line_color = match tone {
             StatusTone::Working => theme.text,
@@ -412,7 +422,8 @@ impl Shell {
                 .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
                 .child(two_lines(
                     space.display_name().to_string(),
-                    format!("{device} · {}", plural(load.sessions, "session")),
+                    device,
+                    format!("· {}", plural(load.sessions, "session")),
                     theme,
                 ))
                 .child(
@@ -530,8 +541,9 @@ pub(super) fn project_row(
         .child(icon(glyph).size(px(14.0)).flex_none().text_color(tint))
 }
 
-/// A row's title over its muted sub-line, taking the row's free width.
-pub(super) fn two_lines(title: String, sub: String, theme: &Theme) -> gpui::Div {
+/// A row's title over its muted sub-line, taking the row's free width. The
+/// sub-line's lead (a device name) truncates before its `tail` does.
+pub(super) fn two_lines(title: String, sub: String, tail: String, theme: &Theme) -> gpui::Div {
     div()
         .flex_1()
         .min_w_0()
@@ -550,11 +562,16 @@ pub(super) fn two_lines(title: String, sub: String, theme: &Theme) -> gpui::Div 
         .child(
             div()
                 .min_w_0()
-                .truncate()
+                .flex()
+                .flex_row()
+                .gap(px(3.0))
                 .text_size(px(11.0))
                 .line_height(px(14.0))
                 .text_color(theme.text_muted.opacity(0.85))
-                .child(SharedString::from(sub)),
+                .child(div().min_w_0().truncate().child(SharedString::from(sub)))
+                .when(!tail.is_empty(), |el| {
+                    el.child(div().flex_none().child(SharedString::from(tail)))
+                }),
         )
 }
 

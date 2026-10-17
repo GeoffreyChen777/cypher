@@ -14,8 +14,7 @@ const PANEL_GAP: f32 = 8.0;
 pub(super) const PANEL_SPAN: f32 = PANEL_W + PANEL_GAP;
 
 impl Shell {
-    /// The workspace column on the Botboard (see the module docs). Esc
-    /// closes an open panel from anywhere in it.
+    /// The workspace column on the Botboard (see the module docs).
     pub(in crate::shell) fn render_botboard(
         &mut self,
         window: &mut Window,
@@ -36,14 +35,6 @@ impl Shell {
             .mr(px(PANEL_EDGE_INSET))
             .flex()
             .flex_row()
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                let keys = &event.keystroke;
-                if keys.key == "escape" && !keys.modifiers.modified() && this.board.panel.is_some()
-                {
-                    this.close_panel(cx);
-                    cx.stop_propagation();
-                }
-            }))
             .child(chat)
             .children(panel)
             .into_any_element()
