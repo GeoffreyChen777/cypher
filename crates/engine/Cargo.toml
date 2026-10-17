@@ -44,10 +44,10 @@ ignore.workspace = true
 nucleo-matcher.workspace = true
 lingua.workspace = true
 tempfile.workspace = true
+# The agent bots' search index (FTS5 is compiled into the bundled SQLite).
+rusqlite.workspace = true
 
 [dev-dependencies]
-# Inspects the docs store schema after the SIGKILL recovery test.
-rusqlite.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
 # In-process registry server for the two-engine workspace integration tests.
