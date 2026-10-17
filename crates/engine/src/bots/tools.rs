@@ -261,6 +261,19 @@ impl Bots {
         tool: &str,
         arguments: serde_json::Value,
     ) -> Result<String, EngineError> {
+        // The tracks' own tools first (coordination, memory, network); each
+        // checks the thread and the bot's capabilities per call (§4.4).
+        if let Some((chat, marker)) = self.thread(chat_id)? {
+            if let Some(answer) = self.work_tool(&chat, &marker, tool, &arguments).await {
+                return answer;
+            }
+            if let Some(answer) = self.memory_tool(&chat, &marker, tool, &arguments).await {
+                return answer;
+            }
+            if let Some(answer) = self.network_tool(&chat, &marker, tool, &arguments).await {
+                return answer;
+            }
+        }
         let view = self.view(chat_id)?;
         match tool {
             "list_projects" => Ok(list_projects(&view)),
@@ -273,8 +286,21 @@ impl Bots {
         }
     }
 
-    /// The caller's view, refusing any chat that is not a bot chat hosted on
-    /// this device or whose bot is gone.
+    /// The calling thread's chat row and marker: a bot thread hosted here,
+    /// `None` for anything else.
+    pub(super) fn thread(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<(Chat, cypher_proto::BotChat)>, EngineError> {
+        let workspace = &self.inner.workspace;
+        Ok(workspace.chat(chat_id)?.and_then(|chat| {
+            let marker = chat.bot.clone()?;
+            (chat.device_id == workspace.device_id()).then_some((chat, marker))
+        }))
+    }
+
+    /// The caller's view, refusing any chat that is not a bot thread hosted
+    /// on this device or whose bot is gone.
     fn view(&self, chat_id: &str) -> Result<View, EngineError> {
         let workspace = &self.inner.workspace;
         let not_a_bot = || EngineError::Other("This chat is not an agent bot.".into());
@@ -285,7 +311,9 @@ impl Bots {
         }
         let bot = workspace
             .bot(&marker.bot_id)?
-            .filter(|bot| bot.chat_id == chat.id)
+            // The bot chat itself, or one of its hidden threads (only the
+            // host writes a thread's marker).
+            .filter(|bot| bot.chat_id == chat.id || !marker.is_main())
             .ok_or_else(|| EngineError::Other("This bot has been deleted.".into()))?;
         Ok(View::build(
             bot,

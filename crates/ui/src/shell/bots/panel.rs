@@ -6,22 +6,58 @@
 use super::board::{load_note, project_loads, project_row, scoped_sessions, two_lines};
 use super::*;
 
-/// What the panel shows. Later phases add a plan, an orchestration, a
-/// routine and the notebook.
+/// What the panel shows: a card's whole list (its header) or one item (a
+/// row). Ids are record ids unless named otherwise.
+// The cards that open the later items are being built out.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::shell) enum PanelItem {
     /// Every project the bot reads (the Projects card's header).
     Projects,
     /// One project's sessions in the bot's scope, by space id.
     Project(String),
+    /// Everything that needs the owner.
+    NeedsYou,
+    /// A plan awaiting approval (work id).
+    Plan(String),
+    /// An action awaiting approval.
+    Approval(String),
+    /// A session the bot started, asking (session chat id, work id).
+    Asking {
+        chat_id: String,
+        work_id: String,
+    },
+    /// A peer answer drafted in Review mode (exchange id).
+    Review(String),
+    /// Running and recent work.
+    Work,
+    /// One orchestration (work id).
+    WorkItem(String),
+    /// Routines and project tasks, by next run.
+    Schedule,
+    Routine(String),
+    Task(String),
+    /// The new-routine form.
+    NewRoutine,
+    /// The new-project-task form.
+    NewTask,
+    /// Every note, editable.
+    Notebook,
+    /// The full audit log.
+    Activity,
+    /// Connections and invites.
+    Network,
+    Connection(String),
+    /// Create an invite or redeem one.
+    Invite,
 }
 
 /// The panel header's glyph, title and subtitle.
-struct PanelHead {
-    glyph: &'static str,
-    tint: Option<gpui::Hsla>,
-    title: String,
-    subtitle: String,
+pub(super) struct PanelHead {
+    pub glyph: &'static str,
+    pub tint: Option<gpui::Hsla>,
+    pub title: String,
+    pub subtitle: String,
 }
 
 impl Shell {
@@ -87,6 +123,24 @@ impl Shell {
             PanelItem::Projects => self.render_projects_panel(&bot, &theme, cx),
             PanelItem::Project(space_id) => {
                 self.render_project_panel(&bot, space_id, &theme, cx)?
+            }
+            PanelItem::NeedsYou
+            | PanelItem::Plan(_)
+            | PanelItem::Approval(_)
+            | PanelItem::Asking { .. }
+            | PanelItem::Review(_) => self.render_needs_panel(&bot, item, &theme, cx)?,
+            PanelItem::Work | PanelItem::WorkItem(_) => {
+                self.render_work_panel(&bot, item, &theme, cx)?
+            }
+            PanelItem::Schedule
+            | PanelItem::Routine(_)
+            | PanelItem::Task(_)
+            | PanelItem::NewRoutine
+            | PanelItem::NewTask => self.render_schedule_panel(&bot, item, &theme, cx)?,
+            PanelItem::Notebook => self.render_notebook_panel(&bot, item, &theme, cx)?,
+            PanelItem::Activity => self.render_activity_panel(&bot, item, &theme, cx)?,
+            PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => {
+                self.render_network_panel(&bot, item, &theme, cx)?
             }
         };
         let card_bg = crate::appearance::chat_style::panel_background(

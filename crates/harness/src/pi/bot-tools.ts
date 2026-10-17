@@ -29,13 +29,13 @@ function engine(): Promise<EngineClient> {
   return connecting;
 }
 
-async function botTool(tool: string, args: unknown): Promise<string> {
+async function botTool(tool: string, args: unknown, timeoutMs = CALL_TIMEOUT_MS): Promise<string> {
   const client = await engine();
   try {
     const reply = await client.call(
       "BotTool",
       { chatId: process.env.CYPHER_CHAT_ID, tool, args },
-      { timeoutMs: CALL_TIMEOUT_MS },
+      { timeoutMs },
     );
     return typeof reply?.text === "string" ? reply.text : JSON.stringify(reply);
   } catch (error) {
@@ -49,7 +49,18 @@ function text(value: string) {
   return { content: [{ type: "text" as const, text: value }], details: undefined };
 }
 
-const TOOLS = [
+type ToolDef = {
+  name: string;
+  label: string;
+  description: string;
+  parameters: unknown;
+  /** Calls that wait (on a session, an approval, another bot) need longer. */
+  timeoutMs?: number;
+};
+
+// Every bot tool is registered; the run's `--tools` allowlist (decided by the
+// engine per thread and capabilities) is what the model is actually offered.
+const TOOLS: ToolDef[] = [
   {
     name: "list_projects",
     label: "List projects",
@@ -118,6 +129,18 @@ const TOOLS = [
       project: Type.String({ description: "Project id or name (an id when the name is on several devices)" }),
     }),
   },
+
+  // ── coordination (P2): plans, orchestration threads, worker sessions ──
+
+  // ── end coordination ──
+
+  // ── memory and routines (P3): notebook, schedule ──
+
+  // ── end memory ──
+
+  // ── network (P4): connections, ask_bot ──
+
+  // ── end network ──
 ];
 
 export default function cypherBotTools(pi: ExtensionAPI): void {
@@ -127,7 +150,7 @@ export default function cypherBotTools(pi: ExtensionAPI): void {
       ...tool,
       execute: async (_id: string, params: unknown) => {
         try {
-          return text(await botTool(tool.name, params ?? {}));
+          return text(await botTool(tool.name, params ?? {}, tool.timeoutMs));
         } catch (error) {
           return text(`${tool.label} failed: ${error instanceof Error ? error.message : String(error)}`);
         }

@@ -105,7 +105,8 @@ fn script_summary(code: &str) -> String {
         .to_owned()
 }
 
-/// An agent bot's read tools (`crate::BOT_TOOLS`), by what they do.
+/// An agent bot's own tools (`crate::BOT_TOOLS`, `BOT_WORK_TOOLS`,
+/// `BOT_MEMORY_TOOLS`, `BOT_NETWORK_TOOLS`), by what they do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BotToolKind {
     ListProjects,
@@ -114,6 +115,45 @@ pub enum BotToolKind {
     SearchSessions,
     ReadSession,
     ProjectGit,
+    ProposePlan,
+    ListWork,
+    GetWork,
+    CreateWorktree,
+    StartSession,
+    WaitForSession,
+    AnswerSession,
+    SteerSession,
+    StopSession,
+    UpdateStep,
+    FinishWork,
+    ReadNotes,
+    WriteNote,
+    ListSchedule,
+    SaveRoutine,
+    SaveProjectTask,
+    ListConnections,
+    AskBot,
+}
+
+impl BotToolKind {
+    /// Whether the call acted (started, steered, stopped, wrote) rather than
+    /// read.
+    pub fn acts(self) -> bool {
+        !matches!(
+            self,
+            Self::ListProjects
+                | Self::ListSessions
+                | Self::SessionActivity
+                | Self::SearchSessions
+                | Self::ReadSession
+                | Self::ProjectGit
+                | Self::ListWork
+                | Self::GetWork
+                | Self::ReadNotes
+                | Self::ListSchedule
+                | Self::ListConnections
+        )
+    }
 }
 
 /// The bot tool a call is, when it is one.
@@ -128,6 +168,24 @@ pub fn bot_tool_kind(call: &crate::ToolCall) -> Option<BotToolKind> {
         "search_sessions" => BotToolKind::SearchSessions,
         "read_session" => BotToolKind::ReadSession,
         "project_git" => BotToolKind::ProjectGit,
+        "propose_plan" => BotToolKind::ProposePlan,
+        "list_work" => BotToolKind::ListWork,
+        "get_work" => BotToolKind::GetWork,
+        "create_worktree" => BotToolKind::CreateWorktree,
+        "start_session" => BotToolKind::StartSession,
+        "wait_for_session" => BotToolKind::WaitForSession,
+        "answer_session" => BotToolKind::AnswerSession,
+        "steer_session" => BotToolKind::SteerSession,
+        "stop_session" => BotToolKind::StopSession,
+        "update_step" => BotToolKind::UpdateStep,
+        "finish_work" => BotToolKind::FinishWork,
+        "read_notes" => BotToolKind::ReadNotes,
+        "write_note" => BotToolKind::WriteNote,
+        "list_schedule" => BotToolKind::ListSchedule,
+        "save_routine" => BotToolKind::SaveRoutine,
+        "save_project_task" => BotToolKind::SaveProjectTask,
+        "list_connections" => BotToolKind::ListConnections,
+        "ask_bot" => BotToolKind::AskBot,
         _ => return None,
     })
 }
@@ -195,6 +253,33 @@ fn bot_chip_content(
         ),
         BotToolKind::ReadSession => ("Read session", arg("session_id").unwrap_or_default()),
         BotToolKind::ProjectGit => ("Read git state", arg("project").unwrap_or_default()),
+        BotToolKind::ProposePlan => ("Proposed a plan", arg("title").unwrap_or_default()),
+        BotToolKind::ListWork => ("Checked its tasks", String::new()),
+        BotToolKind::GetWork => ("Read task", arg("work_id").unwrap_or_default()),
+        BotToolKind::CreateWorktree => (
+            "Created worktree",
+            in_project(arg("branch").unwrap_or_default()),
+        ),
+        BotToolKind::StartSession => (
+            "Started session",
+            in_project(arg("title").unwrap_or_default()),
+        ),
+        BotToolKind::WaitForSession => ("Waited on session", arg("session_id").unwrap_or_default()),
+        BotToolKind::AnswerSession => ("Answered session", arg("session_id").unwrap_or_default()),
+        BotToolKind::SteerSession => ("Steered session", arg("session_id").unwrap_or_default()),
+        BotToolKind::StopSession => ("Stopped session", arg("session_id").unwrap_or_default()),
+        BotToolKind::UpdateStep => ("Updated step", arg("step").unwrap_or_default()),
+        BotToolKind::FinishWork => ("Finished task", arg("outcome").unwrap_or_default()),
+        BotToolKind::ReadNotes => ("Read notes", String::new()),
+        BotToolKind::WriteNote => ("Wrote a note", arg("text").unwrap_or_default()),
+        BotToolKind::ListSchedule => ("Checked schedule", String::new()),
+        BotToolKind::SaveRoutine => ("Saved routine", arg("name").unwrap_or_default()),
+        BotToolKind::SaveProjectTask => (
+            "Saved project task",
+            in_project(arg("name").unwrap_or_default()),
+        ),
+        BotToolKind::ListConnections => ("Checked connections", String::new()),
+        BotToolKind::AskBot => ("Asked bot", arg("bot").unwrap_or_default()),
     }
 }
 
@@ -347,6 +432,12 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
                 | BotToolKind::ListSessions
                 | BotToolKind::SessionActivity => listings += 1,
                 BotToolKind::ProjectGit => git_reads += 1,
+                BotToolKind::ListWork
+                | BotToolKind::GetWork
+                | BotToolKind::ReadNotes
+                | BotToolKind::ListSchedule
+                | BotToolKind::ListConnections => listings += 1,
+                _ => other += 1,
             },
             ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => other += 1,
         }

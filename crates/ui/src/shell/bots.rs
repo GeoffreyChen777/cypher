@@ -14,12 +14,18 @@ use crate::prefs::WindowMode;
 use crate::workspace::TabKey;
 use cypher_proto::{Bot, BotScope, ProjectGrant};
 
+mod activity;
 mod board;
 mod chat;
 mod column;
 mod dialog;
+mod needs;
+mod network;
+mod notebook;
 mod panel;
 mod picker;
+mod schedule;
+mod work;
 
 pub(super) use dialog::BotDialog;
 pub(super) use panel::PanelItem;

@@ -31,11 +31,15 @@ use crate::util::{lock, new_id};
 
 mod git;
 mod index;
+mod memory;
+mod network;
 pub mod profile;
 mod prompt;
+mod taint;
 #[cfg(test)]
 mod tests;
 mod tools;
+mod work;
 
 /// `CreateBot` parameters (the target device is the bot's host).
 #[derive(Debug, Deserialize)]
@@ -77,6 +81,12 @@ struct Inner {
     /// `<store>/bots-index.sqlite`, kept current by the indexer task.
     index: Arc<index::SearchIndex>,
     indexer: std::sync::Mutex<Option<Indexer>>,
+    /// Threads that received another user's bot's answer (§4.3).
+    #[allow(dead_code)]
+    taint: taint::Taint,
+    /// Cancels the host loops (work, schedule, network) at shutdown.
+    hosts_cancel: tokio_util::sync::CancellationToken,
+    hosts: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 struct Indexer {
@@ -96,6 +106,9 @@ impl Bots {
                 root,
                 index: Arc::new(index),
                 indexer: Default::default(),
+                taint: Default::default(),
+                hosts_cancel: Default::default(),
+                hosts: Default::default(),
             }),
         }
     }
@@ -117,8 +130,34 @@ impl Bots {
         *slot = Some(Indexer { cancel, task });
     }
 
+    /// Start the host loops that act on bot records: orchestrations, the
+    /// scheduler and the network (needs a tokio runtime). Each track's
+    /// `start_*` keeps its task with [`Bots::keep_host_task`].
+    pub fn start_hosts(&self) {
+        self.start_work_host();
+        self.start_schedule_host();
+        self.start_network_host();
+    }
+
+    /// Keep a host loop's task so shutdown can wait for it.
+    #[allow(dead_code)]
+    fn keep_host_task(&self, task: tokio::task::JoinHandle<()>) {
+        lock(&self.inner.hosts).push(task);
+    }
+
+    /// Cancelled at shutdown: host loops end when it fires.
+    #[allow(dead_code)]
+    fn hosts_cancelled(&self) -> tokio_util::sync::CancellationToken {
+        self.inner.hosts_cancel.clone()
+    }
+
     /// Stop the indexer and wait for it (a pass in flight finishes first).
     pub async fn shutdown(&self) {
+        self.inner.hosts_cancel.cancel();
+        let hosts: Vec<_> = lock(&self.inner.hosts).drain(..).collect();
+        for task in hosts {
+            let _ = task.await;
+        }
         let indexer = lock(&self.inner.indexer).take();
         if let Some(indexer) = indexer {
             indexer.cancel.cancel();

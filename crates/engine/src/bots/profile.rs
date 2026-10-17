@@ -9,7 +9,7 @@
 use cypher_harness::BotRunEnv;
 use cypher_proto::{Bot, BotOrigin, Chat, PermissionPromptKind, UserInputQuestion};
 
-use super::prompt;
+use super::{memory, network, prompt, work};
 use crate::host::workspace_host::WorkspaceHost;
 
 /// The run env for a bot thread; `None` for every other chat. A thread whose
@@ -19,29 +19,55 @@ pub fn bot_env(workspace: &WorkspaceHost, chat: &Chat) -> Option<BotRunEnv> {
     let bot = workspace.bot(&marker.bot_id).ok().flatten();
     let spaces = workspace.read_spaces().unwrap_or_default();
     let devices = workspace.read_devices().unwrap_or_default();
-    let system_prompt = match &bot {
+    let mut system_prompt = match &bot {
         Some(bot) => prompt::system_prompt(bot, marker.origin, None, &spaces, &devices),
         None => prompt::orphan_prompt(),
     };
+    let mut workspace_roots = Vec::new();
+    if let Some(bot) = &bot {
+        for section in [
+            work::work_prompt(workspace, bot, marker),
+            memory::memory_prompt(workspace, bot, marker),
+            network::network_prompt(workspace, bot, marker),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&section);
+        }
+        workspace_roots = work::workspace_roots(workspace, bot, marker);
+    }
     Some(BotRunEnv {
         bot_id: marker.bot_id.clone(),
         origin: marker.origin,
-        tools: tools_for(marker.origin, bot.as_ref()),
+        tools: tools_for(marker, bot.as_ref()),
         system_prompt,
-        workspace_roots: Vec::new(),
+        workspace_roots,
     })
 }
 
-/// The tool allowlist of a thread with `origin`. Today every origin gets the
-/// read tools; owner threads gain Pi's tools and coordination tools with the
-/// bot's capabilities (P2), which is why the bot row is an input.
-pub fn tools_for(origin: BotOrigin, _bot: Option<&Bot>) -> Vec<String> {
-    match origin {
-        BotOrigin::Owner | BotOrigin::Routine | BotOrigin::Peer => cypher_proto::BOT_TOOLS
-            .iter()
-            .map(|tool| tool.to_string())
-            .collect(),
+/// The tool allowlist of a thread: the read tools for every origin, then
+/// what each track adds for this thread and the bot's capabilities (Pi's
+/// tools with *Work directly*, coordination, notes, the network). A deleted
+/// bot's thread keeps only the read tools, which see nothing.
+pub fn tools_for(marker: &cypher_proto::BotChat, bot: Option<&Bot>) -> Vec<String> {
+    let mut tools: Vec<String> = cypher_proto::BOT_TOOLS
+        .iter()
+        .map(|tool| tool.to_string())
+        .collect();
+    if bot.is_some() {
+        for tool in work::work_tools(marker, bot)
+            .into_iter()
+            .chain(memory::memory_tools(marker, bot))
+            .chain(network::network_tools(marker, bot))
+        {
+            if !tools.iter().any(|t| t == tool) {
+                tools.push(tool.to_string());
+            }
+        }
     }
+    tools
 }
 
 /// Whether nobody watches this chat's runs, so they must never wait for an
@@ -128,7 +154,10 @@ mod tests {
     #[test]
     fn every_origin_gets_the_read_tools() {
         for origin in [BotOrigin::Owner, BotOrigin::Routine, BotOrigin::Peer] {
-            assert_eq!(tools_for(origin, None), cypher_proto::BOT_TOOLS);
+            assert_eq!(
+                tools_for(&BotChat::new("b1", origin), None),
+                cypher_proto::BOT_TOOLS
+            );
         }
     }
 

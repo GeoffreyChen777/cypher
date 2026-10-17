@@ -147,7 +147,7 @@ fn plural(n: usize, word: &str) -> String {
 }
 
 /// The cards' shared surface: the sidebar's focused-project card.
-fn card(theme: &Theme) -> gpui::Div {
+pub(super) fn card(theme: &Theme) -> gpui::Div {
     div()
         .rounded(px(CARD_RADIUS))
         .bg(theme.sidebar_card_fill(1.0))
@@ -181,10 +181,20 @@ impl Shell {
         }
         match bot {
             Some(bot) => {
+                // §13.1's order: Needs you right under Status, so attention
+                // is never below the fold. A card with nothing to show is
+                // `None` and not drawn.
                 column = column.child(self.render_status_card(&bot, theme, cx));
-                if let Some(projects) = self.render_projects_card(&bot, theme, cx) {
-                    column = column.child(projects);
-                }
+                let cards = [
+                    self.render_needs_card(&bot, theme, cx),
+                    self.render_work_card(&bot, theme, cx),
+                    self.render_schedule_card(&bot, theme, cx),
+                    self.render_projects_card(&bot, theme, cx),
+                    self.render_notebook_card(&bot, theme, cx),
+                    self.render_activity_card(&bot, theme, cx),
+                    self.render_network_card(&bot, theme, cx),
+                ];
+                column = column.children(cards.into_iter().flatten());
             }
             None if synced => column = column.child(render_board_empty(theme, cx)),
             None => {}
@@ -446,7 +456,7 @@ impl Shell {
 
 /// A card's header row: glyph, title and count; a click opens the whole
 /// list (highlighted while that list is open).
-fn section_header(
+pub(super) fn section_header(
     key: &'static str,
     glyph: &'static str,
     title: &'static str,

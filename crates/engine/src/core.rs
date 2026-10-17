@@ -275,6 +275,7 @@ impl EngineCore {
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         bots.start_indexer();
+        bots.start_hosts();
         Ok(Self {
             sessions,
             doc_host,

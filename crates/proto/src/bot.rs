@@ -33,6 +33,47 @@ pub const BOT_TOOLS: [&str; 6] = [
     "project_git",
 ];
 
+/// Coordination tools (P2, *Coordinate*): `propose_plan` in the bot chat,
+/// the rest in orchestration threads (`list_work` and `get_work` in both).
+pub const BOT_WORK_TOOLS: [&str; 11] = [
+    "propose_plan",
+    "list_work",
+    "get_work",
+    "create_worktree",
+    "start_session",
+    "wait_for_session",
+    "answer_session",
+    "steer_session",
+    "stop_session",
+    "update_step",
+    "finish_work",
+];
+
+/// Pi's own tools an owner thread gets with *Work directly*, under
+/// permission control.
+pub const BOT_DIRECT_TOOLS: [&str; 8] = [
+    "bash",
+    "read",
+    "write",
+    "edit",
+    "grep",
+    "find",
+    "ls",
+    "request_permission",
+];
+
+/// Notebook and schedule tools (P3).
+pub const BOT_MEMORY_TOOLS: [&str; 5] = [
+    "read_notes",
+    "write_note",
+    "list_schedule",
+    "save_routine",
+    "save_project_task",
+];
+
+/// Network tools (P4), owner threads only.
+pub const BOT_NETWORK_TOOLS: [&str; 2] = ["list_connections", "ask_bot"];
+
 /// One bot definition (a registry `bots` row).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

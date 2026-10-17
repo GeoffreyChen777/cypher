@@ -1456,7 +1456,21 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
             BotToolKind::SessionActivity => crate::kit::icons::PULSE,
             BotToolKind::SearchSessions => crate::kit::icons::MAGNIFER,
             BotToolKind::ReadSession => crate::kit::icons::CHAT_ROUND_LINE,
-            BotToolKind::ProjectGit => crate::kit::icons::GIT_BRANCH,
+            BotToolKind::ProjectGit | BotToolKind::CreateWorktree => crate::kit::icons::GIT_BRANCH,
+            BotToolKind::ProposePlan | BotToolKind::ListWork | BotToolKind::GetWork => {
+                crate::kit::icons::CHECKLIST
+            }
+            BotToolKind::UpdateStep | BotToolKind::FinishWork => crate::kit::icons::CHECKLIST,
+            BotToolKind::StartSession
+            | BotToolKind::WaitForSession
+            | BotToolKind::AnswerSession
+            | BotToolKind::SteerSession
+            | BotToolKind::StopSession => crate::kit::icons::CHAT_ROUND_LINE,
+            BotToolKind::ReadNotes | BotToolKind::WriteNote => crate::kit::icons::PEN,
+            BotToolKind::ListSchedule | BotToolKind::SaveRoutine | BotToolKind::SaveProjectTask => {
+                crate::kit::icons::PULSE
+            }
+            BotToolKind::ListConnections | BotToolKind::AskBot => crate::kit::icons::BOT,
         };
     }
     match call {
