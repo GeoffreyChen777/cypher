@@ -1,0 +1,5 @@
+# The Xcode every iOS build and check uses, locally and in CI: version, then
+# the build number `xcodebuild -version` prints. scripts/ci/select-xcode.sh
+# selects exactly this build and fails if it isn't installed. Bump it
+# deliberately, when you move to a new Xcode locally.
+27.1 27A9275

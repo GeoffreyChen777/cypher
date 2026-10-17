@@ -248,7 +248,7 @@ provider setup, offline recovery, existing sessions and archived sessions.
 For TestFlight/App Store preparation, signing and publication boundaries, see
 [`docs/operations/ios-release.md`](../../docs/operations/ios-release.md).
 
-Builds with Xcode 27 or newer, the version CI pins (the app targets iOS 26 and uses its Liquid Glass APIs).
+Builds with the Xcode pinned in [`.xcode-version`](../../.xcode-version), the one CI archives and tests with (the app targets iOS 26 and uses its Liquid Glass APIs).
 
 ```sh
 cd apps/ios

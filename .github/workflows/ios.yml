@@ -38,8 +38,9 @@ jobs:
 
   archive:
     needs: preflight
-    # Archive with the same major Xcode developers build with. macos-15 stopped
-    # at Xcode 26.3, whose compiler rejected code Xcode 27 accepts (build 21).
+    # Archive with the Xcode pinned in .xcode-version, the one developers
+    # build with. macos-15 stopped at Xcode 26.3, whose compiler rejected code
+    # Xcode 27 accepts (build 21).
     runs-on: xcode-27
     timeout-minutes: 60
     env:
@@ -50,10 +51,10 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - name: select the newest installed Xcode at or above the floor
+      - name: select the Xcode pinned in .xcode-version
         run: |
-          bash scripts/ci/select-xcode.sh 27 \
-            || { echo "NOT PUBLISHED: need Xcode 27 or newer to archive for the App Store"; exit 1; }
+          bash scripts/ci/select-xcode.sh \
+            || { echo "NOT PUBLISHED: the runner lacks the Xcode pinned in .xcode-version"; exit 1; }
       - name: require distribution signing material
         run: |
           test -n "$IOS_DIST_CERT_P12" \

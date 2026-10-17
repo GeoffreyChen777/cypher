@@ -11,6 +11,7 @@ on:
       - "scripts/check.sh"
       - "scripts/ci/ios-unit-tests.sh"
       - "scripts/ci/select-xcode.sh"
+      - ".xcode-version"
       - ".github/workflows/ios-tests.yml"
   push:
     branches: [main]
@@ -20,6 +21,7 @@ on:
       - "scripts/check.sh"
       - "scripts/ci/ios-unit-tests.sh"
       - "scripts/ci/select-xcode.sh"
+      - ".xcode-version"
       - ".github/workflows/ios-tests.yml"
   workflow_dispatch:
 
@@ -32,12 +34,12 @@ concurrency:
 
 jobs:
   unit-tests:
-    # Same runner and Xcode floor as the archive job in ios.yml.
+    # Same runner as the archive job in ios.yml; check.sh ios selects the
+    # Xcode pinned in .xcode-version.
     runs-on: xcode-27
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - run: bash scripts/ci/select-xcode.sh 27
       - run: bash scripts/check.sh ios
