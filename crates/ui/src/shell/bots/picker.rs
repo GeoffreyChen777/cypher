@@ -120,6 +120,7 @@ impl Shell {
             theme,
         );
         let name: SharedString = bot.name.clone().into();
+        let menu_open = self.menus.bot.get().is_some_and(|(id, _)| *id == bot.id);
         let (open_id, menu_id) = (bot.id.clone(), bot.id.clone());
         // The current bot is ringed (the workspace-switcher convention): a
         // 1.5px outline 1.5px off the square, in the bot's own colour.
@@ -140,7 +141,12 @@ impl Shell {
             })
             .cursor_pointer()
             .when(!selected, |el| el.hover(|s| s.opacity(0.85)))
-            .tooltip(move |_, cx| cx.new(|_| super::session::FindTooltip(name.clone())).into())
+            // No name over the tile's own open menu.
+            .when(!menu_open, |el| {
+                el.tooltip(move |_, cx| {
+                    cx.new(|_| super::session::FindTooltip(name.clone())).into()
+                })
+            })
             .on_click(cx.listener(move |this, _, _, cx| this.open_bot(&open_id, cx)))
             .on_mouse_down(
                 MouseButton::Right,
