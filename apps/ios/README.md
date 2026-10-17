@@ -71,6 +71,21 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   an agent receipt, including when a steer falls back to a new run. Old messages
   without a matching command ID remain ordinary rather than being guessed.
   Demo's `chat-tabs` includes an example; no engine/schema change is required.
+- **Context recovery:** a prompt the host sent again after a failed turn
+  (`recovery` on its doc entry) is captioned **Restarted with context** (with
+  the attempt from the second on) in the Steer label's place, with the
+  desktop's restart glyph. A phone has no hover: tapping the caption opens the
+  desktop card's contents in a popover (restart point, the trigger and where
+  it matched with the text around it, the added context, selectable and
+  scrollable past 220pt, and the model that wrote it). While a recovery runs
+  (`recovery` on the session row), the status strip shows the spinner with
+  "Writing context to retry…" / "Restarting with added context…", the elapsed
+  time, the matched phrase and the attempt; a working run wins, and a row
+  older than five minutes shows nothing. Both fields are read leniently: a
+  malformed one drops only itself. Settings stay on the desktop. Demo: the
+  **Context recovery** project has a session per state (writing context,
+  restarting, recovered, out of attempts) and a live one that replays the
+  whole flow when opened and again for each message sent in it.
 - **Composer focus:** the editor owns a native UITextView/delegate rather than
   relying on SwiftUI TextField's backing-view accessibility ID or FocusState.
   Empty focus and the first typed character expand the model/thinking toolbar;
@@ -306,6 +321,8 @@ Run these commands from the repository root.
   `-demo -route chat:chat-veil -sheet subagents`.
   Child fixture: `-demo -route chat:demo-child-planner`.
   Script fixture: `-demo -route chat:chat-deploy`.
+  Context recovery fixtures: `-demo -route space:space-recovery`; the live
+  replay is `-demo -route chat:chat-recovery-live`.
   Comment editor/list fixtures:
   `-demo -route chat:chat-tabs -sheet comment` (or `-sheet comments`).
 

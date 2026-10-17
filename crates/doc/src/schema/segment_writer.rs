@@ -50,6 +50,7 @@ impl<'a> SegmentWriter<'a> {
                 comments: Vec::new(),
                 models: Vec::new(),
                 turn_changes: None,
+                recovery: None,
             },
         )?;
         map.insert_container("parts", LoroList::new())?;

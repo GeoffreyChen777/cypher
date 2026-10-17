@@ -239,11 +239,20 @@ impl Render for Composer {
                 .as_ref()
                 .is_some_and(|wizard| wizard.quiet_entry);
             let wizard = div().w_full().min_w_0().child(self.render_wizard(cx));
-            return container.child(if quiet {
+            let container = container.relative().child(question_card::measure_height(
+                self.wizard_total_height.clone(),
+            ));
+            let container = container.child(if quiet {
                 wizard.into_any_element()
             } else {
                 motion::fade_quick("composer-wizard", wizard).into_any_element()
             });
+            // A block wrapper settles the column's width (`w_full`, capped,
+            // centered) before its height. Laid out straight in the chrome
+            // stack, the column's height was measured at the stack's full
+            // width, where the card's text wraps into fewer lines, so the
+            // card ran past the window's bottom edge.
+            return div().w_full().child(container);
         }
 
         // New chats always use the expanded layout: the repo/branch pickers

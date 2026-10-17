@@ -78,7 +78,7 @@ impl Composer {
                                     })
                                     .collect::<Vec<_>>()
                                     .join("\n");
-                                slash_command_label(&text).map(str::to_string)
+                                question_slash_owner(&questions, &text).map(str::to_string)
                             })
                     };
                     let pick_only = questions.first().is_some_and(wizard_pick_only);
@@ -1344,6 +1344,7 @@ fn echo_entry(
         comments,
         models: Vec::new(),
         turn_changes: None,
+        recovery: None,
     }
 }
 

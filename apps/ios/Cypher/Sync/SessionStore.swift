@@ -428,6 +428,12 @@ final class SessionStore {
             models: (m["models"]?.listValue ?? []).compactMap { value -> AnsweredModel? in
                 guard let model = value.mapValue?["model"]?.stringValue, !model.isEmpty else { return nil }
                 return AnsweredModel(model: model, requested: value.mapValue?["requested"]?.stringValue)
+            },
+            // A malformed record costs only itself (salvage.rs
+            // `recovery_from_json`): the prompt it rides still renders.
+            recovery: m["recovery"].flatMap { record in
+                guard let data = try? JSONSerialization.data(withJSONObject: record.jsonObject) else { return nil }
+                return try? JSONDecoder().decode(ContextRecovery.self, from: data)
             })
     }
 

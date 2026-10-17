@@ -45,12 +45,16 @@ impl EngineRpc {
                 .map_err(failed)
                 .map(drop),
             MutateParams::DeleteSpace { space_id } => {
+                // The rows are read first: their pi session files are deleted
+                // after the rows go.
+                let rows = self.workspace.read_chats().map_err(failed)?;
                 let deleted = self.workspace.delete_space(&space_id).map_err(failed)?;
                 // Best-effort teardown of live runs we host for the deleted chats
                 // (the doc rows are already tombstoned; a straggler run would only
                 // write into an orphaned session doc).
                 let sessions = self.sessions.clone();
                 let doc_host = self.doc_host.clone();
+                let forks = self.session_forks.clone();
                 let chat_ids = deleted.chat_ids;
                 tokio::spawn(async move {
                     for chat_id in chat_ids {
@@ -58,6 +62,9 @@ impl EngineRpc {
                             tracing::debug!(chat = %chat_id, error = %err, "deleteSpace interrupt skipped");
                         }
                         doc_host.purge_chat(&chat_id);
+                        if let Some(chat) = rows.iter().find(|c| c.id == chat_id) {
+                            forks.delete_chat_session(chat);
+                        }
                     }
                 });
                 Ok(())
@@ -125,30 +132,40 @@ impl EngineRpc {
                 // session interruption): a deleted parent must not leave orphaned
                 // navigable child rows behind (no dangling navigation). Child rows
                 // are tombstoned in the same mutation, then torn down async.
+                let chat = self.workspace.chat(&chat_id).map_err(failed)?;
                 let children = self.workspace.child_chats(&chat_id).map_err(failed)?;
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
                 self.doc_host.purge_chat(&chat_id);
-                if !children.is_empty() {
-                    let sessions = self.sessions.clone();
-                    let doc_host = self.doc_host.clone();
-                    let workspace = self.workspace.clone();
-                    tokio::spawn(async move {
-                        for child in children {
-                            // Interrupt first so the run settles and its
-                            // terminal bookkeeping lands BEFORE the row goes
-                            // (a live run's late claim could otherwise
-                            // resurrect the tombstoned row).
-                            if let Err(err) = sessions.interrupt(&child.id).await {
-                                tracing::debug!(chat = %child.id, error = %err, "child interrupt skipped");
-                            }
-                            // The host-local channel entry (initial-run only)
-                            // dies with the row.
-                            sessions.remove_child_channel(&child.id);
-                            let _ = workspace.delete_chat(&child.id);
-                            doc_host.purge_chat(&child.id);
+                let sessions = self.sessions.clone();
+                let doc_host = self.doc_host.clone();
+                let workspace = self.workspace.clone();
+                let forks = self.session_forks.clone();
+                tokio::spawn(async move {
+                    // The pi session file goes with the chat (on its host).
+                    // Its run stops first: a live pi child would write the
+                    // file back on its next append.
+                    if let Some(chat) = chat.filter(|c| c.device_id == workspace.device_id()) {
+                        if let Err(err) = sessions.interrupt(&chat.id).await {
+                            tracing::debug!(chat = %chat.id, error = %err, "deleteChat interrupt skipped");
                         }
-                    });
-                }
+                        forks.delete_chat_session(&chat);
+                    }
+                    for child in children {
+                        // Interrupt first so the run settles and its
+                        // terminal bookkeeping lands BEFORE the row goes
+                        // (a live run's late claim could otherwise
+                        // resurrect the tombstoned row).
+                        if let Err(err) = sessions.interrupt(&child.id).await {
+                            tracing::debug!(chat = %child.id, error = %err, "child interrupt skipped");
+                        }
+                        // The host-local channel entry (initial-run only)
+                        // dies with the row.
+                        sessions.remove_child_channel(&child.id);
+                        let _ = workspace.delete_chat(&child.id);
+                        doc_host.purge_chat(&child.id);
+                        forks.delete_chat_session(&child);
+                    }
+                });
                 Ok(())
             }
             MutateParams::RenameDevice { device_id, name } => self

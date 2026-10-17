@@ -108,6 +108,9 @@ pub(super) struct SessionSlot {
     /// the transcript's bottom clearance, and the jump pill's anchor (the
     /// same one-frame lag every fade here rides).
     pub(super) bottom_stack: Rc<Cell<f32>>,
+    /// The new-session canvas's text ripples (still until the pointer
+    /// stirs them).
+    pub(super) ripples: Rc<std::cell::RefCell<crate::kit::ripples::Ripples>>,
     /// The session area's window bounds (below the tile header), measured at
     /// paint like `bottom_stack`: sizes the docks and drives their drags.
     pub(super) area: Rc<Cell<gpui::Bounds<Pixels>>>,
@@ -181,6 +184,14 @@ impl Shell {
             t.set_bottom_clearance(stack_h, cx);
             t.set_viewport_size(chat_width, chat_height, cx);
         });
+        // The composer stack floats over the column, under the status strip
+        // and below the transcript's top band: a question card never grows
+        // past that. (The area is unmeasured on a tile's first frame.)
+        if chat_height > 0.0 {
+            let room = chat_height - Theme::STATUS_STRIP_HEIGHT - crate::transcript::TOP_CHROME_PX;
+            slot.composer
+                .update(cx, |composer, cx| composer.set_available_height(room, cx));
+        }
         let chat = self.render_session_chat(sid, chat_height, window, cx);
         let dock = self.render_dock(sid, cx);
         let terminal = self.render_terminal_container(sid, cx);

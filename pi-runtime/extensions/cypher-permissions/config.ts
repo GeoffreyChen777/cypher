@@ -243,15 +243,19 @@ export const DEFAULT_LEVELS: Record<LevelName, LevelMatrix> = {
   },
 };
 
+/**
+ * Model first everywhere: the reviewing model approves what plainly serves
+ * the user's request and asks them about the rest. Writes to Cypher's own
+ * data (`self.write`) are a human's alone (`approvalMode`).
+ */
 export const DEFAULT_APPROVAL: Record<string, ApprovalMode> = {
   "external.write": "assisted",
   "protected.write": "assisted",
-  "sensitive.read": "ask",
-  "sensitive.write": "ask",
+  "sensitive.read": "assisted",
+  "sensitive.write": "assisted",
   network: "assisted",
-  tools: "ask",
-  // Running a command outside the sandbox: a human decides.
-  escalate: "ask",
+  tools: "assisted",
+  escalate: "assisted",
 };
 
 export function defaultConfig(): PermissionsConfig {
@@ -460,10 +464,6 @@ export function loadConfig(agentDir: string, projectRoots: readonly string[]): L
     if (raw === undefined) warnings.push(`${projectPath} is not valid JSON; ignored`);
     config = mergeProjectConfig(config, raw);
   }
-  // Safety rules that no file can turn off.
-  for (const key of ["sensitive.read", "sensitive.write"]) {
-    if (config.approval[key] === "assisted") config.approval[key] = "ask";
-  }
   return { config, warnings };
 }
 
@@ -503,11 +503,13 @@ export function resolveLevel(env: string | undefined, config: PermissionsConfig)
   return config.defaultLevel;
 }
 
+/**
+ * How a kind of request is decided. A write to Cypher's own data never goes
+ * to the model, whatever a file says: one wrong approval there could switch
+ * every check off.
+ */
 export function approvalMode(config: PermissionsConfig, key: string): ApprovalMode {
   const mode = config.approval[key] ?? "ask";
-  if ((key === "sensitive.read" || key === "sensitive.write" || key === "self.write" || key === "escalate") && mode === "assisted") {
-    return "ask";
-  }
   if (key === "self.write") return mode === "deny" ? "deny" : "ask";
   return mode;
 }

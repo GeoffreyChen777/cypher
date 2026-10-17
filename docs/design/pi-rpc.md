@@ -257,7 +257,10 @@ engine refuses the start, or when the parent is not a durable local chat.
   navigable chat.
 - **`WatchAgentEvents`** (stream): replayable per-chat agent events (journal
   replay after `afterSeq`, then live) — the parent extension observes the
-  child's terminal `done`/result.
+  child's terminal `done`/result. A `done` waits for context recovery's
+  verdict on its round: a restarted round's `done` is never sent (live or
+  replayed), so the parent takes the retried round's (see
+  `docs/features/context-recovery.md`).
 - Interrupt/abort/timeout teardown queues a normal child `Interrupt` command
   (`QueueCommand`), never an extension-owned kill.
 

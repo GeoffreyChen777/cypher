@@ -161,6 +161,13 @@ struct Inner {
     /// by `StartSubagent` and CONSUMED at first dispatch. Bounded: capped at
     /// [`MAX_LOCAL_CHILD_CHANNELS`], and removed on child-chat delete/rollback.
     child_channels: Mutex<HashMap<String, LocalChildChannel>>,
+    /// Channels already consumed, kept so a context recovery that retries a
+    /// child's initial task can hand the retry the same channel. Same bound
+    /// and lifetime as [`Self::child_channels`].
+    spent_child_channels: Mutex<HashMap<String, LocalChildChannel>>,
+    /// chat_id → journal seq of the newest terminal `Done` published —
+    /// context recovery keys its verdict on a round by it.
+    done_seqs: Mutex<HashMap<String, u64>>,
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (the chat row is the fallback after a restart).
     last_requests: Mutex<HashMap<String, RunRequest>>,
@@ -290,6 +297,8 @@ impl SessionsEngine {
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
                 child_channels: Mutex::new(HashMap::new()),
+                spent_child_channels: Mutex::new(HashMap::new()),
+                done_seqs: Mutex::new(HashMap::new()),
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
@@ -519,7 +528,25 @@ impl SessionsEngine {
 
     /// Drop a child chat's local channel (delete/rollback teardown), returning it.
     pub fn remove_child_channel(&self, chat_id: &str) -> Option<LocalChildChannel> {
+        lock(&self.inner.spent_child_channels).remove(chat_id);
         lock(&self.inner.child_channels).remove(chat_id)
+    }
+
+    /// Hand a child chat's next dispatch the channel its initial run already
+    /// consumed: a context recovery retrying the initial task still answers
+    /// the same parent call. False when the channel is unknown here.
+    pub fn restore_child_channel(&self, chat_id: &str) -> bool {
+        let Some(channel) = lock(&self.inner.spent_child_channels).get(chat_id).cloned() else {
+            return false;
+        };
+        lock(&self.inner.child_channels).insert(chat_id.to_string(), channel);
+        true
+    }
+
+    /// Journal seq of the newest terminal `Done` this process published for
+    /// the chat.
+    pub fn last_done_seq(&self, chat_id: &str) -> Option<u64> {
+        lock(&self.inner.done_seqs).get(chat_id).copied()
     }
 
     /// The chat's Pi session file, when its harness session is one. Pi names
@@ -1031,6 +1058,14 @@ impl SessionsEngine {
         self.inner.set_status(chat_id, status, fresh_start);
     }
 
+    /// Context recovery's progress on the chat's session row: `Some` while a
+    /// recovery is under way (the transcript's recovery spinner), `None` once
+    /// the prompt is sent again or the recovery gives up. A chat without a
+    /// row has no settled round to recover, so nothing is written for it.
+    pub fn set_recovery(&self, chat_id: &str, recovery: Option<cypher_proto::RecoveryProgress>) {
+        self.inner.set_recovery(chat_id, recovery);
+    }
+
     /// Session Fork (v1): is `chat_id` a temporary Side Chat (host-memory
     /// only, no durable workspace row)? Forks of a temporary chat are refused
     /// — the source must be a durable root chat whose transcript and Pi
@@ -1069,6 +1104,9 @@ impl Inner {
                 0
             }
         };
+        if seq != 0 && matches!(event, AgentEvent::Done { .. }) {
+            lock(&self.done_seqs).insert(chat_id.to_string(), seq);
+        }
         if let Some(hub) = lock(&self.hubs).get(chat_id) {
             let _ = hub.send(JournaledEvent {
                 seq,
@@ -1195,6 +1233,7 @@ impl Inner {
                     subagents: Vec::new(),
                     context_usage: seed,
                     throughput: None,
+                    recovery: None,
                 });
             if entry.context_usage == Some(usage) {
                 return;
@@ -1217,6 +1256,24 @@ impl Inner {
     /// snapshot, a transition), and the settle write clears it. No
     /// `updated_at` bump: it is not a liveness signal, and a missing row is
     /// never created for it.
+    /// See [`SessionsEngine::set_recovery`]. Each change is a registry write
+    /// — a recovery makes a handful — so other devices show it too.
+    fn set_recovery(&self, chat_id: &str, recovery: Option<cypher_proto::RecoveryProgress>) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.recovery == recovery {
+                return;
+            }
+            entry.recovery = recovery;
+            entry.updated_at = Utc::now();
+            entry.clone()
+        };
+        self.publish_session(chat_id, &session);
+    }
+
     fn set_throughput(&self, chat_id: &str, throughput: Option<Throughput>) {
         let session = {
             let mut statuses = lock(&self.statuses);
@@ -1255,6 +1312,7 @@ impl Inner {
                     subagents: Vec::new(),
                     context_usage: seed,
                     throughput: None,
+                    recovery: None,
                 });
             entry.subagents = runs;
             entry.updated_at = now;
@@ -1287,6 +1345,7 @@ impl Inner {
                     subagents: Vec::new(),
                     context_usage: seed,
                     throughput: None,
+                    recovery: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -1373,6 +1432,16 @@ impl Inner {
             && let Some(child) = chat.child
         {
             let channel = lock(&self.child_channels).remove(chat_id);
+            if let Some(channel) = &channel {
+                let mut spent = lock(&self.spent_child_channels);
+                if spent.len() >= MAX_LOCAL_CHILD_CHANNELS
+                    && !spent.contains_key(chat_id)
+                    && let Some(oldest) = spent.keys().next().cloned()
+                {
+                    spent.remove(&oldest);
+                }
+                spent.insert(chat_id.to_string(), channel.clone());
+            }
             let (channel_root, child_index, address) = match channel {
                 Some(c) => (Some(c.channel_root), c.child_index, c.address),
                 None => (None, 0, None),

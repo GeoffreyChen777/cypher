@@ -68,6 +68,7 @@ mod render;
 mod scroll;
 use render::*;
 mod comments;
+mod recovery;
 mod translation_cue;
 mod turn_changes;
 

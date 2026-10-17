@@ -184,6 +184,7 @@ impl Shell {
                 // Seed with the compact composer stack's rough height so the
                 // first frame's clearance isn't zero (the measure corrects it).
                 bottom_stack: Rc::new(Cell::new(120.0)),
+                ripples: Rc::default(),
                 // A roomy guess until the first paint measures it, so the
                 // first frame never reads as "too narrow for the dock".
                 area: Rc::new(Cell::new(gpui::Bounds::new(

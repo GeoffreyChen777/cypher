@@ -163,7 +163,8 @@ Modules follow the `foo.rs` + `foo/` layout; a folder groups one feature.
 
 - **`cypher-engine`**: `pi/` (Pi runtime install and updates, packages, providers,
   session modes, subagents, translation, web-search fallback), `session/` (the sessions
-  engine and its run loop, forks, side chats, run journal, titles, scratch chats), `host/`
+  engine and its run loop, forks, side chats, context recovery, run journal, titles,
+  scratch chats), `host/`
   (doc host and its chat2 sync, workspace registry host, local import, spaces, viewport
   activity, notification events), `git/` (repos and worktrees, checkout diffs, GitHub,
   workspace files), `rpc/` (the dispatcher plus one module per method group), `mcp/`,

@@ -153,6 +153,31 @@ fn slash_command_label_reads_the_leading_token() {
 }
 
 #[test]
+fn a_permission_prompt_in_a_slash_turn_stays_a_permission_prompt() {
+    let asked = vec![question("Pick a goal", &["a", "b"], false)];
+    assert_eq!(question_slash_owner(&asked, "/goal ship it"), Some("/goal"));
+    assert_eq!(question_slash_owner(&asked, "ship it"), None);
+    let marked = vec![cypher_proto::UserInputQuestion {
+        permission: Some(cypher_proto::PermissionPrompt {
+            kind: cypher_proto::PermissionPromptKind::Escalate,
+            tool_call_id: None,
+        }),
+        ..question(
+            "Run this command outside the sandbox?",
+            &["Run once", "Deny"],
+            false,
+        )
+    }];
+    assert_eq!(question_slash_owner(&marked, "/goal ship it"), None);
+    let unmarked = vec![question(
+        "Allow the agent to read a sensitive file?",
+        &["Allow once", "Deny", "Deny and stop"],
+        false,
+    )];
+    assert_eq!(question_slash_owner(&unmarked, "/goal ship it"), None);
+}
+
+#[test]
 fn comment_restore_merges_deduped_restored_first() {
     let a = comment("a", "q1", "c1");
     let b = comment("b", "q2", "c2");
@@ -1994,6 +2019,7 @@ fn pending_input_detection() {
             comments: Vec::new(),
             models: Vec::new(),
             turn_changes: None,
+            recovery: None,
         },
     ];
     assert!(pending_input_request(&t).is_none());
@@ -2031,6 +2057,7 @@ fn pending_input_detection() {
         comments: Vec::new(),
         models: Vec::new(),
         turn_changes: None,
+        recovery: None,
     };
     let t = vec![
         entry(Some(MessageStatus::Streaming), vec![input_part.clone()]),
@@ -2068,4 +2095,23 @@ fn pending_input_detection() {
     let t = vec![entry(Some(MessageStatus::Streaming), vec![resolved])];
     assert!(input_request_resolved(&t, "r1"));
     assert!(!input_request_resolved(&t, "other"));
+}
+
+#[test]
+fn a_question_card_yields_to_a_short_column() {
+    assert_eq!(
+        wizard_content_max_height(None, 120.0),
+        WIZARD_CONTENT_MAX_HEIGHT
+    );
+    assert_eq!(
+        wizard_content_max_height(Some(900.0), 120.0),
+        WIZARD_CONTENT_MAX_HEIGHT,
+        "a tall column keeps the usual cap"
+    );
+    assert_eq!(wizard_content_max_height(Some(400.0), 150.0), 250.0);
+    assert_eq!(
+        wizard_content_max_height(Some(100.0), 150.0),
+        WIZARD_CONTENT_MIN_HEIGHT,
+        "never below a couple of lines"
+    );
 }

@@ -96,7 +96,7 @@ final class SteerBubbleTests: XCTestCase {
         XCTAssertNil(optimistic.timestamp)
         XCTAssertNotNil(confirmed.timestamp)
         for row in [optimistic, confirmed] {
-            guard case .user(let text, let isSteer) = row.kind else { return XCTFail("Missing bubble") }
+            guard case .user(let text, let isSteer, _) = row.kind else { return XCTFail("Missing bubble") }
             XCTAssertEqual(text, "Continue")
             XCTAssertTrue(isSteer)
         }

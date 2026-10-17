@@ -136,6 +136,7 @@ fn message(index: usize, text: &str) -> SessionMessageEntry {
         comments: vec![],
         models: vec![],
         turn_changes: None,
+        recovery: None,
     }
 }
 

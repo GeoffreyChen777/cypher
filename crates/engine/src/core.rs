@@ -47,6 +47,10 @@ pub struct EngineCore {
     pub session_forks: SessionForks,
     /// Agent bots hosted here: creation and the bot tool surface.
     pub bots: crate::bots::Bots,
+    /// Context recovery: restarts a failed round with supplementary context.
+    /// Owned HERE — the sessions engine's round-end listener only holds a
+    /// weak handle to it.
+    pub context_recovery: session::context_recovery::ContextRecoveryService,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<host::local_import::LocalImporter>,
@@ -218,6 +222,15 @@ impl EngineCore {
             )
         });
         let title_settings = session::title_settings::TitleSettingsStore::new(data_dir);
+        let context_recovery = session::context_recovery::ContextRecoveryService::new(
+            sessions.clone(),
+            doc_host.clone(),
+            workspace.clone(),
+            session_forks.clone(),
+            registry.clone(),
+            session::context_recovery::ContextRecoverySettingsStore::new(data_dir),
+        );
+        let recovery = context_recovery.downgrade();
         let github = git::github::Github::new(git::github::GithubConfig::detect(), data_dir);
         sessions.set_titles(
             TitleGenerator::new(workspace.clone(), registry.clone(), repos.clone())
@@ -240,6 +253,9 @@ impl EngineCore {
                     let entry_id = handle.doc().last_assistant_entry_id()?;
                     Some((handle, entry_id))
                 });
+                // A round that failed with a trigger phrase restarts with
+                // supplementary context, in the background.
+                recovery.on_round_end(chat_id);
                 let Some((handle, entry_id)) = target else {
                     turn_diff.drop_round(chat_id);
                     return;
@@ -274,6 +290,7 @@ impl EngineCore {
             side_chats,
             session_forks,
             bots,
+            context_recovery,
             device_id,
             local_import,
             workspace_scope: profile.scope(),
@@ -408,6 +425,7 @@ impl EngineCore {
         .with_mcp_logins(self.mcp_logins.clone())
         .with_provider_logins(self.provider_logins.clone())
         .with_title_settings(self.title_settings.clone())
+        .with_context_recovery(self.context_recovery.clone())
         .with_github(self.github.clone())
         .with_bots(self.bots.clone());
         if let Some(links) = self.links() {

@@ -892,6 +892,44 @@ async fn device_settings_route_catalogs_titles_and_web_search_to_the_target() {
         "the other device keeps its pin"
     );
 
+    // The appended system prompt is the target device's own file.
+    for device in ["device-a", "device-b"] {
+        let saved = client
+            .call(
+                methods::SET_APPEND_SYSTEM_PROMPT,
+                serde_json::json!({"targetDeviceId": device, "text": format!("  {device} rules\n")}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved["text"], format!("{device} rules"));
+    }
+    assert_eq!(
+        client
+            .call(
+                methods::GET_APPEND_SYSTEM_PROMPT,
+                serde_json::json!({"targetDeviceId":"device-b"})
+            )
+            .await
+            .unwrap()["text"],
+        "device-b rules"
+    );
+    let cleared = client
+        .call(
+            methods::SET_APPEND_SYSTEM_PROMPT,
+            serde_json::json!({"targetDeviceId":"device-b","text":""}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared["text"], "");
+    assert_eq!(
+        client
+            .call(methods::GET_APPEND_SYSTEM_PROMPT, serde_json::json!({}))
+            .await
+            .unwrap()["text"],
+        "device-a rules",
+        "the other device keeps its prompt"
+    );
+
     relay.abort();
 }
 

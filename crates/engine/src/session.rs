@@ -1,6 +1,7 @@
 //! Agent sessions: the sessions engine and its run loop, forks, side chats,
-//! the run journal, titles and scratch directories.
+//! context recovery, the run journal, titles and scratch directories.
 
+pub mod context_recovery;
 pub(crate) mod engine;
 pub mod forks;
 pub mod journal;

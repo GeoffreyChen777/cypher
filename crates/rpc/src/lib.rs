@@ -102,7 +102,15 @@ pub mod methods {
     pub const LIST_MODELS: &str = "ListModels";
     pub const GET_TITLE_MODEL_SETTINGS: &str = "GetTitleModelSettings";
     pub const SET_TITLE_MODEL_SETTINGS: &str = "SetTitleModelSettings";
+    /// The target device's context recovery settings (Settings → Agents).
+    pub const GET_CONTEXT_RECOVERY_SETTINGS: &str = "GetContextRecoverySettings";
+    /// Save them; replies with the saved settings.
+    pub const SET_CONTEXT_RECOVERY_SETTINGS: &str = "SetContextRecoverySettings";
     pub const GET_WEB_SEARCH_FALLBACK: &str = "GetWebSearchFallback";
+    /// The target device's `APPEND_SYSTEM.md` (Settings → Agents).
+    pub const GET_APPEND_SYSTEM_PROMPT: &str = "GetAppendSystemPrompt";
+    /// Save it (blank removes it); replies with the saved text.
+    pub const SET_APPEND_SYSTEM_PROMPT: &str = "SetAppendSystemPrompt";
     pub const SET_WEB_SEARCH_FALLBACK: &str = "SetWebSearchFallback";
     pub const LIST_COMMANDS: &str = "ListCommands";
     /// What the Pi plugins' per-chat switches are set to (GPT Fast mode,
@@ -405,8 +413,12 @@ pub mod methods {
         MethodSpec::unary(LIST_MODELS).forwardable(),
         MethodSpec::unary(GET_TITLE_MODEL_SETTINGS).forwardable(),
         MethodSpec::unary(SET_TITLE_MODEL_SETTINGS).forwardable(),
+        MethodSpec::unary(GET_CONTEXT_RECOVERY_SETTINGS).forwardable(),
+        MethodSpec::unary(SET_CONTEXT_RECOVERY_SETTINGS).forwardable(),
         MethodSpec::unary(GET_WEB_SEARCH_FALLBACK).forwardable(),
         MethodSpec::unary(SET_WEB_SEARCH_FALLBACK).forwardable(),
+        MethodSpec::unary(GET_APPEND_SYSTEM_PROMPT).forwardable(),
+        MethodSpec::unary(SET_APPEND_SYSTEM_PROMPT).forwardable(),
         MethodSpec::unary(LIST_COMMANDS).forwardable(),
         // Read from the chat's Pi session, which lives on its host.
         MethodSpec::unary(PI_SESSION_MODES).forwardable(),

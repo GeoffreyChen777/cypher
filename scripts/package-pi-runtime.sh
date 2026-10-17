@@ -98,6 +98,13 @@ node "$SPEC/patches/pi-coding-agent-cwd-context-files.mjs" \
 node "$SPEC/patches/pi-claude-bridge-context-files.mjs" \
   "$STAGE/npm/node_modules/pi-claude-bridge"
 
+# pi-claude-bridge tracked its Claude Code sessions in memory only, so every pi
+# restart left the previous session JSONL in ~/.claude/projects. It now deletes
+# the ones it created at exit and sweeps a killed process's (see the patch
+# header). Missing anchors fail the build on purpose.
+node "$SPEC/patches/pi-claude-bridge-session-cleanup.mjs" \
+  "$STAGE/npm/node_modules/pi-claude-bridge"
+
 # The permission extension runs ripgrep (behind `grep`) inside Landstrip and
 # checks apply_patch's file access at the operation (see the patch headers).
 # Missing anchors fail the build on purpose.
@@ -219,6 +226,10 @@ CYPHER_PI_RUNTIME_STAGE="$STAGE" \
 # Both copies of Pi's loader skip ancestors; loads the patched bridge.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
   "$STAGE/bin/node" --test "$SPEC/patches/context-files.staged.test.mjs"
+# Real bridge processes: exit deletes their sessions, the next one sweeps a
+# killed one's, and nothing the bridge did not record is touched.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/patches/session-cleanup.staged.test.mjs"
 # Language gating decides whether a message costs a translation request at all,
 # so it is covered here rather than only through a live session.
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-translation.test.mjs"

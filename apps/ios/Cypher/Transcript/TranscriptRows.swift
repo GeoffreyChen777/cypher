@@ -10,7 +10,9 @@
 import Foundation
 
 enum RowKind {
-    case user(text: String, isSteer: Bool = false)
+    /// `recovery`: sent again by the host after a failed turn, with
+    /// supplementary context: captioned above the bubble.
+    case user(text: String, isSteer: Bool = false, recovery: ContextRecovery? = nil)
     /// Consecutive prose blocks of one part (paragraphs, headings, plain
     /// lists) as one selectable text, so a selection can cross them.
     case prose(blocks: [MDBlock], streaming: Bool)
@@ -301,7 +303,7 @@ enum TranscriptRowBuilder {
         if isFirst { return TranscriptView.gapTurn + 10 }
         // Separate exchanges without pulling a user's prompt away from its
         // reply. Pending sends follow this same path as confirmed messages.
-        if case .user(_, let isSteer) = row.kind {
+        if case .user(_, let isSteer, _) = row.kind {
             return isSteer ? TranscriptView.gapTurn : TranscriptView.gapExchange
         }
         if row.turnStart { return TranscriptView.gapTurn }
@@ -341,8 +343,8 @@ enum TranscriptRowBuilder {
             }.joined(separator: "\n")
             guard !text.isEmpty else { return }
             var row = TranscriptRow(
-                id: entry.id, version: userVersion(text, isSteer: entry.isSteer),
-                turnStart: true, kind: .user(text: text, isSteer: entry.isSteer),
+                id: entry.id, version: userVersion(text, isSteer: entry.isSteer, recovery: entry.recovery),
+                turnStart: true, kind: .user(text: text, isSteer: entry.isSteer, recovery: entry.recovery),
                 entryId: entry.id, timestamp: entry.createdAt,
                 partKey: nil)
             row.copyable = !parseUserMessageImages(text).text
@@ -698,8 +700,11 @@ enum TranscriptRowBuilder {
         return runs
     }
 
-    private static func userVersion(_ text: String, isSteer: Bool) -> UInt64 {
-        fnv1a(text) ^ (isSteer ? UInt64(1) << 63 : 0)
+    private static func userVersion(_ text: String, isSteer: Bool, recovery: ContextRecovery? = nil) -> UInt64 {
+        // rows.rs `user_row`: a record is fixed when the entry is written;
+        // keyed anyway so a malformed one dropping out still re-renders.
+        let recoveryKey = recovery.map { fnv1a($0.context) ^ (UInt64($0.attempt) << 7) } ?? 0
+        return fnv1a(text) ^ recoveryKey ^ (isSteer ? UInt64(1) << 63 : 0)
     }
 
     private static func parse(

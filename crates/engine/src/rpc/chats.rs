@@ -323,7 +323,9 @@ impl EngineRpc {
     /// `WatchAgentEvents` handler: replayable per-chat agent events from the
     /// sessions journal/hub (journal replay after `afterSeq`, then live). The
     /// parent extension subscribes to the child chat and maps terminal
-    /// `Done.result` back into its own result semantics.
+    /// `Done.result` back into its own result semantics, so a `Done` waits
+    /// for context recovery's verdict on its round, and a restarted round's
+    /// `Done` is never sent: the retried round's is the result.
     pub(super) fn watch_agent_events(
         &self,
         chat_id: String,
@@ -337,46 +339,45 @@ impl EngineRpc {
         // published in between is in both; the live leg starts after the
         // newest replayed seq (a doubled text delta would double the text).
         let replayed_through = replay.last().map(|entry| entry.seq).unwrap_or(0);
-        let replay = futures::stream::iter(
-            replay
-                .into_iter()
-                .map(|entry| serde_json::to_value(&entry.event).map_err(failed)),
-        );
-        // Journaled events are tagged JSON (`AgentEvent`'s own serde); the
-        // live hub carries the same shape. A lagging subscriber skips the
-        // deltas it missed rather than ending the stream: the parent extension
-        // treats an ended stream as a lost child, and the terminal `Done` it
-        // waits for is still ahead of it.
+        let replay = futures::stream::iter(replay);
+        // A lagging subscriber skips the deltas it missed rather than ending
+        // the stream: the parent extension treats an ended stream as a lost
+        // child, and the terminal `Done` it waits for is still ahead of it.
         let live = futures::stream::unfold(rx, move |mut rx| async move {
             loop {
                 match rx.recv().await {
                     Ok(entry) if entry.seq != 0 && entry.seq <= replayed_through => continue,
-                    Ok(entry) => {
-                        let value = serde_json::to_value(&entry.event).map_err(failed);
-                        return Some((value, rx));
-                    }
+                    Ok(entry) => return Some((entry, rx)),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                 }
             }
         });
+        let recovery = self.context_recovery.clone();
         let stream = replay
             .chain(live)
-            .filter_map({
-                let chat_id = chat_id.clone();
-                move |item: Result<serde_json::Value, RpcError>| {
-                    let chat = chat_id.clone();
-                    async move {
-                        match item {
-                            Ok(value) => Some(value),
-                            Err(err) => {
-                                tracing::warn!(chat = %chat, error = %err, "watch agent events serialization failed");
-                                None
-                            }
+            .then(move |entry| {
+                let chat = chat_id.clone();
+                let recovery = recovery.clone();
+                async move {
+                    if matches!(entry.event, cypher_proto::AgentEvent::Done { .. })
+                        && let Some(recovery) = recovery
+                        && recovery.hold_done(&chat, entry.seq).await
+                    {
+                        return None;
+                    }
+                    // Journaled events are tagged JSON (`AgentEvent`'s own
+                    // serde); the live hub carries the same shape.
+                    match serde_json::to_value(&entry.event) {
+                        Ok(value) => Some(value),
+                        Err(err) => {
+                            tracing::warn!(chat = %chat, error = %err, "watch agent events serialization failed");
+                            None
                         }
                     }
                 }
             })
+            .filter_map(futures::future::ready)
             .boxed();
         Ok(RpcReply::Stream(stream))
     }

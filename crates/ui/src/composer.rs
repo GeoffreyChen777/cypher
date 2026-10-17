@@ -292,6 +292,22 @@ pub fn slash_command_label(text: &str) -> Option<&str> {
     (cmd.len() >= 2).then_some(cmd)
 }
 
+/// The slash command a question belongs to: the one that started the turn
+/// (`last_user_text`), unless the question is a permission prompt — that one
+/// is the permission extension's, whatever the turn is running.
+pub fn question_slash_owner<'a>(
+    questions: &[cypher_proto::UserInputQuestion],
+    last_user_text: &'a str,
+) -> Option<&'a str> {
+    if questions
+        .first()
+        .is_some_and(permission_card::is_permission_prompt)
+    {
+        return None;
+    }
+    slash_command_label(last_user_text)
+}
+
 /// Slash-command completion state: like [`MentionState`] but the
 /// candidate list is fetched once per harness (`ListCommands`) and filtered
 /// locally per keystroke — no RPC, debounce, or skeleton churn while typing.
@@ -706,6 +722,14 @@ pub struct Composer {
     morph_clock: Instant,
     /// The pill's laid-out width (last frame), for the narrow-tile gate.
     pill_width: Rc<std::cell::Cell<f32>>,
+    /// The height this composer may fill, when its host knows it (the chat
+    /// column's, less the chrome above the composer). Caps the question card.
+    available_height: Option<f32>,
+    /// The question card's laid-out heights (last frame): the whole composer
+    /// and the card's scrolling body. What is not body is the card's fixed
+    /// chrome, which the body yields room to.
+    wizard_total_height: Rc<std::cell::Cell<f32>>,
+    wizard_body_height: Rc<std::cell::Cell<f32>>,
     /// Set on every session/route change: flips committed before this instant
     /// SNAP instead of morphing (see [`ROUTE_SNAP_MS`]).
     route_snap_until: Option<Instant>,
@@ -969,6 +993,9 @@ impl Composer {
             last_rendered_height: 0.0,
             morph_clock: Instant::now(),
             pill_width: Rc::default(),
+            available_height: None,
+            wizard_total_height: Rc::default(),
+            wizard_body_height: Rc::default(),
             route_snap_until: None,
             _observe: observe,
             _pickers_observe: pickers_observe,
@@ -1016,6 +1043,23 @@ impl Composer {
         self.input.update(cx, |input, cx| input.set_text(text, cx));
         self.on_submit(cx);
         window.focus(&self.input.focus_handle(cx), cx);
+    }
+
+    /// The height this composer may fill. A question card taller than this
+    /// scrolls its body instead of running past the column's edge.
+    pub fn set_available_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        let height = Some(height.max(0.0));
+        if self
+            .available_height
+            .zip(height)
+            .is_some_and(|(old, new)| (old - new).abs() <= 0.5)
+        {
+            return;
+        }
+        self.available_height = height;
+        if self.wizard.is_some() {
+            cx.notify();
+        }
     }
 
     #[cfg(test)]

@@ -177,38 +177,71 @@ pub fn option_for_key(
         .position(|shortcut| *shortcut == Some(key))
 }
 
+/// Whether a question is a permission prompt: it says so
+/// (`question.permission`), or — from a Runtime that does not mark its
+/// prompts — offers "Deny and stop".
+pub fn is_permission_prompt(question: &UserInputQuestion) -> bool {
+    question.permission.is_some() || question.options.iter().any(|option| option == STOP_OPTION)
+}
+
+/// A permission prompt as its question, facts and block. A marked prompt
+/// always reads as one, however its context is laid out; an unmarked one
+/// only when its context starts with a fact.
+///
+/// A value runs over several lines (a multi-line command, a reason with line
+/// breaks): the extension indents its lines after the first, and an older
+/// extension leaves them as they are — any line that is not a known
+/// `Label: value` continues the fact before it.
 pub fn parse(question: &UserInputQuestion, prompt: &str) -> Option<PermissionRequest> {
-    // A permission prompt says so (`question.permission`); a Runtime from
-    // before that is still recognised by its "Deny and stop" option.
-    let permission = question.permission.is_some()
-        || question.options.iter().any(|option| option == STOP_OPTION);
-    if question.multi_select || !permission {
+    if question.multi_select || !is_permission_prompt(question) {
         return None;
     }
+    let marked = question.permission.is_some();
     let (question_text, context) = split_question_context(prompt);
-    let context = context?;
-    let mut facts = Vec::new();
+    let mut facts: Vec<Fact> = Vec::new();
     let mut block: Option<(String, Vec<&str>)> = None;
-    for line in context.lines() {
+    for line in context.as_deref().unwrap_or_default().lines() {
         if let Some((_, lines)) = block.as_mut() {
             lines.push(line);
             continue;
         }
-        if matches!(line.trim_end(), "Change:" | "Input:") {
-            block = Some((line.trim_end().trim_end_matches(':').to_owned(), Vec::new()));
-            continue;
+        // Indented: always the value before going on.
+        let continued = line.strip_prefix("  ");
+        if continued.is_none() {
+            if matches!(line.trim_end(), "Change:" | "Input:") {
+                block = Some((line.trim_end().trim_end_matches(':').to_owned(), Vec::new()));
+                continue;
+            }
+            if let Some((kind, value)) = line
+                .split_once(": ")
+                .and_then(|(label, value)| Some((FactKind::parse(label)?, value)))
+            {
+                facts.push(Fact {
+                    kind,
+                    value: value.trim().to_owned(),
+                });
+                continue;
+            }
         }
-        if line.trim().is_empty() {
-            continue;
+        match facts.last_mut() {
+            Some(fact) => {
+                fact.value.push('\n');
+                fact.value.push_str(continued.unwrap_or(line).trim_end());
+            }
+            None if line.trim().is_empty() => {}
+            // Text ahead of any fact: a sentence, on a prompt that says it
+            // is a permission request.
+            None if marked => facts.push(Fact {
+                kind: FactKind::Note,
+                value: line.trim().to_owned(),
+            }),
+            None => return None,
         }
-        let (label, value) = line.split_once(": ")?;
-        let kind = FactKind::parse(label)?;
-        facts.push(Fact {
-            kind,
-            value: value.trim().to_owned(),
-        });
     }
-    if facts.is_empty() {
+    for fact in &mut facts {
+        fact.value.truncate(fact.value.trim_end().len());
+    }
+    if facts.is_empty() && !marked {
         return None;
     }
     let serious = question_text.contains("sensitive")
@@ -332,6 +365,80 @@ mod tests {
             shortcut_keys(&labels(&options)),
             [Some("y"), Some("c"), Some("a"), Some("n"), Some("s")]
         );
+    }
+
+    fn marked(prompt: &str, options: &[&str]) -> UserInputQuestion {
+        UserInputQuestion {
+            permission: Some(cypher_proto::PermissionPrompt {
+                kind: cypher_proto::PermissionPromptKind::Escalate,
+                tool_call_id: Some("call-1".into()),
+            }),
+            ..question(prompt, options)
+        }
+    }
+
+    fn rows(request: &PermissionRequest) -> Vec<(&'static str, &str)> {
+        request
+            .rows()
+            .map(|fact| (fact.kind.label().unwrap(), fact.value.as_str()))
+            .collect()
+    }
+
+    const RUN: [&str; 3] = ["Run once", "Deny", "Deny and stop"];
+
+    #[test]
+    fn an_indented_line_continues_its_value_whatever_it_says() {
+        let prompt = "Run this command outside the sandbox?\n\nContext:\nPurpose: Write notes\nCommand: cat > /tmp/notes <<'EOF'\n  Path: /etc/passwd\n  \n    indented\n  EOF\nReason: First line.\n  Change:\nNote: It runs as you, with your files, keys, keychain and network.";
+        let request = parse(&marked(prompt, &RUN), prompt).expect("a permission request");
+        assert_eq!(
+            rows(&request),
+            [
+                ("Purpose", "Write notes"),
+                (
+                    "Command",
+                    "cat > /tmp/notes <<'EOF'\nPath: /etc/passwd\n\n  indented\nEOF"
+                ),
+                ("Reason", "First line.\nChange:"),
+            ]
+        );
+        assert_eq!(request.sentences().count(), 1);
+        assert_eq!(request.block, None, "an indented Change: is no block");
+    }
+
+    #[test]
+    fn an_unindented_value_line_from_an_older_runtime_continues_it_too() {
+        let prompt = "Run this command outside the sandbox?\n\nContext:\nCommand: cd ~/app\nls -la\n\nmake\nReason: One.\nTwo.\nNote: It runs as you.";
+        for question in [marked(prompt, &RUN), question(prompt, &RUN)] {
+            let request = parse(&question, prompt).expect("a permission request");
+            assert_eq!(
+                rows(&request),
+                [
+                    ("Command", "cd ~/app\nls -la\n\nmake"),
+                    ("Reason", "One.\nTwo.")
+                ]
+            );
+            assert_eq!(request.sentences().count(), 1);
+        }
+    }
+
+    #[test]
+    fn a_marked_prompt_is_a_request_however_it_reads() {
+        let prompt = "Allow the agent to read a sensitive path?\n\nContext:\n/Users/me/app/.env  (**/.env)\n\nTool: request_permission";
+        let request = parse(&marked(prompt, &OPTIONS), prompt).expect("marked");
+        assert_eq!(
+            request.sentences().next().map(|fact| fact.value.as_str()),
+            Some("/Users/me/app/.env  (**/.env)")
+        );
+        assert_eq!(rows(&request), [("Tool", "request_permission")]);
+        assert_eq!(
+            parse(&question(prompt, &OPTIONS), prompt),
+            None,
+            "unmarked, and its context starts with no fact"
+        );
+        let bare = "Allow the agent to use a tool?";
+        let request = parse(&marked(bare, &RUN), bare).expect("no context");
+        assert_eq!(request.question, bare);
+        assert!(request.facts.is_empty());
     }
 
     fn labels(options: &[&str]) -> Vec<String> {

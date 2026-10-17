@@ -93,6 +93,7 @@ pub struct EngineRpc {
     provider_logins: std::sync::Arc<crate::pi::providers::Logins>,
     local_import: Option<crate::host::local_import::LocalImporter>,
     title_settings: Option<crate::session::title_settings::TitleSettingsStore>,
+    context_recovery: Option<crate::session::context_recovery::ContextRecoveryService>,
     github: Option<crate::git::github::Github>,
     bots: Option<crate::bots::Bots>,
     engine_info: EngineInfo,
@@ -151,6 +152,7 @@ impl EngineRpc {
             provider_logins: Default::default(),
             local_import: None,
             title_settings: None,
+            context_recovery: None,
             github: None,
             bots: None,
             engine_info,
@@ -164,6 +166,16 @@ impl EngineRpc {
         settings: crate::session::title_settings::TitleSettingsStore,
     ) -> Self {
         self.title_settings = Some(settings);
+        self
+    }
+
+    /// The device's context recovery: its settings, and the verdicts that
+    /// hold a recovered child's result back from its parent.
+    pub fn with_context_recovery(
+        mut self,
+        recovery: crate::session::context_recovery::ContextRecoveryService,
+    ) -> Self {
+        self.context_recovery = Some(recovery);
         self
     }
 
@@ -680,9 +692,19 @@ impl RpcService for EngineRpc {
             methods::SET_WEB_SEARCH_FALLBACK => {
                 settings::set_web_search_fallback(self, params).await
             }
+            methods::GET_APPEND_SYSTEM_PROMPT => {
+                RpcReply::value(&crate::pi::system_prompt::load(self.pi_runtime()?.paths()))
+            }
+            methods::SET_APPEND_SYSTEM_PROMPT => {
+                settings::set_append_system_prompt(self, params).await
+            }
             methods::GET_TITLE_MODEL_SETTINGS => settings::get_title_model_settings(self),
             methods::SET_TITLE_MODEL_SETTINGS => {
                 settings::set_title_model_settings(self, params).await
+            }
+            methods::GET_CONTEXT_RECOVERY_SETTINGS => settings::get_context_recovery_settings(self),
+            methods::SET_CONTEXT_RECOVERY_SETTINGS => {
+                settings::set_context_recovery_settings(self, params).await
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;

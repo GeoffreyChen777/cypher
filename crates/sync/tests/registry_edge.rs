@@ -62,6 +62,7 @@ async fn two_rust_clients_converge_through_a_real_registry_do() {
             subagents: Vec::new(),
             context_usage: None,
             throughput: None,
+            recovery: None,
         })
         .unwrap();
     }
@@ -185,6 +186,7 @@ async fn cursor_delta_and_churn_stay_bounded_on_a_real_do() {
                 subagents: Vec::new(),
                 context_usage: None,
                 throughput: None,
+                recovery: None,
             })
             .unwrap();
         }

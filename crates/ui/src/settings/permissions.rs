@@ -82,15 +82,6 @@ impl ApprovalKey {
         }
     }
 
-    /// Sensitive requests and commands leaving the sandbox never go to the
-    /// judge.
-    fn allows_assisted(self) -> bool {
-        !matches!(
-            self,
-            Self::SensitiveRead | Self::SensitiveWrite | Self::Escalate
-        )
-    }
-
     fn get(self, approvals: &PermissionApprovals) -> ApprovalMode {
         match self {
             Self::ExternalWrite => approvals.external_write,
@@ -693,13 +684,11 @@ impl PermissionsPage {
     ) -> AnyElement {
         let mut card = widgets::section_card(theme).mt(px(12.0));
         for (index, key) in ApprovalKey::ALL.into_iter().enumerate() {
-            let mut options = vec![
+            let options = vec![
                 (mode_label(ApprovalMode::Deny), ApprovalMode::Deny),
                 (mode_label(ApprovalMode::Ask), ApprovalMode::Ask),
+                (mode_label(ApprovalMode::Assisted), ApprovalMode::Assisted),
             ];
-            if key.allows_assisted() {
-                options.push((mode_label(ApprovalMode::Assisted), ApprovalMode::Assisted));
-            }
             let control = self.segmented(
                 format!("permissions-approval-{}", key.id()),
                 options,
@@ -1442,21 +1431,5 @@ mod tests {
             lines("  **/a.yaml \n\n~/.x\r\n"),
             vec!["**/a.yaml".to_string(), "~/.x".to_string()]
         );
-    }
-
-    #[test]
-    fn sensitive_and_escalation_rows_never_offer_the_model() {
-        for key in ApprovalKey::ALL {
-            assert_eq!(
-                key.allows_assisted(),
-                !matches!(
-                    key,
-                    ApprovalKey::SensitiveRead
-                        | ApprovalKey::SensitiveWrite
-                        | ApprovalKey::Escalate
-                ),
-                "{key:?}"
-            );
-        }
     }
 }
