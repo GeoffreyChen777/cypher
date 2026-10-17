@@ -478,6 +478,7 @@ impl AppState {
         self.chats_synced = false;
         self.spaces_synced = false;
         self.bots_synced = false;
+        self.bot_records = Default::default();
         self.transcript.clear();
         self.commands.clear();
         self.echoes.clear();

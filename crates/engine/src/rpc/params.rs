@@ -383,6 +383,65 @@ pub(super) enum MutateParams {
         #[serde(default)]
         instructions: Option<String>,
         scope: cypher_proto::BotScope,
+        /// Absent from older clients: the capabilities are left alone.
+        #[serde(default)]
+        capabilities: Option<cypher_proto::BotCapabilities>,
+    },
+    /// The bot's kill switch: no routine runs and no new work starts.
+    #[serde(rename_all = "camelCase")]
+    SetBotPaused { bot_id: String, paused: bool },
+    /// Approve or cancel a proposed plan (its host starts the work).
+    #[serde(rename_all = "camelCase")]
+    ResolveBotPlan { work_id: String, approve: bool },
+    /// Stop running work and every session it started.
+    #[serde(rename_all = "camelCase")]
+    StopBotWork { work_id: String },
+    /// Approve or decline an action a bot thread is waiting on.
+    #[serde(rename_all = "camelCase")]
+    ResolveBotApproval { approval_id: String, approve: bool },
+    /// Create or edit a notebook entry (an owner edit makes it the owner's).
+    #[serde(rename_all = "camelCase")]
+    SaveBotNote {
+        note_id: String,
+        bot_id: String,
+        text: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    DeleteBotNote { note_id: String },
+    /// Create or edit a routine's definition (its run state is the host's).
+    #[serde(rename_all = "camelCase")]
+    SaveBotRoutine { routine: cypher_proto::BotRoutine },
+    #[serde(rename_all = "camelCase")]
+    DeleteBotRoutine { routine_id: String },
+    /// Run a routine once now.
+    #[serde(rename_all = "camelCase")]
+    RunBotRoutine { routine_id: String },
+    #[serde(rename_all = "camelCase")]
+    SaveProjectTask { task: cypher_proto::ProjectTask },
+    #[serde(rename_all = "camelCase")]
+    DeleteProjectTask { task_id: String },
+    #[serde(rename_all = "camelCase")]
+    RunProjectTask { task_id: String },
+    /// A connection's reply mode and narrowed scope.
+    #[serde(rename_all = "camelCase")]
+    UpdateBotConnection {
+        connection_id: String,
+        reply_mode: cypher_proto::ReplyMode,
+        #[serde(default)]
+        scope: Option<cypher_proto::BotScope>,
+    },
+    /// Revoke a connection on both sides (its host tells the Edge).
+    #[serde(rename_all = "camelCase")]
+    RevokeBotConnection { connection_id: String },
+    #[serde(rename_all = "camelCase")]
+    RevokeBotInvite { invite_id: String },
+    /// Send (optionally edited) or decline an answer drafted in Review mode.
+    #[serde(rename_all = "camelCase")]
+    ReviewBotExchange {
+        exchange_id: String,
+        send: bool,
+        #[serde(default)]
+        text: Option<String>,
     },
     /// Tombstone a bot with its chat. Its host stops its run and removes its
     /// folder.
@@ -408,6 +467,18 @@ pub(super) enum MutateParams {
         platform: String,
         #[serde(default)]
         last_seen_at: Option<i64>,
+    },
+    /// Development builds only: write (or, with `delete`, tombstone) any bot
+    /// record row as given, for judging the Botboard with realistic data.
+    #[cfg(feature = "development")]
+    #[serde(rename_all = "camelCase")]
+    SeedBotRecord {
+        kind: String,
+        id: String,
+        #[serde(default)]
+        fields: serde_json::Map<String, serde_json::Value>,
+        #[serde(default)]
+        delete: bool,
     },
 }
 

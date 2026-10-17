@@ -79,6 +79,8 @@ fn view_with(scope: BotScope, sessions: Vec<Session>) -> View {
             chat_id: "bot-chat".into(),
             instructions: None,
             scope,
+            capabilities: Default::default(),
+            paused: false,
             created_at: at(0),
         },
         vec![space("s1", "/code/billing"), space("s2", "/code/secret")],
@@ -650,6 +652,8 @@ fn index_targets_are_the_union_of_this_devices_reading_bots() {
         chat_id: format!("{id}-chat"),
         instructions: None,
         scope,
+        capabilities: Default::default(),
+        paused: false,
         created_at: at(0),
     };
     let grant = |space: &str| BotScope {

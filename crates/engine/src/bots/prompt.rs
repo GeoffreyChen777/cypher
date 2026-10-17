@@ -225,6 +225,8 @@ mod tests {
                 projects: ProjectGrant::All,
                 ..Default::default()
             },
+            capabilities: Default::default(),
+            paused: false,
             created_at: DateTime::from_timestamp_millis(0).unwrap(),
         }
     }

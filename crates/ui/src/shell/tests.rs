@@ -1672,6 +1672,8 @@ fn test_bot(id: &str) -> cypher_proto::Bot {
         chat_id: format!("{id}-chat"),
         instructions: None,
         scope: Default::default(),
+        capabilities: Default::default(),
+        paused: false,
         created_at: Utc::now(),
     }
 }

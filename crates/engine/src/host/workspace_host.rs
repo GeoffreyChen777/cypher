@@ -34,6 +34,8 @@ use crate::host::doc_host::EdgeConfig;
 use crate::util::lock;
 use crate::util::now_ms;
 
+mod bot_records;
+pub use bot_records::Fields;
 mod entities;
 mod presence;
 mod sync;
@@ -127,6 +129,7 @@ struct WorkspaceHostInner {
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
     bots_tx: watch::Sender<Vec<Bot>>,
+    records_tx: watch::Sender<cypher_proto::BotRecords>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// Bumped on every registry change (local mutation or applied server
     /// frame) — drives republish + the snapshot debounce in `workspace_task`.
@@ -191,6 +194,7 @@ impl WorkspaceHost {
         let (sessions_tx, _) = watch::channel(state.sessions);
         let (spaces_tx, _) = watch::channel(state.spaces);
         let (bots_tx, _) = watch::channel(state.bots);
+        let (records_tx, _) = watch::channel(doc.read_bot_records());
         let (changed_tx, changed_rx) = watch::channel(0u64);
         let (evicted_tx, _) = watch::channel(false);
         let registry_synced = config.edge.is_none();
@@ -206,6 +210,7 @@ impl WorkspaceHost {
                 sessions_tx,
                 spaces_tx,
                 bots_tx,
+                records_tx,
                 room: Mutex::new(None),
                 changed_tx,
                 registry_synced: AtomicBool::new(registry_synced),
@@ -691,14 +696,27 @@ impl WorkspaceHostInner {
     }
 
     fn publish(&self) {
-        match lock(&self.reg).read_all() {
-            Ok(mut state) => {
+        // One read under the lock (a second `lock` inside the match would
+        // deadlock: the scrutinee's guard lives to the end of the match).
+        let read = {
+            let reg = lock(&self.reg);
+            reg.read_all().map(|state| (state, reg.read_bot_records()))
+        };
+        match read {
+            Ok((mut state, records)) => {
                 self.overlay_presence(&mut state.devices);
                 publish_if_changed(&self.chats_tx, state.chats);
                 publish_if_changed(&self.devices_tx, state.devices);
                 publish_if_changed(&self.sessions_tx, state.sessions);
                 publish_if_changed(&self.spaces_tx, state.spaces);
                 publish_if_changed(&self.bots_tx, state.bots);
+                self.records_tx.send_if_modified(|current| {
+                    let changed = *current != records;
+                    if changed {
+                        *current = records;
+                    }
+                    changed
+                });
             }
             Err(err) => {
                 tracing::warn!(error = %err, "registry read failed");

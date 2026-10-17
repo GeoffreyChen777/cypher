@@ -274,6 +274,9 @@ pub struct AppState {
     /// A bots frame has landed: until then an empty `bots` says nothing
     /// (the Botboard waits rather than showing its empty state).
     pub bots_synced: bool,
+    /// Every bot record: plans, notes, routines, tasks, activity, approvals
+    /// and the network (the Botboard's cards).
+    pub bot_records: cypher_proto::BotRecords,
     /// The project the new-session canvas mints into. Healed by
     /// [`Self::apply_spaces`] when the row vanishes; selecting a chat implies
     /// its project.
@@ -516,6 +519,7 @@ impl AppState {
             chats: Vec::new(),
             sessions: Vec::new(),
             bots: Vec::new(),
+            bot_records: Default::default(),
             selected_space: None,
             no_project: false,
             scratch_pending: false,
@@ -577,6 +581,7 @@ impl AppState {
         seed.chats = m.chats.clone();
         seed.sessions = m.sessions.clone();
         seed.bots = m.bots.clone();
+        seed.bot_records = m.bot_records.clone();
         seed.bots_synced = m.bots_synced;
         seed.chats_synced = m.chats_synced;
         seed.spaces_synced = m.spaces_synced;
@@ -693,6 +698,7 @@ impl AppState {
             chats,
             sessions,
             bots,
+            bot_records,
             local_device_id,
             data_dir,
             update,

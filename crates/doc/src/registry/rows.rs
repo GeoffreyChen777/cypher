@@ -212,6 +212,11 @@ pub(crate) struct RawBot {
     /// reads as the empty scope, so the bot sees nothing rather than more.
     #[serde(default)]
     scope: Option<serde_json::Value>,
+    /// Raw like `scope`: unreadable capabilities read as none.
+    #[serde(default)]
+    capabilities: Option<serde_json::Value>,
+    #[serde(default)]
+    paused: Option<bool>,
     #[serde(default)]
     created_at: i64,
 }
@@ -237,6 +242,11 @@ impl From<RawBot> for Bot {
             chat_id: raw.chat_id,
             instructions: raw.instructions,
             scope,
+            capabilities: raw
+                .capabilities
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_default(),
+            paused: raw.paused.unwrap_or(false),
             created_at: dt(raw.created_at),
         }
     }

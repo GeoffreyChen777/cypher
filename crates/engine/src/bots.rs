@@ -54,6 +54,9 @@ pub struct CreateBot {
     pub model: Option<String>,
     #[serde(default)]
     pub reasoning: Option<ReasoningLevel>,
+    /// Absent from older clients: a new bot's defaults.
+    #[serde(default)]
+    pub capabilities: Option<cypher_proto::BotCapabilities>,
 }
 
 /// This engine's bot service: creation on the host and the tool surface.
@@ -166,6 +169,10 @@ impl Bots {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
             scope: request.scope,
+            capabilities: request
+                .capabilities
+                .unwrap_or_else(cypher_proto::BotCapabilities::new_bot),
+            paused: false,
             created_at: now,
         };
         bot.validate().map_err(EngineError::Other)?;

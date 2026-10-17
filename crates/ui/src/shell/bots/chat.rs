@@ -311,6 +311,8 @@ mod tests {
             chat_id: "c".into(),
             instructions: None,
             scope,
+            capabilities: Default::default(),
+            paused: false,
             created_at: Utc::now(),
         }
     }

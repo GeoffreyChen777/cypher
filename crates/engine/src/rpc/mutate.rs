@@ -179,6 +179,31 @@ impl EngineRpc {
                 .map_err(failed)
                 .map(drop),
             #[cfg(feature = "development")]
+            MutateParams::SeedBotRecord {
+                kind,
+                id,
+                fields,
+                delete,
+            } => {
+                if !cypher_proto::BOT_RECORD_KINDS.contains(&kind.as_str()) {
+                    return Err(RpcError::BadParams(format!(
+                        "not a bot record kind: {kind}"
+                    )));
+                }
+                if delete {
+                    self.workspace.delete_records(&kind, &[id]);
+                    return Ok(());
+                }
+                self.workspace
+                    .put_record(
+                        &kind,
+                        &id,
+                        &serde_json::Value::Object(fields),
+                        crate::host::workspace_host::Fields::All,
+                    )
+                    .map_err(failed)
+            }
+            #[cfg(feature = "development")]
             MutateParams::SeedDevice {
                 device_id,
                 name,
@@ -200,6 +225,7 @@ impl EngineRpc {
                 color,
                 instructions,
                 scope,
+                capabilities,
             } => {
                 let name = name.trim().to_string();
                 cypher_proto::validate_name(&name).map_err(RpcError::BadParams)?;
@@ -219,6 +245,8 @@ impl EngineRpc {
                     color: Some(color.filter(|s| !s.is_empty())),
                     instructions: Some(instructions),
                     scope: Some(scope),
+                    capabilities,
+                    paused: None,
                 };
                 if !self
                     .workspace
@@ -229,6 +257,35 @@ impl EngineRpc {
                 }
                 Ok(())
             }
+            MutateParams::SetBotPaused { bot_id, paused } => {
+                let update = cypher_doc::BotUpdate {
+                    paused: Some(paused),
+                    ..Default::default()
+                };
+                if !self
+                    .workspace
+                    .update_bot(&bot_id, &update)
+                    .map_err(failed)?
+                {
+                    return Err(RpcError::Failed("No such bot.".into()));
+                }
+                Ok(())
+            }
+            record @ (MutateParams::ResolveBotPlan { .. }
+            | MutateParams::StopBotWork { .. }
+            | MutateParams::ResolveBotApproval { .. }
+            | MutateParams::SaveBotNote { .. }
+            | MutateParams::DeleteBotNote { .. }
+            | MutateParams::SaveBotRoutine { .. }
+            | MutateParams::DeleteBotRoutine { .. }
+            | MutateParams::RunBotRoutine { .. }
+            | MutateParams::SaveProjectTask { .. }
+            | MutateParams::DeleteProjectTask { .. }
+            | MutateParams::RunProjectTask { .. }
+            | MutateParams::UpdateBotConnection { .. }
+            | MutateParams::RevokeBotConnection { .. }
+            | MutateParams::RevokeBotInvite { .. }
+            | MutateParams::ReviewBotExchange { .. }) => self.mutate_bot_record(record),
             MutateParams::DeleteBot { bot_id } => {
                 let bot = self.workspace.bot(&bot_id).map_err(failed)?;
                 let Some(chat_id) = self.workspace.delete_bot(&bot_id).map_err(failed)? else {

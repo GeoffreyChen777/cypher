@@ -35,3 +35,225 @@ pub(super) async fn bot_tool(
     };
     RpcReply::value(&serde_json::json!({ "text": text }))
 }
+
+impl EngineRpc {
+    /// The owner's edits of bot records: each writes only the fields an
+    /// owner device owns (docs/design/agent-bots.md §13.1); the bot's host
+    /// watches the rows and acts on them.
+    pub(super) fn mutate_bot_record(&self, params: MutateParams) -> Result<(), RpcError> {
+        use crate::host::workspace_host::Fields;
+        use cypher_proto as p;
+        let ws = &self.workspace;
+        let now = p::now_ms();
+        let fields =
+            |pairs: &[(&str, serde_json::Value)]| -> serde_json::Map<String, serde_json::Value> {
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect()
+            };
+        let missing = |what: &str| RpcError::Failed(format!("No such {what}."));
+        let decision = |approve: bool| serde_json::json!(p::PlanDecision { approve, at: now });
+        match params {
+            MutateParams::ResolveBotPlan { work_id, approve } => {
+                let work: p::BotWork = ws
+                    .record(p::KIND_BOT_WORK, &work_id)
+                    .ok_or_else(|| missing("plan"))?;
+                if !work.awaiting_approval() {
+                    return Err(RpcError::Failed("This plan was already decided.".into()));
+                }
+                ws.update_record(
+                    p::KIND_BOT_WORK,
+                    &work_id,
+                    fields(&[("decision", decision(approve))]),
+                )
+                .map_err(failed)?;
+            }
+            MutateParams::StopBotWork { work_id } => {
+                if !ws
+                    .update_record(
+                        p::KIND_BOT_WORK,
+                        &work_id,
+                        fields(&[("stopRequestedAt", now.into())]),
+                    )
+                    .map_err(failed)?
+                {
+                    return Err(missing("task"));
+                }
+            }
+            MutateParams::ResolveBotApproval {
+                approval_id,
+                approve,
+            } => {
+                if !ws
+                    .update_record(
+                        p::KIND_BOT_APPROVALS,
+                        &approval_id,
+                        fields(&[("decision", decision(approve))]),
+                    )
+                    .map_err(failed)?
+                {
+                    return Err(missing("approval"));
+                }
+            }
+            MutateParams::SaveBotNote {
+                note_id,
+                bot_id,
+                text,
+            } => {
+                let created_at = ws
+                    .record::<p::BotNote>(p::KIND_BOT_NOTES, &note_id)
+                    .map_or(now, |n| n.created_at);
+                let mut note = p::BotNote {
+                    id: note_id.clone(),
+                    bot_id,
+                    text,
+                    source: p::NoteSource::Owner,
+                    created_at,
+                    updated_at: now,
+                };
+                note.clamp();
+                if note.text.is_empty() {
+                    return Err(RpcError::BadParams("A note needs some text.".into()));
+                }
+                ws.put_record(p::KIND_BOT_NOTES, &note_id, &note, Fields::All)
+                    .map_err(failed)?;
+            }
+            MutateParams::DeleteBotNote { note_id } => {
+                ws.delete_records(p::KIND_BOT_NOTES, &[note_id]);
+            }
+            MutateParams::SaveBotRoutine { mut routine } => {
+                routine.clamp();
+                routine.validate().map_err(RpcError::BadParams)?;
+                routine.updated_at = now;
+                ws.put_record(
+                    p::KIND_BOT_ROUTINES,
+                    &routine.id.clone(),
+                    &routine,
+                    Fields::Except(&[p::BotRoutine::HOST_FIELDS, &["runRequestedAt"]].concat()),
+                )
+                .map_err(failed)?;
+            }
+            MutateParams::DeleteBotRoutine { routine_id } => {
+                ws.delete_records(p::KIND_BOT_ROUTINES, &[routine_id]);
+            }
+            MutateParams::RunBotRoutine { routine_id } => {
+                if !ws
+                    .update_record(
+                        p::KIND_BOT_ROUTINES,
+                        &routine_id,
+                        fields(&[("runRequestedAt", now.into())]),
+                    )
+                    .map_err(failed)?
+                {
+                    return Err(missing("routine"));
+                }
+            }
+            MutateParams::SaveProjectTask { mut task } => {
+                task.clamp();
+                task.validate().map_err(RpcError::BadParams)?;
+                task.updated_at = now;
+                ws.put_record(
+                    p::KIND_PROJECT_TASKS,
+                    &task.id.clone(),
+                    &task,
+                    Fields::Except(&[p::ProjectTask::HOST_FIELDS, &["runRequestedAt"]].concat()),
+                )
+                .map_err(failed)?;
+            }
+            MutateParams::DeleteProjectTask { task_id } => {
+                ws.delete_records(p::KIND_PROJECT_TASKS, &[task_id]);
+            }
+            MutateParams::RunProjectTask { task_id } => {
+                if !ws
+                    .update_record(
+                        p::KIND_PROJECT_TASKS,
+                        &task_id,
+                        fields(&[("runRequestedAt", now.into())]),
+                    )
+                    .map_err(failed)?
+                {
+                    return Err(missing("task"));
+                }
+            }
+            MutateParams::UpdateBotConnection {
+                connection_id,
+                reply_mode,
+                scope,
+            } => {
+                if let Some(scope) = &scope {
+                    scope.validate().map_err(RpcError::BadParams)?;
+                }
+                let scope = match scope {
+                    Some(scope) => {
+                        serde_json::to_value(scope).map_err(|e| RpcError::Failed(e.to_string()))?
+                    }
+                    None => serde_json::Value::Null,
+                };
+                if !ws
+                    .update_record(
+                        p::KIND_BOT_CONNECTIONS,
+                        &connection_id,
+                        fields(&[
+                            ("replyMode", serde_json::json!(reply_mode)),
+                            ("scope", scope),
+                        ]),
+                    )
+                    .map_err(failed)?
+                {
+                    return Err(missing("connection"));
+                }
+            }
+            MutateParams::RevokeBotConnection { connection_id } => {
+                if !ws
+                    .update_record(
+                        p::KIND_BOT_CONNECTIONS,
+                        &connection_id,
+                        fields(&[("revokeRequestedAt", now.into())]),
+                    )
+                    .map_err(failed)?
+                {
+                    return Err(missing("connection"));
+                }
+            }
+            MutateParams::RevokeBotInvite { invite_id } => {
+                if !ws
+                    .update_record(
+                        p::KIND_BOT_INVITES,
+                        &invite_id,
+                        fields(&[("revokeRequestedAt", now.into())]),
+                    )
+                    .map_err(failed)?
+                {
+                    return Err(missing("invite"));
+                }
+            }
+            MutateParams::ReviewBotExchange {
+                exchange_id,
+                send,
+                text,
+            } => {
+                let text = text
+                    .map(|t| p::clip(&t, p::ANSWER_MAX))
+                    .filter(|t| !t.is_empty());
+                let review = p::ReviewDecision {
+                    send,
+                    text,
+                    at: now,
+                };
+                if !ws
+                    .update_record(
+                        p::KIND_BOT_EXCHANGES,
+                        &exchange_id,
+                        fields(&[("review", serde_json::json!(review))]),
+                    )
+                    .map_err(failed)?
+                {
+                    return Err(missing("question"));
+                }
+            }
+            _ => unreachable!("only bot record edits are routed here"),
+        }
+        Ok(())
+    }
+}

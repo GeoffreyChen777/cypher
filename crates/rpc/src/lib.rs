@@ -288,6 +288,9 @@ pub mod methods {
     pub const CREATE_BOT: &str = "CreateBot";
     /// The registry's bot rows (stream).
     pub const WATCH_BOTS: &str = "WatchBots";
+    /// Every bot record (plans, notes, routines, tasks, activity, approvals,
+    /// connections, invites, exchanges) as one frame per change.
+    pub const WATCH_BOT_RECORDS: &str = "WatchBotRecords";
     /// One bot tool call from a bot run's extension (unary, host-local):
     /// `{chatId, tool, args}` → `{text}`. The engine resolves the bot from
     /// `chatId` and enforces its scope.
@@ -513,6 +516,7 @@ pub mod methods {
         // A bot is created on its host; its tools answer only there.
         MethodSpec::unary(CREATE_BOT).forwardable(),
         MethodSpec::stream(WATCH_BOTS),
+        MethodSpec::stream(WATCH_BOT_RECORDS),
         MethodSpec::unary(BOT_TOOL),
     ];
 

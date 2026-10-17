@@ -1568,6 +1568,8 @@ fn session_context_mirrors_main_lists(cx: &mut gpui::TestAppContext) {
             chat_id: "c".into(),
             instructions: None,
             scope: Default::default(),
+            capabilities: Default::default(),
+            paused: false,
             created_at: Utc::now(),
         }]);
         cx.notify();

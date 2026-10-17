@@ -1052,6 +1052,8 @@ fn bot(id: &str, chat_id: &str) -> Bot {
             },
             ..Default::default()
         },
+        capabilities: Default::default(),
+        paused: false,
         created_at: ts(4_000),
     }
 }
@@ -1112,4 +1114,38 @@ fn an_unreadable_bot_scope_reads_as_empty() {
     doc.write(KIND_BOTS, "b1", OpKind::Update, set);
     let read = doc.bot("b1").unwrap().unwrap();
     assert_eq!(read.scope, cypher_proto::BotScope::default());
+}
+
+#[test]
+fn bot_records_write_per_field_and_refuse_oversized_rows() {
+    use cypher_proto as p;
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut work = serde_json::Map::new();
+    work.insert("id".into(), json!("w1"));
+    work.insert("botId".into(), json!("b"));
+    work.insert("title".into(), json!("Fix it"));
+    work.insert("chatId".into(), json!("c"));
+    work.insert("createdAt".into(), json!(1));
+    work.insert("state".into(), json!("proposed"));
+    doc.put_record(p::KIND_BOT_WORK, "w1", work).unwrap();
+    // An owner device decides; the host's fields are untouched.
+    let mut decision = serde_json::Map::new();
+    decision.insert("decision".into(), json!({"approve": true, "at": 2}));
+    assert!(doc.update_record(p::KIND_BOT_WORK, "w1", decision).unwrap());
+    assert!(
+        !doc.update_record(p::KIND_BOT_WORK, "nope", serde_json::Map::new())
+            .unwrap()
+    );
+    let records = doc.read_bot_records();
+    assert_eq!(records.work.len(), 1);
+    assert_eq!(records.work[0].title, "Fix it");
+    assert!(records.work[0].decision.as_ref().is_some_and(|d| d.approve));
+
+    let mut huge = serde_json::Map::new();
+    huge.insert("text".into(), json!("x".repeat(20_000)));
+    assert!(doc.put_record(p::KIND_BOT_NOTES, "n", huge).is_err());
+    assert!(doc.read_bot_records().notes.is_empty());
+
+    doc.delete_records(p::KIND_BOT_WORK, &["w1".to_string()]);
+    assert!(doc.read_bot_records().work.is_empty());
 }

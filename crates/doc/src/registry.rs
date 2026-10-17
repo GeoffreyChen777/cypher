@@ -44,6 +44,10 @@ pub struct BotUpdate {
     pub instructions: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<cypher_proto::BotScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<cypher_proto::BotCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<bool>,
 }
 
 /// Row kinds — the four sidebar tables, plus agent-bot definitions.
@@ -1049,6 +1053,8 @@ impl RegistryDoc {
             ("chatId", json!(bot.chat_id)),
             ("instructions", opt_str(bot.instructions.as_deref())),
             ("scope", serde_json::to_value(&bot.scope)?),
+            ("capabilities", serde_json::to_value(bot.capabilities)?),
+            ("paused", json!(bot.paused)),
             ("createdAt", json!(bot.created_at.timestamp_millis())),
         ]);
         self.write(KIND_BOTS, &bot.id.clone(), OpKind::Upsert, set);
@@ -1076,6 +1082,12 @@ impl RegistryDoc {
         }
         if let Some(scope) = &update.scope {
             set.insert("scope".into(), serde_json::to_value(scope)?);
+        }
+        if let Some(capabilities) = &update.capabilities {
+            set.insert("capabilities".into(), serde_json::to_value(capabilities)?);
+        }
+        if let Some(paused) = update.paused {
+            set.insert("paused".into(), json!(paused));
         }
         if set.is_empty() {
             return Ok(true);
@@ -1115,6 +1127,106 @@ impl RegistryDoc {
         Ok(Some(bot.chat_id))
     }
 
+    // ── bot records (cypher_proto::bot_records) ─────────────────────────────
+
+    /// Write `fields` of a record row, creating it when missing. Each field
+    /// is its own LWW value, so a writer sends only the fields it owns.
+    /// Refuses a write the Edge would refuse (over [`RECORD_MAX_BYTES`]):
+    /// a refused batch would wedge sync for every later write.
+    pub fn put_record(
+        &mut self,
+        kind: &str,
+        id: &str,
+        fields: serde_json::Map<String, Value>,
+    ) -> Result<(), DocError> {
+        check_record(kind, id, &fields)?;
+        if fields.is_empty() {
+            return Ok(());
+        }
+        self.write(kind, id, OpKind::Upsert, fields.into_iter().collect());
+        Ok(())
+    }
+
+    /// Write `fields` of an existing record; `false` when there is none.
+    pub fn update_record(
+        &mut self,
+        kind: &str,
+        id: &str,
+        fields: serde_json::Map<String, Value>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(kind, id) {
+            return Ok(false);
+        }
+        check_record(kind, id, &fields)?;
+        if !fields.is_empty() {
+            self.write(kind, id, OpKind::Update, fields.into_iter().collect());
+        }
+        Ok(true)
+    }
+
+    /// Tombstone records, in batches the Edge accepts.
+    pub fn delete_records(&mut self, kind: &str, ids: &[String]) {
+        let keys: Vec<(&str, &str)> = ids.iter().map(|id| (kind, id.as_str())).collect();
+        self.delete_row_ops(&keys);
+    }
+
+    /// One record's fields, overlay applied.
+    pub fn record(&self, kind: &str, id: &str) -> Option<Value> {
+        self.overlay_row(kind, id)
+            .map(|row| Value::Object(row.fields.into_iter().collect()))
+    }
+
+    /// Every live record of `kind` decoded as `T`; malformed rows are
+    /// skipped with a warning.
+    pub fn read_records<T: serde::de::DeserializeOwned>(&self, kind: &str) -> Vec<T> {
+        self.read_kind(kind)
+    }
+
+    /// Every bot record.
+    pub fn read_bot_records(&self) -> cypher_proto::BotRecords {
+        use cypher_proto as p;
+        let mut records = p::BotRecords {
+            work: self.read_records(p::KIND_BOT_WORK),
+            notes: self.read_records(p::KIND_BOT_NOTES),
+            routines: self.read_records(p::KIND_BOT_ROUTINES),
+            tasks: self.read_records(p::KIND_PROJECT_TASKS),
+            activity: self.read_records(p::KIND_BOT_ACTIVITY),
+            approvals: self.read_records(p::KIND_BOT_APPROVALS),
+            connections: self.read_records(p::KIND_BOT_CONNECTIONS),
+            invites: self.read_records(p::KIND_BOT_INVITES),
+            exchanges: self.read_records(p::KIND_BOT_EXCHANGES),
+        };
+        // Stable orders: newest first for logs, oldest first for the rest.
+        records
+            .work
+            .sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        records
+            .notes
+            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.id.cmp(&b.id)));
+        records
+            .routines
+            .sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        records
+            .tasks
+            .sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        records
+            .activity
+            .sort_by(|a, b| b.at.cmp(&a.at).then(b.id.cmp(&a.id)));
+        records
+            .approvals
+            .sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        records
+            .connections
+            .sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        records
+            .invites
+            .sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
+        records
+            .exchanges
+            .sort_by(|a, b| b.asked_at.cmp(&a.asked_at).then(a.id.cmp(&b.id)));
+        records
+    }
+
     // ── whole-doc read ──────────────────────────────────────────────────────
 
     pub fn read_all(&self) -> Result<WorkspaceState, DocError> {
@@ -1129,6 +1241,25 @@ impl RegistryDoc {
 }
 
 // ── field helpers ───────────────────────────────────────────────────────────
+
+/// The largest record write accepted (UTF-16 units), under the Edge's 16 Ki per-op cap
+/// with room for the op envelope.
+pub const RECORD_MAX_BYTES: usize = 14 * 1024;
+
+fn check_record(
+    kind: &str,
+    id: &str,
+    fields: &serde_json::Map<String, Value>,
+) -> Result<(), DocError> {
+    // The Edge measures `JSON.stringify(op).length`: UTF-16 code units.
+    let units = serde_json::to_string(fields)?.encode_utf16().count() + kind.len() + id.len();
+    if units > RECORD_MAX_BYTES {
+        return Err(DocError::Schema(format!(
+            "{kind} row {id} is {units} characters; the registry takes at most {RECORD_MAX_BYTES}"
+        )));
+    }
+    Ok(())
+}
 
 fn fields<const N: usize>(entries: [(&str, Value); N]) -> BTreeMap<String, Value> {
     entries

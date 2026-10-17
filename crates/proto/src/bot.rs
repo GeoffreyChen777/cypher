@@ -54,6 +54,12 @@ pub struct Bot {
     pub instructions: Option<String>,
     #[serde(default)]
     pub scope: BotScope,
+    /// What its owner threads may do beyond reading.
+    #[serde(default)]
+    pub capabilities: crate::BotCapabilities,
+    /// Kill switch: no routine runs and no new work starts while set.
+    #[serde(default)]
+    pub paused: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -100,6 +106,13 @@ pub struct BotChat {
     /// bots' own chats, so a missing origin reads as the owner.
     #[serde(default)]
     pub origin: BotOrigin,
+    /// Which of the bot's threads this is; `Main` for the bot chat.
+    #[serde(default, skip_serializing_if = "is_main")]
+    pub thread: crate::BotThread,
+}
+
+fn is_main(thread: &crate::BotThread) -> bool {
+    *thread == crate::BotThread::Main
 }
 
 impl BotChat {
@@ -112,7 +125,22 @@ impl BotChat {
         Self {
             bot_id: bot_id.into(),
             origin,
+            thread: crate::BotThread::Main,
         }
+    }
+
+    /// The marker of a hidden thread the host creates.
+    pub fn thread(bot_id: impl Into<String>, origin: BotOrigin, thread: crate::BotThread) -> Self {
+        Self {
+            bot_id: bot_id.into(),
+            origin,
+            thread,
+        }
+    }
+
+    /// The bot chat itself (not a hidden thread).
+    pub fn is_main(&self) -> bool {
+        is_main(&self.thread)
     }
 }
 

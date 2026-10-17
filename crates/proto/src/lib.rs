@@ -14,6 +14,7 @@ mod agent;
 pub mod agent_prompt;
 pub mod attachment_refs;
 mod bot;
+mod bot_records;
 mod context_recovery;
 mod entities;
 mod github;
@@ -26,6 +27,7 @@ mod workspace;
 
 pub use agent::*;
 pub use bot::*;
+pub use bot_records::*;
 pub use context_recovery::*;
 pub use entities::*;
 pub use github::*;
