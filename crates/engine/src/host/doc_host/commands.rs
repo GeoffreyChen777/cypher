@@ -300,6 +300,19 @@ impl DocHost {
                 Some("no pending input request".into()),
             ));
         };
+        // A subagent's question mirrored here is the subagent's to answer:
+        // this chat's agent never asked it, so it must not get the answer as
+        // a turn. Its mirror is gone with the run; close the question.
+        if questions.iter().any(|q| q.asked_by.is_some()) {
+            if let Err(err) = handle.doc.resolve_input(request_id) {
+                tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
+                    "orphaned subagent question resolve failed");
+            }
+            return Ok((
+                SessionCommandStatus::Rejected,
+                Some("the subagent's question is no longer pending".into()),
+            ));
+        }
         // The run died under the question (engine restart, crash).
         // The question is still open in the doc and the command is
         // durable, so honor it anyway — stamp the part resolved and

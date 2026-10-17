@@ -401,6 +401,7 @@ fn tall_question() -> UserInputQuestion {
         ],
         multi_select: false,
         permission: None,
+        asked_by: None,
     }
 }
 
@@ -443,6 +444,7 @@ fn marked_run(
                                 ],
                                 multi_select: false,
                                 permission: None,
+                                asked_by: None,
                             }
                         }]);
                         tokio::select! {

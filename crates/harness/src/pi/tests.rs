@@ -635,6 +635,7 @@ fn ui_question_shapes_match_the_bridge() {
                 .unwrap_or_default(),
             multi_select: false,
             permission: None,
+            asked_by: None,
         }
     };
     let question = q(&select);

@@ -165,6 +165,13 @@ struct Inner {
     /// child's initial task can hand the retry the same channel. Same bound
     /// and lifetime as [`Self::child_channels`].
     spent_child_channels: Mutex<HashMap<String, LocalChildChannel>>,
+    /// Subagent questions open in a root chat, by the copy's request id
+    /// (see [`Inner::forward_input`]). Host memory only: a copy outlives
+    /// neither the engine nor the child's question.
+    forwarded: Mutex<HashMap<String, ForwardedFrom>>,
+    /// Root chats showing as awaiting input for a forwarded question, with
+    /// the status their own run last set (see [`Inner::set_status`]).
+    held_statuses: Mutex<HashMap<String, SessionStatus>>,
     /// chat_id → journal seq of the newest terminal `Done` published —
     /// context recovery keys its verdict on a round by it.
     done_seqs: Mutex<HashMap<String, u64>>,
@@ -243,6 +250,41 @@ impl QuiesceWindows {
     }
 }
 
+/// A turn is running (or waiting on the user mid-turn).
+fn is_active(status: SessionStatus) -> bool {
+    matches!(
+        status,
+        SessionStatus::Working | SessionStatus::AwaitingInput
+    )
+}
+
+/// How many child chats up [`Inner::forward_input`] looks for the root.
+const MAX_FORWARD_DEPTH: usize = 8;
+
+/// A child chat's question mirrored into its root chat by
+/// [`Inner::forward_input`]. Retired when the child's own question settles —
+/// answered (here or in the child chat), withdrawn, or dropped with its run.
+struct ForwardedInput {
+    inner: std::sync::Weak<Inner>,
+    mirror_id: String,
+}
+
+impl ForwardedInput {
+    fn retire(self) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.retire_forward(&self.mirror_id);
+        }
+    }
+}
+
+/// Where a mirrored question came from (see [`Inner::forwarded`]).
+#[derive(Debug, Clone)]
+struct ForwardedFrom {
+    root: String,
+    child: String,
+    request_id: String,
+}
+
 /// Host-local messaging channel for one child chat's INITIAL run (see
 /// [`Inner::child_channels`]). Not serialized, never synced.
 #[derive(Debug, Clone)]
@@ -298,6 +340,8 @@ impl SessionsEngine {
                 sessions_tx,
                 child_channels: Mutex::new(HashMap::new()),
                 spent_child_channels: Mutex::new(HashMap::new()),
+                forwarded: Mutex::new(HashMap::new()),
+                held_statuses: Mutex::new(HashMap::new()),
                 done_seqs: Mutex::new(HashMap::new()),
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
@@ -461,12 +505,7 @@ impl SessionsEngine {
             return; // temporary Side Chat: no checkout snapshot for the diff pane
         }
         if let Some(listener) = self.inner.turn_listener.get() {
-            let opens_round = !lock(&self.inner.statuses).get(chat_id).is_some_and(|s| {
-                matches!(
-                    s.status,
-                    SessionStatus::Working | SessionStatus::AwaitingInput
-                )
-            });
+            let opens_round = !self.inner.run_status(chat_id).is_some_and(is_active);
             listener(chat_id, TurnEvent::Start { cwd, opens_round });
         }
     }
@@ -805,6 +844,8 @@ impl SessionsEngine {
         let request_input = {
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
+            let inner = Arc::downgrade(&self.inner);
+            let asking_chat = chat_id.to_string();
             Box::new(move |questions: Vec<UserInputQuestion>| {
                 let (tx, rx) = oneshot::channel();
                 let (mut answer_tx, answer_rx) = oneshot::channel();
@@ -812,8 +853,14 @@ impl SessionsEngine {
                 lock(&pending).insert(request_id.clone(), tx);
                 let _ = engine_tx.send(AgentEvent::InputRequested {
                     request_id: request_id.clone(),
-                    questions,
+                    questions: questions.clone(),
                 });
+                // A subagent's child chat is hidden: ask in the chat the
+                // user is watching too. Whichever copy is answered first
+                // wins; the mirror retires when this question settles.
+                let forward = inner
+                    .upgrade()
+                    .and_then(|inner| inner.forward_input(&asking_chat, &request_id, questions));
                 // Withdrawal watch: the harness drops its receiver when the
                 // dialog it bridges is gone (Pi resolves a timed-out dialog on
                 // its own, silently). Retire the question then, or it stays
@@ -833,6 +880,9 @@ impl SessionsEngine {
                                 let _ = engine_tx.send(AgentEvent::InputResolved { request_id });
                             }
                         }
+                    }
+                    if let Some(forward) = forward {
+                        forward.retire();
                     }
                 });
                 answer_rx
@@ -940,20 +990,13 @@ impl SessionsEngine {
         request_id: &str,
         answers: Vec<UserInputAnswer>,
     ) -> Result<bool, EngineError> {
-        let target = lock(&self.inner.runs)
-            .get(chat_id)
-            .map(|h| (h.pending_inputs.clone(), h.engine_tx.clone()));
-        let Some((pending, engine_tx)) = target else {
-            return Ok(false);
-        };
-        let Some(resolver) = lock(&pending).remove(request_id) else {
-            return Ok(false);
-        };
-        let _ = resolver.send(answers);
-        let _ = engine_tx.send(AgentEvent::InputResolved {
-            request_id: request_id.to_string(),
-        });
-        Ok(true)
+        if self
+            .inner
+            .respond_forwarded(chat_id, request_id, answers.clone())
+        {
+            return Ok(true);
+        }
+        Ok(self.inner.respond_input(chat_id, request_id, answers))
     }
 
     /// Session Fork quiesce: cancel a PARKED (Idle) attached run so the fork
@@ -997,14 +1040,9 @@ impl SessionsEngine {
     pub async fn recycle_idle_sessions(&self) {
         self.inner.plugin_epoch.fetch_add(1, Ordering::SeqCst);
         let idle: Vec<(String, CancellationToken, String)> = {
-            let statuses = lock(&self.inner.statuses);
             lock(&self.inner.runs)
                 .iter()
-                .filter(|&(id, _handle)| {
-                    statuses
-                        .get(id)
-                        .is_some_and(|session| session.status == SessionStatus::Idle)
-                })
+                .filter(|&(id, _handle)| self.inner.run_status(id) == Some(SessionStatus::Idle))
                 .map(|(id, handle)| {
                     (
                         id.clone(),
@@ -1310,7 +1348,77 @@ impl Inner {
         self.publish_session(chat_id, &session);
     }
 
+    /// Set the status a chat's run is in. A root chat with a subagent's
+    /// question open (see [`Inner::forward_input`]) keeps SHOWING awaiting
+    /// input meanwhile: its own run's status is held underneath, still
+    /// driving the turn timer and the end-of-turn hook, and comes back when
+    /// the last question closes.
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
+        let held = lock(&self.held_statuses)
+            .get_mut(chat_id)
+            .map(|run| std::mem::replace(run, status));
+        match held {
+            None => self.write_status(chat_id, status, status, None, fresh_start),
+            Some(before) => self.write_status(
+                chat_id,
+                SessionStatus::AwaitingInput,
+                status,
+                Some(is_active(before)),
+                fresh_start,
+            ),
+        }
+    }
+
+    /// The status the chat's own run is in, under any awaiting-input hold.
+    fn run_status(&self, chat_id: &str) -> Option<SessionStatus> {
+        if let Some(run) = lock(&self.held_statuses).get(chat_id) {
+            return Some(*run);
+        }
+        lock(&self.statuses).get(chat_id).map(|s| s.status)
+    }
+
+    /// Start showing `chat_id` as awaiting input for a forwarded question.
+    fn hold_awaiting_input(&self, chat_id: &str) {
+        let run = {
+            let mut held = lock(&self.held_statuses);
+            if held.contains_key(chat_id) {
+                return;
+            }
+            let run = lock(&self.statuses)
+                .get(chat_id)
+                .map_or(SessionStatus::Idle, |s| s.status);
+            held.insert(chat_id.to_string(), run);
+            run
+        };
+        self.write_status(
+            chat_id,
+            SessionStatus::AwaitingInput,
+            run,
+            Some(is_active(run)),
+            false,
+        );
+    }
+
+    /// Show `chat_id`'s own run status again.
+    fn release_awaiting_input(&self, chat_id: &str) {
+        let Some(run) = lock(&self.held_statuses).remove(chat_id) else {
+            return;
+        };
+        self.write_status(chat_id, run, run, Some(is_active(run)), false);
+    }
+
+    /// Write and publish a status row. `shown` is what the row says; `run`
+    /// (the chat's own run status) decides the turn timer and whether a turn
+    /// just settled, against `run_was_active` when the row does not show it.
+    fn write_status(
+        &self,
+        chat_id: &str,
+        shown: SessionStatus,
+        run: SessionStatus,
+        run_was_active: Option<bool>,
+        fresh_start: bool,
+    ) {
+        let status = shown;
         let now = Utc::now();
         let seed = self.durable_context_usage(chat_id);
         let (session, entered_attention, settled) = {
@@ -1342,16 +1450,13 @@ impl Inner {
             // the old base showed the previous turn's 30min on send), and a
             // settled session drops its base entirely so no later reader can
             // resurrect a stale elapsed.
-            let was_active = matches!(
-                entry.status,
-                SessionStatus::Working | SessionStatus::AwaitingInput
-            );
+            let was_active = run_was_active.unwrap_or_else(|| is_active(entry.status));
             entry.status = status;
             entry.updated_at = now;
             // Throughput belongs to one turn, like `started_at`: a settled
             // session must not keep the last tok/s, nor a new turn open with
             // the previous one's token count.
-            match status {
+            match run {
                 SessionStatus::Working if fresh_start || !was_active => {
                     entry.started_at = Some(now);
                     entry.throughput = None;
@@ -1362,8 +1467,7 @@ impl Inner {
                     entry.throughput = None;
                 }
             }
-            let settled =
-                was_active && matches!(status, SessionStatus::Idle | SessionStatus::Errored);
+            let settled = was_active && matches!(run, SessionStatus::Idle | SessionStatus::Errored);
             (entry.clone(), entered_attention, settled)
         };
         // Statuses guard released before publish (publish re-locks it).
@@ -1439,6 +1543,163 @@ impl Inner {
             });
         }
         ctx
+    }
+
+    /// Resolve a pending input request of `chat_id`'s live run; false when
+    /// no such request is pending (unknown id, or the run already settled).
+    fn respond_input(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        answers: Vec<UserInputAnswer>,
+    ) -> bool {
+        let target = lock(&self.runs)
+            .get(chat_id)
+            .map(|h| (h.pending_inputs.clone(), h.engine_tx.clone()));
+        let Some((pending, engine_tx)) = target else {
+            return false;
+        };
+        let Some(resolver) = lock(&pending).remove(request_id) else {
+            return false;
+        };
+        let _ = resolver.send(answers);
+        let _ = engine_tx.send(AgentEvent::InputResolved {
+            request_id: request_id.to_string(),
+        });
+        true
+    }
+
+    /// Mirror a Cypher-hosted child chat's question into its root chat — the
+    /// chat the user is looking at. Child chats are hidden, so a subagent's
+    /// question or permission prompt asked only there leaves it waiting on
+    /// something nobody sees.
+    ///
+    /// The copy is written straight into the root's transcript, whatever the
+    /// root is doing: a background subagent usually asks after the root's
+    /// turn ended, so it cannot ride the root's run. While a copy is open the
+    /// root shows as awaiting input (see [`Inner::set_status`]); its answer
+    /// is relayed to the child by [`Inner::respond_forwarded`].
+    fn forward_input(
+        self: &Arc<Self>,
+        chat_id: &str,
+        request_id: &str,
+        questions: Vec<UserInputQuestion>,
+    ) -> Option<ForwardedInput> {
+        if self.is_ephemeral(chat_id) {
+            return None;
+        }
+        let ws = self.workspace()?;
+        let asking = ws.chat(chat_id).ok()??;
+        let agent = asking.child.as_ref()?.agent.clone();
+        // Nested subagents: every chat between the asker and the root is a
+        // hidden child chat too.
+        let mut root = asking.parent_chat_id()?.to_owned();
+        for _ in 0..MAX_FORWARD_DEPTH {
+            let chat = ws.chat(&root).ok()??;
+            match chat.parent_chat_id() {
+                Some(parent) => root = parent.to_owned(),
+                None => break,
+            }
+        }
+        let handle = self.doc_host()?.open(&root).ok()?;
+        let mirror_id = new_id();
+        let questions = questions
+            .into_iter()
+            .map(|question| UserInputQuestion {
+                // The gated call is in the child's transcript, not the root's.
+                permission: question
+                    .permission
+                    .map(|prompt| cypher_proto::PermissionPrompt {
+                        tool_call_id: None,
+                        ..prompt
+                    }),
+                asked_by: Some(agent.clone()),
+                ..question
+            })
+            .collect();
+        let entry = cypher_doc::SessionMessageEntry {
+            id: new_id(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Input {
+                // Input parts carry their request id as their part id.
+                id: mirror_id.clone(),
+                request_id: mirror_id.clone(),
+                questions,
+                resolved: false,
+            }],
+            created_at: now_ms(),
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            completed_at: None,
+            comments: Vec::new(),
+            models: Vec::new(),
+            turn_changes: None,
+            recovery: None,
+        };
+        if let Err(err) = handle.doc().push_message(&entry) {
+            tracing::warn!(chat = %root, child = %chat_id, error = %err,
+                "subagent question could not be forwarded");
+            return None;
+        }
+        lock(&self.forwarded).insert(
+            mirror_id.clone(),
+            ForwardedFrom {
+                root: root.clone(),
+                child: chat_id.to_string(),
+                request_id: request_id.to_string(),
+            },
+        );
+        self.hold_awaiting_input(&root);
+        tracing::info!(chat = %root, child = %chat_id, "subagent question forwarded");
+        Some(ForwardedInput {
+            inner: Arc::downgrade(self),
+            mirror_id,
+        })
+    }
+
+    /// Answer a question forwarded into `chat_id`: the answer goes to the
+    /// subagent that asked. False when `request_id` is no open copy there.
+    fn respond_forwarded(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        answers: Vec<UserInputAnswer>,
+    ) -> bool {
+        let Some(from) = lock(&self.forwarded)
+            .get(request_id)
+            .filter(|from| from.root == chat_id)
+            .cloned()
+        else {
+            return false;
+        };
+        // The child's settle retires the copy; a child that is already gone
+        // never will, so retire it here.
+        if !self.respond_input(&from.child, &from.request_id, answers) {
+            self.retire_forward(request_id);
+        }
+        true
+    }
+
+    /// Close a forwarded copy (idempotent), and end the root's awaiting-input
+    /// hold with its last copy.
+    fn retire_forward(&self, mirror_id: &str) {
+        let (from, last) = {
+            let mut forwarded = lock(&self.forwarded);
+            let Some(from) = forwarded.remove(mirror_id) else {
+                return;
+            };
+            let last = !forwarded.values().any(|f| f.root == from.root);
+            (from, last)
+        };
+        if let Some(handle) = self.doc_host().and_then(|host| host.open(&from.root).ok())
+            && let Err(err) = handle.doc().resolve_input(mirror_id)
+        {
+            tracing::warn!(chat = %from.root, error = %err, "forwarded question resolve failed");
+        }
+        if last {
+            self.release_awaiting_input(&from.root);
+        }
     }
 
     /// Sidebar freshness: push a message-persist preview into the chat's workspace row.

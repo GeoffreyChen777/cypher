@@ -752,9 +752,13 @@ async fn read_session_transcript(
 /// the QuestionPanel vanish exactly when the user typed (earlier forensics;
 /// matches the original composer.tsx, which reads the live-assistant fold —
 /// rebuilt from replay even after the run died).
+///
+/// A subagent's question forwarded here (`asked_by`) is never superseded:
+/// the subagent is still waiting on it while this chat's agent goes on.
 pub fn pending_input_request(
     transcript: &[SessionMessageEntry],
 ) -> Option<(String, Vec<UserInputQuestion>)> {
+    let mut superseded = false;
     for entry in transcript.iter().rev() {
         if entry.role != MessageRole::Assistant {
             continue;
@@ -765,7 +769,9 @@ pub fn pending_input_request(
                 questions,
                 resolved: false,
                 ..
-            } => Some((request_id.clone(), questions.clone())),
+            } if !superseded || questions.iter().any(|q| q.asked_by.is_some()) => {
+                Some((request_id.clone(), questions.clone()))
+            }
             _ => None,
         }) {
             return Some(found);
@@ -776,7 +782,7 @@ pub fn pending_input_request(
         // previous segment, and treating the new empty entry as "moved on"
         // hides the picker while Pi waits forever.
         if assistant_entry_has_content(entry) {
-            return None;
+            superseded = true;
         }
     }
     None

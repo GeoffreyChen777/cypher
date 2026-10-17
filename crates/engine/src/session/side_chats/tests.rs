@@ -195,6 +195,7 @@ fn transcript_context_serializes_safe_visible_content_only() {
                         options: vec![],
                         multi_select: false,
                         permission: None,
+                        asked_by: None,
                     }],
                     resolved: true,
                 },

@@ -64,6 +64,7 @@ fn bridge_ui_request(
         },
         multi_select: false,
         permission,
+        asked_by: None,
     };
     // Pi resolves a dialog with a `timeout` to its default on its own and
     // tells no one. Give up on the answer at the same moment: dropping the
