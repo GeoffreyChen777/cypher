@@ -616,6 +616,7 @@ async fn question_on_a_quiesced_turn_reaches_the_user() {
                 options: vec!["Online".into(), "Offline".into()],
                 multi_select: false,
                 permission: None,
+                asked_by: None,
             }]);
             if let Ok(labels) = answer.await {
                 let _ = answer_tx.send(labels.len());

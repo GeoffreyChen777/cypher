@@ -941,9 +941,11 @@ impl<'r> RunLoop<'r> {
             // Working — `/subagent-config` and friends ARE the turn,
             // and auto-declining them hangs the extension handler.
             AgentEvent::InputRequested { request_id, .. } => {
-                let live = lock(&inner.statuses).get(chat_id).is_some_and(|s| {
+                // The run's own status: a forwarded subagent question shows
+                // the chat awaiting input without a turn behind it.
+                let live = inner.run_status(chat_id).is_some_and(|status| {
                     matches!(
-                        s.status,
+                        status,
                         SessionStatus::Working | SessionStatus::AwaitingInput
                     )
                 });

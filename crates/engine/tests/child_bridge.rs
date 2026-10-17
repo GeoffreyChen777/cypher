@@ -998,3 +998,336 @@ async fn parent_delete_cascades_to_children() {
     );
     rig.core.shutdown().await;
 }
+
+/// Child runs ask one question and finish with whatever they were answered;
+/// the parent's run stays live until `release` fires.
+struct AskingRig {
+    core: EngineCore,
+    _dir: tempfile::TempDir,
+    /// What the child's question was answered with (`None` until it was).
+    answered: Arc<Mutex<Option<Vec<cypher_proto::UserInputAnswer>>>>,
+    release: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>>>,
+}
+
+fn asking_rig() -> AskingRig {
+    let answered = Arc::new(Mutex::new(None));
+    let release = Arc::new(Mutex::new(None));
+    let (seen, parent_feed) = (answered.clone(), release.clone());
+    let harness = common::TestHarness::new(HarnessId::Pi, "Asking", move |request, controls| {
+        if controls.host.child.is_none() && request.prompt != "delegate it" {
+            // The auto-titler.
+            return common::script(vec![done_ok()]);
+        }
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let _ = tx.send(child_started(&request.cwd));
+        if controls.host.child.is_none() {
+            // The parent: Working until the test ends its turn.
+            *parent_feed.lock().unwrap() = Some(tx);
+            return Ok(common::channel_stream(rx));
+        }
+        let seen = seen.clone();
+        tokio::spawn(async move {
+            let answer = (controls.request_input)(vec![cypher_proto::UserInputQuestion {
+                id: "q1".into(),
+                header: "Which layout?".into(),
+                question: "Which layout?".into(),
+                options: vec!["grid".into(), "list".into()],
+                multi_select: false,
+                permission: Some(cypher_proto::PermissionPrompt {
+                    kind: cypher_proto::PermissionPromptKind::Access,
+                    tool_call_id: Some("child-call".into()),
+                }),
+                asked_by: None,
+            }]);
+            let answers = answer.await.unwrap_or_default();
+            *seen.lock().unwrap() = Some(answers);
+            let _ = tx.send(common::text("child done"));
+            let _ = tx.send(done_ok());
+        });
+        Ok(common::channel_stream(rx))
+    })
+    .steering();
+    let dir = tempfile::tempdir().unwrap();
+    let core = engine(dir.path(), harness);
+    core.workspace
+        .create_chat(PARENT, None, Some(core.device_id.as_str()), None, None)
+        .expect("parent chat");
+    AskingRig {
+        core,
+        _dir: dir,
+        answered,
+        release,
+    }
+}
+
+fn pi_run(prompt: &str) -> cypher_doc::SessionCommandPayload {
+    cypher_doc::SessionCommandPayload::Run {
+        request: cypher_proto::RunRequest {
+            harness: Some(HarnessId::Pi),
+            ..common::run_request(prompt)
+        },
+        message_id: String::new(),
+        agent_prompt: None,
+    }
+}
+
+/// The open question in `chat`'s transcript: its request id and questions.
+fn open_question(
+    core: &EngineCore,
+    chat: &str,
+) -> Option<(String, Vec<cypher_proto::UserInputQuestion>)> {
+    common::entries(core, chat).iter().find_map(|e| {
+        e.parts.iter().find_map(|p| match p {
+            cypher_doc::MessagePart::Input {
+                request_id,
+                questions,
+                resolved: false,
+                ..
+            } => Some((request_id.clone(), questions.clone())),
+            _ => None,
+        })
+    })
+}
+
+fn has_resolved_question(core: &EngineCore, chat: &str) -> bool {
+    common::entries(core, chat).iter().any(|e| {
+        e.parts
+            .iter()
+            .any(|p| matches!(p, cypher_doc::MessagePart::Input { resolved: true, .. }))
+    })
+}
+
+fn answer(label: &str) -> cypher_doc::SessionCommandPayload {
+    cypher_doc::SessionCommandPayload::RespondInput {
+        request_id: String::new(),
+        answers: vec![cypher_proto::UserInputAnswer {
+            question_id: "q1".into(),
+            labels: vec![label.into()],
+        }],
+    }
+}
+
+fn answer_to(request_id: String, label: &str) -> cypher_doc::SessionCommandPayload {
+    match answer(label) {
+        cypher_doc::SessionCommandPayload::RespondInput { answers, .. } => {
+            cypher_doc::SessionCommandPayload::RespondInput {
+                request_id,
+                answers,
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// A subagent's question reaches the chat the user is in: it is asked in
+/// the parent too (labelled with the agent), and the parent's answer is the
+/// one the child receives.
+#[tokio::test(flavor = "multi_thread")]
+async fn child_question_is_forwarded_to_the_parent_and_answered_there() {
+    let rig = asking_rig();
+    let core = &rig.core;
+    core.doc_host
+        .queue_command(PARENT, pi_run("delegate it"))
+        .expect("parent run");
+    common::wait_for(
+        || common::status(core, PARENT) == Some(SessionStatus::Working),
+        "parent turn running",
+    )
+    .await;
+    let child_id = start(core, "run-1", PARENT).await.expect("start ok");
+
+    let (mirror_id, questions) =
+        common::wait_for_some("forwarded question", || open_question(core, PARENT)).await;
+    assert_eq!(questions.len(), 1);
+    assert_eq!(questions[0].asked_by.as_deref(), Some("planner"));
+    assert_eq!(questions[0].options, ["grid", "list"]);
+    let permission = questions[0]
+        .permission
+        .as_ref()
+        .expect("still a permission prompt");
+    assert_eq!(
+        permission.tool_call_id, None,
+        "the gated call lives in the child's transcript"
+    );
+    common::wait_for(
+        || common::status(core, PARENT) == Some(SessionStatus::AwaitingInput),
+        "parent awaiting input",
+    )
+    .await;
+    let (child_request, _) =
+        common::wait_for_some("child's own question", || open_question(core, &child_id)).await;
+    assert_ne!(child_request, mirror_id);
+
+    core.doc_host
+        .queue_command(PARENT, answer_to(mirror_id, "list"))
+        .expect("answer in parent");
+    let answers =
+        common::wait_for_some("child answered", || rig.answered.lock().unwrap().clone()).await;
+    assert_eq!(answers[0].labels, ["list"]);
+    common::wait_for(
+        || {
+            common::status(core, &child_id) == Some(SessionStatus::Idle)
+                && has_resolved_question(core, PARENT)
+                && has_resolved_question(core, &child_id)
+                && common::status(core, PARENT) == Some(SessionStatus::Working)
+        },
+        "both questions resolved, parent working again",
+    )
+    .await;
+
+    let feed = rig.release.lock().unwrap().take().expect("parent feed");
+    let _ = feed.send(done_ok());
+    common::wait_for(
+        || common::status(core, PARENT) == Some(SessionStatus::Idle),
+        "parent settles",
+    )
+    .await;
+    core.shutdown().await;
+}
+
+/// Answered in the child chat instead, the question is withdrawn from the
+/// parent: no stale card is left behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn answering_in_the_child_retires_the_parent_copy() {
+    let rig = asking_rig();
+    let core = &rig.core;
+    core.doc_host
+        .queue_command(PARENT, pi_run("delegate it"))
+        .expect("parent run");
+    common::wait_for(
+        || common::status(core, PARENT) == Some(SessionStatus::Working),
+        "parent turn running",
+    )
+    .await;
+    let child_id = start(core, "run-1", PARENT).await.expect("start ok");
+    common::wait_for_some("forwarded question", || open_question(core, PARENT)).await;
+    let (child_request, _) =
+        common::wait_for_some("child's own question", || open_question(core, &child_id)).await;
+
+    core.doc_host
+        .queue_command(&child_id, answer_to(child_request, "grid"))
+        .expect("answer in child");
+    let answers =
+        common::wait_for_some("child answered", || rig.answered.lock().unwrap().clone()).await;
+    assert_eq!(answers[0].labels, ["grid"]);
+    common::wait_for(
+        || {
+            open_question(core, PARENT).is_none()
+                && has_resolved_question(core, PARENT)
+                && common::status(core, PARENT) == Some(SessionStatus::Working)
+        },
+        "parent copy retired",
+    )
+    .await;
+
+    let feed = rig.release.lock().unwrap().take().expect("parent feed");
+    let _ = feed.send(done_ok());
+    core.shutdown().await;
+}
+
+/// A background subagent usually asks after the parent's turn is over:
+/// the question is forwarded all the same, shows the parent as awaiting
+/// input, and the parent settles back to idle once it is answered there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_parent_between_turns_still_gets_the_question() {
+    let rig = asking_rig();
+    let core = &rig.core;
+    core.doc_host
+        .queue_command(PARENT, pi_run("delegate it"))
+        .expect("parent run");
+    common::wait_for(
+        || common::status(core, PARENT) == Some(SessionStatus::Working),
+        "parent turn running",
+    )
+    .await;
+    // The parent's turn ends before the subagent starts asking.
+    let feed = rig.release.lock().unwrap().take().expect("parent feed");
+    let _ = feed.send(done_ok());
+    common::wait_for(
+        || common::status(core, PARENT) == Some(SessionStatus::Idle),
+        "parent turn over",
+    )
+    .await;
+
+    let child_id = start(core, "run-1", PARENT).await.expect("start ok");
+    let (mirror_id, questions) =
+        common::wait_for_some("forwarded question", || open_question(core, PARENT)).await;
+    assert_eq!(questions[0].asked_by.as_deref(), Some("planner"));
+    common::wait_for(
+        || common::status(core, PARENT) == Some(SessionStatus::AwaitingInput),
+        "parent awaiting input",
+    )
+    .await;
+
+    core.doc_host
+        .queue_command(PARENT, answer_to(mirror_id, "grid"))
+        .expect("answer in parent");
+    let answers =
+        common::wait_for_some("child answered", || rig.answered.lock().unwrap().clone()).await;
+    assert_eq!(answers[0].labels, ["grid"]);
+    common::wait_for(
+        || {
+            open_question(core, PARENT).is_none()
+                && has_resolved_question(core, PARENT)
+                && common::status(core, PARENT) == Some(SessionStatus::Idle)
+                && common::status(core, &child_id) == Some(SessionStatus::Idle)
+        },
+        "parent back to idle, child done",
+    )
+    .await;
+    core.shutdown().await;
+}
+
+/// The parent's turn ending while a forwarded question is open neither
+/// closes the question nor drops the awaiting-input status.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_parent_turn_ending_keeps_the_question_open() {
+    let rig = asking_rig();
+    let core = &rig.core;
+    core.doc_host
+        .queue_command(PARENT, pi_run("delegate it"))
+        .expect("parent run");
+    common::wait_for(
+        || common::status(core, PARENT) == Some(SessionStatus::Working),
+        "parent turn running",
+    )
+    .await;
+    let child_id = start(core, "run-1", PARENT).await.expect("start ok");
+    let (mirror_id, _) =
+        common::wait_for_some("forwarded question", || open_question(core, PARENT)).await;
+
+    let feed = rig.release.lock().unwrap().take().expect("parent feed");
+    let _ = feed.send(common::text("started the planner"));
+    let _ = feed.send(done_ok());
+    common::wait_for(
+        || common::complete_assistant_count(core, PARENT) >= 2,
+        "parent turn settled",
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        open_question(core, PARENT).map(|(id, _)| id),
+        Some(mirror_id.clone()),
+        "the question outlives the parent's turn"
+    );
+    assert_eq!(
+        common::status(core, PARENT),
+        Some(SessionStatus::AwaitingInput)
+    );
+
+    core.doc_host
+        .queue_command(PARENT, answer_to(mirror_id, "list"))
+        .expect("answer in parent");
+    let answers =
+        common::wait_for_some("child answered", || rig.answered.lock().unwrap().clone()).await;
+    assert_eq!(answers[0].labels, ["list"]);
+    common::wait_for(
+        || {
+            common::status(core, PARENT) == Some(SessionStatus::Idle)
+                && common::status(core, &child_id) == Some(SessionStatus::Idle)
+        },
+        "parent back to idle",
+    )
+    .await;
+    core.shutdown().await;
+}

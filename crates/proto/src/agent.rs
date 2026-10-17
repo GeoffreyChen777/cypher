@@ -402,6 +402,10 @@ pub struct UserInputQuestion {
     /// it gates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<PermissionPrompt>,
+    /// The subagent that asked, when the question was forwarded from one of
+    /// the chat's child chats rather than asked by the chat's own agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_by: Option<String>,
 }
 
 /// What a permission prompt is about (Cypher's Pi permission extension).

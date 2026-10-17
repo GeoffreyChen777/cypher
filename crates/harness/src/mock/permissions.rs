@@ -163,6 +163,7 @@ fn prompt(
             kind,
             tool_call_id: call.map(str::to_owned),
         }),
+        asked_by: None,
     }
 }
 

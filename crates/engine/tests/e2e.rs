@@ -38,6 +38,7 @@ fn asking_harness() -> common::TestHarness {
                 options: vec!["a".into(), "b".into()],
                 multi_select: false,
                 permission: None,
+                asked_by: None,
             }])
             .await
             .unwrap_or_default();
@@ -1048,6 +1049,7 @@ async fn abandoned_question_is_withdrawn_mid_turn() {
                 options: vec!["a".into(), "b".into()],
                 multi_select: false,
                 permission: None,
+                asked_by: None,
             }]);
             let _ = tokio::time::timeout(Duration::from_millis(300), answer).await;
             let _ = tx
@@ -1296,6 +1298,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                         options: vec!["a".into(), "b".into()],
                         multi_select: false,
                         permission: None,
+                        asked_by: None,
                     }])
                     .await;
                     interrupt.cancelled().await;
@@ -1445,6 +1448,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                 options: vec!["a".into(), "b".into()],
                 multi_select: false,
                 permission: None,
+                asked_by: None,
             };
             // The pre-fix Claude/Codex shape: surface the question under
             // the harness's own id BEFORE asking through the bridge.

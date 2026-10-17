@@ -1436,6 +1436,7 @@ fn question(id: &str, options: &[&str], multi: bool) -> UserInputQuestion {
         options: options.iter().map(|s| s.to_string()).collect(),
         multi_select: multi,
         permission: None,
+        asked_by: None,
     }
 }
 
@@ -1545,6 +1546,7 @@ fn blank_optional_comment_answers_empty_text_not_a_cancel() {
         options: Vec::new(),
         multi_select: false,
         permission: None,
+        asked_by: None,
     };
     let mut w = Wizard::new("req".into(), vec![comment.clone()]);
     let WizardStep::Done(answers) = w.advance() else {
@@ -2023,6 +2025,22 @@ fn pending_input_detection() {
         },
     ];
     assert!(pending_input_request(&t).is_none());
+    // … but not a subagent's question forwarded here: the subagent is
+    // still waiting on it while this chat's agent goes on.
+    let mut forwarded = t.clone();
+    forwarded[0].parts = vec![MessagePart::Input {
+        id: "in-r1".into(),
+        request_id: "r1".into(),
+        questions: vec![UserInputQuestion {
+            asked_by: Some("actor".into()),
+            ..question("q", &["a"], false)
+        }],
+        resolved: false,
+    }];
+    assert_eq!(
+        pending_input_request(&forwarded).map(|(id, _)| id),
+        Some("r1".into())
+    );
     // Resolved part → no panel.
     let resolved = MessagePart::Input {
         id: "in-r1".into(),

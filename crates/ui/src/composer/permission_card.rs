@@ -269,6 +269,7 @@ mod tests {
             options: options.iter().map(|option| option.to_string()).collect(),
             multi_select: false,
             permission: None,
+            asked_by: None,
         }
     }
 
