@@ -1094,8 +1094,6 @@ struct ShellMenus {
     space_style: popover::Popup<(String, Point<Pixels>)>,
     /// Bot tile context menu: (bot id, window position).
     bot: popover::Popup<(String, Point<Pixels>)>,
-    /// The sidebar header's `+` menu (new project / new bot): position.
-    new_item: popover::Popup<Point<Pixels>>,
     user: popover::Popup<()>,
 }
 
@@ -1332,6 +1330,8 @@ pub struct Shell {
     /// The session slots behind the workspace's tabs, and how main follows
     /// the focused one.
     tiles: SlotTable,
+    /// The Botboard's conversation slot and detail panel (main window).
+    board: bots::BoardUi,
     /// What closed session tabs leave behind for their next slot.
     closed_tabs: ClosedTabStash,
     /// The main state's chats generation `prune_tabs` last judged: only a
@@ -1568,6 +1568,7 @@ impl Shell {
                 saved_workspace,
                 ..Default::default()
             },
+            board: bots::BoardUi::default(),
             closed_tabs: ClosedTabStash::default(),
             seen_chats_generation: 0,
             expected_chats: std::collections::HashMap::new(),
@@ -1750,10 +1751,8 @@ impl Shell {
                         let s = shell.state.read(cx);
                         let now = Utc::now();
                         shell
-                            .workspace
-                            .visible_tabs()
-                            .into_iter()
-                            .filter_map(|tab| tab.chat_id())
+                            .shown_chats()
+                            .iter()
                             .any(|id| s.indicator_for(id, now) != Indicator::None)
                     };
                     if live

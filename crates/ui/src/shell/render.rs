@@ -207,7 +207,7 @@ impl Shell {
     /// through to the titlebar drag strips below.
     fn render_titlebar_cluster(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let can_back = self.nav.can_back();
+        let can_back = self.can_navigate_back();
         let can_forward = self.nav.can_forward();
         // The new-session + joins the cluster while the sidebar is collapsed
         // (fading on the sidebar width tween) — INSIDE the cluster row so it
@@ -215,7 +215,9 @@ impl Shell {
         // the title row sat 10px off the cluster and read misaligned (user
         // report).
         let plus_alpha = self.titlebar_plus_alpha();
-        let show_plus = matches!(self.route, Route::Chat) && plus_alpha > 0.01;
+        // New sessions and tile layouts belong to Projects mode.
+        let tiles = matches!(self.route, Route::Chat) && !self.botboard();
+        let show_plus = tiles && plus_alpha > 0.01;
         div()
             .absolute()
             .top_0()
@@ -260,10 +262,8 @@ impl Shell {
                         cx.listener(|this, _, _, cx| this.open_new_session(cx)),
                     ))
             }))
-            // Workspace layout presets (Chat route only).
-            .when(matches!(self.route, Route::Chat), |el| {
-                el.child(self.render_layout_button(&theme, cx))
-            })
+            // Workspace layout presets (Projects mode only).
+            .when(tiles, |el| el.child(self.render_layout_button(&theme, cx)))
             .into_any_element()
     }
 
@@ -854,10 +854,100 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Chat-mode sidebar: project-grouped session cards (every host
-    /// together) under the top chrome ([`Self::render_sidebar_top_chrome`]),
+    /// Chat-route sidebar: project-grouped session cards (every host
+    /// together) — or on the Botboard the bot picker and the current bot's
+    /// cards — under the top chrome ([`Self::render_sidebar_top_chrome`]),
     /// then the update and notice strips.
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let list = if self.botboard() {
+            self.render_board_sidebar(theme, cx)
+        } else {
+            self.render_project_list(theme, cx)
+        };
+        let top_chrome = SIDEBAR_TITLEBAR_BAND + SIDEBAR_HEADER_HEIGHT;
+        // Update strips — app-wide chrome, the main window's alone — sit
+        // under the list with the sidebar's bottom gutter.
+        let update_strips: Vec<AnyElement> = [
+            self.render_update_strip(theme, cx),
+            self.render_pi_update_strip(theme, cx),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|_| !self.is_project_window())
+        .collect();
+
+        div()
+            .w(px(self.settings.sidebar_width))
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    // The list runs the full column height, padded past the
+                    // top chrome. Rows rising under the chrome fade out
+                    // toward the window's top edge (the per-glyph EdgeFade,
+                    // always on — at rest nothing sits in the band). No
+                    // bottom mask (user request).
+                    .child(crate::kit::edge_fade::edge_faded(
+                        top_chrome,
+                        true,
+                        false,
+                        div().size_full().relative().child(
+                            div()
+                                .id("sidebar-lists")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.sidebar.scroll)
+                                .px(px(Theme::SPACE_SM))
+                                .flex()
+                                .flex_col()
+                                // No "Sessions" header (user request) —
+                                // the list is the whole column; a little
+                                // air stands in.
+                                .pt(px(top_chrome + 4.0))
+                                .child(list),
+                        ),
+                    )),
+            )
+            .when(!update_strips.is_empty(), |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .pb(px(Theme::SPACE_SM))
+                        .children(update_strips),
+                )
+            })
+            // Inline mutation-failure notice.
+            .when_some(self.sidebar.notice.clone(), |el, notice| {
+                el.child(
+                    div()
+                        .id("sidebar-notice")
+                        .mx(px(Theme::SPACE_SM))
+                        .mb(px(Theme::SPACE_SM))
+                        .px(px(Theme::SPACE_SM))
+                        .py(px(4.0))
+                        .rounded(px(Theme::CONTROL_RADIUS))
+                        .border_1()
+                        .border_color(theme.danger)
+                        .text_size(px(11.0))
+                        .text_color(theme.danger)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.sidebar.notice = None;
+                            cx.notify();
+                        }))
+                        .child(notice),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The project cards, with the resort glide and the focused card's
+    /// plate.
+    fn render_project_list(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         // Keyed rows: (stable key, estimated height, element) — the key + height
         // list drives the resort FLIP diff below (attention-bucket
         // promotions glide; cleared rows just go).
@@ -920,102 +1010,19 @@ impl Shell {
             theme.clone(),
         );
 
-        let top_chrome = SIDEBAR_TITLEBAR_BAND + SIDEBAR_HEADER_HEIGHT;
-        let bot_strip = self.render_bot_strip(theme, cx);
-        // Update strips — app-wide chrome, the main window's alone — sit
-        // under the list with the sidebar's bottom gutter.
-        let update_strips: Vec<AnyElement> = [
-            self.render_update_strip(theme, cx),
-            self.render_pi_update_strip(theme, cx),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|_| !self.is_project_window())
-        .collect();
-
+        if list_items.is_empty() {
+            return self.render_sidebar_empty(theme, cx);
+        }
         div()
-            .w(px(self.settings.sidebar_width))
-            .h_full()
+            .relative()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    // The project-grouped card list runs the full column
-                    // height, padded past the top chrome. Rows rising under
-                    // the chrome fade out toward the window's top edge (the
-                    // per-glyph EdgeFade, always on — at rest nothing sits
-                    // in the band). No bottom mask (user request).
-                    .child(crate::kit::edge_fade::edge_faded(
-                        top_chrome,
-                        true,
-                        false,
-                        div().size_full().relative().child(
-                            div()
-                                .id("sidebar-lists")
-                                .size_full()
-                                .overflow_y_scroll()
-                                .track_scroll(&self.sidebar.scroll)
-                                .px(px(Theme::SPACE_SM))
-                                .flex()
-                                .flex_col()
-                                // No "Sessions" header (user request) —
-                                // the list is the whole column; a little
-                                // air stands in.
-                                .pt(px(top_chrome + 4.0))
-                                // The bot strip leads the list, above the
-                                // project cards.
-                                .children(bot_strip)
-                                .child(if !list_items.is_empty() {
-                                    div()
-                                        .relative()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(GROUP_CARD_GAP))
-                                        .pb(px(Theme::SPACE_SM))
-                                        // First, so it paints under every
-                                        // card after they all prepainted.
-                                        .child(plate)
-                                        .children(list_items)
-                                        .into_any_element()
-                                } else {
-                                    self.render_sidebar_empty(theme, cx)
-                                }),
-                        ),
-                    )),
-            )
-            .when(!update_strips.is_empty(), |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .pb(px(Theme::SPACE_SM))
-                        .children(update_strips),
-                )
-            })
-            // Inline mutation-failure notice.
-            .when_some(self.sidebar.notice.clone(), |el, notice| {
-                el.child(
-                    div()
-                        .id("sidebar-notice")
-                        .mx(px(Theme::SPACE_SM))
-                        .mb(px(Theme::SPACE_SM))
-                        .px(px(Theme::SPACE_SM))
-                        .py(px(4.0))
-                        .rounded(px(Theme::CONTROL_RADIUS))
-                        .border_1()
-                        .border_color(theme.danger)
-                        .text_size(px(11.0))
-                        .text_color(theme.danger)
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.sidebar.notice = None;
-                            cx.notify();
-                        }))
-                        .child(notice),
-                )
-            })
+            .gap(px(GROUP_CARD_GAP))
+            .pb(px(Theme::SPACE_SM))
+            // First, so it paints under every card after they all
+            // prepainted.
+            .child(plate)
+            .children(list_items)
             .into_any_element()
     }
 }
@@ -1806,12 +1813,9 @@ impl Shell {
         if window_active {
             let unseen_visible: Vec<String> = {
                 let s = self.state.read(cx);
-                self.workspace
-                    .visible_tabs()
+                self.shown_chats()
                     .into_iter()
-                    .filter_map(|tab| tab.chat_id())
                     .filter(|id| s.chats.iter().any(|c| c.id == *id && c.unseen()))
-                    .map(str::to_string)
                     .collect()
             };
             for chat_id in unseen_visible {
@@ -1847,6 +1851,7 @@ impl Shell {
         // outlet. The per-session state stays intact for the return
         // trip.
         let main = match self.route {
+            Route::Chat if self.botboard() => self.render_botboard(window, cx),
             Route::Chat => self.render_workspace(window, cx),
             Route::Settings(section) => self.render_settings_main(section, cx),
         };

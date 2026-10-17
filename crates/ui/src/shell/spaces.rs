@@ -242,115 +242,91 @@ impl Shell {
 
     // ---- sidebar sections ----
 
-    /// The fixed sidebar header over the project-card list: product identity
-    /// on the left, the view / quick chat / new (project or bot) actions and the
-    /// `account` button on the right. New sessions are created from
-    /// project/checkout hover actions (or ⌘N). Exactly
-    /// [`SIDEBAR_HEADER_HEIGHT`] tall — the list pads past it.
+    /// The fixed sidebar header: the logo on the left, which in the main
+    /// window is the Projects / Botboard switch, and the mode's actions on
+    /// the right ([`header_buttons`]) with the `account` button. New
+    /// sessions are created from project/checkout hover actions (or ⌘N).
+    /// Exactly [`SIDEBAR_HEADER_HEIGHT`] tall — the list pads past it.
     pub(super) fn render_sidebar_header(
         &mut self,
         account: Option<AnyElement>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let buttons = header_buttons(self.is_project_window(), self.settings.window_mode);
+        let botboard = self.botboard();
         // One resting/hover tint for every header icon button, applied to the
         // GLYPH: gpui SVGs take no colour from their parent, so a tint on the
         // button alone left the + and quick-chat glyphs stuck at full text
         // while the others rested muted (user report).
         let tint = |key: &str| motion::hover_blend(key, theme.text_muted.opacity(0.8), theme.text);
-        let add_project = div()
-            .id("sidebar-add-project")
-            .size(px(28.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .bg(motion::hover_blend(
-                "sidebar-add-project",
-                crate::kit::theme::wash(0.0),
-                crate::kit::theme::wash(0.14),
-            ))
-            .on_hover(motion::hover_listener("sidebar-add-project"))
-            // A press toggles the New project / New bot menu. Mounted (open
-            // or closing) counts as open, so the press that dismissed it
-            // through the menu's click-out never reopens it.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    if this.menus.new_item.get().is_some() {
-                        this.close_new_item_menu(cx);
-                    } else {
-                        this.menus.new_item.open(event.position);
-                        cx.notify();
-                    }
-                }),
-            )
-            .child(
-                icon(icons::PLUS)
-                    .size(px(14.0))
-                    .text_color(tint("sidebar-add-project")),
-            );
+        let icon_button = |key: &'static str| {
+            div()
+                .id(key)
+                .size(px(28.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.0))
+                .cursor_pointer()
+                .bg(motion::hover_blend(
+                    key,
+                    crate::kit::theme::wash(0.0),
+                    crate::kit::theme::wash(0.14),
+                ))
+                .on_hover(motion::hover_listener(key))
+        };
+        // `+`: a new project, or on the Botboard a new bot.
+        let add = buttons.add.map(|add| {
+            let (key, tip) = match add {
+                HeaderAdd::Project => ("sidebar-add-project", "Add project"),
+                HeaderAdd::Bot => ("sidebar-new-bot", "New bot"),
+            };
+            icon_button(key)
+                .tooltip(move |_, cx| cx.new(|_| super::session::FindTooltip(tip.into())).into())
+                .on_click(cx.listener(move |this, _, _, cx| match add {
+                    HeaderAdd::Project => this.open_add_space(cx),
+                    HeaderAdd::Bot => this.open_bot_dialog(None, cx),
+                }))
+                .child(icon(icons::PLUS).size(px(14.0)).text_color(tint(key)))
+        });
         // View menu: filter the cards by device and time, and pick their
         // sort. Tinted while a non-default view is active so the narrowed
         // list is obvious.
-        let view_active = self.settings.sidebar_device_filter.is_some()
-            || self.settings.sidebar_active_within_mins.is_some()
-            || self.settings.sidebar_sort != crate::prefs::SidebarSort::Activity
-            || self.settings.sidebar_sort_reversed;
-        let view_tint = if view_active {
-            theme.accent
-        } else {
-            tint("sidebar-view-menu")
-        };
-        let view_button = div()
-            .id("sidebar-view-menu")
-            .size(px(28.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .text_color(view_tint)
-            .bg(motion::hover_blend(
-                "sidebar-view-menu",
-                crate::kit::theme::wash(0.0),
-                crate::kit::theme::wash(0.14),
-            ))
-            .on_hover(motion::hover_listener("sidebar-view-menu"))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    this.open_sidebar_view_menu(event.position, cx);
-                }),
-            )
-            // gpui SVGs take no colour from their parent: tint the glyph itself.
-            .child(icon(icons::TUNING).size(px(14.0)).text_color(view_tint));
+        let view_button = buttons.view.then(|| {
+            let view_active = self.settings.sidebar_device_filter.is_some()
+                || self.settings.sidebar_active_within_mins.is_some()
+                || self.settings.sidebar_sort != crate::prefs::SidebarSort::Activity
+                || self.settings.sidebar_sort_reversed;
+            let view_tint = if view_active {
+                theme.accent
+            } else {
+                tint("sidebar-view-menu")
+            };
+            icon_button("sidebar-view-menu")
+                .text_color(view_tint)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        this.open_sidebar_view_menu(event.position, cx);
+                    }),
+                )
+                // gpui SVGs take no colour from their parent: tint the glyph itself.
+                .child(icon(icons::TUNING).size(px(14.0)).text_color(view_tint))
+        });
         // Quick chat: a session in a throwaway folder on a device of your
         // choice — no project needed (the dialog only asks for the device).
-        let quick_chat = div()
-            .id("sidebar-quick-chat")
-            .size(px(28.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .bg(motion::hover_blend(
-                "sidebar-quick-chat",
-                crate::kit::theme::wash(0.0),
-                crate::kit::theme::wash(0.14),
-            ))
-            .on_hover(motion::hover_listener("sidebar-quick-chat"))
-            .on_click(cx.listener(|this, _, _, cx| this.open_quick_chat_dialog(cx)))
-            .child(
-                icon(icons::CHAT_ROUND_LINE)
-                    .size(px(14.0))
-                    .text_color(tint("sidebar-quick-chat")),
-            );
+        let quick_chat = buttons.quick_chat.then(|| {
+            icon_button("sidebar-quick-chat")
+                .on_click(cx.listener(|this, _, _, cx| this.open_quick_chat_dialog(cx)))
+                .child(
+                    icon(icons::CHAT_ROUND_LINE)
+                        .size(px(14.0))
+                        .text_color(tint("sidebar-quick-chat")),
+                )
+        });
+        let logo = self.render_logo(botboard, theme, cx);
         div()
             .flex_none()
             .flex()
@@ -362,33 +338,159 @@ impl Shell {
             .pr(px(Theme::SPACE_SM))
             .h(px(SIDEBAR_HEADER_HEIGHT))
             .pt(px(4.0))
+            .child(logo)
             .child(
                 div()
-                    .min_w_0()
-                    .truncate()
-                    .font_family("Oxanium")
-                    .text_size(px(16.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(SharedString::from("Cypher")),
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .children(view_button)
+                    .children(quick_chat)
+                    .children(add)
+                    .children(account.filter(|_| buttons.account)),
             )
-            // A project window lists one fixed project: no view menu, quick
-            // chats or new projects (those belong to the main window).
-            .when(!self.is_project_window(), |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(2.0))
-                        .child(view_button)
-                        .child(quick_chat)
-                        .child(add_project)
-                        .children(account),
-                )
-            })
             .into_any_element()
+    }
+
+    /// The wordmark. In the main window it is the mode switch: "Cypher ⇅"
+    /// in Projects mode, with a badge counting what the bots need from you;
+    /// "Cypher Botboard ⇅" on the Botboard, the second word in the current
+    /// bot's colour. A project window's is the plain wordmark.
+    fn render_logo(&self, botboard: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let word = |text: &'static str, color: gpui::Hsla| {
+            div()
+                .flex_none()
+                .font_family("Oxanium")
+                .text_size(px(16.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(color)
+                .child(SharedString::from(text))
+        };
+        if self.is_project_window() {
+            return word("Cypher", theme.text).into_any_element();
+        }
+        let (bot_color, needs_you) = {
+            let state = self.state.read(cx);
+            let color = super::bots::current_bot_color(state, &self.settings, theme);
+            (color, super::bots::needs_you_count(state, Utc::now()))
+        };
+        let key = "sidebar-logo";
+        let tip = if botboard {
+            "Switch to Projects"
+        } else {
+            "Switch to Botboard"
+        };
+        let badge = (!botboard && needs_you > 0).then(|| {
+            div()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(3.0))
+                .h(px(18.0))
+                .px(px(5.0))
+                .rounded(px(6.0))
+                .bg(theme.warning.opacity(0.14))
+                .child(icon(icons::BOT).size(px(12.0)).text_color(theme.warning))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.warning)
+                        .child(SharedString::from(needs_you.to_string())),
+                )
+        });
+        div()
+            .id(key)
+            .min_w_0()
+            .h(px(28.0))
+            // The wash pads past the wordmark without moving it off the
+            // cards' glyph column.
+            .ml(px(-6.0))
+            .px(px(6.0))
+            .rounded(px(8.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(5.0))
+            .cursor_pointer()
+            .bg(motion::hover_blend(
+                key,
+                crate::kit::theme::wash(0.0),
+                crate::kit::theme::wash(0.14),
+            ))
+            .on_hover(motion::hover_listener(key))
+            .tooltip(move |_, cx| cx.new(|_| super::session::FindTooltip(tip.into())).into())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let next = if botboard {
+                    crate::prefs::WindowMode::Projects
+                } else {
+                    crate::prefs::WindowMode::Botboard
+                };
+                this.set_window_mode(next, cx);
+            }))
+            .child(word("Cypher", theme.text))
+            .when(botboard, |el| el.child(word("Botboard", bot_color)))
+            .children(badge)
+            .child(
+                icon(icons::ALT_ARROW_UP_DOWN)
+                    .size(px(12.0))
+                    .flex_none()
+                    .text_color(motion::hover_blend(
+                        key,
+                        theme.text_muted.opacity(0.6),
+                        theme.text_muted,
+                    )),
+            )
+            .into_any_element()
+    }
+}
+
+/// The `+` in the sidebar header: what it makes in this mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HeaderAdd {
+    Project,
+    Bot,
+}
+
+/// The sidebar header's actions. Projects mode has the view menu, quick
+/// chat, a new project and the account; the Botboard keeps the account and
+/// makes `+` a new bot (the view menu and quick chat are about sessions).
+/// A project window lists one fixed project and has none of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct HeaderButtons {
+    pub view: bool,
+    pub quick_chat: bool,
+    pub add: Option<HeaderAdd>,
+    pub account: bool,
+}
+
+pub(super) fn header_buttons(
+    project_window: bool,
+    mode: crate::prefs::WindowMode,
+) -> HeaderButtons {
+    use crate::prefs::WindowMode;
+    match (project_window, mode) {
+        (true, _) => HeaderButtons {
+            view: false,
+            quick_chat: false,
+            add: None,
+            account: false,
+        },
+        (false, WindowMode::Projects) => HeaderButtons {
+            view: true,
+            quick_chat: true,
+            add: Some(HeaderAdd::Project),
+            account: true,
+        },
+        (false, WindowMode::Botboard) => HeaderButtons {
+            view: false,
+            quick_chat: false,
+            add: Some(HeaderAdd::Bot),
+            account: true,
+        },
     }
 }
 

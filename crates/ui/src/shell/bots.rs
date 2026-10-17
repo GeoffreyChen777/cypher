@@ -1,20 +1,81 @@
-//! Agent bots in the sidebar (docs/design/agent-bots.md §10): the bot strip
-//! between the header and the project cards, a bot's context menu, and the
-//! create/edit dialog. A bot opens as an ordinary session tab on its chat.
+//! Agent bots (docs/design/agent-bots.md §13.1): the main window's Botboard
+//! mode, the other half of the sidebar logo's switch. In Botboard the
+//! sidebar shows the bot picker ([`picker`]) and the current bot's cards
+//! ([`board`]); the workspace column shows the bot's conversation as one
+//! card outside the tile tree, with the detail panel beside it
+//! ([`column`], [`panel`]). Bot chats never open as session tabs: whatever
+//! would open one switches to the Botboard instead. Also here: a bot's
+//! context menu, the create/edit palette ([`dialog`]) and the delete dialog.
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
 
+use super::session::SlotId;
 use super::*;
+use crate::prefs::WindowMode;
+use crate::workspace::TabKey;
 use cypher_proto::{Bot, BotScope, ProjectGrant};
 
+mod board;
 mod chat;
+mod column;
 mod dialog;
-mod strip;
+mod panel;
+mod picker;
 
 pub(super) use dialog::BotDialog;
+pub(super) use panel::PanelItem;
 
 /// Hosts older than this answer `CreateBot` with an unknown-method error, so
 /// the dialog does not offer them.
 const BOTS_MIN_VERSION: (u64, u64, u64) = (0, 3, 57);
+
+/// The Botboard's own UI state. Everything it shows comes from the main
+/// state; this holds only what the board has open.
+#[derive(Default)]
+pub(super) struct BoardUi {
+    /// The slot showing the current bot's conversation. It lives in the slot
+    /// table beside the tabs' slots but its tab is never in the workspace,
+    /// so the tile tree neither renders nor disposes it. Created on the
+    /// first visit and kept through Projects mode.
+    pub(super) slot: Option<SlotId>,
+    /// What the detail panel shows; `None` while it is shut.
+    panel: Option<PanelItem>,
+    /// What it showed as it slides shut (rendered until the tween ends).
+    panel_last: Option<PanelItem>,
+    /// The panel's width tween (0 ↔ [`column::PANEL_SPAN`]).
+    panel_tween: Option<WidthTween>,
+}
+
+/// What needs the owner across every bot, for the Projects-mode logo badge.
+/// For now a bot conversation waiting on an answer; later phases add plans
+/// awaiting approval and workers' questions (§13.1 "Needs you").
+pub(super) fn needs_you_count(state: &crate::state::AppState, now: chrono::DateTime<Utc>) -> usize {
+    state
+        .bots
+        .iter()
+        .filter_map(|bot| state.chats.iter().find(|c| c.id == bot.chat_id))
+        .filter(|chat| state.display_status_for(chat, now) == ChatIndicator::AwaitingInput)
+        .count()
+}
+
+/// The bot the Botboard should show: the saved one while it exists, else
+/// the oldest. `None` with no bots.
+fn current_bot<'a>(bots: &'a [Bot], saved: Option<&str>) -> Option<&'a Bot> {
+    saved
+        .and_then(|id| bots.iter().find(|b| b.id == id))
+        .or_else(|| bots.first())
+}
+
+/// The current bot's colour (the logo's "Botboard"), the theme accent for
+/// a bot without one.
+pub(super) fn current_bot_color(
+    state: &crate::state::AppState,
+    settings: &UiSettings,
+    theme: &Theme,
+) -> gpui::Hsla {
+    current_bot(&state.bots, settings.botboard_bot.as_deref())
+        .and_then(|bot| crate::appearance::space_style::space_color(bot.color.as_deref(), theme))
+        .unwrap_or(theme.accent)
+}
 
 /// Whether a device can host a bot: a Mac or Linux engine, online, and new
 /// enough. The local engine always qualifies (it is running this code).
@@ -62,11 +123,152 @@ impl Shell {
         }
     }
 
-    /// Open a bot's conversation as a session tab.
+    /// Whether this window shows the Botboard: the main window in Botboard
+    /// mode (a project window has none).
+    pub(super) fn botboard(&self) -> bool {
+        !self.is_project_window() && self.settings.window_mode == WindowMode::Botboard
+    }
+
+    /// Switch the main window's mode (the sidebar logo). Each mode keeps
+    /// its own state: the tab layout stays as it was through the Botboard,
+    /// and the Botboard keeps its bot.
+    pub(super) fn set_window_mode(&mut self, mode: WindowMode, cx: &mut Context<Self>) {
+        if self.is_project_window() || self.settings.window_mode == mode {
+            return;
+        }
+        self.settings.window_mode = mode;
+        self.route = Route::Chat;
+        self.close_bot_menu(cx);
+        self.close_sidebar_view_menu(cx);
+        self.sync_board(cx);
+        self.tiles.focus_pending = true;
+        self.schedule_save(cx);
+        // Comment UI of the tiles that left the screen goes, main follows
+        // the conversation now in front.
+        self.workspace_changed(cx);
+    }
+
+    /// Show `bot_id` on the Botboard, switching to it. A project window
+    /// hands it to the main window.
     pub(super) fn open_bot(&mut self, bot_id: &str, cx: &mut Context<Self>) {
         self.close_bot_menu(cx);
-        if let Some(bot) = self.bot_row(bot_id, cx) {
-            self.open_chat(bot.chat_id, cx);
+        if self.is_project_window() {
+            let bot_id = bot_id.to_string();
+            self.forward_to_main(cx, move |main, cx| main.open_bot(&bot_id, cx));
+            return;
+        }
+        if self.settings.botboard_bot.as_deref() != Some(bot_id) {
+            self.settings.botboard_bot = Some(bot_id.to_string());
+            self.close_panel_now();
+            self.schedule_save(cx);
+        }
+        if self.botboard() {
+            self.sync_board(cx);
+            self.tiles.focus_pending = true;
+            cx.notify();
+        } else {
+            self.set_window_mode(WindowMode::Botboard, cx);
+        }
+    }
+
+    /// The bot whose conversation `chat_id` is, by the chat's own marker
+    /// (the bot row may not have landed yet).
+    pub(super) fn bot_of_chat(&self, chat_id: &str, cx: &App) -> Option<String> {
+        self.state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|c| c.id == chat_id)
+            .and_then(|c| c.bot.as_ref())
+            .map(|marker| marker.bot_id.clone())
+    }
+
+    /// The Botboard's conversation: the board slot's chat.
+    pub(super) fn board_chat(&self) -> Option<&str> {
+        self.board
+            .slot
+            .and_then(|sid| self.tiles.slots.get(&sid))
+            .and_then(|slot| slot.tab.chat_id())
+    }
+
+    /// Keep the Botboard on a bot that exists and its slot on that bot's
+    /// conversation. A deleted current bot hands over to the oldest one (or
+    /// the empty state); nothing moves before the first bots frame, nor
+    /// while a just-created bot's row is still on its way. The slot is
+    /// created on the Botboard only, and replaced when the conversation
+    /// changes. Runs on every main-state change.
+    pub(super) fn sync_board(&mut self, cx: &mut Context<Self>) {
+        if self.is_project_window() {
+            return;
+        }
+        // The slot of a bot created moments ago, whose rows may trail.
+        let pending = self
+            .board_chat()
+            .filter(|chat_id| self.chat_expected(chat_id))
+            .map(str::to_string);
+        let (current, wanted, listed) = {
+            let state = self.state.read(cx);
+            let saved = self.settings.botboard_bot.as_deref();
+            let saved_live = saved.is_some_and(|id| state.bots.iter().any(|b| b.id == id));
+            if !saved_live && (pending.is_some() || !state.bots_synced) {
+                return;
+            }
+            let bot = current_bot(&state.bots, saved);
+            let wanted = bot.map(|b| b.chat_id.clone());
+            // A bot row can land before its chat row; the slot waits for it.
+            let listed = wanted
+                .as_ref()
+                .is_some_and(|id| state.chats.iter().any(|c| c.id == *id));
+            (bot.map(|b| b.id.clone()), wanted, listed)
+        };
+        if current != self.settings.botboard_bot {
+            self.settings.botboard_bot = current;
+            self.close_panel_now();
+            self.schedule_save(cx);
+        }
+        if pending.is_some() && pending == wanted {
+            return;
+        }
+        let chat = wanted.filter(|_| listed);
+        let bound = self.board.slot.and_then(|sid| {
+            let slot = self.tiles.slots.get(&sid)?;
+            let selected = slot.state.read(cx).selected_chat.clone();
+            Some((slot.tab.chat_id().map(str::to_string), selected))
+        });
+        let settled = match &bound {
+            Some((tab, selected)) => *tab == chat && *selected == chat,
+            None => chat.is_none() || !self.botboard(),
+        };
+        if settled {
+            return;
+        }
+        if let Some(sid) = self.board.slot.take() {
+            self.dispose_slot(sid, cx);
+        }
+        if let Some(chat_id) = chat.filter(|_| self.botboard()) {
+            self.board.slot = Some(self.create_slot(TabKey::Session(chat_id), cx));
+            self.tiles.focus_pending = true;
+        }
+        self.sync_follow(cx);
+        cx.notify();
+    }
+
+    /// A bot palette that just created `bot`: show it on the Botboard (its
+    /// row may trail the reply; the slot holds on to its chat meanwhile).
+    fn show_new_bot(&mut self, bot: Bot, cx: &mut Context<Self>) {
+        self.expect_chat(&bot.chat_id);
+        self.settings.botboard_bot = Some(bot.id.clone());
+        self.close_panel_now();
+        if let Some(sid) = self.board.slot.take() {
+            self.dispose_slot(sid, cx);
+        }
+        self.board.slot = Some(self.create_slot(TabKey::Session(bot.chat_id), cx));
+        if self.botboard() {
+            self.tiles.focus_pending = true;
+            self.schedule_save(cx);
+            self.workspace_changed(cx);
+        } else {
+            self.set_window_mode(WindowMode::Botboard, cx);
         }
     }
 
@@ -88,7 +290,6 @@ impl Shell {
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).clone();
         [
-            self.render_new_item_menu(&theme, cx),
             self.render_bot_menu(&theme, cx),
             self.render_bot_dialog(viewport, &theme, window, cx),
             self.render_delete_bot_dialog(viewport, &theme, cx),
@@ -96,48 +297,6 @@ impl Shell {
         .into_iter()
         .flatten()
         .collect()
-    }
-
-    pub(super) fn close_new_item_menu(&mut self, cx: &mut Context<Self>) {
-        if self.menus.new_item.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.menus.new_item);
-            cx.notify();
-        }
-    }
-
-    /// The sidebar header's `+` menu: a new project or a new bot.
-    fn render_new_item_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let position = *self.menus.new_item.get()?;
-        let closing = self.menus.new_item.closing_since();
-        let row = |id: &'static str, glyph: &'static str, label: &'static str| {
-            popover::menu_row(theme, false, id)
-                .id(id)
-                .child(icon(glyph).size(px(16.0)).text_color(theme.text_muted))
-                .child(SharedString::from(label))
-        };
-        let menu = popover::popover_card(theme)
-            .w(px(170.0))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_new_item_menu(cx)))
-            .flex()
-            .flex_col()
-            .child(
-                row("new-item-project", icons::FOLDER, "New project…").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.close_new_item_menu(cx);
-                        this.open_add_space(cx);
-                    },
-                )),
-            )
-            .child(
-                row("new-item-bot", icons::BOT, "New bot…").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.close_new_item_menu(cx);
-                        this.open_bot_dialog(None, cx);
-                    },
-                )),
-            )
-            .into_any_element();
-        Some(popover::menu_at("new-item-menu", position, menu, closing))
     }
 
     /// A bot tile's context menu: open, edit, delete.

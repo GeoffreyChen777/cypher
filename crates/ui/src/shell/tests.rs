@@ -1659,3 +1659,272 @@ fn nav_settings_sections_are_distinct_entries() {
     );
     assert_eq!(nav.back(), Some(chat("a")));
 }
+
+// ---- Botboard (docs/design/agent-bots.md §13.1) ----
+
+fn test_bot(id: &str) -> cypher_proto::Bot {
+    cypher_proto::Bot {
+        id: id.into(),
+        name: id.to_uppercase(),
+        icon: None,
+        color: None,
+        host_device_id: "dev".into(),
+        chat_id: format!("{id}-chat"),
+        instructions: None,
+        scope: Default::default(),
+        created_at: Utc::now(),
+    }
+}
+
+fn test_bot_chat(bot_id: &str) -> cypher_proto::Chat {
+    cypher_proto::Chat {
+        bot: Some(cypher_proto::BotChat {
+            bot_id: bot_id.into(),
+        }),
+        ..test_chat(&format!("{bot_id}-chat"), false)
+    }
+}
+
+fn set_bots(state: &Entity<AppState>, bots: &[&str], cx: &mut gpui::TestAppContext) {
+    state.update(cx, |s, cx| {
+        s.apply_bots(bots.iter().map(|id| test_bot(id)).collect());
+        cx.notify();
+    });
+    cx.run_until_parked();
+}
+
+fn mode(shell: &Entity<Shell>, cx: &mut gpui::TestAppContext) -> crate::prefs::WindowMode {
+    shell.read_with(cx, |shell, _| shell.settings.window_mode)
+}
+
+fn board_chat(shell: &Entity<Shell>, cx: &mut gpui::TestAppContext) -> Option<String> {
+    shell.read_with(cx, |shell, _| shell.board_chat().map(str::to_string))
+}
+
+#[gpui::test]
+fn a_bot_chat_opens_on_the_botboard_and_the_tabs_wait(cx: &mut gpui::TestAppContext) {
+    use crate::prefs::WindowMode;
+    let (shell, state) = test_shell(cx);
+    set_bots(&state, &["bob"], cx);
+    set_chats(
+        &state,
+        vec![
+            test_chat("a", false),
+            test_chat("b", false),
+            test_bot_chat("bob"),
+        ],
+        cx,
+    );
+    shell.update(cx, |shell, cx| shell.open_chat("b".into(), cx));
+    let tabs = tab_shape(&shell, cx);
+    assert!(tabs.iter().flatten().all(|tab| tab != "bob-chat"));
+    assert_eq!(mode(&shell, cx), WindowMode::Projects);
+    assert_eq!(board_chat(&shell, cx), None, "no board slot until it shows");
+
+    // Opening the bot's chat (its menu, a notification, a jump) shows it on
+    // the Botboard; the tab layout is left as it was.
+    shell.update(cx, |shell, cx| shell.open_chat("bob-chat".into(), cx));
+    assert_eq!(mode(&shell, cx), WindowMode::Botboard);
+    assert_eq!(board_chat(&shell, cx).as_deref(), Some("bob-chat"));
+    assert_eq!(tab_shape(&shell, cx), tabs);
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.settings.botboard_bot.as_deref(), Some("bob"));
+        assert_eq!(shell.focused_slot(), shell.board.slot);
+        let slot = &shell.tiles.slots[&shell.board.slot.unwrap()];
+        assert_eq!(
+            slot.state.read(cx).selected_chat.as_deref(),
+            Some("bob-chat")
+        );
+    });
+    assert_eq!(
+        state
+            .read_with(cx, |s, _| s.selected_chat.clone())
+            .as_deref(),
+        Some("bob-chat"),
+        "main follows the conversation in front"
+    );
+
+    // Any other session goes back to Projects mode, layout intact.
+    shell.update(cx, |shell, cx| shell.open_chat("b".into(), cx));
+    assert_eq!(mode(&shell, cx), WindowMode::Projects);
+    assert_eq!(tab_shape(&shell, cx), tabs);
+    assert_eq!(
+        state
+            .read_with(cx, |s, _| s.selected_chat.clone())
+            .as_deref(),
+        Some("b")
+    );
+    // Tile verbs are Projects-mode only; the logo brings the bot back.
+    shell.update(cx, |shell, cx| {
+        shell.set_window_mode(WindowMode::Botboard, cx);
+        shell.split_focused(crate::workspace::Edge::Right, cx);
+        shell.close_focused_tab(cx);
+    });
+    assert_eq!(tab_shape(&shell, cx), tabs);
+    assert_eq!(board_chat(&shell, cx).as_deref(), Some("bob-chat"));
+    // Back from the board lands on the tab it sat over.
+    shell.update(cx, |shell, cx| shell.navigate_back(cx));
+    assert_eq!(mode(&shell, cx), WindowMode::Projects);
+    assert_eq!(
+        state
+            .read_with(cx, |s, _| s.selected_chat.clone())
+            .as_deref(),
+        Some("b")
+    );
+}
+
+#[gpui::test]
+fn a_restored_layout_drops_its_bot_tabs(cx: &mut gpui::TestAppContext) {
+    use crate::workspace::{TabKey, Workspace};
+    let ui = tempfile::tempdir().unwrap().keep();
+    let mut saved = Workspace::new();
+    saved.open(TabKey::session("a"));
+    saved.open(TabKey::session("bob-chat"));
+    UiSettings {
+        workspace: Some(saved),
+        ..Default::default()
+    }
+    .save(&ui)
+    .unwrap();
+    let (shell, state) = test_shell_in(ui, cx);
+    set_bots(&state, &["bob"], cx);
+    set_chats(
+        &state,
+        vec![test_chat("a", false), test_bot_chat("bob")],
+        cx,
+    );
+    assert_eq!(tab_shape(&shell, cx), vec![vec!["a".to_string()]]);
+    // …and lands on the Botboard with that bot.
+    assert_eq!(mode(&shell, cx), crate::prefs::WindowMode::Botboard);
+    assert_eq!(board_chat(&shell, cx).as_deref(), Some("bob-chat"));
+}
+
+#[gpui::test]
+fn a_saved_botboard_survives_the_boot_landing(cx: &mut gpui::TestAppContext) {
+    use crate::prefs::WindowMode;
+    let ui = tempfile::tempdir().unwrap().keep();
+    UiSettings {
+        window_mode: WindowMode::Botboard,
+        botboard_bot: Some("bob".into()),
+        ..Default::default()
+    }
+    .save(&ui)
+    .unwrap();
+    let (shell, state) = test_shell_in(ui, cx);
+    set_bots(&state, &["bob"], cx);
+    // No sessions: the landing opens a canvas in Projects mode's layout,
+    // which waits behind the board.
+    set_chats(&state, vec![test_bot_chat("bob")], cx);
+    assert_eq!(mode(&shell, cx), WindowMode::Botboard);
+    assert_eq!(board_chat(&shell, cx).as_deref(), Some("bob-chat"));
+    shell.read_with(cx, |shell, _| {
+        assert!(
+            shell
+                .workspace
+                .tabs()
+                .any(|tab| matches!(tab, crate::workspace::TabKey::NewSession(_)))
+        );
+    });
+}
+
+#[gpui::test]
+fn the_botboard_survives_its_bot_being_deleted(cx: &mut gpui::TestAppContext) {
+    use crate::prefs::WindowMode;
+    let ui = tempfile::tempdir().unwrap().keep();
+    UiSettings {
+        window_mode: WindowMode::Botboard,
+        botboard_bot: Some("ann".into()),
+        ..Default::default()
+    }
+    .save(&ui)
+    .unwrap();
+    let (shell, state) = test_shell_in(ui, cx);
+    set_chats(
+        &state,
+        vec![
+            test_chat("a", false),
+            test_bot_chat("bob"),
+            test_bot_chat("ann"),
+        ],
+        cx,
+    );
+    // Nothing moves before the bots frame.
+    shell.read_with(cx, |shell, _| {
+        assert_eq!(shell.settings.botboard_bot.as_deref(), Some("ann"));
+        assert!(shell.board.slot.is_none());
+    });
+    set_bots(&state, &["bob", "ann"], cx);
+    assert_eq!(board_chat(&shell, cx).as_deref(), Some("ann-chat"));
+    // Deleting the current bot moves to another one…
+    set_bots(&state, &["bob"], cx);
+    set_chats(
+        &state,
+        vec![test_chat("a", false), test_bot_chat("bob")],
+        cx,
+    );
+    assert_eq!(board_chat(&shell, cx).as_deref(), Some("bob-chat"));
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.settings.botboard_bot.clone()),
+        Some("bob".into())
+    );
+    // …and the last one leaves the empty state, still on the Botboard.
+    set_bots(&state, &[], cx);
+    set_chats(&state, vec![test_chat("a", false)], cx);
+    assert_eq!(board_chat(&shell, cx), None);
+    assert_eq!(mode(&shell, cx), WindowMode::Botboard);
+    shell.read_with(cx, |shell, _| {
+        assert_eq!(shell.settings.botboard_bot, None);
+        assert_eq!(shell.focused_slot(), None);
+    });
+}
+
+#[test]
+fn header_buttons_follow_the_mode() {
+    use crate::prefs::WindowMode;
+    use spaces::{HeaderAdd, header_buttons};
+    let projects = header_buttons(false, WindowMode::Projects);
+    assert!(projects.view && projects.quick_chat && projects.account);
+    assert_eq!(projects.add, Some(HeaderAdd::Project));
+    let board = header_buttons(false, WindowMode::Botboard);
+    assert!(!board.view && !board.quick_chat && board.account);
+    assert_eq!(board.add, Some(HeaderAdd::Bot));
+    for mode in [WindowMode::Projects, WindowMode::Botboard] {
+        let window = header_buttons(true, mode);
+        assert!(!window.view && !window.quick_chat && !window.account);
+        assert_eq!(window.add, None, "a project window has no Botboard");
+    }
+}
+
+#[test]
+fn needs_you_counts_bots_waiting_on_their_owner() {
+    let now = Utc::now();
+    let mut state = AppState::new();
+    state.apply_bots(vec![test_bot("bob"), test_bot("ann"), test_bot("cat")]);
+    state.apply_chats(vec![
+        test_bot_chat("bob"),
+        test_bot_chat("ann"),
+        test_bot_chat("cat"),
+        test_chat("plain", false),
+    ]);
+    let session = |chat: &str, status| cypher_proto::Session {
+        chat_id: chat.into(),
+        status,
+        updated_at: now,
+        ..crate::test_fixtures::session()
+    };
+    use cypher_proto::SessionStatus;
+    state.apply_sessions(vec![
+        session("bob-chat", SessionStatus::AwaitingInput),
+        session("ann-chat", SessionStatus::Working),
+        // Only bots' conversations count.
+        session("plain", SessionStatus::AwaitingInput),
+    ]);
+    assert_eq!(bots::needs_you_count(&state, now), 1);
+    state.apply_sessions(vec![
+        session("bob-chat", SessionStatus::AwaitingInput),
+        session("cat-chat", SessionStatus::AwaitingInput),
+    ]);
+    assert_eq!(bots::needs_you_count(&state, now), 2);
+    state.apply_sessions(Vec::new());
+    assert_eq!(bots::needs_you_count(&state, now), 0);
+}

@@ -247,8 +247,7 @@ impl Shell {
                 }) {
                     Ok(bot) => {
                         this.close_bot_dialog(cx);
-                        this.expect_chat(&bot.chat_id);
-                        this.open_chat(bot.chat_id, cx);
+                        this.show_new_bot(bot, cx);
                     }
                     Err(message) => fail(this, message, cx),
                 }

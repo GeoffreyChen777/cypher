@@ -432,6 +432,12 @@ fn preset_glyph(preset: Preset, color: gpui::Hsla) -> AnyElement {
 impl Shell {
     // ---- workspace actions ----
 
+    /// Whether the tile verbs apply: the workspace is on screen (the Chat
+    /// route in Projects mode — not Settings, not the Botboard).
+    fn tiles_shown(&self) -> bool {
+        matches!(self.route, Route::Chat) && !self.botboard()
+    }
+
     /// Focus a tile (mouse down anywhere in it). Keyboard focus stays with
     /// whatever the click lands on.
     pub(super) fn focus_group(&mut self, group: GroupId, cx: &mut Context<Self>) {
@@ -460,7 +466,7 @@ impl Shell {
     /// Chat-scoped like the other tile verbs: a rebindable key pressed on
     /// the Settings → Shortcuts page must not yank the user off it.
     pub(super) fn split_focused(&mut self, edge: Edge, cx: &mut Context<Self>) {
-        if !matches!(self.route, Route::Chat) {
+        if !self.tiles_shown() {
             return;
         }
         let focused = self.workspace.focused();
@@ -471,7 +477,7 @@ impl Shell {
     }
 
     pub(super) fn focus_neighbour(&mut self, edge: Edge, cx: &mut Context<Self>) {
-        if !matches!(self.route, Route::Chat) || self.workspace.zoomed().is_some() {
+        if !self.tiles_shown() || self.workspace.zoomed().is_some() {
             return;
         }
         if let Some(group) = self.workspace.neighbour(self.workspace.focused(), edge) {
@@ -484,7 +490,7 @@ impl Shell {
     /// ⌘1…⌘9: focus the `index`th tile in reading order (a zoomed tile
     /// unzooms first so the target is on screen).
     pub(super) fn focus_tile(&mut self, index: usize, cx: &mut Context<Self>) {
-        if !matches!(self.route, Route::Chat) {
+        if !self.tiles_shown() {
             return;
         }
         let Some(&group) = self.workspace.groups_in_reading_order().get(index) else {
@@ -501,7 +507,7 @@ impl Shell {
     }
 
     pub(super) fn close_focused_tab(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.route, Route::Chat) {
+        if !self.tiles_shown() {
             return;
         }
         if let Some(tab) = self.workspace.focused_tab().cloned() {
@@ -510,7 +516,7 @@ impl Shell {
     }
 
     pub(super) fn toggle_zoom_focused(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.route, Route::Chat) {
+        if !self.tiles_shown() {
             return;
         }
         self.workspace.toggle_zoom(self.workspace.focused());
@@ -533,8 +539,10 @@ impl Shell {
         self.workspace_changed(cx);
     }
 
-    /// View → Layout: a preset from anywhere lands back on the workspace.
+    /// View → Layout: a preset from anywhere lands back on the workspace
+    /// (in Projects mode).
     pub(super) fn apply_layout_from_menu(&mut self, preset: Preset, cx: &mut Context<Self>) {
+        self.set_window_mode(crate::prefs::WindowMode::Projects, cx);
         self.route = Route::Chat;
         self.apply_layout_preset(preset, cx);
     }
@@ -1063,32 +1071,17 @@ impl Shell {
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
-        let (title, harness, status, target, bot): (
+        let (title, harness, status, target): (
             SharedString,
             Option<cypher_proto::HarnessId>,
             ChatIndicator,
             Option<SharedString>,
-            Option<cypher_proto::Bot>,
         ) = {
             let state = self.state.read(cx);
             match tab
                 .chat_id()
                 .and_then(|id| state.chats.iter().find(|c| c.id == id))
             {
-                // A bot's conversation wears the bot's avatar, not a model
-                // brand.
-                Some(chat) if let Some(bot) = state.bot_for_chat(&chat.id) => {
-                    let device = state
-                        .device_name(&bot.host_device_id)
-                        .unwrap_or("Unknown device");
-                    (
-                        transcript::single_line(&bot.name).into(),
-                        chat.config.as_ref().map(|c| c.harness),
-                        state.display_status_for(chat, now),
-                        Some(format!("Bot @ {device}").into()),
-                        Some(bot.clone()),
-                    )
-                }
                 Some(chat) => {
                     let folder = chat
                         .space_id
@@ -1107,13 +1100,11 @@ impl Shell {
                         chat.config.as_ref().map(|c| c.harness),
                         state.display_status_for(chat, now),
                         Some(format!("{folder} @ {device}").into()),
-                        None,
                     )
                 }
-                None => ("New session".into(), None, ChatIndicator::Idle, None, None),
+                None => ("New session".into(), None, ChatIndicator::Idle, None),
             }
         };
-        let bot_tab = bot.is_some();
         let drag = TabDrag::new(tab.clone(), title.clone(), harness);
         let accent = theme.accent;
         let hover_group: SharedString = format!("tile-tab-{}-{index}", group.0).into();
@@ -1194,19 +1185,8 @@ impl Shell {
                 MouseButton::Middle,
                 cx.listener(move |this, _, _, cx| this.close_tab(&middle_tab, cx)),
             )
-            .when_some(bot, |el, bot| {
-                el.child(crate::appearance::bot_style::bot_avatar(
-                    &bot.name,
-                    bot.icon.as_deref(),
-                    bot.color.as_deref(),
-                    16.0,
-                    &theme,
-                ))
-            })
             .when_some(
-                harness
-                    .filter(|_| !bot_tab)
-                    .map(crate::pickers::harness_brand_icon),
+                harness.map(crate::pickers::harness_brand_icon),
                 |el, (path, tint)| {
                     el.child(
                         icon(path)

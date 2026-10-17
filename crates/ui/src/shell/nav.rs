@@ -184,16 +184,30 @@ impl Shell {
 
     // ---- back/forward (route history) ----
 
+    /// The Botboard records no history of its own: it sits over the
+    /// current entry, so Back from it lands in Projects mode on that entry.
     pub(super) fn navigate_back(&mut self, cx: &mut Context<Self>) {
+        if self.botboard() && matches!(self.route, Route::Chat) {
+            return self.set_window_mode(crate::prefs::WindowMode::Projects, cx);
+        }
         if let Some(entry) = self.nav.back() {
             self.apply_nav(entry, cx);
         }
     }
 
     pub(super) fn navigate_forward(&mut self, cx: &mut Context<Self>) {
+        if self.nav.can_forward() && matches!(self.route, Route::Chat) {
+            self.set_window_mode(crate::prefs::WindowMode::Projects, cx);
+        }
         if let Some(entry) = self.nav.forward() {
             self.apply_nav(entry, cx);
         }
+    }
+
+    /// Whether Back goes anywhere (the Botboard always has Projects
+    /// behind it).
+    pub(super) fn can_navigate_back(&self) -> bool {
+        self.nav.can_back() || (self.botboard() && matches!(self.route, Route::Chat))
     }
 
     /// Land on a history entry WITHOUT recording a new one: the stack already
@@ -207,8 +221,11 @@ impl Shell {
             NavEntry::Chat(chat_id) => {
                 self.route = Route::Chat;
                 // Land on the entry's tab (reopening it if it was closed);
-                // the follow push then dedups against `current()`.
-                self.open_nav_target(chat_id, cx);
+                // the follow push then dedups against `current()`. Leaving
+                // Settings for a Botboard comes back to the board.
+                if !self.botboard() {
+                    self.open_nav_target(chat_id, cx);
+                }
             }
             NavEntry::Settings(section) => {
                 self.dismiss_comment_popup(cx);

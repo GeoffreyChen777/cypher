@@ -1,8 +1,8 @@
-//! A bot's conversation tab: the note over the composer saying what the bot
-//! can see, and the start screen a new bot opens on. The tab's other
-//! differences live where they apply (the tab wears the bot's avatar, the
-//! rail drops the terminal and the dock, the composer asks "Ask <bot>…", the
-//! transcript names bot tool calls).
+//! A bot's conversation on the Botboard: the note over the composer saying
+//! what the bot can see, and the start screen a new bot opens on. Its other
+//! differences live where they apply (the card's header wears the bot's
+//! avatar, the slot has no terminal and no dock, the composer asks "Ask
+//! <bot>…", the transcript names bot tool calls).
 
 use super::super::session::SlotId;
 use super::*;

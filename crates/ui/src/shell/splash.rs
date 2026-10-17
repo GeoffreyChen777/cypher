@@ -45,6 +45,8 @@ impl Shell {
         // Deleted / archived sessions, and sessions whose project moved to
         // (or out of) this window's scope, leave the workspace.
         self.prune_tabs(cx);
+        // The Botboard stays on a bot that exists.
+        self.sync_board(cx);
         self.advance_splash(state, cx);
     }
 

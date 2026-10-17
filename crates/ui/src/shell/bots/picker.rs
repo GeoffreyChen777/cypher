@@ -1,8 +1,8 @@
-//! The bot strip: one avatar square per bot (bots are created from the
-//! sidebar header's `+` menu). A click opens the bot's conversation; a
-//! right-click opens its menu.
-//! A dot in the corner carries the conversation's status, like a session
-//! row's.
+//! The bot picker heading the Botboard sidebar: one avatar square per bot,
+//! the current one ringed in its colour, then a dashed `+` for a new bot. A
+//! click makes that bot current; a right-click opens its menu (Open /
+//! Settings… / Delete…). A dot in a tile's corner carries its conversation's
+//! status, like a session row's.
 
 use super::*;
 
@@ -13,49 +13,86 @@ const RING: f32 = 3.0;
 const GAP: f32 = 4.0;
 
 impl Shell {
-    /// `None` with no bots, and in a project window (bots belong to the main
-    /// window, like quick chats).
-    pub(in crate::shell) fn render_bot_strip(
+    /// The picker row; `None` before the first bots frame. With no bots it
+    /// is the `+` alone.
+    pub(in crate::shell) fn render_bot_picker(
         &mut self,
+        current: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.is_project_window() {
-            return None;
-        }
         let now = Utc::now();
-        let tiles: Vec<AnyElement> = {
+        let tiles: Vec<(Bot, Option<ChatIndicator>)> = {
             let state = self.state.read(cx);
+            if !state.bots_synced {
+                return None;
+            }
             state
                 .bots
                 .iter()
                 .map(|bot| {
                     let chat = state.chats.iter().find(|c| c.id == bot.chat_id);
-                    let status = chat.map(|c| state.display_status_for(c, now));
-                    let selected = state.selected_chat.as_deref() == Some(bot.chat_id.as_str());
-                    (bot.clone(), status, selected)
+                    (bot.clone(), chat.map(|c| state.display_status_for(c, now)))
                 })
-                .collect::<Vec<_>>()
-        }
-        .into_iter()
-        .map(|(bot, status, selected)| self.render_bot_tile(bot, status, selected, theme, cx))
-        .collect();
-
-        if tiles.is_empty() {
-            return None;
-        }
+                .collect()
+        };
+        let tiles: Vec<AnyElement> = tiles
+            .into_iter()
+            .map(|(bot, status)| {
+                let selected = current == Some(bot.id.as_str());
+                self.render_bot_tile(bot, status, selected, theme, cx)
+            })
+            .collect();
+        let add_key = "bot-picker-add";
+        let add = div()
+            .id(add_key)
+            .flex_none()
+            .size(px(TILE + 2.0 * RING))
+            .p(px(RING))
+            .cursor_pointer()
+            .tooltip(|_, cx| {
+                cx.new(|_| super::super::session::FindTooltip("New bot".into()))
+                    .into()
+            })
+            .on_hover(motion::hover_listener(add_key))
+            .on_click(cx.listener(|this, _, _, cx| this.open_bot_dialog(None, cx)))
+            .child(
+                div()
+                    .size(px(TILE))
+                    .rounded(px((TILE * 0.27).round()))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(motion::hover_blend(
+                        add_key,
+                        theme.text_muted.opacity(0.35),
+                        theme.text_muted.opacity(0.7),
+                    ))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        icon(icons::PLUS)
+                            .size(px(13.0))
+                            .text_color(motion::hover_blend(
+                                add_key,
+                                theme.text_muted.opacity(0.75),
+                                theme.text,
+                            )),
+                    ),
+            );
         Some(
             div()
-                .id("bot-strip")
+                .id("bot-picker")
                 .flex()
                 .flex_row()
                 .flex_wrap()
                 .gap(px(GAP))
-                // The first square's edge lines up with the project glyphs
+                // The first square's edge lines up with the cards' insets
                 // below (the ring sits in the padding).
-                .px(px(8.0))
-                .pb(px(12.0))
+                .px(px(4.0))
+                .pb(px(4.0))
                 .children(tiles)
+                .child(add)
                 .into_any_element(),
         )
     }
@@ -85,7 +122,7 @@ impl Shell {
         );
         let name: SharedString = bot.name.clone().into();
         let (open_id, menu_id) = (bot.id.clone(), bot.id.clone());
-        // The open bot is ringed (the workspace-switcher convention): a
+        // The current bot is ringed (the workspace-switcher convention): a
         // 1.5px outline 1.5px off the square, in the bot's own colour.
         let ring = crate::appearance::space_style::space_color(bot.color.as_deref(), theme)
             .unwrap_or(theme.text_muted);
