@@ -41,6 +41,8 @@ fn round_trip() {
                 used_at: 7,
             },
         )]),
+        window_mode: WindowMode::Botboard,
+        botboard_bot: Some("bot-1".into()),
     };
     settings.save(dir.path()).unwrap();
     assert_eq!(UiSettings::load(dir.path()), settings);
@@ -50,6 +52,8 @@ fn round_trip() {
         "\"projectWorkspaces\"",
         "\"sessionDocks\"",
         "\"rightOpen\"",
+        "\"windowMode\": \"botboard\"",
+        "\"botboardBot\"",
     ] {
         assert!(json.contains(key), "{key} missing: {json}");
     }
@@ -232,6 +236,21 @@ fn settings_without_appearance_default_to_system() {
         pre_runtime.pi_runtime_setup_version, 0,
         "users who completed the old system-Pi setup see the runtime prompt once"
     );
+}
+
+/// Files from before the Botboard open in Projects mode; an unknown mode
+/// (a newer build's) does too, without resetting anything else.
+#[test]
+fn the_window_mode_defaults_to_projects() {
+    let old: UiSettings = serde_json::from_str(r#"{"sidebarWidth": 300}"#).unwrap();
+    assert_eq!(old.window_mode, WindowMode::Projects);
+    assert_eq!(old.botboard_bot, None);
+    let newer: UiSettings =
+        serde_json::from_str(r#"{"sidebarWidth": 300, "windowMode": "inbox"}"#).unwrap();
+    assert_eq!(newer.window_mode, WindowMode::Projects);
+    assert_eq!(newer.sidebar_width, 300.0);
+    let json = serde_json::to_string(&UiSettings::default()).unwrap();
+    assert!(!json.contains("botboardBot"), "{json}");
 }
 
 #[test]

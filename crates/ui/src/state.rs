@@ -269,8 +269,11 @@ pub struct AppState {
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     pub sessions: Vec<Session>,
-    /// Agent bots, oldest first (the sidebar's bot strip order).
+    /// Agent bots, oldest first (the Botboard picker's order).
     pub bots: Vec<Bot>,
+    /// A bots frame has landed: until then an empty `bots` says nothing
+    /// (the Botboard waits rather than showing its empty state).
+    pub bots_synced: bool,
     /// The project the new-session canvas mints into. Healed by
     /// [`Self::apply_spaces`] when the row vanishes; selecting a chat implies
     /// its project.
@@ -535,6 +538,7 @@ impl AppState {
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
+            bots_synced: false,
             chats_generation: 0,
             scope: ProjectScope::default(),
             transcript_watches: true,
@@ -573,6 +577,7 @@ impl AppState {
         seed.chats = m.chats.clone();
         seed.sessions = m.sessions.clone();
         seed.bots = m.bots.clone();
+        seed.bots_synced = m.bots_synced;
         seed.chats_synced = m.chats_synced;
         seed.spaces_synced = m.spaces_synced;
         seed.update = m.update.clone();
@@ -694,6 +699,7 @@ impl AppState {
             pi_update,
             chats_synced,
             spaces_synced,
+            bots_synced,
             scope,
         );
         // Only a chats frame judges the selection (see `chats_generation`);

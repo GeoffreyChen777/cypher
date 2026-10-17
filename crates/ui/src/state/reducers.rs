@@ -222,6 +222,7 @@ impl AppState {
 
     pub fn apply_bots(&mut self, bots: Vec<cypher_proto::Bot>) {
         self.bots = bots;
+        self.bots_synced = true;
     }
 
     /// First project on the composer's picked device (falling back through

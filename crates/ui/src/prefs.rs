@@ -140,6 +140,25 @@ pub struct UiSettings {
         skip_serializing_if = "HashMap::is_empty"
     )]
     pub session_docks: HashMap<String, SessionDock>,
+    /// The main window's mode: project work or the Botboard
+    /// (docs/design/agent-bots.md §13.1). Project windows ignore it. An
+    /// unknown mode (a newer build's) loads as Projects.
+    #[serde(default, deserialize_with = "lenient")]
+    pub window_mode: WindowMode,
+    /// The bot the Botboard shows, while it still exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub botboard_bot: Option<String>,
+}
+
+/// The main window's two modes, switched from the sidebar logo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WindowMode {
+    /// Project and session cards beside the session tabs.
+    #[default]
+    Projects,
+    /// The current bot's cards beside its conversation.
+    Botboard,
 }
 
 /// The user's appearance preference. Persisted in `ui-settings.json`.
@@ -285,6 +304,8 @@ impl Default for UiSettings {
             workspace: None,
             project_workspaces: HashMap::new(),
             session_docks: HashMap::new(),
+            window_mode: WindowMode::Projects,
+            botboard_bot: None,
         }
     }
 }

@@ -6,7 +6,7 @@ impl AppState {
     /// Non-archived, NON-CHILD chats in sidebar order. Cypher child subagent
     /// chats (engine-owned `child: Some(..)` rows) are hidden from the root
     /// sidebar/session overview — they are reached only through the parent's
-    /// Subagents inspector. Bot chats live in the bot strip instead. [`Self::selected_chat_row`] and transcript
+    /// Subagents inspector. Bot chats live on the Botboard instead. [`Self::selected_chat_row`] and transcript
     /// subscriptions still work for a selected child (navigation selects it
     /// directly).
     ///
@@ -477,6 +477,7 @@ impl AppState {
         self.auto_selected = false;
         self.chats_synced = false;
         self.spaces_synced = false;
+        self.bots_synced = false;
         self.transcript.clear();
         self.commands.clear();
         self.echoes.clear();

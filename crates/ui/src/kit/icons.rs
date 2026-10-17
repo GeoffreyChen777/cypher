@@ -120,6 +120,9 @@ icon_assets![
     (DIFF_SPLIT, "diff-split"),
     (ALT_ARROW_LEFT, "alt-arrow-left"),
     (ALT_ARROW_RIGHT, "alt-arrow-right"),
+    // Hand-drawn up/down chevron pair in the Solar Linear style: the
+    // sidebar logo's mode switch.
+    (ALT_ARROW_UP_DOWN, "alt-arrow-up-down"),
     (SMARTPHONE, "smartphone"),
     (ARCHIVE_UP_MINIMALISTIC, "archive-up-minimalistic"),
     (REFRESH, "refresh"),
