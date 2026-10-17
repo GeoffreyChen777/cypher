@@ -817,10 +817,17 @@ impl Pickers {
             selected_id,
         };
 
-        // ── rail: icons only — the favorites star, a divider, one brand
-        //    icon per provider. Hidden while a search is live.
-        let rail: Option<AnyElement> = (!searching)
-            .then(|| self.model_rail(&view, &provider_tabs, viewed_provider, &theme, cx));
+        // ── rail: icons only — the favorites star, then one mark per
+        //    provider. Hidden while a search is live.
+        let rail: Option<AnyElement> = (!searching).then(|| {
+            div()
+                .flex_none()
+                .p(px(MODEL_RAIL_MARGIN))
+                .flex()
+                .flex_col()
+                .child(self.model_rail(&view, &provider_tabs, viewed_provider, &theme, cx))
+                .into_any_element()
+        });
         let search_row = self.model_search_row(&theme);
 
         // ── model rows, flat — the scroll container's direct children so
@@ -839,13 +846,6 @@ impl Pickers {
             .min_w_0()
             .flex()
             .flex_col()
-            // A whisper of wash lifts the pane off the rail (t3
-            // `bg-muted/40` + `border-l border-border/70`).
-            .bg(crate::kit::theme::ink(0.02))
-            .when(rail.is_some(), |el| {
-                el.border_l_1()
-                    .border_color(crate::kit::theme::hairline(0.07))
-            })
             .child(search_row)
             .child(
                 div().flex_1().min_h_0().py(px(6.0)).child(
@@ -872,8 +872,12 @@ impl Pickers {
             .into_any_element()
     }
 
-    /// The provider rail: the favorites star, a full-bleed divider, then one
-    /// brand icon per provider (dimmed where the locked harness rules it out).
+    /// The provider rail: the favorites star above one icon per provider,
+    /// with no divider from the model pane. Selection is ICON COLOUR only —
+    /// every idle mark is a uniform light grey and the viewed one shows its
+    /// real brand colour (or full text ink for a monochrome mark); there is no
+    /// selection plate and no slide. Hovering an idle mark fades it to that
+    /// same real colour over the standard 150ms hover blend.
     fn model_rail(
         &self,
         view: &ModelListView,
@@ -888,27 +892,34 @@ impl Pickers {
             favorites_view,
             ..
         } = *view;
+        // Same chrome as a session tile's right-hand button rail: one raised
+        // card (surface_raised + small shadow, 3px padding) of uniform 28px
+        // icon buttons, 4px apart.
         let mut column = div()
-            .w(px(44.0))
+            .relative()
+            .w(px(MODEL_RAIL_WIDTH))
             .flex_none()
-            .p(px(4.0))
+            // Content height: the card is exactly as long as its items, never
+            // the popover's full height.
+            .p(px(MODEL_RAIL_PAD))
+            .rounded(px(MODEL_RAIL_CARD_RADIUS))
+            .bg(theme.surface_raised)
+            .shadow_sm()
             .flex()
             .flex_col()
-            .gap(px(4.0));
+            .items_center()
+            .gap(px(MODEL_RAIL_GAP));
+        let star_fade: SharedString = "model-rail-star".into();
         column = column.child(
             div()
                 .id("model-rail-favorites")
-                .relative()
-                .w(px(36.0))
-                .h(px(36.0))
-                .rounded(px(8.0))
+                .size(px(MODEL_RAIL_ITEM))
+                .rounded(px(MODEL_RAIL_RADIUS))
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .when(!favorites_view, |el| {
-                    el.hover(|s| s.bg(crate::kit::theme::ink(0.06)))
-                })
+                .on_hover(motion::hover_listener(star_fade.clone()))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.model_rail = ModelRail::Favorites;
                     // Anchor on the selected row when it's starred, else
@@ -920,25 +931,14 @@ impl Pickers {
                 }))
                 .child(
                     crate::kit::icons::icon(crate::kit::icons::STAR_BOLD)
-                        .size(px(17.0))
-                        .text_color(if favorites_view {
-                            theme.text
-                        } else {
-                            theme.text_muted.opacity(0.75)
-                        }),
-                )
-                .when(favorites_view, |el| {
-                    el.child(rail_indicator(picker_purple(theme)))
-                }),
-        );
-        // Full-bleed divider, aligned with the search row's bottom
-        // hairline (see the height math there) — one line across.
-        column = column.child(
-            div()
-                .h(px(1.0))
-                .mx(px(-4.0))
-                .my(px(1.0))
-                .bg(crate::kit::theme::hairline(0.08)),
+                        .size(px(MODEL_RAIL_ICON))
+                        .text_color(rail_mark_color(
+                            &star_fade,
+                            favorites_view,
+                            theme.text,
+                            theme,
+                        )),
+                ),
         );
         for (ix, provider) in provider_tabs.iter().enumerate() {
             let provider = provider.clone();
@@ -948,55 +948,54 @@ impl Pickers {
                 && ((provider == "mock" && effective != Some(HarnessId::Mock))
                     || (provider != "mock" && effective == Some(HarnessId::Mock)));
             let (icon_path, tint) = provider_brand_icon(&provider);
+            // Selection is colour, not a plate: every idle mark is the same
+            // light grey, and only the viewed provider shows its real colour
+            // (its brand tint, or full text ink for a monochrome mark).
+            // A hovered idle mark fades to the provider's own colour.
+            let fade: SharedString = format!("model-rail-provider-{provider}").into();
+            let icon_color = rail_mark_color(&fade, is_viewed, tint.unwrap_or(theme.text), theme);
+            // A generic provider has no brand mark to tell it apart: badge the
+            // globe with its name's first letter, overlapping its
+            // bottom-right corner.
+            let label = if icon_path == crate::kit::icons::GLOBAL {
+                generic_provider_mark(icon_path, &provider, is_viewed, icon_color, theme)
+            } else {
+                div().flex().items_center().justify_center().child(
+                    crate::kit::icons::icon(icon_path)
+                        .size(px(MODEL_RAIL_ICON))
+                        .text_color(icon_color),
+                )
+            };
             column = column.child(
                 div()
                     .id(("provider-tab", ix))
                     .aria_label(provider_display_name(&provider).to_string())
-                    .relative()
-                    .w(px(36.0))
-                    .h(px(36.0))
-                    .rounded(px(8.0))
+                    .size(px(MODEL_RAIL_ITEM))
+                    .rounded(px(MODEL_RAIL_RADIUS))
                     .flex()
                     .items_center()
                     .justify_center()
                     .when(is_disabled, |el| el.opacity(0.35))
                     .when(!is_disabled, |el| el.cursor_pointer())
                     .when(!is_disabled && !is_viewed, |el| {
-                        el.hover(|s| s.bg(crate::kit::theme::ink(0.06)))
+                        el.on_hover(motion::hover_listener(fade.clone()))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.pick_provider(provider.clone(), cx);
                     }))
-                    .child(
-                        crate::kit::icons::icon(icon_path)
-                            .size(px(18.0))
-                            .text_color(tint.unwrap_or(if is_viewed {
-                                theme.text
-                            } else {
-                                theme.text_muted
-                            })),
-                    )
-                    .when(is_viewed, |el| {
-                        el.child(rail_indicator(picker_purple(theme)))
-                    }),
+                    .child(label),
             );
         }
         column.into_any_element()
     }
 
-    /// The search row: icon + borderless input over a FULL-BLEED hairline
-    /// (it meets the rail's divider at the same y, one line across the
-    /// card — user request; no accent tint). Height matches the rail's
-    /// star tab band exactly: 4px pad + 36px tab + 4px gap + 1px
-    /// divider margin = the hairline at y 45–46, same as this row's
-    /// inside-drawn bottom border at h 46.
+    /// The search row: icon + borderless input, sitting directly on the pane
+    /// (the old full-bleed hairline under it is gone).
     fn model_search_row(&self, theme: &Theme) -> gpui::Div {
         div()
             .flex_none()
             .h(px(46.0))
             .px(px(10.0))
-            .border_b_1()
-            .border_color(crate::kit::theme::hairline(0.08))
             .flex()
             .flex_row()
             .items_center()
@@ -1377,33 +1376,106 @@ fn default_badge(theme: &Theme) -> gpui::Div {
         .child(SharedString::from("Default"))
 }
 
-/// Brand mark + optional tint for a harness (the Claude mark keeps its brand
-/// orange even on the monochrome surface; the mock harness scripts
-/// Claude-flavoured runs, so it wears the Claude mark).
-/// The 3px bar marking the selected rail tab (t3 ModelPickerSidebar
-/// `SELECTED_INDICATOR_CLASS`, `rounded-l-full`): LEFT half-capsule only —
-/// the flat right edge presses against the rail/pane border it hugs.
-fn rail_indicator(tint: gpui::Hsla) -> gpui::Div {
-    div()
-        .absolute()
-        .right(px(-4.0))
-        .top(px(8.0))
-        .w(px(3.0))
-        .h(px(20.0))
-        .rounded_tl(px(3.0))
-        .rounded_bl(px(3.0))
-        .bg(tint)
+/// A rail mark's colour: idle is one uniform light grey; viewed shows the
+/// mark's real colour; a hovered idle mark fades the same way over
+/// [`motion::HOVER_FADE`], so pointing at a provider previews the colour that
+/// picking it would lock in.
+fn rail_mark_color(fade: &str, is_real: bool, real: gpui::Hsla, theme: &Theme) -> gpui::Hsla {
+    if is_real {
+        return real;
+    }
+    motion::hover_blend(fade, theme.text_muted.opacity(0.55), real)
 }
 
-/// The picker's selection purple — the app's violet identity, intentionally
-/// independent of the emerald inline-code palette. It is NOT the indigo
-/// `accent`: that bar read blue against the glass. Violet-400 on dark,
-/// violet-600 on light (AA against white).
-fn picker_purple(theme: &Theme) -> gpui::Hsla {
-    match theme.appearance {
-        crate::kit::theme::Appearance::Dark => crate::kit::theme::oklch(0.702, 0.183, 293.541),
-        crate::kit::theme::Appearance::Light => crate::kit::theme::oklch(0.541, 0.281, 293.009),
-    }
+/// The model rail's geometry — a session tile's right-hand button rail scaled
+/// to a popover: 3px card padding around uniform 28px buttons, 4px apart.
+const MODEL_RAIL_WIDTH: f32 = MODEL_RAIL_ITEM + 2.0 * MODEL_RAIL_PAD;
+const MODEL_RAIL_PAD: f32 = 6.0;
+const MODEL_RAIL_ITEM: f32 = 28.0;
+const MODEL_RAIL_GAP: f32 = 4.0;
+const MODEL_RAIL_RADIUS: f32 = 8.0;
+/// Air between the rail card and the popover's edges.
+const MODEL_RAIL_MARGIN: f32 = 8.0;
+/// Rail icon size (one step up from the dock rail's 15: these are the only
+/// brand marks in the popover).
+const MODEL_RAIL_ICON: f32 = 17.0;
+/// The rail card's own rounding (the dock rail's card: tab radius + 5).
+const MODEL_RAIL_CARD_RADIUS: f32 = 11.0;
+/// The compact tag that distinguishes a generic (unbranded) provider: the
+/// first letter of its display name in a small rounded chip that sits on the
+/// icon's bottom-right corner (see [`generic_provider_mark`]).
+fn provider_tag(id: &str, viewed: bool, color: gpui::Hsla, theme: &Theme) -> gpui::Div {
+    let name = provider_display_name(id);
+    let tag: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(1)
+        .collect::<String>()
+        .to_uppercase();
+    div()
+        .flex_none()
+        .size(px(9.0))
+        .rounded(px(3.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        // Fully opaque plate so the globe behind the badge never shows
+        // through (mixed from two opaque theme colors, so alpha stays 1).
+        .bg(motion::mix(theme.surface_raised, theme.bg, 0.25))
+        .border_1()
+        .border_color(crate::kit::theme::hairline(if viewed {
+            0.20
+        } else {
+            0.10
+        }))
+        // A hair of lift so the badge reads above the globe it covers.
+        .shadow(vec![gpui::BoxShadow {
+            color: gpui::black().opacity(0.22),
+            offset: gpui::point(px(0.0), px(0.5)),
+            blur_radius: px(1.5),
+            spread_radius: px(0.0),
+            inset: false,
+        }])
+        .text_size(px(6.5))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(color)
+        .child(SharedString::from(tag))
+}
+
+/// A generic provider's mark: the globe with its one-letter tag overlapping
+/// the icon's bottom-right corner, so the two read as one mark.
+fn generic_provider_mark(
+    icon_path: &'static str,
+    id: &str,
+    viewed: bool,
+    color: gpui::Hsla,
+    theme: &Theme,
+) -> gpui::Div {
+    const ICON: f32 = MODEL_RAIL_ICON;
+    div()
+        .relative()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            crate::kit::icons::icon(icon_path)
+                .size(px(ICON))
+                .text_color(color),
+        )
+        // Anchored at the icon's lower-right quadrant: the tag covers the
+        // corner and hangs a little past the icon's edge. Its own scene layer
+        // is REQUIRED — gpui groups equal draw orders by primitive kind (quads,
+        // then icons), so a plain background quad would still be painted UNDER
+        // the globe's strokes and the opaque badge would read transparent.
+        .child(
+            div()
+                .absolute()
+                .left(px(ICON * 0.52))
+                .top(px(ICON * 0.52))
+                .child(crate::kit::frost::layered(provider_tag(
+                    id, viewed, color, theme,
+                ))),
+        )
 }
 
 /// Centered muted note filling an empty model list ("No models found").
