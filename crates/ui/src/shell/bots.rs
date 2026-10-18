@@ -23,6 +23,7 @@ mod needs;
 mod network;
 mod notebook;
 mod panel;
+mod parts;
 mod picker;
 mod schedule;
 mod work;
@@ -49,6 +50,12 @@ pub(super) struct BoardUi {
     panel_last: Option<PanelItem>,
     /// The panel's width tween (0 ↔ [`column::PANEL_SPAN`]).
     panel_tween: Option<WidthTween>,
+    /// The Schedule, Notebook and Network panels' forms and drafts.
+    schedule: schedule::ScheduleUi,
+    notebook: notebook::NotebookUi,
+    network: network::NetworkUi,
+    /// A delete or revoke waiting on the owner's yes.
+    confirm: Option<parts::Confirm>,
 }
 
 /// What needs the owner across every bot, for the Projects-mode logo badge.
@@ -299,6 +306,7 @@ impl Shell {
             self.render_bot_menu(&theme, cx),
             self.render_bot_dialog(viewport, &theme, window, cx),
             self.render_delete_bot_dialog(viewport, &theme, cx),
+            self.render_board_confirm(viewport, &theme, cx),
         ]
         .into_iter()
         .flatten()

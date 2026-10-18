@@ -155,6 +155,11 @@ icon_assets![
     (USERS, "users"),
     (PULSE, "pulse"),
     (BOOK, "book"),
+    // The Botboard's Schedule and Network: a clock for routines and tasks,
+    // a play glyph for Run now, and two linked rings for a connection.
+    (CLOCK, "clock-circle"),
+    (PLAY, "play"),
+    (LINK, "link"),
     (WIFI_OFF, "wifi-off"),
     (CLOSE_CIRCLE, "close-circle"),
     // Hand-drawn info glyph in the Solar Linear style (like the terminal/

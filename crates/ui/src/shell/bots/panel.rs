@@ -89,6 +89,11 @@ impl Shell {
     /// over it takes the key. Returns whether it did.
     pub(in crate::shell) fn close_panel_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
         let shown = self.botboard() && matches!(self.route, Route::Chat);
+        // A confirm over the panel takes the key first.
+        if shown && self.board.confirm.take().is_some() {
+            cx.notify();
+            return true;
+        }
         if !shown
             || self.board.panel.is_none()
             || self.dialogs.bot.is_some()
