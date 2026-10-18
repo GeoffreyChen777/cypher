@@ -194,6 +194,9 @@ pub(super) struct Commands {
     /// Why the newest run or steer was refused, when it was.
     pub refused: Option<String>,
     pub any: bool,
+    /// Questions an answer was sent for (request ids), until the session
+    /// moves on: its row and transcript can trail the answer.
+    pub answered: std::collections::HashSet<String>,
 }
 
 pub(super) fn commands_of(entries: &[cypher_doc::SessionCommandEntry]) -> Commands {
@@ -209,6 +212,14 @@ pub(super) fn commands_of(entries: &[cypher_doc::SessionCommandEntry]) -> Comman
         }
         if entry.status == SessionCommandStatus::Pending {
             out.pending = true;
+        }
+        if let cypher_doc::SessionCommandPayload::RespondInput { request_id, .. } = &entry.payload
+            && !matches!(
+                entry.status,
+                SessionCommandStatus::Rejected | SessionCommandStatus::Expired
+            )
+        {
+            out.answered.insert(request_id.clone());
         }
         if matches!(kind, SessionCommandKind::Run | SessionCommandKind::Steer)
             && newest.is_none_or(|n| entry.issued_at >= n.issued_at)
@@ -256,6 +267,10 @@ pub(super) fn session_state(
     match row.status {
         SessionStatus::Working => SessionState::Working,
         SessionStatus::AwaitingInput => match pending_input(entries) {
+            // Answered already; the session hasn't caught up yet.
+            Some((request_id, _)) if commands.answered.contains(&request_id) => {
+                SessionState::Working
+            }
             Some((request_id, questions)) => SessionState::Asking {
                 request_id,
                 questions,
@@ -1655,6 +1670,15 @@ mod state_tests {
             session_state(Some(&awaiting), &issued, &asking(false), now),
             SessionState::Asking { request_id, .. } if request_id == "req-1"
         ));
+        let answered = Commands {
+            answered: ["req-1".to_string()].into(),
+            ..issued_clone(&issued)
+        };
+        assert_eq!(
+            session_state(Some(&awaiting), &answered, &asking(false), now),
+            SessionState::Working,
+            "an answered question while the session catches up"
+        );
         let refused = Commands {
             refused: Some("no such model".into()),
             ..issued_clone(&issued)
@@ -1671,6 +1695,7 @@ mod state_tests {
             latest: c.latest,
             refused: c.refused.clone(),
             any: c.any,
+            answered: c.answered.clone(),
         }
     }
 
