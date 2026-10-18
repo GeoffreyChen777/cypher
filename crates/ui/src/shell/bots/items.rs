@@ -1,5 +1,5 @@
 //! Pieces the coordination cards and panels share (Needs you, Work,
-//! Activity and the Status card's controls): item rows led by a mark,
+//! Activity and the chat header's bot actions): item rows led by a mark,
 //! section labels, text blocks, step and outcome marks, the progress bar,
 //! the arm-then-confirm Stop, and the session a panel looks into.
 
@@ -241,7 +241,7 @@ pub(super) fn session_mark(
     })
 }
 
-/// A square icon button (the Status card's controls): a hover wash and a
+/// A square icon button (the chat header's bot actions): a hover wash and a
 /// tooltip.
 pub(super) fn icon_button(
     key: &'static str,

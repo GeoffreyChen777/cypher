@@ -14,8 +14,6 @@ use cypher_proto::{Chat, Space};
 /// The cards' inner inset and corner radius (the project cards' own).
 const CARD_PAD: f32 = 12.0;
 const CARD_RADIUS: f32 = 12.0;
-/// The Status card's avatar.
-const STATUS_AVATAR: f32 = 38.0;
 
 /// One granted project on the Projects card: its sessions in the bot's
 /// scope, and how many of them run or ask.
@@ -77,108 +75,31 @@ fn in_project(chat: &Chat, space_id: &str) -> bool {
     !chat.archived && !chat.is_child() && chat.space_id.as_deref() == Some(space_id)
 }
 
-/// The Status card's permission badges: what the bot may read. `live`
-/// says whether a granted project still exists.
-pub(super) fn access_badges(scope: &BotScope, live: impl Fn(&str) -> bool) -> Vec<String> {
-    let projects = match &scope.projects {
-        ProjectGrant::All => "Reads all projects".to_string(),
-        ProjectGrant::None => "Reads no projects".to_string(),
-        ProjectGrant::Selected { space_ids } => {
-            match space_ids.iter().filter(|id| live(id)).count() {
-                0 => "Reads no projects".to_string(),
-                1 => "Reads 1 project".to_string(),
-                n => format!("Reads {n} projects"),
-            }
-        }
-    };
-    let mut badges = vec![projects];
-    match scope.include_sessions.len() {
-        0 => {}
-        1 => badges.push("+1 session".to_string()),
-        n => badges.push(format!("+{n} sessions")),
-    }
-    badges.push(
-        if scope.transcripts {
-            "Reads conversations"
-        } else {
-            "Titles only"
-        }
-        .to_string(),
-    );
-    badges
-}
-
-/// How a part of the Status card's line reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StatusTone {
-    Working,
-    Waiting,
-    Failed,
+/// Something off about the bot, said once at the top of the board: it is
+/// paused, its host is unreachable, or its last turn failed. The normal
+/// case says nothing, as the project sidebar marks only an offline host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum BoardNotice {
     Paused,
-    Quiet,
+    Offline(String),
+    Failed,
 }
 
-/// The Status card's line, part by part: what the conversation is doing,
-/// then the bot's running work and what needs the owner ("Working… · 1
-/// task running · 2 need you"), and the tone its mark takes, the most
-/// pressing part's. A question in the conversation counts among `needs`.
-pub(super) fn status_summary(
-    chat: ChatIndicator,
-    running: usize,
-    needs: usize,
+pub(super) fn board_notice(
     paused: bool,
-) -> (Vec<(String, StatusTone)>, StatusTone) {
-    let mut parts = Vec::new();
+    host_online: bool,
+    host: &str,
+    chat: ChatIndicator,
+) -> Option<BoardNotice> {
     if paused {
-        parts.push(("Paused".to_string(), StatusTone::Paused));
+        Some(BoardNotice::Paused)
+    } else if !host_online {
+        Some(BoardNotice::Offline(host.to_string()))
+    } else if chat == ChatIndicator::Errored {
+        Some(BoardNotice::Failed)
+    } else {
+        None
     }
-    match chat {
-        ChatIndicator::Working => parts.push(("Working…".to_string(), StatusTone::Working)),
-        ChatIndicator::Errored => {
-            parts.push(("The last run failed".to_string(), StatusTone::Failed))
-        }
-        _ => {}
-    }
-    if running > 0 {
-        parts.push((
-            format!(
-                "{running} task{} running",
-                if running == 1 { "" } else { "s" }
-            ),
-            StatusTone::Working,
-        ));
-    }
-    if needs > 0 {
-        parts.push((
-            format!("{needs} need{} you", if needs == 1 { "s" } else { "" }),
-            StatusTone::Waiting,
-        ));
-    }
-    if parts.is_empty() {
-        parts.push(("Idle".to_string(), StatusTone::Quiet));
-    }
-    let lead = [
-        StatusTone::Waiting,
-        StatusTone::Working,
-        StatusTone::Failed,
-        StatusTone::Paused,
-    ]
-    .into_iter()
-    .find(|tone| parts.iter().any(|(_, t)| t == tone))
-    .unwrap_or(StatusTone::Quiet);
-    (parts, lead)
-}
-
-/// The Status card's acting badges: what the bot may do beyond reading.
-pub(super) fn capability_badges(caps: &cypher_proto::BotCapabilities) -> Vec<&'static str> {
-    [
-        (caps.work_directly, "Works directly"),
-        (caps.coordinate, "Can start sessions"),
-        (caps.steer, "Can steer sessions"),
-    ]
-    .into_iter()
-    .filter_map(|(on, label)| on.then_some(label))
-    .collect()
 }
 
 /// A Projects row's right-hand note: "1 asking · 2 running", else "idle".
@@ -234,11 +155,16 @@ pub(super) fn card_of(
     }
 }
 
-/// The card that floats: the open panel item's, else Status (the bot chat
-/// beside it, as the project sidebar floats the selected session's
-/// project). A card not drawn (Needs you emptied) hands it back to Status.
-pub(super) fn focused_card(wanted: Option<&'static str>, drawn: &[&'static str]) -> &'static str {
-    wanted.filter(|key| drawn.contains(key)).unwrap_or("status")
+/// The card that floats: the open panel item's, while it is drawn. With
+/// the panel shut nothing floats, as no project does without a selected
+/// session; only the no-bots card stands on its own.
+pub(super) fn focused_card(
+    wanted: Option<&'static str>,
+    drawn: &[&'static str],
+) -> Option<&'static str> {
+    wanted
+        .filter(|key| drawn.contains(key))
+        .or_else(|| drawn.contains(&"empty").then_some("empty"))
 }
 
 impl Shell {
@@ -264,12 +190,17 @@ impl Shell {
         {
             column = column.child(picker);
         }
+        if let Some(notice) = bot
+            .as_ref()
+            .and_then(|bot| self.render_board_notice(bot, theme, cx))
+        {
+            column = column.child(notice);
+        }
         self.board.plate.begin_render();
-        // §13.1's order: Needs you right under Status, so attention is never
-        // below the fold. A card with nothing to show is `None` and not drawn.
+        // §13.1's order: Needs you first, so attention is never below the
+        // fold. A card with nothing to show is `None` and not drawn.
         let cards: Vec<(&'static str, AnyElement)> = match bot {
             Some(bot) => [
-                ("status", Some(self.render_status_card(&bot, theme, cx))),
                 ("needs", self.render_needs_card(&bot, theme, cx)),
                 ("work", self.render_work_card(&bot, theme, cx)),
                 ("schedule", self.render_schedule_card(&bot, theme, cx)),
@@ -281,7 +212,7 @@ impl Shell {
             .into_iter()
             .filter_map(|(key, card)| card.map(|card| (key, card)))
             .collect(),
-            None if synced => vec![("status", render_board_empty(theme, cx))],
+            None if synced => vec![("empty", render_board_empty(theme, cx))],
             None => Vec::new(),
         };
         let wanted = self.board.panel.as_ref().map(|item| {
@@ -296,7 +227,7 @@ impl Shell {
             })
         });
         let drawn: Vec<&'static str> = cards.iter().map(|(key, _)| *key).collect();
-        let focused = (!drawn.is_empty()).then(|| focused_card(wanted, &drawn));
+        let focused = focused_card(wanted, &drawn);
         if focused != self.board.focused_card {
             let previous = std::mem::replace(&mut self.board.focused_card, focused);
             // Never on first paint: the plate appears where it belongs.
@@ -328,243 +259,98 @@ impl Shell {
         column.child(list).into_any_element()
     }
 
-    /// Who the bot is, where it runs, what it is doing, and what it may
-    /// read; the settings button opens its palette.
-    fn render_status_card(&self, bot: &Bot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let now = Utc::now();
-        let (host, online, status, badges, running, needs) = {
+    /// The notice line under the picker ([`board_notice`]), `None` while
+    /// all is well. A pause offers Resume in place.
+    fn render_board_notice(
+        &self,
+        bot: &Bot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let notice = {
             let state = self.state.read(cx);
-            let status = state
+            let now = Utc::now();
+            let chat = state
                 .chats
                 .iter()
                 .find(|c| c.id == bot.chat_id)
                 .map(|chat| state.display_status_for(chat, now))
                 .unwrap_or(ChatIndicator::Idle);
-            (
+            board_notice(
+                bot.paused,
+                state.device_online(&bot.host_device_id, now),
                 state
                     .device_name(&bot.host_device_id)
-                    .unwrap_or("Unknown device")
-                    .to_string(),
-                state.device_online(&bot.host_device_id, now),
-                status,
-                access_badges(&bot.scope, |id| state.space_row(id).is_some()),
-                state
-                    .bot_records
-                    .work_of(&bot.id)
-                    .filter(|w| w.state == cypher_proto::WorkState::Running)
-                    .count(),
-                bot_needs(state, bot, now).len(),
+                    .unwrap_or("Its device"),
+                chat,
             )
-        };
-        let avatar = crate::appearance::bot_style::bot_avatar(
-            &bot.name,
-            bot.icon.as_deref(),
-            bot.color.as_deref(),
-            STATUS_AVATAR,
-            theme,
-        );
-        let presence = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(5.0))
-            .text_size(px(11.5))
-            .text_color(theme.text_muted)
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(if online {
-                        theme.success
-                    } else {
-                        theme.text_faint
-                    }),
-            )
-            // A long device name truncates; the presence word stays.
-            .child(
-                div()
-                    .min_w_0()
-                    .flex()
-                    .flex_row()
-                    .gap(px(3.0))
-                    .child(div().min_w_0().truncate().child(SharedString::from(host)))
-                    .child(div().flex_none().child(SharedString::from(if online {
-                        "· online"
-                    } else {
-                        "· offline"
-                    }))),
-            );
-        let (parts, tone) = status_summary(status, running, needs, bot.paused);
-        let tone_color = |tone: StatusTone| match tone {
-            StatusTone::Working => theme.text,
-            StatusTone::Waiting => theme.warning,
-            StatusTone::Failed => theme.danger,
-            StatusTone::Paused | StatusTone::Quiet => theme.text_muted,
-        };
-        let ticker = self.pulse_ticker.entity_id();
-        let line_mark = match tone {
-            StatusTone::Working => {
-                super::super::render::status_mark(ChatIndicator::Working, ticker, theme)
-            }
-            StatusTone::Waiting => {
-                super::super::render::status_mark(ChatIndicator::AwaitingInput, ticker, theme)
-            }
-            StatusTone::Failed => Some(
-                icon(icons::DANGER_TRIANGLE)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(theme.danger)
-                    .into_any_element(),
+        }?;
+        let (glyph, text, tint) = match &notice {
+            BoardNotice::Paused => (
+                icons::PAUSE,
+                format!("{} is paused", bot.name),
+                theme.warning,
             ),
-            StatusTone::Paused => Some(
-                icon(icons::PAUSE)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(theme.text_muted)
-                    .into_any_element(),
+            BoardNotice::Offline(host) => (
+                icons::CLOUD_OFF,
+                format!("{host} is offline"),
+                theme.text_muted,
             ),
-            StatusTone::Quiet => None,
+            BoardNotice::Failed => (
+                icons::DANGER_TRIANGLE,
+                "The last run failed".to_string(),
+                theme.danger,
+            ),
         };
-        let last = parts.len().saturating_sub(1);
-        // The mark stays on the first line; a long line wraps part by part
-        // beside it.
-        let status_row = div()
-            .flex()
-            .flex_row()
-            .items_start()
-            .gap(px(6.0))
-            .text_size(px(12.5))
-            .line_height(px(17.0))
-            .children(line_mark.map(|mark| {
-                div()
-                    .flex_none()
-                    .h(px(17.0))
-                    .flex()
-                    .items_center()
-                    .child(mark)
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .children(parts.into_iter().enumerate().map(|(ix, (text, tone))| {
-                        div()
-                            .flex_none()
-                            .flex()
-                            .flex_row()
-                            .text_color(tone_color(tone))
-                            .child(SharedString::from(text))
-                            .when(ix < last, |el| {
-                                el.child(
-                                    div()
-                                        .flex_none()
-                                        .px(px(4.0))
-                                        .text_color(theme.text_faint)
-                                        .child(SharedString::from("·")),
-                                )
-                            })
-                    })),
-            );
-        // What it may read in the quiet tone; what lets it act in the
-        // accent's; a pause in amber.
-        let badge = |label: String, fg: gpui::Hsla, bg: gpui::Hsla| {
+        let resume = (notice == BoardNotice::Paused).then(|| {
+            let bot_id = bot.id.clone();
+            let key = "bot-notice-resume";
             div()
-                .px(px(7.0))
-                .py(px(2.0))
-                .rounded(px(6.0))
-                .bg(bg)
-                .text_size(px(11.0))
-                .text_color(fg)
-                .child(SharedString::from(label))
-        };
-        let badge_row = div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(4.0))
-            .when(bot.paused, |el| {
-                el.child(badge(
-                    "Paused".into(),
-                    theme.warning,
-                    theme.warning.opacity(0.14),
-                ))
-            })
-            .children(
-                badges
-                    .into_iter()
-                    .map(|label| badge(label, theme.text_muted, crate::kit::theme::ink(0.06))),
-            )
-            .children(
-                capability_badges(&bot.capabilities)
-                    .into_iter()
-                    .map(|label| badge(label.into(), theme.accent, theme.accent.opacity(0.12))),
-            );
-        let edit_id = bot.id.clone();
-        let settings =
-            super::items::icon_button("bot-status-settings", icons::TUNING, "Bot settings", theme)
+                .id(key)
+                .flex_none()
+                .cursor_pointer()
+                .text_color(motion::hover_blend(key, theme.text_muted, theme.text))
+                .on_hover(motion::hover_listener(key))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_bot_dialog(Some(edit_id.clone()), cx)
-                }));
-        let (pause_glyph, pause_tip) = if bot.paused {
-            (icons::PLAY, "Resume: let it run routines and start work")
-        } else {
-            (icons::PAUSE, "Pause: no routines run and no work starts")
-        };
-        let (pause_id, paused) = (bot.id.clone(), bot.paused);
-        let pause = super::items::icon_button("bot-status-pause", pause_glyph, pause_tip, theme)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.mutate(
-                    serde_json::json!({
-                        "op": "setBotPaused", "botId": pause_id, "paused": !paused,
-                    }),
-                    cx,
-                )
-            }));
-        card(theme)
-            .p(px(CARD_PAD))
-            .gap(px(10.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(avatar)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(14.0))
-                                    .line_height(px(18.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(transcript::single_line(&bot.name))),
-                            )
-                            .child(presence),
+                    this.mutate(
+                        serde_json::json!({
+                            "op": "setBotPaused", "botId": bot_id, "paused": false,
+                        }),
+                        cx,
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .flex_row()
-                            .child(pause)
-                            .child(settings),
-                    ),
-            )
-            .child(status_row)
-            .child(badge_row)
-            .into_any_element()
+                }))
+                .child(SharedString::from("Resume"))
+        });
+        Some(
+            div()
+                .h(px(28.0))
+                .px(px(10.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(7.0))
+                .text_size(px(12.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(20.0))
+                        .ml(px(-3.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon(glyph).size(px(13.0)).text_color(tint)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(tint)
+                        .child(SharedString::from(text)),
+                )
+                .children(resume)
+                .into_any_element(),
+        )
     }
 
     /// Each granted project with its sessions in scope; the header opens
@@ -647,7 +433,7 @@ impl Shell {
                     .map(|marker| marker.thread.clone())
             })
         });
-        wanted.unwrap_or("status") == card
+        wanted == Some(card)
     }
 }
 
@@ -1017,14 +803,11 @@ mod tests {
         };
         assert_eq!(card_of(&PanelItem::Thread("t".into()), routine), "schedule");
         assert_eq!(card_of(&PanelItem::Thread("t".into()), none), "work");
-        let drawn = ["status", "work", "projects"];
-        assert_eq!(focused_card(None, &drawn), "status");
-        assert_eq!(focused_card(Some("work"), &drawn), "work");
-        assert_eq!(
-            focused_card(Some("needs"), &drawn),
-            "status",
-            "a card no longer drawn hands focus back"
-        );
+        let drawn = ["needs", "work", "projects"];
+        assert_eq!(focused_card(None, &drawn), None, "nothing floats");
+        assert_eq!(focused_card(Some("work"), &drawn), Some("work"));
+        assert_eq!(focused_card(Some("schedule"), &drawn), None);
+        assert_eq!(focused_card(None, &["empty"]), Some("empty"));
     }
 
     #[test]
@@ -1114,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_and_badges_read_plainly() {
+    fn project_notes_read_plainly() {
         let load = |running, asking| ProjectLoad {
             space_id: "a".into(),
             sessions: 3,
@@ -1124,91 +907,24 @@ mod tests {
         assert_eq!(load_note(&load(0, 0)), "idle");
         assert_eq!(load_note(&load(2, 0)), "2 running");
         assert_eq!(load_note(&load(1, 1)), "1 asking · 1 running");
-        let live = |id: &str| id != "gone";
-        assert_eq!(
-            access_badges(&selected(&["a", "b", "gone"]), live),
-            ["Reads 2 projects", "Reads conversations"]
-        );
-        assert_eq!(
-            access_badges(
-                &BotScope {
-                    transcripts: false,
-                    include_sessions: vec!["x".into()],
-                    ..selected(&["a"])
-                },
-                live
-            ),
-            ["Reads 1 project", "+1 session", "Titles only"]
-        );
-        assert_eq!(
-            access_badges(
-                &BotScope {
-                    projects: ProjectGrant::All,
-                    ..Default::default()
-                },
-                live
-            )[0],
-            "Reads all projects"
-        );
-        assert_eq!(
-            access_badges(&BotScope::default(), live)[0],
-            "Reads no projects"
-        );
     }
 
     #[test]
-    fn the_status_line_combines_the_chat_work_and_needs() {
-        let text = |chat, running, needs, paused| {
-            let (parts, tone) = status_summary(chat, running, needs, paused);
-            let line: Vec<String> = parts.into_iter().map(|(t, _)| t).collect();
-            (line.join(" · "), tone)
-        };
+    fn only_something_off_earns_a_notice() {
+        let ok = ChatIndicator::Idle;
+        assert_eq!(board_notice(false, true, "Mac", ok), None);
         assert_eq!(
-            text(ChatIndicator::Completed, 0, 0, false),
-            ("Idle".to_string(), StatusTone::Quiet)
+            board_notice(false, false, "Mac", ok),
+            Some(BoardNotice::Offline("Mac".into()))
         );
         assert_eq!(
-            text(ChatIndicator::Idle, 1, 2, false),
-            (
-                "1 task running · 2 need you".to_string(),
-                StatusTone::Waiting
-            )
+            board_notice(true, false, "Mac", ChatIndicator::Errored),
+            Some(BoardNotice::Paused),
+            "a pause says the most"
         );
         assert_eq!(
-            text(ChatIndicator::Working, 2, 0, false),
-            (
-                "Working… · 2 tasks running".to_string(),
-                StatusTone::Working
-            )
-        );
-        assert_eq!(
-            text(ChatIndicator::AwaitingInput, 0, 1, true),
-            ("Paused · 1 needs you".to_string(), StatusTone::Waiting)
-        );
-        assert_eq!(
-            text(ChatIndicator::Errored, 0, 0, true),
-            (
-                "Paused · The last run failed".to_string(),
-                StatusTone::Failed
-            )
-        );
-        assert_eq!(text(ChatIndicator::Idle, 0, 0, true).1, StatusTone::Paused);
-    }
-
-    #[test]
-    fn acting_badges_name_each_capability() {
-        assert!(capability_badges(&Default::default()).is_empty());
-        assert_eq!(
-            capability_badges(&cypher_proto::BotCapabilities::new_bot()),
-            ["Works directly"]
-        );
-        assert_eq!(
-            capability_badges(&cypher_proto::BotCapabilities {
-                work_directly: false,
-                coordinate: true,
-                steer: true,
-            }),
-            ["Can start sessions", "Can steer sessions"]
+            board_notice(false, true, "Mac", ChatIndicator::Errored),
+            Some(BoardNotice::Failed)
         );
     }
 }

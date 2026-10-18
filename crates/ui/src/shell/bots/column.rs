@@ -115,8 +115,48 @@ impl Shell {
                         .text_color(theme.text.opacity(0.9))
                         .child(SharedString::from(transcript::single_line(&bot.name))),
                 )
+                .child(div().flex_1())
+                .child(self.render_board_actions(&bot, theme, cx))
             });
         self.titlebar_drag_region("botboard-header", header, cx)
+            .into_any_element()
+    }
+
+    /// The bot's own actions where a tile keeps its own: pause (or resume)
+    /// and settings. A press here never starts the window drag the header
+    /// is.
+    fn render_board_actions(&self, bot: &Bot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let edit_id = bot.id.clone();
+        let settings =
+            super::items::icon_button("bot-header-settings", icons::TUNING, "Bot settings", theme)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_bot_dialog(Some(edit_id.clone()), cx)
+                }));
+        let (glyph, tip) = if bot.paused {
+            (icons::PLAY, "Resume: let it run routines and start work")
+        } else {
+            (icons::PAUSE, "Pause: no routines run and no work starts")
+        };
+        let (pause_id, paused) = (bot.id.clone(), bot.paused);
+        let pause = super::items::icon_button("bot-header-pause", glyph, tip, theme)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.mutate(
+                    serde_json::json!({
+                        "op": "setBotPaused", "botId": pause_id, "paused": !paused,
+                    }),
+                    cx,
+                )
+            }));
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0))
+            .child(pause)
+            .child(settings)
             .into_any_element()
     }
 

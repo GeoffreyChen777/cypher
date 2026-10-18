@@ -941,7 +941,7 @@ Botboard mode
 ┌ sidebar ───────────┐┌──────── chat ─────────┐┌── detail ──┐
 │ Cypher Botboard ⇅  ││                       ││ Fix invoice│
 │ [Bob][Rel][Team][+]││  conversation with    ││ rounding   │
-│ ┌ Status ────────┐ ││  the bot; plan,       ││ steps,     │
+│ ⏸ Bob is paused    ││  the bot; plan,       ││ steps,     │
 │ ┌ Needs you (2) ─┐ ││  progress and result  ││ sessions,  │
 │ ┌ Work ──────────┐ ││  cards inline         ││ Stop       │
 │ ┌ Schedule ──────┐ ││                       ││            │
@@ -962,11 +962,16 @@ bot. A click switches the whole board to that bot; a right-click opens Open /
 Settings… / Delete…. With many bots, the row becomes the current bot with a dropdown
 (open question, §17).
 
+**No status card.** Who the bot is reads from the picker and the chat header, what it
+may do from the access note over the composer, and its pause and settings buttons sit
+in the chat header where a tile keeps its actions. Under the picker a single quiet line
+appears only when something is off, the way the project sidebar marks only an offline
+host: "Bob is paused" (with Resume), "<device> is offline", or "The last run failed".
+
 **The cards** below it describe the current bot, top to bottom:
 
 | Card | Shows | Opens in the detail panel |
 |---|---|---|
-| **Status** | Avatar, name, host and its online dot, one status line ("1 task running · 2 need you"), and permission badges (*Reads 3 projects · Works directly · Can start sessions*), the ones that let it act in a distinct colour; a settings button | The bot's settings palette |
 | **Needs you** | Plans awaiting approval, workers asking or failed on an approval, tainted actions awaiting approval, and later review drafts | The item with its context and actions: the plan to approve, the question with the worker's recent messages and the bot's suggested answer, the action and why it needs approval |
 | **Work** | Running orchestrations with their current step, a step bar and elapsed time; the last few finished ones with a one-line result | The orchestration: every step with project, device, worker session link, state and duration; Stop; the result |
 | **Schedule** | Routines and its projects' recurring tasks, in order of next run: name, trigger, next run, last result; today's budget use | The routine or task: trigger, prompt, permissions, run history with links, pause, edit, run now |
@@ -975,9 +980,9 @@ Settings… / Delete…. With many bots, the row becomes the current bot with a 
 | **Activity** | The last few things the bot did | The full audit log, filterable by kind |
 | **Network** (P4) | Connections with reply mode and last exchange; pending invites | A connection: its scope, reply mode, rate limits, exchanges, revoke |
 
-A card with nothing to show is not drawn; a read-only bot shows only Status, Projects,
-Notebook and Activity. **Needs you** always sits right under Status, so attention items
-are never below the fold. A card's header opens its whole list; a row opens that item.
+A card with nothing to show is not drawn. **Needs you** always comes first, so attention
+items are never below the fold. One card floats at a time, the open panel item's; with
+the panel shut none does. A card's header opens its whole list; a row opens that item.
 
 **The chat** is the bot conversation as built: the owner instructs the bot here, and
 plan, progress and result cards appear inline. Its access note over the composer opens
@@ -991,7 +996,7 @@ Behaviour:
 
 - Cards update live from the engine (`WatchBotRecords`: work, routines, notes, the
   audit log); they hold no state of their own. Resolving an item anywhere updates every
-  count: the card, the Status line, the picker and the Projects-mode logo badge.
+  count: the card, the picker and the Projects-mode logo badge.
 - Settings stay in the palette; no card edits permissions itself.
 - Usage meters and embedded transcripts are left out: rows link to the thread or session
   instead.
