@@ -249,6 +249,55 @@ fn the_chat_sandbox_level_reaches_the_permission_extension() {
     assert_eq!(level(&probe), Some(None));
 }
 
+/// A subagent's file-tool denials tell it to call `request_permission`, and
+/// Pi registers no tool its `--tools` allowlist leaves out.
+#[test]
+fn subagents_with_file_tools_can_request_permission() {
+    let harness = harness();
+    let tools_arg = |tools: &[&str]| {
+        let host = RunHostContext {
+            chat_id: Some("child-chat".into()),
+            child: Some(cypher_harness::ChildRunEnv {
+                system_prompt: String::new(),
+                tools: tools.iter().map(|tool| tool.to_string()).collect(),
+                model: None,
+                thinking: None,
+                channel_root: None,
+                run_id: "run".into(),
+                agent: "actor".into(),
+                child_index: 0,
+            }),
+        };
+        let cmd = harness
+            .spawn_command(None, &host, None)
+            .expect("command builds");
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let at = args
+            .iter()
+            .position(|arg| arg == "--tools")
+            .expect("--tools");
+        args[at + 1].clone()
+    };
+    assert_eq!(
+        tools_arg(&["read", "grep", "find", "ls", "bash"]),
+        "read,grep,find,ls,bash,send_message,read_inbox,reply_message,request_permission"
+    );
+    assert_eq!(
+        tools_arg(&["bash", "request_permission"]),
+        "bash,request_permission,send_message,read_inbox,reply_message",
+        "named once"
+    );
+    assert_eq!(
+        tools_arg(&["bash"]),
+        "bash,send_message,read_inbox,reply_message",
+        "bash escalates instead"
+    );
+}
+
 #[test]
 fn empty_catalog_placeholder_is_not_passed_to_pi() {
     let harness = harness();
