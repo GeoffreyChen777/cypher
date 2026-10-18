@@ -128,6 +128,24 @@ impl EngineRpc {
                     return Err(missing("task"));
                 }
             }
+            MutateParams::DeleteBotWork { work_id } => {
+                let work = ws
+                    .record::<p::BotWork>(p::KIND_BOT_WORK, &work_id)
+                    .ok_or_else(|| missing("task"))?;
+                if work.is_live() {
+                    return Err(RpcError::BadParams(
+                        "Stop or cancel this work before deleting it.".into(),
+                    ));
+                }
+                ws.delete_records(p::KIND_BOT_WORK, &[work_id]);
+                // Its background session goes with it; the sessions it
+                // started in projects are ordinary sessions and stay.
+                if let Some(thread) = &work.thread_chat_id
+                    && let Err(err) = ws.delete_chat(thread)
+                {
+                    tracing::warn!(chat = %thread, error = %err, "work session not deleted");
+                }
+            }
             MutateParams::ResolveBotApproval {
                 approval_id,
                 approve,

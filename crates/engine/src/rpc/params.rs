@@ -396,6 +396,10 @@ pub(super) enum MutateParams {
     /// Stop running work and every session it started.
     #[serde(rename_all = "camelCase")]
     StopBotWork { work_id: String },
+    /// Delete finished work and its background session; the sessions it
+    /// started in projects stay.
+    #[serde(rename_all = "camelCase")]
+    DeleteBotWork { work_id: String },
     /// Approve or decline an action a bot thread is waiting on.
     #[serde(rename_all = "camelCase")]
     ResolveBotApproval { approval_id: String, approve: bool },

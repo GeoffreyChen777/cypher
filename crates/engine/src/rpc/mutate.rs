@@ -273,6 +273,7 @@ impl EngineRpc {
             }
             record @ (MutateParams::ResolveBotPlan { .. }
             | MutateParams::StopBotWork { .. }
+            | MutateParams::DeleteBotWork { .. }
             | MutateParams::ResolveBotApproval { .. }
             | MutateParams::SaveBotNote { .. }
             | MutateParams::DeleteBotNote { .. }

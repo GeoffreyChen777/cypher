@@ -568,6 +568,18 @@ async fn stop_reaches_the_thread_and_every_session() {
         "both running",
     )
     .await;
+    // Running work can't be deleted; it has to be stopped first.
+    let refused = rig
+        .client()
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "deleteBotWork", "workId": work_id }),
+        )
+        .await;
+    assert!(
+        refused.is_err_and(|err| err.to_string().contains("Stop or cancel")),
+        "a running item stays"
+    );
 
     rig.mutate(serde_json::json!({ "op": "stopBotWork", "workId": work_id }))
         .await;
@@ -590,6 +602,18 @@ async fn stop_reaches_the_thread_and_every_session() {
     // A settled thread after Stop leaves the state alone.
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(rig.work(&work_id).state, WorkState::Stopped);
+
+    // Deleted, it takes its background session; the project's stays.
+    rig.mutate(serde_json::json!({ "op": "deleteBotWork", "workId": work_id }))
+        .await;
+    assert!(
+        rig.core
+            .workspace
+            .record::<BotWork>(cypher_proto::KIND_BOT_WORK, &work_id)
+            .is_none()
+    );
+    assert!(rig.core.workspace.chat(&thread).unwrap().is_none());
+    assert!(rig.core.workspace.chat(&session).unwrap().is_some());
     rig.core.shutdown().await;
 }
 

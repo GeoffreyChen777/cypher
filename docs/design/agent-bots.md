@@ -1065,6 +1065,7 @@ Each method is one constant plus one `SPECS` entry in `cypher_rpc::methods`.
 | `BotTool` | unary, local | P0 | The extension's entry point; refusals come back as text for the model. Carries the Pi tool call's id (P2), and serves the engine-only `direct_tool` gate. |
 | `Mutate updateBot` / `deleteBot` | unary | P0 | LWW edits; delete takes the bot's chats with it (and later its connections and room). |
 | `Mutate resolveBotPlan` / `stopBotWork` / `resolveBotApproval` | unary | P2 | An owner device writes the control field (`decision`, `stopRequestedAt`, an approval's `decision`); the registry syncs it to the bot's host, whose work host acts on it. Built. |
+| `Mutate deleteBotWork` | unary | P2 | Deletes finished work and its background session (the sessions it started in projects stay); proposed or running work is refused until it is cancelled or stopped. The Work panel's Delete, after a confirm. |
 | `WatchBotRecords` | stream | P2 | Every bot record (work, activity, approvals, notes, routines, network), for the cards and panes. Built. |
 | `Mutate saveBotNote` / `deleteBotNote` | unary | P3 | Owner notes (source `owner`) and deleting any note. |
 | `Mutate saveBotRoutine` / `deleteBotRoutine` / `runBotRoutine` | unary | P3 | A routine's definition (the host's fields are left alone; a project target needs *Coordinate* and the project in scope), deleting it with its sessions, and "Run now" (`runRequestedAt`). |

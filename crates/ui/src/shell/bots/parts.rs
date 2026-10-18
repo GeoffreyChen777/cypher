@@ -14,6 +14,7 @@ pub(super) const CARD_ROWS: usize = 4;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Confirm {
     DeleteRoutine { id: String, name: String },
+    DeleteWork { id: String, name: String },
     RevokeConnection { id: String, name: String },
 }
 
@@ -432,6 +433,13 @@ impl Shell {
                 );
                 self.open_panel(PanelItem::Schedule, cx);
             }
+            Confirm::DeleteWork { id, .. } => {
+                self.board_mutate(
+                    serde_json::json!({ "op": "deleteBotWork", "workId": id }),
+                    cx,
+                );
+                self.open_panel(PanelItem::Work, cx);
+            }
             Confirm::RevokeConnection { id, .. } => {
                 self.board_mutate(
                     serde_json::json!({ "op": "revokeBotConnection", "connectionId": id }),
@@ -456,6 +464,14 @@ impl Shell {
                 format!(
                     "\u{201C}{name}\u{201D} stops running and is deleted with its \
                      sessions. Results it already posted stay in the chat."
+                ),
+                "Delete",
+            ),
+            Confirm::DeleteWork { name, .. } => (
+                "Delete work?",
+                format!(
+                    "\u{201C}{name}\u{201D} and its background session are deleted. \
+                     Sessions it started in your projects stay."
                 ),
                 "Delete",
             ),

@@ -508,6 +508,24 @@ impl Shell {
             );
             any = true;
         }
+        // Finished work can go (proposed or running work is cancelled or
+        // stopped first).
+        if phase.ended() {
+            let (id, name) = (work.id.clone(), work.title.clone());
+            actions = actions.child(div().flex_1()).child(
+                parts::action(
+                    "bot-work-delete",
+                    icons::TRASH_BIN_MINIMALISTIC,
+                    "Delete",
+                    theme.danger,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let (id, name) = (id.clone(), name.clone());
+                    this.ask_confirm(parts::Confirm::DeleteWork { id, name }, cx);
+                })),
+            );
+            any = true;
+        }
         if let Some(stopped) = work
             .stop_requested_at
             .filter(|_| phase == PlanPhase::Stopping)
