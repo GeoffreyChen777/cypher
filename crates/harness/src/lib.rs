@@ -109,8 +109,9 @@ pub struct BotRunEnv {
     /// The run's whole tool allowlist (`--tools`), derived from the origin.
     pub tools: Vec<String>,
     pub system_prompt: String,
-    /// Checkouts the run may work in directly. Empty until owner threads get
-    /// *Work directly* (P2), which hands them to permission control.
+    /// Checkouts the run may work in directly (owner threads with *Work
+    /// directly*): the permission extension's extra workspace roots for the
+    /// chat, passed as `CYPHER_BOT_WORKSPACE_ROOTS`.
     pub workspace_roots: Vec<String>,
 }
 

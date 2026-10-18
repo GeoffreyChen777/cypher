@@ -725,6 +725,14 @@ impl SessionsEngine {
         {
             request.sandbox = config.sandbox;
         }
+        // A bot thread's level is the engine's, never the row's: any owner
+        // device may write the row (docs/design/agent-bots.md §4.4).
+        if let Some(ws) = self.inner.workspace()
+            && let Ok(Some(chat)) = ws.chat(chat_id)
+            && let Some(level) = crate::bots::profile::run_sandbox(&ws, &chat)
+        {
+            request.sandbox = level;
+        }
         // A parked process launched with other model settings or another
         // level must not take this turn: end it here so the turn below
         // spawns with the new ones.
