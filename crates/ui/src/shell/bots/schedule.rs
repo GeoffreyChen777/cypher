@@ -780,6 +780,11 @@ impl Shell {
         if let JobState::Next(_) = job.state() {
             body = body.child(parts::fact(theme, "Next run", next_value(&job, &now)));
         }
+        body = body.child(parts::fact(
+            theme,
+            "Prompt",
+            SharedString::from(routine.prompt.clone()),
+        ));
         if routine.last_run.is_some() {
             body = body.child(parts::fact(
                 theme,
@@ -787,11 +792,6 @@ impl Shell {
                 self.last_run_value(routine.last_run.as_ref(), theme),
             ));
         }
-        body = body.child(parts::fact(
-            theme,
-            "Prompt",
-            SharedString::from(routine.prompt.clone()),
-        ));
         Some((head, body))
     }
 
