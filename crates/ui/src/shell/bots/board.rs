@@ -108,22 +108,77 @@ pub(super) fn access_badges(scope: &BotScope, live: impl Fn(&str) -> bool) -> Ve
     badges
 }
 
-/// How the Status card's line reads for the bot conversation's status.
+/// How a part of the Status card's line reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StatusTone {
     Working,
     Waiting,
     Failed,
+    Paused,
     Quiet,
 }
 
-pub(super) fn status_line(status: ChatIndicator) -> (&'static str, StatusTone) {
-    match status {
-        ChatIndicator::Working => ("Working…", StatusTone::Working),
-        ChatIndicator::AwaitingInput => ("Waiting for you", StatusTone::Waiting),
-        ChatIndicator::Errored => ("The last run failed", StatusTone::Failed),
-        ChatIndicator::Completed | ChatIndicator::Idle => ("Idle", StatusTone::Quiet),
+/// The Status card's line, part by part: what the conversation is doing,
+/// then the bot's running work and what needs the owner ("Working… · 1
+/// task running · 2 need you"), and the tone its mark takes, the most
+/// pressing part's. A question in the conversation counts among `needs`.
+pub(super) fn status_summary(
+    chat: ChatIndicator,
+    running: usize,
+    needs: usize,
+    paused: bool,
+) -> (Vec<(String, StatusTone)>, StatusTone) {
+    let mut parts = Vec::new();
+    if paused {
+        parts.push(("Paused".to_string(), StatusTone::Paused));
     }
+    match chat {
+        ChatIndicator::Working => parts.push(("Working…".to_string(), StatusTone::Working)),
+        ChatIndicator::Errored => {
+            parts.push(("The last run failed".to_string(), StatusTone::Failed))
+        }
+        _ => {}
+    }
+    if running > 0 {
+        parts.push((
+            format!(
+                "{running} task{} running",
+                if running == 1 { "" } else { "s" }
+            ),
+            StatusTone::Working,
+        ));
+    }
+    if needs > 0 {
+        parts.push((
+            format!("{needs} need{} you", if needs == 1 { "s" } else { "" }),
+            StatusTone::Waiting,
+        ));
+    }
+    if parts.is_empty() {
+        parts.push(("Idle".to_string(), StatusTone::Quiet));
+    }
+    let lead = [
+        StatusTone::Waiting,
+        StatusTone::Working,
+        StatusTone::Failed,
+        StatusTone::Paused,
+    ]
+    .into_iter()
+    .find(|tone| parts.iter().any(|(_, t)| t == tone))
+    .unwrap_or(StatusTone::Quiet);
+    (parts, lead)
+}
+
+/// The Status card's acting badges: what the bot may do beyond reading.
+pub(super) fn capability_badges(caps: &cypher_proto::BotCapabilities) -> Vec<&'static str> {
+    [
+        (caps.work_directly, "Works directly"),
+        (caps.coordinate, "Can start sessions"),
+        (caps.steer, "Can steer sessions"),
+    ]
+    .into_iter()
+    .filter_map(|(on, label)| on.then_some(label))
+    .collect()
 }
 
 /// A Projects row's right-hand note: "1 asking · 2 running", else "idle".
@@ -206,7 +261,7 @@ impl Shell {
     /// read; the settings button opens its palette.
     fn render_status_card(&self, bot: &Bot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let now = Utc::now();
-        let (host, online, status, badges) = {
+        let (host, online, status, badges, running, needs) = {
             let state = self.state.read(cx);
             let status = state
                 .chats
@@ -222,6 +277,12 @@ impl Shell {
                 state.device_online(&bot.host_device_id, now),
                 status,
                 access_badges(&bot.scope, |id| state.space_row(id).is_some()),
+                state
+                    .bot_records
+                    .work_of(&bot.id)
+                    .filter(|w| w.state == cypher_proto::WorkState::Running)
+                    .count(),
+                bot_needs(state, bot, now).len(),
             )
         };
         let avatar = crate::appearance::bot_style::bot_avatar(
@@ -263,16 +324,20 @@ impl Shell {
                         "· offline"
                     }))),
             );
-        let (line, tone) = status_line(status);
-        let line_color = match tone {
+        let (parts, tone) = status_summary(status, running, needs, bot.paused);
+        let tone_color = |tone: StatusTone| match tone {
             StatusTone::Working => theme.text,
             StatusTone::Waiting => theme.warning,
             StatusTone::Failed => theme.danger,
-            StatusTone::Quiet => theme.text_muted,
+            StatusTone::Paused | StatusTone::Quiet => theme.text_muted,
         };
+        let ticker = self.pulse_ticker.entity_id();
         let line_mark = match tone {
-            StatusTone::Working | StatusTone::Waiting => {
-                super::super::render::status_mark(status, self.pulse_ticker.entity_id(), theme)
+            StatusTone::Working => {
+                super::super::render::status_mark(ChatIndicator::Working, ticker, theme)
+            }
+            StatusTone::Waiting => {
+                super::super::render::status_mark(ChatIndicator::AwaitingInput, ticker, theme)
             }
             StatusTone::Failed => Some(
                 icon(icons::DANGER_TRIANGLE)
@@ -281,66 +346,98 @@ impl Shell {
                     .text_color(theme.danger)
                     .into_any_element(),
             ),
+            StatusTone::Paused => Some(
+                icon(icons::PAUSE)
+                    .size(px(12.0))
+                    .flex_none()
+                    .text_color(theme.text_muted)
+                    .into_any_element(),
+            ),
             StatusTone::Quiet => None,
         };
+        let last = parts.len().saturating_sub(1);
         let status_row = div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
             .gap(px(6.0))
             .text_size(px(12.5))
-            .text_color(line_color)
             .children(line_mark)
-            .child(SharedString::from(line));
-        let badge_row =
-            div()
-                .flex()
-                .flex_row()
-                .flex_wrap()
-                .gap(px(4.0))
-                .children(badges.into_iter().map(|label| {
+            .child(div().flex().flex_row().flex_wrap().children(
+                parts.into_iter().enumerate().map(|(ix, (text, tone))| {
                     div()
-                        .px(px(7.0))
-                        .py(px(2.0))
-                        .rounded(px(6.0))
-                        .bg(crate::kit::theme::ink(0.06))
-                        .text_size(px(11.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(label))
-                }));
-        let edit_id = bot.id.clone();
-        let settings_key = "bot-status-settings";
-        let settings = div()
-            .id(settings_key)
-            .flex_none()
-            .size(px(28.0))
-            .rounded(px(8.0))
+                        .flex_none()
+                        .text_color(tone_color(tone))
+                        .child(SharedString::from(text))
+                        .when(ix < last, |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .px(px(4.0))
+                                    .text_color(theme.text_faint)
+                                    .child(SharedString::from("·")),
+                            )
+                        })
+                        .flex()
+                        .flex_row()
+                }),
+            ));
+        // What it may read in the quiet tone; what lets it act in the
+        // accent's; a pause in amber.
+        let badge = |label: String, fg: gpui::Hsla, bg: gpui::Hsla| {
+            div()
+                .px(px(7.0))
+                .py(px(2.0))
+                .rounded(px(6.0))
+                .bg(bg)
+                .text_size(px(11.0))
+                .text_color(fg)
+                .child(SharedString::from(label))
+        };
+        let badge_row = div()
             .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .bg(motion::hover_blend(
-                settings_key,
-                crate::kit::theme::wash(0.0),
-                crate::kit::theme::wash(0.14),
-            ))
-            .on_hover(motion::hover_listener(settings_key))
-            .tooltip(|_, cx| {
-                cx.new(|_| super::super::session::FindTooltip("Bot settings".into()))
-                    .into()
+            .flex_row()
+            .flex_wrap()
+            .gap(px(4.0))
+            .when(bot.paused, |el| {
+                el.child(badge(
+                    "Paused".into(),
+                    theme.warning,
+                    theme.warning.opacity(0.14),
+                ))
             })
-            .on_click(
-                cx.listener(move |this, _, _, cx| this.open_bot_dialog(Some(edit_id.clone()), cx)),
+            .children(
+                badges
+                    .into_iter()
+                    .map(|label| badge(label, theme.text_muted, crate::kit::theme::ink(0.06))),
             )
-            .child(
-                icon(icons::TUNING)
-                    .size(px(14.0))
-                    .text_color(motion::hover_blend(
-                        settings_key,
-                        theme.text_muted.opacity(0.8),
-                        theme.text,
-                    )),
+            .children(
+                capability_badges(&bot.capabilities)
+                    .into_iter()
+                    .map(|label| badge(label.into(), theme.accent, theme.accent.opacity(0.12))),
             );
+        let edit_id = bot.id.clone();
+        let settings =
+            super::items::icon_button("bot-status-settings", icons::TUNING, "Bot settings", theme)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_bot_dialog(Some(edit_id.clone()), cx)
+                }));
+        let (pause_glyph, pause_tip) = if bot.paused {
+            (icons::PLAY, "Resume: let it run routines and start work")
+        } else {
+            (icons::PAUSE, "Pause: no routines run and no work starts")
+        };
+        let (pause_id, paused) = (bot.id.clone(), bot.paused);
+        let pause = super::items::icon_button("bot-status-pause", pause_glyph, pause_tip, theme)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.mutate(
+                    serde_json::json!({
+                        "op": "setBotPaused", "botId": pause_id, "paused": !paused,
+                    }),
+                    cx,
+                )
+            }));
         card(theme)
             .p(px(CARD_PAD))
             .gap(px(10.0))
@@ -370,7 +467,14 @@ impl Shell {
                             )
                             .child(presence),
                     )
-                    .child(settings),
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .child(pause)
+                            .child(settings),
+                    ),
             )
             .child(status_row)
             .child(badge_row)
@@ -464,6 +568,20 @@ pub(super) fn section_header(
     open: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    section_header_tinted(key, glyph, title, count, open, None, theme)
+}
+
+/// [`section_header`] with its glyph and count in `tint` (the Needs you
+/// card's amber).
+pub(super) fn section_header_tinted(
+    key: &'static str,
+    glyph: &'static str,
+    title: &'static str,
+    count: usize,
+    open: bool,
+    tint: Option<gpui::Hsla>,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(key)
         .h(px(GROUP_CARD_HEADER_HEIGHT))
@@ -490,7 +608,7 @@ pub(super) fn section_header(
             icon(glyph)
                 .size(px(14.0))
                 .flex_none()
-                .text_color(theme.text_muted),
+                .text_color(tint.unwrap_or(theme.text_muted)),
         )
         .child(
             div()
@@ -502,7 +620,10 @@ pub(super) fn section_header(
         .child(
             div()
                 .text_size(px(12.0))
-                .text_color(theme.text_muted.opacity(0.75))
+                .when(tint.is_some(), |el| {
+                    el.font_weight(gpui::FontWeight::MEDIUM)
+                })
+                .text_color(tint.unwrap_or(theme.text_muted.opacity(0.75)))
                 .child(SharedString::from(count.to_string())),
         )
         .child(div().flex_1())
@@ -773,10 +894,61 @@ mod tests {
             access_badges(&BotScope::default(), live)[0],
             "Reads no projects"
         );
+    }
+
+    #[test]
+    fn the_status_line_combines_the_chat_work_and_needs() {
+        let text = |chat, running, needs, paused| {
+            let (parts, tone) = status_summary(chat, running, needs, paused);
+            let line: Vec<String> = parts.into_iter().map(|(t, _)| t).collect();
+            (line.join(" · "), tone)
+        };
         assert_eq!(
-            status_line(ChatIndicator::AwaitingInput),
-            ("Waiting for you", StatusTone::Waiting)
+            text(ChatIndicator::Completed, 0, 0, false),
+            ("Idle".to_string(), StatusTone::Quiet)
         );
-        assert_eq!(status_line(ChatIndicator::Completed).0, "Idle");
+        assert_eq!(
+            text(ChatIndicator::Idle, 1, 2, false),
+            (
+                "1 task running · 2 need you".to_string(),
+                StatusTone::Waiting
+            )
+        );
+        assert_eq!(
+            text(ChatIndicator::Working, 2, 0, false),
+            (
+                "Working… · 2 tasks running".to_string(),
+                StatusTone::Working
+            )
+        );
+        assert_eq!(
+            text(ChatIndicator::AwaitingInput, 0, 1, true),
+            ("Paused · 1 needs you".to_string(), StatusTone::Waiting)
+        );
+        assert_eq!(
+            text(ChatIndicator::Errored, 0, 0, true),
+            (
+                "Paused · The last run failed".to_string(),
+                StatusTone::Failed
+            )
+        );
+        assert_eq!(text(ChatIndicator::Idle, 0, 0, true).1, StatusTone::Paused);
+    }
+
+    #[test]
+    fn acting_badges_name_each_capability() {
+        assert!(capability_badges(&Default::default()).is_empty());
+        assert_eq!(
+            capability_badges(&cypher_proto::BotCapabilities::new_bot()),
+            ["Works directly"]
+        );
+        assert_eq!(
+            capability_badges(&cypher_proto::BotCapabilities {
+                work_directly: false,
+                coordinate: true,
+                steer: true,
+            }),
+            ["Can start sessions", "Can steer sessions"]
+        );
     }
 }

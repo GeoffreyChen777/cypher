@@ -46,6 +46,8 @@ pub(in crate::shell) struct BotDialog {
     exclude_sessions: Vec<String>,
     include_archived: bool,
     transcripts: bool,
+    /// What it may do beyond reading (§4.2).
+    capabilities: cypher_proto::BotCapabilities,
     error: Option<SharedString>,
     busy: bool,
     focus_pending: bool,
@@ -180,6 +182,11 @@ impl Shell {
             exclude_sessions: scope.exclude_sessions,
             include_archived: scope.include_archived,
             transcripts: scope.transcripts,
+            // A new bot may work in its local projects; it coordinates only
+            // once the owner turns that on.
+            capabilities: existing
+                .as_ref()
+                .map_or_else(cypher_proto::BotCapabilities::new_bot, |b| b.capabilities),
             error: None,
             busy: false,
             focus_pending: true,
@@ -220,6 +227,7 @@ impl Shell {
             "color": dialog.color,
             "instructions": (!instructions.is_empty()).then_some(instructions),
             "scope": scope,
+            "capabilities": dialog.capabilities,
         });
         if let Some(bot_id) = dialog.bot_id.clone() {
             body["op"] = "updateBot".into();
@@ -648,13 +656,16 @@ impl Shell {
                 dialog.include_archived,
                 |d| d.include_archived = !d.include_archived,
             ));
+        let caps = dialog.capabilities;
+        let read_only = !(caps.work_directly || caps.coordinate || caps.steer);
         let summary = access.map(|(sessions, spaces)| {
             let text = match (sessions, spaces) {
                 (0, 0) => "No access to any sessions yet.".to_string(),
                 (sessions, spaces) => format!(
-                    "Access to {sessions} session{} in {spaces} project{}. Read-only.",
+                    "Access to {sessions} session{} in {spaces} project{}.{}",
                     if sessions == 1 { "" } else { "s" },
-                    if spaces == 1 { "" } else { "s" }
+                    if spaces == 1 { "" } else { "s" },
+                    if read_only { " Read-only." } else { "" }
                 ),
             };
             div()
@@ -672,6 +683,86 @@ impl Shell {
                 )
                 .child(SharedString::from(text))
         });
+
+        // ── Capabilities: what it may do beyond reading. Each lets the bot
+        //    act, so each wears the accent's bolt (lit while on).
+        let capability = |id: &str,
+                          title: &str,
+                          detail: &str,
+                          on: bool,
+                          first: bool,
+                          flip: fn(&mut cypher_proto::BotCapabilities)| {
+            div()
+                .id(SharedString::from(id.to_string()))
+                .when(!first, |el| el.border_t_1())
+                .border_color(hairline)
+                .px(px(12.0))
+                .py(px(10.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(d) = this.dialogs.bot.as_mut() {
+                        flip(&mut d.capabilities);
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(24.0))
+                        .rounded(px(7.0))
+                        .bg(if on {
+                            theme.accent.opacity(0.14)
+                        } else {
+                            crate::kit::theme::ink(0.05)
+                        })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon(icons::BOLT).size(px(13.0)).text_color(if on {
+                            theme.accent
+                        } else {
+                            theme.text_muted.opacity(0.7)
+                        })),
+                )
+                .child(permission_text(title, detail))
+                .child(crate::settings::widgets::toggle_switch(theme, on))
+        };
+        let capabilities = div()
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(hairline)
+            .bg(crate::kit::theme::ink(0.02))
+            .flex()
+            .flex_col()
+            .child(capability(
+                "bot-cap-direct",
+                "Work directly",
+                "Run commands and edit files in its projects on this device, under your \
+                 permission rules.",
+                caps.work_directly,
+                true,
+                |c| c.work_directly = !c.work_directly,
+            ))
+            .child(capability(
+                "bot-cap-coordinate",
+                "Coordinate",
+                "Plan work and start sessions in its projects, after you approve.",
+                caps.coordinate,
+                false,
+                |c| c.coordinate = !c.coordinate,
+            ))
+            .child(capability(
+                "bot-cap-steer",
+                "Steer others' sessions",
+                "Steer, answer or stop sessions it didn't start, each after you confirm.",
+                caps.steer,
+                false,
+                |c| c.steer = !c.steer,
+            ));
 
         // ── The form column: scrolls the card's full height, under both
         //    glass bands; its padding keeps every row clear of them at rest.
@@ -711,6 +802,8 @@ impl Shell {
             .child(section("Permissions"))
             .child(permissions)
             .children(summary)
+            .child(section("What it may do"))
+            .child(capabilities)
             .child(section("Instructions"))
             .child(popover::dialog_field(
                 dialog.instructions.clone().into_any_element(),

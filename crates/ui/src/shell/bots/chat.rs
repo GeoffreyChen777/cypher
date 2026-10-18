@@ -7,7 +7,9 @@
 use super::super::session::SlotId;
 use super::*;
 
-/// What `bot` can see, in a few words: "Billing · reads conversations".
+/// What `bot` can see and do, in a few words: "Billing · reads
+/// conversations", or with capabilities "3 projects · works directly · can
+/// start sessions".
 pub(in crate::shell) fn access_summary(bot: &Bot, state: &crate::state::AppState) -> String {
     let scope = &bot.scope;
     let projects = match &scope.projects {
@@ -34,12 +36,27 @@ pub(in crate::shell) fn access_summary(bot: &Bot, state: &crate::state::AppState
         (false, 0) => projects,
         (false, n) => format!("{projects} + {n} session{}", if n == 1 { "" } else { "s" }),
     };
-    let depth = if scope.transcripts {
-        "reads conversations"
-    } else {
-        "titles and status only"
+    let caps = &bot.capabilities;
+    let acts: Vec<&str> = [
+        (caps.work_directly, "works directly"),
+        (caps.coordinate, "can start sessions"),
+        (caps.steer, "can steer sessions"),
+    ]
+    .into_iter()
+    .filter_map(|(on, words)| on.then_some(words))
+    .collect();
+    // What it may do says more than how deep it reads, which only stays
+    // when it is the narrow kind.
+    let depth = match (scope.transcripts, acts.is_empty()) {
+        (true, false) => None,
+        (true, true) => Some("reads conversations"),
+        (false, _) => Some("titles and status only"),
     };
-    format!("{reach} · {depth}")
+    std::iter::once(reach.as_str())
+        .chain(depth)
+        .chain(acts)
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// Questions a new bot offers, fitted to what it can see, each with its
@@ -373,6 +390,32 @@ mod tests {
             }),
             "2 shared sessions · reads conversations"
         );
+    }
+
+    #[test]
+    fn access_names_what_the_bot_may_do() {
+        let state = state();
+        let mut acting = bot(BotScope {
+            projects: selected(&["billing", "auth", "web"]),
+            ..Default::default()
+        });
+        acting.capabilities = cypher_proto::BotCapabilities {
+            work_directly: true,
+            coordinate: true,
+            steer: false,
+        };
+        assert_eq!(
+            access_summary(&acting, &state),
+            "3 projects · works directly · can start sessions"
+        );
+        acting.scope.transcripts = false;
+        acting.capabilities = cypher_proto::BotCapabilities::new_bot();
+        assert_eq!(
+            access_summary(&acting, &state),
+            "3 projects · titles and status only · works directly"
+        );
+        acting.scope = BotScope::default();
+        assert_eq!(access_summary(&acting, &state), "No access yet");
     }
 
     #[test]

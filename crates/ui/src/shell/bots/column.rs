@@ -191,6 +191,7 @@ impl Shell {
         if width < 0.5 && self.board.panel.is_none() {
             self.board.panel_last = None;
             self.board.panel_tween = None;
+            self.drop_panel_extras();
             return None;
         }
         let item = self
@@ -198,7 +199,27 @@ impl Shell {
             .panel
             .clone()
             .or_else(|| self.board.panel_last.clone())?;
-        let card = self.render_panel_card(&item, cx)?;
+        // An item that no longer resolves (its record went away) slides the
+        // panel shut, empty, instead of leaving the chat narrowed.
+        let card = match self.render_panel_card(&item, cx) {
+            Some(card) => card,
+            None => {
+                if self.board.panel.as_ref() == Some(&item) {
+                    self.close_panel(cx);
+                }
+                let card_bg = crate::appearance::chat_style::panel_background(
+                    crate::appearance::chat_style::settings(cx),
+                    Theme::of(cx),
+                    true,
+                );
+                div()
+                    .size_full()
+                    .rounded(px(PANEL_CORNER_RADIUS))
+                    .bg(card_bg)
+                    .shadow_sm()
+                    .into_any_element()
+            }
+        };
         Some(
             div()
                 .h_full()

@@ -19,6 +19,7 @@ mod board;
 mod chat;
 mod column;
 mod dialog;
+mod items;
 mod needs;
 mod network;
 mod notebook;
@@ -49,18 +50,75 @@ pub(super) struct BoardUi {
     panel_last: Option<PanelItem>,
     /// The panel's width tween (0 ↔ [`column::PANEL_SPAN`]).
     panel_tween: Option<WidthTween>,
+    /// A session the panel looks into (an asking worker, an orchestration
+    /// thread): a session context watching its transcript, and for a thread
+    /// the read-only transcript drawn from it.
+    peek: Option<items::Peek>,
+    /// The Review panel's editable draft, for the exchange it was opened on.
+    review: Option<(String, Entity<TextInput>)>,
+    /// Questions answered from the Asking panel, until their session says
+    /// so (request ids).
+    answered: std::collections::HashSet<String>,
+    /// The work item whose Stop is armed (a second click stops it), and the
+    /// task that disarms it.
+    stop_armed: Option<String>,
+    stop_disarm: Option<Task<()>>,
+    /// The Activity panel's kind filter; `None` shows everything.
+    activity_filter: Option<cypher_proto::ActivityGroup>,
+}
+
+/// One item on a bot's **Needs you** card: its conversation waiting on an
+/// answer, or a record that waits on the owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Need {
+    Chat,
+    Record(cypher_proto::NeedsYou),
+}
+
+/// Whether `chat_id` is a session waiting on an answer.
+fn chat_asking(state: &crate::state::AppState, chat_id: &str, now: chrono::DateTime<Utc>) -> bool {
+    state
+        .chats
+        .iter()
+        .find(|c| c.id == chat_id)
+        .is_some_and(|chat| state.display_status_for(chat, now) == ChatIndicator::AwaitingInput)
+}
+
+/// What needs the owner for `bot`, most pressing first: its own question,
+/// then the records' items ([`cypher_proto::BotRecords::needs_you`]). The
+/// Needs you card, the Status line, the picker and the logo badge all count
+/// this one list, so resolving an item anywhere updates them together.
+pub(super) fn bot_needs(
+    state: &crate::state::AppState,
+    bot: &Bot,
+    now: chrono::DateTime<Utc>,
+) -> Vec<Need> {
+    let chat = chat_asking(state, &bot.chat_id, now).then_some(Need::Chat);
+    chat.into_iter()
+        .chain(
+            state
+                .bot_records
+                .needs_you(&bot.id, |chat_id| chat_asking(state, chat_id, now))
+                .into_iter()
+                .map(Need::Record),
+        )
+        .collect()
 }
 
 /// What needs the owner across every bot, for the Projects-mode logo badge.
-/// For now a bot conversation waiting on an answer; later phases add plans
-/// awaiting approval and workers' questions (§13.1 "Needs you").
 pub(super) fn needs_you_count(state: &crate::state::AppState, now: chrono::DateTime<Utc>) -> usize {
     state
         .bots
         .iter()
-        .filter_map(|bot| state.chats.iter().find(|c| c.id == bot.chat_id))
-        .filter(|chat| state.display_status_for(chat, now) == ChatIndicator::AwaitingInput)
-        .count()
+        .map(|bot| bot_needs(state, bot, now).len())
+        .sum()
+}
+
+/// "by Bob" for a session a bot started, from its work records.
+pub(super) fn started_by_mark(state: &crate::state::AppState, chat_id: &str) -> Option<String> {
+    let (work, _) = state.bot_records.started_by(chat_id)?;
+    let bot = state.bots.iter().find(|b| b.id == work.bot_id)?;
+    Some(format!("by {}", transcript::single_line(&bot.name)))
 }
 
 /// The bot the Botboard should show: the saved one while it exists, else

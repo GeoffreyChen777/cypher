@@ -2,7 +2,8 @@
 //! the current one ringed in its colour, then a dashed `+` for a new bot. A
 //! click makes that bot current; a right-click opens its menu (Open /
 //! Settings… / Delete…). A dot in a tile's corner carries its conversation's
-//! status, like a session row's.
+//! status, like a session row's; an amber count takes its place while
+//! something needs the owner ([`super::bot_needs`]).
 
 use super::*;
 
@@ -22,7 +23,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let now = Utc::now();
-        let tiles: Vec<(Bot, Option<ChatIndicator>)> = {
+        let tiles: Vec<(Bot, Option<ChatIndicator>, usize)> = {
             let state = self.state.read(cx);
             if !state.bots_synced {
                 return None;
@@ -32,15 +33,19 @@ impl Shell {
                 .iter()
                 .map(|bot| {
                     let chat = state.chats.iter().find(|c| c.id == bot.chat_id);
-                    (bot.clone(), chat.map(|c| state.display_status_for(c, now)))
+                    (
+                        bot.clone(),
+                        chat.map(|c| state.display_status_for(c, now)),
+                        bot_needs(state, bot, now).len(),
+                    )
                 })
                 .collect()
         };
         let tiles: Vec<AnyElement> = tiles
             .into_iter()
-            .map(|(bot, status)| {
+            .map(|(bot, status, needs)| {
                 let selected = current == Some(bot.id.as_str());
-                self.render_bot_tile(bot, status, selected, theme, cx)
+                self.render_bot_tile(bot, status, needs, selected, theme, cx)
             })
             .collect();
         let add_key = "bot-picker-add";
@@ -100,12 +105,15 @@ impl Shell {
         &self,
         bot: Bot,
         status: Option<ChatIndicator>,
+        needs: usize,
         selected: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = format!("bot-tile-{}", bot.id);
-        let dot = match status {
+        // What needs the owner outranks the conversation's dot: an amber
+        // count in its place.
+        let dot = match status.filter(|_| needs == 0) {
             Some(ChatIndicator::Working) => Some(theme.accent),
             Some(ChatIndicator::AwaitingInput) => Some(theme.warning),
             Some(ChatIndicator::Errored) => Some(theme.danger),
@@ -156,6 +164,33 @@ impl Shell {
                 }),
             )
             .child(avatar)
+            .when(needs > 0, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .top(px(-3.0))
+                        .right(px(-4.0))
+                        .min_w(px(15.0))
+                        .h(px(15.0))
+                        .px(px(3.0))
+                        .rounded_full()
+                        .border_2()
+                        .border_color(theme.bg)
+                        .bg(theme.warning)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(9.0))
+                        .line_height(px(11.0))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(gpui::white())
+                        .child(SharedString::from(if needs > 9 {
+                            "9+".to_string()
+                        } else {
+                            needs.to_string()
+                        })),
+                )
+            })
             .when_some(dot, |el, color| {
                 el.child(
                     div()

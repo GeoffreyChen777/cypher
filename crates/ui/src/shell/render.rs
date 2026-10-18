@@ -606,6 +606,8 @@ impl Shell {
             nested,
         } = row;
         let corner = chat_row_corner(time_ago, status, self.pulse_ticker.entity_id(), theme);
+        // A session a bot started says so, quietly, after its title.
+        let by_bot = super::bots::started_by_mark(self.state.read(cx), &id);
         let (hover, text) = (
             crate::appearance::surface_style::sidebar_hover(theme),
             theme.text,
@@ -707,6 +709,17 @@ impl Shell {
                             .line_height(px(16.0))
                             .child(title),
                     )
+                    .when_some(by_bot, |el, by| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .max_w(px(96.0))
+                                .truncate()
+                                .text_size(px(10.5))
+                                .text_color(theme.text_muted.opacity(0.65))
+                                .child(SharedString::from(by)),
+                        )
+                    })
                     .when(pinned, |el| {
                         el.child(
                             icon(icons::PIN)

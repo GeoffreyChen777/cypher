@@ -62,6 +62,7 @@ pub use chips::*;
 mod highlight;
 use highlight::*;
 mod attachments;
+pub mod bot_plan;
 mod find;
 pub mod rail;
 mod render;
@@ -128,6 +129,11 @@ pub const ATT_STRIP_H: f32 = ATT_THUMB_H + 10.0;
 // ---------------------------------------------------------------------------
 // Transcript entity
 // ---------------------------------------------------------------------------
+
+/// What [`Transcript::sync`] last built rows from: the state's transcript
+/// revision, the selected chat, the attachment devices, the tool call cap,
+/// and the chat's plans ([`bot_plan::plans_key`]).
+type SyncedRevision = (u64, Option<String>, Vec<String>, u32, u64);
 
 struct CachedRows {
     fingerprint: u64,
@@ -293,7 +299,7 @@ pub struct Transcript {
     /// (The attachment devices ride along: protected attachments re-key when
     /// the chat's row or the local device id lands; so does the tool call
     /// cap, which [`cap_work_runs`] applies at build time.)
-    synced_revision: Option<(u64, Option<String>, Vec<String>, u32)>,
+    synced_revision: Option<SyncedRevision>,
     /// Hovered rail tick (grows + shows the preview card).
     rail_hover: Option<usize>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
@@ -346,6 +352,11 @@ pub struct Transcript {
     rewind_armed: Option<(String, String)>,
     /// Disarms [`Self::rewind_armed`] after the window elapses.
     rewind_disarm: Option<Task<()>>,
+    /// The plan whose Stop is armed on its card (work id): a second click
+    /// stops it ([`bot_plan`]).
+    bot_plan_armed: Option<String>,
+    /// Disarms [`Self::bot_plan_armed`] after the window elapses.
+    bot_plan_disarm: Option<Task<()>>,
     /// In-chat find (⌘F). `None` while the find bar is closed — the shell
     /// renders the bar from this, so the two can never disagree about
     /// whether find is open.
@@ -543,6 +554,8 @@ impl Transcript {
             rewind_pending: std::collections::HashSet::new(),
             rewind_armed: None,
             rewind_disarm: None,
+            bot_plan_armed: None,
+            bot_plan_disarm: None,
             find: None,
             live: None,
             trailer_tick: None,

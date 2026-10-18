@@ -1978,3 +1978,101 @@ fn needs_you_counts_bots_waiting_on_their_owner() {
     state.apply_sessions(Vec::new());
     assert_eq!(bots::needs_you_count(&state, now), 0);
 }
+
+#[test]
+fn needs_you_counts_records_and_worker_questions_across_bots() {
+    use cypher_proto::{
+        ApprovalState, BotApproval, BotWork, SessionStatus, StepState, WorkState, WorkStep,
+    };
+    let now = Utc::now();
+    let mut state = AppState::new();
+    state.apply_bots(vec![test_bot("bob"), test_bot("ann")]);
+    state.apply_chats(vec![
+        test_bot_chat("bob"),
+        test_bot_chat("ann"),
+        test_chat("worker", false),
+        test_chat("plain", false),
+    ]);
+    let work = |id: &str, bot: &str, state: WorkState, sessions: Vec<String>| BotWork {
+        id: id.into(),
+        bot_id: bot.into(),
+        title: id.into(),
+        instruction: String::new(),
+        summary: None,
+        steps: vec![WorkStep {
+            id: "1".into(),
+            title: "Run the tests".into(),
+            project: None,
+            detail: None,
+            state: StepState::Running,
+            sessions,
+            note: None,
+            started_at: None,
+            ended_at: None,
+        }],
+        state,
+        chat_id: format!("{bot}-chat"),
+        tool_call_id: None,
+        thread_chat_id: None,
+        created_at: 0,
+        started_at: None,
+        ended_at: None,
+        result: None,
+        decision: None,
+        stop_requested_at: None,
+    };
+    let records = cypher_proto::BotRecords {
+        work: vec![
+            work("plan", "bob", WorkState::Proposed, vec![]),
+            work("run", "ann", WorkState::Running, vec!["worker".into()]),
+        ],
+        approvals: vec![BotApproval {
+            id: "a".into(),
+            bot_id: "bob".into(),
+            thread_chat_id: "t".into(),
+            work_id: None,
+            action: "Start a session".into(),
+            reason: "It read a peer's answer".into(),
+            created_at: 0,
+            state: ApprovalState::Pending,
+            decision: None,
+        }],
+        ..Default::default()
+    };
+    state.apply_bot_records(records);
+    let bob = state.bots.iter().find(|b| b.id == "bob").cloned();
+    let ann = state.bots.iter().find(|b| b.id == "ann").cloned();
+    let (bob, ann) = (bob.expect("bob"), ann.expect("ann"));
+    assert_eq!(
+        bots::bot_needs(&state, &bob, now).len(),
+        2,
+        "plan + approval"
+    );
+    assert!(bots::bot_needs(&state, &ann, now).is_empty());
+    assert_eq!(bots::needs_you_count(&state, now), 2);
+    // A worker asking, and Bob's own conversation asking, both count.
+    let session = |chat: &str| cypher_proto::Session {
+        chat_id: chat.into(),
+        status: SessionStatus::AwaitingInput,
+        updated_at: now,
+        ..crate::test_fixtures::session()
+    };
+    state.apply_sessions(vec![
+        session("worker"),
+        session("bob-chat"),
+        session("plain"),
+    ]);
+    assert_eq!(
+        bots::bot_needs(&state, &bob, now).first(),
+        Some(&bots::Need::Chat),
+        "the bot's own question leads"
+    );
+    assert_eq!(bots::bot_needs(&state, &ann, now).len(), 1);
+    assert_eq!(bots::needs_you_count(&state, now), 4);
+    // Sessions a bot started say so; others don't.
+    assert_eq!(
+        bots::started_by_mark(&state, "worker").as_deref(),
+        Some("by ANN")
+    );
+    assert_eq!(bots::started_by_mark(&state, "plain"), None);
+}

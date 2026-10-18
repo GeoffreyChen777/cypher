@@ -572,6 +572,11 @@ impl Transcript {
                 ..
             } => input_chip(header.clone(), *resolved, *permission, theme),
             RowKind::ErrorChip { message } => error_chip(message.clone(), theme),
+            RowKind::BotPlan {
+                call_id,
+                title,
+                resolved,
+            } => self.render_bot_plan(&row.id, call_id, title, *resolved, theme, cx),
             RowKind::Worked { label } => worked_rule(label.clone(), theme),
             RowKind::TurnChanges { changes } => {
                 self.render_turn_changes(&row.id, changes, theme, cx)

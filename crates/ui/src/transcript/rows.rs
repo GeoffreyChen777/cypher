@@ -108,6 +108,14 @@ pub enum RowKind {
     ErrorChip {
         message: SharedString,
     },
+    /// A bot's `propose_plan` call: the plan card, drawn from the plan's
+    /// record ([`super::bot_plan`]). The row's version carries the chat's
+    /// plans, so the card re-measures when its record changes.
+    BotPlan {
+        call_id: SharedString,
+        title: SharedString,
+        resolved: bool,
+    },
     /// The toggle over a reasoning part: "Thinking…" while it streams,
     /// "Thought" once it settled. The `blocks` [`RowKind::ThoughtBlock`] rows
     /// that follow are dropped while it is closed, the default (see
@@ -278,6 +286,7 @@ pub(super) fn row_match_count(row: &Row, query: &str) -> u32 {
         | RowKind::TurnChanges { .. }
         | RowKind::InputChip { .. }
         | RowKind::ErrorChip { .. }
+        | RowKind::BotPlan { .. }
         | RowKind::Thought { .. }
         | RowKind::ThoughtBlock { .. } => 0,
     };
@@ -656,7 +665,10 @@ pub fn rows_for_entry(
             MessagePart::Input { request_id, .. } if fold.filed.contains(request_id) => continue,
             _ => {}
         }
-        if let Some((part_id, item)) = tool_item(part, &fold) {
+        // A plan is a card of its own, not a chip in a group.
+        if !super::bot_plan::is_plan_call(part)
+            && let Some((part_id, item)) = tool_item(part, &fold)
+        {
             // Nothing is pushed until the group flushes, so the run's
             // rows start here.
             run.get_or_insert_with(|| (rows.len(), part_id.clone()));
@@ -710,8 +722,26 @@ pub fn rows_for_entry(
                     message: single_line(message).into(),
                 },
             )),
-            // Tools are grouped above; nothing reaches here.
-            MessagePart::Tool { .. } => {}
+            // Tools are grouped above; only a plan reaches here.
+            MessagePart::Tool {
+                id: part_id,
+                call,
+                resolved,
+                ..
+            } => {
+                let title = super::bot_plan::call_title(call);
+                rows.push(cx.row(
+                    format!("{}#{}", entry.id, part_id),
+                    fnv1a(part_id.as_bytes())
+                        ^ fnv1a(title.as_bytes()).rotate_left(3)
+                        ^ u64::from(*resolved),
+                    RowKind::BotPlan {
+                        call_id: part_id.clone().into(),
+                        title: title.into(),
+                        resolved: *resolved,
+                    },
+                ))
+            }
         }
     }
     cx.flush_tool_group(

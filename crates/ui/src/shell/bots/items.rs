@@ -1,0 +1,404 @@
+//! Pieces the coordination cards and panels share (Needs you, Work,
+//! Activity and the Status card's controls): item rows led by a mark,
+//! section labels, text blocks, step and outcome marks, the progress bar,
+//! the arm-then-confirm Stop, and the session a panel looks into.
+
+use super::*;
+pub(super) use crate::transcript::bot_plan::progress_bar;
+use crate::transcript::bot_plan::{PlanPhase, plan_phase};
+use cypher_proto::{BotWork, StepState};
+
+/// How long an armed Stop waits for its confirming click.
+const STOP_ARM_MS: u64 = 4000;
+
+/// A session the detail panel looks into: a session context following its
+/// transcript (an asking worker's question, an orchestration thread), and
+/// for a thread the read-only transcript drawn from it.
+pub(super) struct Peek {
+    pub chat_id: String,
+    pub state: Entity<crate::state::AppState>,
+    pub transcript: Option<Entity<Transcript>>,
+    _observe: Subscription,
+}
+
+/// An item row on a card or in a panel: the caller adds its mark, text and
+/// trailing note. Selected while its item is open in the panel.
+pub(super) fn item_row(key: &str, selected: bool) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(key.to_string()))
+        .px(px(8.0))
+        .py(px(6.0))
+        .rounded(px(8.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .cursor_pointer()
+        .bg(if selected {
+            crate::kit::theme::wash(0.08)
+        } else {
+            motion::hover_blend(
+                key,
+                crate::kit::theme::wash(0.0),
+                crate::kit::theme::wash(0.05),
+            )
+        })
+        .on_hover(motion::hover_listener(key.to_string()))
+}
+
+/// The row's leading mark, centred in the glyph column the project rows
+/// use.
+pub(super) fn mark_cell(mark: impl IntoElement) -> gpui::Div {
+    div()
+        .flex_none()
+        .w(px(14.0))
+        .flex()
+        .justify_center()
+        .child(mark)
+}
+
+/// A glyph in its tint, at the rows' size.
+pub(super) fn glyph(path: &'static str, tint: gpui::Hsla) -> gpui::Svg {
+    icon(path).size(px(14.0)).flex_none().text_color(tint)
+}
+
+/// A row's right-hand note (a time, a count).
+pub(super) fn trailing(text: String, color: gpui::Hsla) -> gpui::Div {
+    div()
+        .flex_none()
+        .text_size(px(11.0))
+        .text_color(color)
+        .child(SharedString::from(text))
+}
+
+/// A panel section's small caps label ("STEPS", "RESULT").
+pub(super) fn section_label(text: &str, theme: &Theme) -> gpui::Div {
+    div()
+        .px(px(8.0))
+        .pt(px(10.0))
+        .pb(px(6.0))
+        .text_size(px(10.5))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text_muted.opacity(0.75))
+        .child(SharedString::from(text.to_uppercase()))
+}
+
+/// Prose in a panel: a paragraph at the panel's reading size.
+pub(super) fn prose(text: String, color: gpui::Hsla) -> gpui::Div {
+    div()
+        .px(px(8.0))
+        .text_size(px(13.0))
+        .line_height(px(19.0))
+        .text_color(color)
+        .child(SharedString::from(text))
+}
+
+/// A quoted block: what an action does, a question, a result.
+pub(super) fn text_block(text: String, theme: &Theme) -> gpui::Div {
+    div()
+        .mx(px(8.0))
+        .px(px(12.0))
+        .py(px(9.0))
+        .rounded(px(8.0))
+        .bg(crate::kit::theme::ink(0.04))
+        .text_size(px(13.0))
+        .line_height(px(19.0))
+        .text_color(theme.text)
+        .child(SharedString::from(text))
+}
+
+/// Epoch milliseconds as a time.
+pub(super) fn at(ms: i64) -> chrono::DateTime<Utc> {
+    chrono::DateTime::from_timestamp_millis(ms).unwrap_or_default()
+}
+
+/// "5m", "2h": how long ago `ms` was.
+pub(super) fn ago(ms: i64, now: chrono::DateTime<Utc>) -> String {
+    format_time_ago(at(ms), now)
+}
+
+/// A step's state mark at the rows' size.
+pub(super) fn step_mark(state: StepState, ticker: gpui::EntityId, theme: &Theme) -> AnyElement {
+    let glyph_mark = |path, color| {
+        icon(path)
+            .size(px(12.0))
+            .text_color(color)
+            .into_any_element()
+    };
+    match state {
+        StepState::Pending => div()
+            .size(px(9.0))
+            .rounded_full()
+            .border_1()
+            .border_color(theme.text_faint.opacity(0.8))
+            .into_any_element(),
+        StepState::Running => {
+            super::super::render::status_mark(ChatIndicator::Working, ticker, theme)
+                .unwrap_or_else(|| gpui::Empty.into_any_element())
+        }
+        StepState::Asking => glyph_mark(icons::QUESTION_CIRCLE, theme.warning),
+        StepState::Done => glyph_mark(icons::CHECK, theme.success),
+        StepState::Failed => glyph_mark(icons::CLOSE_CIRCLE, theme.danger),
+        StepState::Skipped => div()
+            .w(px(8.0))
+            .h(px(1.5))
+            .rounded_full()
+            .bg(theme.text_faint)
+            .into_any_element(),
+    }
+}
+
+/// A work item's mark: a spinner while it runs, then how it ended.
+pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -> AnyElement {
+    let glyph_mark = |path, color| {
+        icon(path)
+            .size(px(12.0))
+            .text_color(color)
+            .into_any_element()
+    };
+    match plan_phase(work) {
+        PlanPhase::Running | PlanPhase::Starting | PlanPhase::Stopping => {
+            super::super::render::status_mark(ChatIndicator::Working, ticker, theme)
+                .unwrap_or_else(|| gpui::Empty.into_any_element())
+        }
+        PlanPhase::Awaiting => glyph_mark(icons::CHECKLIST, theme.warning),
+        PlanPhase::Done => glyph_mark(icons::CHECK, theme.success),
+        PlanPhase::Failed => glyph_mark(icons::CLOSE_CIRCLE, theme.danger),
+        PlanPhase::Stopped | PlanPhase::Cancelled | PlanPhase::Cancelling => div()
+            .size(px(8.0))
+            .rounded(px(2.0))
+            .bg(theme.text_faint)
+            .into_any_element(),
+    }
+}
+
+/// A session's status mark, with a quiet dot where the sidebar shows none.
+pub(super) fn session_mark(
+    status: ChatIndicator,
+    ticker: gpui::EntityId,
+    theme: &Theme,
+) -> AnyElement {
+    super::super::render::status_mark(status, ticker, theme).unwrap_or_else(|| {
+        div()
+            .flex_none()
+            .size(px(5.0))
+            .rounded_full()
+            .bg(if status == ChatIndicator::Errored {
+                theme.danger
+            } else {
+                theme.text_faint.opacity(0.6)
+            })
+            .into_any_element()
+    })
+}
+
+/// A square icon button (the Status card's controls): a hover wash and a
+/// tooltip.
+pub(super) fn icon_button(
+    key: &'static str,
+    path: &'static str,
+    tip: &'static str,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(key)
+        .flex_none()
+        .size(px(28.0))
+        .rounded(px(8.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(motion::hover_blend(
+            key,
+            crate::kit::theme::wash(0.0),
+            crate::kit::theme::wash(0.14),
+        ))
+        .on_hover(motion::hover_listener(key))
+        .tooltip(move |_, cx| {
+            cx.new(|_| super::super::session::FindTooltip(tip.into()))
+                .into()
+        })
+        .child(icon(path).size(px(14.0)).text_color(motion::hover_blend(
+            key,
+            theme.text_muted.opacity(0.8),
+            theme.text,
+        )))
+}
+
+/// A project as a step names it: glyph, tint, name and device.
+pub(super) struct ProjectLabel {
+    pub glyph: &'static str,
+    pub tint: gpui::Hsla,
+    pub name: String,
+    pub device: String,
+}
+
+pub(super) fn project_label(
+    state: &crate::state::AppState,
+    space_id: &str,
+    theme: &Theme,
+) -> Option<ProjectLabel> {
+    let space = state.space_row(space_id)?;
+    Some(ProjectLabel {
+        glyph: crate::appearance::space_style::space_icon(space.icon.as_deref()),
+        tint: crate::appearance::space_style::space_color(space.color.as_deref(), theme)
+            .unwrap_or(theme.text_muted),
+        name: space.display_name().to_string(),
+        device: state
+            .device_name(&space.device_id)
+            .unwrap_or("Unknown device")
+            .to_string(),
+    })
+}
+
+/// A panel's action row (Approve / Cancel …).
+pub(super) fn action_row() -> gpui::Div {
+    div()
+        .px(px(8.0))
+        .pt(px(14.0))
+        .pb(px(8.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+}
+
+/// After a decision: the state it left the item in, with its mark.
+pub(super) fn outcome_line(mark: AnyElement, text: String, color: gpui::Hsla) -> gpui::Div {
+    div()
+        .px(px(8.0))
+        .pt(px(14.0))
+        .pb(px(8.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(px(12.5))
+        .text_color(color)
+        .child(mark_cell(mark))
+        .child(SharedString::from(text))
+}
+
+impl Shell {
+    /// The session context following `chat_id` for the panel, made on first
+    /// use (with the read-only transcript when `transcript`).
+    pub(super) fn peek(
+        &mut self,
+        chat_id: &str,
+        transcript: bool,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::state::AppState> {
+        if self
+            .board
+            .peek
+            .as_ref()
+            .is_none_or(|p| p.chat_id != chat_id)
+        {
+            let state = crate::state::AppState::new_session_context(
+                &self.state,
+                Some(chat_id.to_string()),
+                cx,
+            );
+            let observe = cx.observe(&state, |_, _, cx| cx.notify());
+            self.board.peek = Some(Peek {
+                chat_id: chat_id.to_string(),
+                state,
+                transcript: None,
+                _observe: observe,
+            });
+        }
+        let state = self
+            .board
+            .peek
+            .as_ref()
+            .map(|p| p.state.clone())
+            .expect("peek was just made");
+        if transcript
+            && self
+                .board
+                .peek
+                .as_ref()
+                .is_some_and(|p| p.transcript.is_none())
+        {
+            let view = cx.new(|cx| Transcript::for_side_chat(state.clone(), cx));
+            if let Some(peek) = self.board.peek.as_mut() {
+                peek.transcript = Some(view);
+            }
+        }
+        state
+    }
+
+    /// The Stop button of a running work item: the first click arms it, a
+    /// second within [`STOP_ARM_MS`] stops the work and its sessions.
+    pub(super) fn stop_button(
+        &self,
+        key: &str,
+        work_id: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let armed = self.board.stop_armed.as_deref() == Some(work_id);
+        let work_id = work_id.to_string();
+        div()
+            .id(SharedString::from(key.to_string()))
+            .px(px(10.0))
+            .py(px(5.0))
+            .rounded(px(8.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(7.0))
+            .cursor_pointer()
+            .text_size(px(13.0))
+            .when(armed, |el| {
+                el.bg(theme.danger.opacity(0.12)).text_color(theme.danger)
+            })
+            .when(!armed, |el| {
+                el.text_color(motion::hover_blend(key, theme.text_muted, theme.text))
+                    .bg(motion::hover_blend(
+                        key,
+                        crate::kit::theme::wash(0.0),
+                        crate::kit::theme::ink(0.06),
+                    ))
+            })
+            .on_hover(motion::hover_listener(key.to_string()))
+            .on_click(cx.listener(move |this, _, _, cx| this.arm_or_stop(work_id.clone(), cx)))
+            .child(div().size(px(8.0)).rounded(px(2.0)).bg(if armed {
+                theme.danger
+            } else {
+                theme.text_muted
+            }))
+            .child(SharedString::from(if armed {
+                "Stop the work and its sessions?"
+            } else {
+                "Stop"
+            }))
+    }
+
+    fn arm_or_stop(&mut self, work_id: String, cx: &mut Context<Self>) {
+        if self.board.stop_armed.as_deref() == Some(work_id.as_str()) {
+            self.board.stop_armed = None;
+            self.board.stop_disarm = None;
+            self.mutate(
+                serde_json::json!({ "op": "stopBotWork", "workId": work_id }),
+                cx,
+            );
+            cx.notify();
+            return;
+        }
+        self.board.stop_armed = Some(work_id.clone());
+        self.board.stop_disarm = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(STOP_ARM_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.board.stop_armed.as_deref() == Some(work_id.as_str()) {
+                    this.board.stop_armed = None;
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+}

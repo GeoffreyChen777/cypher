@@ -836,12 +836,14 @@ impl Transcript {
                 s.selected_chat.clone(),
                 self.attachment_device_ids(cx),
                 crate::appearance::chat_style::settings(cx).tool_call_limit,
+                super::bot_plan::plans_key(&s.bot_records, s.selected_chat.as_deref()),
             )
         };
         if self.synced_revision.as_ref() == Some(&revision) {
             return;
         }
         let tool_call_limit = revision.3;
+        let plans_key = revision.4;
         self.synced_revision = Some(revision);
         let (selected, entries, echoes, steers) = {
             let s = self.state.read(cx);
@@ -869,13 +871,19 @@ impl Transcript {
             self.reset_for_attach(selected, cx);
         }
 
-        let new_rows = self.build_rows(
+        let mut new_rows = self.build_rows(
             &entries,
             &echoes,
             &steers,
             pending_request_id.as_deref(),
             tool_call_limit,
         );
+        // A plan card's height follows its record, not its entry.
+        for row in &mut new_rows {
+            if matches!(row.kind, RowKind::BotPlan { .. }) {
+                row.version ^= plans_key;
+            }
+        }
 
         self.update_veils(attached, entries.is_empty(), &new_rows);
 

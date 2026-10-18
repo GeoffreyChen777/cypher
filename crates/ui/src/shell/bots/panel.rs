@@ -33,6 +33,8 @@ pub(in crate::shell) enum PanelItem {
     Work,
     /// One orchestration (work id).
     WorkItem(String),
+    /// An orchestration's thread, read-only (work id).
+    Thread(String),
     /// Routines and project tasks, by next run.
     Schedule,
     Routine(String),
@@ -71,7 +73,24 @@ impl Shell {
             self.board.panel_tween = Some(WidthTween::new(from, super::column::PANEL_SPAN));
         }
         self.board.panel = Some(item);
+        self.drop_panel_extras();
         cx.notify();
+    }
+
+    /// What an item kept while it was open (the session it looked into, a
+    /// draft being edited) goes with it.
+    pub(super) fn drop_panel_extras(&mut self) {
+        let keep_peek = match self.board.panel.as_ref() {
+            Some(PanelItem::Asking { chat_id, .. }) => Some(chat_id.clone()),
+            Some(PanelItem::Thread(_)) => self.board.peek.as_ref().map(|p| p.chat_id.clone()),
+            _ => None,
+        };
+        if self.board.peek.as_ref().map(|p| &p.chat_id) != keep_peek.as_ref() {
+            self.board.peek = None;
+        }
+        if !matches!(self.board.panel, Some(PanelItem::Review(_))) {
+            self.board.review = None;
+        }
     }
 
     /// Slide the panel shut, its content kept until the tween ends.
@@ -105,6 +124,7 @@ impl Shell {
         self.board.panel = None;
         self.board.panel_last = None;
         self.board.panel_tween = None;
+        self.drop_panel_extras();
     }
 
     /// The panel card for `item`, `None` when it no longer resolves (the
@@ -129,7 +149,7 @@ impl Shell {
             | PanelItem::Approval(_)
             | PanelItem::Asking { .. }
             | PanelItem::Review(_) => self.render_needs_panel(&bot, item, &theme, cx)?,
-            PanelItem::Work | PanelItem::WorkItem(_) => {
+            PanelItem::Work | PanelItem::WorkItem(_) | PanelItem::Thread(_) => {
                 self.render_work_panel(&bot, item, &theme, cx)?
             }
             PanelItem::Schedule
@@ -229,8 +249,24 @@ impl Shell {
                     ),
             )
             .child(close);
-        // Replacing the content fades the new item in.
+        // Replacing the content fades the new item in. A thread's
+        // transcript scrolls itself, so its body fills the card unscrolled.
         let content_key = SharedString::from(format!("bot-panel-{item:?}"));
+        let body = if matches!(item, PanelItem::Thread(_)) {
+            div()
+                .flex_1()
+                .min_h_0()
+                .child(motion::fade_quick(content_key, body.size_full()))
+                .into_any_element()
+        } else {
+            div()
+                .id("bot-panel-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(motion::fade_quick(content_key, body))
+                .into_any_element()
+        };
         Some(
             div()
                 .size_full()
@@ -241,14 +277,7 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .child(header)
-                .child(
-                    div()
-                        .id("bot-panel-body")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .child(motion::fade_quick(content_key, body)),
-                )
+                .child(body)
                 .into_any_element(),
         )
     }

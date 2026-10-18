@@ -204,6 +204,9 @@ icon_assets![
     (BOT_HELMET, "bot-helmet"),
     (BOT_TV, "bot-tv"),
     (BOT_SLEEPY, "bot-sleepy"),
+    // A bot's pause switch, hand-drawn in the Solar Linear style.
+    (PAUSE, "pause"),
+    (PLAY, "play"),
     // Harness brand marks (icons.tsx).
     (CLAUDE_MARK, "claude-mark"),
     (OPENAI_MARK, "openai-mark"),
