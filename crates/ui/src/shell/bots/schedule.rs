@@ -797,30 +797,15 @@ impl Shell {
                         })),
                     );
             }
-            RoutineTarget::Project { worktree, .. } => {
-                let flip = routine.clone();
-                settings = settings.child(
-                    parts::switch_row(
-                        "bot-routine-worktree",
-                        "Its own worktree",
-                        "Made on the first run and kept, so runs never touch your checkout.",
-                        *worktree,
-                        first,
-                        theme,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let mut routine = flip.clone();
-                        if let RoutineTarget::Project { worktree, .. } = &mut routine.target {
-                            *worktree = !*worktree;
-                        }
-                        this.save_routine_now(routine, cx);
-                    })),
-                );
-            }
+            // Its checkout is chosen in the form (Edit).
+            RoutineTarget::Project { .. } => {}
         }
-        body = body
-            .child(parts::section_label(theme, "Settings"))
-            .child(settings);
+        let has_settings = !first || routine.target == RoutineTarget::Workspace;
+        if has_settings {
+            body = body
+                .child(parts::section_label(theme, "Settings"))
+                .child(settings);
+        }
         Some((head, body))
     }
 
