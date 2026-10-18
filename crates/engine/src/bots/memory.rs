@@ -338,24 +338,35 @@ impl Bots {
                     )));
                 };
                 let previous = existing.as_ref().and_then(|r| match &r.target {
-                    RoutineTarget::Project {
-                        worktree, model, ..
-                    } => Some((*worktree, model.clone())),
+                    RoutineTarget::Project { worktree, .. } => Some(*worktree),
                     RoutineTarget::Workspace => None,
                 });
                 RoutineTarget::Project {
                     space_id: space_id.clone(),
-                    worktree: args
-                        .worktree
-                        .or(previous.as_ref().map(|p| p.0))
-                        .unwrap_or(false),
-                    model: model.or_else(|| previous.and_then(|p| p.1)),
+                    worktree: args.worktree.or(previous).unwrap_or(false),
+                    model: None,
                 }
             }
             None => existing
                 .as_ref()
                 .map(|r| r.target.clone())
                 .unwrap_or_default(),
+        };
+        // The model lives on the routine itself, whichever way it runs.
+        let model = model.or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|r| r.chosen_model().map(str::to_string))
+        });
+        let target = match target {
+            RoutineTarget::Project {
+                space_id, worktree, ..
+            } => RoutineTarget::Project {
+                space_id,
+                worktree,
+                model: None,
+            },
+            other => other,
         };
         if let Some(space_id) = target.space_id() {
             if !bot.capabilities.coordinate {
@@ -377,6 +388,7 @@ impl Bots {
             name: args.name,
             prompt: args.prompt,
             target,
+            model,
             schedule: args.schedule,
             enabled: args
                 .enabled
@@ -703,6 +715,9 @@ pub(super) fn render_schedule(
                     format!(" · a session in {place}, in {checkout}")
                 }
             });
+            if let Some(model) = r.chosen_model() {
+                line.push_str(&format!(" · model {model}"));
+            }
             if r.write_notes {
                 line.push_str(" · writes notes");
             }

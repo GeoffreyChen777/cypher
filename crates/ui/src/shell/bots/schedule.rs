@@ -334,11 +334,26 @@ pub(super) struct JobForm {
     space_id: Option<String>,
     /// A project routine's own worktree rather than the project checkout.
     worktree: bool,
-    /// Kept from the record: the form doesn't edit it.
+    /// The model its runs use; `None` follows the workspace chat.
     model: Option<String>,
+    /// The model list: open, its filter, and the device's catalogue.
+    model_open: bool,
+    model_search: Entity<TextInput>,
+    models: ModelList,
+    /// The device the catalogue was asked of.
+    models_device: Option<String>,
     error: Option<SharedString>,
     busy: bool,
     _events: Vec<Subscription>,
+}
+
+/// A device's model catalogue, as the form loads it.
+#[derive(Debug, Clone, Default)]
+pub(super) enum ModelList {
+    #[default]
+    Loading,
+    Ready(Vec<cypher_proto::Model>),
+    Failed(String),
 }
 
 /// The Routines panels' own state: the open form, and an item just saved
@@ -736,9 +751,7 @@ impl Shell {
                     SharedString::from("This workspace"),
                 ));
             }
-            RoutineTarget::Project {
-                worktree, model, ..
-            } => {
+            RoutineTarget::Project { worktree, .. } => {
                 body = body
                     .child(parts::fact(
                         theme,
@@ -760,15 +773,16 @@ impl Shell {
                             "The project's checkout"
                         }),
                     ));
-                if let Some(model) = model {
-                    body = body.child(parts::fact(
-                        theme,
-                        "Model",
-                        SharedString::from(model.clone()),
-                    ));
-                }
             }
         }
+        body = body.child(parts::fact(
+            theme,
+            "Model",
+            SharedString::from(match routine.chosen_model() {
+                Some(model) => model.to_string(),
+                None => "Default, same as the workspace chat".to_string(),
+            }),
+        ));
         body = body.child(parts::fact(
             theme,
             "Repeats",
@@ -1035,14 +1049,13 @@ impl Shell {
                 },
                 FormTarget::Routine(id) => {
                     let r = state.bot_records.routines.iter().find(|r| r.id == *id)?;
-                    let (space_id, worktree, model) = match &r.target {
-                        RoutineTarget::Workspace => (None, true, None),
+                    let (space_id, worktree) = match &r.target {
+                        RoutineTarget::Workspace => (None, true),
                         RoutineTarget::Project {
-                            space_id,
-                            worktree,
-                            model,
-                        } => (Some(space_id.clone()), *worktree, model.clone()),
+                            space_id, worktree, ..
+                        } => (Some(space_id.clone()), *worktree),
                     };
+                    let model = r.chosen_model().map(str::to_string);
                     Seed {
                         name: r.name.clone(),
                         prompt: r.prompt.clone(),
@@ -1061,6 +1074,7 @@ impl Shell {
             TextInput::settings_prompt_field("What moved, what's stuck, and what needs me?", cx)
         });
         let time = cx.new(|cx| TextInput::settings_field("09:00", false, cx));
+        let model_search = cx.new(|cx| TextInput::settings_field("Search models…", false, cx));
         let every = cx.new(|cx| TextInput::settings_field("2", false, cx));
         let (draft, time_text, every_text) = ScheduleDraft::from_schedule(&seed.schedule);
         name.update(cx, |input, cx| input.set_text(seed.name, cx));
@@ -1093,6 +1107,10 @@ impl Shell {
             space_id: seed.space_id,
             worktree: seed.worktree,
             model: seed.model,
+            model_open: false,
+            model_search,
+            models: ModelList::Loading,
+            models_device: None,
             error: None,
             busy: false,
             _events: events,
@@ -1143,7 +1161,8 @@ impl Shell {
                 bot_id: form.bot_id.clone(),
                 name: name.clone(),
                 prompt,
-                target: form_target(form.space_id.clone(), form.worktree, form.model.clone()),
+                target: form_target(form.space_id.clone(), form.worktree),
+                model: form.model.clone(),
                 schedule,
                 enabled: existing.is_none_or(|r| r.enabled),
                 write_notes: form.write_notes,
@@ -1232,6 +1251,7 @@ impl Shell {
             .into(),
             subtitle: format!("Runs unattended; {} posts each result", bot.name),
         };
+        let model_picker = self.render_model_picker(bot, theme, cx);
         let Some(form) = self.board.schedule.form.as_ref() else {
             return (head, div());
         };
@@ -1574,6 +1594,10 @@ impl Shell {
             }
         }
 
+        body = body
+            .child(parts::field_label(theme, "Model"))
+            .child(model_picker);
+
         let new = target == FormTarget::NewRoutine;
         let (footer, cancel, save) = parts::form_footer(
             theme,
@@ -1593,6 +1617,221 @@ impl Shell {
                 .into_any_element(),
         );
         (head, body.pb(px(16.0)))
+    }
+}
+
+impl Shell {
+    /// The device a form's routine runs on: its project's, else the
+    /// workspace's host.
+    fn form_device(&self, bot: &Bot, cx: &App) -> Option<String> {
+        let form = self.board.schedule.form.as_ref()?;
+        let state = self.state.read(cx);
+        Some(match &form.space_id {
+            Some(id) => state.space_row(id)?.device_id.clone(),
+            None => bot.host_device_id.clone(),
+        })
+    }
+
+    /// Ask the routine's device for its models, once per device.
+    fn load_form_models(&mut self, bot: &Bot, cx: &mut Context<Self>) {
+        let Some(device) = self.form_device(bot, cx) else {
+            return;
+        };
+        let Some(form) = self.board.schedule.form.as_mut() else {
+            return;
+        };
+        if form.models_device.as_deref() == Some(device.as_str()) {
+            return;
+        }
+        form.models_device = Some(device.clone());
+        form.models = ModelList::Loading;
+        let asked = device.clone();
+        self.board_call(
+            methods::LIST_MODELS,
+            serde_json::json!({ "harness": "pi", "targetDeviceId": device }),
+            cx,
+            move |this, result, cx| {
+                let Some(form) = this.board.schedule.form.as_mut() else {
+                    return;
+                };
+                if form.models_device.as_deref() != Some(asked.as_str()) {
+                    return;
+                }
+                form.models = match result {
+                    Ok(value) => match serde_json::from_value::<Vec<cypher_proto::Model>>(value) {
+                        Ok(models) => {
+                            ModelList::Ready(crate::pickers::normalize_model_rows(models))
+                        }
+                        Err(err) => ModelList::Failed(err.to_string()),
+                    },
+                    Err(CallError::Unknown) => {
+                        ModelList::Failed("This device can't list its models.".into())
+                    }
+                    Err(CallError::Failed(text)) => ModelList::Failed(text),
+                };
+                cx.notify();
+            },
+        );
+    }
+
+    /// The form's model choice: a row naming it that opens a searchable
+    /// list of the device's models, "Default" first.
+    fn render_model_picker(
+        &mut self,
+        bot: &Bot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        self.load_form_models(bot, cx);
+        let Some(form) = self.board.schedule.form.as_ref() else {
+            return div();
+        };
+        let label = |id: &str, models: &ModelList| match models {
+            ModelList::Ready(models) => models
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| m.label.clone())
+                .unwrap_or_else(|| id.to_string()),
+            _ => id.to_string(),
+        };
+        let current = match &form.model {
+            Some(id) => label(id, &form.models),
+            None => "Default".to_string(),
+        };
+        let open = form.model_open;
+        let key = "bot-form-model";
+        let trigger = div()
+            .id(key)
+            .h(px(36.0))
+            .px(px(12.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, window, cx| {
+                if let Some(form) = this.board.schedule.form.as_mut() {
+                    form.model_open = !form.model_open;
+                    if form.model_open {
+                        window.focus(&form.model_search.focus_handle(cx), cx);
+                    }
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.5))
+                    .text_color(theme.text)
+                    .child(SharedString::from(current)),
+            )
+            .when(form.model.is_none(), |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.5))
+                        .text_color(theme.text_muted)
+                        .child("same as the workspace chat"),
+                )
+            })
+            .child(
+                icon(if open {
+                    icons::ALT_ARROW_DOWN
+                } else {
+                    icons::ALT_ARROW_RIGHT
+                })
+                .size(px(11.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+            );
+        let mut picker = parts::group_box().child(trigger);
+        if !open {
+            return picker;
+        }
+        let row = |id: Option<String>, text: String, on: bool, cx: &mut Context<Self>| {
+            div()
+                .id(SharedString::from(format!(
+                    "bot-form-model-{}",
+                    id.as_deref().unwrap_or("default")
+                )))
+                .h(px(28.0))
+                .px(px(8.0))
+                .rounded(px(6.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .cursor_pointer()
+                .when(on, |el| el.bg(crate::kit::theme::ink(0.06)))
+                .when(!on, |el| el.hover(|s| s.bg(theme.element_hover)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(form) = this.board.schedule.form.as_mut() {
+                        form.model = id.clone();
+                        form.model_open = false;
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .text_color(theme.text)
+                        .child(SharedString::from(text)),
+                )
+                .when(on, |el| {
+                    el.child(icon(icons::CHECK).size(px(12.0)).text_color(theme.text))
+                })
+        };
+        let query = form.model_search.read(cx).text().trim().to_lowercase();
+        let chosen = form.model.clone();
+        let mut list = div()
+            .id("bot-form-model-list")
+            .max_h(px(220.0))
+            .overflow_y_scroll()
+            .px(px(4.0))
+            .pb(px(4.0))
+            .flex()
+            .flex_col()
+            .child(row(None, "Default".into(), chosen.is_none(), cx));
+        match form.models.clone() {
+            ModelList::Ready(models) => {
+                let matching: Vec<_> = models
+                    .into_iter()
+                    .filter(|m| {
+                        query.is_empty()
+                            || m.label.to_lowercase().contains(&query)
+                            || m.id.to_lowercase().contains(&query)
+                    })
+                    .collect();
+                if matching.is_empty() {
+                    list = list.child(parts::quiet_line(theme, "No matching models."));
+                }
+                for m in matching {
+                    let on = chosen.as_deref() == Some(m.id.as_str());
+                    list = list.child(row(Some(m.id), m.label, on, cx));
+                }
+            }
+            ModelList::Loading => list = list.child(parts::quiet_line(theme, "Loading models…")),
+            ModelList::Failed(why) => list = list.child(parts::quiet_line(theme, why)),
+        }
+        picker = picker.child(
+            div()
+                .border_t_1()
+                .border_color(crate::kit::theme::hairline(0.06))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .p(px(6.0))
+                        .child(parts::field(&form.model_search).mx(px(0.0))),
+                )
+                .child(list),
+        );
+        picker
     }
 }
 
@@ -1636,14 +1875,14 @@ fn job_mark(
     }
 }
 
-/// The routine target a form describes.
-fn form_target(space_id: Option<String>, worktree: bool, model: Option<String>) -> RoutineTarget {
+/// The routine target a form describes (its model lives on the routine).
+fn form_target(space_id: Option<String>, worktree: bool) -> RoutineTarget {
     match space_id {
         None => RoutineTarget::Workspace,
         Some(space_id) => RoutineTarget::Project {
             space_id,
             worktree,
-            model,
+            model: None,
         },
     }
 }
@@ -1845,6 +2084,7 @@ mod tests {
             name: " ".into(),
             prompt: "Summarize".into(),
             target: RoutineTarget::Workspace,
+            model: None,
             schedule: Schedule::default(),
             enabled: true,
             write_notes: false,
@@ -1863,13 +2103,11 @@ mod tests {
 
     #[test]
     fn forms_say_where_a_routine_runs() {
-        assert_eq!(form_target(None, true, None), RoutineTarget::Workspace);
-        let target = form_target(Some("web".into()), false, Some("haiku".into()));
+        assert_eq!(form_target(None, true), RoutineTarget::Workspace);
+        let target = form_target(Some("web".into()), false);
         assert_eq!(
             serde_json::to_value(&target).unwrap(),
-            serde_json::json!({
-                "kind": "project", "spaceId": "web", "worktree": false, "model": "haiku",
-            })
+            serde_json::json!({ "kind": "project", "spaceId": "web", "worktree": false })
         );
         assert_eq!(
             serde_json::to_value(RoutineTarget::Workspace).unwrap(),

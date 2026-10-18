@@ -556,6 +556,11 @@ pub struct BotRoutine {
     pub prompt: String,
     #[serde(default)]
     pub target: RoutineTarget,
+    /// The model its runs use; `None` follows the workspace chat's (a
+    /// project routine written before this field may carry its own in
+    /// `target`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default)]
     pub schedule: Schedule,
     #[serde(default = "yes")]
@@ -591,6 +596,14 @@ pub struct BotRoutine {
 }
 
 impl BotRoutine {
+    /// The model its runs should use, when it names one.
+    pub fn chosen_model(&self) -> Option<&str> {
+        self.model.as_deref().or(match &self.target {
+            RoutineTarget::Project { model, .. } => model.as_deref(),
+            RoutineTarget::Workspace => None,
+        })
+    }
+
     /// The fields the host writes; everything else is the owner's.
     pub const HOST_FIELDS: &'static [&'static str] = &[
         "threadChatId",

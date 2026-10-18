@@ -383,7 +383,22 @@ impl Bots {
                 .doc_host
                 .request_from_chat_row(&session, &prompt)
                 .ok_or_else(|| EngineError::Other("the routine thread has no row".into()))
-                .map(|request| (request, None)),
+                .map(|mut request| {
+                    // The routine's model, else the workspace chat's as it is
+                    // now (the thread copied it once, when it was made).
+                    let chat_model = self
+                        .inner
+                        .workspace
+                        .chat(&bot.chat_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|chat| chat.config)
+                        .and_then(|config| config.model);
+                    if let Some(model) = routine.chosen_model().map(str::to_string).or(chat_model) {
+                        request.model = Some(model);
+                    }
+                    (request, None)
+                }),
             Some(space) => Ok(self
                 .project_request(routine, space, &session, &prompt)
                 .await),
@@ -424,12 +439,17 @@ impl Bots {
         session: &str,
         prompt: &str,
     ) -> (p::RunRequest, Option<String>) {
-        let (worktree, model) = match &routine.target {
-            RoutineTarget::Project {
-                worktree, model, ..
-            } => (*worktree, model.clone()),
-            RoutineTarget::Workspace => (false, None),
-        };
+        let worktree = matches!(
+            routine.target,
+            RoutineTarget::Project { worktree: true, .. }
+        );
+        // The routine's model, else the workspace chat's, as a workspace
+        // routine's runs do.
+        let model = routine.chosen_model().map(str::to_string).or_else(|| {
+            let workspace = &self.inner.workspace;
+            let bot = workspace.bot(&routine.bot_id).ok().flatten()?;
+            workspace.chat(&bot.chat_id).ok().flatten()?.config?.model
+        });
         let own = routine
             .worktree_path
             .clone()

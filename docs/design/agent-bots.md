@@ -428,7 +428,10 @@ routines apart is where they run and what they can reach:
   agent turn or more.
 
 As built (P3, engine). A routine is a registry row: `botRoutines` (`BotRoutine`), with a
-`target` of `{kind: "workspace"}` or `{kind: "project", spaceId, worktree, model?}`.
+`target` of `{kind: "workspace"}` or `{kind: "project", spaceId, worktree}` and an optional
+`model`. Every run, either kind, uses that model, else the workspace chat's model as it is
+at that run (a project target's own `model`, written before the field moved, still
+counts).
 Owner devices write the definition and `runRequestedAt` ("Run now"); the host writes only
 `threadChatId` (the standing session), `manualChatId` (the latest Run now's session),
 `worktreePath` (a project routine's own worktree), `lastRun` (with `manual` set for a Run

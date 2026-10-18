@@ -187,6 +187,7 @@ fn the_schedule_lists_routines_and_where_they_run() {
         name: "Morning brief".into(),
         prompt: "What's stuck?".into(),
         target: RoutineTarget::Workspace,
+        model: None,
         schedule: Schedule::Daily {
             time: "09:00".into(),
             days: vec![1, 2, 3, 4, 5],

@@ -166,6 +166,7 @@ fn routine_def(id: &str, bot: &Bot, prompt: &str, schedule: Schedule) -> BotRout
         name: "Morning brief".into(),
         prompt: prompt.into(),
         target: p::RoutineTarget::Workspace,
+        model: None,
         schedule,
         enabled: true,
         write_notes: false,
@@ -224,12 +225,13 @@ async fn a_due_routine_runs_in_its_thread_and_posts_to_the_bot_chat() {
         ..
     } = rig().await;
     let bot = create_bot(&core, false).await;
-    let def = routine_def(
+    let mut def = routine_def(
         "r-brief",
         &bot,
         "Tell me what's stuck.",
         Schedule::Interval { minutes: 60 },
     );
+    def.model = Some("pi/routine-model".into());
     save_routine(&core, &def).await;
 
     // The host plans the next run as soon as the routine exists.
@@ -296,6 +298,11 @@ async fn a_due_routine_runs_in_its_thread_and_posts_to_the_bot_chat() {
         request.prompt.starts_with("Routine \"Morning brief\" · "),
         "{}",
         request.prompt
+    );
+    assert_eq!(
+        request.model.as_deref(),
+        Some("pi/routine-model"),
+        "the routine's model"
     );
     let env = env.expect("a bot run");
     assert_eq!(env.origin, BotOrigin::Routine);

@@ -308,7 +308,7 @@ const TOOLS: ToolDef[] = [
       enabled: Type.Optional(Type.Boolean({ description: "Off keeps it but runs it only by hand (default on)" })),
       project: Type.Optional(Type.String({ description: "Run as a session in this project (id or name) instead of as you; \"\" moves it back to you; leave out to keep where it runs" })),
       worktree: Type.Optional(Type.Boolean({ description: "project only: run in its own worktree, kept across runs, instead of the project's checkout (default off)" })),
-      model: Type.Optional(Type.String({ description: "project only: the model its sessions run on, e.g. claude-bridge/claude-haiku-5-5 (default: the project's)" })),
+      model: Type.Optional(Type.String({ description: "The model its runs use, e.g. claude-bridge/claude-haiku-5-5 (default: the workspace chat's)" })),
     }),
   },
   // ── end memory ──
