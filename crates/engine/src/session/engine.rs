@@ -153,6 +153,11 @@ struct Inner {
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
     sessions_tx: watch::Sender<Vec<Session>>,
+    /// Held across each publication. Writers change `statuses` and publish
+    /// after releasing it, so two publications can run in either order; each
+    /// reads the current row under this lock, so the last one to run carries
+    /// the latest state instead of its writer's older copy.
+    publish_order: Mutex<()>,
     /// Host-LOCAL messaging channel identity for child chats, keyed by child
     /// chat id. The channel root is an absolute host-local path
     /// (`/tmp/pi-subagents-messages/<session>`); it is NEVER persisted or
@@ -338,6 +343,7 @@ impl SessionsEngine {
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
+                publish_order: Mutex::new(()),
                 child_channels: Mutex::new(HashMap::new()),
                 spent_child_channels: Mutex::new(HashMap::new()),
                 forwarded: Mutex::new(HashMap::new()),
@@ -1150,40 +1156,59 @@ impl Inner {
 
     /// Publish a session status: ephemeral chats update ONLY their private
     /// watch (the Side Chat panel); normal chats update the public sessions
-    /// watch AND the workspace session row (remote sidebars).
+    /// watch AND the workspace session row (remote sidebars). Both get the
+    /// chat's row as it is now (see [`Inner::publish_order`]); `session`, the
+    /// change being published, goes to the notification hook.
     fn publish_session(&self, chat_id: &str, session: &Session) {
-        if !self.publish_local(chat_id, session) {
-            return;
+        {
+            let _order = lock(&self.publish_order);
+            let Some(current) = self.publish_current(chat_id) else {
+                return;
+            };
+            if let Some(ws) = self.workspace() {
+                ws.record_session(&current);
+            }
         }
         if let Some(ws) = self.workspace() {
-            ws.record_session(session);
             ws.notify_session_event(session);
         }
     }
 
     /// The engine-local half of [`Self::publish_session`]: refresh the
     /// ephemeral watch or the public `WatchSessions` list, without touching
-    /// the workspace registry. Returns whether the chat is public (i.e.
-    /// whether a registry mirror would apply).
-    fn publish_local(&self, chat_id: &str, session: &Session) -> bool {
+    /// the workspace registry.
+    fn publish_local(&self, chat_id: &str) {
+        let _order = lock(&self.publish_order);
+        self.publish_current(chat_id);
+    }
+
+    /// Under [`Inner::publish_order`]: send `chat_id`'s current row to the
+    /// ephemeral watch or the public `WatchSessions` list. Returns the row
+    /// when the chat is public (a registry mirror applies) and still has one.
+    fn publish_current(&self, chat_id: &str) -> Option<Session> {
         if self.is_ephemeral(chat_id) {
-            if let Some(tx) = lock(&self.ephemeral_tx).get(chat_id) {
-                let _ = tx.send_replace(Some(session.clone()));
+            let current = lock(&self.statuses).get(chat_id).cloned();
+            if let (Some(current), Some(tx)) = (current, lock(&self.ephemeral_tx).get(chat_id)) {
+                let _ = tx.send_replace(Some(current));
             }
-            return false;
+            return None;
         }
         let ephemeral = lock(&self.ephemeral);
-        let mut list: Vec<Session> = lock(&self.statuses)
-            .values()
-            .filter(|s| !ephemeral.contains(&s.chat_id))
-            .cloned()
-            .collect();
+        let (current, mut list) = {
+            let statuses = lock(&self.statuses);
+            let list: Vec<Session> = statuses
+                .values()
+                .filter(|s| !ephemeral.contains(&s.chat_id))
+                .cloned()
+                .collect();
+            (statuses.get(chat_id).cloned(), list)
+        };
         list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
         drop(ephemeral);
         // send_replace: keep the current value fresh even with no receivers,
         // so late WatchSessions subscribers see the last transition.
         self.sessions_tx.send_replace(list);
-        true
+        current
     }
 
     /// Bump the session's freshness on stream activity WITHOUT a status
@@ -1269,7 +1294,7 @@ impl Inner {
             entry.clone()
         };
         if session.status == SessionStatus::Working {
-            self.publish_local(chat_id, &session);
+            self.publish_local(chat_id);
         } else {
             self.publish_session(chat_id, &session);
         }
@@ -1302,7 +1327,7 @@ impl Inner {
     }
 
     fn set_throughput(&self, chat_id: &str, throughput: Option<Throughput>) {
-        let session = {
+        {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {
                 return;
@@ -1311,9 +1336,8 @@ impl Inner {
                 return;
             }
             entry.throughput = throughput;
-            entry.clone()
-        };
-        self.publish_local(chat_id, &session);
+        }
+        self.publish_local(chat_id);
     }
 
     /// Live subagent projection (pi `cypher.subagents.v1`): update the chat's

@@ -477,16 +477,19 @@ async fn the_session_shows_the_recovery_under_way_until_the_resend() {
     assert_eq!(progress.trigger, "can't HELP");
     assert_eq!(progress.matched_in, RecoveryTriggerSource::Response);
     assert_eq!(progress.attempt, 1);
-    // Other devices read it off the registry row.
-    let row = rig
-        .core
-        .workspace
-        .read_sessions()
-        .unwrap()
-        .into_iter()
-        .find(|s| s.chat_id == CHAT)
-        .expect("registry session row");
-    assert_eq!(row.recovery.as_ref(), Some(&progress));
+    // Other devices read it off the registry row, written just after the
+    // live row.
+    let row = common::wait_for_some("the recovery on the registry row", || {
+        rig.core
+            .workspace
+            .read_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.chat_id == CHAT)
+            .and_then(|s| s.recovery)
+    })
+    .await;
+    assert_eq!(row, progress);
     // The failed reply is still on screen while the context is written.
     assert_eq!(text_of(&common::entries(&rig.core, CHAT)[1]), REFUSAL);
 

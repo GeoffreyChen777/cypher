@@ -11,8 +11,9 @@ use std::time::Duration;
 use cypher_doc::{MessageRole, SessionMessageEntry};
 use cypher_engine::EngineCore;
 use cypher_proto::{
-    AgentEvent, ContextUsage, DoneStatus, HarnessId, Session, SessionStatus, SubagentRun,
-    SubagentRunMode, SubagentRunStatus, Throughput, ToolCall,
+    AgentEvent, ContextUsage, DoneStatus, HarnessId, RecoveryProgress, RecoveryStage,
+    RecoveryTriggerSource, Session, SessionStatus, SubagentRun, SubagentRunMode, SubagentRunStatus,
+    Throughput, ToolCall,
 };
 
 use common::{FeedRig, run_request, status, wait_for};
@@ -791,6 +792,67 @@ async fn boot_recovery_terminalizes_local_but_not_remote_rows() {
         "remote device rows are untouched"
     );
     assert_eq!(r.subagents[0].ended_at, None);
+
+    rig.core.sessions.shutdown().await;
+}
+
+/// Each status write changes the live row under the status lock and writes the
+/// registry after releasing it, so two writers race to the registry. Whichever
+/// lands last, the row must end up as the live status: an older copy written
+/// over a newer one left other devices without a recovery in progress.
+#[tokio::test]
+async fn racing_status_writes_leave_the_registry_row_current() {
+    let rig = assemble("race");
+    let sessions = &rig.core.sessions;
+    let run = |round: u32| SubagentRun {
+        run_id: format!("run-{round}"),
+        tool_call_id: None,
+        agent: "planner".into(),
+        model: None,
+        task: "Plan the panel".into(),
+        mode: SubagentRunMode::Async,
+        status: SubagentRunStatus::Running,
+        progress: None,
+        started_at: 1000,
+        updated_at: 2000,
+        ended_at: None,
+        child_chat_id: None,
+    };
+    sessions.set_subagents(CHAT, Vec::new());
+    for round in 0..200 {
+        let progress = |writer: u32| RecoveryProgress {
+            stage: RecoveryStage::WritingContext,
+            trigger: format!("round {round}, writer {writer}"),
+            matched_in: RecoveryTriggerSource::Response,
+            attempt: 1,
+            started_at: chrono::Utc::now(),
+        };
+        std::thread::scope(|scope| {
+            for writer in 0..4 {
+                scope.spawn(move || {
+                    if writer % 2 == 0 {
+                        sessions.set_subagents(CHAT, vec![run(round * 4 + writer)]);
+                    } else {
+                        sessions.set_recovery(CHAT, Some(progress(writer)));
+                    }
+                });
+            }
+        });
+        let live = sessions.session_status(CHAT).expect("live row");
+        let row = rig
+            .core
+            .workspace
+            .read_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.chat_id == CHAT)
+            .expect("registry row");
+        assert_eq!(
+            (row.subagents, row.recovery),
+            (live.subagents, live.recovery),
+            "round {round}"
+        );
+    }
 
     rig.core.sessions.shutdown().await;
 }
