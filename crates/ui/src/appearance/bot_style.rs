@@ -25,6 +25,7 @@ pub const BOT_FACES: &[(&str, &str)] = &[
     ("bot-cat", icons::BOT_CAT),
     ("bot-ghost", icons::BOT_GHOST),
     ("bot-sleepy", icons::BOT_SLEEPY),
+    ("bot-headset", icons::BOT_HEADSET),
 ];
 
 /// Symbols for a workspace named after what it is about: (key, asset), in

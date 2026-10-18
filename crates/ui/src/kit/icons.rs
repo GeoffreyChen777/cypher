@@ -208,6 +208,7 @@ icon_assets![
     (BOT_HELMET, "bot-helmet"),
     (BOT_TV, "bot-tv"),
     (BOT_SLEEPY, "bot-sleepy"),
+    (BOT_HEADSET, "bot-headset"),
     // Avatar symbols for what a workspace is about (Solar Linear).
     (CASE_MINIMALISTIC, "case-minimalistic"),
     (GRAPH_UP, "graph-up"),
