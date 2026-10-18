@@ -579,6 +579,7 @@ impl Transcript {
                 run_at,
                 thread,
             } => bot_post_header(&row.id, name, *failed, *run_at, thread.clone(), theme),
+            RowKind::PeerAnswer { header } => peer_answer_header(header, theme),
             RowKind::Worked { label } => worked_rule(label.clone(), theme),
             RowKind::TurnChanges { changes } => {
                 self.render_turn_changes(&row.id, changes, theme, cx)
@@ -1356,6 +1357,34 @@ fn bot_post_header(
                     .child(SharedString::from("Open thread")),
             )
         })
+        .into_any_element()
+}
+
+/// The attribution over another user's bot's late answer in a bot chat.
+fn peer_answer_header(header: &SharedString, theme: &Theme) -> AnyElement {
+    use crate::kit::icons::{USERS, icon};
+    div()
+        .pt(px(10.0))
+        .pb(px(2.0))
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(12.0))
+        .child(
+            icon(USERS)
+                .size(px(13.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(theme.text_muted)
+                .child(header.clone()),
+        )
         .into_any_element()
 }
 

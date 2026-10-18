@@ -125,6 +125,12 @@ pub enum RowKind {
         run_at: i64,
         thread: Option<SharedString>,
     },
+    /// The attribution over another user's bot's late answer in a bot chat
+    /// (§10.6), e.g. `Answer from "Ada" (alice's bot) to your question "…"`.
+    /// The answer itself follows as ordinary text rows.
+    PeerAnswer {
+        header: SharedString,
+    },
     /// The toggle over a reasoning part: "Thinking…" while it streams,
     /// "Thought" once it settled. The `blocks` [`RowKind::ThoughtBlock`] rows
     /// that follow are dropped while it is closed, the default (see
@@ -297,6 +303,7 @@ pub(super) fn row_match_count(row: &Row, query: &str) -> u32 {
         | RowKind::ErrorChip { .. }
         | RowKind::BotPlan { .. }
         | RowKind::BotPost { .. }
+        | RowKind::PeerAnswer { .. }
         | RowKind::Thought { .. }
         | RowKind::ThoughtBlock { .. } => 0,
     };
@@ -648,6 +655,9 @@ pub fn rows_for_entry(
     parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
 ) -> Vec<Row> {
     if entry.role == MessageRole::User {
+        if let Some(rows) = peer_answer_rows(entry, parse) {
+            return rows;
+        }
         return vec![user_row(entry, pending)];
     }
 
@@ -1115,6 +1125,52 @@ fn part_is_silent(part: &MessagePart) -> bool {
 }
 
 /// The per-entry facts every assistant/system row is built from.
+/// The id prefix of the turn the engine starts in a bot chat when another
+/// user's bot answers late (`bots/network/host.rs` `deliver_late`).
+const PEER_ANSWER_PREFIX: &str = "bot-answer-";
+
+/// A late peer answer reads as an attribution row and the answer as
+/// markdown, not as a message the owner sent.
+fn peer_answer_rows(
+    entry: &SessionMessageEntry,
+    parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
+) -> Option<Vec<Row>> {
+    if !entry.id.starts_with(PEER_ANSWER_PREFIX) {
+        return None;
+    }
+    let (part_id, text) = entry.parts.iter().find_map(|part| match part {
+        MessagePart::Text { id, text, .. } => Some((id.as_str(), text.as_str())),
+        _ => None,
+    })?;
+    let (head, body) = text.split_once('\n').unwrap_or((text, ""));
+    let header = head
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let cx = EntryRows {
+        entry,
+        entry_id: entry.id.clone().into(),
+        streaming: false,
+        last_part_ix: entry.parts.len().saturating_sub(1),
+    };
+    let mut first = cx.row(
+        format!("{}#peer", entry.id),
+        fnv1a(header.as_bytes()),
+        RowKind::PeerAnswer {
+            header: header.into(),
+        },
+    );
+    first.turn_start = true;
+    first.timestamp = Some(entry.created_at);
+    let mut rows = vec![first];
+    let body = body.trim();
+    if !body.is_empty() {
+        cx.push_text_rows(&mut rows, part_id, body, None, parse);
+    }
+    Some(rows)
+}
+
 struct EntryRows<'a> {
     entry: &'a SessionMessageEntry,
     entry_id: SharedString,

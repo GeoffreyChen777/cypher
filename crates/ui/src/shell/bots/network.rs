@@ -960,10 +960,14 @@ impl Shell {
                         .pt(px(6.0))
                         .text_size(px(11.5))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(format!(
-                            "{same_label}: {}.",
-                            super::chat::access_summary(bot, self.state.read(cx))
-                        ))),
+                        // A peer only ever reads: what the bot may do stays out.
+                        .child(SharedString::from(format!("{same_label}: {}.", {
+                            let reading = Bot {
+                                capabilities: Default::default(),
+                                ..bot.clone()
+                            };
+                            super::chat::access_summary(&reading, self.state.read(cx))
+                        }))),
                 );
             }
             Some(ids) => {
