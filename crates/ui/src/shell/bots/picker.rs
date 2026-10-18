@@ -183,7 +183,9 @@ impl Shell {
                         .text_size(px(9.0))
                         .line_height(px(11.0))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(gpui::white())
+                        // The window's own ground on the amber: dark in dark
+                        // mode, where the amber is light, and light in light.
+                        .text_color(theme.bg)
                         .child(SharedString::from(if needs > 9 {
                             "9+".to_string()
                         } else {
