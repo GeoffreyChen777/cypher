@@ -399,20 +399,10 @@ impl Shell {
             body = body.child(step_block(step, project, mark, theme).children(
                 span.map(|span| div().pt(px(1.0)).child(trailing(span, theme.text_faint))),
             ));
-            if let Some(note) = step.note.clone().filter(|_| !numbered) {
-                body = body.child(
-                    div()
-                        .pl(px(40.0))
-                        .pr(px(8.0))
-                        .pb(px(2.0))
-                        .text_size(px(11.5))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(note)),
-                );
-            }
             for (chat_id, chat) in sessions {
                 let key = format!("bot-work-session-{chat_id}");
-                let row = item_row(&key, false).ml(px(32.0)).py(px(4.0));
+                // Its mark sits under the step's title.
+                let row = item_row(&key, false).ml(px(24.0)).py(px(4.0));
                 body = body.child(match chat {
                     Some((title, status)) => {
                         let open = chat_id.clone();
@@ -485,8 +475,12 @@ impl Shell {
             .stop_requested_at
             .filter(|_| phase == PlanPhase::Stopping)
         {
+            let when = match ago(stopped, now).as_str() {
+                "now" => "just now".to_string(),
+                ago => format!("{ago} ago"),
+            };
             body = body.child(div().pt(px(10.0)).child(prose(
-                format!("Stop requested {} ago.", ago(stopped, now)),
+                format!("Stop requested {when}; waiting for its device."),
                 theme.text_muted,
             )));
         }

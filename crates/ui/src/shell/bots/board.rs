@@ -356,33 +356,48 @@ impl Shell {
             StatusTone::Quiet => None,
         };
         let last = parts.len().saturating_sub(1);
+        // The mark stays on the first line; a long line wraps part by part
+        // beside it.
         let status_row = div()
             .flex()
             .flex_row()
-            .flex_wrap()
-            .items_center()
+            .items_start()
             .gap(px(6.0))
             .text_size(px(12.5))
-            .children(line_mark)
-            .child(div().flex().flex_row().flex_wrap().children(
-                parts.into_iter().enumerate().map(|(ix, (text, tone))| {
-                    div()
-                        .flex_none()
-                        .text_color(tone_color(tone))
-                        .child(SharedString::from(text))
-                        .when(ix < last, |el| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .px(px(4.0))
-                                    .text_color(theme.text_faint)
-                                    .child(SharedString::from("·")),
-                            )
-                        })
-                        .flex()
-                        .flex_row()
-                }),
-            ));
+            .line_height(px(17.0))
+            .children(line_mark.map(|mark| {
+                div()
+                    .flex_none()
+                    .h(px(17.0))
+                    .flex()
+                    .items_center()
+                    .child(mark)
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .children(parts.into_iter().enumerate().map(|(ix, (text, tone))| {
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .text_color(tone_color(tone))
+                            .child(SharedString::from(text))
+                            .when(ix < last, |el| {
+                                el.child(
+                                    div()
+                                        .flex_none()
+                                        .px(px(4.0))
+                                        .text_color(theme.text_faint)
+                                        .child(SharedString::from("·")),
+                                )
+                            })
+                    })),
+            );
         // What it may read in the quiet tone; what lets it act in the
         // accent's; a pause in amber.
         let badge = |label: String, fg: gpui::Hsla, bg: gpui::Hsla| {

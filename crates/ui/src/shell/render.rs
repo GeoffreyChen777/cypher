@@ -1645,6 +1645,33 @@ impl Shell {
         root: gpui::Stateful<gpui::Div>,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
+        // Dev capture's `inject`: an entry appended to the Botboard
+        // conversation's transcript, locally.
+        #[cfg(feature = "dev-capture")]
+        let root = root.on_action(cx.listener(
+            |this, _: &super::dev_capture::InjectEntry, _, cx| {
+                let Some(entry) = super::dev_capture::take_entry(cx) else {
+                    return;
+                };
+                let Some(state) = this
+                    .board
+                    .slot
+                    .and_then(|sid| this.tiles.slots.get(&sid))
+                    .map(|slot| slot.state.clone())
+                else {
+                    return;
+                };
+                state.update(cx, |state, cx| {
+                    let mut entries = state.transcript.clone();
+                    entries.retain(|e| e.id != entry.id);
+                    entries.push(entry);
+                    let _ = state.apply_transcript_frame(cypher_doc::TranscriptFrame::Reset {
+                        reset: entries,
+                    });
+                    cx.notify();
+                });
+            },
+        ));
         root.on_drag_move(cx.listener(Self::on_sidebar_drag))
             .on_drag_move(cx.listener(Self::on_dock_drag))
             .on_drag_move(cx.listener(Self::on_terminal_drag))

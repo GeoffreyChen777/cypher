@@ -616,8 +616,17 @@ impl Shell {
                                     question.id.clone(),
                                     option.clone(),
                                 );
+                                // Resting like the start screen's suggestion
+                                // cards, so each reads as an answer to pick.
                                 item_row(&key, false)
-                                    .mx(px(0.0))
+                                    .mx(px(8.0))
+                                    .mb(px(4.0))
+                                    .py(px(8.0))
+                                    .bg(motion::hover_blend(
+                                        &key,
+                                        crate::kit::theme::ink(0.035),
+                                        crate::kit::theme::ink(0.07),
+                                    ))
                                     .child(mark_cell(
                                         div()
                                             .size(px(16.0))
@@ -995,6 +1004,22 @@ pub(super) fn step_block(
                                 .child(SharedString::from(detail)),
                         )
                     },
+                )
+                .when_some(
+                    step.note.clone().filter(|n| !n.trim().is_empty()),
+                    |el, note| {
+                        el.child(
+                            div()
+                                .text_size(px(12.0))
+                                .line_height(px(17.0))
+                                .text_color(if step.state == cypher_proto::StepState::Asking {
+                                    theme.warning
+                                } else {
+                                    theme.text_muted
+                                })
+                                .child(SharedString::from(note)),
+                        )
+                    },
                 ),
         )
 }
@@ -1020,7 +1045,7 @@ fn recent_messages(entries: &[cypher_doc::SessionMessageEntry], n: usize) -> Vec
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
-            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let text = plain_preview(&text);
             (!text.is_empty()).then(|| (user, cypher_proto::clip(&text, 280)))
         })
         .take(n)
@@ -1029,9 +1054,51 @@ fn recent_messages(entries: &[cypher_doc::SessionMessageEntry], n: usize) -> Vec
     out
 }
 
+/// Markdown read as one plain line for a preview: headings, list and quote
+/// markers, emphasis and code ticks dropped, fenced code left out.
+fn plain_preview(text: &str) -> String {
+    let mut fenced = false;
+    let mut words: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let line = line.trim_start_matches(['#', '>']).trim_start();
+        let line = line
+            .strip_prefix("- ")
+            .or_else(|| line.strip_prefix("* "))
+            .or_else(|| {
+                let (number, rest) = line.split_once(". ")?;
+                number.chars().all(|c| c.is_ascii_digit()).then_some(rest)
+            })
+            .unwrap_or(line);
+        words.extend(line.split_whitespace());
+    }
+    words
+        .join(" ")
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previews_read_markdown_as_plain_text() {
+        assert_eq!(
+            plain_preview(
+                "## Streaming pipeline\n\n1. **Doc command** queues a `run` entry\n- Fold\n```rust\nlet x = 1;\n```\nDone."
+            ),
+            "Streaming pipeline Doc command queues a run entry Fold Done."
+        );
+    }
 
     #[test]
     fn recent_messages_keep_the_text_of_the_last_few() {
