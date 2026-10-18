@@ -633,6 +633,8 @@ impl Shell {
                 .child(permission_text(title, detail))
                 .child(crate::settings::widgets::toggle_switch(theme, on))
         };
+        // Reading first, then what it may do beyond reading, in one box.
+        let caps = dialog.capabilities;
         let permissions = div()
             .rounded(px(10.0))
             .border_1()
@@ -655,8 +657,29 @@ impl Shell {
                 "Include sessions you have archived.",
                 dialog.include_archived,
                 |d| d.include_archived = !d.include_archived,
+            ))
+            .child(toggle(
+                "bot-cap-direct",
+                "Work directly",
+                "Run commands and edit files in its projects on this device, under your \
+                 permission rules.",
+                caps.work_directly,
+                |d| d.capabilities.work_directly = !d.capabilities.work_directly,
+            ))
+            .child(toggle(
+                "bot-cap-coordinate",
+                "Coordinate",
+                "Plan work and start sessions in its projects, after you approve.",
+                caps.coordinate,
+                |d| d.capabilities.coordinate = !d.capabilities.coordinate,
+            ))
+            .child(toggle(
+                "bot-cap-steer",
+                "Steer others' sessions",
+                "Steer, answer or stop sessions it didn't start, each after you confirm.",
+                caps.steer,
+                |d| d.capabilities.steer = !d.capabilities.steer,
             ));
-        let caps = dialog.capabilities;
         let read_only = !(caps.work_directly || caps.coordinate || caps.steer);
         let summary = access.map(|(sessions, spaces)| {
             let text = match (sessions, spaces) {
@@ -683,86 +706,6 @@ impl Shell {
                 )
                 .child(SharedString::from(text))
         });
-
-        // ── Capabilities: what it may do beyond reading. Each lets the bot
-        //    act, so each wears the accent's bolt (lit while on).
-        let capability = |id: &str,
-                          title: &str,
-                          detail: &str,
-                          on: bool,
-                          first: bool,
-                          flip: fn(&mut cypher_proto::BotCapabilities)| {
-            div()
-                .id(SharedString::from(id.to_string()))
-                .when(!first, |el| el.border_t_1())
-                .border_color(hairline)
-                .px(px(12.0))
-                .py(px(10.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(12.0))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(d) = this.dialogs.bot.as_mut() {
-                        flip(&mut d.capabilities);
-                    }
-                    cx.notify();
-                }))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(24.0))
-                        .rounded(px(7.0))
-                        .bg(if on {
-                            theme.accent.opacity(0.14)
-                        } else {
-                            crate::kit::theme::ink(0.05)
-                        })
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icon(icons::BOLT).size(px(13.0)).text_color(if on {
-                            theme.accent
-                        } else {
-                            theme.text_muted.opacity(0.7)
-                        })),
-                )
-                .child(permission_text(title, detail))
-                .child(crate::settings::widgets::toggle_switch(theme, on))
-        };
-        let capabilities = div()
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(hairline)
-            .bg(crate::kit::theme::ink(0.02))
-            .flex()
-            .flex_col()
-            .child(capability(
-                "bot-cap-direct",
-                "Work directly",
-                "Run commands and edit files in its projects on this device, under your \
-                 permission rules.",
-                caps.work_directly,
-                true,
-                |c| c.work_directly = !c.work_directly,
-            ))
-            .child(capability(
-                "bot-cap-coordinate",
-                "Coordinate",
-                "Plan work and start sessions in its projects, after you approve.",
-                caps.coordinate,
-                false,
-                |c| c.coordinate = !c.coordinate,
-            ))
-            .child(capability(
-                "bot-cap-steer",
-                "Steer others' sessions",
-                "Steer, answer or stop sessions it didn't start, each after you confirm.",
-                caps.steer,
-                false,
-                |c| c.steer = !c.steer,
-            ));
 
         // ── The form column: scrolls the card's full height, under both
         //    glass bands; its padding keeps every row clear of them at rest.
@@ -802,8 +745,6 @@ impl Shell {
             .child(section("Permissions"))
             .child(permissions)
             .children(summary)
-            .child(section("What it may do"))
-            .child(capabilities)
             .child(section("Instructions"))
             .child(popover::dialog_field(
                 dialog.instructions.clone().into_any_element(),

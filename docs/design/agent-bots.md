@@ -905,9 +905,10 @@ Built:
   cards, the bot chat in the middle and a detail panel on the right. It replaced the P0
   bot strip and the header's New project / New bot menu.
 - **Bot palette** (create and edit), drawn like the Quick Chat and Add project palettes: a
-  frosted header band, the form on the left (name beside a live avatar; twelve robot
-  faces, a few symbols or the initial, and a colour; Permissions; "What it may do" with
-  *Work directly*, *Coordinate* and *Steer others' sessions*, the acting switches marked;
+  frosted header band, the form on the left (name beside a live avatar; thirteen robot
+  faces, 38 symbols or the initial, and a colour; one Permissions box, reading first
+  (project access, conversations, archived sessions) then acting (*Work directly*,
+  *Coordinate*, *Steer others' sessions*), with an access summary under it;
   instructions), a "Run on device" rail on the right (fixed after creation), and a
   Cancel / Save footer with Delete when editing. New bots start with *Work directly* on.
 - **Bot conversation:** the Workspaces board's middle card, wearing the bot's avatar. A quiet
