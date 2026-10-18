@@ -154,9 +154,8 @@ impl Shell {
             return None;
         }
         let filter = self.board.activity_filter;
-        let (entries, total) = {
+        let entries = {
             let state = self.state.read(cx);
-            let total = activity_of(&state.bot_records, &bot.id, None).len();
             let entries: Vec<(BotActivity, Link)> =
                 activity_of(&state.bot_records, &bot.id, filter)
                     .into_iter()
@@ -165,17 +164,13 @@ impl Shell {
                         (a.clone(), link)
                     })
                     .collect();
-            (entries, total)
+            entries
         };
         let head = PanelHead {
             glyph: icons::PULSE,
             tint: None,
             title: "Activity".into(),
-            subtitle: format!(
-                "What {} did · {total} entr{}",
-                bot.name,
-                if total == 1 { "y" } else { "ies" }
-            ),
+            subtitle: String::new(),
         };
         // The palette's segmented control, one segment per kind.
         let chips = div()
