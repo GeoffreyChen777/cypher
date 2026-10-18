@@ -137,6 +137,13 @@ fn exchanges(side: &Side, direction: ExchangeDirection) -> Vec<BotExchange> {
         .collect()
 }
 
+/// Whether `side`'s one incoming question has settled as `state`.
+fn settled(side: &Side, state: ExchangeState) -> bool {
+    exchanges(side, ExchangeDirection::Incoming)
+        .first()
+        .is_some_and(|e| e.state == state)
+}
+
 fn activity(side: &Side, kind: ActivityKind) -> Vec<String> {
     side.core
         .workspace
@@ -318,9 +325,17 @@ async fn an_invite_connects_both_bots_and_auto_answers_flow_back() {
             .unwrap()
             .cwd
     );
+    // Bob can hold the answer a moment before Alice's host writes its row.
+    wait_for(
+        || {
+            settled(&alice, ExchangeState::Answered)
+                && !activity(&alice, ActivityKind::PeerAnswered).is_empty()
+        },
+        "Alice's row records the answer",
+    )
+    .await;
     let incoming = exchanges(&alice, ExchangeDirection::Incoming);
     assert_eq!(incoming.len(), 1);
-    assert_eq!(incoming[0].state, ExchangeState::Answered);
     assert!(
         incoming[0]
             .answer
@@ -512,10 +527,15 @@ async fn review_mode_waits_for_the_owner_and_the_late_answer_reaches_the_main_ch
         draft.answer.as_deref().unwrap().contains("[redacted]"),
         "drafts are scrubbed"
     );
-    assert_eq!(
-        exchanges(&bob, ExchangeDirection::Outgoing)[0].state,
-        ExchangeState::Queued,
-        "nothing was sent"
+    // Bob may see its progress (delivered, working, awaiting_review), never
+    // an answer.
+    let waiting = exchanges(&bob, ExchangeDirection::Outgoing).remove(0);
+    assert!(
+        !matches!(
+            waiting.state,
+            ExchangeState::Answered | ExchangeState::Declined
+        ) && waiting.answer.is_none(),
+        "nothing was sent: {waiting:?}"
     );
     let main_runs = |side: &Side| {
         side.runs
@@ -548,10 +568,11 @@ async fn review_mode_waits_for_the_owner_and_the_late_answer_reaches_the_main_ch
             .as_deref(),
         Some("Yes, Friday works.")
     );
-    assert_eq!(
-        exchanges(&alice, ExchangeDirection::Incoming)[0].state,
-        ExchangeState::Answered
-    );
+    wait_for(
+        || settled(&alice, ExchangeState::Answered),
+        "Alice's row records the sent answer",
+    )
+    .await;
     // Late: a durable run in Bob's main chat, attributed, and tainted.
     wait_for(
         || main_runs(&bob) == 1,
@@ -596,10 +617,11 @@ async fn replies_off_decline_without_running() {
         peer_questions(&alice).is_empty(),
         "no run for a declined question"
     );
-    assert_eq!(
-        exchanges(&alice, ExchangeDirection::Incoming)[0].state,
-        ExchangeState::Declined
-    );
+    wait_for(
+        || settled(&alice, ExchangeState::Declined),
+        "Alice's row records the decline",
+    )
+    .await;
     assert!(bob.core.bots.tainted(&bob.bot.chat_id).is_none());
 }
 
