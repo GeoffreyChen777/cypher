@@ -690,23 +690,28 @@ impl Shell {
         {
             self.board.schedule.saving = None;
         }
-        let space = {
+        let (space, device) = {
             let state = self.state.read(cx);
-            routine
+            let space = routine
                 .target
                 .space_id()
-                .and_then(|id| state.space_row(id).cloned())
+                .and_then(|id| state.space_row(id).cloned());
+            let device = space.as_ref().map(|s| {
+                state
+                    .device_name(&s.device_id)
+                    .unwrap_or("Unknown device")
+                    .to_string()
+            });
+            (space, device)
         };
         let now = Local::now();
         let job = Job::routine(&routine, &now);
         let (glyph, tint) = job_mark(&job, space.as_ref(), bot_tint(bot, theme), theme);
-        // The subtitle says where and when it runs; the body only what it
-        // did, what it does, and its switches.
         let head = PanelHead {
             glyph,
             tint: Some(tint),
             title: routine.name.clone(),
-            subtitle: job_sub(&job, space.as_ref().map(|s| s.display_name())),
+            subtitle: String::new(),
         };
         let mut body = div()
             .p(px(8.0))
@@ -723,6 +728,56 @@ impl Shell {
                 .text_color(theme.warning),
             );
         }
+        // Where and when it runs, then what it last did.
+        match &routine.target {
+            RoutineTarget::Workspace => {
+                body = body.child(parts::fact(
+                    theme,
+                    "Runs in",
+                    SharedString::from("This workspace"),
+                ));
+            }
+            RoutineTarget::Project {
+                worktree, model, ..
+            } => {
+                body = body
+                    .child(parts::fact(
+                        theme,
+                        "Runs in",
+                        SharedString::from(format!(
+                            "{} · {}",
+                            space
+                                .as_ref()
+                                .map_or("A project it can't see", |s| s.display_name()),
+                            device.as_deref().unwrap_or("Unknown device"),
+                        )),
+                    ))
+                    .child(parts::fact(
+                        theme,
+                        "Checkout",
+                        SharedString::from(if *worktree {
+                            "Its own worktree"
+                        } else {
+                            "The project's checkout"
+                        }),
+                    ));
+                if let Some(model) = model {
+                    body = body.child(parts::fact(
+                        theme,
+                        "Model",
+                        SharedString::from(model.clone()),
+                    ));
+                }
+            }
+        }
+        body = body.child(parts::fact(
+            theme,
+            "Repeats",
+            SharedString::from(match &routine.schedule {
+                Schedule::Manual => "Only when you press Run now".to_string(),
+                schedule => schedule.describe(),
+            }),
+        ));
         if let JobState::Next(_) = job.state() {
             body = body.child(parts::fact(theme, "Next run", next_value(&job, &now)));
         }

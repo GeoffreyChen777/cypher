@@ -239,14 +239,16 @@ impl Shell {
                             .text_color(theme.text)
                             .child(SharedString::from(head.title)),
                     )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(head.subtitle)),
-                    ),
+                    .when(!head.subtitle.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(head.subtitle)),
+                        )
+                    }),
             )
             .child(close);
         // Replacing the content fades the new item in. A thread's
