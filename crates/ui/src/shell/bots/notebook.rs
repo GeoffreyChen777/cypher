@@ -6,7 +6,7 @@
 //! notes; an owner's edit makes a note the owner's (the engine resets its
 //! source).
 
-use super::board::{card_corner, card_item, card_with_rows, section_header};
+use super::board::{card_corner, card_item};
 use super::panel::{PanelHead, PanelItem};
 use super::parts;
 use super::*;
@@ -154,17 +154,17 @@ impl Shell {
                 cx,
             ));
         }
-        let open = self.board.panel.as_ref() == Some(&PanelItem::Notebook);
-        let header = section_header(
+        let header = self.card_header(
+            "notebook",
             "bot-notebook-header",
             icons::BOOK,
             "Notebook",
             notes.len(),
-            open,
-            self.card_focused("notebook", cx),
+            PanelItem::Notebook,
+            None,
             theme,
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Notebook, cx)));
+            cx,
+        );
         let rows: Vec<_> = notes
             .iter()
             .take(CARD_NOTES)
@@ -186,7 +186,7 @@ impl Shell {
                 .on_click(cx.listener(|this, _, _, cx| this.show_panel(PanelItem::Notebook, cx)))
             })
             .collect();
-        Some(card_with_rows(header, rows, theme))
+        Some(self.fold_card("notebook", header, rows, theme))
     }
 
     /// The detail panel: the add field, then every note newest first.

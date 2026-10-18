@@ -10,9 +10,7 @@
 //! A decision is one owner field on the record (a `Mutate`), so every count
 //! follows the record wherever it was made.
 
-use super::board::{
-    card_corner, card_glyph, card_item, card_with_rows, section_header_tinted, two_lines,
-};
+use super::board::{card_corner, card_glyph, card_item, two_lines};
 use super::items::{
     action_row, ago, glyph, item_row, mark_cell, outcome_line, project_label, prose, section_label,
     step_mark, text_block, trailing,
@@ -217,18 +215,17 @@ impl Shell {
             return None;
         }
         let total = rows.len();
-        let open = self.board.panel == Some(PanelItem::NeedsYou);
-        let header = section_header_tinted(
+        let header = self.card_header(
+            "needs",
             "bot-needs-header",
             icons::BELL,
             "Needs you",
             total,
-            open,
-            self.card_focused("needs", cx),
+            PanelItem::NeedsYou,
             Some(theme.warning),
             theme,
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::NeedsYou, cx)));
+            cx,
+        );
         let shown: Vec<_> = rows
             .into_iter()
             .take(CARD_ROWS)
@@ -247,7 +244,7 @@ impl Shell {
             .text_color(theme.text_muted)
             .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::NeedsYou, cx)))
         });
-        Some(card_with_rows(header, shown.into_iter().chain(more), theme))
+        Some(self.fold_card("needs", header, shown.into_iter().chain(more), theme))
     }
 
     /// The detail panel for this card's items; `None` when the item no

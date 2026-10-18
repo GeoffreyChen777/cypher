@@ -4,7 +4,7 @@
 //! project, sessions, state and duration, Stop while it runs, the result
 //! once it ends, and its thread, read-only in the panel.
 
-use super::board::{card_corner, card_item, card_with_rows, section_header, two_lines};
+use super::board::{card_corner, card_item, two_lines};
 use super::items::{
     action_row, ago, item_row, mark_cell, progress_bar, project_label, prose, section_label,
     session_mark, step_mark, text_block, trailing, work_mark,
@@ -238,8 +238,8 @@ impl Shell {
         if running.is_empty() && finished.is_empty() {
             return None;
         }
-        let open = self.board.panel == Some(PanelItem::Work);
-        let header = section_header(
+        let header = self.card_header(
+            "work",
             "bot-work-header",
             icons::HIERARCHY,
             "Work",
@@ -248,11 +248,11 @@ impl Shell {
             } else {
                 running.len()
             },
-            open,
-            self.card_focused("work", cx),
+            PanelItem::Work,
+            None,
             theme,
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Work, cx)));
+            cx,
+        );
         let mut rows = Vec::new();
         for w in &running {
             rows.push(self.running_row(format!("bot-work-{}", w.id), w, false, theme, cx));
@@ -260,7 +260,7 @@ impl Shell {
         for w in &finished {
             rows.push(self.settled_row(format!("bot-work-{}", w.id), w, false, theme, cx));
         }
-        Some(card_with_rows(header, rows, theme))
+        Some(self.fold_card("work", header, rows, theme))
     }
 
     /// The detail panel for this card's items; `None` when the item no

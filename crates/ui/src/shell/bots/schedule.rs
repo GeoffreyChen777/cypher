@@ -7,7 +7,7 @@
 //! the run state (last run, next run, runs today) is the host's and only
 //! read here.
 
-use super::board::{card_corner, card_glyph, card_item, card_with_rows, section_header, two_lines};
+use super::board::{card_corner, card_glyph, card_item, two_lines};
 use super::panel::{PanelHead, PanelItem};
 use super::parts::{self, CallError};
 use super::*;
@@ -567,16 +567,17 @@ impl Shell {
         }
         let open = self.board.panel.clone();
         let tint = bot_tint(bot, theme);
-        let header = section_header(
+        let header = self.card_header(
+            "schedule",
             "bot-schedule-header",
             icons::CLOCK,
             "Schedule",
             jobs.len(),
-            open == Some(PanelItem::Schedule),
-            self.card_focused("schedule", cx),
+            PanelItem::Schedule,
+            None,
             theme,
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Schedule, cx)));
+            cx,
+        );
         let rows: Vec<_> = jobs
             .iter()
             .take(parts::CARD_ROWS)
@@ -585,7 +586,7 @@ impl Shell {
                 self.job_item(job, space.as_ref(), tint, selected, theme, cx)
             })
             .collect();
-        Some(card_with_rows(header, rows, theme))
+        Some(self.fold_card("schedule", header, rows, theme))
     }
 
     /// The detail panel for this card's items; `None` when the item no

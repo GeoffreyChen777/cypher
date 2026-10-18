@@ -379,16 +379,17 @@ impl Shell {
             return None;
         }
         let open = self.board.panel.clone();
-        let header = section_header(
+        let header = self.card_header(
+            "projects",
             "bot-projects-header",
             icons::WIDGET,
             "Projects",
             rows.len(),
-            open == Some(PanelItem::Projects),
-            self.card_focused("projects", cx),
+            PanelItem::Projects,
+            None,
             theme,
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Projects, cx)));
+            cx,
+        );
         let rows = rows.into_iter().map(|(load, space)| {
             let item = PanelItem::Project(space.id.clone());
             let selected = open.as_ref() == Some(&item);
@@ -416,11 +417,106 @@ impl Shell {
             )
             .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
         });
-        Some(card_with_rows(header, rows, theme))
+        Some(self.fold_card("projects", header, rows, theme))
     }
 
     /// Whether `card` is the one floating: the open panel item's card
     /// ([`focused_card`]).
+    /// A full card's header, the project card header's twin: 36px tall, the
+    /// glyph on the card's 10px edge, the title at 13.5 (semibold only on
+    /// the focused card, medium elsewhere, as the project sidebar weighs its
+    /// projects) and a quiet count. A click folds the card to this row and
+    /// back, as a project header does; the arrow at its end, shown on hover
+    /// and while the list is open, opens the whole list.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn card_header(
+        &self,
+        card: &'static str,
+        key: &'static str,
+        glyph: &'static str,
+        title: &'static str,
+        count: usize,
+        list: PanelItem,
+        tint: Option<gpui::Hsla>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let open = self.board.panel.as_ref() == Some(&list);
+        let shown = if open { 1.0 } else { motion::hover_t(key) };
+        let arrow_key = SharedString::from(format!("{key}-open"));
+        let arrow =
+            div()
+                .id(arrow_key.clone())
+                .flex_none()
+                .size(px(22.0))
+                .mr(px(-5.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .bg(motion::hover_blend(
+                    &arrow_key,
+                    crate::kit::theme::wash(0.0),
+                    crate::kit::theme::wash(0.12),
+                ))
+                .on_hover(motion::hover_listener(arrow_key.clone()))
+                .tooltip(|_, cx| {
+                    cx.new(|_| super::super::session::FindTooltip("Show all".into()))
+                        .into()
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.open_panel(list.clone(), cx);
+                }))
+                .child(icon(icons::ALT_ARROW_RIGHT).size(px(11.0)).text_color(
+                    motion::hover_blend(
+                        &arrow_key,
+                        theme.text_muted.opacity(0.8 * shown),
+                        theme.text,
+                    ),
+                ));
+        header_frame(key, glyph, title, self.card_focused(card, cx), tint, theme)
+            .pr(px(7.0))
+            .cursor_pointer()
+            .on_hover(motion::hover_listener(key))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_card(card, cx)))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.5))
+                    .when(tint.is_some(), |el| {
+                        el.font_weight(gpui::FontWeight::MEDIUM)
+                    })
+                    .text_color(tint.unwrap_or(theme.text_muted.opacity(0.6)))
+                    .child(SharedString::from(count.to_string())),
+            )
+            .child(div().flex_1())
+            .child(arrow)
+    }
+
+    /// A full card: its header over its rows, or the header alone while it
+    /// is folded.
+    pub(super) fn fold_card(
+        &self,
+        card: &'static str,
+        header: impl IntoElement,
+        rows: impl IntoIterator<Item = impl IntoElement>,
+        theme: &Theme,
+    ) -> AnyElement {
+        if self.board.collapsed.contains(card) {
+            return super::board::card(theme).child(header).into_any_element();
+        }
+        card_with_rows(header, rows, theme)
+    }
+
+    fn toggle_card(&mut self, card: &'static str, cx: &mut Context<Self>) {
+        if !self.board.collapsed.remove(card) {
+            self.board.collapsed.insert(card);
+        }
+        cx.notify();
+    }
+
     pub(super) fn card_focused(&self, card: &str, cx: &App) -> bool {
         let wanted = self.board.panel.as_ref().map(|item| {
             let state = self.state.read(cx);
@@ -435,62 +531,6 @@ impl Shell {
         });
         wanted == Some(card)
     }
-}
-
-/// A card's header row, the project card header's twin: 36px tall, the
-/// glyph on the card's 10px edge, the title at 13.5 (semibold only on the
-/// focused card, medium elsewhere, as the project sidebar weighs its
-/// projects) and a quiet count. A click opens the whole list; the chevron
-/// shows on hover and while the list is open.
-pub(super) fn section_header(
-    key: &'static str,
-    glyph: &'static str,
-    title: &'static str,
-    count: usize,
-    open: bool,
-    focused: bool,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    section_header_tinted(key, glyph, title, count, open, focused, None, theme)
-}
-
-/// [`section_header`] with its glyph and count in `tint` (the Needs you
-/// card's amber).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn section_header_tinted(
-    key: &'static str,
-    glyph: &'static str,
-    title: &'static str,
-    count: usize,
-    open: bool,
-    focused: bool,
-    tint: Option<gpui::Hsla>,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    header_frame(key, glyph, title, focused, tint, theme)
-        .cursor_pointer()
-        .on_hover(motion::hover_listener(key))
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(11.5))
-                .when(tint.is_some(), |el| {
-                    el.font_weight(gpui::FontWeight::MEDIUM)
-                })
-                .text_color(tint.unwrap_or(theme.text_muted.opacity(0.6)))
-                .child(SharedString::from(count.to_string())),
-        )
-        .child(div().flex_1())
-        .child(
-            icon(icons::ALT_ARROW_RIGHT)
-                .size(px(11.0))
-                .flex_none()
-                .text_color(theme.text_muted.opacity(if open {
-                    0.8
-                } else {
-                    0.8 * motion::hover_t(key)
-                })),
-        )
 }
 
 /// The header row both full and empty cards start from: glyph and title on

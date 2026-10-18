@@ -73,6 +73,9 @@ pub(super) struct BoardUi {
     /// panel shows, else Status. The previous card and the 0→1 glide.
     plate: super::spaces::CardPlate,
     focused_card: Option<&'static str>,
+    /// Cards folded to their header, by card key; like the project cards'
+    /// collapse, local to this window and never saved.
+    collapsed: std::collections::HashSet<&'static str>,
     focus_tween: Option<WidthTween>,
     /// The Schedule, Notebook and Network panels' forms and drafts.
     schedule: schedule::ScheduleUi,

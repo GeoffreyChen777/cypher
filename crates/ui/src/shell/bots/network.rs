@@ -6,7 +6,7 @@
 //! RPCs on the bot's host; an engine that does not have them yet answers
 //! an unknown method, and the panel says so instead of failing.
 
-use super::board::{card_corner, card_glyph, card_item, card_with_rows, section_header};
+use super::board::{card_corner, card_glyph, card_item};
 use super::panel::{PanelHead, PanelItem};
 use super::parts::{self, CallError};
 use super::*;
@@ -306,16 +306,17 @@ impl Shell {
             ));
         }
         let open = self.board.panel.clone();
-        let header = section_header(
+        let header = self.card_header(
+            "network",
             "bot-network-header",
             icons::GLOBAL,
             "Network",
             connections.len(),
-            open == Some(PanelItem::Network),
-            self.card_focused("network", cx),
+            PanelItem::Network,
+            None,
             theme,
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Network, cx)));
+            cx,
+        );
         let mut rows: Vec<AnyElement> = connections
             .iter()
             .take(parts::CARD_ROWS)
@@ -347,7 +348,7 @@ impl Shell {
                 .into_any_element(),
             );
         }
-        Some(card_with_rows(header, rows, theme))
+        Some(self.fold_card("network", header, rows, theme))
     }
 
     /// A connection row: the peer's neutral avatar, "<bot> · <owner>", and

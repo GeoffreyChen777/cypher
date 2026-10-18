@@ -992,7 +992,7 @@ There is no Activity card: it mostly repeated Work, Schedule and Network. The fu
 log, filterable by kind, opens from the chat header's activity button and from "View all
 activity" in the Work panel. A card with nothing to show is not drawn. **Needs you** always comes first, so attention
 items are never below the fold. One card floats at a time, the open panel item's; with
-the panel shut none does. A card's header opens its whole list; a row opens that item.
+the panel shut none does. A click on a card's header folds the card to that one row and back, as a project card's does (for this window only, like the project cards); the arrow at the header's end, shown on hover, opens its whole list; a row opens that item.
 
 **The chat** is the bot conversation as built: the owner instructs the bot here, and
 plan, progress and result cards appear inline. Its access note over the composer opens
