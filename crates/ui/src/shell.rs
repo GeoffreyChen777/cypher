@@ -1092,8 +1092,10 @@ struct ShellMenus {
     sidebar_view: popover::Popup<Point<Pixels>>,
     /// Project glyph/colour picker: (space id, window position).
     space_style: popover::Popup<(String, Point<Pixels>)>,
-    /// Bot tile context menu: (bot id, window position).
+    /// Bot context menu: (bot id, window position).
     bot: popover::Popup<(String, Point<Pixels>)>,
+    /// The Botboard's bot switcher list (its filter lives in the board).
+    bot_switcher: popover::Popup<()>,
     user: popover::Popup<()>,
 }
 

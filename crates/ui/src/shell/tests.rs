@@ -1662,7 +1662,7 @@ fn nav_settings_sections_are_distinct_entries() {
 
 // ---- Botboard (docs/design/agent-bots.md §13.1) ----
 
-fn test_bot(id: &str) -> cypher_proto::Bot {
+pub(super) fn test_bot(id: &str) -> cypher_proto::Bot {
     cypher_proto::Bot {
         id: id.into(),
         name: id.to_uppercase(),

@@ -66,6 +66,8 @@ pub(super) struct BoardUi {
     stop_disarm: Option<Task<()>>,
     /// The Activity panel's kind filter; `None` shows everything.
     activity_filter: Option<cypher_proto::ActivityGroup>,
+    /// The bot switcher's open list: its filter and keyboard cursor.
+    switcher: Option<picker::Switcher>,
     /// The one floating plate under the focused card (the project
     /// sidebar's [`super::spaces::CardPlate`]): the card whose item the
     /// panel shows, else Status. The previous card and the 0→1 glide.

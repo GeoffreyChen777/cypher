@@ -931,7 +931,7 @@ the sidebar. The mode switch is the sidebar's logo:
 | | Projects mode | Botboard mode |
 |---|---|---|
 | Logo | **Cypher** ⇅ | **Cypher Botboard** ⇅ (the second word in the bot's accent) |
-| Sidebar | Project and session cards, as today; no bot strip | The bot picker, then the current bot's cards |
+| Sidebar | Project and session cards, as today; no bot strip | The bot switcher, then the current bot's cards |
 | Middle | Session tabs | The bot's chat |
 | Right | The session dock | The detail panel |
 | Header `+` | New project | New bot |
@@ -956,15 +956,17 @@ owner across all bots, so attention is visible without bringing bot content back
 the project sidebar. Sessions a bot started stay in their projects, marked "by <bot>".
 Project windows have no Botboard.
 
-**The bot picker** heads the Botboard sidebar: a row of avatar squares, the current one
-ringed in its colour, each with its Needs-you count or status dot, then `+` for a new
-bot. A click switches the whole board to that bot; a right-click opens Open /
-Settings… / Delete…. With many bots, the row becomes the current bot with a dropdown
-(open question, §17).
+**The bot switcher** heads the Botboard sidebar: the current bot as a row (its avatar
+and name on the cards' header grid, ⇅) with an amber count when other bots need the
+owner. A click opens a list of every bot by name, each with what it is doing (a
+Needs-you count, a spinner while it works, "paused", an offline host) and a check on the
+current one, then New bot; past five bots it leads with a search field. Type to filter,
+↑↓ and Enter to switch, Esc to close; a right-click on the row or a list row opens that
+bot's Open / Settings… / Delete… menu.
 
-**No status card.** Who the bot is reads from the picker and the chat header, what it
+**No status card.** Who the bot is reads from the switcher and the chat header, what it
 may do from the access note over the composer, and its pause and settings buttons sit
-in the chat header where a tile keeps its actions. Under the picker a single quiet line
+in the chat header where a tile keeps its actions. Under the switcher a single quiet line
 appears only when something is off, the way the project sidebar marks only an offline
 host: "Bob is paused" (with Resume), "<device> is offline", or "The last run failed".
 
@@ -996,7 +998,7 @@ Behaviour:
 
 - Cards update live from the engine (`WatchBotRecords`: work, routines, notes, the
   audit log); they hold no state of their own. Resolving an item anywhere updates every
-  count: the card, the picker and the Projects-mode logo badge.
+  count: the card, the switcher and the Projects-mode logo badge.
 - Settings stay in the palette; no card edits permissions itself.
 - Usage meters and embedded transcripts are left out: rows link to the thread or session
   instead.
@@ -1092,8 +1094,6 @@ DeviceRoom objects behind the route table), `bot-frames.test.ts` and
 - **Cross-device dependencies.** Which remote does the bot push A's branch to when B is on
   another device: the project's origin, or a Cypher-managed transfer over the device
   relay?
-- **Many bots.** The Botboard picker is a row of avatars; past a handful of bots, should
-  it become the current bot with a dropdown?
 - **Fallback host.** Should a bot have a second host, so work and questions don't wait
   while the only host sleeps? This needs claim and lease logic.
 - **Identity shown to peers.** The owner's WorkOS display name, editable per bot, is the
