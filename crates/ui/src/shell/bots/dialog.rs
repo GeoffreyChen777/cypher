@@ -1014,9 +1014,7 @@ impl Shell {
                     .truncate()
                     .text_size(px(12.0))
                     .text_color(theme.text_faint)
-                    .child(SharedString::from(
-                        "Answers using only the sessions you allow",
-                    )),
+                    .child(SharedString::from("Reads and works only where you allow")),
             )
             .child(
                 popover::key_cap(theme)

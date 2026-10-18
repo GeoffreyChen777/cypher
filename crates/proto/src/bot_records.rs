@@ -976,15 +976,16 @@ impl BotRecords {
         );
         let mut work: Vec<&BotWork> = self.work.iter().filter(|w| w.bot_id == bot_id).collect();
         work.sort_by_key(|w| w.created_at);
+        // A session the bot started that waits on an answer needs the owner
+        // whatever its work did since: the work may have ended (or been
+        // stopped) while the question stays open.
         for w in &work {
-            if w.state == WorkState::Running {
-                for chat_id in w.session_ids() {
-                    if asking(chat_id) {
-                        items.push(NeedsYou::Asking {
-                            chat_id: chat_id.to_string(),
-                            work_id: w.id.clone(),
-                        });
-                    }
+            for chat_id in w.session_ids() {
+                if asking(chat_id) {
+                    items.push(NeedsYou::Asking {
+                        chat_id: chat_id.to_string(),
+                        work_id: w.id.clone(),
+                    });
                 }
             }
         }
@@ -1182,6 +1183,7 @@ mod tests {
             work("plan", WorkState::Proposed, vec![]),
             work("run", WorkState::Running, vec!["s1", "s2"]),
             work("other-bot", WorkState::Proposed, vec![]),
+            work("ended", WorkState::Done, vec!["s3"]),
         ];
         records.work[2].bot_id = "x".into();
         records.approvals = vec![BotApproval {
@@ -1195,7 +1197,7 @@ mod tests {
             state: ApprovalState::Pending,
             decision: None,
         }];
-        let items = records.needs_you("b", |chat| chat == "s2");
+        let items = records.needs_you("b", |chat| chat == "s2" || chat == "s3");
         assert_eq!(
             items,
             vec![
@@ -1203,6 +1205,10 @@ mod tests {
                 NeedsYou::Asking {
                     chat_id: "s2".into(),
                     work_id: "run".into()
+                },
+                NeedsYou::Asking {
+                    chat_id: "s3".into(),
+                    work_id: "ended".into()
                 },
                 NeedsYou::Plan("plan".into()),
             ]

@@ -221,7 +221,8 @@ impl Shell {
                     .text_size(px(13.0))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(format!(
-                        "Answers questions about your work · runs on {host}"
+                        "{} · runs on {host}",
+                        bot_role(&bot.capabilities)
                     ))),
             );
         if has_access {
@@ -310,6 +311,17 @@ impl Shell {
                 .child(motion::fade_in(("bot-start-in", sid), column))
                 .into_any_element(),
         )
+    }
+}
+
+/// What the bot does, in a few words, from what it may do.
+fn bot_role(capabilities: &cypher_proto::BotCapabilities) -> &'static str {
+    if capabilities.coordinate {
+        "Plans and does work across your projects"
+    } else if capabilities.work_directly {
+        "Answers questions and works in your projects"
+    } else {
+        "Answers questions about your work"
     }
 }
 
