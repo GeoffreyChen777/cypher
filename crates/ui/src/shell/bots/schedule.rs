@@ -1148,7 +1148,7 @@ impl Shell {
                         .text_size(px(12.0))
                         .line_height(px(17.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(summary)),
+                        .child(SharedString::from(super::items::plain_markdown(&summary))),
                 )
             })
             .into_any_element()

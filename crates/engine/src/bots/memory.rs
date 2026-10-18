@@ -138,6 +138,8 @@ struct SaveProjectTask {
     schedule: Schedule,
     #[serde(default)]
     worktree: Option<bool>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 fn args<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Result<T, EngineError> {
@@ -446,7 +448,11 @@ impl Bots {
                 .worktree
                 .or(existing.as_ref().map(|t| t.worktree))
                 .unwrap_or(false),
-            model: existing.as_ref().and_then(|t| t.model.clone()),
+            model: args
+                .model
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .or_else(|| existing.as_ref().and_then(|t| t.model.clone())),
             created_by: existing
                 .as_ref()
                 .map_or(Some(bot.id.clone()), |t| t.created_by.clone()),

@@ -328,6 +328,7 @@ const TOOLS: ToolDef[] = [
         { description: "When it runs" },
       ),
       worktree: Type.Optional(Type.Boolean({ description: "Run each session in a new worktree (default off)" })),
+      model: Type.Optional(Type.String({ description: "The model each session runs on, e.g. claude-bridge/claude-haiku-5-5 (default: the project's)" })),
     }),
   },
 

@@ -109,10 +109,32 @@ pub(super) fn text_block(text: String, theme: &Theme) -> gpui::Div {
 
 /// Markdown an agent wrote, read as plain text for a panel or a row: a
 /// link keeps its text (a cited `cypher://session/…` reads as the session's
-/// title), emphasis and code ticks drop; lines and paragraphs stay.
+/// title), emphasis, code ticks and heading marks drop, a table row reads
+/// as its cells joined by " · " (its rule line goes); lines and paragraphs
+/// stay.
 pub(super) fn plain_markdown(text: &str) -> String {
+    let lines: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with('|') {
+                if trimmed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) {
+                    return None;
+                }
+                let cells: Vec<&str> = trimmed
+                    .trim_matches('|')
+                    .split('|')
+                    .map(str::trim)
+                    .filter(|cell| !cell.is_empty())
+                    .collect();
+                return Some(cells.join(" · "));
+            }
+            Some(trimmed.trim_start_matches('#').trim_start().to_string())
+        })
+        .collect();
+    let text = lines.join("\n");
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
+    let mut rest = text.as_str();
     while let Some(open) = rest.find('[') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
@@ -441,6 +463,10 @@ mod tests {
                 "Fixed in [Fix rounding](cypher://session/c1); ran `make test` **twice**.\n\nSee [x]"
             ),
             "Fixed in Fix rounding; ran make test twice.\n\nSee [x]"
+        );
+        assert_eq!(
+            plain_markdown("## Result\n| Tests | Result |\n|---|:--:|\n| 2 | OK |"),
+            "Result\nTests · Result\n2 · OK"
         );
     }
 }

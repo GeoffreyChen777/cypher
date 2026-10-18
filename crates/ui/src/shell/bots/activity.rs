@@ -115,7 +115,8 @@ impl Shell {
                     ))),
             )
             .child(text.child(SharedString::from(if roomy {
-                entry.text.clone()
+                // Two lines' worth: gpui's clamp cuts without an ellipsis.
+                cypher_proto::clip(&transcript::single_line(&entry.text), 110)
             } else {
                 transcript::single_line(&entry.text)
             })))
