@@ -817,8 +817,8 @@ impl Shell {
         let mut settings = parts::group_box().child(
             parts::switch_row(
                 "bot-routine-enabled",
-                "On schedule",
-                "Off keeps it, and Run now still works.",
+                "Enabled",
+                "Runs on its schedule. When off, it runs only when you press Run now.",
                 routine.enabled,
                 true,
                 theme,
