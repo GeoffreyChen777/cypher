@@ -298,6 +298,50 @@ impl BotScope {
         self.sees_chat_in(chat, &by_id)
     }
 
+    /// The scope both `self` and `other` grant (§5.2: a connection's scope
+    /// only narrows the bot's). Projects are those both grant, excluded
+    /// sessions add up, and archived sessions and message text need both. A
+    /// session both see by different rules (one grants its project, the
+    /// other names it) is named in `includeSessions`, resolved against
+    /// `chats`, so the result sees exactly the chats both scopes see.
+    pub fn intersect(&self, other: &BotScope, chats: &[Chat]) -> BotScope {
+        let projects = match (&self.projects, &other.projects) {
+            (ProjectGrant::None, _) | (_, ProjectGrant::None) => ProjectGrant::None,
+            (ProjectGrant::All, grant) | (grant, ProjectGrant::All) => grant.clone(),
+            (ProjectGrant::Selected { space_ids: a }, ProjectGrant::Selected { space_ids: b }) => {
+                ProjectGrant::Selected {
+                    space_ids: a.iter().filter(|id| b.contains(id)).cloned().collect(),
+                }
+            }
+        };
+        let mut exclude_sessions = self.exclude_sessions.clone();
+        for id in &other.exclude_sessions {
+            if !exclude_sessions.contains(id) {
+                exclude_sessions.push(id.clone());
+            }
+        }
+        let mut narrowed = BotScope {
+            projects,
+            include_sessions: Vec::new(),
+            exclude_sessions,
+            include_archived: self.include_archived && other.include_archived,
+            transcripts: self.transcripts && other.transcripts,
+        };
+        let by_id: HashMap<&str, &Chat> = chats.iter().map(|c| (c.id.as_str(), c)).collect();
+        let include: Vec<String> = chats
+            .iter()
+            .filter(|chat| chat.parent_chat_id().is_none())
+            .filter(|chat| {
+                self.sees_chat_in(chat, &by_id)
+                    && other.sees_chat_in(chat, &by_id)
+                    && !narrowed.sees_chat_in(chat, &by_id)
+            })
+            .map(|chat| chat.id.clone())
+            .collect();
+        narrowed.include_sessions = include;
+        narrowed
+    }
+
     fn sees_chat_in(&self, chat: &Chat, by_id: &HashMap<&str, &Chat>) -> bool {
         // Walk to the root of a child chain; a broken or cyclic chain hides
         // the chat rather than guessing.
@@ -486,6 +530,73 @@ mod tests {
             ..Default::default()
         };
         assert!(ids(&scope, &chats).is_empty());
+    }
+
+    #[test]
+    fn an_intersection_sees_only_what_both_scopes_see() {
+        let mut archived = chat("old", Some("s1"));
+        archived.archived = true;
+        let chats = [
+            chat("a", Some("s1")),
+            chat("b", Some("s2")),
+            chat("c", Some("s3")),
+            chat("loose", None),
+            child_of("a-child", "a"),
+            child_of("b-child", "b"),
+            archived,
+        ];
+        let bot = BotScope {
+            projects: ProjectGrant::Selected {
+                space_ids: vec!["s1".into(), "s2".into()],
+            },
+            include_sessions: vec!["loose".into()],
+            exclude_sessions: vec!["b-child".into()],
+            include_archived: true,
+            transcripts: true,
+        };
+        let connection = BotScope {
+            projects: ProjectGrant::Selected {
+                space_ids: vec!["s1".into(), "s3".into()],
+            },
+            include_sessions: vec!["b".into(), "loose".into()],
+            exclude_sessions: vec!["a-child".into()],
+            include_archived: false,
+            transcripts: false,
+        };
+        let both = bot.intersect(&connection, &chats);
+        let seen = |scope: &BotScope| -> std::collections::BTreeSet<String> {
+            ids(scope, &chats).into_iter().collect()
+        };
+        let expected: std::collections::BTreeSet<String> = seen(&bot)
+            .intersection(&seen(&connection))
+            .cloned()
+            .collect();
+        assert_eq!(seen(&both), expected);
+        assert_eq!(
+            seen(&both).into_iter().collect::<Vec<_>>(),
+            ["a", "b", "loose"],
+            "s3 is the connection's only, archived needs both, each side's exclusions hold"
+        );
+        assert_eq!(
+            both.projects,
+            ProjectGrant::Selected {
+                space_ids: vec!["s1".into()]
+            }
+        );
+        assert!(both.sees_space("s1") && !both.sees_space("s2") && !both.sees_space("s3"));
+        assert!(!both.transcripts && !both.include_archived);
+        // Commutative in what it sees, and "all" narrows to the other side.
+        assert_eq!(seen(&connection.intersect(&bot, &chats)), seen(&both));
+        let all = BotScope {
+            projects: ProjectGrant::All,
+            ..Default::default()
+        };
+        assert_eq!(all.intersect(&bot, &chats).projects, bot.projects);
+        assert_eq!(
+            BotScope::default().intersect(&all, &chats).projects,
+            ProjectGrant::None
+        );
+        assert!(seen(&BotScope::default().intersect(&bot, &chats)).is_empty());
     }
 
     #[test]
