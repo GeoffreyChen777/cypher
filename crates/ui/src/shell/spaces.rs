@@ -356,8 +356,8 @@ impl Shell {
 
     /// The wordmark. In the main window it is the mode switch: "Cypher ⇅"
     /// in Projects mode, with a badge counting what the bots need from you;
-    /// "Cypher Workspaces ⇅" on the Workspaces board, the second word in the current
-    /// bot's colour. A project window's is the plain wordmark.
+    /// "Cypher · Workspaces ⇅" on the Workspaces board, the mode a quiet
+    /// label beside the wordmark. A project window's is the plain wordmark.
     fn render_logo(&self, botboard: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let word = |text: &'static str, color: gpui::Hsla| {
             div()
@@ -371,11 +371,7 @@ impl Shell {
         if self.is_project_window() {
             return word("Cypher", theme.text).into_any_element();
         }
-        let (bot_color, needs_you) = {
-            let state = self.state.read(cx);
-            let color = super::bots::current_bot_color(state, &self.settings, theme);
-            (color, super::bots::needs_you_count(state, Utc::now()))
-        };
+        let needs_you = super::bots::needs_you_count(self.state.read(cx), Utc::now());
         let key = "sidebar-logo";
         let tip = if botboard {
             "Switch to Projects"
@@ -432,7 +428,15 @@ impl Shell {
                 this.set_window_mode(next, cx);
             }))
             .child(word("Cypher", theme.text))
-            .when(botboard, |el| el.child(word("Workspaces", bot_color)))
+            .when(botboard, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(13.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from("· Workspaces")),
+                )
+            })
             .children(badge)
             .child(
                 icon(icons::ALT_ARROW_UP_DOWN)

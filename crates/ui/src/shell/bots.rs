@@ -144,18 +144,6 @@ fn current_bot<'a>(bots: &'a [Bot], saved: Option<&str>) -> Option<&'a Bot> {
         .or_else(|| bots.first())
 }
 
-/// The current bot's colour (the logo's "Botboard"), the theme accent for
-/// a bot without one.
-pub(super) fn current_bot_color(
-    state: &crate::state::AppState,
-    settings: &UiSettings,
-    theme: &Theme,
-) -> gpui::Hsla {
-    current_bot(&state.bots, settings.botboard_bot.as_deref())
-        .and_then(|bot| crate::appearance::space_style::space_color(bot.color.as_deref(), theme))
-        .unwrap_or(theme.accent)
-}
-
 /// Whether a device can host a bot: a Mac or Linux engine, online, and new
 /// enough. The local engine always qualifies (it is running this code).
 fn can_host(device: &cypher_proto::Device, local: Option<&str>, online: bool) -> bool {
