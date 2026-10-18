@@ -454,13 +454,16 @@ fn step_mark(
     if numbered {
         return cell()
             .child(
-                // An even box and a line box exactly the digit's height, so
-                // the number sits in the circle's middle.
+                // An even box and a line box exactly the digit's height; the
+                // digits' shapes sit a touch low and left at this size, so
+                // they are nudged to the circle's optical middle.
                 div()
                     .size(px(18.0))
                     .rounded_full()
                     .border_1()
                     .border_color(crate::kit::theme::hairline(0.16))
+                    .pl(px(1.0))
+                    .pb(px(1.0))
                     .flex()
                     .items_center()
                     .justify_center()
