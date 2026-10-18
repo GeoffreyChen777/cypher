@@ -15,6 +15,11 @@ use cypher_proto::{
     BotConnection, BotExchange, BotInvite, ExchangeDirection, ExchangeState, ReplyMode,
 };
 
+/// The lead column of network rows (peer avatars, the invite and question
+/// glyphs): with its 6px inset and 8px gap the titles line up with the
+/// other cards' rows.
+const LEAD: f32 = 18.0;
+
 /// Exchanges a list shows.
 const RECENT_EXCHANGES: usize = 8;
 
@@ -102,10 +107,12 @@ struct Issued {
 pub(super) struct NetworkUi {
     issued: Option<Issued>,
     creating: bool,
-    invite_error: Option<SharedString>,
+    /// Why the last invite failed, and whether it is only "not yet" (said
+    /// quietly) rather than an error.
+    invite_error: Option<(SharedString, bool)>,
     redeem: Option<(Entity<TextInput>, Subscription)>,
     redeeming: bool,
-    redeem_error: Option<SharedString>,
+    redeem_error: Option<(SharedString, bool)>,
 }
 
 impl Shell {
@@ -137,8 +144,14 @@ impl Shell {
         input
     }
 
-    /// The words for a failed network call.
-    fn network_error(&self, err: CallError, cx: &App) -> SharedString {
+    /// The words for a failed network call, and whether they only mean
+    /// "not yet" (said quietly, not as an error).
+    fn network_failure(&self, err: CallError, cx: &App) -> (SharedString, bool) {
+        let quiet = err == CallError::Unknown;
+        (self.network_words(err, cx), quiet)
+    }
+
+    fn network_words(&self, err: CallError, cx: &App) -> SharedString {
         let host = {
             let state = self.state.read(cx);
             current_bot(&state.bots, self.settings.botboard_bot.as_deref())
@@ -180,7 +193,7 @@ impl Shell {
             move |this, result, cx| {
                 this.board.network.creating = false;
                 let issued = result
-                    .map_err(|err| this.network_error(err, cx))
+                    .map_err(|err| this.network_failure(err, cx))
                     .and_then(|v| {
                         let code = v.get("code").and_then(|c| c.as_str());
                         let expires_at = v.get("expiresAt").and_then(|e| e.as_i64());
@@ -191,7 +204,7 @@ impl Shell {
                                 expires_at,
                                 copied: false,
                             }),
-                            _ => Err("The device sent back no code.".into()),
+                            _ => Err(("The device sent back no code.".into(), false)),
                         }
                     });
                 match issued {
@@ -216,7 +229,7 @@ impl Shell {
             return;
         };
         if code.is_empty() {
-            self.board.network.redeem_error = Some("Paste the code you were sent.".into());
+            self.board.network.redeem_error = Some(("Paste the code you were sent.".into(), false));
             return cx.notify();
         }
         self.board.network.redeeming = true;
@@ -240,7 +253,9 @@ impl Shell {
                             .unwrap_or(PanelItem::Network);
                         this.show_panel(item, cx);
                     }
-                    Err(err) => this.board.network.redeem_error = Some(this.network_error(err, cx)),
+                    Err(err) => {
+                        this.board.network.redeem_error = Some(this.network_failure(err, cx))
+                    }
                 }
             },
         );
@@ -276,9 +291,9 @@ impl Shell {
                 icons::GLOBAL,
                 "Network",
                 if ready {
-                    "No connections yet"
+                    "No connections"
                 } else {
-                    "Sign in to connect bots"
+                    "Sign in to connect"
                 },
                 "Connect a bot",
                 PanelItem::Network,
@@ -356,19 +371,18 @@ impl Shell {
             conn.id
         );
         let item = PanelItem::Connection(conn.id.clone());
-        let last = conn
-            .last_exchange_at
-            .map(|at| format!("last {}", parts::past_ms(at)));
+        let last = conn.last_exchange_at.map(parts::ago_ms);
         let revoking = conn.revoke_requested_at.is_some();
         div()
             .id(SharedString::from(key.clone()))
-            .px(px(8.0))
+            .pl(px(6.0))
+            .pr(px(8.0))
             .py(px(if panel { 8.0 } else { 6.0 }))
             .rounded(px(8.0))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(10.0))
+            .gap(px(8.0))
             .cursor_pointer()
             .bg(if selected {
                 crate::kit::theme::wash(0.08)
@@ -382,7 +396,7 @@ impl Shell {
             .on_hover(motion::hover_listener(key.clone()))
             .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
             .when(revoking, |el| el.opacity(0.6))
-            .child(peer_avatar(&conn.peer.name, 22.0, theme))
+            .child(peer_avatar(&conn.peer.name, LEAD, theme))
             .child(
                 div()
                     .flex_1()
@@ -539,6 +553,9 @@ impl Shell {
             .iter()
             .map(|c| (c.id.clone(), c.peer.name.clone()))
             .collect();
+        if !ready && connections.is_empty() && invites.is_empty() && exchanges.is_empty() {
+            return (head, body.child(privacy_note(theme)));
+        }
         body = body.child(parts::section_label(theme, "Connections"));
         if connections.is_empty() {
             body = body.child(parts::quiet_line(
@@ -584,7 +601,7 @@ impl Shell {
         invite_glyph_row(&format!("bot-panel-invite-{}", invite.id), theme)
             .py(px(8.0))
             .child(super::board::two_lines(
-                format!("Invite · created {}", parts::past_ms(invite.created_at)),
+                format!("Invite code · made {}", parts::ago_ms(invite.created_at)),
                 if revoking {
                     "Revoking…".into()
                 } else {
@@ -728,13 +745,17 @@ impl Shell {
                     .when(net.creating, |el| el.opacity(0.6))
                     .on_click(cx.listener(|this, _, _, cx| this.create_invite(cx))),
                 )
-                .children(net.invite_error.clone().map(|error| {
+                .children(net.invite_error.clone().map(|(error, quiet)| {
                     div()
                         .flex_1()
                         .min_w_0()
                         .text_size(px(11.5))
                         .line_height(px(16.0))
-                        .text_color(theme.danger)
+                        .text_color(if quiet {
+                            theme.text_muted
+                        } else {
+                            theme.danger
+                        })
                         .child(error)
                 })),
         };
@@ -784,12 +805,16 @@ impl Shell {
                 .pt(px(0.0)),
             )
             .child(redeem)
-            .children(net.redeem_error.clone().map(|error| {
+            .children(net.redeem_error.clone().map(|(error, quiet)| {
                 div()
                     .px(px(8.0))
                     .pt(px(6.0))
                     .text_size(px(11.5))
-                    .text_color(theme.danger)
+                    .text_color(if quiet {
+                        theme.text_muted
+                    } else {
+                        theme.danger
+                    })
                     .child(error)
             }))
             .child(privacy_note(theme));
@@ -897,7 +922,9 @@ impl Shell {
                 .pt(px(6.0))
                 .text_size(px(11.5))
                 .text_color(theme.text_muted)
-                .child(SharedString::from(mode_detail)),
+                .child(SharedString::from(format!(
+                    "{mode_detail} At most 30 questions an hour and 200 a day."
+                ))),
         );
 
         // ── what the peer's questions may read ──
@@ -912,7 +939,10 @@ impl Shell {
         if editable && !projects.is_empty() {
             body = body.child(div().mx(px(8.0)).child(parts::segmented(
                 "bot-conn-scope",
-                &[(0usize, "Same as the bot"), (1usize, "Only some projects")],
+                &[
+                    (0usize, same_label.as_str()),
+                    (1usize, "Only some projects"),
+                ],
                 mode,
                 |this, pick, cx| {
                     let narrow = pick == 1;
@@ -978,18 +1008,17 @@ impl Shell {
                 );
             }
         }
-        body = body
-            .child(parts::fact(
-                theme,
-                "Limits",
-                SharedString::from("30 questions an hour, 200 a day"),
-            ))
-            .child(parts::section_label(theme, "Recent questions"));
+        body = body.child(parts::section_label(theme, "Recent questions"));
         if exchanges.is_empty() {
             body = body.child(parts::quiet_line(theme, "No questions yet."));
         }
         for exchange in &exchanges {
-            body = body.child(exchange_row(exchange, None, &bot.name, theme));
+            body = body.child(exchange_row(
+                exchange,
+                Some(&conn.peer.name),
+                &bot.name,
+                theme,
+            ));
         }
         if editable {
             let (revoke_id, name) = (conn.id.clone(), conn.peer.name.clone());
@@ -1099,16 +1128,17 @@ fn expiry_words(at: i64) -> String {
 fn invite_glyph_row(key: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id(SharedString::from(key.to_string()))
-        .px(px(8.0))
+        .pl(px(6.0))
+        .pr(px(8.0))
         .py(px(6.0))
         .rounded(px(8.0))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(10.0))
+        .gap(px(8.0))
         .child(
             div()
-                .size(px(22.0))
+                .size(px(LEAD))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -1122,9 +1152,22 @@ fn invite_glyph_row(key: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
 }
 
 /// Another owner's bot: its initial on a neutral tile (peers publish no
-/// avatar).
+/// avatar), sized for a row's lead column.
 fn peer_avatar(name: &str, size: f32, theme: &Theme) -> gpui::Div {
-    crate::appearance::bot_style::bot_avatar(name, None, None, size, theme)
+    div()
+        .size(px(size))
+        .flex_none()
+        .rounded(px((size * 0.3).round()))
+        .bg(crate::kit::theme::ink(0.08))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px((size * 0.56).round()))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text_muted)
+        .child(SharedString::from(crate::appearance::bot_style::initial(
+            name,
+        )))
 }
 
 fn check_box(on: bool, theme: &Theme) -> gpui::Div {
@@ -1153,7 +1196,7 @@ fn exchange_row(exchange: &BotExchange, peer: Option<&str>, bot: &str, theme: &T
     let who = match (incoming, peer) {
         (true, Some(peer)) => format!("{peer} asked {bot}"),
         (false, Some(peer)) => format!("{bot} asked {peer}"),
-        (true, None) => "Asked of this bot".to_string(),
+        (true, None) => format!("Asked of {bot}"),
         (false, None) => format!("{bot} asked"),
     };
     let state_color = match exchange.state {
@@ -1162,15 +1205,16 @@ fn exchange_row(exchange: &BotExchange, peer: Option<&str>, bot: &str, theme: &T
         _ => theme.text_muted.opacity(0.85),
     };
     div()
-        .px(px(8.0))
+        .pl(px(6.0))
+        .pr(px(8.0))
         .py(px(6.0))
         .flex()
         .flex_row()
         .items_start()
-        .gap(px(10.0))
+        .gap(px(8.0))
         .child(
             div()
-                .w(px(22.0))
+                .w(px(LEAD))
                 .flex_none()
                 .flex()
                 .justify_center()
@@ -1218,10 +1262,8 @@ fn exchange_row(exchange: &BotExchange, peer: Option<&str>, bot: &str, theme: &T
                                 .text_color(state_color)
                                 .child(SharedString::from(exchange_state_words(exchange.state))),
                         )
-                        .child(SharedString::from(format!(
-                            "· {}",
-                            parts::past_ms(exchange.asked_at)
-                        ))),
+                        .child("·")
+                        .child(SharedString::from(parts::ago_ms(exchange.asked_at))),
                 ),
         )
 }

@@ -250,8 +250,9 @@ pub(super) fn switch_row(
         .child(crate::settings::widgets::toggle_switch(theme, on))
 }
 
-/// A static row in a [`group_box`]: a check or a cross, then the line.
-pub(super) fn grant_row(theme: &Theme, granted: bool, text: &str, first: bool) -> gpui::Div {
+/// A fixed grant in a [`group_box`], laid out like a [`switch_row`] with a
+/// check where the switch would be.
+pub(super) fn grant_row(theme: &Theme, title: &str, detail: &str, first: bool) -> gpui::Div {
     div()
         .when(!first, |el| {
             el.border_t_1()
@@ -262,26 +263,43 @@ pub(super) fn grant_row(theme: &Theme, granted: bool, text: &str, first: bool) -
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(10.0))
-        .text_size(px(12.5))
-        .text_color(theme.text)
+        .gap(px(12.0))
         .child(
-            icon(if granted { icons::CHECK } else { icons::CROSS })
-                .size(px(12.0))
-                .text_color(if granted {
-                    theme.text_muted
-                } else {
-                    theme.text_faint
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(theme.text)
+                        .child(SharedString::from(title.to_string())),
+                )
+                .when(!detail.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(detail.to_string())),
+                    )
                 }),
         )
-        .child(SharedString::from(text.to_string()))
+        .child(
+            div().w(px(32.0)).flex_none().flex().justify_center().child(
+                icon(icons::CHECK)
+                    .size(px(13.0))
+                    .text_color(theme.text_muted),
+            ),
+        )
 }
 
 /// A segmented choice (the palette's Selected / All / None): `options` as
 /// `(value, label)`, the current one lifted. `pick` applies a click.
 pub(super) fn segmented<T: Copy + PartialEq + 'static>(
     key: &str,
-    options: &[(T, &'static str)],
+    options: &[(T, &str)],
     current: T,
     pick: fn(&mut Shell, T, &mut Context<Shell>),
     theme: &Theme,
@@ -314,7 +332,7 @@ pub(super) fn segmented<T: Copy + PartialEq + 'static>(
                 })
                 .when(!on, |el| el.hover(|s| s.text_color(theme.text)))
                 .on_click(cx.listener(move |this, _, _, cx| pick(this, value, cx)))
-                .child(SharedString::from(label))
+                .child(SharedString::from(label.to_string()))
         }))
 }
 
@@ -647,7 +665,8 @@ fn day_month<Tz: TimeZone>(at: &DateTime<Tz>) -> String {
 }
 
 /// When something next happens, as a card's right-hand note: "in 25m",
-/// "in 3h", "02:00" (within a day), "Mon" (within a week), else "Oct 30".
+/// "in 3h", "02:00" (today or tomorrow), "Mon" (within a week), else
+/// "Oct 30".
 pub(super) fn next_label<Tz: TimeZone>(at: &DateTime<Tz>, now: &DateTime<Tz>) -> String {
     let minutes = (at.clone() - now.clone()).num_minutes();
     if minutes < 1 {
@@ -659,10 +678,11 @@ pub(super) fn next_label<Tz: TimeZone>(at: &DateTime<Tz>, now: &DateTime<Tz>) ->
     if minutes < 12 * 60 {
         return format!("in {}h", minutes / 60);
     }
-    if minutes < 24 * 60 {
+    let days = (at.date_naive() - now.date_naive()).num_days();
+    if days <= 1 {
         return hm(at);
     }
-    if minutes < 7 * 24 * 60 {
+    if days < 7 {
         return WEEKDAYS[at.weekday().num_days_from_monday() as usize].into();
     }
     day_month(at)
@@ -717,6 +737,17 @@ pub(super) fn past_ms(ms: i64) -> String {
         .unwrap_or_default()
 }
 
+/// How long ago, for sub-lines: "just now", "5m ago", "2h ago", "3d ago".
+pub(super) fn ago_ms(ms: i64) -> String {
+    let Some(then) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms) else {
+        return String::new();
+    };
+    match format_time_ago(then, chrono::Utc::now()).as_str() {
+        "now" => "just now".into(),
+        short => format!("{short} ago"),
+    }
+}
+
 /// [`past_full`] for epoch ms, in this device's time zone.
 pub(super) fn past_full_ms(ms: i64) -> String {
     local(ms)
@@ -742,7 +773,8 @@ mod tests {
         assert_eq!(label("2026-10-18T10:25:00+01:00"), "in 25m");
         assert_eq!(label("2026-10-18T14:30:00+01:00"), "in 4h");
         assert_eq!(label("2026-10-19T02:00:00+01:00"), "02:00");
-        assert_eq!(label("2026-10-19T18:30:00+01:00"), "Mon");
+        assert_eq!(label("2026-10-19T23:00:00+01:00"), "23:00", "tomorrow");
+        assert_eq!(label("2026-10-20T18:30:00+01:00"), "Tue");
         assert_eq!(label("2026-10-30T09:00:00+01:00"), "Oct 30");
         let full = |s: &str| next_full(&at(s), &now);
         assert_eq!(full("2026-10-18T18:30:00+01:00"), "Today 18:30");

@@ -425,6 +425,7 @@ impl Shell {
                 self.pulse_ticker.entity_id(),
                 theme,
             ),
+            JobState::Starting => None,
             _ if job.failed() => Some(
                 icon(icons::DANGER_TRIANGLE)
                     .size(px(11.0))
@@ -618,15 +619,40 @@ impl Shell {
             .iter()
             .partition(|(job, _)| job.kind == JobKind::Routine);
         let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+        // Today's budget use across the bot's routines that are on.
+        let budget = {
+            let today = Local::now().format("%Y-%m-%d").to_string();
+            let state = self.state.read(cx);
+            let on: Vec<&BotRoutine> = state
+                .bot_records
+                .routines
+                .iter()
+                .filter(|r| r.bot_id == bot.id && r.enabled)
+                .collect();
+            (!on.is_empty()).then(|| {
+                on.iter().fold((0, 0), |(used, budget), r| {
+                    (
+                        used + runs_today(r.runs_today, r.runs_day.as_deref(), &today),
+                        budget + r.max_runs_per_day,
+                    )
+                })
+            })
+        };
         let head = PanelHead {
             glyph: icons::CLOCK,
             tint: None,
             title: "Schedule".into(),
-            subtitle: format!(
-                "{} · {}",
-                plural(routines.len(), "routine"),
-                plural(tasks.len(), "project task")
-            ),
+            subtitle: {
+                let mut line = format!(
+                    "{} · {}",
+                    plural(routines.len(), "routine"),
+                    plural(tasks.len(), "project task")
+                );
+                if let Some((used, budget)) = budget {
+                    line.push_str(&format!(" · {used} of {budget} routine runs today"));
+                }
+                line
+            },
         };
         let actions = div()
             .px(px(4.0))
@@ -766,11 +792,7 @@ impl Shell {
         }
         body = body
             .child(parts::section_label(theme, "Runs"))
-            .child(parts::fact(
-                theme,
-                "Next run",
-                next_value(job.state(), &now),
-            ))
+            .child(parts::fact(theme, "Next run", next_value(&job, &now)))
             .child(parts::fact(
                 theme,
                 "Last run",
@@ -809,7 +831,12 @@ impl Shell {
                         this.save_routine_now(routine, cx);
                     })),
                 )
-                .child(parts::grant_row(theme, true, "Reads the notebook", false))
+                .child(parts::grant_row(
+                    theme,
+                    "Reads the notebook",
+                    "Always, at the start of each run.",
+                    false,
+                ))
                 .child(
                     parts::switch_row(
                         "bot-routine-notes",
@@ -880,11 +907,7 @@ impl Shell {
                 "Project",
                 SharedString::from(format!("{} · {device}", space.display_name())),
             ))
-            .child(parts::fact(
-                theme,
-                "Next run",
-                next_value(job.state(), &now),
-            ))
+            .child(parts::fact(theme, "Next run", next_value(&job, &now)))
             .child(parts::fact(
                 theme,
                 "Last run",
@@ -968,7 +991,9 @@ impl Shell {
             .text_color(theme.on_solid)
             .cursor_pointer()
             .hover(|s| s.opacity(0.9))
-            .child(icon(icons::PLAY).size(px(11.0)).text_color(theme.on_solid))
+            .when(!busy, |el| {
+                el.child(icon(icons::PLAY).size(px(11.0)).text_color(theme.on_solid))
+            })
             .child(SharedString::from(match job.state() {
                 JobState::Running => "Running…",
                 JobState::Starting => "Starting…",
@@ -1483,7 +1508,7 @@ impl Shell {
                     div()
                         .id(SharedString::from(format!("bot-form-day-{day}")))
                         .flex_1()
-                        .h(px(26.0))
+                        .h(px(24.0))
                         .rounded(px(6.0))
                         .flex()
                         .items_center()
@@ -1496,10 +1521,7 @@ impl Shell {
                                 .shadow(crate::kit::theme::card_selected_shadows())
                                 .font_weight(gpui::FontWeight::MEDIUM)
                         })
-                        .when(!on, |el| {
-                            el.bg(crate::kit::theme::ink(0.03))
-                                .hover(|s| s.text_color(theme.text))
-                        })
+                        .when(!on, |el| el.hover(|s| s.text_color(theme.text)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(form) = this.board.schedule.form.as_mut() {
                                 form.draft.toggle_day(day);
@@ -1528,7 +1550,18 @@ impl Shell {
                             )
                             .child(parts::field(&form.time).mx(px(0.0)).w(px(76.0))),
                     )
-                    .child(div().flex().flex_row().gap(px(4.0)).children(chips))
+                    // Day chips sit in a segmented control's track; any
+                    // number may be on.
+                    .child(
+                        div()
+                            .p(px(2.0))
+                            .rounded(px(8.0))
+                            .bg(crate::kit::theme::ink(0.05))
+                            .flex()
+                            .flex_row()
+                            .gap(px(2.0))
+                            .children(chips),
+                    )
             }
             ScheduleKind::Every => div()
                 .flex()
@@ -1555,20 +1588,24 @@ impl Shell {
                     theme,
                     cx,
                 ))),
-            ScheduleKind::Manual => div()
-                .text_size(px(12.0))
-                .text_color(theme.text_muted)
-                .child("Runs only when you press Run now."),
+            ScheduleKind::Manual => div(),
         };
-        let hint = match (&preview, form.draft.kind) {
-            (_, ScheduleKind::Manual) => None,
-            (Ok(schedule), _) => Some(match schedule {
-                Schedule::Daily { days, .. } if days.is_empty() => {
-                    format!("{} · pick days to narrow it", schedule.describe())
-                }
-                _ => schedule.describe(),
-            }),
-            (Err(_), _) => None,
+        // One line under the editor, always there so nothing jumps: when
+        // it next runs, or what to fix.
+        let (hint, hint_color) = match &preview {
+            Ok(Schedule::Manual) => (
+                "Runs only when you press Run now.".to_string(),
+                theme.text_faint,
+            ),
+            Ok(schedule) => {
+                let now = Local::now();
+                let next = schedule
+                    .next_after(&now)
+                    .map(|at| format!(" · next run {}", lower_first(&parts::next_full(&at, &now))))
+                    .unwrap_or_default();
+                (format!("{}{next}", schedule.describe()), theme.text_faint)
+            }
+            Err(problem) => (problem.clone(), theme.danger.opacity(0.85)),
         };
         body = body.child(
             div()
@@ -1576,14 +1613,14 @@ impl Shell {
                 .mt(px(10.0))
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
+                .gap(px(8.0))
                 .child(when)
-                .children(hint.map(|hint| {
+                .child(
                     div()
                         .text_size(px(11.5))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(hint))
-                })),
+                        .text_color(hint_color)
+                        .child(SharedString::from(hint)),
+                ),
         );
 
         // ── what the job may do, and where it runs ──
@@ -1592,8 +1629,8 @@ impl Shell {
                 parts::group_box()
                     .child(parts::grant_row(
                         theme,
-                        true,
-                        "Reads what the bot reads, and its notebook",
+                        "Reads what the bot reads",
+                        "Its projects, and the notebook.",
                         true,
                     ))
                     .child(
@@ -1722,18 +1759,22 @@ impl Shell {
     }
 }
 
-/// A Next run fact's words.
-fn next_value(state: JobState, now: &DateTime<Local>) -> SharedString {
-    match state {
-        JobState::Running => "Running now".into(),
-        JobState::Starting => "Starting…".into(),
-        JobState::Next(at) => parts::local(at)
-            .map(|at| parts::next_full(&at, now))
-            .unwrap_or_default()
-            .into(),
-        JobState::Manual => "Only when run by hand".into(),
-        JobState::Unplanned => "Not planned yet".into(),
-        JobState::Off => "Off".into(),
+/// A Next run fact's words: the next scheduled run even while one runs.
+fn next_value(job: &Job, now: &DateTime<Local>) -> SharedString {
+    match (job.next.and_then(parts::local), job.state()) {
+        (Some(at), _) => parts::next_full(&at, now).into(),
+        (None, _) if !job.enabled => "Off".into(),
+        (None, _) if job.schedule == Schedule::Manual => "Only when run by hand".into(),
+        (None, _) => "Not planned yet".into(),
+    }
+}
+
+/// "Today 09:00" → "today 09:00", for mid-sentence use.
+fn lower_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) if text.starts_with("To") => first.to_lowercase().chain(chars).collect(),
+        _ => text.to_string(),
     }
 }
 

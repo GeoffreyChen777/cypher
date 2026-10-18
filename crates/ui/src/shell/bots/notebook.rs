@@ -269,7 +269,9 @@ impl Shell {
                 popover::btn_primary(theme, "Add")
                     .id("bot-note-add")
                     .mr(px(8.0))
-                    .py(px(5.0))
+                    .h(px(32.0))
+                    .flex()
+                    .items_center()
                     .on_click(cx.listener(|this, _, _, cx| this.add_note(cx))),
             );
         let mut body = div()
@@ -333,7 +335,10 @@ impl Shell {
                     .flex_row()
                     .flex_wrap()
                     .gap(px(4.0))
-                    .child(SharedString::from(format!("Written by {}", bot.name)))
+                    .child(SharedString::from(format!(
+                        "Written by {} · {when}",
+                        bot.name
+                    )))
                     .when_some(from, |el, from| {
                         el.child("· from").child(match chat_id.clone() {
                             Some(chat_id) => parts::link(format!("{key}-from"), from, theme)
@@ -344,11 +349,10 @@ impl Shell {
                             None => div().child(SharedString::from(from)).into_any_element(),
                         })
                     })
-                    .child(SharedString::from(format!("· {when}")))
             }
         };
         let reveal = motion::hover_t(&key);
-        let (edit_note, delete_id) = (note.clone(), note.id.clone());
+        let (edit_note, pen_note, delete_id) = (note.clone(), note.clone(), note.id.clone());
         let tool = |id: String, glyph: &'static str, tip: &'static str, color: gpui::Hsla| {
             div()
                 .id(SharedString::from(id.clone()))
@@ -414,23 +418,38 @@ impl Shell {
                     ),
             )
             .child(
-                div().flex_none().flex().flex_row().child(
-                    tool(
-                        format!("{key}-delete"),
-                        icons::TRASH_BIN_MINIMALISTIC,
-                        "Delete note",
-                        theme.text_muted,
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .child(
+                        tool(
+                            format!("{key}-edit"),
+                            icons::PEN,
+                            "Edit note",
+                            theme.text_muted,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| this.edit_note(&pen_note, window, cx),
+                        )),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.board_mutate(
-                            serde_json::json!({
-                                "op": "deleteBotNote",
-                                "noteId": delete_id,
-                            }),
-                            cx,
-                        );
-                    })),
-                ),
+                    .child(
+                        tool(
+                            format!("{key}-delete"),
+                            icons::TRASH_BIN_MINIMALISTIC,
+                            "Delete note",
+                            theme.text_muted,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.board_mutate(
+                                serde_json::json!({
+                                    "op": "deleteBotNote",
+                                    "noteId": delete_id,
+                                }),
+                                cx,
+                            );
+                        })),
+                    ),
             )
             .into_any_element()
     }
@@ -441,8 +460,10 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // Indented to the note text it replaces.
         div()
             .py(px(6.0))
+            .pl(px(24.0))
             .flex()
             .flex_col()
             .gap(px(8.0))
@@ -482,12 +503,12 @@ fn note_mark(source: &NoteSource, bot: &Bot, theme: &Theme) -> AnyElement {
             &bot.name,
             bot.icon.as_deref(),
             bot.color.as_deref(),
-            16.0,
+            14.0,
             theme,
         )
         .into_any_element(),
         NoteSource::Owner => div()
-            .size(px(16.0))
+            .size(px(14.0))
             .flex_none()
             .flex()
             .items_center()
