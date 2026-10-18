@@ -3,7 +3,7 @@
 //! (plans, sessions, memory, network); a row opens the work or session it
 //! names.
 
-use super::board::{card, section_header};
+use super::board::{card_corner, card_glyph, card_item, card_with_rows, section_header};
 use super::items::{ago, glyph, item_row, mark_cell, trailing};
 use super::panel::{PanelHead, PanelItem};
 use super::*;
@@ -84,7 +84,22 @@ impl Shell {
         let now = Utc::now();
         let selected = matches!(&link, Link::Work(id)
             if self.board.panel == Some(PanelItem::WorkItem(id.clone())));
-        let row = item_row(&key, selected);
+        let row = if roomy {
+            item_row(&key, selected)
+        } else {
+            card_item(
+                &key,
+                Some(card_glyph(
+                    group_glyph(entry.kind.group()),
+                    theme.text_muted.opacity(0.7),
+                )),
+                transcript::single_line(&entry.text),
+                Some(card_corner(ago(entry.at, now), None, theme)),
+                // The work item it links to is the Work card's to mark.
+                false,
+                theme,
+            )
+        };
         let row = match link {
             Link::Work(id) => row.on_click(cx.listener(move |this, _, _, cx| {
                 this.open_panel(PanelItem::WorkItem(id.clone()), cx)
@@ -94,6 +109,9 @@ impl Shell {
             }
             Link::None => row.cursor_default(),
         };
+        if !roomy {
+            return row;
+        }
         let text = div()
             .flex_1()
             .min_w_0()
@@ -154,6 +172,7 @@ impl Shell {
             "Activity",
             total,
             open,
+            self.card_focused("activity", cx),
             theme,
         )
         .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Activity, cx)));
@@ -168,13 +187,7 @@ impl Shell {
                 cx,
             ));
         }
-        Some(
-            card(theme)
-                .pb(px(4.0))
-                .child(header)
-                .child(div().px(px(4.0)).flex().flex_col().children(rows))
-                .into_any_element(),
-        )
+        Some(card_with_rows(header, rows, theme))
     }
 
     /// The detail panel for this card's items; `None` when the item no

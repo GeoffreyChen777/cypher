@@ -30,6 +30,7 @@ pub(super) fn empty_card(
     add_label: &'static str,
     open: PanelItem,
     add: fn(&mut Shell, &mut Window, &mut Context<Shell>),
+    focused: bool,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> AnyElement {
@@ -67,46 +68,18 @@ pub(super) fn empty_card(
                     theme.text,
                 )),
         );
-    let header = div()
-        .id(key)
-        .h(px(GROUP_CARD_HEADER_HEIGHT))
-        .m(px(4.0))
-        .pl(px(8.0))
-        .pr(px(5.0))
-        .rounded(px(8.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
+    let header = super::board::header_frame(key, glyph, title, focused, None, theme)
+        .pr(px(7.0))
         .cursor_pointer()
-        .bg(motion::hover_blend(
-            key,
-            crate::kit::theme::wash(0.0),
-            crate::kit::theme::wash(0.05),
-        ))
         .on_hover(motion::hover_listener(key))
         .on_click(cx.listener(move |this, _, _, cx| this.open_panel(open.clone(), cx)))
-        .child(
-            icon(glyph)
-                .size(px(14.0))
-                .flex_none()
-                .text_color(theme.text_muted),
-        )
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(13.5))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(SharedString::from(title)),
-        )
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(px(12.0))
-                .text_color(theme.text_muted.opacity(0.7))
+                .text_size(px(11.5))
+                .text_color(theme.text_muted.opacity(0.6))
                 .child(SharedString::from(hint)),
         )
         .child(plus);

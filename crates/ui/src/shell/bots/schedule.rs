@@ -7,7 +7,7 @@
 //! the run state (last run, next run, runs today) is the host's and only
 //! read here.
 
-use super::board::{card, section_header, two_lines};
+use super::board::{card_corner, card_glyph, card_item, card_with_rows, section_header, two_lines};
 use super::panel::{PanelHead, PanelItem};
 use super::parts::{self, CallError};
 use super::*;
@@ -489,6 +489,53 @@ impl Shell {
             )
     }
 
+    /// A job on the card: its glyph, name and when it runs next (a spinner
+    /// while it runs, the note in red when its last run failed).
+    fn job_item(
+        &self,
+        job: &Job,
+        space: Option<&Space>,
+        bot_tint: gpui::Hsla,
+        selected: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let (glyph, tint) = match space {
+            Some(space) => (
+                crate::appearance::space_style::space_icon(space.icon.as_deref()),
+                crate::appearance::space_style::space_color(space.color.as_deref(), theme)
+                    .unwrap_or(theme.text_muted),
+            ),
+            None => (icons::CLOCK, bot_tint),
+        };
+        let state = job.state();
+        let corner = match state {
+            JobState::Running => super::super::render::status_mark(
+                ChatIndicator::Working,
+                self.pulse_ticker.entity_id(),
+                theme,
+            )
+            .unwrap_or_else(|| card_corner("running", None, theme)),
+            _ => card_corner(
+                state_note(state, &Local::now()),
+                job.failed().then_some(theme.danger),
+                theme,
+            ),
+        };
+        let dim = !job.enabled && !matches!(state, JobState::Running | JobState::Starting);
+        let item = job.item();
+        card_item(
+            &format!("bot-job-{}", job.id),
+            Some(card_glyph(glyph, tint.opacity(0.82))),
+            job.name.clone(),
+            Some(corner),
+            selected,
+            theme,
+        )
+        .when(dim, |el| el.opacity(0.55))
+        .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
+    }
+
     /// The sidebar card: every job by next run, or the one-line way to
     /// make the first routine.
     pub(super) fn render_schedule_card(
@@ -507,6 +554,7 @@ impl Shell {
                 "New routine",
                 PanelItem::Schedule,
                 |this, window, cx| this.open_job_form(FormTarget::NewRoutine, Some(window), cx),
+                self.card_focused("schedule", cx),
                 theme,
                 cx,
             ));
@@ -519,6 +567,7 @@ impl Shell {
             "Schedule",
             jobs.len(),
             open == Some(PanelItem::Schedule),
+            self.card_focused("schedule", cx),
             theme,
         )
         .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Schedule, cx)));
@@ -527,24 +576,10 @@ impl Shell {
             .take(parts::CARD_ROWS)
             .map(|(job, space)| {
                 let selected = open.as_ref() == Some(&job.item());
-                self.job_row(
-                    format!("bot-job-{}", job.id),
-                    job,
-                    space.as_ref(),
-                    tint,
-                    selected,
-                    theme,
-                    cx,
-                )
+                self.job_item(job, space.as_ref(), tint, selected, theme, cx)
             })
             .collect();
-        Some(
-            card(theme)
-                .pb(px(4.0))
-                .child(header)
-                .child(div().px(px(4.0)).flex().flex_col().children(rows))
-                .into_any_element(),
-        )
+        Some(card_with_rows(header, rows, theme))
     }
 
     /// The detail panel for this card's items; `None` when the item no

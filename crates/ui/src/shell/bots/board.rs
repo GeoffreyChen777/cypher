@@ -197,10 +197,6 @@ pub(super) fn load_note(load: &ProjectLoad) -> String {
     }
 }
 
-fn plural(n: usize, word: &str) -> String {
-    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
-}
-
 /// A card's shape. Like the project sidebar's groups, cards are bare: one
 /// plate floats under the focused card ([`focused_card`]) and glides when
 /// focus moves.
@@ -580,7 +576,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let now = Utc::now();
-        let rows: Vec<(ProjectLoad, Space, String)> = {
+        let rows: Vec<(ProjectLoad, Space)> = {
             let state = self.state.read(cx);
             let spaces = state.spaces_sorted();
             project_loads(&bot.scope, &spaces, &state.chats, |chat| {
@@ -589,11 +585,7 @@ impl Shell {
             .into_iter()
             .filter_map(|load| {
                 let space = state.space_row(&load.space_id)?.clone();
-                let device = state
-                    .device_name(&space.device_id)
-                    .unwrap_or("Unknown device")
-                    .to_string();
-                Some((load, space, device))
+                Some((load, space))
             })
             .collect()
         };
@@ -607,113 +599,99 @@ impl Shell {
             "Projects",
             rows.len(),
             open == Some(PanelItem::Projects),
+            self.card_focused("projects", cx),
             theme,
         )
         .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Projects, cx)));
-        let rows = rows.into_iter().map(|(load, space, device)| {
+        let rows = rows.into_iter().map(|(load, space)| {
             let item = PanelItem::Project(space.id.clone());
             let selected = open.as_ref() == Some(&item);
             let key = format!("bot-project-{}", space.id);
-            let note = load_note(&load);
-            let note_color = if load.asking > 0 {
-                theme.warning
-            } else if load.running > 0 {
-                theme.text
-            } else {
-                theme.text_faint
-            };
-            project_row(&key, &space, selected, theme)
-                .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
-                .child(two_lines(
-                    space.display_name().to_string(),
-                    device,
-                    format!("· {}", plural(load.sessions, "session")),
+            let tint = crate::appearance::space_style::space_color(space.color.as_deref(), theme)
+                .unwrap_or(theme.text_muted);
+            let glyph = crate::appearance::space_style::space_icon(space.icon.as_deref());
+            // What runs or asks there, else how many sessions it holds.
+            let corner = if load.asking > 0 || load.running > 0 {
+                card_corner(
+                    load_note(&load),
+                    (load.asking > 0).then_some(theme.warning),
                     theme,
-                ))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(11.0))
-                        .text_color(note_color)
-                        .child(SharedString::from(note)),
                 )
+            } else {
+                card_corner(load.sessions.to_string(), None, theme)
+            };
+            card_item(
+                &key,
+                Some(card_glyph(glyph, tint.opacity(0.82))),
+                space.display_name().to_string(),
+                Some(corner),
+                selected,
+                theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
         });
-        Some(
-            card(theme)
-                .pb(px(4.0))
-                .child(header)
-                .child(div().px(px(4.0)).flex().flex_col().children(rows))
-                .into_any_element(),
-        )
+        Some(card_with_rows(header, rows, theme))
+    }
+
+    /// Whether `card` is the one floating: the open panel item's card,
+    /// else Status ([`focused_card`]).
+    pub(super) fn card_focused(&self, card: &str, cx: &App) -> bool {
+        let wanted = self.board.panel.as_ref().map(|item| {
+            let state = self.state.read(cx);
+            card_of(item, |chat_id| {
+                state
+                    .chats
+                    .iter()
+                    .find(|c| c.id == chat_id)
+                    .and_then(|c| c.bot.as_ref())
+                    .map(|marker| marker.thread.clone())
+            })
+        });
+        wanted.unwrap_or("status") == card
     }
 }
 
-/// A card's header row: glyph, title and count; a click opens the whole
-/// list (highlighted while that list is open).
+/// A card's header row, the project card header's twin: 36px tall, the
+/// glyph on the card's 10px edge, the title at 13.5 (semibold only on the
+/// focused card, medium elsewhere, as the project sidebar weighs its
+/// projects) and a quiet count. A click opens the whole list; the chevron
+/// shows on hover and while the list is open.
 pub(super) fn section_header(
     key: &'static str,
     glyph: &'static str,
     title: &'static str,
     count: usize,
     open: bool,
+    focused: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    section_header_tinted(key, glyph, title, count, open, None, theme)
+    section_header_tinted(key, glyph, title, count, open, focused, None, theme)
 }
 
 /// [`section_header`] with its glyph and count in `tint` (the Needs you
 /// card's amber).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn section_header_tinted(
     key: &'static str,
     glyph: &'static str,
     title: &'static str,
     count: usize,
     open: bool,
+    focused: bool,
     tint: Option<gpui::Hsla>,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(key)
-        .h(px(GROUP_CARD_HEADER_HEIGHT))
-        .mx(px(4.0))
-        .mt(px(4.0))
-        .px(px(8.0))
-        .rounded(px(8.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
+    header_frame(key, glyph, title, focused, tint, theme)
         .cursor_pointer()
-        .bg(if open {
-            crate::kit::theme::wash(0.08)
-        } else {
-            motion::hover_blend(
-                key,
-                crate::kit::theme::wash(0.0),
-                crate::kit::theme::wash(0.05),
-            )
-        })
         .on_hover(motion::hover_listener(key))
         .child(
-            icon(glyph)
-                .size(px(14.0))
+            div()
                 .flex_none()
-                .text_color(tint.unwrap_or(theme.text_muted)),
-        )
-        .child(
-            div()
-                .text_size(px(13.5))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(SharedString::from(title)),
-        )
-        .child(
-            div()
-                .text_size(px(12.0))
+                .text_size(px(11.5))
                 .when(tint.is_some(), |el| {
                     el.font_weight(gpui::FontWeight::MEDIUM)
                 })
-                .text_color(tint.unwrap_or(theme.text_muted.opacity(0.75)))
+                .text_color(tint.unwrap_or(theme.text_muted.opacity(0.6)))
                 .child(SharedString::from(count.to_string())),
         )
         .child(div().flex_1())
@@ -721,11 +699,180 @@ pub(super) fn section_header_tinted(
             icon(icons::ALT_ARROW_RIGHT)
                 .size(px(11.0))
                 .flex_none()
-                .text_color(theme.text_muted.opacity(if open { 0.8 } else { 0.0 }))
-                .when(!open, |el| {
-                    el.text_color(theme.text_muted.opacity(0.8 * motion::hover_t(key)))
-                }),
+                .text_color(theme.text_muted.opacity(if open {
+                    0.8
+                } else {
+                    0.8 * motion::hover_t(key)
+                })),
         )
+}
+
+/// The header row both full and empty cards start from: glyph and title on
+/// the project header's grid.
+pub(super) fn header_frame(
+    key: &'static str,
+    glyph: &'static str,
+    title: &'static str,
+    focused: bool,
+    tint: Option<gpui::Hsla>,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(key)
+        .h(px(GROUP_CARD_HEADER_HEIGHT))
+        .flex_none()
+        .px(px(10.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(7.0))
+        // The project header's 20px glyph box pulled 3px left, so titles
+        // share its column.
+        .child(
+            div()
+                .flex_none()
+                .size(px(20.0))
+                .ml(px(-3.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    icon(glyph)
+                        .size(px(14.0))
+                        .text_color(tint.unwrap_or(theme.text.opacity(0.85))),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(13.5))
+                .line_height(px(18.0))
+                .font_weight(if focused {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::MEDIUM
+                })
+                .text_color(theme.text)
+                .child(SharedString::from(title)),
+        )
+}
+
+/// One item on a card, drawn like a session row under its project: a
+/// single line inset under the header, its small mark beneath the header
+/// title (or, without one, the title itself on that column), the title at
+/// the session rows' 12.5 and 80% ink until hovered or open, and a quiet
+/// corner for its time or state. Detail lives in the panel, not here.
+pub(super) fn card_item(
+    key: &str,
+    mark: Option<AnyElement>,
+    title: impl Into<SharedString>,
+    corner: Option<AnyElement>,
+    selected: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let hover = crate::appearance::surface_style::sidebar_hover(theme);
+    let selected_wash = crate::appearance::surface_style::sidebar_selected(theme);
+    let rest_bg = if selected {
+        selected_wash
+    } else {
+        crate::kit::theme::wash(0.0)
+    };
+    let hover_bg = if selected { selected_wash } else { hover };
+    let rest_text = if selected {
+        theme.text
+    } else {
+        theme.text.opacity(0.8)
+    };
+    let has_mark = mark.is_some();
+    div()
+        .id(SharedString::from(key.to_string()))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .rounded(px(8.0))
+        .mx(px(6.0))
+        .mb(px(2.0))
+        .pl(px(if has_mark { 20.0 } else { 27.0 }))
+        .pr(px(8.0))
+        .py(px(6.0))
+        .cursor_pointer()
+        .text_color(motion::hover_blend(key, rest_text, theme.text))
+        .bg(motion::hover_blend(key, rest_bg, hover_bg))
+        .on_hover(motion::hover_listener(key.to_string()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .when_some(mark, |el, mark| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .size(px(14.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(mark),
+                    )
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .line_height(px(16.0))
+                        .child(title.into()),
+                ),
+        )
+        .children(corner)
+}
+
+/// A card row's corner: the session rows' 10px time-and-state note, in the
+/// sub-line ink unless `color` says otherwise (amber when something asks).
+pub(super) fn card_corner(
+    text: impl Into<SharedString>,
+    color: Option<gpui::Hsla>,
+    theme: &Theme,
+) -> AnyElement {
+    div()
+        .flex_none()
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(color.unwrap_or(theme.text_muted.opacity(0.5)))
+        .child(text.into())
+        .into_any_element()
+}
+
+/// A card's mark glyph at the session rows' agent-mark size.
+pub(super) fn card_glyph(path: &'static str, tint: gpui::Hsla) -> AnyElement {
+    icon(path)
+        .size(px(13.0))
+        .flex_none()
+        .text_color(tint)
+        .into_any_element()
+}
+
+/// A card: its header over its rows, with the project card's body padding.
+pub(super) fn card_with_rows(
+    header: impl IntoElement,
+    rows: impl IntoIterator<Item = impl IntoElement>,
+    theme: &Theme,
+) -> AnyElement {
+    card(theme)
+        .child(header)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .pb(px(GROUP_CARD_BODY_PADDING))
+                .children(rows),
+        )
+        .into_any_element()
 }
 
 /// A project row (the Projects card and the panel's list): the project's

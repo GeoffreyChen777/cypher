@@ -6,7 +6,7 @@
 //! notes; an owner's edit makes a note the owner's (the engine resets its
 //! source).
 
-use super::board::{card, section_header};
+use super::board::{card_corner, card_item, card_with_rows, section_header};
 use super::panel::{PanelHead, PanelItem};
 use super::parts;
 use super::*;
@@ -163,6 +163,7 @@ impl Shell {
                 "Add a note",
                 PanelItem::Notebook,
                 |this, window, cx| this.open_notebook_to_add(window, cx),
+                self.card_focused("notebook", cx),
                 theme,
                 cx,
             ));
@@ -174,6 +175,7 @@ impl Shell {
             "Notebook",
             notes.len(),
             open,
+            self.card_focused("notebook", cx),
             theme,
         )
         .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Notebook, cx)));
@@ -181,47 +183,24 @@ impl Shell {
             .iter()
             .take(CARD_NOTES)
             .map(|note| {
-                let key = format!("bot-note-{}", note.id);
-                let sub = provenance(
-                    &note.source,
-                    &bot.name,
-                    &parts::past_ms(note.updated_at.max(note.created_at)),
-                );
-                div()
-                    .id(SharedString::from(key.clone()))
-                    .px(px(8.0))
-                    .py(px(6.0))
-                    .rounded(px(8.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.0))
-                    .cursor_pointer()
-                    .bg(motion::hover_blend(
-                        &key,
-                        crate::kit::theme::wash(0.0),
-                        crate::kit::theme::wash(0.05),
-                    ))
-                    .on_hover(motion::hover_listener(key.clone()))
-                    .on_click(
-                        cx.listener(|this, _, _, cx| this.show_panel(PanelItem::Notebook, cx)),
-                    )
-                    .child(note_mark(&note.source, bot, theme))
-                    .child(super::board::two_lines(
-                        transcript::single_line(&note.text),
-                        sub,
-                        String::new(),
+                // The bot's mark tells its notes from the owner's; who and
+                // where from read in the panel.
+                card_item(
+                    &format!("bot-note-{}", note.id),
+                    Some(note_mark(&note.source, bot, theme)),
+                    transcript::single_line(&note.text),
+                    Some(card_corner(
+                        super::items::ago(note.updated_at.max(note.created_at), Utc::now()),
+                        None,
                         theme,
-                    ))
+                    )),
+                    false,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.show_panel(PanelItem::Notebook, cx)))
             })
             .collect();
-        Some(
-            card(theme)
-                .pb(px(4.0))
-                .child(header)
-                .child(div().px(px(4.0)).flex().flex_col().children(rows))
-                .into_any_element(),
-        )
+        Some(card_with_rows(header, rows, theme))
     }
 
     /// The detail panel: the add field, then every note newest first.

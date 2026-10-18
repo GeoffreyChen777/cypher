@@ -6,7 +6,7 @@
 //! RPCs on the bot's host; an engine that does not have them yet answers
 //! an unknown method, and the panel says so instead of failing.
 
-use super::board::{card, section_header};
+use super::board::{card_corner, card_glyph, card_item, card_with_rows, section_header};
 use super::panel::{PanelHead, PanelItem};
 use super::parts::{self, CallError};
 use super::*;
@@ -298,6 +298,7 @@ impl Shell {
                 "Connect a bot",
                 PanelItem::Network,
                 |this, _, cx| this.show_panel(PanelItem::Invite, cx),
+                self.card_focused("network", cx),
                 theme,
                 cx,
             ));
@@ -309,6 +310,7 @@ impl Shell {
             "Network",
             connections.len(),
             open == Some(PanelItem::Network),
+            self.card_focused("network", cx),
             theme,
         )
         .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Network, cx)));
@@ -322,37 +324,28 @@ impl Shell {
             })
             .collect();
         if !invites.is_empty() {
-            let key = "bot-network-invites";
             let soonest = invites.iter().map(|i| i.expires_at).min().unwrap_or(now);
             rows.push(
-                invite_glyph_row(key, theme)
-                    .cursor_pointer()
-                    .bg(motion::hover_blend(
-                        key,
-                        crate::kit::theme::wash(0.0),
-                        crate::kit::theme::wash(0.05),
-                    ))
-                    .on_hover(motion::hover_listener(key))
-                    .on_click(cx.listener(|this, _, _, cx| this.show_panel(PanelItem::Network, cx)))
-                    .child(super::board::two_lines(
-                        match invites.len() {
-                            1 => "1 open invite".to_string(),
-                            n => format!("{n} open invites"),
-                        },
-                        format!("Expires {}", expiry_words(soonest)),
-                        String::new(),
+                card_item(
+                    "bot-network-invites",
+                    Some(card_glyph(icons::LINK, theme.text_muted.opacity(0.7))),
+                    match invites.len() {
+                        1 => "1 open invite".to_string(),
+                        n => format!("{n} open invites"),
+                    },
+                    Some(card_corner(
+                        format!("expires {}", expiry_words(soonest)),
+                        None,
                         theme,
-                    ))
-                    .into_any_element(),
+                    )),
+                    false,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.show_panel(PanelItem::Network, cx)))
+                .into_any_element(),
             );
         }
-        Some(
-            card(theme)
-                .pb(px(4.0))
-                .child(header)
-                .child(div().px(px(4.0)).flex().flex_col().children(rows))
-                .into_any_element(),
-        )
+        Some(card_with_rows(header, rows, theme))
     }
 
     /// A connection row: the peer's neutral avatar, "<bot> · <owner>", and
@@ -373,6 +366,29 @@ impl Shell {
         let item = PanelItem::Connection(conn.id.clone());
         let last = conn.last_exchange_at.map(parts::ago_ms);
         let revoking = conn.revoke_requested_at.is_some();
+        if !panel {
+            // On the card: the peer and how it is answered; Auto, the
+            // usual, says when it last asked instead.
+            let corner = if revoking {
+                "revoking".to_string()
+            } else {
+                match conn.reply_mode {
+                    ReplyMode::Review => "review".to_string(),
+                    ReplyMode::Off => "off".to_string(),
+                    ReplyMode::Auto => last.clone().unwrap_or_default(),
+                }
+            };
+            return card_item(
+                &key,
+                Some(peer_avatar(&conn.peer.name, 14.0, theme).into_any_element()),
+                transcript::single_line(&conn.peer.name),
+                (!corner.is_empty()).then(|| card_corner(corner, None, theme)),
+                selected,
+                theme,
+            )
+            .when(revoking, |el| el.opacity(0.6))
+            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)));
+        }
         div()
             .id(SharedString::from(key.clone()))
             .pl(px(6.0))

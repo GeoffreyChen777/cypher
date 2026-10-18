@@ -4,7 +4,7 @@
 //! project, sessions, state and duration, Stop while it runs, the result
 //! once it ends, and its thread, read-only in the panel.
 
-use super::board::{card, section_header, two_lines};
+use super::board::{card_corner, card_item, card_with_rows, section_header, two_lines};
 use super::items::{
     action_row, ago, item_row, mark_cell, progress_bar, project_label, prose, section_label,
     session_mark, step_mark, text_block, trailing, work_mark,
@@ -91,9 +91,29 @@ impl Shell {
         let (done, total) = work.progress();
         let elapsed = format_span(now - work.started_at.unwrap_or(work.created_at));
         let stopping = plan_phase(work) == PlanPhase::Stopping;
+        if !roomy {
+            // On the card: its mark, title and how far it got.
+            return card_item(
+                &key,
+                Some(work_mark(work, self.pulse_ticker.entity_id(), theme)),
+                transcript::single_line(&work.title),
+                Some(card_corner(
+                    if stopping {
+                        "stopping".to_string()
+                    } else {
+                        format!("{done}/{total}")
+                    },
+                    None,
+                    theme,
+                )),
+                selected,
+                theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)));
+        }
         item_row(&key, selected)
             .items_start()
-            .when(roomy, |el| el.py(px(8.0)))
+            .py(px(8.0))
             .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
             .child(div().pt(px(2.0)).child(mark_cell(work_mark(
                 work,
@@ -160,8 +180,23 @@ impl Shell {
         } else {
             result_line(work)
         };
+        if !roomy {
+            return card_item(
+                &key,
+                Some(work_mark(work, self.pulse_ticker.entity_id(), theme)),
+                transcript::single_line(&work.title),
+                Some(card_corner(
+                    ago(work.ended_at.unwrap_or(work.created_at), now),
+                    None,
+                    theme,
+                )),
+                selected,
+                theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)));
+        }
         item_row(&key, selected)
-            .when(roomy, |el| el.py(px(8.0)))
+            .py(px(8.0))
             .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
             .child(mark_cell(work_mark(
                 work,
@@ -214,6 +249,7 @@ impl Shell {
                 running.len()
             },
             open,
+            self.card_focused("work", cx),
             theme,
         )
         .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Work, cx)));
@@ -224,13 +260,7 @@ impl Shell {
         for w in &finished {
             rows.push(self.settled_row(format!("bot-work-{}", w.id), w, false, theme, cx));
         }
-        Some(
-            card(theme)
-                .pb(px(4.0))
-                .child(header)
-                .child(div().px(px(4.0)).flex().flex_col().children(rows))
-                .into_any_element(),
-        )
+        Some(card_with_rows(header, rows, theme))
     }
 
     /// The detail panel for this card's items; `None` when the item no

@@ -10,7 +10,9 @@
 //! A decision is one owner field on the record (a `Mutate`), so every count
 //! follows the record wherever it was made.
 
-use super::board::{card, section_header_tinted, two_lines};
+use super::board::{
+    card_corner, card_glyph, card_item, card_with_rows, section_header_tinted, two_lines,
+};
 use super::items::{
     action_row, ago, glyph, item_row, mark_cell, outcome_line, project_label, prose, section_label,
     step_mark, text_block, trailing,
@@ -171,16 +173,30 @@ impl Shell {
         let now = Utc::now();
         let selected = row.item.is_some() && self.board.panel == row.item;
         let item = row.item.clone();
+        let open = cx.listener(move |this, _, _, cx| match item.clone() {
+            Some(item) => this.open_panel(item, cx),
+            None => {
+                this.close_panel(cx);
+                this.tiles.focus_pending = true;
+                cx.notify();
+            }
+        });
+        if !roomy {
+            // On the card: one line, what it is; the panel says what to do.
+            return card_item(
+                &key,
+                Some(card_glyph(row.glyph, row.tint)),
+                row.title,
+                row.at
+                    .map(|at| card_corner(format_time_ago(at, now), None, theme)),
+                selected,
+                theme,
+            )
+            .on_click(open);
+        }
         item_row(&key, selected)
-            .when(roomy, |el| el.py(px(8.0)))
-            .on_click(cx.listener(move |this, _, _, cx| match item.clone() {
-                Some(item) => this.open_panel(item, cx),
-                None => {
-                    this.close_panel(cx);
-                    this.tiles.focus_pending = true;
-                    cx.notify();
-                }
-            }))
+            .py(px(8.0))
+            .on_click(open)
             .child(mark_cell(glyph(row.glyph, row.tint)))
             .child(two_lines(row.title, row.sub, String::new(), theme))
             .children(
@@ -208,6 +224,7 @@ impl Shell {
             "Needs you",
             total,
             open,
+            self.card_focused("needs", cx),
             Some(theme.warning),
             theme,
         )
@@ -219,30 +236,18 @@ impl Shell {
             .map(|(ix, row)| self.need_row(format!("bot-need-{ix}"), row, false, theme, cx))
             .collect();
         let more = (total > CARD_ROWS).then(|| {
-            item_row("bot-needs-more", false)
-                .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::NeedsYou, cx)))
-                .child(mark_cell(div()))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!("{} more", total - CARD_ROWS))),
-                )
+            card_item(
+                "bot-needs-more",
+                None,
+                format!("{} more", total - CARD_ROWS),
+                None,
+                false,
+                theme,
+            )
+            .text_color(theme.text_muted)
+            .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::NeedsYou, cx)))
         });
-        Some(
-            card(theme)
-                .pb(px(4.0))
-                .child(header)
-                .child(
-                    div()
-                        .px(px(4.0))
-                        .flex()
-                        .flex_col()
-                        .children(shown)
-                        .children(more),
-                )
-                .into_any_element(),
-        )
+        Some(card_with_rows(header, shown.into_iter().chain(more), theme))
     }
 
     /// The detail panel for this card's items; `None` when the item no
