@@ -1,12 +1,13 @@
 # Agent bots
 
-Status: **P0 and P1 implemented.** P0: local, read-only bots (definition, scope, the bot
-chat and its read tools, the palette). P1: engine-stamped origins, the role-aware run
-profile, per-origin prompts with the untrusted-data rule, slash commands by origin, the
-unattended run mode, the search index, `session_activity` and `project_git`. The first
-Botboard slice (§13.1: mode switch, picker, Status and Projects cards, detail panel) is
-built. The rest is design; §16 is the build order. Where the built code differs from the
-full design, the section says so.
+Status: **P0 and P1 implemented; P3's engine side built.** P0: local, read-only bots
+(definition, scope, the bot chat and its read tools, the palette). P1: engine-stamped
+origins, the role-aware run profile, per-origin prompts with the untrusted-data rule, slash
+commands by origin, the unattended run mode, the search index, `session_activity` and
+`project_git`. P3 (engine): the notebook tools, the scheduler, routines and recurring
+project tasks (§7, §8). The first Botboard slice (§13.1: mode switch, picker, Status and
+Projects cards, detail panel) is built. The rest is design; §16 is the build order. Where
+the built code differs from the full design, the section says so.
 
 A bot is a **coordinator**: a long-lived agent responsible for everything in the projects
 it is given. Inward, it takes instructions from its owner and gets work done across those
@@ -279,6 +280,26 @@ owner. Nothing stalls silently.
 - **Phasing.** First the owner writes notes ("remember that…"); bot-written notes follow
   once provenance and the notebook view exist.
 
+As built (P3, engine): a note is a `botNotes` registry row (`BotNote`), not a file, so it
+syncs to every owner device like the bot row. The owner writes with `Mutate saveBotNote`
+(source `owner`) and deletes with `deleteBotNote`; the bot writes with `write_note`, which
+stamps `source: {kind: "bot", chatId, title}` naming the thread it was written in (the bot
+chat, an orchestration thread or a routine thread). Who may do what is one function,
+`bots::memory::access`, checked on every call:
+
+| Thread | `read_notes` | `write_note` |
+|---|---|---|
+| Bot chat, orchestration thread (owner) | yes | yes |
+| Routine thread | yes | only when its routine's `writeNotes` is set |
+| Peer thread | no | no |
+
+A note is at most 1,000 characters (longer ones are cut, and the answer says so); an
+empty one is refused. Each write adds a `noteWritten` activity entry. The prompt of owner
+and routine threads carries a "Your notebook:" section with the newest 40 notes
+(`NOTES_IN_PROMPT`), each with its source and date, and says that `read_notes {query?}`
+finds the rest; peer threads get no section. A routine thread's section says whether it
+may write.
+
 ## 8. Routines and recurring tasks
 
 Two kinds of scheduled job, run by one engine scheduler on the host:
@@ -301,6 +322,83 @@ Two kinds of scheduled job, run by one engine scheduler on the host:
 - **Delivery:** the scheduler queues a durable command, so jobs run with no UI open.
 - Hidden routine threads sync through chat2 like any chat; each run has the cost of one
   agent turn or more.
+
+As built (P3, engine). Definitions are registry rows: `botRoutines` (`BotRoutine`) and
+`projectTasks` (`ProjectTask`). Owner devices write the definition and `runRequestedAt`
+("Run now"); the host writes only `threadChatId`, `lastRun`, `nextRunAt`, `runsToday` and
+`runsDay` (a routine) or `lastRun` and `nextRunAt` (a task). A schedule is `{kind:
+"daily", time: "HH:MM", days?: [1–7]}`, `{kind: "interval", minutes ≥ 15}` or `{kind:
+"manual"}`, in the host's local time.
+
+**The scheduler** (`bots/memory/host.rs`, rules in `bots/memory/schedule.rs`) runs the
+routines of bots hosted on this device and the tasks of spaces on this device. One pass at
+a time; it wakes every 30 s, on record and bot row changes, when a tool saves a job, and,
+while a run it started is going or a post waits, on session status changes. Per job:
+
+- `nextRunAt` is written when missing or stale: a held time stays while it is still one of
+  the schedule's slots and no slot comes before it; otherwise it becomes the first slot
+  after now. Manual and disabled jobs have none.
+- A job is due when `nextRunAt` has passed, or `runRequestedAt` is newer than the last
+  run's start (a disabled job still runs when asked).
+- **Missed runs:** a slot the device slept through stays due, runs once on wake, and the
+  next run is planned from now, so the rest are skipped.
+- **Never twice:** while the last run is `running`, a slot that comes due is skipped and a
+  request waits for the run to end.
+- **Pause and budget:** a due routine of a paused bot, or one that already ran
+  `maxRunsPerDay` times today (`runsToday` on the local date `runsDay`), gets `lastRun`
+  `skipped` with the reason ("Skipped: the bot is paused."); a request is skipped the same
+  way. Tasks have neither.
+- **Delivery survives restarts:** the run is recorded (`lastRun {at, outcome: running,
+  chatId}`) before its Run command is queued in the chat's durable command ledger. A pass
+  settles a running record from that command and the session: a command still pending is
+  waiting; a rejected or expired one failed ("The run couldn't start: …"); once applied, a
+  working session is waiting and a settled one ended. No command 60 s after the record
+  means it never started. After a restart the next pass settles whatever the old engine
+  left running.
+- **Settling:** a run ends `done` with its last answer as `summary` (clipped to 1,000
+  characters) or `failed` with the best reason: the unattended stop's reason, the
+  command's, the transcript's last error, or "The run was stopped before it finished."
+  for a run interrupted mid-answer or that ended with no answer at all.
+
+**Routine runs.** Each routine has one hidden thread, created on its first run: a chat on
+this device marked `{botId, origin: "routine", thread: {kind: "routine", routineId}}`,
+titled with the routine's name, in the bot's folder, with the bot chat's config. The Run's
+prompt is a header and the routine's prompt: `Routine "<name>" · <Weekday Month D, YYYY,
+HH:MM>`, a blank line, then the prompt. The run is unattended (P1). When it settles, the
+host writes `lastRun`, adds a `routineRan` activity entry, and **posts the output into the
+bot chat**: a complete assistant entry (id `routine-<routineId>-<run start ms>`, so it is
+posted once) with one `post` part, written straight into the doc. It starts no turn. If
+the bot chat is in the middle of a turn, the post waits until that turn settles. The post
+also sets the bot chat's preview to "<name>: <output>" and bumps its activity, so it shows
+unread. A failed run posts its reason the same way; failed routines are listed by
+`BotRecords::needs_you`.
+
+The `post` part (`cypher_doc::MessagePart::Post`) is additive: `{id, kind: "post", text,
+from}`, with the body under `text` so readers that predate the kind show it as a text
+part. `from` is a `BotPost`: `{kind: "routine", routineId, name, outcome: "done" |
+"failed", runAt, threadChatId?}`; a kind from a newer engine reads as `unknown`. The
+desktop transcript renders the body like text for now; the Botboard draws a card with the
+routine's name, the time, a failed badge and a link to the thread.
+
+**Recurring task runs.** On the space's device each run creates a fresh session in the
+project (`createChat` with the space), titled "<task name> · <Mon D>", records `lastRun`,
+then queues a Run with the task's prompt and model. With `worktree` set, the Run carries a
+`WorktreeSpec` (the space's folder, its current branch as the base), so the host creates
+the worktree at drain time exactly as the composer's isolated sessions do. The agent's
+copy of the prompt says the run is unattended. On settle, `lastRun` is updated and every
+bot that sees the project gets a `taskRan` activity entry (only the task's `createdBy` bot
+when set). Task sessions are ordinary sessions: they show in their project, and a
+failure surfaces like any errored session.
+
+**Unattended runs.** `bots::profile::is_unattended(workspace, chat)` covers routine
+threads and a task session while the scheduled run it was started for is `running`
+(the owner's later messages there run attended). The engine hands every unattended stop
+to its listeners (`SessionsEngine::add_unattended_listener`); the scheduler's records the
+reason and settles the run `failed` with it.
+
+**Notifications.** There is no new notification path. A failed routine run raises
+attention through its post (unread bot chat on every device) and Needs you; a failed task
+run is an errored session in its project, which notifies like any other.
 
 ## 9. Bot runtime on the host device
 
@@ -366,8 +464,13 @@ device. As built:
   as "no approval was given", and none surfaces as a pending card. The first one a working
   turn asks stops the run: the transcript gets "This run is unattended, so it couldn't ask
   for approval to …. It stopped.", the status ends Errored, and the engine hands an
-  `UnattendedStop` (chat id, reason) to its unattended-stop listener, where the owner's
-  notification goes once routines exist (§8).
+  `UnattendedStop` (chat id, reason) to its unattended-stop listeners; the scheduler's
+  settles the routine or task run as failed with that reason (§8).
+- **Scheduler (built in P3).** One host loop (`bots/memory/host.rs`) runs the routines of
+  the bots hosted here and the recurring tasks of this device's spaces. All of its state
+  is in the `botRoutines` and `projectTasks` rows and the chats' command ledgers, so a
+  restart loses nothing: the next pass settles runs the old engine left running. Its
+  rules are in §8.
 
 ## 10. Bot tools
 
@@ -409,7 +512,11 @@ control, with the bot's local scoped checkouts as workspace roots (§4.4).
 
 | Tool | Threads | Does |
 |---|---|---|
-| `read_notes`, `write_note` | owner, routine (if granted) | The notebook (§7). |
+| `read_notes {query?}` | owner, routine | The bot's notes, newest first, each with its source and date; `query` keeps notes containing every word (any case). |
+| `write_note {text}` | owner, routine (if its routine allows) | Adds one note with the thread as its source (§7). |
+| `list_schedule` | owner, routine | The bot's routines and its projects' recurring tasks: name, id, schedule in words, next run, last result (and the task's last session). |
+| `save_routine {id?, name, prompt, schedule, write_notes?, enabled?}` | bot chat | Creates or changes a routine; validates it and answers with what was saved and its next run. |
+| `save_project_task {id?, project, name, prompt, schedule, worktree?}` | bot chat, with *Coordinate* | Creates or changes a recurring task on a project in scope; `createdBy` is the bot. |
 | `list_connections` | owner | Connected bots, owners, groups, reachability. |
 | `ask_bot` | owner | Asks one connected bot; waits up to `wait_s` (default 120 s). Taints the thread (§4.3). |
 | `ask_group` | owner | Fans a question out to a group; returns the answers received in the window. |
@@ -671,7 +778,10 @@ Each method is one constant plus one `SPECS` entry in `cypher_rpc::methods`.
 | `ResolveBotPlan` | unary, forwardable | P2 | Approve, edit or cancel a plan card. |
 | `StopBotThread` | unary, forwardable | P2 | Stops an orchestration or routine thread and the sessions it started. |
 | `WatchBotWork` | stream, forwardable | P2 | Orchestrations, their steps and sessions, for the progress cards and *Work* pane. |
-| `SaveBotRoutine`, `DeleteBotRoutine`, `SaveProjectTask`, `DeleteProjectTask` | unary, forwardable | P3 | Routine and recurring-task definitions (registry rows). |
+| `Mutate saveBotNote` / `deleteBotNote` | unary | P3 | Owner notes (source `owner`) and deleting any note. |
+| `Mutate saveBotRoutine` / `deleteBotRoutine` / `runBotRoutine` | unary | P3 | A routine's definition (the host's fields are left alone), and "Run now" (`runRequestedAt`). |
+| `Mutate saveProjectTask` / `deleteProjectTask` / `runProjectTask` | unary | P3 | A recurring task's definition, and "Run now". |
+| `Mutate setBotPaused` | unary | P3 | The kill switch: due routines are recorded as skipped. |
 | `BotAsk` | stream, local | P4 | `ask_bot` / `ask_group`: exchange states until answered or `wait_s`. |
 | `CreateBotInvite`, `RevokeBotInvite`, `RedeemBotInvite` | unary, forwardable | P4 | |
 | `UpdateBotConnection`, `RevokeBotConnection` | unary, forwardable | P4 | Reply mode, connection scope, rate limits. |
@@ -696,7 +806,7 @@ Each method is one constant plus one `SPECS` entry in `cypher_rpc::methods`.
 | **P0: local bot** (done) | `bots` rows, the bot chat, the bot spawn mode with tool allowlist, four read tools (bounded scan), scope enforcement, the strip, palette and conversation UI, use from other owner devices. |
 | **P1: foundation** | Role-aware run profiles with engine-stamped origins; the untrusted-data prompt; the non-interactive run mode; the FTS index, `session_activity` and `project_git`. |
 | **P2: coordinator** | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; plan, progress and result cards; Stop; limits; audit log. |
-| **P3: memory and routines** | The notebook (owner notes first, then bot notes with provenance); the scheduler; routines and recurring project tasks; the attention inbox ("what needs me"). |
+| **P3: memory and routines** (engine built) | The notebook (owner notes first, then bot notes with provenance); the scheduler; routines and recurring project tasks; the attention inbox ("what needs me"). Built in the engine: the notebook and schedule tools, the scheduler, routine threads and their posts in the bot chat, task sessions, unattended task runs. Left: the Schedule and Notebook cards and the post card in the UI; event triggers. |
 | **P4: network** | `BotRoom`, publish, invites, connections, peer threads, `ask_bot` in Auto mode, exchange states, late answers, the Connections and Activity panes. |
 | **P5: review and control** | Review mode, the outgoing scrub, notifications for reviews, plans and connections; *Coordinate: steer*. |
 | **P6: groups, iPhone, E2E** | Owner groups, then shared groups; the iOS bot surfaces; end-to-end encrypted exchanges. |
