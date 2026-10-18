@@ -108,22 +108,6 @@ pub(super) fn fact(theme: &Theme, label: &str, value: impl IntoElement) -> gpui:
         )
 }
 
-/// Body text in a quiet well (a routine's prompt).
-pub(super) fn well(theme: &Theme, text: impl Into<SharedString>) -> gpui::Div {
-    div()
-        .mx(px(8.0))
-        .px(px(12.0))
-        .py(px(10.0))
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(crate::kit::theme::hairline(0.06))
-        .bg(crate::kit::theme::ink(0.02))
-        .text_size(px(12.5))
-        .line_height(px(19.0))
-        .text_color(theme.text)
-        .child(text.into())
-}
-
 /// The bordered group switch rows sit in (the palette's Permissions box).
 pub(super) fn group_box() -> gpui::Div {
     div()

@@ -787,9 +787,11 @@ impl Shell {
                 self.last_run_value(routine.last_run.as_ref(), theme),
             ));
         }
-        body = body
-            .child(parts::section_label(theme, "Prompt"))
-            .child(parts::well(theme, routine.prompt.clone()));
+        body = body.child(parts::fact(
+            theme,
+            "Prompt",
+            SharedString::from(routine.prompt.clone()),
+        ));
         Some((head, body))
     }
 
