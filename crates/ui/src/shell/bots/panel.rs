@@ -140,6 +140,7 @@ impl Shell {
             let state = self.state.read(cx);
             current_bot(&state.bots, self.settings.botboard_bot.as_deref()).cloned()
         }?;
+        self.board.panel_footer = None;
         let (head, body) = match item {
             PanelItem::Projects => self.render_projects_panel(&bot, &theme, cx),
             PanelItem::Project(space_id) => {
@@ -266,6 +267,16 @@ impl Shell {
                 .child(motion::fade_quick(content_key, body))
                 .into_any_element()
         };
+        // A form's buttons stay put at the foot while its fields scroll.
+        let footer = self.board.panel_footer.take().map(|footer| {
+            div()
+                .flex_none()
+                .border_t_1()
+                .border_color(crate::kit::theme::hairline(0.06))
+                .px(px(8.0))
+                .py(px(10.0))
+                .child(footer)
+        });
         Some(
             div()
                 .size_full()
@@ -277,6 +288,7 @@ impl Shell {
                 .flex_col()
                 .child(header)
                 .child(body)
+                .children(footer)
                 .into_any_element(),
         )
     }

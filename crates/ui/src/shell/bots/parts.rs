@@ -363,7 +363,6 @@ pub(super) fn form_footer(
         .py(px(5.0))
         .when(busy, |el| el.opacity(0.6));
     let row = div()
-        .mt(px(16.0))
         .px(px(8.0))
         .flex()
         .flex_row()

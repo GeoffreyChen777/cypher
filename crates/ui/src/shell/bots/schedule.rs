@@ -1714,12 +1714,13 @@ impl Shell {
             },
             form.busy,
         );
-        body = body.child(
+        self.board.panel_footer = Some(
             footer
                 .child(cancel.on_click(cx.listener(|this, _, _, cx| this.close_job_form(cx))))
-                .child(save.on_click(cx.listener(|this, _, _, cx| this.save_job_form(cx)))),
+                .child(save.on_click(cx.listener(|this, _, _, cx| this.save_job_form(cx))))
+                .into_any_element(),
         );
-        (head, body)
+        (head, body.pb(px(16.0)))
     }
 }
 

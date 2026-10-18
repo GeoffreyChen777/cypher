@@ -83,6 +83,9 @@ pub(super) struct BoardUi {
     network: network::NetworkUi,
     /// A delete or revoke waiting on the owner's yes.
     confirm: Option<parts::Confirm>,
+    /// A form's buttons, pinned under the panel's scrolling body; set by
+    /// the panel item while it renders and taken by the card.
+    panel_footer: Option<AnyElement>,
 }
 
 /// One item on a bot's **Needs you** card: its conversation waiting on an
