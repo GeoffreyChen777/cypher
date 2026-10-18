@@ -18,11 +18,26 @@ use crate::host::workspace_host::WorkspaceHost;
 /// bot row is gone still runs locked down, seeing nothing.
 pub fn bot_env(workspace: &WorkspaceHost, chat: &Chat) -> Option<BotRunEnv> {
     let marker = chat.bot.as_ref()?;
-    let bot = workspace.bot(&marker.bot_id).ok().flatten();
+    let mut bot = workspace.bot(&marker.bot_id).ok().flatten();
+    // A peer thread describes the scope it reads (bot ∩ connection) and
+    // who is asking.
+    if let Some(bot) = bot.as_mut() {
+        let chats = workspace.read_chats().unwrap_or_default();
+        if let Some(scope) = network::peer_scope(workspace, bot, marker, &chats) {
+            bot.scope = scope;
+        }
+    }
+    let asker = network::asker(workspace, marker);
     let spaces = workspace.read_spaces().unwrap_or_default();
     let devices = workspace.read_devices().unwrap_or_default();
     let mut system_prompt = match &bot {
-        Some(bot) => prompt::system_prompt(bot, marker.origin, None, &spaces, &devices),
+        Some(bot) => prompt::system_prompt(
+            bot,
+            marker.origin,
+            asker.as_ref().map(network::as_asker).as_ref(),
+            &spaces,
+            &devices,
+        ),
         None => prompt::orphan_prompt(),
     };
     let mut workspace_roots = Vec::new();
@@ -170,6 +185,43 @@ mod tests {
             room_gen: None,
             child: None,
             bot,
+        }
+    }
+
+    #[test]
+    fn network_tools_reach_owner_threads_only() {
+        let bot = Bot {
+            id: "b1".into(),
+            name: "Bot".into(),
+            icon: None,
+            color: None,
+            host_device_id: "dev".into(),
+            chat_id: "c1".into(),
+            instructions: None,
+            scope: Default::default(),
+            capabilities: Default::default(),
+            paused: false,
+            created_at: DateTime::from_timestamp_millis(0).unwrap(),
+        };
+        let owner = tools_for(&BotChat::owner("b1"), Some(&bot));
+        for tool in cypher_proto::BOT_NETWORK_TOOLS {
+            assert!(owner.iter().any(|t| t == tool), "{tool}");
+        }
+        for origin in [BotOrigin::Routine, BotOrigin::Peer] {
+            let thread = BotChat::thread(
+                "b1",
+                origin,
+                cypher_proto::BotThread::Peer {
+                    connection_id: "cn".into(),
+                },
+            );
+            let tools = tools_for(&thread, Some(&bot));
+            assert!(
+                cypher_proto::BOT_NETWORK_TOOLS
+                    .iter()
+                    .all(|tool| !tools.iter().any(|t| t == tool)),
+                "{origin:?}: {tools:?}"
+            );
         }
     }
 

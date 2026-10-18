@@ -46,6 +46,43 @@ pub(super) async fn bot_tool(
     RpcReply::value(&serde_json::json!({ "text": text }))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateBotInviteParams {
+    bot_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RedeemBotInviteParams {
+    bot_id: String,
+    code: String,
+}
+
+/// `CreateBotInvite` on the bot's host: `{inviteId, code, expiresAt}`.
+pub(super) async fn create_bot_invite(
+    rpc: &EngineRpc,
+    params: serde_json::Value,
+) -> Result<RpcReply, RpcError> {
+    let p: CreateBotInviteParams = parse_params(strip_target(params))?;
+    let invite = rpc.bots()?.create_invite(&p.bot_id).await.map_err(failed)?;
+    RpcReply::value(&invite)
+}
+
+/// `RedeemBotInvite` on the bot's host: the new `BotConnection`.
+pub(super) async fn redeem_bot_invite(
+    rpc: &EngineRpc,
+    params: serde_json::Value,
+) -> Result<RpcReply, RpcError> {
+    let p: RedeemBotInviteParams = parse_params(strip_target(params))?;
+    let connection = rpc
+        .bots()?
+        .redeem_invite(&p.bot_id, &p.code)
+        .await
+        .map_err(failed)?;
+    RpcReply::value(&connection)
+}
+
 impl EngineRpc {
     /// The owner's edits of bot records: each writes only the fields an
     /// owner device owns (docs/design/agent-bots.md §13.1); the bot's host

@@ -46,6 +46,8 @@ lingua.workspace = true
 tempfile.workspace = true
 # The agent bots' search index (FTS5 is compiled into the bundled SQLite).
 rusqlite.workspace = true
+# The bot network's outgoing secret scrub.
+regex.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

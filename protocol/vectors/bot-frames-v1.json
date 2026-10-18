@@ -1,0 +1,34 @@
+{
+  "frames": [
+    {"name": "ask", "frame": {"t": "ask", "exchangeId": "ex-1", "connectionId": "cn-1", "text": "How is the auth migration going?", "sentAt": 1760000000000}},
+    {"name": "ask with non-ASCII text", "frame": {"t": "ask", "exchangeId": "ex-2", "connectionId": "cn-1", "text": "迁移进展如何？", "sentAt": 1760000000001}},
+    {"name": "answered", "frame": {"t": "answer", "exchangeId": "ex-1", "connectionId": "cn-1", "status": "answered", "text": "Done on Tuesday; see the release notes.", "answeredAt": 1760000060000}},
+    {"name": "declined without text", "frame": {"t": "answer", "exchangeId": "ex-3", "connectionId": "cn-1", "status": "declined", "answeredAt": 1760000060000}},
+    {"name": "expired", "frame": {"t": "answer", "exchangeId": "ex-4", "connectionId": "cn-2", "status": "expired", "answeredAt": 1760604800000}},
+    {"name": "state delivered", "frame": {"t": "state", "exchangeId": "ex-1", "state": "delivered"}},
+    {"name": "state working", "frame": {"t": "state", "exchangeId": "ex-1", "state": "working"}},
+    {"name": "state awaiting review", "frame": {"t": "state", "exchangeId": "ex-1", "state": "awaiting_review"}},
+    {"name": "link added by redeeming", "frame": {"t": "link", "connectionId": "cn-1", "op": "added", "peer": {"botRoomId": "room-a", "name": "Auth bot", "ownerName": "Alice"}}},
+    {"name": "link added from an invite", "frame": {"t": "link", "connectionId": "cn-2", "op": "added", "peer": {"botRoomId": "room-b", "name": "Release bot", "ownerName": "Bob"}, "inviteId": "inv-1"}},
+    {"name": "link revoked", "frame": {"t": "link", "connectionId": "cn-1", "op": "revoked"}}
+  ],
+  "invalid": [
+    {"name": "no tag", "frame": {"exchangeId": "ex-1", "connectionId": "cn-1", "text": "q", "sentAt": 1}},
+    {"name": "ask without text", "frame": {"t": "ask", "exchangeId": "ex-1", "connectionId": "cn-1", "sentAt": 1}},
+    {"name": "ask with a string time", "frame": {"t": "ask", "exchangeId": "ex-1", "connectionId": "cn-1", "text": "q", "sentAt": "now"}},
+    {"name": "answer with an unknown status", "frame": {"t": "answer", "exchangeId": "ex-1", "connectionId": "cn-1", "status": "maybe", "answeredAt": 1}},
+    {"name": "answer without a connection", "frame": {"t": "answer", "exchangeId": "ex-1", "status": "answered", "text": "a", "answeredAt": 1}},
+    {"name": "state in camelCase", "frame": {"t": "state", "exchangeId": "ex-1", "state": "awaitingReview"}},
+    {"name": "link with an unknown op", "frame": {"t": "link", "connectionId": "cn-1", "op": "paused"}},
+    {"name": "link peer without a room", "frame": {"t": "link", "connectionId": "cn-1", "op": "added", "peer": {"name": "x"}}}
+  ],
+  "codes": [
+    {"code": "room-a.c2VjcmV0_x-1", "room": "room-a", "secret": "c2VjcmV0_x-1"},
+    {"code": "  room-a.secret  ", "room": "room-a", "secret": "secret"},
+    {"code": "nodot", "room": null, "secret": null},
+    {"code": ".secret", "room": null, "secret": null},
+    {"code": "room.", "room": null, "secret": null},
+    {"code": "room.se.cret", "room": null, "secret": null},
+    {"code": "ro/om.secret", "room": null, "secret": null}
+  ]
+}

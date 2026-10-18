@@ -866,6 +866,8 @@ impl RpcService for EngineRpc {
             // Boxed: `project_git` awaits three relay calls at once, and its
             // future inlined here overflowed a default worker stack.
             methods::BOT_TOOL => Box::pin(bots::bot_tool(self, params)).await,
+            methods::CREATE_BOT_INVITE => Box::pin(bots::create_bot_invite(self, params)).await,
+            methods::REDEEM_BOT_INVITE => Box::pin(bots::redeem_bot_invite(self, params)).await,
             other => Err(RpcError::UnknownMethod(other.to_string())),
         }
     }

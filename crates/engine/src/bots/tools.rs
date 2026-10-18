@@ -309,16 +309,21 @@ impl Bots {
         if chat.device_id != workspace.device_id() {
             return Err(not_a_bot());
         }
-        let bot = workspace
+        let mut bot = workspace
             .bot(&marker.bot_id)?
             // The bot chat itself, or one of its hidden threads (only the
             // host writes a thread's marker).
             .filter(|bot| bot.chat_id == chat.id || !marker.is_main())
             .ok_or_else(|| EngineError::Other("This bot has been deleted.".into()))?;
+        let chats = workspace.read_chats()?;
+        // A peer thread reads through the bot scope ∩ the connection scope.
+        if let Some(scope) = super::network::peer_scope(workspace, &bot, marker, &chats) {
+            bot.scope = scope;
+        }
         Ok(View::build(
             bot,
             workspace.read_spaces()?,
-            workspace.read_chats()?,
+            chats,
             workspace.read_sessions()?,
             workspace.read_devices()?,
             Utc::now(),

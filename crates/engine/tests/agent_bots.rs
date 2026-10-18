@@ -340,6 +340,7 @@ async fn a_bot_chat_runs_locked_down() {
     let env = env.as_ref().expect("bot runs carry the bot env");
     assert_eq!(env.bot_id, bot.id);
     assert_eq!(env.origin, cypher_proto::BotOrigin::Owner);
+    // The read tools, plus the network tools every owner thread carries.
     assert_eq!(
         env.tools[..cypher_proto::BOT_TOOLS.len()],
         cypher_proto::BOT_TOOLS
@@ -348,6 +349,9 @@ async fn a_bot_chat_runs_locked_down() {
     // Coordinate, which a new bot lacks.
     assert!(env.tools.iter().any(|t| t == "write_note"));
     assert!(!env.tools.iter().any(|t| t == "save_project_task"));
+    for tool in cypher_proto::BOT_NETWORK_TOOLS {
+        assert!(env.tools.iter().any(|t| t == tool), "{tool}");
+    }
     assert!(env.workspace_roots.is_empty());
     assert_eq!(
         request.sandbox,

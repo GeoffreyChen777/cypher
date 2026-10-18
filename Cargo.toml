@@ -75,6 +75,7 @@ reqwest_client = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a
 
 # diffs
 similar = "2"
+regex = "1"
 
 # async / net
 tokio = { version = "1", features = ["full"] }

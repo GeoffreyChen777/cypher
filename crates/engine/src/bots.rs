@@ -29,6 +29,8 @@ use crate::host::doc_host::DocHost;
 use crate::host::workspace_host::WorkspaceHost;
 use crate::util::{lock, new_id};
 
+pub use network::{BotEdge, HttpBotEdge, InviteReply, NetError, OwnerName, SIGNED_OUT};
+
 mod git;
 mod index;
 mod memory;
@@ -89,6 +91,8 @@ struct Inner {
     taint: taint::Taint,
     /// The work track's state (permission control, row edits).
     work: work::WorkShared,
+    /// The bot network: the Edge client and the host loop's state (§11).
+    network: Arc<network::Network>,
     /// Cancels the host loops (work, schedule, network) at shutdown.
     hosts_cancel: tokio_util::sync::CancellationToken,
     hosts: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -115,6 +119,7 @@ impl Bots {
                 indexer: Default::default(),
                 taint: Default::default(),
                 work: Default::default(),
+                network: Default::default(),
                 hosts_cancel: Default::default(),
                 hosts: Default::default(),
                 schedule: Default::default(),

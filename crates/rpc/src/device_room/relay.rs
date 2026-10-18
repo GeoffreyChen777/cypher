@@ -14,8 +14,8 @@ use super::frames::{
     DeviceFrameHeader, decode_device_frame, encode_device_frame, relay_error_code,
 };
 use super::{
-    NUDGE_KIND, NudgeHandler, PING_INTERVAL, RELAY_KIND, RPC_KIND, SILENCE_LEASE, TokenSource,
-    device_room_ws_url, token_changed,
+    BOTS_NUDGE_KIND, NUDGE_KIND, NudgeHandler, PING_INTERVAL, RELAY_KIND, RPC_KIND, SILENCE_LEASE,
+    TokenSource, device_room_ws_url, token_changed,
 };
 use crate::{RpcError, RpcService, serve_connection};
 
@@ -26,6 +26,9 @@ pub struct HostRelayConfig {
     pub token: Arc<dyn TokenSource>,
     /// Reconnect delay after a session ends (a small jitter is added).
     pub retry: Duration,
+    /// Called with the bot room id of every bot network nudge; `None`
+    /// skips them like any unknown stream kind.
+    pub on_bots_nudge: Option<NudgeHandler>,
 }
 
 impl HostRelayConfig {
@@ -39,7 +42,14 @@ impl HostRelayConfig {
             device_id: device_id.into(),
             token,
             retry: Duration::from_secs(5),
+            on_bots_nudge: None,
         }
+    }
+
+    /// Hand bot network nudges to `handler`.
+    pub fn with_bots_nudge(mut self, handler: NudgeHandler) -> Self {
+        self.on_bots_nudge = Some(handler);
+        self
     }
 }
 
@@ -80,7 +90,8 @@ impl HostRelay {
                     );
                     let started = tokio::time::Instant::now();
                     let outcome = {
-                        let session = host_session(&url, &service, &on_nudge);
+                        let session =
+                            host_session(&url, &service, &on_nudge, config.on_bots_nudge.as_ref());
                         tokio::pin!(session);
                         loop {
                             tokio::select! {
@@ -198,6 +209,7 @@ async fn host_session(
     url: &str,
     service: &Arc<dyn RpcService>,
     on_nudge: &NudgeHandler,
+    on_bots_nudge: Option<&NudgeHandler>,
 ) -> Result<(), RpcError> {
     let ws = cypher_net::dial::connect_ws(url)
         .await
@@ -225,7 +237,8 @@ async fn host_session(
             message = stream.next() => match message {
                 Some(Ok(WsMessage::Binary(bytes))) => {
                     last_rx = tokio::time::Instant::now();
-                    handle_host_frame(&bytes, &mut conns, service, &out_tx, on_nudge).await;
+                    handle_host_frame(&bytes, &mut conns, service, &out_tx, on_nudge, on_bots_nudge)
+                        .await;
                 }
                 Some(Ok(WsMessage::Close(frame))) => {
                     if let Some(frame) = frame {
@@ -263,6 +276,7 @@ async fn handle_host_frame(
     service: &Arc<dyn RpcService>,
     out_tx: &mpsc::Sender<Vec<u8>>,
     on_nudge: &NudgeHandler,
+    on_bots_nudge: Option<&NudgeHandler>,
 ) {
     let (header, payload) = match decode_device_frame(bytes) {
         Ok(frame) => frame,
@@ -293,6 +307,25 @@ async fn handle_host_frame(
                 chat_id: Some(chat_id),
             }) => on_nudge(chat_id),
             _ => tracing::warn!("device-room: malformed nudge — ignoring"),
+        }
+        return;
+    }
+    if header.k == BOTS_NUDGE_KIND {
+        // Bot network nudge: the bot's host pulls that room's inbox.
+        #[derive(Deserialize)]
+        struct BotsNudge {
+            #[serde(rename = "botRoomId")]
+            bot_room_id: Option<String>,
+        }
+        match (serde_json::from_slice::<BotsNudge>(&payload), on_bots_nudge) {
+            (
+                Ok(BotsNudge {
+                    bot_room_id: Some(room),
+                }),
+                Some(handler),
+            ) => handler(room),
+            (Ok(_), None) => {}
+            _ => tracing::warn!("device-room: malformed bots nudge — ignoring"),
         }
         return;
     }

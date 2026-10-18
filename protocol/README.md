@@ -18,6 +18,7 @@ Every language loads the same JSON file and runs every case in it.
 | Registry merge core and HLC (`encodeHlc`, `hlcNewer`, `applyOp`, `maxClock`, `rowToSeedOp`) | [`crates/doc/src/registry/core.rs`](../crates/doc/src/registry/core.rs); tests [`registry/tests.rs`](../crates/doc/src/registry/tests.rs) (`shared_vectors_*`) | [`apps/edge/src/registry/registry-core.ts`](../apps/edge/src/registry/registry-core.ts); [`registry-core.test.ts`](../apps/edge/src/registry/registry-core.test.ts) | [`Sync/RegistryCore.swift`](../apps/ios/Cypher/Sync/RegistryCore.swift); [`RegistryCoreTests.swift`](../apps/ios/CypherTests/Sync/RegistryCoreTests.swift) | [`registry-core-v1.json`](vectors/registry-core-v1.json) |
 | chat2 frame codec `[type u8][headerLen u32 LE][header JSON][payload]` | [`crates/sync/src/chat_frames.rs`](../crates/sync/src/chat_frames.rs) (inline tests) | [`apps/edge/src/chat/chat-frames.ts`](../apps/edge/src/chat/chat-frames.ts); [`chat-frames.test.ts`](../apps/edge/src/chat/chat-frames.test.ts) | [`Sync/ChatFrames.swift`](../apps/ios/Cypher/Sync/ChatFrames.swift); [`ChatFramesTests.swift`](../apps/ios/CypherTests/Sync/ChatFramesTests.swift) | [`chat-frames-v1.json`](vectors/chat-frames-v1.json) |
 | Device-room frame codec `uleb128(len) ‖ header JSON ‖ payload`, header key order `s, k, to, from` | [`crates/rpc/src/device_room/frames.rs`](../crates/rpc/src/device_room/frames.rs); tests [`device_room/tests.rs`](../crates/rpc/src/device_room/tests.rs) | [`apps/edge/src/device/device-frame.ts`](../apps/edge/src/device/device-frame.ts); [`device-frame.test.ts`](../apps/edge/src/device/device-frame.test.ts) | [`Sync/DeviceRelayClient.swift`](../apps/ios/Cypher/Sync/DeviceRelayClient.swift) (frame codec); [`DeviceFrameTests.swift`](../apps/ios/CypherTests/Sync/DeviceFrameTests.swift) | [`device-frames-v1.json`](vectors/device-frames-v1.json) |
+| Bot network frames (`ask`, `answer`, `state`, `link`) and invite codes | [`crates/proto/src/bot_wire.rs`](../crates/proto/src/bot_wire.rs) (inline tests) | [`apps/edge/src/bots/bot-frames.ts`](../apps/edge/src/bots/bot-frames.ts); [`bot-frames.test.ts`](../apps/edge/src/bots/bot-frames.test.ts) | — | [`bot-frames-v1.json`](vectors/bot-frames-v1.json) |
 | Stream preview codec (inactive: the Edge relay is removed) | [`crates/sync/src/stream_preview.rs`](../crates/sync/src/stream_preview.rs) (inline tests) | — (the Edge rejects preview frames: `apps/edge/test/workerd/preview.workerd.test.ts`) | [`Sync/StreamPreview.swift`](../apps/ios/Cypher/Sync/StreamPreview.swift); [`StreamPreviewTests.swift`](../apps/ios/CypherTests/Sync/StreamPreviewTests.swift) | [`stream-preview-v1.json`](vectors/stream-preview-v1.json) |
 | Preview reducer | [`crates/sync/src/preview_link.rs`](../crates/sync/src/preview_link.rs) (inline tests) | — | [`Sync/PreviewProjection.swift`](../apps/ios/Cypher/Sync/PreviewProjection.swift); [`PreviewProjectionTests.swift`](../apps/ios/CypherTests/Sync/PreviewProjectionTests.swift) | [`preview-reducer-v1.json`](vectors/preview-reducer-v1.json) |
 
@@ -36,6 +37,8 @@ the tests on every side by hand.
 | Registry JSON wire frames (`hello`, `push`, `presence`, `probe` ↔ `state`, `rows`, `ack`, `presence`, `probe-ok`, `error`) | `crates/sync/src/registry/frames.rs`; `crates/sync/tests/registry_client.rs`, `registry_transport.rs` (`mock-server` feature), `registry_edge.rs` (against a running Edge) | `apps/edge/src/registry/registry-room.ts`; the `RegistryRoom` workerd tests in `apps/edge/test/workerd/` | `Sync/RegistryClient.swift`; `RegistryClientLifecycleTests.swift` |
 | chat2 catch-up plan | `crates/sync/src/chat_client.rs` (`plan_catch_up`); `chat_client/tests.rs` | — (the server only reports state) | `Sync/ChatFrames.swift` (`chatPlanCatchUp`); `ChatFramesTests.testPlanCatchUp` |
 | Room liveness constants (ping 15 s, silence lease 45 s, hello 15 s, probe 10 s, probe after 15 min quiet, backoff 250 ms to 30 s) | `crates/sync/src/chat_client.rs`, `crates/sync/src/registry.rs` | — | `Sync/RoomSocketLifecycle.swift` |
+| Bot network limits (question 8 KiB, answer 64 KiB, 30/h, 200/day, 3 in flight, 7-day expiry), route bodies and error codes | `crates/proto/src/bot_wire.rs`; `crates/engine/tests/bot_network.rs` (fake Edge) | `apps/edge/src/bots/bot-frames.ts`, `bot-room.ts`; `test/workerd/bot-room.workerd.test.ts` | — |
+| Device-room nudge kinds `nudge` `{chatId}` and `bots` `{botRoomId}` | `crates/rpc/src/device_room.rs` (`NUDGE_KIND`, `BOTS_NUDGE_KIND`); `tests/device_room.rs` | `apps/edge/src/device/device-room.ts` | — |
 | Device-room relay kind `" relay"`, relay error codes, host liveness | `crates/rpc/src/device_room.rs` (`RELAY_KIND`, `HOST_OFFLINE`, …) | `apps/edge/src/device/device-room.ts` (`RELAY_KIND`, `HOST_LIVENESS_MS`); `device-room.test.ts` | `Sync/DeviceRelayClient.swift` |
 | Transcript delta frames (`WatchDocMessages`) | `crates/doc/src/transcript_delta.rs` | — | `Sync/TranscriptFeed.swift`; `SideChatTests.swift` |
 | Agent prompt envelope (comments, session references, translation markers) | `crates/proto/src/agent_prompt.rs` | `pi-runtime/extensions/cypher-translation.ts`; `cypher-translation.test.mjs` | `Models/Comments.swift`, `Composer/SessionReferences.swift`; `CommentsTests.swift`, `MentionsTests.swift` |
@@ -93,6 +96,16 @@ An object with one array per function. Rows and ops are in their wire shape
   length byte (overflow, never a wrapped small length) and lengths past the
   buffer. Header shape is not shared: the Edge relays any JSON header, the Rust
   codec requires `s` and `k`.
+
+### `bot-frames-v1.json`
+
+- `frames`: `{name, frame}` — every decoder accepts `frame` and gives it back
+  unchanged (Rust re-serializes it to the same JSON; absent optional keys stay
+  absent). Exchange states are snake_case (`awaiting_review`).
+- `invalid`: `{name, frame}` — every decoder rejects these. A frame whose `t` no
+  side knows is not invalid: the Rust client decodes it as `Unknown` and skips it.
+- `codes`: `{code, room, secret}` — splitting an invite code `<botRoomId>.<secret>`
+  (trimmed) gives `room` and `secret`, or `null` for both when it is not a code.
 
 ### `stream-preview-v1.json`, `preview-reducer-v1.json`
 
