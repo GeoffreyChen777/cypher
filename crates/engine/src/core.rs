@@ -149,6 +149,7 @@ impl EngineCore {
                 edge: edge.clone(),
             },
         );
+        let bots_edge = edge.clone();
         let workspace = WorkspaceHost::open(
             store,
             WorkspaceHostConfig {
@@ -190,6 +191,11 @@ impl EngineCore {
             repos.clone(),
             profile.store_root().join("bots"),
         );
+        // The bot network needs the Edge: a signed-in (or dev-bearer)
+        // profile. Without one its tools and RPCs say so.
+        if let Some(edge) = bots_edge {
+            bots.attach_network(Arc::new(crate::bots::HttpBotEdge::new(edge)));
+        }
         // Worktree materialization for Run commands carrying a WorktreeSpec
         // happens on the HOST at drain time (see `DocHost::materialize_worktree`).
         doc_host.set_repos(repos.clone());
@@ -321,6 +327,13 @@ impl EngineCore {
             expected_user,
             expected_org,
         ));
+        let profile = auth.clone();
+        self.bots.set_owner_name(Arc::new(move || {
+            profile
+                .state()
+                .user()
+                .map(|user| user.name.clone().unwrap_or_else(|| user.email.clone()))
+        }));
         *lock(&self.auth) = Some(auth);
     }
 
@@ -395,8 +408,10 @@ impl EngineCore {
     /// re-reads auth on every (re)dial, so token refreshes take effect at reconnect.
     pub fn start_host_relay(&self, edge_url: &str) -> cypher_rpc::HostRelay {
         let auth = self.auth();
+        let bots = self.bots.clone();
         let config =
-            cypher_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth));
+            cypher_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth))
+                .with_bots_nudge(Arc::new(move |room: String| bots.bots_nudged(room)));
         let doc_host = self.doc_host.clone();
         let on_nudge: cypher_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
             // Opening the doc joins its room + syncs; drain fires on the change
