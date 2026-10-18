@@ -234,6 +234,12 @@ impl Bots {
         *lock(&self.inner.work.approval_wait) = wait;
     }
 
+    /// Tests: taint a thread the way `ask_bot` does (§4.3).
+    #[doc(hidden)]
+    pub fn taint_thread(&self, chat_id: &str, reason: &str) {
+        self.inner.taint.mark(chat_id, reason);
+    }
+
     /// Answer `tool` when it is one of this track's; `None` otherwise.
     pub(super) async fn work_tool(
         &self,

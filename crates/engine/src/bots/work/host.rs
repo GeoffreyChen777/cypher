@@ -444,7 +444,7 @@ impl Bots {
         let started = work.started_at.unwrap_or(work.created_at);
         if let Some(row) = row
             && matches!(row.status, SessionStatus::Idle | SessionStatus::Errored)
-            && row.updated_at.timestamp_millis() > started
+            && row.updated_at.timestamp_millis() >= started
             && !commands.pending
         {
             let entries = handle.doc().read_entries()?;
