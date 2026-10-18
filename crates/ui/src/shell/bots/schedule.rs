@@ -1430,26 +1430,25 @@ impl Shell {
         ));
         match form.draft.kind {
             ScheduleKind::Daily => {
+                // Like the Repeats control: a track, the picked days lifted.
                 let chips = (1..=7u8).map(|day| {
                     let on = form.draft.has_day(day);
-                    let key = SharedString::from(format!("bot-form-day-{day}"));
                     div()
-                        .id(key.clone())
-                        .flex_none()
-                        .size(px(26.0))
-                        .rounded_full()
+                        .id(SharedString::from(format!("bot-form-day-{day}")))
+                        .w(px(26.0))
+                        .py(px(3.0))
+                        .rounded(px(6.0))
                         .flex()
-                        .items_center()
                         .justify_center()
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_size(px(12.0))
                         .cursor_pointer()
-                        .when(on, |el| el.bg(theme.text).text_color(theme.on_solid))
-                        .when(!on, |el| {
-                            el.bg(crate::kit::theme::ink(0.05))
-                                .text_color(theme.text_muted)
-                                .hover(|s| s.text_color(theme.text))
+                        .text_color(if on { theme.text } else { theme.text_muted })
+                        .when(on, |el| {
+                            el.bg(crate::kit::theme::card_selected_bg())
+                                .shadow(crate::kit::theme::card_selected_shadows())
+                                .font_weight(gpui::FontWeight::MEDIUM)
                         })
+                        .when(!on, |el| el.hover(|s| s.text_color(theme.text)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(form) = this.board.schedule.form.as_mut() {
                                 form.draft.toggle_day(day);
@@ -1460,18 +1459,18 @@ impl Shell {
                             ["M", "T", "W", "T", "F", "S", "S"][day as usize - 1],
                         ))
                 });
+                let days = div()
+                    .flex_none()
+                    .p(px(2.0))
+                    .rounded(px(8.0))
+                    .bg(crate::kit::theme::ink(0.05))
+                    .flex()
+                    .flex_row()
+                    .gap(px(2.0))
+                    .children(chips);
                 when = when
                     .child(row("Time", false).child(compact(&form.time, 64.0)))
-                    .child(
-                        row("Days", false).child(
-                            div()
-                                .flex_none()
-                                .flex()
-                                .flex_row()
-                                .gap(px(4.0))
-                                .children(chips),
-                        ),
-                    );
+                    .child(row("Days", false).child(days));
             }
             ScheduleKind::Every => {
                 when = when.child(row("Every", false).child(compact(&form.every, 52.0)).child(
@@ -1934,10 +1933,16 @@ mod tests {
             days: vec![],
             unit: Unit::Hours,
         };
-        assert!((1..=7).all(|d| draft.has_day(d)), "none picked is every day");
+        assert!(
+            (1..=7).all(|d| draft.has_day(d)),
+            "none picked is every day"
+        );
         draft.toggle_day(6);
         draft.toggle_day(7);
-        assert_eq!(draft.build("08:30", ""), Ok(daily("08:30", vec![1, 2, 3, 4, 5])));
+        assert_eq!(
+            draft.build("08:30", ""),
+            Ok(daily("08:30", vec![1, 2, 3, 4, 5]))
+        );
         for day in 1..=5 {
             draft.toggle_day(day);
         }
