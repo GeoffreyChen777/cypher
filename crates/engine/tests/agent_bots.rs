@@ -461,7 +461,7 @@ async fn an_unattended_run_that_asks_stops_failed() {
     let core = common::engine_at(&tmp.path().join("data"), asking_harness(answers.clone()));
     let stops = Arc::new(Mutex::new(Vec::<UnattendedStop>::new()));
     let heard = stops.clone();
-    core.sessions.set_unattended_listener(Arc::new(move |stop| {
+    core.sessions.add_unattended_listener(Arc::new(move |stop| {
         heard.lock().unwrap().push(stop.clone())
     }));
     seed(&core, tmp.path());

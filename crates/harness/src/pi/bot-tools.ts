@@ -135,6 +135,75 @@ const TOOLS: ToolDef[] = [
   // ── end coordination ──
 
   // ── memory and routines (P3): notebook, schedule ──
+  {
+    name: "read_notes",
+    label: "Read notes",
+    description:
+      "Read your notebook: short notes you or your owner kept across conversations, newest first, each with where it came from. Your prompt already shows the newest notes; use this to search older ones.",
+    parameters: Type.Object({
+      query: Type.Optional(Type.String({ description: "Words a note must contain (any case)" })),
+    }),
+  },
+  {
+    name: "write_note",
+    label: "Write note",
+    description:
+      "Add one note to your notebook: a short fact or decision worth remembering in later conversations (\"the release is blocked on the migration\", \"Alice owns auth\"). One fact per note, at most 1000 characters. The note records which thread wrote it.",
+    parameters: Type.Object({
+      text: Type.String({ description: "The note" }),
+    }),
+  },
+  {
+    name: "list_schedule",
+    label: "Checked schedule",
+    description:
+      "List your routines and the recurring tasks of your projects: name, id, schedule, next run and the last run's result. Times are the host device's local time.",
+    parameters: Type.Object({}),
+  },
+  {
+    name: "save_routine",
+    label: "Save routine",
+    description:
+      "Create or change a routine: a job you run on a schedule, unattended, in its own thread; its result is posted in this chat. Use it when your owner asks for something recurring (\"every morning, tell me what's stuck\"). Pass `id` to change an existing routine (list_schedule shows ids). The schedule is one of {\"kind\":\"daily\",\"time\":\"09:00\",\"days\":[1,2,3,4,5]} (days 1 = Monday … 7 = Sunday; leave out for every day), {\"kind\":\"interval\",\"minutes\":60} (at least 15) or {\"kind\":\"manual\"} (only when run by hand), in the host device's local time. Returns what was saved and the next run.",
+    parameters: Type.Object({
+      id: Type.Optional(Type.String({ description: "The routine to change; leave out to create one" })),
+      name: Type.String({ description: "A short name, e.g. Morning brief" }),
+      prompt: Type.String({ description: "What each run should do and report, written as an instruction to yourself" }),
+      schedule: Type.Object(
+        {
+          kind: Type.Union([Type.Literal("daily"), Type.Literal("interval"), Type.Literal("manual")]),
+          time: Type.Optional(Type.String({ description: "daily: HH:MM, 24-hour" })),
+          days: Type.Optional(Type.Array(Type.Integer({ minimum: 1, maximum: 7 }), { description: "daily: 1 = Monday … 7 = Sunday" })),
+          minutes: Type.Optional(Type.Integer({ minimum: 15, description: "interval: minutes between runs" })),
+        },
+        { description: "When it runs" },
+      ),
+      write_notes: Type.Optional(Type.Boolean({ description: "Whether its runs may write to your notebook (default off)" })),
+      enabled: Type.Optional(Type.Boolean({ description: "Off keeps it but runs it only by hand (default on)" })),
+    }),
+  },
+  {
+    name: "save_project_task",
+    label: "Save project task",
+    description:
+      "Create or change a recurring task on one of your projects: every run starts a fresh session there, unattended, on the project's device (\"every night, run the tests and fix anything flaky\"). Needs the Coordinate permission. Pass `id` to change an existing task. The schedule takes the same shapes as save_routine: {\"kind\":\"daily\",\"time\":\"02:00\",\"days\":[1,2,3,4,5]}, {\"kind\":\"interval\",\"minutes\":60} or {\"kind\":\"manual\"}, in that device's local time.",
+    parameters: Type.Object({
+      id: Type.Optional(Type.String({ description: "The task to change; leave out to create one" })),
+      project: Type.String({ description: "Project id or name" }),
+      name: Type.String({ description: "A short name; sessions are titled \"<name> · <date>\"" }),
+      prompt: Type.String({ description: "The instruction each run's session gets" }),
+      schedule: Type.Object(
+        {
+          kind: Type.Union([Type.Literal("daily"), Type.Literal("interval"), Type.Literal("manual")]),
+          time: Type.Optional(Type.String({ description: "daily: HH:MM, 24-hour" })),
+          days: Type.Optional(Type.Array(Type.Integer({ minimum: 1, maximum: 7 }), { description: "daily: 1 = Monday … 7 = Sunday" })),
+          minutes: Type.Optional(Type.Integer({ minimum: 15, description: "interval: minutes between runs" })),
+        },
+        { description: "When it runs" },
+      ),
+      worktree: Type.Optional(Type.Boolean({ description: "Run each session in a new worktree (default off)" })),
+    }),
+  },
 
   // ── end memory ──
 

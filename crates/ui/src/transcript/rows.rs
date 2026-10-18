@@ -351,7 +351,7 @@ pub(super) fn message_copy_text(entry: &SessionMessageEntry) -> Option<String> {
         .parts
         .iter()
         .filter_map(|part| match part {
-            MessagePart::Text { text, .. } => Some(text.as_str()),
+            MessagePart::Text { text, .. } | MessagePart::Post { text, .. } => Some(text.as_str()),
             MessagePart::Error { message, .. } if entry.role != MessageRole::User => {
                 Some(message.as_str())
             }
@@ -686,6 +686,11 @@ pub fn rows_for_entry(
                 text,
                 agent_text,
             } => cx.push_text_rows(&mut rows, part_id, text, agent_text.as_deref(), parse),
+            // A routine's output posted into a bot chat: its text for now;
+            // the Botboard draws it as a card attributed to the routine.
+            MessagePart::Post {
+                id: part_id, text, ..
+            } => cx.push_text_rows(&mut rows, part_id, text, None, parse),
             MessagePart::Reasoning { id: part_id, text } => {
                 run.get_or_insert_with(|| (rows.len(), part_id.clone()));
                 // Still thinking: the reasoning is the live tail.
@@ -1034,9 +1039,9 @@ fn permission_output(
 /// still pending in the composer.
 fn part_is_silent(part: &MessagePart) -> bool {
     match part {
-        MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
-            text.trim().is_empty()
-        }
+        MessagePart::Text { text, .. }
+        | MessagePart::Reasoning { text, .. }
+        | MessagePart::Post { text, .. } => text.trim().is_empty(),
         MessagePart::Input { resolved, .. } => !*resolved,
         MessagePart::Error { .. } | MessagePart::Tool { .. } => false,
     }

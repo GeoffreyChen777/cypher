@@ -184,9 +184,9 @@ struct Inner {
     /// checkout tree for the Changes pane's "Latest turn" scope and records
     /// each round's changed files. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
-    /// Hears every unattended run the engine stopped for asking for input.
-    /// Absent until routines notify their owner (P3).
-    unattended_listener: OnceLock<UnattendedListener>,
+    /// Hear every unattended run the engine stopped for asking for input:
+    /// the bot scheduler settles the routine or task run as failed.
+    unattended_listeners: Mutex<Vec<UnattendedListener>>,
     /// Temporary Side Chat ids: in-memory status + harness-session
     /// continuity ONLY. Everything that would make a chat observable or durable
     /// — the public `sessions_tx` watch, workspace session rows, the run
@@ -314,7 +314,7 @@ impl SessionsEngine {
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
                 turn_listener: OnceLock::new(),
-                unattended_listener: OnceLock::new(),
+                unattended_listeners: Mutex::new(Vec::new()),
                 ephemeral: Mutex::new(HashSet::new()),
                 ephemeral_tx: Mutex::new(HashMap::new()),
                 plugin_epoch: AtomicU64::new(0),
@@ -356,9 +356,9 @@ impl SessionsEngine {
         let _ = self.inner.turn_listener.set(listener);
     }
 
-    /// Wire the unattended-stop listener (first set wins).
-    pub fn set_unattended_listener(&self, listener: UnattendedListener) {
-        let _ = self.inner.unattended_listener.set(listener);
+    /// Add an unattended-stop listener (engine assembly; tests add more).
+    pub fn add_unattended_listener(&self, listener: UnattendedListener) {
+        lock(&self.inner.unattended_listeners).push(listener);
     }
 
     // ── temporary Side Chat support ─────────────────────────────
@@ -1143,11 +1143,13 @@ fn unattended_input(
             session_id: None,
         });
         interrupt.cancel();
-        if let Some(listener) = inner.unattended_listener.get() {
-            listener(&UnattendedStop {
-                chat_id: chat_id.clone(),
-                reason,
-            });
+        let stop = UnattendedStop {
+            chat_id: chat_id.clone(),
+            reason,
+        };
+        let listeners = lock(&inner.unattended_listeners).clone();
+        for listener in listeners {
+            listener(&stop);
         }
         rx
     })
@@ -1157,9 +1159,12 @@ impl Inner {
     /// Whether nobody watches this chat's runs
     /// ([`crate::bots::profile::is_unattended`]).
     fn is_unattended(&self, chat_id: &str) -> bool {
-        self.workspace()
-            .and_then(|ws| ws.chat(chat_id).ok().flatten())
-            .is_some_and(|chat| crate::bots::profile::is_unattended(&chat))
+        self.workspace().is_some_and(|ws| {
+            ws.chat(chat_id)
+                .ok()
+                .flatten()
+                .is_some_and(|chat| crate::bots::profile::is_unattended(&ws, &chat))
+        })
     }
 
     fn quiesce_windows(&self) -> QuiesceWindows {

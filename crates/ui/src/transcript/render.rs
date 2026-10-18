@@ -969,7 +969,9 @@ impl Transcript {
                     message_for_copy(&state.transcript, state.pending_echoes(), &row.entry_id)
                         .is_some_and(|entry| {
                             entry.parts.iter().any(|part| match part {
-                                MessagePart::Text { text, .. } => !text.trim().is_empty(),
+                                MessagePart::Text { text, .. } | MessagePart::Post { text, .. } => {
+                                    !text.trim().is_empty()
+                                }
                                 MessagePart::Error { message, .. } => !message.trim().is_empty(),
                                 _ => false,
                             })

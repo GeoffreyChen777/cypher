@@ -301,7 +301,7 @@ impl Bots {
 
     /// The caller's view, refusing any chat that is not a bot thread hosted
     /// on this device or whose bot is gone.
-    fn view(&self, chat_id: &str) -> Result<View, EngineError> {
+    pub(super) fn view(&self, chat_id: &str) -> Result<View, EngineError> {
         let workspace = &self.inner.workspace;
         let not_a_bot = || EngineError::Other("This chat is not an agent bot.".into());
         let chat = workspace.chat(chat_id)?.ok_or_else(not_a_bot)?;
@@ -918,7 +918,7 @@ fn render_entry(index: usize, entry: &SessionMessageEntry, now: DateTime<Utc>) -
     let mut text = String::new();
     for part in &entry.parts {
         match part {
-            MessagePart::Text { text: body, .. } => {
+            MessagePart::Text { text: body, .. } | MessagePart::Post { text: body, .. } => {
                 if !text.is_empty() {
                     text.push('\n');
                 }
