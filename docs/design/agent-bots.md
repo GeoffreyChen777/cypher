@@ -1,15 +1,12 @@
 # Agent bots
 
-Status: **P0 and P1 implemented; P3's engine side built.** P0: local, read-only bots
-(definition, scope, the bot chat and its read tools, the palette). P1: engine-stamped
-origins, the role-aware run profile, per-origin prompts with the untrusted-data rule, slash
-commands by origin, the unattended run mode, the search index, `session_activity` and
-`project_git`. P3 (engine): the notebook tools, the scheduler, routines and recurring
-project tasks (§7, §8). P2 (engine): *Work directly*, plans, orchestration threads,
-worker sessions, Stop, limits, approvals and the activity log (§4.3, §4.4, §6.7, §10.2,
-§10.3). The first Botboard slice (§13.1: mode switch, picker, Status and
-Projects cards, detail panel) is built. The bot network's Edge and engine side (§11, P4) is built. The rest is design; §16 is the build order. Where
-the built code differs from the full design, the section says so.
+Status: **P0–P4 built, with Review mode, the outgoing scrub and *Coordinate: steer*
+from P5, and the whole Botboard (§13.1).** A bot reads its projects (P0, P1), works in
+them directly, plans work that runs in orchestration threads and worker sessions on any
+owner device (P2), keeps a notebook and runs routines and recurring project tasks (P3),
+and answers other users' bots by invite (P4). Not built: event triggers for routines,
+groups (§11.7), the iPhone surfaces and end-to-end encrypted exchanges (P6). Where the
+built code differs from the design below, the section says so.
 
 A bot is a **coordinator**: a long-lived agent responsible for everything in the projects
 it is given. Inward, it takes instructions from its owner and gets work done across those
@@ -895,41 +892,36 @@ before it ships.
 
 ## 13. UI
 
-Built (P0):
+Built:
 
-- **Bot strip:** 30px avatar squares between the sidebar header and the project cards,
-  lined up with the project glyphs; hidden when there are no bots. The open bot is ringed
-  in its own colour, a corner dot carries its chat's status, a hover shows the name, and a
-  right-click opens Open / Settings… / Delete…. Bots are created from the header's `+`
-  menu (New project… / New bot…). Project windows have no strip.
+- **Botboard** (§13.1): bots are a mode of the main window with their own sidebar of
+  cards, the bot chat in the middle and a detail panel on the right. It replaced the P0
+  bot strip and the header's New project / New bot menu.
 - **Bot palette** (create and edit), drawn like the Quick Chat and Add project palettes: a
   frosted header band, the form on the left (name beside a live avatar; twelve robot
-  faces, a few symbols or the initial, and a colour; Permissions; instructions), a "Run
-  on device" rail on the right (two-line device rows, fixed after creation), and a Cancel
-  / Save footer with Delete when editing.
-- **Bot conversation:** an ordinary session tab that wears the bot's avatar. A quiet access
-  note over the composer ("All projects · reads conversations") opens the bot's settings.
-  A new bot opens on a start screen with a 2×2 grid of suggested questions. Bot tool calls
-  read as what they did ("Read session · <title>"; "Looked over your work · read 2
-  sessions"), and cited `cypher://session/<id>` links open the session. No terminal and no
-  dock; the composer asks "Ask <bot>…".
+  faces, a few symbols or the initial, and a colour; Permissions; "What it may do" with
+  *Work directly*, *Coordinate* and *Steer others' sessions*, the acting switches marked;
+  instructions), a "Run on device" rail on the right (fixed after creation), and a
+  Cancel / Save footer with Delete when editing. New bots start with *Work directly* on.
+- **Bot conversation:** the Botboard's middle card, wearing the bot's avatar. A quiet
+  access note over the composer ("invoice-demo · works directly · can start sessions")
+  opens the bot's settings. A new bot opens on a start screen with a 2×2 grid of
+  suggested questions. Bot tool calls read as what they did ("Read session · <title>";
+  "Proposed a plan · read 2 sessions"), and cited `cypher://session/<id>` links open the
+  session (a link to one of the bot's hidden threads opens it read-only in the panel).
+- **Plan card:** a `propose_plan` call draws the plan from its record: title, summary,
+  steps with their projects and devices, Approve / Edit / Cancel while it waits (Edit
+  cancels it and starts the owner's reply asking for the change), live step marks,
+  sessions and Stop while it runs, and the result rendered as markdown when it ends.
+- **Routine posts and late answers** in the bot chat read under an attribution row
+  (the routine's name, when it ran, Failed, Open thread; "Answer from …" for another
+  bot's late answer) over the text rendered like any answer.
+- **Worker sessions:** a quiet "by <bot>" on their sidebar row and tab in Projects mode.
 
 Planned:
 
-- **Capabilities in the palette:** *Work directly*, *Coordinate: start* and *Coordinate:
-  steer* as separate switches below Permissions, the coordination switches marked as the
-  ones that let the bot act. A bot with *Coordinate* on says so in its access note.
-- **Plan card:** steps, projects, devices and dependencies, with Approve / Edit / Cancel.
-- **Progress card:** each step's state and session link, elapsed time and Stop; it turns
-  into a result card when the orchestration ends.
-- **Worker sessions:** "Started by <bot> · <task>" on their row and tab.
-- **Botboard** (§13.1): bots move out of the project sidebar into a mode of their own.
-  The sidebar shows the current bot's cards, the chat stays in the middle, and a detail
-  panel slides in on the right when a card's item is opened. This replaces the built
-  strip and the header's New project / New bot menu.
-- **Project tasks:** recurring tasks in a project's menu, with their last runs.
 - **iPhone:** the bot list, the bot chat, plan approvals and reviews, driven by push
-  notifications.
+  notifications (P6).
 
 ### 13.1 Botboard
 
@@ -1004,9 +996,25 @@ Behaviour:
 - Usage meters and embedded transcripts are left out: rows link to the thread or session
   instead.
 
-Phasing: the mode switch, picker, Status and Projects cards replace the built strip
-first, since they need nothing new from the engine; Needs you, Work and Activity arrive
-with the coordinator (P2), Schedule and Notebook with P3, Network with P4.
+As built, beyond the table:
+
+- **Needs you** lists, most pressing first: the bot chat waiting on the owner, actions
+  awaiting approval, sessions the bot started that are asking (whatever their work did
+  since: an orchestration can end while its session's question stays open), plans
+  awaiting approval, review drafts, and routines whose last run failed. The Asking panel
+  answers a single-question prompt with its options; others say to answer in the
+  session.
+- **The bot learns where its plans stand.** Approval, progress and results happen
+  outside the conversation, so each owner turn carries a short status of the bot's live
+  and recently ended plans to the agent (the transcript keeps the owner's words).
+- **Hidden threads** (orchestrations, routines, peer questions) never appear in the
+  Projects sidebar and never chime, banner or push; the panel's Thread view shows one
+  read-only with a way back to its work item, routine or connection.
+- **A routine** can be granted *Work directly* ("May run commands"), only while the bot
+  has it; unattended, anything that needs approval fails the run.
+- **Empty cards** for Schedule, Notebook and Network show only their header with a quiet
+  hint and `+`, so the first routine, note or connection is one click away.
+- **Signed out**, the Network card says "Sign in to connect bots"; records stay visible.
 
 ## 14. RPC
 
@@ -1047,12 +1055,12 @@ As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is n
 
 | Phase | Delivers |
 |---|---|
-| **P0: local bot** (done) | `bots` rows, the bot chat, the bot spawn mode with tool allowlist, four read tools (bounded scan), scope enforcement, the strip, palette and conversation UI, use from other owner devices. |
-| **P1: foundation** | Role-aware run profiles with engine-stamped origins; the untrusted-data prompt; the non-interactive run mode; the FTS index, `session_activity` and `project_git`. |
-| **P2: coordinator** (engine built) | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; plan, progress and result cards; Stop; limits; audit log. Built in the engine: all of it but the cards, plus approvals for tainted threads and *Coordinate: steer*'s per-action approval. Not built: turn and time budgets, plan editing. |
-| **P3: memory and routines** (engine built) | The notebook (owner notes first, then bot notes with provenance); the scheduler; routines and recurring project tasks; the attention inbox ("what needs me"). Built in the engine: the notebook and schedule tools, the scheduler, routine threads and their posts in the bot chat, task sessions, unattended task runs. Left: the Schedule and Notebook cards and the post card in the UI; event triggers. |
-| **P4: network** | `BotRoom`, publish, invites, connections, peer threads, `ask_bot` in Auto mode, exchange states, late answers, the Connections and Activity panes. Built on the Edge and in the engine, with Review mode and the scrub from P5; the panes are the UI track's. |
-| **P5: review and control** | Review mode, the outgoing scrub (both built with P4), notifications for reviews, plans and connections; *Coordinate: steer*. |
+| **P0: local bot** (built) | `bots` rows, the bot chat, the bot spawn mode with tool allowlist, four read tools (bounded scan), scope enforcement, palette and conversation UI, use from other owner devices. |
+| **P1: foundation** (built) | Role-aware run profiles with engine-stamped origins; the untrusted-data prompt; the non-interactive run mode; the FTS index, `session_activity` and `project_git`. |
+| **P2: coordinator** (built) | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; plan, progress and result cards; Stop; limits including a 4-hour time budget; audit log; approvals for tainted threads. Not built: per-worker turn budgets. |
+| **P3: memory and routines** (built) | The notebook (owner and bot notes with provenance); the scheduler; routines (optionally working directly) and recurring project tasks; their posts in the bot chat; the Schedule and Notebook cards; Needs you. Not built: event triggers. |
+| **P4: network** (built) | `BotRoom`, publish, invites, connections, peer threads, `ask_bot`, exchange states, late answers, the Network card and panels. |
+| **P5: review and control** (built but notifications) | Review mode and the outgoing scrub, reviews in Needs you; *Coordinate: steer* with a per-action approval. Not built: push notifications for reviews, plans and connections. |
 | **P6: groups, iPhone, E2E** | Owner groups, then shared groups; the iOS bot surfaces; end-to-end encrypted exchanges. |
 
 P2 comes before the network because a coordinator is useful to a single user on day one,
