@@ -69,7 +69,7 @@ pub(super) fn current_step_line(work: &BotWork) -> String {
 pub(super) fn result_line(work: &BotWork) -> String {
     work.result
         .as_deref()
-        .map(transcript::single_line)
+        .map(|r| transcript::single_line(&super::items::plain_markdown(r)))
         .filter(|r| !r.is_empty())
         .unwrap_or_else(|| phase_line(work, 0))
 }

@@ -286,6 +286,76 @@ fn create_private_dir(path: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// The first line of [`turn_note`], so a re-dispatched turn never carries
+/// it twice.
+const TURN_NOTE_HEAD: &str = "[Cypher: where your plans stand now";
+
+/// What an owner turn in a bot chat should know before it answers: where
+/// the bot's plans stand. The conversation only shows a plan being proposed;
+/// approval, progress and results happen in the work host, so without this
+/// the bot reports a finished plan as still waiting. Plans awaiting approval
+/// or running, and those that ended in the last day, newest first. `None`
+/// for any other chat, or when there is nothing to say.
+pub fn turn_note(workspace: &WorkspaceHost, chat: &Chat) -> Option<String> {
+    let marker = chat.bot.as_ref()?;
+    if !marker.is_main() || marker.origin != cypher_proto::BotOrigin::Owner {
+        return None;
+    }
+    let now = cypher_proto::now_ms();
+    let records = workspace.read_bot_records();
+    let mut work: Vec<&cypher_proto::BotWork> = records
+        .work_of(&marker.bot_id)
+        .filter(|w| w.is_live() || w.ended_at.is_some_and(|at| now - at < 24 * 3_600_000))
+        .collect();
+    if work.is_empty() {
+        return None;
+    }
+    work.sort_by_key(|w| std::cmp::Reverse(w.ended_at.or(w.started_at).unwrap_or(w.created_at)));
+    let ago = |ms: i64| {
+        tools::when(
+            chrono::DateTime::from_timestamp_millis(ms).unwrap_or_default(),
+            chrono::Utc::now(),
+        )
+    };
+    let mut lines = vec![format!(
+        "{TURN_NOTE_HEAD} (status from Cypher, not your owner's words)]"
+    )];
+    for w in work.iter().take(8) {
+        let (done, total) = w.progress();
+        let state = match w.state {
+            cypher_proto::WorkState::Proposed if w.awaiting_approval() => {
+                "awaiting your owner's approval".to_string()
+            }
+            cypher_proto::WorkState::Proposed => "approved, starting".to_string(),
+            cypher_proto::WorkState::Running => format!("running, {done} of {total} steps done"),
+            cypher_proto::WorkState::Done => format!("done {}", ago(w.ended_at.unwrap_or(now))),
+            cypher_proto::WorkState::Failed => format!("failed {}", ago(w.ended_at.unwrap_or(now))),
+            cypher_proto::WorkState::Stopped => {
+                format!("stopped {}", ago(w.ended_at.unwrap_or(now)))
+            }
+            cypher_proto::WorkState::Cancelled => "cancelled by your owner".to_string(),
+        };
+        let mut line = format!("- \"{}\" (work {}): {state}", w.title, w.id);
+        if let Some(result) = w.result.as_deref().filter(|_| !w.is_live()) {
+            line.push_str(&format!(
+                ". Result: {}",
+                cypher_proto::clip(&result.replace('\n', " "), 400)
+            ));
+        }
+        lines.push(line);
+    }
+    lines.push("Use get_work for the details.".to_string());
+    Some(lines.join("\n"))
+}
+
+/// `prompt` with [`turn_note`] ahead of it, unless it already has one.
+pub fn with_turn_note(note: &str, prompt: &str) -> String {
+    if prompt.starts_with(TURN_NOTE_HEAD) {
+        return prompt.to_string();
+    }
+    format!("{note}\n\n{prompt}")
+}
+
 /// Runtime slash commands an owner thread refuses: each would change the
 /// run's tools or modes behind the bot tool allowlist.
 pub const REFUSED_COMMANDS: [&str; 3] = ["scripts", "orchestrate", "goal"];

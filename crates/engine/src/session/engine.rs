@@ -690,7 +690,17 @@ impl SessionsEngine {
     ) -> Result<String, EngineError> {
         // Read before stripping: the transcript shows the quote the user saw.
         let comments = MessageComment::from_agent_prompt(agent_prompt.as_deref().unwrap_or(""));
-        let agent_prompt = agent_prompt_for(harness_id, agent_prompt);
+        let mut agent_prompt = agent_prompt_for(harness_id, agent_prompt);
+        // A bot chat's owner turn learns where its plans stand (approval,
+        // progress and results happen outside the conversation).
+        if let Some(ws) = self.inner.workspace()
+            && let Ok(Some(chat)) = ws.chat(chat_id)
+            && let Some(note) = crate::bots::turn_note(&ws, &chat)
+            && !request.prompt.trim_start().starts_with('/')
+        {
+            let base = agent_prompt.as_deref().unwrap_or(&request.prompt);
+            agent_prompt = Some(crate::bots::with_turn_note(&note, base));
+        }
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::git::repos::expand_home(&request.cwd);

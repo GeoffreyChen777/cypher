@@ -860,3 +860,92 @@ async fn search_reads_the_index_and_filters_scope_at_query_time() {
     wait_for(|| indexed_chats(&folder).is_empty(), "the index emptied").await;
     core.shutdown().await;
 }
+
+/// An owner turn in the bot chat learns where its plans stand: the
+/// conversation only shows a plan being proposed, so without the note the
+/// bot would report a finished plan as still waiting. The transcript keeps
+/// the owner's words.
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_turns_learn_where_their_plans_stand() {
+    let tmp = tempfile::tempdir().unwrap();
+    let log = HostLog::default();
+    let seen = log.clone();
+    let harness = common::TestHarness::new(HarnessId::Pi, "Recording", move |request, controls| {
+        seen.lock()
+            .unwrap()
+            .push((request.clone(), controls.host.profile.bot().cloned()));
+        common::reply(HarnessId::Pi, &request, "sess-bot", "On it.")
+    });
+    let core = common::engine_at(&tmp.path().join("data"), harness);
+    seed(&core, tmp.path());
+    let bot = create_bot(&core, billing_only()).await;
+    let now = cypher_proto::now_ms();
+    let done = cypher_proto::BotWork {
+        id: "w-done".into(),
+        bot_id: bot.id.clone(),
+        title: "Fix rounding".into(),
+        instruction: "Fix it".into(),
+        summary: None,
+        steps: vec![],
+        state: cypher_proto::WorkState::Done,
+        chat_id: bot.chat_id.clone(),
+        tool_call_id: None,
+        thread_chat_id: None,
+        created_at: now - 60_000,
+        started_at: Some(now - 50_000),
+        ended_at: Some(now - 10_000),
+        result: Some("Fixed in calc.py; tests pass.".into()),
+        decision: None,
+        stop_requested_at: None,
+    };
+    core.workspace
+        .put_record(
+            cypher_proto::KIND_BOT_WORK,
+            "w-done",
+            &done,
+            cypher_engine::RecordFields::All,
+        )
+        .unwrap();
+    let chat = core.workspace.chat(&bot.chat_id).unwrap().unwrap();
+    core.doc_host
+        .queue_command(
+            &bot.chat_id,
+            SessionCommandPayload::Run {
+                request: RunRequest {
+                    cwd: chat.cwd.clone().unwrap(),
+                    ..run_request("Is the rounding fix done?")
+                },
+                message_id: "msg-status".into(),
+                agent_prompt: None,
+            },
+        )
+        .expect("queue the bot run");
+    wait_for(
+        || complete_assistant_count(&core, &bot.chat_id) == 1,
+        "the bot's turn",
+    )
+    .await;
+    let runs = log.lock().unwrap().clone();
+    let (request, _) = runs.last().expect("the run reached the harness");
+    assert!(
+        request.prompt.contains("where your plans stand")
+            && request
+                .prompt
+                .contains("\"Fix rounding\" (work w-done): done")
+            && request.prompt.contains("Fixed in calc.py; tests pass.")
+            && request.prompt.ends_with("Is the rounding fix done?"),
+        "{}",
+        request.prompt
+    );
+    let user = common::entries(&core, &bot.chat_id)
+        .into_iter()
+        .find(|e| e.role == MessageRole::User)
+        .expect("the owner's message");
+    assert!(
+        user.parts.iter().all(|p| match p {
+            MessagePart::Text { text, .. } => !text.contains("where your plans stand"),
+            _ => true,
+        }),
+        "the transcript keeps the owner's words"
+    );
+}

@@ -387,12 +387,20 @@ impl Transcript {
     pub(super) fn render_bot_plan(
         &mut self,
         row_id: &SharedString,
-        call_id: &SharedString,
-        title: &SharedString,
-        resolved: bool,
+        kind: &RowKind,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let RowKind::BotPlan {
+            call_id,
+            title,
+            resolved,
+        } = kind
+        else {
+            return gpui::Empty.into_any_element();
+        };
+        let resolved = *resolved;
         let now = chrono::Utc::now();
         let now_ms = now.timestamp_millis();
         let view = cx.entity_id();
@@ -630,10 +638,18 @@ impl Transcript {
                     .py(px(9.0))
                     .rounded(px(8.0))
                     .bg(crate::kit::theme::ink(0.04))
-                    .text_size(px(13.0))
-                    .line_height(px(19.0))
                     .text_color(theme.text)
-                    .child(SharedString::from(result.clone())),
+                    // Markdown like any answer: the result cites its
+                    // sessions as links.
+                    .child(crate::markdown::render::render_tree(
+                        &crate::markdown::parser::parse_full(result),
+                        &crate::markdown::render::RenderOptions::settled(
+                            format!("{row_id}-result").into(),
+                        ),
+                        theme,
+                        window,
+                        &|_| None,
+                    )),
             );
         }
         let actions = self.plan_actions(row_id, &work, phase, theme, cx);

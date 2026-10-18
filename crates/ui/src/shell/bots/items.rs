@@ -104,7 +104,34 @@ pub(super) fn text_block(text: String, theme: &Theme) -> gpui::Div {
         .text_size(px(13.0))
         .line_height(px(19.0))
         .text_color(theme.text)
-        .child(SharedString::from(text))
+        .child(SharedString::from(plain_markdown(&text)))
+}
+
+/// Markdown an agent wrote, read as plain text for a panel or a row: a
+/// link keeps its text (a cited `cypher://session/…` reads as the session's
+/// title), emphasis and code ticks drop; lines and paragraphs stay.
+pub(super) fn plain_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find("](").and_then(|close| {
+            let url = &after[close + 2..];
+            url.find(')').map(|end| (close, close + 2 + end + 1))
+        }) {
+            Some((close, skip)) if !after[..close].contains('\n') => {
+                out.push_str(&after[..close]);
+                rest = &after[skip..];
+            }
+            _ => {
+                out.push('[');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.replace("**", "").replace("__", "").replace('`', "")
 }
 
 /// Epoch milliseconds as a time.
@@ -400,5 +427,20 @@ impl Shell {
             });
         }));
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markdown_reads_plainly() {
+        assert_eq!(
+            plain_markdown(
+                "Fixed in [Fix rounding](cypher://session/c1); ran `make test` **twice**.\n\nSee [x]"
+            ),
+            "Fixed in Fix rounding; ran make test twice.\n\nSee [x]"
+        );
     }
 }

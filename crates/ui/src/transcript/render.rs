@@ -572,11 +572,7 @@ impl Transcript {
                 ..
             } => input_chip(header.clone(), *resolved, *permission, theme),
             RowKind::ErrorChip { message } => error_chip(message.clone(), theme),
-            RowKind::BotPlan {
-                call_id,
-                title,
-                resolved,
-            } => self.render_bot_plan(&row.id, call_id, title, *resolved, theme, cx),
+            RowKind::BotPlan { .. } => self.render_bot_plan(&row.id, &row.kind, theme, window, cx),
             RowKind::BotPost {
                 name,
                 failed,
