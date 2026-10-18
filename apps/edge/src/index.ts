@@ -10,7 +10,7 @@
  *   auth-routes.ts               /auth/* (pre-bearer: exchange, refresh, callbacks, orgs)
  *   revoke-route.ts              POST /notifications/revoke (revocation-only capability)
  *   ── bearer verified below; 401 otherwise ──
- *   room-routes.ts               /chat2/*, /registry/*, /device/* → Durable Objects
+ *   room-routes.ts               /chat2/*, /registry/*, /device/*, /bots/* → Durable Objects
  *   blob-route.ts                GET|HEAD /blob/:chatId/:partId (read-only R2)
  *   legacy/attachments-route.ts  PUT /attachments/* (retired, acknowledged)
  *
@@ -28,6 +28,7 @@ import { handleRoomRoute } from "./room-routes";
 import { routeContext } from "./router";
 
 export { APNsSender } from "./notifications/apns-sender";
+export { BotRoom } from "./bots/bot-room";
 export { ChatRoom } from "./chat/chat-room";
 export { DeviceRoom } from "./device/device-room";
 export { PushDevice } from "./notifications/push-device";
