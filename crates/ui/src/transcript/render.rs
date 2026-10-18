@@ -337,11 +337,22 @@ impl Transcript {
         let (top_gap, inner) = match row.card {
             Some(slice) => {
                 let (bg, line) = if slice.failed {
-                    (theme.danger.opacity(0.05), theme.danger.opacity(0.22))
+                    let edge = if theme.appearance.is_dark() {
+                        0.22
+                    } else {
+                        0.13
+                    };
+                    (theme.danger.opacity(0.05), theme.danger.opacity(edge))
                 } else {
+                    // Light mode's hairline scale runs dark; keep the edge soft.
+                    let edge = if theme.appearance.is_dark() {
+                        0.1
+                    } else {
+                        0.045
+                    };
                     (
                         crate::kit::theme::ink(0.035),
-                        crate::kit::theme::hairline(0.1),
+                        crate::kit::theme::hairline(edge),
                     )
                 };
                 let card = div()
@@ -1367,9 +1378,17 @@ fn bot_post_header(
         .w_full()
         .border_b_1()
         .border_color(if failed {
-            theme.danger.opacity(0.16)
+            theme.danger.opacity(if theme.appearance.is_dark() {
+                0.16
+            } else {
+                0.1
+            })
         } else {
-            crate::kit::theme::hairline(0.08)
+            crate::kit::theme::hairline(if theme.appearance.is_dark() {
+                0.08
+            } else {
+                0.04
+            })
         })
         .flex()
         .flex_row()
