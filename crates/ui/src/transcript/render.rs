@@ -1365,7 +1365,7 @@ fn bot_post_header(
     thread: Option<SharedString>,
     theme: &Theme,
 ) -> AnyElement {
-    use crate::kit::icons::{CHECK, DANGER_TRIANGLE, REFRESH, icon};
+    use crate::kit::icons::{CHECK, CLOCK, DANGER_TRIANGLE, icon};
     let when = chrono::DateTime::from_timestamp_millis(run_at)
         .map(|at| {
             let local = at.with_timezone(&chrono::Local);
@@ -1445,7 +1445,7 @@ fn bot_post_header(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(icon(REFRESH).size(px(14.0)).text_color(tone)),
+                .child(icon(CLOCK).size(px(14.0)).text_color(tone)),
         )
         .child(
             div()
