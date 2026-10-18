@@ -1594,9 +1594,7 @@ impl Shell {
             }
         }
 
-        body = body
-            .child(parts::field_label(theme, "Model"))
-            .child(model_picker);
+        body = body.child(div().h(px(10.0))).child(model_picker);
 
         let new = target == FormTarget::NewRoutine;
         let (footer, cancel, save) = parts::form_footer(
@@ -1674,41 +1672,147 @@ impl Shell {
         );
     }
 
-    /// The form's model choice: a row naming it that opens a searchable
-    /// list of the device's models, "Default" first.
+    /// The form's model choice, drawn like Settings' model pickers: a row
+    /// with a bordered trigger naming it, opening a menu over it with a
+    /// search field over the device's models, "Default" first.
     fn render_model_picker(
         &mut self,
         bot: &Bot,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        use crate::settings::widgets;
         self.load_form_models(bot, cx);
         let Some(form) = self.board.schedule.form.as_ref() else {
             return div();
         };
-        let label = |id: &str, models: &ModelList| match models {
-            ModelList::Ready(models) => models
+        let current = match (&form.model, &form.models) {
+            (None, _) => "Default".to_string(),
+            (Some(id), ModelList::Ready(models)) => models
                 .iter()
-                .find(|m| m.id == id)
+                .find(|m| &m.id == id)
                 .map(|m| m.label.clone())
-                .unwrap_or_else(|| id.to_string()),
-            _ => id.to_string(),
+                .unwrap_or_else(|| id.clone()),
+            (Some(id), _) => id.clone(),
         };
-        let current = match &form.model {
-            Some(id) => label(id, &form.models),
-            None => "Default".to_string(),
-        };
-        let open = form.model_open;
-        let key = "bot-form-model";
-        let trigger = div()
-            .id(key)
-            .h(px(36.0))
-            .px(px(12.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .cursor_pointer()
+        let popup = form.model_open.then(|| {
+            let row =
+                |id: Option<String>, label: String, selected: bool, cx: &mut Context<Self>| {
+                    div()
+                        .id(SharedString::from(format!(
+                            "bot-form-model-{}",
+                            id.as_deref().unwrap_or("default")
+                        )))
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .rounded(px(8.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .cursor_pointer()
+                        .bg(if selected {
+                            theme.ink(0.07)
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .hover(|style| style.bg(theme.ink(0.05)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(form) = this.board.schedule.form.as_mut() {
+                                form.model = id.clone();
+                                form.model_open = false;
+                            }
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(13.0))
+                                .text_color(theme.text)
+                                .child(SharedString::from(label)),
+                        )
+                        .child(div().w(px(16.0)).when(selected, |row| {
+                            row.child(icon(icons::CHECK).size(px(12.0)).text_color(theme.accent))
+                        }))
+                };
+            let chosen = form.model.clone();
+            let mut menu = div()
+                .w(px(280.0))
+                .rounded(px(10.0))
+                .bg(theme.surface_overlay)
+                .border_1()
+                .border_color(theme.border_strong)
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    if let Some(form) = this.board.schedule.form.as_mut() {
+                        form.model_open = false;
+                    }
+                    cx.notify();
+                }))
+                .child(div().p(px(8.0)).child(form.model_search.clone()))
+                .child(
+                    div()
+                        .px(px(4.0))
+                        .child(row(None, "Default".into(), chosen.is_none(), cx)),
+                );
+            match form.models.clone() {
+                ModelList::Ready(models) => {
+                    let query = form.model_search.read(cx).text().trim().to_lowercase();
+                    let matching: Vec<_> = models
+                        .into_iter()
+                        .filter(|m| {
+                            query.is_empty()
+                                || m.label.to_lowercase().contains(&query)
+                                || m.id.to_lowercase().contains(&query)
+                        })
+                        .collect();
+                    if matching.is_empty() {
+                        menu = menu.child(
+                            div()
+                                .p(px(12.0))
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child("No matching models."),
+                        );
+                    } else {
+                        let mut list = div()
+                            .id("bot-form-model-list")
+                            .max_h(px(240.0))
+                            .overflow_y_scroll()
+                            .px(px(4.0))
+                            .pb(px(4.0));
+                        for m in matching {
+                            let on = chosen.as_deref() == Some(m.id.as_str());
+                            list = list.child(row(Some(m.id), m.label, on, cx));
+                        }
+                        menu = menu.child(list);
+                    }
+                }
+                ModelList::Failed(error) => {
+                    menu = menu.child(widgets::error_strip(theme, &error).mt(px(0.0)))
+                }
+                ModelList::Loading => {
+                    menu = menu.child(
+                        div()
+                            .p(px(12.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child("Loading models…"),
+                    )
+                }
+            }
+            // The row sits at the form's foot, by the window's corner: the
+            // menu opens upward, aligned to the trigger's right edge.
+            popover::anchored_menu_above_end("bot-form-model-popup", menu.into_any_element(), None)
+        });
+        let trigger = widgets::ghost_action(theme)
+            .id("bot-form-model-trigger")
+            .relative()
+            .w(px(180.0))
+            .flex_none()
+            .border_1()
+            .border_color(theme.border)
+            .hover(|s| widgets::ghost_hover(theme, s))
             .on_click(cx.listener(|this, _, window, cx| {
                 if let Some(form) = this.board.schedule.form.as_mut() {
                     form.model_open = !form.model_open;
@@ -1723,115 +1827,45 @@ impl Shell {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(12.5))
                     .text_color(theme.text)
                     .child(SharedString::from(current)),
             )
-            .when(form.model.is_none(), |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(11.5))
-                        .text_color(theme.text_muted)
-                        .child("same as the workspace chat"),
-                )
-            })
             .child(
-                icon(if open {
-                    icons::ALT_ARROW_DOWN
-                } else {
-                    icons::ALT_ARROW_RIGHT
-                })
-                .size(px(11.0))
-                .flex_none()
-                .text_color(theme.text_muted),
-            );
-        let mut picker = parts::group_box().child(trigger);
-        if !open {
-            return picker;
-        }
-        let row = |id: Option<String>, text: String, on: bool, cx: &mut Context<Self>| {
+                icon(icons::ALT_ARROW_DOWN)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+            )
+            .children(popup);
+        parts::group_box().child(
             div()
-                .id(SharedString::from(format!(
-                    "bot-form-model-{}",
-                    id.as_deref().unwrap_or("default")
-                )))
-                .h(px(28.0))
-                .px(px(8.0))
-                .rounded(px(6.0))
+                .px(px(12.0))
+                .py(px(9.0))
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(8.0))
-                .cursor_pointer()
-                .when(on, |el| el.bg(crate::kit::theme::ink(0.06)))
-                .when(!on, |el| el.hover(|s| s.bg(theme.element_hover)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(form) = this.board.schedule.form.as_mut() {
-                        form.model = id.clone();
-                        form.model_open = false;
-                    }
-                    cx.notify();
-                }))
+                .gap(px(12.0))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
-                        .text_size(px(12.5))
-                        .text_color(theme.text)
-                        .child(SharedString::from(text)),
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.0))
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(theme.text)
+                                .child("Model"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(theme.text_muted)
+                                .child("Default: the workspace chat's."),
+                        ),
                 )
-                .when(on, |el| {
-                    el.child(icon(icons::CHECK).size(px(12.0)).text_color(theme.text))
-                })
-        };
-        let query = form.model_search.read(cx).text().trim().to_lowercase();
-        let chosen = form.model.clone();
-        let mut list = div()
-            .id("bot-form-model-list")
-            .max_h(px(220.0))
-            .overflow_y_scroll()
-            .px(px(4.0))
-            .pb(px(4.0))
-            .flex()
-            .flex_col()
-            .child(row(None, "Default".into(), chosen.is_none(), cx));
-        match form.models.clone() {
-            ModelList::Ready(models) => {
-                let matching: Vec<_> = models
-                    .into_iter()
-                    .filter(|m| {
-                        query.is_empty()
-                            || m.label.to_lowercase().contains(&query)
-                            || m.id.to_lowercase().contains(&query)
-                    })
-                    .collect();
-                if matching.is_empty() {
-                    list = list.child(parts::quiet_line(theme, "No matching models."));
-                }
-                for m in matching {
-                    let on = chosen.as_deref() == Some(m.id.as_str());
-                    list = list.child(row(Some(m.id), m.label, on, cx));
-                }
-            }
-            ModelList::Loading => list = list.child(parts::quiet_line(theme, "Loading models…")),
-            ModelList::Failed(why) => list = list.child(parts::quiet_line(theme, why)),
-        }
-        picker = picker.child(
-            div()
-                .border_t_1()
-                .border_color(crate::kit::theme::hairline(0.06))
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .p(px(6.0))
-                        .child(parts::field(&form.model_search).mx(px(0.0))),
-                )
-                .child(list),
-        );
-        picker
+                .child(trigger),
+        )
     }
 }
 
