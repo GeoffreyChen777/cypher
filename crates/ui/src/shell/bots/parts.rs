@@ -665,8 +665,8 @@ fn day_month<Tz: TimeZone>(at: &DateTime<Tz>) -> String {
 }
 
 /// When something next happens, as a card's right-hand note: "in 25m",
-/// "in 3h", "02:00" (today or tomorrow), "Mon" (within a week), else
-/// "Oct 30".
+/// "in 3h", "21:00" (later today), "Mon" (within a week), else "Oct 30".
+/// A bare time is always today's, so it never reads as tomorrow's.
 pub(super) fn next_label<Tz: TimeZone>(at: &DateTime<Tz>, now: &DateTime<Tz>) -> String {
     let minutes = (at.clone() - now.clone()).num_minutes();
     if minutes < 1 {
@@ -679,7 +679,7 @@ pub(super) fn next_label<Tz: TimeZone>(at: &DateTime<Tz>, now: &DateTime<Tz>) ->
         return format!("in {}h", minutes / 60);
     }
     let days = (at.date_naive() - now.date_naive()).num_days();
-    if days <= 1 {
+    if days <= 0 {
         return hm(at);
     }
     if days < 7 {
@@ -772,8 +772,13 @@ mod tests {
         assert_eq!(label("2026-10-18T10:00:20+01:00"), "now");
         assert_eq!(label("2026-10-18T10:25:00+01:00"), "in 25m");
         assert_eq!(label("2026-10-18T14:30:00+01:00"), "in 4h");
-        assert_eq!(label("2026-10-19T02:00:00+01:00"), "02:00");
-        assert_eq!(label("2026-10-19T23:00:00+01:00"), "23:00", "tomorrow");
+        assert_eq!(label("2026-10-18T23:00:00+01:00"), "23:00");
+        assert_eq!(
+            label("2026-10-19T02:00:00+01:00"),
+            "Mon",
+            "tomorrow, past 12h"
+        );
+        assert_eq!(label("2026-10-18T21:00:00+01:00"), "in 11h");
         assert_eq!(label("2026-10-20T18:30:00+01:00"), "Tue");
         assert_eq!(label("2026-10-30T09:00:00+01:00"), "Oct 30");
         let full = |s: &str| next_full(&at(s), &now);

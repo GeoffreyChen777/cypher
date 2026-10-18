@@ -50,11 +50,13 @@ pub(super) struct NotebookUi {
 }
 
 impl Shell {
+    /// The add field. Like the edit field it wraps and grows with the note:
+    /// Enter adds, Shift+Enter breaks a line.
     fn note_add_input(&mut self, cx: &mut Context<Self>) -> Entity<TextInput> {
         if let Some((input, _)) = &self.board.notebook.add {
             return input.clone();
         }
-        let input = cx.new(|cx| TextInput::settings_field("Add a note…", false, cx));
+        let input = cx.new(|cx| TextInput::new("Add a note…", cx));
         let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
             if matches!(event, TextInputEvent::Submitted) {
                 this.add_note(cx);
@@ -93,7 +95,7 @@ impl Shell {
     }
 
     fn edit_note(&mut self, note: &BotNote, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| TextInput::settings_field("Note", false, cx));
+        let input = cx.new(|cx| TextInput::new("Note", cx));
         input.update(cx, |input, cx| input.set_text(note.text.clone(), cx));
         window.focus(&input.focus_handle(cx), cx);
         let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
@@ -307,7 +309,10 @@ impl Shell {
             .map(|e| (e.note_id.clone(), e.input.clone()));
         for note in notes {
             let row = match &editing {
-                Some((id, input)) if *id == note.id => self.note_editor(input, theme, cx),
+                Some((id, input)) if *id == note.id => {
+                    let by_bot = matches!(note.source, NoteSource::Bot { .. });
+                    self.note_editor(input, by_bot, theme, cx)
+                }
                 _ => self.note_row(&note, bot, theme, cx),
             };
             body = body.child(row);
@@ -454,9 +459,12 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The edit field in a note's place. Saving a bot's note makes it the
+    /// owner's (§7), and the editor says so.
     fn note_editor(
         &self,
         input: &Entity<TextInput>,
+        by_bot: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -473,8 +481,17 @@ impl Shell {
                     .px(px(8.0))
                     .flex()
                     .flex_row()
+                    .items_center()
                     .justify_end()
                     .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.5))
+                            .text_color(theme.text_faint)
+                            .when(by_bot, |el| el.child("Saving makes it your note.")),
+                    )
                     .child(
                         popover::btn_ghost(theme, "Cancel", "bot-note-edit-cancel")
                             .id("bot-note-edit-cancel")

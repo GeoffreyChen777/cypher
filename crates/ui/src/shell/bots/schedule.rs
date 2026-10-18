@@ -715,8 +715,9 @@ impl Shell {
                 if has_projects {
                     "A recurring task starts a fresh session in a project each run, \
                      like nightly tests."
+                        .to_string()
                 } else {
-                    "Give the bot a project to schedule tasks there."
+                    format!("Give {} a project to schedule tasks there.", bot.name)
                 },
             ));
         }
@@ -1883,7 +1884,7 @@ mod tests {
         assert_eq!(job_sub(&task, Some("Web")), "Web · Weekdays 18:30");
         let now = at("2026-10-18T10:00:00+01:00");
         let next = at("2026-10-19T02:00:00+01:00").timestamp_millis();
-        assert_eq!(state_note(JobState::Next(next), &now), "02:00");
+        assert_eq!(state_note(JobState::Next(next), &now), "Mon");
         assert_eq!(state_note(JobState::Off, &now), "off");
         assert_eq!(state_note(JobState::Manual, &now), "manual");
         assert_eq!(runs_today(3, Some("2026-10-18"), "2026-10-18"), 3);
