@@ -276,12 +276,26 @@ impl ScheduleDraft {
         Ok(schedule)
     }
 
-    fn toggle_day(&mut self, day: u8) {
-        if let Some(ix) = self.days.iter().position(|d| *d == day) {
-            self.days.remove(ix);
+    /// Whether `day` (1 = Monday) is picked; none picked means every day.
+    pub(super) fn has_day(&self, day: u8) -> bool {
+        self.days.is_empty() || self.days.contains(&day)
+    }
+
+    /// Flip one day. Every day (none picked) drops just this one; the last
+    /// day left stays, since a daily routine runs on at least one.
+    pub(super) fn toggle_day(&mut self, day: u8) {
+        if self.days.is_empty() {
+            self.days = (1..=7).filter(|d| *d != day).collect();
+        } else if let Some(ix) = self.days.iter().position(|d| *d == day) {
+            if self.days.len() > 1 {
+                self.days.remove(ix);
+            }
         } else {
             self.days.push(day);
             self.days.sort_unstable();
+            if self.days.len() == 7 {
+                self.days.clear();
+            }
         }
     }
 }
@@ -1361,14 +1375,45 @@ impl Shell {
             .child(parts::field_label(theme, "What it does each run"))
             .child(parts::field(&form.prompt));
 
-        // ── the schedule editor ──
-        body = body
-            .child(parts::field_label(theme, "When"))
-            .child(div().mx(px(8.0)).child(parts::segmented(
+        // ── the schedule editor: one box, a labelled row per choice ──
+        let hairline = crate::kit::theme::hairline(0.06);
+        let row = |label: &'static str, first: bool| {
+            div()
+                .when(!first, |el| el.border_t_1().border_color(hairline))
+                .h(px(42.0))
+                .px(px(12.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.5))
+                        .text_color(theme.text)
+                        .child(label),
+                )
+        };
+        let compact = |input: &Entity<TextInput>, width: f32| {
+            div()
+                .flex_none()
+                .w(px(width))
+                .px(px(8.0))
+                .py(px(3.0))
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(crate::kit::theme::hairline(0.08))
+                .bg(crate::kit::theme::ink(0.04))
+                .text_size(px(12.5))
+                .child(input.clone().into_any_element())
+        };
+        let mut when = parts::group_box().child(row("Repeats", true).child(
+            div().w(px(216.0)).flex_none().child(parts::segmented(
                 "bot-form-kind",
                 &[
                     (ScheduleKind::Daily, "Daily"),
-                    (ScheduleKind::Every, "Every"),
+                    (ScheduleKind::Every, "Interval"),
                     (ScheduleKind::Manual, "Manual"),
                 ],
                 form.draft.kind,
@@ -1381,28 +1426,30 @@ impl Shell {
                 },
                 theme,
                 cx,
-            )));
-        let when = match form.draft.kind {
+            )),
+        ));
+        match form.draft.kind {
             ScheduleKind::Daily => {
                 let chips = (1..=7u8).map(|day| {
-                    let on = form.draft.days.contains(&day);
+                    let on = form.draft.has_day(day);
+                    let key = SharedString::from(format!("bot-form-day-{day}"));
                     div()
-                        .id(SharedString::from(format!("bot-form-day-{day}")))
-                        .flex_1()
-                        .h(px(24.0))
-                        .rounded(px(6.0))
+                        .id(key.clone())
+                        .flex_none()
+                        .size(px(26.0))
+                        .rounded_full()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(11.5))
+                        .text_size(px(11.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
                         .cursor_pointer()
-                        .text_color(if on { theme.text } else { theme.text_muted })
-                        .when(on, |el| {
-                            el.bg(crate::kit::theme::card_selected_bg())
-                                .shadow(crate::kit::theme::card_selected_shadows())
-                                .font_weight(gpui::FontWeight::MEDIUM)
+                        .when(on, |el| el.bg(theme.text).text_color(theme.on_solid))
+                        .when(!on, |el| {
+                            el.bg(crate::kit::theme::ink(0.05))
+                                .text_color(theme.text_muted)
+                                .hover(|s| s.text_color(theme.text))
                         })
-                        .when(!on, |el| el.hover(|s| s.text_color(theme.text)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(form) = this.board.schedule.form.as_mut() {
                                 form.draft.toggle_day(day);
@@ -1410,73 +1457,47 @@ impl Shell {
                             cx.notify();
                         }))
                         .child(SharedString::from(
-                            ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][day as usize - 1],
+                            ["M", "T", "W", "T", "F", "S", "S"][day as usize - 1],
                         ))
                 });
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
+                when = when
+                    .child(row("Time", false).child(compact(&form.time, 64.0)))
                     .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .text_size(px(12.5))
-                                    .text_color(theme.text_muted)
-                                    .child("At"),
-                            )
-                            .child(parts::field(&form.time).mx(px(0.0)).w(px(76.0))),
-                    )
-                    // Day chips sit in a segmented control's track; any
-                    // number may be on.
-                    .child(
-                        div()
-                            .p(px(2.0))
-                            .rounded(px(8.0))
-                            .bg(crate::kit::theme::ink(0.05))
-                            .flex()
-                            .flex_row()
-                            .gap(px(2.0))
-                            .children(chips),
-                    )
+                        row("Days", false).child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .flex_row()
+                                .gap(px(4.0))
+                                .children(chips),
+                        ),
+                    );
             }
-            ScheduleKind::Every => div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(12.5))
-                        .text_color(theme.text_muted)
-                        .child("Every"),
-                )
-                .child(parts::field(&form.every).mx(px(0.0)).w(px(64.0)))
-                .child(div().w(px(150.0)).child(parts::segmented(
-                    "bot-form-unit",
-                    &[(Unit::Hours, "hours"), (Unit::Minutes, "minutes")],
-                    form.draft.unit,
-                    |this, unit, cx| {
-                        if let Some(form) = this.board.schedule.form.as_mut() {
-                            form.draft.unit = unit;
-                        }
-                        cx.notify();
-                    },
-                    theme,
-                    cx,
-                ))),
-            ScheduleKind::Manual => div(),
-        };
-        // One line under the editor, always there so nothing jumps: when
+            ScheduleKind::Every => {
+                when = when.child(row("Every", false).child(compact(&form.every, 52.0)).child(
+                    div().w(px(144.0)).flex_none().child(parts::segmented(
+                        "bot-form-unit",
+                        &[(Unit::Hours, "hours"), (Unit::Minutes, "minutes")],
+                        form.draft.unit,
+                        |this, unit, cx| {
+                            if let Some(form) = this.board.schedule.form.as_mut() {
+                                form.draft.unit = unit;
+                            }
+                            cx.notify();
+                        },
+                        theme,
+                        cx,
+                    )),
+                ));
+            }
+            ScheduleKind::Manual => {}
+        }
+        // One line at the box's foot, always there so nothing jumps: when
         // it next runs, or what to fix.
         let (hint, hint_color) = match &preview {
             Ok(Schedule::Manual) => (
                 "Runs only when you press Run now.".to_string(),
-                theme.text_faint,
+                theme.text_muted,
             ),
             Ok(schedule) => {
                 let now = Local::now();
@@ -1484,25 +1505,26 @@ impl Shell {
                     .next_after(&now)
                     .map(|at| format!(" · next run {}", lower_first(&parts::next_full(&at, &now))))
                     .unwrap_or_default();
-                (format!("{}{next}", schedule.describe()), theme.text_faint)
+                (format!("{}{next}", schedule.describe()), theme.text_muted)
             }
             Err(problem) => (problem.clone(), theme.danger.opacity(0.85)),
         };
-        body = body.child(
+        when = when.child(
             div()
-                .mx(px(8.0))
-                .mt(px(10.0))
+                .border_t_1()
+                .border_color(hairline)
+                .px(px(12.0))
+                .py(px(8.0))
                 .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .child(when)
-                .child(
-                    div()
-                        .text_size(px(11.5))
-                        .text_color(hint_color)
-                        .child(SharedString::from(hint)),
-                ),
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(px(11.5))
+                .text_color(hint_color)
+                .child(icon(icons::CLOCK).size(px(12.0)).text_color(hint_color))
+                .child(SharedString::from(hint)),
         );
+        body = body.child(parts::field_label(theme, "When")).child(when);
 
         // ── where it runs, and what it may do there ──
         let coordinate = bot.capabilities.coordinate;
@@ -1903,6 +1925,27 @@ mod tests {
             unit: Unit::Hours,
         };
         assert_eq!(all.build("9:30", ""), Ok(daily("09:30", vec![])));
+    }
+
+    #[test]
+    fn days_start_as_every_day_and_keep_at_least_one() {
+        let mut draft = ScheduleDraft {
+            kind: ScheduleKind::Daily,
+            days: vec![],
+            unit: Unit::Hours,
+        };
+        assert!((1..=7).all(|d| draft.has_day(d)), "none picked is every day");
+        draft.toggle_day(6);
+        draft.toggle_day(7);
+        assert_eq!(draft.build("08:30", ""), Ok(daily("08:30", vec![1, 2, 3, 4, 5])));
+        for day in 1..=5 {
+            draft.toggle_day(day);
+        }
+        assert_eq!(draft.days, [5], "the last day stays");
+        for day in [1, 2, 3, 4, 6, 7] {
+            draft.toggle_day(day);
+        }
+        assert!(draft.days.is_empty(), "all seven is every day again");
     }
 
     #[test]
