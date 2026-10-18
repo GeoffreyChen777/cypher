@@ -376,7 +376,10 @@ mod tests {
         }
         for prompt in ["/scripts on", "  /goal ship it", "/orchestrate"] {
             let err = refuse_widening_command(&owner, prompt).unwrap_err();
-            assert!(err.to_string().contains("isn't available in a bot chat"));
+            assert!(
+                err.to_string()
+                    .contains("isn't available in a workspace chat")
+            );
         }
         for prompt in ["/compact", "what changed?", "see /goal"] {
             refuse_widening_command(&owner, prompt).expect("owner threads keep the rest");

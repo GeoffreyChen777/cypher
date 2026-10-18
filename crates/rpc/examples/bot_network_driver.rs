@@ -164,7 +164,7 @@ async fn main() {
         fail(&format!("ask_bot did not get an answer: {text}"));
     }
     pass(&format!(
-        "B's bot asked A's bot and got: {}",
+        "B's workspace asked A's workspace and got: {}",
         text.lines().nth(3).unwrap_or_default()
     ));
     wait_records(&a, "A's exchange row", |records| {

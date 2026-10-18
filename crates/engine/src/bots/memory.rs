@@ -150,9 +150,9 @@ fn args<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Result<T, 
 fn refuse(tool: &str) -> EngineError {
     EngineError::Other(match tool {
         "write_note" => "This thread may read the notebook but not write to it.".into(),
-        "save_routine" => "Routines are made in the bot chat, when your owner asks.".into(),
+        "save_routine" => "Routines are made in the workspace chat, when your owner asks.".into(),
         "save_project_task" => {
-            "Recurring project tasks need the Coordinate permission and are made in the bot \
+            "Recurring project tasks need the Coordinate permission and are made in the workspace \
              chat, when your owner asks."
                 .into()
         }
@@ -197,7 +197,7 @@ impl Bots {
         let bot = workspace
             .bot(&marker.bot_id)?
             .filter(|bot| bot.chat_id == chat.id || !marker.is_main())
-            .ok_or_else(|| EngineError::Other("This bot has been deleted.".into()))?;
+            .ok_or_else(|| EngineError::Other("This workspace has been deleted.".into()))?;
         let routine = thread_routine(workspace, marker);
         let access = access(
             marker,
@@ -398,7 +398,9 @@ impl Bots {
             out.push("It is turned off: it runs only when started by hand.".into());
         }
         if bot.paused {
-            out.push("This bot is paused, so its routines are skipped until it resumes.".into());
+            out.push(
+                "This workspace is paused, so its routines are skipped until it resumes.".into(),
+            );
         }
         Ok(out.join(" "))
     }
@@ -689,7 +691,7 @@ pub(super) fn render_schedule(
         now.format("%a %b %-d %H:%M")
     )];
     if bot.paused {
-        out.push("This bot is paused: its routines are skipped until it resumes.".into());
+        out.push("This workspace is paused: its routines are skipped until it resumes.".into());
     }
     let mut routines: Vec<&BotRoutine> = records
         .routines

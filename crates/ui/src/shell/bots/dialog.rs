@@ -115,7 +115,7 @@ impl Shell {
         if bot_id.is_some() && existing.is_none() {
             return;
         }
-        let name = cx.new(|cx| TextInput::new("Bot name", cx));
+        let name = cx.new(|cx| TextInput::new("Workspace name", cx));
         let instructions =
             cx.new(|cx| TextInput::new("Anything it should always keep in mind (optional)", cx));
         let (grant, selected) = match existing.as_ref().map(|b| &b.scope.projects) {
@@ -236,7 +236,7 @@ impl Shell {
             return self.close_bot_dialog(cx);
         }
         let Some(host) = dialog.host.clone() else {
-            return fail(self, "Pick the device the bot runs on.".into(), cx);
+            return fail(self, "Pick the device the workspace runs on.".into(), cx);
         };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return fail(self, "Engine not connected".into(), cx);
@@ -310,7 +310,7 @@ impl Shell {
         let editing = dialog.bot_id.is_some();
         let name_text = dialog.name.read(cx).text().trim().to_string();
         let shown_name = if name_text.is_empty() {
-            "Bot".to_string()
+            "Workspace".to_string()
         } else {
             name_text
         };
@@ -920,7 +920,7 @@ impl Shell {
                         .px(px(8.0))
                         .text_size(px(12.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from("No device can host a bot.")),
+                        .child(SharedString::from("No device can host a workspace.")),
                 )
             })
             .child(
@@ -931,7 +931,7 @@ impl Shell {
                     .line_height(px(15.0))
                     .text_color(theme.text_faint)
                     .child(SharedString::from(if editing {
-                        "A bot stays on the device it was created on."
+                        "A workspace stays on the device it was created on."
                     } else {
                         "Mac and Linux devices that are online. Fixed once created."
                     })),
@@ -1002,9 +1002,9 @@ impl Shell {
                     .text_size(px(14.0))
                     .text_color(theme.text)
                     .child(SharedString::from(if editing {
-                        "Bot settings"
+                        "Workspace settings"
                     } else {
-                        "New bot"
+                        "New workspace"
                     })),
             )
             .child(
@@ -1084,7 +1084,7 @@ impl Shell {
                     theme,
                     match (editing, busy) {
                         (true, _) => "Save",
-                        (false, false) => "Create bot",
+                        (false, false) => "Create workspace",
                         (false, true) => "Creating…",
                     },
                 )

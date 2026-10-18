@@ -82,7 +82,7 @@ impl Shell {
     /// Open the list, its filter cleared and focused, the cursor on the
     /// current bot.
     fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let search = cx.new(|cx| TextInput::new("Find a bot…", cx));
+        let search = cx.new(|cx| TextInput::new("Find a workspace…", cx));
         // The field's own bindings take Enter, ↑ and ↓ before any key
         // listener sees them: Enter arrives as Submitted, the arrows are
         // caught in the list's capture phase ([`Self::render_switcher_list`]).
@@ -269,7 +269,7 @@ impl Shell {
             // Other bots' attention, which the row would otherwise hide.
             .when(elsewhere > 0, |el| {
                 let tip: SharedString = format!(
-                    "{elsewhere} {} you in your other bots",
+                    "{elsewhere} {} you in your other workspaces",
                     if elsewhere == 1 { "needs" } else { "need" }
                 )
                 .into();
@@ -424,7 +424,7 @@ impl Shell {
                 .py(px(8.0))
                 .text_size(px(12.5))
                 .text_color(theme.text_muted)
-                .child(SharedString::from("No bot by that name"))
+                .child(SharedString::from("No workspace by that name"))
         });
         let new_bot = popover::menu_row(theme, false, "bot-switcher-new")
             .id("bot-switcher-new")
@@ -446,7 +446,7 @@ impl Shell {
                             .text_color(theme.text_muted),
                     ),
             )
-            .child(SharedString::from("New bot"));
+            .child(SharedString::from("New workspace"));
         let width = (self.settings.sidebar_width - 2.0 * Theme::SPACE_SM).max(220.0);
         Some(
             popover::popover_card(theme)

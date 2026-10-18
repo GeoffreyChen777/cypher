@@ -900,9 +900,9 @@ impl Shell {
                         "bot-routine-direct",
                         "May run commands",
                         if bot.capabilities.work_directly {
-                            "In the bot's projects on this device, e.g. to run tests."
+                            "In the workspace's projects on this device, e.g. to run tests."
                         } else {
-                            "Needs the bot's Work directly, which is off."
+                            "Needs the workspace's Work directly, which is off."
                         },
                         routine.work_directly,
                         false,
@@ -1484,7 +1484,7 @@ impl Shell {
                         form.error = Some(
                             match err {
                                 CallError::Unknown => {
-                                    "This bot's device can't save routines yet.".to_string()
+                                    "This workspace's device can't save routines yet.".to_string()
                                 }
                                 CallError::Failed(text) => text,
                             }
@@ -1698,7 +1698,7 @@ impl Shell {
                 parts::group_box()
                     .child(parts::grant_row(
                         theme,
-                        "Reads what the bot reads",
+                        "Reads what the workspace reads",
                         "Its projects, and the notebook.",
                         true,
                     ))
@@ -1722,7 +1722,7 @@ impl Shell {
                         parts::switch_row(
                             "bot-form-direct",
                             "May run commands",
-                            "In the bot's projects on this device, e.g. to run tests. Anything that needs approval fails the run.",
+                            "In the workspace's projects on this device, e.g. to run tests. Anything that needs approval fails the run.",
                             form.work_directly,
                             false,
                             theme,

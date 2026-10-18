@@ -279,7 +279,7 @@ fn bot_chip_content(
             in_project(arg("name").unwrap_or_default()),
         ),
         BotToolKind::ListConnections => ("Checked connections", String::new()),
-        BotToolKind::AskBot => ("Asked bot", arg("bot").unwrap_or_default()),
+        BotToolKind::AskBot => ("Asked workspace", arg("bot").unwrap_or_default()),
     }
 }
 
@@ -314,7 +314,7 @@ impl BotAction {
             Self::Note => ("wrote a note", "wrote {n} notes"),
             Self::Routine => ("saved a routine", "saved {n} routines"),
             Self::Task => ("saved a project task", "saved {n} project tasks"),
-            Self::Ask => ("asked a bot", "asked bots {n} times"),
+            Self::Ask => ("asked a workspace", "asked workspaces {n} times"),
         };
         if n == 1 {
             one.to_string()

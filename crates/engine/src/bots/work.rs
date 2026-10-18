@@ -308,7 +308,7 @@ impl Bots {
         };
         let bot = match self.inner.workspace.bot(&marker.bot_id) {
             Ok(Some(bot)) => bot,
-            _ => return "This bot has been deleted, so it can't use any tools.".into(),
+            _ => return "This workspace has been deleted, so it can't use any tools.".into(),
         };
         if role(marker) == Role::Other && !routine_works_directly(&self.inner.workspace, marker) {
             return format!("{tool} isn't available in this thread.");
@@ -343,7 +343,8 @@ impl Bots {
     /// off, or cannot enforce on this device, those tools don't run.
     async fn permission_control(&self) -> Result<(), String> {
         let paths = lock(&self.inner.work.pi_paths).clone().ok_or_else(|| {
-            "Pi isn't set up on this device, so shell and file tools are off for bots.".to_string()
+            "Pi isn't set up on this device, so shell and file tools are off for workspaces."
+                .to_string()
         })?;
         let settings_path = crate::pi::permissions::settings_path(&paths);
         let enabled = off_runtime(move || {
@@ -356,7 +357,7 @@ impl Bots {
         .unwrap_or(false);
         if !enabled {
             return Err(
-                "Permission control is off on this device, so bots can't use shell and \
+                "Permission control is off on this device, so workspaces can't use shell and \
                  file tools. Your owner can turn it on in Settings → Permissions."
                     .into(),
             );
@@ -386,7 +387,7 @@ impl Bots {
         };
         verdict.map_err(|error| {
             format!(
-                "Permission control can't enforce anything on this device ({error}), so bots \
+                "Permission control can't enforce anything on this device ({error}), so workspaces \
                  can't use shell and file tools."
             )
         })

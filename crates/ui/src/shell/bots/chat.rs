@@ -138,7 +138,7 @@ impl Shell {
                 .text_color(tint)
                 .on_hover(motion::hover_listener(key.clone()))
                 .tooltip(|_, cx| {
-                    cx.new(|_| super::super::session::FindTooltip("Bot permissions".into()))
+                    cx.new(|_| super::super::session::FindTooltip("Workspace permissions".into()))
                         .into()
                 })
                 .on_click(

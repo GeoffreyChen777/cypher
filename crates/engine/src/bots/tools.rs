@@ -282,7 +282,9 @@ impl Bots {
             "project_git" => self.project_git(&view, args(arguments)?).await,
             "search_sessions" => self.search_sessions(view, args(arguments)?).await,
             "read_session" => self.read_session(view, args(arguments)?).await,
-            other => Err(EngineError::Other(format!("Unknown bot tool: {other}"))),
+            other => Err(EngineError::Other(format!(
+                "Unknown workspace tool: {other}"
+            ))),
         }
     }
 
@@ -303,7 +305,7 @@ impl Bots {
     /// on this device or whose bot is gone.
     pub(super) fn view(&self, chat_id: &str) -> Result<View, EngineError> {
         let workspace = &self.inner.workspace;
-        let not_a_bot = || EngineError::Other("This chat is not an agent bot.".into());
+        let not_a_bot = || EngineError::Other("This chat is not a workspace's agent.".into());
         let chat = workspace.chat(chat_id)?.ok_or_else(not_a_bot)?;
         let marker = chat.bot.as_ref().ok_or_else(not_a_bot)?;
         if chat.device_id != workspace.device_id() {
@@ -314,7 +316,7 @@ impl Bots {
             // The bot chat itself, or one of its hidden threads (only the
             // host writes a thread's marker).
             .filter(|bot| bot.chat_id == chat.id || !marker.is_main())
-            .ok_or_else(|| EngineError::Other("This bot has been deleted.".into()))?;
+            .ok_or_else(|| EngineError::Other("This workspace has been deleted.".into()))?;
         let chats = workspace.read_chats()?;
         // A peer thread reads through the bot scope ∩ the connection scope.
         if let Some(scope) = super::network::peer_scope(workspace, &bot, marker, &chats) {
@@ -386,7 +388,7 @@ impl Bots {
         }
         if !transcripts {
             out.push(
-                "Only titles and previews were searched: this bot may not read message text."
+                "Only titles and previews were searched: this workspace may not read message text."
                     .into(),
             );
         }
@@ -416,7 +418,7 @@ impl Bots {
             .ok_or_else(|| EngineError::Other(format!("No session \"{id}\" that you can see.")))?;
         if !view.bot.scope.transcripts {
             return Err(EngineError::Other(
-                "This bot may not read message text: its owner allowed titles, previews and \
+                "This workspace may not read message text: its owner allowed titles, previews and \
                  status only."
                     .into(),
             ));

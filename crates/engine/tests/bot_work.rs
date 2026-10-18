@@ -693,7 +693,7 @@ async fn limits_and_refusals_hold() {
         )
         .await;
     assert!(
-        in_thread.contains("only works in the bot chat"),
+        in_thread.contains("only works in the workspace chat"),
         "{in_thread}"
     );
     let mut peer = rig.core.workspace.chat(&bot.chat_id).unwrap().unwrap();
@@ -836,7 +836,7 @@ async fn approvals_gate_tainted_threads_and_others_sessions() {
     // A tainted thread asks before starting a session of its own.
     rig.core
         .bots
-        .taint_thread(&thread, "Alice's bot answered in this thread");
+        .taint_thread(&thread, "Alice's workspace answered in this thread");
     let client = rig.client();
     let call = {
         let thread = thread.clone();
@@ -852,7 +852,7 @@ async fn approvals_gate_tainted_threads_and_others_sessions() {
         })
     };
     let approval = wait_for_some("a taint approval", || pending(&rig)).await;
-    assert_eq!(approval.reason, "Alice's bot answered in this thread");
+    assert_eq!(approval.reason, "Alice's workspace answered in this thread");
     assert!(approval.action.starts_with("Start a session in sp-billing"));
     assert!(
         rig.work(&work_id).session_ids().next().is_none(),

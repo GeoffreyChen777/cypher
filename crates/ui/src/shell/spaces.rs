@@ -281,7 +281,7 @@ impl Shell {
         let add = buttons.add.map(|add| {
             let (key, tip) = match add {
                 HeaderAdd::Project => ("sidebar-add-project", "Add project"),
-                HeaderAdd::Bot => ("sidebar-new-bot", "New bot"),
+                HeaderAdd::Bot => ("sidebar-new-bot", "New workspace"),
             };
             icon_button(key)
                 .tooltip(move |_, cx| cx.new(|_| super::session::FindTooltip(tip.into())).into())
@@ -356,7 +356,7 @@ impl Shell {
 
     /// The wordmark. In the main window it is the mode switch: "Cypher ⇅"
     /// in Projects mode, with a badge counting what the bots need from you;
-    /// "Cypher Botboard ⇅" on the Botboard, the second word in the current
+    /// "Cypher Workspaces ⇅" on the Workspaces board, the second word in the current
     /// bot's colour. A project window's is the plain wordmark.
     fn render_logo(&self, botboard: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let word = |text: &'static str, color: gpui::Hsla| {
@@ -380,7 +380,7 @@ impl Shell {
         let tip = if botboard {
             "Switch to Projects"
         } else {
-            "Switch to Botboard"
+            "Switch to Workspaces"
         };
         let badge = (!botboard && needs_you > 0).then(|| {
             div()
@@ -432,7 +432,7 @@ impl Shell {
                 this.set_window_mode(next, cx);
             }))
             .child(word("Cypher", theme.text))
-            .when(botboard, |el| el.child(word("Botboard", bot_color)))
+            .when(botboard, |el| el.child(word("Workspaces", bot_color)))
             .children(badge)
             .child(
                 icon(icons::ALT_ARROW_UP_DOWN)

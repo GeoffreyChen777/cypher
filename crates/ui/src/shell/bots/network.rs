@@ -156,13 +156,15 @@ impl Shell {
             let state = self.state.read(cx);
             current_bot(&state.bots, self.settings.botboard_bot.as_deref())
                 .and_then(|bot| state.device_name(&bot.host_device_id))
-                .unwrap_or("this bot's device")
+                .unwrap_or("this workspace's device")
                 .to_string()
         };
         match err {
-            CallError::Unknown => format!("Connecting bots isn't available on {host} yet.").into(),
+            CallError::Unknown => {
+                format!("Connecting workspaces isn't available on {host} yet.").into()
+            }
             CallError::Failed(text) if text.to_lowercase().contains("sign") => {
-                "Sign in to connect bots.".into()
+                "Sign in to connect workspaces.".into()
             }
             CallError::Failed(text) => text.into(),
         }
@@ -295,7 +297,7 @@ impl Shell {
                 } else {
                     "Sign in to connect"
                 },
-                "Connect a bot",
+                "Connect a workspace",
                 PanelItem::Network,
                 |this, _, cx| this.show_panel(PanelItem::Invite, cx),
                 self.card_focused("network", cx),
@@ -518,8 +520,8 @@ impl Shell {
             tint: None,
             title: "Network".into(),
             subtitle: match (connections.len(), invites.len()) {
-                (0, 0) if !ready => "Sign in to connect bots".into(),
-                (0, 0) => format!("Other people's bots {} can talk to", bot.name),
+                (0, 0) if !ready => "Sign in to connect workspaces".into(),
+                (0, 0) => format!("Other people's workspaces {} can talk to", bot.name),
                 (c, i) => {
                     let mut parts =
                         vec![format!("{c} connection{}", if c == 1 { "" } else { "s" })];
@@ -543,7 +545,7 @@ impl Shell {
                         parts::action(
                             "bot-network-invite",
                             icons::PLUS,
-                            "Invite a bot",
+                            "Invite a workspace",
                             theme.text,
                         )
                         .on_click(cx.listener(|this, _, _, cx| this.create_invite(cx))),
@@ -577,7 +579,7 @@ impl Shell {
             body = body.child(parts::quiet_line(
                 theme,
                 format!(
-                    "Connected bots can ask {} questions, read-only, within what you allow.",
+                    "Connected workspaces can ask {} questions, read-only, within what you allow.",
                     bot.name
                 ),
             ));
@@ -659,8 +661,11 @@ impl Shell {
         let head = PanelHead {
             glyph: icons::LINK,
             tint: None,
-            title: "Connect a bot".into(),
-            subtitle: format!("Let another person's bot ask {}, and ask it back", bot.name),
+            title: "Connect a workspace".into(),
+            subtitle: format!(
+                "Let another person's workspace ask {}, and ask it back",
+                bot.name
+            ),
         };
         if !self.network_ready(cx) {
             return (
@@ -800,11 +805,11 @@ impl Shell {
             .p(px(8.0))
             .flex()
             .flex_col()
-            .child(parts::section_label(theme, "Invite a bot"))
+            .child(parts::section_label(theme, "Invite a workspace"))
             .child(
                 parts::quiet_line(
                     theme,
-                    "Send the code to the other person; they connect one of their bots with it.",
+                    "Send the code to the other person; they connect one of their workspaces with it.",
                 )
                 .pt(px(0.0)),
             )
@@ -814,7 +819,7 @@ impl Shell {
                 parts::quiet_line(
                     theme,
                     format!(
-                        "Got a code from someone? Connect {} to their bot.",
+                        "Got a code from someone? Connect {} to their workspace.",
                         bot.name
                     ),
                 )
@@ -879,7 +884,7 @@ impl Shell {
                 format!("Connected {}", parts::past_ms(conn.created_at))
             } else {
                 format!(
-                    "{}'s bot · connected {}",
+                    "{}'s workspace · connected {}",
                     conn.peer.owner_name,
                     parts::past_ms(conn.created_at)
                 )
@@ -1318,7 +1323,7 @@ fn signed_out(theme: &Theme) -> gpui::Div {
                     div()
                         .text_size(px(12.5))
                         .text_color(theme.text)
-                        .child("Sign in to connect bots"),
+                        .child("Sign in to connect workspaces"),
                 )
                 .child(
                     div()

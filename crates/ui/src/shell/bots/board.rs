@@ -739,19 +739,19 @@ fn render_board_empty(theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
                 .text_size(px(13.5))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.text)
-                .child(SharedString::from("No bots yet")),
+                .child(SharedString::from("No workspaces yet")),
         )
         .child(
             div()
                 .text_size(px(12.0))
                 .text_color(theme.text_muted)
                 .child(SharedString::from(
-                    "A bot answers questions about the projects you give it.",
+                    "A workspace looks after the projects you give it: it answers, plans and runs work.",
                 )),
         )
         .child(
             div().mt(px(8.0)).flex().child(
-                popover::btn_primary(theme, "New bot")
+                popover::btn_primary(theme, "New workspace")
                     .id("board-empty-new-bot")
                     .on_click(cx.listener(|this, _, _, cx| this.open_bot_dialog(None, cx))),
             ),

@@ -95,7 +95,7 @@ pub(super) fn runs_on(today: &str, runs_today: u32, runs_day: Option<&str>) -> u
 /// Why a due routine is skipped instead of run, if it is.
 pub(super) fn skip_reason(paused: bool, runs_today: u32, max_runs_per_day: u32) -> Option<String> {
     if paused {
-        Some("Skipped: the bot is paused.".into())
+        Some("Skipped: the workspace is paused.".into())
     } else if runs_today >= max_runs_per_day {
         Some(format!(
             "Skipped: today's budget of {max_runs_per_day} run{} is spent.",
@@ -261,7 +261,7 @@ mod tests {
         );
         assert_eq!(
             skip_reason(true, 0, 3).as_deref(),
-            Some("Skipped: the bot is paused.")
+            Some("Skipped: the workspace is paused.")
         );
         assert!(is_running(Some(&run(1, RunOutcome::Running))));
         assert!(!is_running(Some(&run(1, RunOutcome::Failed))));

@@ -15,20 +15,6 @@ use cypher_proto::{BotNote, NoteSource};
 /// Notes the card lists.
 const CARD_NOTES: usize = 3;
 
-/// A note's provenance line: "You · Oct 12", "Written by Bob · from Nightly
-/// review", or "Written by Bob · Oct 12" when the bot named no source.
-pub(super) fn provenance(source: &NoteSource, bot: &str, when: &str) -> String {
-    match source {
-        NoteSource::Owner => format!("You · {when}"),
-        NoteSource::Bot {
-            title: Some(title), ..
-        } => {
-            format!("Written by {bot} · from {}", transcript::single_line(title))
-        }
-        NoteSource::Bot { title: None, .. } => format!("Written by {bot} · {when}"),
-    }
-}
-
 /// The bot's notes, newest first.
 pub(super) fn notes_of<'a>(notes: &'a [BotNote], bot_id: &str) -> Vec<&'a BotNote> {
     let mut notes: Vec<&BotNote> = notes.iter().filter(|n| n.bot_id == bot_id).collect();
@@ -531,36 +517,6 @@ mod tests {
             created_at: at,
             updated_at: at,
         }
-    }
-
-    #[test]
-    fn provenance_names_the_writer_and_source() {
-        assert_eq!(
-            provenance(&NoteSource::Owner, "Bob", "Oct 12"),
-            "You · Oct 12"
-        );
-        assert_eq!(
-            provenance(
-                &NoteSource::Bot {
-                    chat_id: Some("c".into()),
-                    title: Some("Nightly\nreview".into()),
-                },
-                "Bob",
-                "Oct 12"
-            ),
-            "Written by Bob · from Nightly review"
-        );
-        assert_eq!(
-            provenance(
-                &NoteSource::Bot {
-                    chat_id: None,
-                    title: None
-                },
-                "Bob",
-                "09:12"
-            ),
-            "Written by Bob · 09:12"
-        );
     }
 
     #[test]

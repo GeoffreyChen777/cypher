@@ -125,7 +125,7 @@ fn need_rows(
                     .iter()
                     .find(|c| c.id == exchange.connection_id)
                     .map(|c| c.peer.name.clone())
-                    .unwrap_or_else(|| "a connected bot".into());
+                    .unwrap_or_else(|| "a connected workspace".into());
                 Some(NeedRow {
                     item: Some(PanelItem::Review(id)),
                     glyph: icons::USERS,
@@ -811,7 +811,7 @@ impl Shell {
                         format!("{} ({})", c.peer.name, c.peer.owner_name)
                     }
                 })
-                .unwrap_or_else(|| "A connected bot".into());
+                .unwrap_or_else(|| "A connected workspace".into());
             (exchange, peer)
         };
         let awaiting = exchange.awaiting_review();
@@ -854,7 +854,7 @@ impl Shell {
                     (input.clone(), exchange.id.clone(), exchange.id.clone());
                 let original = exchange.answer.clone().unwrap_or_default();
                 body =
-                    body.child(section_label("Your bot's answer", theme))
+                    body.child(section_label("Your workspace's answer", theme))
                         .child(div().mx(px(8.0)).child(
                             popover::dialog_field(input.into_any_element()).text_size(px(13.0)),
                         ))

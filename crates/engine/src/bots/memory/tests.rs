@@ -73,7 +73,7 @@ fn owner_threads_keep_the_notebook_and_peers_never_see_it() {
     assert!(orchestration.read_notes && orchestration.write_notes);
     assert!(
         !orchestration.save_routine && !orchestration.save_task,
-        "the bot chat only"
+        "the workspace chat only"
     );
 
     let routine = access(&routine_thread(), &bot(true), false);
@@ -151,7 +151,7 @@ fn the_prompt_carries_the_newest_notes() {
     assert!(section.contains("(Your notebook is empty.)"), "{section}");
     assert!(
         !section.contains("save_routine"),
-        "only the bot chat: {section}"
+        "only the workspace chat: {section}"
     );
 
     let many: Vec<BotNote> = (0..cypher_proto::NOTES_IN_PROMPT + 5)
@@ -275,7 +275,7 @@ fn the_schedule_lists_routines_and_the_tasks_of_granted_projects() {
         |_| "Studio".into(),
         local(0),
     );
-    assert!(empty.contains("This bot is paused"), "{empty}");
+    assert!(empty.contains("This workspace is paused"), "{empty}");
     assert!(empty.contains("No routines yet."), "{empty}");
     assert!(
         empty.contains("No recurring tasks in your projects."),

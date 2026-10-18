@@ -1,12 +1,19 @@
 # Agent bots
 
 Status: **P0–P4 built, with Review mode, the outgoing scrub and *Coordinate: steer*
-from P5, and the whole Botboard (§13.1).** A bot reads its projects (P0, P1), works in
+from P5, and the whole Workspaces (§13.1).** A bot reads its projects (P0, P1), works in
 them directly, plans work that runs in orchestration threads and worker sessions on any
 owner device (P2), keeps a notebook and runs routines and recurring project tasks (P3),
 and answers other users' bots by invite (P4). Not built: event triggers for routines,
 groups (§11.7), the iPhone surfaces and end-to-end encrypted exchanges (P6). Where the
 built code differs from the design below, the section says so.
+
+**Naming.** Users see this feature as **Workspaces**: each bot is a *workspace* ("New
+workspace", "Find a workspace…", the "Projects | Workspaces" switch), another user's bot
+is their workspace, and the permission level once called "Edit workspace" is now "Edit
+project" (`/permissions project`; `workspace` still works). This document, the code and
+the wire keep the engineering name *bot* (`Bot`, `BotWork`, `ask_bot`, the `bots` rows),
+so nothing synced was renamed.
 
 A bot is a **coordinator**: a long-lived agent responsible for everything in the projects
 it is given. Inward, it takes instructions from its owner and gets work done across those
@@ -469,7 +476,7 @@ The `post` part (`cypher_doc::MessagePart::Post`) is additive: `{id, kind: "post
 from}`, with the body under `text` so readers that predate the kind show it as a text
 part. `from` is a `BotPost`: `{kind: "routine", routineId, name, outcome: "done" |
 "failed", runAt, threadChatId?}`; a kind from a newer engine reads as `unknown`. The
-desktop transcript renders the body like text for now; the Botboard draws a card with the
+desktop transcript renders the body like text for now; the Workspaces board draws a card with the
 routine's name, the time, a failed badge and a link to the thread.
 
 **Recurring task runs.** On the space's device each run creates a fresh session in the
@@ -894,7 +901,7 @@ before it ships.
 
 Built:
 
-- **Botboard** (§13.1): bots are a mode of the main window with their own sidebar of
+- **Workspaces** (§13.1): bots are a mode of the main window with their own sidebar of
   cards, the bot chat in the middle and a detail panel on the right. It replaced the P0
   bot strip and the header's New project / New bot menu.
 - **Bot palette** (create and edit), drawn like the Quick Chat and Add project palettes: a
@@ -903,7 +910,7 @@ Built:
   *Work directly*, *Coordinate* and *Steer others' sessions*, the acting switches marked;
   instructions), a "Run on device" rail on the right (fixed after creation), and a
   Cancel / Save footer with Delete when editing. New bots start with *Work directly* on.
-- **Bot conversation:** the Botboard's middle card, wearing the bot's avatar. A quiet
+- **Bot conversation:** the Workspaces board's middle card, wearing the bot's avatar. A quiet
   access note over the composer ("invoice-demo · works directly · can start sessions")
   opens the bot's settings. A new bot opens on a start screen with a 2×2 grid of
   suggested questions. Bot tool calls read as what they did ("Read session · <title>";
@@ -923,23 +930,23 @@ Planned:
 - **iPhone:** the bot list, the bot chat, plan approvals and reviews, driven by push
   notifications (P6).
 
-### 13.1 Botboard
+### 13.1 Workspaces
 
 Bots and projects are two modes of the window, so project work and bot work never share
 the sidebar. The mode switch is the sidebar's logo:
 
-| | Projects mode | Botboard mode |
+| | Projects mode | Workspaces mode |
 |---|---|---|
-| Logo | **Cypher** ⇅ | **Cypher Botboard** ⇅ (the second word in the bot's accent) |
+| Logo | **Cypher** ⇅ | **Cypher Workspaces** ⇅ (the second word in the bot's accent) |
 | Sidebar | Project and session cards, as today; no bot strip | The bot switcher, then the current bot's cards |
 | Middle | Session tabs | The bot's chat |
 | Right | The session dock | The detail panel |
 | Header `+` | New project | New bot |
 
 ```
-Botboard mode
+Workspaces mode
 ┌ sidebar ───────────┐┌──────── chat ─────────┐┌── detail ──┐
-│ Cypher Botboard ⇅  ││                       ││ Fix invoice│
+│ Cypher Workspaces ⇅  ││                       ││ Fix invoice│
 │ [Bob][Rel][Team][+]││  conversation with    ││ rounding   │
 │ ⏸ Bob is paused    ││  the bot; plan,       ││ steps,     │
 │ ┌ Needs you (2) ─┐ ││  progress and result  ││ sessions,  │
@@ -954,9 +961,9 @@ mode keeps its own state: the bot that was open, the session tabs and their layo
 Projects mode the logo carries a small bot badge with the number of items that need the
 owner across all bots, so attention is visible without bringing bot content back into
 the project sidebar. Sessions a bot started stay in their projects, marked "by <bot>".
-Project windows have no Botboard.
+Project windows have no Workspaces.
 
-**The bot switcher** heads the Botboard sidebar: the current bot as a row (its avatar
+**The bot switcher** heads the Workspaces board sidebar: the current bot as a row (its avatar
 and name on the cards' header grid, ⇅) with an amber count when other bots need the
 owner. A click opens a list of every bot by name, each with what it is doing (a
 Needs-you count, a spinner while it works, "paused", an offline host) and a check on the

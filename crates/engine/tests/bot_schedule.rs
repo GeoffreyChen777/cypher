@@ -396,7 +396,7 @@ async fn run_now_failures_and_the_pause_switch() {
                     )
             })
         },
-        "the failure posted to the bot chat",
+        "the failure posted to the workspace chat",
     )
     .await;
 
@@ -421,7 +421,7 @@ async fn run_now_failures_and_the_pause_switch() {
     let skipped = routine(&core, "r-quiet");
     assert_eq!(
         skipped.last_run.unwrap().summary.as_deref(),
-        Some("Skipped: the bot is paused.")
+        Some("Skipped: the workspace is paused.")
     );
     assert!(skipped.thread_chat_id.is_none(), "no thread, no run");
 
@@ -725,7 +725,7 @@ async fn notes_follow_the_thread_that_writes_them() {
     )
     .await;
     assert!(
-        refused.starts_with("Routines are made in the bot chat"),
+        refused.starts_with("Routines are made in the workspace chat"),
         "{refused}"
     );
 

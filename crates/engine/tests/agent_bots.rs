@@ -174,7 +174,7 @@ async fn bot_tools_see_only_the_granted_scope() {
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(refused, "This chat is not an agent bot.");
+    assert_eq!(refused, "This chat is not a workspace's agent.");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -420,7 +420,9 @@ async fn a_bot_chat_refuses_commands_that_widen_its_tools() {
             .dispatch(&bot.chat_id, HarnessId::Pi, run(prompt), None)
             .await;
         assert!(
-            refused.is_err_and(|e| e.to_string().contains("isn't available in a bot chat")),
+            refused.is_err_and(|e| e
+                .to_string()
+                .contains("isn't available in a workspace chat")),
             "{prompt} must be refused"
         );
     }

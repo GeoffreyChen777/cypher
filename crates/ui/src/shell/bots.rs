@@ -474,9 +474,9 @@ impl Shell {
         let name = self
             .bot_row(&bot_id, cx)
             .map(|b| b.name)
-            .unwrap_or_else(|| "This bot".into());
+            .unwrap_or_else(|| "This workspace".into());
         let card = popover::dialog_card(theme)
-            .child(popover::dialog_title(theme, "Delete bot?"))
+            .child(popover::dialog_title(theme, "Delete workspace?"))
             .child(div().mt(px(6.0)).child(popover::dialog_body(
                 theme,
                 format!(

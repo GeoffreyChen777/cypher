@@ -471,7 +471,7 @@ impl Bots {
         let view = self.view(&chat.id)?;
         if !view.bot.capabilities.coordinate {
             return Err(refuse(format!(
-                "Your owner turned off Coordinate for this bot, so you can't use {tool}. Say \
+                "Your owner turned off Coordinate for this workspace, so you can't use {tool}. Say \
                  what you would have done instead."
             )));
         }
@@ -480,7 +480,7 @@ impl Bots {
             (_, "list_work") => Ok(self.list_work(&view)),
             (_, "get_work") => self.get_work(&view, parse(args)?),
             (Role::Work(_), "propose_plan") => Err(refuse(
-                "propose_plan only works in the bot chat; you are already carrying out an \
+                "propose_plan only works in the workspace chat; you are already carrying out an \
                  approved plan.",
             )),
             (Role::Main, _) => Err(refuse(format!(
@@ -587,7 +587,7 @@ impl Bots {
             }
             "update_step" => self.update_step(&work, parse(args)?),
             "finish_work" => self.finish_work(chat, view, &work, parse(args)?),
-            other => Err(refuse(format!("Unknown bot tool: {other}"))),
+            other => Err(refuse(format!("Unknown workspace tool: {other}"))),
         }
     }
 
@@ -927,7 +927,7 @@ impl Bots {
     fn refuse_if_paused(&self, view: &View) -> Result<(), EngineError> {
         if view.bot.paused {
             return Err(refuse(
-                "Your owner paused this bot, so it can't start anything new. Finish with what \
+                "Your owner paused this workspace, so it can't start anything new. Finish with what \
                  you have.",
             ));
         }
@@ -1208,7 +1208,7 @@ impl Bots {
         let session = self.session(view, &args.session_id)?;
         if !view.bot.scope.transcripts {
             return Err(refuse(
-                "This bot may not read message text, so it can't follow sessions.",
+                "This workspace may not read message text, so it can't follow sessions.",
             ));
         }
         let timeout = args
@@ -1387,7 +1387,7 @@ impl Bots {
             None,
         );
         Ok(
-            "Recorded. Your owner sees the result in the bot chat. End your turn now with the \
+            "Recorded. Your owner sees the result in the workspace chat. End your turn now with the \
             same short summary."
                 .into(),
         )

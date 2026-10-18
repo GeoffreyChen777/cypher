@@ -127,12 +127,16 @@ impl Shell {
     /// is.
     fn render_board_actions(&self, bot: &Bot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let edit_id = bot.id.clone();
-        let settings =
-            super::items::icon_button("bot-header-settings", icons::TUNING, "Bot settings", theme)
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_bot_dialog(Some(edit_id.clone()), cx)
-                }));
+        let settings = super::items::icon_button(
+            "bot-header-settings",
+            icons::TUNING,
+            "Workspace settings",
+            theme,
+        )
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(
+            cx.listener(move |this, _, _, cx| this.open_bot_dialog(Some(edit_id.clone()), cx)),
+        );
         let (glyph, tip) = if bot.paused {
             (icons::PLAY, "Resume: let it run routines and start work")
         } else {
@@ -197,7 +201,7 @@ impl Shell {
                     .text_size(px(15.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(SharedString::from("No bots yet")),
+                    .child(SharedString::from("No workspaces yet")),
             )
             .child(
                 div()
@@ -206,11 +210,11 @@ impl Shell {
                     .text_size(px(13.0))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(
-                        "A bot reads the projects you give it and answers questions about your work.",
+                        "A workspace looks after the projects you give it: it answers questions, plans work and runs it.",
                     )),
             )
             .child(
-                popover::btn_primary(theme, "New bot")
+                popover::btn_primary(theme, "New workspace")
                     .id("botboard-empty-new-bot")
                     .mt(px(6.0))
                     .on_click(cx.listener(|this, _, _, cx| this.open_bot_dialog(None, cx))),

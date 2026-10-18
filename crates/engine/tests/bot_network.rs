@@ -258,7 +258,10 @@ async fn an_invite_connects_both_bots_and_auto_answers_flow_back() {
         serde_json::json!({}),
     )
     .await;
-    assert!(listed.contains("\"Billing bot\" (Alice's bot)"), "{listed}");
+    assert!(
+        listed.contains("\"Billing bot\" (Alice's workspace)"),
+        "{listed}"
+    );
 
     let answer = tool(
         &bob.core,
@@ -291,14 +294,14 @@ async fn an_invite_connects_both_bots_and_auto_answers_flow_back() {
     assert!(
         request
             .prompt
-            .starts_with("Question from \"Release bot\" (Bob's bot)")
+            .starts_with("Question from \"Release bot\" (Bob's workspace)")
     );
     let env = env.as_ref().expect("a bot run");
     assert_eq!(env.origin, BotOrigin::Peer);
     assert_eq!(env.tools, cypher_proto::BOT_TOOLS, "read tools only");
     assert!(
         env.system_prompt
-            .contains("\"Release bot\", the bot of Bob"),
+            .contains("\"Release bot\", the workspace of Bob"),
         "{}",
         env.system_prompt
     );
@@ -576,7 +579,7 @@ async fn review_mode_waits_for_the_owner_and_the_late_answer_reaches_the_main_ch
     // Late: a durable run in Bob's main chat, attributed, and tainted.
     wait_for(
         || main_runs(&bob) == 1,
-        "the late answer runs in the bot chat",
+        "the late answer runs in the workspace chat",
     )
     .await;
     let entries = common::entries(&bob.core, &bob.bot.chat_id);
@@ -590,7 +593,7 @@ async fn review_mode_waits_for_the_owner_and_the_late_answer_reaches_the_main_ch
     };
     assert_eq!(
         shown,
-        "[Answer from \"Billing bot\" (Alice's bot) to your question \"Can we ship Friday?\"]\n\n\
+        "[Answer from \"Billing bot\" (Alice's workspace) to your question \"Can we ship Friday?\"]\n\n\
          Yes, Friday works."
     );
     assert!(bob.core.bots.tainted(&bob.bot.chat_id).is_some());
@@ -612,7 +615,10 @@ async fn replies_off_decline_without_running() {
         serde_json::json!({ "bot": "Billing bot", "question": "Anything?", "wait_s": 30 }),
     )
     .await;
-    assert_eq!(answer, "\"Billing bot\" (Alice's bot) declined to answer.");
+    assert_eq!(
+        answer,
+        "\"Billing bot\" (Alice's workspace) declined to answer."
+    );
     assert!(
         peer_questions(&alice).is_empty(),
         "no run for a declined question"
@@ -653,7 +659,7 @@ async fn revoking_disconnects_both_sides() {
         serde_json::json!({ "bot": "Billing bot", "question": "Still there?" }),
     )
     .await;
-    assert!(refused.starts_with("No connected bot"), "{refused}");
+    assert!(refused.starts_with("No connected workspace"), "{refused}");
     let listed = tool(
         &alice.core,
         &alice.bot.chat_id,
@@ -661,7 +667,10 @@ async fn revoking_disconnects_both_sides() {
         serde_json::json!({}),
     )
     .await;
-    assert!(listed.starts_with("You have no connected bots"), "{listed}");
+    assert!(
+        listed.starts_with("You have no connected workspaces"),
+        "{listed}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

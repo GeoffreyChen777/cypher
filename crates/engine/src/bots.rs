@@ -374,10 +374,10 @@ pub fn refuse_widening_command(chat: &Chat, prompt: &str) -> Result<(), EngineEr
     match marker.origin {
         BotOrigin::Owner if !REFUSED_COMMANDS.contains(&command) => Ok(()),
         BotOrigin::Owner => Err(EngineError::Other(format!(
-            "/{command} isn't available in a bot chat."
+            "/{command} isn't available in a workspace chat."
         ))),
         BotOrigin::Routine | BotOrigin::Peer => Err(EngineError::Other(
-            "Slash commands aren't available in this bot thread.".into(),
+            "Slash commands aren't available in this workspace thread.".into(),
         )),
     }
 }

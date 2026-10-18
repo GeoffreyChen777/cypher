@@ -430,7 +430,7 @@ impl Bots {
         let peer = connection
             .as_ref()
             .map(|c| peer_label(&c.peer))
-            .unwrap_or_else(|| "A connected bot".into());
+            .unwrap_or_else(|| "A connected workspace".into());
         let question = one_line(&exchange.question);
         let prompt = match exchange.state {
             ExchangeState::Answered => format!(
@@ -628,7 +628,7 @@ impl Bots {
         let peer = self
             .connection(&exchange.connection_id)
             .map(|c| peer_label(&c.peer))
-            .unwrap_or_else(|| "a connected bot".into());
+            .unwrap_or_else(|| "a connected workspace".into());
         let text = match settled.state {
             ExchangeState::Answered => format!("Answered {peer}: {}", one_line(&exchange.question)),
             ExchangeState::Declined => {
@@ -734,7 +734,7 @@ impl Bots {
             })
             .find(|text| !text.trim().is_empty());
         Ok(Some(reply.map(|t| t.trim().to_string()).ok_or_else(|| {
-            EngineError::Other("the bot gave no answer".into())
+            EngineError::Other("the workspace gave no answer".into())
         })))
     }
 
@@ -749,7 +749,7 @@ impl Bots {
         }
         let main = workspace
             .chat(&bot.chat_id)?
-            .ok_or_else(|| EngineError::Other("the bot's chat is gone".into()))?;
+            .ok_or_else(|| EngineError::Other("the workspace's chat is gone".into()))?;
         let now = chrono::Utc::now();
         let thread = Chat {
             id: new_id(),

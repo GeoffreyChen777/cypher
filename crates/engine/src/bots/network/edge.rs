@@ -16,7 +16,7 @@ use cypher_proto::{
 use crate::host::doc_host::EdgeConfig;
 
 /// What every network tool and RPC says without an Edge.
-pub const SIGNED_OUT: &str = "The bot network needs you signed in to Cypher.";
+pub const SIGNED_OUT: &str = "Connecting workspaces needs you signed in to Cypher.";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
