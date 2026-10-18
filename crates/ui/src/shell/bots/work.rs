@@ -6,8 +6,8 @@
 
 use super::board::{card_corner, card_item, two_lines};
 use super::items::{
-    action_row, ago, item_row, mark_cell, progress_bar, project_label, prose, section_label,
-    session_mark, step_mark, text_block, trailing, work_mark,
+    ago, decision_bar, item_row, mark_cell, progress_bar, project_label, prose, section_label,
+    session_mark, status_value, step_mark, text_value, trailing, work_mark,
 };
 use super::needs::{number_mark, step_block};
 use super::panel::{PanelHead, PanelItem};
@@ -296,11 +296,6 @@ impl Shell {
             glyph: icons::HIERARCHY,
             tint: None,
             title: "Work".into(),
-            subtitle: match running.len() {
-                0 => format!("Nothing running for {}", bot.name),
-                1 => "1 task running".into(),
-                n => format!("{n} tasks running"),
-            },
         };
         let mut body = div().p(px(8.0)).flex().flex_col().gap(px(1.0));
         if !running.is_empty() {
@@ -340,9 +335,12 @@ impl Shell {
         (head, body)
     }
 
-    /// One orchestration in full.
-    fn render_work_item(
-        &self,
+    /// One work item in every phase, the plan to approve included: its
+    /// status, what was asked, its steps and their sessions, and its result.
+    /// Approve / Cancel or Stop sit in the footer; opening its background
+    /// session and Delete in the header.
+    pub(super) fn render_work_item(
+        &mut self,
         work_id: &str,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -390,34 +388,103 @@ impl Shell {
             (work, steps, thread_listed)
         };
         let phase = plan_phase(&work);
+        let ticker = self.pulse_ticker.entity_id();
         let head = PanelHead {
             glyph: icons::HIERARCHY,
             tint: (!matches!(phase, PlanPhase::Running | PlanPhase::Starting))
-                .then_some(phase.tint(theme)),
+                .then(|| phase.tint(theme)),
             title: work.title.clone(),
-            subtitle: phase_line(&work, now_ms),
         };
-        let ticker = self.pulse_ticker.entity_id();
-        let mut body = div().p(px(8.0)).flex().flex_col();
-        if matches!(phase, PlanPhase::Running | PlanPhase::Stopping) {
-            let (done, total) = work.progress();
-            body = body.child(
-                div()
-                    .px(px(8.0))
-                    .pt(px(8.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(div().flex_1().child(progress_bar(done, total, theme)))
-                    .child(trailing(format!("{done} of {total}"), theme.text_muted)),
+        // ── header: its background session, and Delete once it ended ──
+        let mut buttons = Vec::new();
+        if thread_listed {
+            let thread = PanelItem::Thread(work.thread_chat_id.clone().unwrap_or_default());
+            buttons.push(
+                super::items::icon_button(
+                    "bot-work-thread",
+                    icons::CHAT_ROUND_LINE,
+                    "Open its session",
+                    theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.open_panel(thread.clone(), cx)))
+                .into_any_element(),
             );
         }
-        if !work.instruction.trim().is_empty() {
-            body = body
-                .child(section_label("You asked", theme))
-                .child(text_block(work.instruction.clone(), theme));
+        if phase.ended() {
+            let (id, name) = (work.id.clone(), work.title.clone());
+            buttons.push(
+                super::items::icon_button(
+                    "bot-work-delete",
+                    icons::TRASH_BIN_MINIMALISTIC,
+                    "Delete",
+                    theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let (id, name) = (id.clone(), name.clone());
+                    this.ask_confirm(parts::Confirm::DeleteWork { id, name }, cx);
+                }))
+                .into_any_element(),
+            );
         }
+        self.set_panel_actions(buttons);
+
+        // ── facts ──
+        let status = status_value(
+            work_mark(&work, ticker, theme),
+            phase_line(&work, now_ms),
+            phase.tint(theme),
+        );
+        let status = if matches!(phase, PlanPhase::Running | PlanPhase::Stopping) {
+            let (done, total) = work.progress();
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(status)
+                .child(progress_bar(done, total, theme))
+        } else {
+            div().child(status)
+        };
+        // Where it works, named once when every step shares the project.
+        let place = |p: &super::items::ProjectLabel| format!("{} · {}", p.name, p.device);
+        let common = steps
+            .first()
+            .and_then(|(p, _)| p.as_ref().map(place))
+            .filter(|first| {
+                steps
+                    .iter()
+                    .all(|(p, _)| p.as_ref().map(place).as_deref() == Some(first.as_str()))
+            });
+        let mut body = div()
+            .p(px(8.0))
+            .flex()
+            .flex_col()
+            .child(parts::fact(theme, "Status", status));
+        if let Some(common) = &common {
+            body = body.child(parts::fact(
+                theme,
+                "Project",
+                SharedString::from(common.clone()),
+            ));
+        }
+        // The request, unless it only repeats the title.
+        let same = |a: &str, b: &str| {
+            let norm = |t: &str| t.trim().trim_end_matches('.').to_lowercase();
+            norm(a) == norm(b)
+        };
+        if !work.instruction.trim().is_empty() && !same(&work.instruction, &work.title) {
+            body = body.child(parts::fact(theme, "Request", text_value(&work.instruction)));
+        }
+        if let Some(summary) = work.summary.as_ref().filter(|s| !s.trim().is_empty()) {
+            body = body.child(parts::fact(theme, "Plan", text_value(summary)));
+        }
+        if phase.ended()
+            && let Some(result) = work.result.as_ref().filter(|r| !r.trim().is_empty())
+        {
+            body = body.child(parts::fact(theme, "Result", text_value(result)));
+        }
+
+        // ── steps ──
         let numbered = matches!(
             phase,
             PlanPhase::Awaiting
@@ -427,6 +494,7 @@ impl Shell {
         );
         body = body.child(section_label("Steps", theme));
         for (ix, (step, (project, sessions))) in work.steps.iter().zip(steps).enumerate() {
+            let project = project.filter(|_| common.is_none());
             let mark = if numbered {
                 number_mark(ix + 1, theme)
             } else {
@@ -475,71 +543,48 @@ impl Shell {
                 });
             }
         }
-        if phase.ended()
-            && let Some(result) = work.result.clone().filter(|r| !r.trim().is_empty())
-        {
-            body = body
-                .child(section_label("Result", theme))
-                .child(text_block(result, theme));
-        }
-        let mut actions = action_row();
-        let mut any = false;
+
+        // ── footer: the decision it waits on ──
         if phase.awaiting() {
-            let plan = PanelItem::Plan(work.id.clone());
-            actions = actions.child(
-                popover::btn_primary(theme, "Review the plan")
-                    .id("bot-work-review-plan")
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_panel(plan.clone(), cx))),
-            );
-            any = true;
-        }
-        if phase.running() {
-            actions = actions.child(self.stop_button("bot-work-stop", &work.id, theme, cx));
-            any = true;
-        }
-        if thread_listed {
-            let thread = PanelItem::Thread(work.thread_chat_id.clone().unwrap_or_default());
-            actions = actions.child(
-                popover::btn_ghost(theme, "View session", "bot-work-thread")
-                    .id("bot-work-thread")
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.open_panel(thread.clone(), cx)),
+            let (approve, cancel) = (work.id.clone(), work.id.clone());
+            self.set_panel_footer(
+                decision_bar(Some("Nothing runs until you approve."), theme)
+                    .child(
+                        popover::btn_ghost(theme, "Cancel plan", "bot-plan-cancel")
+                            .id("bot-plan-cancel")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.mutate(
+                                    serde_json::json!({
+                                        "op": "resolveBotPlan", "workId": cancel, "approve": false,
+                                    }),
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        popover::btn_primary(theme, "Approve")
+                            .id("bot-plan-approve")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.mutate(
+                                    serde_json::json!({
+                                        "op": "resolveBotPlan", "workId": approve, "approve": true,
+                                    }),
+                                    cx,
+                                )
+                            })),
                     ),
             );
-            any = true;
-        }
-        // Finished work can go (proposed or running work is cancelled or
-        // stopped first).
-        if phase.ended() {
-            let (id, name) = (work.id.clone(), work.title.clone());
-            actions = actions.child(div().flex_1()).child(
-                parts::action(
-                    "bot-work-delete",
-                    icons::TRASH_BIN_MINIMALISTIC,
-                    "Delete",
-                    theme.danger,
+        } else if phase.running() {
+            let stop = self.stop_button("bot-work-stop", &work.id, theme, cx);
+            self.set_panel_footer(
+                decision_bar(
+                    Some("Stop ends the work and every session it started."),
+                    theme,
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let (id, name) = (id.clone(), name.clone());
-                    this.ask_confirm(parts::Confirm::DeleteWork { id, name }, cx);
-                })),
+                .child(stop),
             );
-            any = true;
         }
-        if let Some(stopped) = work
-            .stop_requested_at
-            .filter(|_| phase == PlanPhase::Stopping)
-        {
-            let when = match ago(stopped, now).as_str() {
-                "now" => "just now".to_string(),
-                ago => format!("{ago} ago"),
-            };
-            body = body.child(div().pt(px(10.0)).child(prose(
-                format!("Stop requested {when}; waiting for its device."),
-                theme.text_muted,
-            )));
-        }
-        Some((head, body.when(any, |el| el.child(actions))))
+        Some((head, body))
     }
 
     /// The orchestration's thread, read-only, with the way back to its work.
@@ -552,7 +597,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
-        let (subtitle, back_item, back_label) = {
+        let (title, back_item, back_label) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|c| c.id == thread)?;
             let marker = chat.bot.as_ref()?;
@@ -594,8 +639,7 @@ impl Shell {
         let head = PanelHead {
             glyph: icons::CHAT_ROUND_LINE,
             tint: None,
-            title: "Session".into(),
-            subtitle,
+            title,
         };
         let back_key = "bot-thread-back";
         let back = div()

@@ -948,15 +948,7 @@ impl Shell {
                         "New workspace"
                     })),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(12.0))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from("Reads and works only where you allow")),
-            )
+            .child(div().flex_1())
             .child(
                 popover::key_cap(theme)
                     .mono(theme)

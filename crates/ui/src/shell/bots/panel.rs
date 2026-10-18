@@ -50,12 +50,13 @@ pub(in crate::shell) enum PanelItem {
     Invite,
 }
 
-/// The panel header's glyph, title and subtitle.
+/// The panel header's glyph and title. Item actions join it through
+/// [`Shell::set_panel_actions`]; there is no subtitle (a panel says where
+/// things stand in its body).
 pub(super) struct PanelHead {
     pub glyph: &'static str,
     pub tint: Option<gpui::Hsla>,
     pub title: String,
-    pub subtitle: String,
 }
 
 impl Shell {
@@ -227,29 +228,12 @@ impl Shell {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.0))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(15.0))
-                            .line_height(px(20.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child(SharedString::from(head.title)),
-                    )
-                    .when(!head.subtitle.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(12.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(head.subtitle)),
-                        )
-                    }),
+                    .truncate()
+                    .text_size(px(15.0))
+                    .line_height(px(20.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(SharedString::from(head.title)),
             )
             .children(self.board.panel_actions.take())
             .child(close);
@@ -323,22 +307,21 @@ impl Shell {
             })
             .collect()
         };
-        let reach = match bot.scope.projects {
-            ProjectGrant::All => "all projects".to_string(),
-            _ if rows.len() == 1 => "1 project".to_string(),
-            _ => format!("{} projects", rows.len()),
-        };
         let head = PanelHead {
             glyph: icons::WIDGET,
             tint: None,
             title: "Projects".into(),
-            subtitle: format!("{} reads {reach}", bot.name),
         };
         let list = rows.into_iter().map(|(load, space, device)| {
             let key = format!("bot-panel-project-{}", space.id);
             let item = PanelItem::Project(space.id.clone());
             let sessions = load.sessions;
-            let note = load_note(&load);
+            // What runs or asks there; the sub-line already counts sessions.
+            let note = if load.asking > 0 || load.running > 0 {
+                load_note(&load)
+            } else {
+                String::new()
+            };
             let note_color = if load.asking > 0 {
                 theme.warning
             } else if load.running > 0 {
@@ -409,15 +392,10 @@ impl Shell {
                     .collect();
             (space, device, sessions)
         };
-        let count = sessions.len();
         let head = PanelHead {
             glyph: crate::appearance::space_style::space_icon(space.icon.as_deref()),
             tint: crate::appearance::space_style::space_color(space.color.as_deref(), theme),
             title: space.display_name().to_string(),
-            subtitle: format!(
-                "{device} · {count} session{}",
-                if count == 1 { "" } else { "s" }
-            ),
         };
         let ticker = self.pulse_ticker.entity_id();
         let rows = sessions
@@ -482,28 +460,17 @@ impl Shell {
                     )
             })
             .collect::<Vec<_>>();
-        let body = div().p(px(8.0)).flex().flex_col().gap(px(1.0));
+        let body = div()
+            .p(px(8.0))
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .child(parts::fact(theme, "Device", SharedString::from(device)))
+            .child(parts::section_label(theme, "Sessions"));
         let body = if rows.is_empty() {
-            body.child(
-                div()
-                    .px(px(8.0))
-                    .py(px(10.0))
-                    .text_size(px(12.5))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from("No sessions here yet.")),
-            )
+            body.child(parts::quiet_line(theme, "No sessions here yet."))
         } else {
-            body.child(
-                div()
-                    .px(px(8.0))
-                    .pt(px(6.0))
-                    .pb(px(6.0))
-                    .text_size(px(10.5))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text_muted.opacity(0.75))
-                    .child(SharedString::from("SESSIONS")),
-            )
-            .children(rows)
+            body.children(rows)
         };
         Some((head, body))
     }

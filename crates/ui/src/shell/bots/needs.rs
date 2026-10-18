@@ -12,12 +12,11 @@
 
 use super::board::{card_corner, card_glyph, card_item, two_lines};
 use super::items::{
-    action_row, ago, glyph, item_row, mark_cell, outcome_line, project_label, prose, section_label,
-    step_mark, text_block, trailing,
+    ago, decision_bar, glyph, item_row, mark_cell, outcome_value, project_label, section_label,
+    text_value, trailing,
 };
 use super::panel::{PanelHead, PanelItem};
 use super::*;
-use crate::transcript::bot_plan::{PlanPhase, phase_line, plan_phase};
 use cypher_proto::{ApprovalState, ExchangeState, NeedsYou};
 
 /// Rows the card shows before it points at the full list.
@@ -258,7 +257,8 @@ impl Shell {
     ) -> Option<(PanelHead, gpui::Div)> {
         match item {
             PanelItem::NeedsYou => Some(self.render_needs_list(bot, theme, cx)),
-            PanelItem::Plan(id) => self.render_plan_panel(id, theme, cx),
+            // A plan is a work item waiting on its approval: one page.
+            PanelItem::Plan(id) => self.render_work_item(id, theme, cx),
             PanelItem::Approval(id) => self.render_approval_panel(bot, id, theme, cx),
             PanelItem::Asking { chat_id, work_id } => {
                 self.render_asking_panel(bot, chat_id, work_id, theme, cx)
@@ -269,22 +269,16 @@ impl Shell {
     }
 
     fn render_needs_list(
-        &self,
+        &mut self,
         bot: &Bot,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> (PanelHead, gpui::Div) {
         let rows = self.current_need_rows(bot, theme, cx);
-        let count = rows.len();
         let head = PanelHead {
             glyph: icons::BELL,
             tint: Some(theme.warning),
             title: "Needs you".into(),
-            subtitle: match count {
-                0 => format!("Nothing waits on you from {}", bot.name),
-                1 => format!("1 thing from {}", bot.name),
-                n => format!("{n} things from {}", bot.name),
-            },
         };
         let body = div().p(px(8.0)).flex().flex_col().gap(px(2.0));
         let body = if rows.is_empty() {
@@ -304,121 +298,10 @@ impl Shell {
         (head, body)
     }
 
-    /// A plan awaiting approval: its steps, then Approve / Cancel; once
-    /// decided, where it stands.
-    fn render_plan_panel(
-        &self,
-        work_id: &str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<(PanelHead, gpui::Div)> {
-        let now = Utc::now();
-        let (work, projects) = {
-            let state = self.state.read(cx);
-            let work = state
-                .bot_records
-                .work
-                .iter()
-                .find(|w| w.id == work_id)?
-                .clone();
-            let projects: Vec<_> = work
-                .steps
-                .iter()
-                .map(|s| {
-                    s.project
-                        .as_deref()
-                        .and_then(|id| project_label(state, id, theme))
-                })
-                .collect();
-            (work, projects)
-        };
-        let phase = plan_phase(&work);
-        let head = PanelHead {
-            glyph: icons::CHECKLIST,
-            tint: (phase != PlanPhase::Running).then_some(phase.tint(theme)),
-            title: work.title.clone(),
-            subtitle: phase_line(&work, now.timestamp_millis()),
-        };
-        let mut body = div().p(px(8.0)).flex().flex_col();
-        if let Some(summary) = work.summary.clone().filter(|s| !s.trim().is_empty()) {
-            body = body.child(div().pt(px(6.0)).child(prose(summary, theme.text)));
-        }
-        if !work.instruction.trim().is_empty() {
-            body = body
-                .child(section_label("You asked", theme))
-                .child(text_block(work.instruction.clone(), theme));
-        }
-        let numbered = !matches!(
-            phase,
-            PlanPhase::Running | PlanPhase::Stopping | PlanPhase::Done | PlanPhase::Failed
-        );
-        let ticker = self.pulse_ticker.entity_id();
-        body = body.child(section_label("Steps", theme)).children(
-            work.steps
-                .iter()
-                .zip(projects)
-                .enumerate()
-                .map(|(ix, (step, project))| {
-                    let mark = if numbered {
-                        number_mark(ix + 1, theme)
-                    } else {
-                        step_mark(step.state, ticker, theme)
-                    };
-                    step_block(step, project, mark, theme)
-                }),
-        );
-        let actions = if phase.awaiting() {
-            let (approve, cancel) = (work.id.clone(), work.id.clone());
-            action_row()
-                .child(
-                    popover::btn_primary(theme, "Approve")
-                        .id("bot-plan-approve")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.mutate(
-                                serde_json::json!({
-                                    "op": "resolveBotPlan", "workId": approve, "approve": true,
-                                }),
-                                cx,
-                            )
-                        })),
-                )
-                .child(
-                    popover::btn_ghost(theme, "Cancel plan", "bot-plan-cancel")
-                        .id("bot-plan-cancel")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.mutate(
-                                serde_json::json!({
-                                    "op": "resolveBotPlan", "workId": cancel, "approve": false,
-                                }),
-                                cx,
-                            )
-                        })),
-                )
-        } else {
-            let progress = !matches!(phase, PlanPhase::Cancelling | PlanPhase::Cancelled);
-            let open = PanelItem::WorkItem(work.id.clone());
-            outcome_line(
-                super::items::work_mark(&work, ticker, theme),
-                phase_line(&work, now.timestamp_millis()),
-                phase.tint(theme),
-            )
-            .when(progress, |el| {
-                el.child(div().flex_1()).child(
-                    popover::btn_ghost(theme, "View progress", "bot-plan-progress")
-                        .id("bot-plan-progress")
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.open_panel(open.clone(), cx)),
-                        ),
-                )
-            })
-        };
-        Some((head, body.child(actions)))
-    }
-
-    /// An action a thread waits on: what it is and why it needs you, then
-    /// Approve / Decline.
+    /// An action a background session waits on: what it is, why it needs
+    /// you and where it comes from; Decline / Approve in the footer.
     fn render_approval_panel(
-        &self,
+        &mut self,
         bot: &Bot,
         approval_id: &str,
         theme: &Theme,
@@ -448,54 +331,57 @@ impl Shell {
             glyph: icons::SHIELD_CHECK,
             tint: awaiting.then_some(theme.warning),
             title: if awaiting {
-                "Approve this action?".into()
+                "Approve action".into()
             } else {
                 "Action".into()
             },
-            subtitle: format!(
-                "{} · {} · {}",
-                bot.name,
-                work_title.unwrap_or_else(|| "its conversation".into()),
-                ago(approval.created_at, now)
-            ),
         };
-        let body = div()
+        let mut body = div()
             .p(px(8.0))
             .flex()
             .flex_col()
-            .child(section_label("It wants to", theme))
-            .child(text_block(approval.action.clone(), theme))
-            .child(section_label("Why it asks you", theme))
-            .child(prose(approval.reason.clone(), theme.text));
-        let decided = approval.decision.as_ref().map(|d| d.approve);
-        let footer = if awaiting {
+            .child(parts::fact(theme, "Action", text_value(&approval.action)))
+            .child(parts::fact(theme, "Why", text_value(&approval.reason)))
+            .child(parts::fact(
+                theme,
+                "From",
+                SharedString::from(format!(
+                    "{} · {}",
+                    work_title.unwrap_or_else(|| bot.name.clone()),
+                    ago(approval.created_at, now)
+                )),
+            ));
+        if awaiting {
             let (yes, no) = (approval.id.clone(), approval.id.clone());
-            action_row()
-                .child(
-                    popover::btn_primary(theme, "Approve")
-                        .id("bot-approval-approve")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.mutate(
-                                serde_json::json!({
-                                    "op": "resolveBotApproval", "approvalId": yes, "approve": true,
-                                }),
-                                cx,
-                            )
-                        })),
-                )
-                .child(
-                    popover::btn_ghost(theme, "Decline", "bot-approval-decline")
-                        .id("bot-approval-decline")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.mutate(
-                                serde_json::json!({
-                                    "op": "resolveBotApproval", "approvalId": no, "approve": false,
-                                }),
-                                cx,
-                            )
-                        })),
-                )
+            self.set_panel_footer(
+                decision_bar(None, theme)
+                    .child(
+                        popover::btn_ghost(theme, "Decline", "bot-approval-decline")
+                            .id("bot-approval-decline")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.mutate(
+                                    serde_json::json!({
+                                        "op": "resolveBotApproval", "approvalId": no, "approve": false,
+                                    }),
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        popover::btn_primary(theme, "Approve")
+                            .id("bot-approval-approve")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.mutate(
+                                    serde_json::json!({
+                                        "op": "resolveBotApproval", "approvalId": yes, "approve": true,
+                                    }),
+                                    cx,
+                                )
+                            })),
+                    ),
+            );
         } else {
+            let decided = approval.decision.as_ref().map(|d| d.approve);
             let (text, ok) = match (approval.state, decided) {
                 (ApprovalState::Approved, _) | (ApprovalState::Pending, Some(true)) => {
                     ("Approved", true)
@@ -507,20 +393,9 @@ impl Shell {
                     ("Expired before an answer", false)
                 }
             };
-            outcome_line(
-                icon(if ok {
-                    icons::CHECK
-                } else {
-                    icons::CLOSE_CIRCLE
-                })
-                .size(px(12.0))
-                .text_color(if ok { theme.success } else { theme.text_muted })
-                .into_any_element(),
-                text.into(),
-                theme.text_muted,
-            )
-        };
-        Some((head, body.child(footer)))
+            body = body.child(parts::fact(theme, "Status", outcome_value(text, ok, theme)));
+        }
+        Some((head, body))
     }
 
     /// A session the bot started, asking: its question with the options as
@@ -562,21 +437,35 @@ impl Shell {
                 !state.transcript.is_empty(),
             )
         };
-        let mut subtitle = Vec::new();
-        if let Some(place) = &place {
-            subtitle.push(place.name.clone());
-        }
-        subtitle.push(match &work_title {
-            Some(work) => format!("{} · {work}", bot.name),
-            None => format!("Started by {}", bot.name),
-        });
         let head = PanelHead {
             glyph: icons::QUESTION_CIRCLE,
             tint: (status == ChatIndicator::AwaitingInput).then_some(theme.warning),
             title,
-            subtitle: subtitle.join(" · "),
         };
+        let open = chat_id.to_string();
+        self.set_panel_actions(vec![
+            super::items::icon_button(
+                "bot-asking-open",
+                icons::CHAT_ROUND_LINE,
+                "Open the session",
+                theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open.clone(), cx)))
+            .into_any_element(),
+        ]);
         let mut body = div().p(px(8.0)).flex().flex_col();
+        if let Some(place) = &place {
+            body = body.child(parts::fact(
+                theme,
+                "Project",
+                SharedString::from(format!("{} · {}", place.name, place.device)),
+            ));
+        }
+        body = body.child(parts::fact(
+            theme,
+            "From",
+            SharedString::from(work_title.unwrap_or_else(|| bot.name.clone())),
+        ));
         match pending {
             Some((request_id, questions)) if !self.board.answered.contains(&request_id) => {
                 let first = questions.first().cloned();
@@ -588,20 +477,11 @@ impl Shell {
                             &question.question
                         },
                     );
-                    body = body
-                        .child(section_label("It asks", theme))
-                        .child(
-                            div()
-                                .px(px(8.0))
-                                .text_size(px(14.0))
-                                .line_height(px(20.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme.text)
-                                .child(SharedString::from(headline)),
-                        )
-                        .children(
-                            context.map(|c| div().pt(px(4.0)).child(prose(c, theme.text_muted))),
-                        );
+                    let question = match context {
+                        Some(context) => format!("{headline}\n\n{context}"),
+                        None => headline,
+                    };
+                    body = body.child(parts::fact(theme, "Question", text_value(&question)));
                 }
                 let simple = questions.len() == 1
                     && first
@@ -609,7 +489,7 @@ impl Shell {
                         .is_some_and(|q| !q.multi_select && !q.options.is_empty());
                 match first.filter(|_| simple) {
                     Some(question) => {
-                        body = body.child(div().h(px(10.0))).children(
+                        body = body.child(section_label("Answer", theme)).children(
                             question.options.iter().enumerate().map(|(ix, option)| {
                                 let key = format!("bot-asking-option-{ix}");
                                 let (chat, request, question_id, label) = (
@@ -664,40 +544,34 @@ impl Shell {
                         );
                     }
                     None => {
-                        body = body.child(
-                            div()
-                                .pt(px(10.0))
-                                .child(prose("Answer it in the session.".into(), theme.text_muted)),
-                        );
+                        body = body.child(parts::fact(
+                            theme,
+                            "Answer",
+                            SharedString::from("In the session"),
+                        ));
                     }
                 }
             }
             Some(_) => {
-                body = body.child(outcome_line(
-                    icon(icons::CHECK)
-                        .size(px(12.0))
-                        .text_color(theme.success)
-                        .into_any_element(),
-                    "Answer sent".into(),
-                    theme.text_muted,
+                body = body.child(parts::fact(
+                    theme,
+                    "Status",
+                    outcome_value("Answer sent", true, theme),
                 ));
             }
             None if loaded => {
-                body = body.child(outcome_line(
-                    icon(icons::CHECK)
-                        .size(px(12.0))
-                        .text_color(theme.success)
-                        .into_any_element(),
-                    "Nothing to answer right now".into(),
-                    theme.text_muted,
+                body = body.child(parts::fact(
+                    theme,
+                    "Status",
+                    outcome_value("Nothing to answer right now", true, theme),
                 ));
             }
             None => {
-                body = body.child(
-                    div()
-                        .pt(px(8.0))
-                        .child(prose("Loading the session…".into(), theme.text_muted)),
-                );
+                body = body.child(parts::fact(
+                    theme,
+                    "Status",
+                    SharedString::from("Loading the session…"),
+                ));
             }
         }
         if !recent.is_empty() {
@@ -729,14 +603,6 @@ impl Shell {
                     )
             }));
         }
-        let open = chat_id.to_string();
-        body = body.child(
-            action_row().child(
-                popover::btn_ghost(theme, "Open session", "bot-asking-open")
-                    .id("bot-asking-open")
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open.clone(), cx))),
-            ),
-        );
         Some((head, body))
     }
 
@@ -831,14 +697,21 @@ impl Shell {
             glyph: icons::USERS,
             tint: awaiting.then_some(theme.warning),
             title: "Review answer".into(),
-            subtitle: format!("{peer} asked · {}", ago(exchange.asked_at, now)),
         };
         let mut body = div()
             .p(px(8.0))
             .flex()
             .flex_col()
-            .child(section_label("They asked", theme))
-            .child(text_block(exchange.question.clone(), theme));
+            .child(parts::fact(
+                theme,
+                "From",
+                SharedString::from(format!("{peer} · {}", ago(exchange.asked_at, now))),
+            ))
+            .child(parts::fact(
+                theme,
+                "Question",
+                text_value(&exchange.question),
+            ));
         let input = self
             .board
             .review
@@ -851,45 +724,44 @@ impl Shell {
                     (input.clone(), exchange.id.clone(), exchange.id.clone());
                 let original = exchange.answer.clone().unwrap_or_default();
                 body =
-                    body.child(section_label("Your workspace's answer", theme))
+                    body.child(parts::field_label(theme, "Answer"))
                         .child(div().mx(px(8.0)).child(
                             popover::dialog_field(input.into_any_element()).text_size(px(13.0)),
-                        ))
+                        ));
+                self.set_panel_footer(
+                    decision_bar(Some("Edit it before it goes, or decline."), theme)
                         .child(
-                            action_row()
-                                .child(
-                                    popover::btn_primary(theme, "Send")
-                                        .id("bot-review-send")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            let text =
-                                                send_input.read(cx).text().trim().to_string();
-                                            let edited = (text != original.trim()).then_some(text);
-                                            this.mutate(
-                                                serde_json::json!({
-                                                    "op": "reviewBotExchange",
-                                                    "exchangeId": id_send,
-                                                    "send": true,
-                                                    "text": edited,
-                                                }),
-                                                cx,
-                                            )
-                                        })),
-                                )
-                                .child(
-                                    popover::btn_ghost(theme, "Decline", "bot-review-decline")
-                                        .id("bot-review-decline")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.mutate(
-                                                serde_json::json!({
-                                                    "op": "reviewBotExchange",
-                                                    "exchangeId": id_decline,
-                                                    "send": false,
-                                                }),
-                                                cx,
-                                            )
-                                        })),
-                                ),
-                        );
+                            popover::btn_ghost(theme, "Decline", "bot-review-decline")
+                                .id("bot-review-decline")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.mutate(
+                                        serde_json::json!({
+                                            "op": "reviewBotExchange",
+                                            "exchangeId": id_decline,
+                                            "send": false,
+                                        }),
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .child(
+                            popover::btn_primary(theme, "Send")
+                                .id("bot-review-send")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let text = send_input.read(cx).text().trim().to_string();
+                                    let edited = (text != original.trim()).then_some(text);
+                                    this.mutate(
+                                        serde_json::json!({
+                                            "op": "reviewBotExchange",
+                                            "exchangeId": id_send,
+                                            "send": true,
+                                            "text": edited,
+                                        }),
+                                        cx,
+                                    )
+                                })),
+                        ),
+                );
             }
             None => {
                 let sent = exchange.review.as_ref().map(|r| (r.send, r.text.clone()));
@@ -898,9 +770,7 @@ impl Shell {
                     .and_then(|(_, text)| text.clone())
                     .or_else(|| exchange.answer.clone());
                 if let Some(answer) = shown.filter(|a| !a.trim().is_empty()) {
-                    body = body
-                        .child(section_label("Answer", theme))
-                        .child(text_block(answer, theme));
+                    body = body.child(parts::fact(theme, "Answer", text_value(&answer)));
                 }
                 let (text, ok) = match (exchange.state, sent) {
                     (ExchangeState::Answered, _) | (_, Some((true, _))) => ("Sent", true),
@@ -908,18 +778,7 @@ impl Shell {
                     (ExchangeState::Expired, _) => ("Expired", false),
                     _ => ("Waiting on its answer", false),
                 };
-                body = body.child(outcome_line(
-                    icon(if ok {
-                        icons::CHECK
-                    } else {
-                        icons::CLOSE_CIRCLE
-                    })
-                    .size(px(12.0))
-                    .text_color(if ok { theme.success } else { theme.text_muted })
-                    .into_any_element(),
-                    text.into(),
-                    theme.text_muted,
-                ));
+                body = body.child(parts::fact(theme, "Status", outcome_value(text, ok, theme)));
             }
         }
         Some((head, body))

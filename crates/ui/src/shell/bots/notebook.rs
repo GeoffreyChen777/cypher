@@ -198,23 +198,10 @@ impl Shell {
                 .cloned()
                 .collect()
         };
-        let by_bot = notes
-            .iter()
-            .filter(|n| matches!(n.source, NoteSource::Bot { .. }))
-            .count();
         let head = PanelHead {
             glyph: icons::BOOK,
             tint: None,
             title: "Notebook".into(),
-            subtitle: match (notes.len(), by_bot) {
-                (0, _) => format!("What {} keeps in mind", bot.name),
-                (n, 0) => format!("{n} note{}", if n == 1 { "" } else { "s" }),
-                (n, k) => format!(
-                    "{n} note{} · {k} written by {}",
-                    if n == 1 { "" } else { "s" },
-                    bot.name
-                ),
-            },
         };
         let add = self.note_add_input(cx);
         let add_row = div()
@@ -236,27 +223,15 @@ impl Shell {
             .p(px(8.0))
             .flex()
             .flex_col()
-            .child(div().pt(px(4.0)).child(add_row))
-            .child(
-                div()
-                    .px(px(8.0))
-                    .pt(px(6.0))
-                    .text_size(px(11.5))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(format!(
-                        "Short facts and decisions {} reads at the start of each conversation.",
-                        bot.name
-                    ))),
-            );
+            .child(div().pt(px(4.0)).pb(px(6.0)).child(add_row));
         if notes.is_empty() {
-            body = body.child(div().h(px(8.0))).child(parts::quiet_line(
+            body = body.child(parts::quiet_line(
                 theme,
                 "No notes yet. Try \u{201C}The release waits on the migration\u{201D} \
                  or \u{201C}Alice owns auth\u{201D}.",
             ));
             return Some((head, body));
         }
-        body = body.child(parts::section_label(theme, "Notes"));
         let editing = self
             .board
             .notebook
@@ -296,12 +271,9 @@ impl Shell {
                     .flex_row()
                     .flex_wrap()
                     .gap(px(4.0))
-                    .child(SharedString::from(format!(
-                        "Written by {} · {when}",
-                        bot.name
-                    )))
+                    .child(SharedString::from(format!("{} · {when}", bot.name)))
                     .when_some(from, |el, from| {
-                        el.child("· from").child(match chat_id.clone() {
+                        el.child("·").child(match chat_id.clone() {
                             Some(chat_id) => parts::link(format!("{key}-from"), from, theme)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.open_chat(chat_id.clone(), cx)

@@ -648,13 +648,6 @@ pub(super) fn past_full<Tz: TimeZone>(at: &DateTime<Tz>, now: &DateTime<Tz>) -> 
     }
 }
 
-/// [`past_label`] for epoch ms, in this device's time zone.
-pub(super) fn past_ms(ms: i64) -> String {
-    local(ms)
-        .map(|at| past_label(&at, &Local::now()))
-        .unwrap_or_default()
-}
-
 /// How long ago, for sub-lines: "just now", "5m ago", "2h ago", "3d ago".
 pub(super) fn ago_ms(ms: i64) -> String {
     let Some(then) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms) else {

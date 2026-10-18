@@ -8,8 +8,8 @@ use super::super::session::SlotId;
 use super::*;
 
 /// What `bot` can see and do, in a few words: "Billing · reads
-/// conversations", or with capabilities "3 projects · works directly · can
-/// start sessions".
+/// conversations", or with capabilities "3 projects · works directly ·
+/// starts sessions".
 pub(in crate::shell) fn access_summary(bot: &Bot, state: &crate::state::AppState) -> String {
     let scope = &bot.scope;
     let projects = match &scope.projects {
@@ -37,14 +37,18 @@ pub(in crate::shell) fn access_summary(bot: &Bot, state: &crate::state::AppState
         (false, n) => format!("{projects} + {n} session{}", if n == 1 { "" } else { "s" }),
     };
     let caps = &bot.capabilities;
-    let acts: Vec<&str> = [
-        (caps.work_directly, "works directly"),
-        (caps.coordinate, "can start sessions"),
-        (caps.steer, "can steer sessions"),
-    ]
-    .into_iter()
-    .filter_map(|(on, words)| on.then_some(words))
-    .collect();
+    let sessions = match (caps.coordinate, caps.steer) {
+        (true, true) => Some("starts and steers sessions"),
+        (true, false) => Some("starts sessions"),
+        (false, true) => Some("steers sessions"),
+        (false, false) => None,
+    };
+    let acts: Vec<&str> = caps
+        .work_directly
+        .then_some("works directly")
+        .into_iter()
+        .chain(sessions)
+        .collect();
     // What it may do says more than how deep it reads, which only stays
     // when it is the narrow kind.
     let depth = match (scope.transcripts, acts.is_empty()) {
@@ -418,13 +422,13 @@ mod tests {
         };
         assert_eq!(
             access_summary(&acting, &state),
-            "3 projects · works directly · can start sessions"
+            "3 projects · works directly · starts sessions"
         );
         acting.scope.transcripts = false;
         acting.capabilities = cypher_proto::BotCapabilities::new_bot();
         assert_eq!(
             access_summary(&acting, &state),
-            "3 projects · titles and status only · works directly · can start sessions"
+            "3 projects · titles and status only · works directly · starts sessions"
         );
         acting.scope = BotScope::default();
         assert_eq!(access_summary(&acting, &state), "No access yet");

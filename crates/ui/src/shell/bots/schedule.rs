@@ -362,6 +362,10 @@ pub(super) enum ModelList {
 pub(super) struct ScheduleUi {
     form: Option<JobForm>,
     saving: Option<(String, String)>,
+    /// Model labels by id, from any device's list, so a routine page names
+    /// its model as the pickers do; and the devices already asked.
+    model_labels: std::collections::HashMap<String, String>,
+    labels_asked: std::collections::HashSet<String>,
 }
 
 impl Shell {
@@ -621,7 +625,6 @@ impl Shell {
                     glyph: icons::CLOCK,
                     tint: None,
                     title: name.clone(),
-                    subtitle: "Saving…".into(),
                 },
                 div().p(px(8.0)),
             )
@@ -641,10 +644,6 @@ impl Shell {
             glyph: icons::CLOCK,
             tint: None,
             title: "Routines".into(),
-            subtitle: {
-                let n = jobs.len();
-                format!("{n} routine{}", if n == 1 { "" } else { "s" })
-            },
         };
         let actions = div().px(px(4.0)).pt(px(2.0)).flex().flex_row().child(
             parts::action(
@@ -726,7 +725,6 @@ impl Shell {
             glyph,
             tint: Some(tint),
             title: routine.name.clone(),
-            subtitle: String::new(),
         };
         let mut body = div().p(px(8.0)).flex().flex_col();
         self.board.panel_actions = Some(
@@ -779,21 +777,20 @@ impl Shell {
             theme,
             "Model",
             SharedString::from(match routine.chosen_model() {
-                Some(model) => model.to_string(),
-                None => "Default, same as the workspace chat".to_string(),
+                Some(model) => {
+                    let host = space
+                        .as_ref()
+                        .map_or(bot.host_device_id.clone(), |s| s.device_id.clone());
+                    self.model_label(Some(host), model, cx)
+                }
+                None => "Default".to_string(),
             }),
         ));
         body = body.child(parts::fact(
             theme,
-            "Repeats",
-            SharedString::from(match &routine.schedule {
-                Schedule::Manual => "Only when you press Run now".to_string(),
-                schedule => schedule.describe(),
-            }),
+            "Schedule",
+            SharedString::from(schedule_value(&job, &now)),
         ));
-        if let JobState::Next(_) = job.state() {
-            body = body.child(parts::fact(theme, "Next run", next_value(&job, &now)));
-        }
         body = body.child(parts::fact(
             theme,
             "Prompt",
@@ -1249,7 +1246,6 @@ impl Shell {
                 FormTarget::Routine(_) => "Edit routine",
             }
             .into(),
-            subtitle: format!("Runs unattended; {} posts each result", bot.name),
         };
         let model_picker = self.render_model_picker(bot, theme, cx);
         let Some(form) = self.board.schedule.form.as_ref() else {
@@ -1322,9 +1318,12 @@ impl Shell {
         ));
         match form.draft.kind {
             ScheduleKind::Daily => {
-                // Like the Repeats control: a track, the picked days lifted.
+                // Like the Repeats control: a track, the picked days lifted
+                // — none when it is every day, which the foot line says.
+                let every_day = form.draft.days.is_empty();
                 let chips = (1..=7u8).map(|day| {
                     let on = form.draft.has_day(day);
+                    let lifted = on && !every_day;
                     div()
                         .id(SharedString::from(format!("bot-form-day-{day}")))
                         .w(px(26.0))
@@ -1335,7 +1334,7 @@ impl Shell {
                         .text_size(px(12.0))
                         .cursor_pointer()
                         .text_color(if on { theme.text } else { theme.text_muted })
-                        .when(on, |el| {
+                        .when(lifted, |el| {
                             el.bg(crate::kit::theme::card_selected_bg())
                                 .shadow(crate::kit::theme::card_selected_shadows())
                                 .font_weight(gpui::FontWeight::MEDIUM)
@@ -1630,6 +1629,37 @@ impl Shell {
         })
     }
 
+    /// The label for a routine's model, asking its device for its models
+    /// once when no list has named it yet; the id until then.
+    fn model_label(&mut self, device: Option<String>, id: &str, cx: &mut Context<Self>) -> String {
+        if let Some(label) = self.board.schedule.model_labels.get(id) {
+            return label.clone();
+        }
+        if let Some(device) = device
+            && self.board.schedule.labels_asked.insert(device.clone())
+        {
+            self.board_call(
+                methods::LIST_MODELS,
+                serde_json::json!({ "harness": "pi", "targetDeviceId": device }),
+                cx,
+                |this, result, cx| {
+                    let Ok(value) = result else { return };
+                    let Ok(models) = serde_json::from_value::<Vec<cypher_proto::Model>>(value)
+                    else {
+                        return;
+                    };
+                    this.board.schedule.model_labels.extend(
+                        crate::pickers::normalize_model_rows(models)
+                            .into_iter()
+                            .map(|m| (m.id, m.label)),
+                    );
+                    cx.notify();
+                },
+            );
+        }
+        id.to_string()
+    }
+
     /// Ask the routine's device for its models, once per device.
     fn load_form_models(&mut self, bot: &Bot, cx: &mut Context<Self>) {
         let Some(device) = self.form_device(bot, cx) else {
@@ -1658,7 +1688,12 @@ impl Shell {
                 form.models = match result {
                     Ok(value) => match serde_json::from_value::<Vec<cypher_proto::Model>>(value) {
                         Ok(models) => {
-                            ModelList::Ready(crate::pickers::normalize_model_rows(models))
+                            let models = crate::pickers::normalize_model_rows(models);
+                            this.board
+                                .schedule
+                                .model_labels
+                                .extend(models.iter().map(|m| (m.id.clone(), m.label.clone())));
+                            ModelList::Ready(models)
                         }
                         Err(err) => ModelList::Failed(err.to_string()),
                     },
@@ -1869,13 +1904,31 @@ impl Shell {
     }
 }
 
-/// A Next run fact's words: the next scheduled run even while one runs.
-fn next_value(job: &Job, now: &DateTime<Local>) -> SharedString {
-    match (job.next.and_then(parts::local), job.state()) {
-        (Some(at), _) => parts::next_full(&at, now).into(),
-        (None, _) if !job.enabled => "Off".into(),
-        (None, _) if job.schedule == Schedule::Manual => "Only when run by hand".into(),
-        (None, _) => "Not planned yet".into(),
+/// A routine's Schedule fact: when it repeats, and how soon it next runs
+/// ("Weekdays 08:30 · next in 9h"), "off" while disabled; a manual one
+/// runs only when asked.
+fn schedule_value(job: &Job, now: &DateTime<Local>) -> String {
+    if job.schedule == Schedule::Manual {
+        return "Only when you press Run now".into();
+    }
+    let when = job.schedule.describe();
+    if !job.enabled {
+        return format!("{when} · off");
+    }
+    match job.next.and_then(parts::local) {
+        Some(at) => format!("{when} · next {}", in_words(&at, now)),
+        None => when,
+    }
+}
+
+/// How soon `at` comes: "in 25m", "in 9h", "in 3 days".
+fn in_words(at: &DateTime<Local>, now: &DateTime<Local>) -> String {
+    let minutes = (*at - *now).num_minutes().max(0);
+    match minutes {
+        0 => "now".into(),
+        1..=59 => format!("in {minutes}m"),
+        60..=2879 => format!("in {}h", minutes / 60),
+        _ => format!("in {} days", minutes / 1440),
     }
 }
 

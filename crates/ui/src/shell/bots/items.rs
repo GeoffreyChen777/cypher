@@ -73,14 +73,7 @@ pub(super) fn trailing(text: String, color: gpui::Hsla) -> gpui::Div {
 
 /// A panel section's small caps label ("STEPS", "RESULT").
 pub(super) fn section_label(text: &str, theme: &Theme) -> gpui::Div {
-    div()
-        .px(px(8.0))
-        .pt(px(10.0))
-        .pb(px(6.0))
-        .text_size(px(10.5))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.text_muted.opacity(0.75))
-        .child(SharedString::from(text.to_uppercase()))
+    super::parts::section_label(theme, text)
 }
 
 /// Prose in a panel: a paragraph at the panel's reading size.
@@ -91,20 +84,6 @@ pub(super) fn prose(text: String, color: gpui::Hsla) -> gpui::Div {
         .line_height(px(19.0))
         .text_color(color)
         .child(SharedString::from(text))
-}
-
-/// A quoted block: what an action does, a question, a result.
-pub(super) fn text_block(text: String, theme: &Theme) -> gpui::Div {
-    div()
-        .mx(px(8.0))
-        .px(px(12.0))
-        .py(px(9.0))
-        .rounded(px(8.0))
-        .bg(crate::kit::theme::ink(0.04))
-        .text_size(px(13.0))
-        .line_height(px(19.0))
-        .text_color(theme.text)
-        .child(SharedString::from(plain_markdown(&text)))
 }
 
 /// Markdown an agent wrote, read as plain text for a panel or a row: a
@@ -301,35 +280,83 @@ pub(super) fn project_label(
     })
 }
 
-/// A panel's action row (Approve / Cancel …).
-pub(super) fn action_row() -> gpui::Div {
+/// A status as a fact's value: its mark, then its words in its colour.
+pub(super) fn status_value(
+    mark: AnyElement,
+    text: impl Into<SharedString>,
+    color: gpui::Hsla,
+) -> gpui::Div {
     div()
-        .px(px(8.0))
-        .pt(px(14.0))
-        .pb(px(8.0))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(6.0))
+        .child(div().flex_none().child(mark))
+        .child(div().min_w_0().text_color(color).child(text.into()))
 }
 
-/// After a decision: the state it left the item in, with its mark.
-pub(super) fn outcome_line(mark: AnyElement, text: String, color: gpui::Hsla) -> gpui::Div {
-    div()
-        .px(px(8.0))
-        .pt(px(14.0))
-        .pb(px(8.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .text_size(px(12.5))
+/// A mark for a status line: a glyph at the facts' size.
+pub(super) fn status_glyph(path: &'static str, color: gpui::Hsla) -> AnyElement {
+    icon(path)
+        .size(px(12.0))
         .text_color(color)
-        .child(mark_cell(mark))
-        .child(SharedString::from(text))
+        .into_any_element()
+}
+
+/// How a decision ended, as a status value: a check when it went through.
+pub(super) fn outcome_value(text: &str, ok: bool, theme: &Theme) -> gpui::Div {
+    let (path, color) = if ok {
+        (icons::CHECK, theme.success)
+    } else {
+        (icons::CLOSE_CIRCLE, theme.text_muted)
+    };
+    status_value(status_glyph(path, color), text.to_string(), theme.text)
+}
+
+/// A long fact (a request, a prompt, a result): the text an agent or the
+/// owner wrote, read as plain text.
+pub(super) fn text_value(text: &str) -> SharedString {
+    plain_markdown(text).into()
+}
+
+/// The pinned footer of a panel that asks for a decision: a quiet note on
+/// the left, then the caller's buttons, the primary one last.
+pub(super) fn decision_bar(note: Option<&str>, theme: &Theme) -> gpui::Div {
+    div().flex().flex_row().items_center().gap(px(6.0)).child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(px(11.5))
+            .text_color(theme.text_muted)
+            .children(note.map(|n| SharedString::from(n.to_string()))),
+    )
 }
 
 impl Shell {
+    /// The open panel item's own buttons, drawn in the panel header before
+    /// its close button (icon buttons: edit, delete, open its session…).
+    pub(super) fn set_panel_actions(&mut self, buttons: Vec<AnyElement>) {
+        if buttons.is_empty() {
+            return;
+        }
+        self.board.panel_actions = Some(
+            div()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.0))
+                .children(buttons)
+                .into_any_element(),
+        );
+    }
+
+    /// The open panel item's decision bar, pinned under its body.
+    pub(super) fn set_panel_footer(&mut self, footer: impl IntoElement) {
+        self.board.panel_footer = Some(footer.into_any_element());
+    }
+
     /// The session context following `chat_id` for the panel, made on first
     /// use (with the read-only transcript when `transcript`).
     pub(super) fn peek(

@@ -518,18 +518,6 @@ impl Shell {
             glyph: icons::GLOBAL,
             tint: None,
             title: "Network".into(),
-            subtitle: match (connections.len(), invites.len()) {
-                (0, 0) if !ready => "Sign in to connect workspaces".into(),
-                (0, 0) => format!("Other people's workspaces {} can talk to", bot.name),
-                (c, i) => {
-                    let mut parts =
-                        vec![format!("{c} connection{}", if c == 1 { "" } else { "s" })];
-                    if i > 0 {
-                        parts.push(format!("{i} open invite{}", if i == 1 { "" } else { "s" }));
-                    }
-                    parts.join(" · ")
-                }
-            },
         };
         let mut body = div().p(px(8.0)).flex().flex_col();
         body = if ready {
@@ -571,7 +559,7 @@ impl Shell {
             .map(|c| (c.id.clone(), c.peer.name.clone()))
             .collect();
         if !ready && connections.is_empty() && invites.is_empty() && exchanges.is_empty() {
-            return (head, body.child(privacy_note(theme)));
+            return (head, body);
         }
         body = body.child(parts::section_label(theme, "Connections"));
         if connections.is_empty() {
@@ -602,7 +590,6 @@ impl Shell {
                 body = body.child(exchange_row(exchange, Some(&peer), &bot.name, theme));
             }
         }
-        body = body.child(privacy_note(theme));
         (head, body)
     }
 
@@ -661,10 +648,6 @@ impl Shell {
             glyph: icons::LINK,
             tint: None,
             title: "Connect a workspace".into(),
-            subtitle: format!(
-                "Let another person's workspace ask {}, and ask it back",
-                bot.name
-            ),
         };
         if !self.network_ready(cx) {
             return (
@@ -879,34 +862,58 @@ impl Shell {
             glyph: icons::LINK,
             tint: None,
             title: conn.peer.name.clone(),
-            subtitle: if conn.peer.owner_name.is_empty() {
-                format!("Connected {}", parts::past_ms(conn.created_at))
-            } else {
-                format!(
-                    "{}'s workspace · connected {}",
-                    conn.peer.owner_name,
-                    parts::past_ms(conn.created_at)
-                )
-            },
         };
         let revoked = conn.revoked_at.is_some();
         let revoking = conn.revoke_requested_at.is_some();
         let editable = ready && !revoked && !revoking;
-        let mut body = div().p(px(8.0)).flex().flex_col();
-        if revoked || revoking {
-            body = body.child(
-                parts::quiet_line(
+        if editable {
+            let (revoke_id, name) = (conn.id.clone(), conn.peer.name.clone());
+            self.set_panel_actions(vec![
+                super::items::icon_button(
+                    "bot-conn-revoke",
+                    icons::TRASH_BIN_MINIMALISTIC,
+                    "Revoke connection",
                     theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.ask_confirm(
+                        parts::Confirm::RevokeConnection {
+                            id: revoke_id.clone(),
+                            name: name.clone(),
+                        },
+                        cx,
+                    )
+                }))
+                .into_any_element(),
+            ]);
+        }
+        let mut body = div().p(px(8.0)).flex().flex_col();
+        if !conn.peer.owner_name.is_empty() {
+            body = body.child(parts::fact(
+                theme,
+                "Owner",
+                SharedString::from(conn.peer.owner_name.clone()),
+            ));
+        }
+        body = body.child(parts::fact(
+            theme,
+            "Connected",
+            SharedString::from(parts::past_full_ms(conn.created_at)),
+        ));
+        if revoked || revoking {
+            body = body.child(parts::fact(
+                theme,
+                "Status",
+                super::items::outcome_value(
                     if revoked {
-                        "This connection was revoked."
+                        "Revoked"
                     } else {
                         "Revoking on both sides…"
                     },
-                )
-                .text_color(theme.warning),
-            );
-        } else if !ready {
-            body = body.child(signed_out(theme));
+                    false,
+                    theme,
+                ),
+            ));
         }
 
         // ── replies ──
@@ -915,8 +922,8 @@ impl Shell {
             ReplyMode::Review => "Answers wait for you as drafts in Needs you.",
             ReplyMode::Off => "Questions are declined.",
         };
-        body = body.child(parts::section_label(theme, "Replies"));
         if editable {
+            body = body.child(parts::section_label(theme, "Replies"));
             body = body.child(div().mx(px(8.0)).child(parts::segmented(
                 "bot-conn-mode",
                 &[
@@ -929,23 +936,21 @@ impl Shell {
                 theme,
                 cx,
             )));
+            body = body.child(
+                div()
+                    .px(px(8.0))
+                    .pt(px(6.0))
+                    .text_size(px(11.5))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(mode_detail)),
+            );
         } else {
             body = body.child(parts::fact(
                 theme,
-                "Mode",
-                SharedString::from(mode_words(conn.reply_mode)),
+                "Replies",
+                SharedString::from(mode_detail),
             ));
         }
-        body = body.child(
-            div()
-                .px(px(8.0))
-                .pt(px(6.0))
-                .text_size(px(11.5))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(format!(
-                    "{mode_detail} At most 30 questions an hour and 200 a day."
-                ))),
-        );
 
         // ── what the peer's questions may read ──
         body = body.child(parts::section_label(theme, "May read"));
@@ -1044,29 +1049,6 @@ impl Shell {
                 theme,
             ));
         }
-        if editable {
-            let (revoke_id, name) = (conn.id.clone(), conn.peer.name.clone());
-            body = body.child(
-                div().px(px(4.0)).pt(px(14.0)).flex().child(
-                    parts::action(
-                        "bot-conn-revoke",
-                        icons::TRASH_BIN_MINIMALISTIC,
-                        "Revoke connection",
-                        theme.danger,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.ask_confirm(
-                            parts::Confirm::RevokeConnection {
-                                id: revoke_id.clone(),
-                                name: name.clone(),
-                            },
-                            cx,
-                        )
-                    })),
-                ),
-            );
-        }
-        body = body.child(privacy_note(theme));
         Some((head, body))
     }
 
@@ -1329,11 +1311,7 @@ fn signed_out(theme: &Theme) -> gpui::Div {
                         .text_size(px(11.5))
                         .line_height(px(16.0))
                         .text_color(theme.text_muted)
-                        .child(
-                            "Workspaces connect through your Cypher account. Sign in from the \
-                             account menu to invite another person's workspace or use their \
-                             code.",
-                        ),
+                        .child("Use the account menu. Connections go through your Cypher account."),
                 ),
         )
 }

@@ -927,7 +927,7 @@ Built:
   instructions), a "Run on device" rail on the right (fixed after creation), and a
   Cancel / Save footer with Delete when editing. New bots start with *Work directly* and *Coordinate* on.
 - **Bot conversation:** the Workspaces board's middle card, wearing the bot's avatar. A quiet
-  access note over the composer ("invoice-demo · works directly · can start sessions")
+  access note over the composer ("invoice-demo · works directly · starts sessions")
   opens the bot's settings. A new bot opens on a start screen with a 2×2 grid of
   suggested questions. Bot tool calls read as what they did ("Read session · <title>";
   "Proposed a plan · read 2 sessions"), and cited `cypher://session/<id>` links open the
@@ -1023,6 +1023,19 @@ the bot's settings. It has no terminal and no session dock.
 **The detail panel** slides in from the window's right edge and the chat narrows to make
 room. It shows one item in full with its actions, closes with × or Esc, and opening
 another row replaces its content; the opened row stays highlighted in the sidebar.
+
+Every panel page shares one layout, so a page says each thing once:
+
+- **Header:** the item's glyph and title, no subtitle. Actions on the item itself (open
+  its session, run, edit, delete, revoke) are icon buttons at the header's end.
+- **Facts:** label and value rows (Status, Project, Request, Plan, Result, Schedule,
+  Model…). Status is coloured text with a small glyph, never a badge. A project named
+  by every step is named once, as a fact; a request that repeats the title is left out.
+- **Lists:** a small caps label (Steps, Sessions, Connections…) only where a page holds
+  more than one list.
+- **Decisions** (Approve, Send, Stop, Save) sit in a footer pinned to the panel's foot,
+  the primary button last, with at most one short note.
+- Editable fields alone keep a grey well; read-only text is a fact.
 
 Behaviour:
 

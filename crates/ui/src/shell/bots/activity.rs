@@ -170,7 +170,6 @@ impl Shell {
             glyph: icons::PULSE,
             tint: None,
             title: "Activity".into(),
-            subtitle: String::new(),
         };
         // The palette's segmented control, one segment per kind.
         let chips = div()
