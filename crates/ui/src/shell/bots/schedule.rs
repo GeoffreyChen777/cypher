@@ -178,11 +178,6 @@ pub(super) fn state_note<Tz: TimeZone>(state: JobState, now: &DateTime<Tz>) -> S
     }
 }
 
-/// Runs counted today: the host's count while its day is today.
-pub(super) fn runs_today(count: u32, day: Option<&str>, today: &str) -> u32 {
-    if day == Some(today) { count } else { 0 }
-}
-
 // ── the schedule editor ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -627,36 +622,13 @@ impl Shell {
     ) -> (PanelHead, gpui::Div) {
         let jobs = self.schedule_jobs(bot, cx);
         let tint = bot_tint(bot, theme);
-        // Today's budget use across the bot's routines that are on.
-        let budget = {
-            let today = Local::now().format("%Y-%m-%d").to_string();
-            let state = self.state.read(cx);
-            let on: Vec<&BotRoutine> = state
-                .bot_records
-                .routines
-                .iter()
-                .filter(|r| r.bot_id == bot.id && r.enabled)
-                .collect();
-            (!on.is_empty()).then(|| {
-                on.iter().fold((0, 0), |(used, budget), r| {
-                    (
-                        used + runs_today(r.runs_today, r.runs_day.as_deref(), &today),
-                        budget + r.max_runs_per_day,
-                    )
-                })
-            })
-        };
         let head = PanelHead {
             glyph: icons::CLOCK,
             tint: None,
             title: "Routines".into(),
             subtitle: {
                 let n = jobs.len();
-                let mut line = format!("{n} routine{}", if n == 1 { "" } else { "s" });
-                if let Some((used, budget)) = budget {
-                    line.push_str(&format!(" · {used} of {budget} runs today"));
-                }
-                line
+                format!("{n} routine{}", if n == 1 { "" } else { "s" })
             },
         };
         let actions = div().px(px(4.0)).pt(px(2.0)).flex().flex_row().child(
@@ -743,8 +715,6 @@ impl Shell {
             title: routine.name.clone(),
             subtitle: job_sub(&job, space.as_ref().map(|s| s.display_name())),
         };
-        let today = now.format("%Y-%m-%d").to_string();
-        let used = runs_today(routine.runs_today, routine.runs_day.as_deref(), &today);
         let mut body = div()
             .p(px(8.0))
             .flex()
@@ -793,19 +763,6 @@ impl Shell {
                 theme,
                 "Last run",
                 self.last_run_value(routine.last_run.as_ref(), theme, cx),
-            ))
-            .child(parts::fact(
-                theme,
-                "Today",
-                SharedString::from(format!(
-                    "{used} of {} run{}",
-                    routine.max_runs_per_day,
-                    if routine.max_runs_per_day == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
-                )),
             ));
         if let Some(sessions) = self.session_links(&routine, theme, cx) {
             body = body.child(parts::fact(theme, "Sessions", sessions));
@@ -1262,7 +1219,6 @@ impl Shell {
                 enabled: existing.is_none_or(|r| r.enabled),
                 write_notes: form.write_notes,
                 work_directly: form.work_directly,
-                max_runs_per_day: existing.map_or(24, |r| r.max_runs_per_day),
                 created_at: existing.map_or(now, |r| r.created_at),
                 updated_at: now,
                 run_requested_at: None,
@@ -1271,8 +1227,6 @@ impl Shell {
                 worktree_path: None,
                 last_run: None,
                 next_run_at: None,
-                runs_today: 0,
-                runs_day: None,
             };
             routine.validate()?;
             if routine.target.space_id().is_some() && !coordinate {
@@ -1888,8 +1842,6 @@ mod tests {
         assert_eq!(state_note(JobState::Next(next), &now), "Mon");
         assert_eq!(state_note(JobState::Off, &now), "off");
         assert_eq!(state_note(JobState::Manual, &now), "manual");
-        assert_eq!(runs_today(3, Some("2026-10-18"), "2026-10-18"), 3);
-        assert_eq!(runs_today(3, Some("2026-10-17"), "2026-10-18"), 0);
     }
 
     #[test]
@@ -1981,7 +1933,6 @@ mod tests {
             enabled: true,
             write_notes: false,
             work_directly: false,
-            max_runs_per_day: 24,
             created_at: 0,
             updated_at: 0,
             run_requested_at: None,
@@ -1990,8 +1941,6 @@ mod tests {
             worktree_path: None,
             last_run: None,
             next_run_at: None,
-            runs_today: 0,
-            runs_day: None,
         };
         assert_eq!(routine.validate(), Err("Name the routine.".into()));
     }
@@ -2024,7 +1973,6 @@ mod tests {
             enabled: true,
             write_notes: false,
             work_directly: false,
-            max_runs_per_day: 24,
             created_at: 0,
             updated_at: 0,
             run_requested_at: None,
@@ -2033,8 +1981,6 @@ mod tests {
             worktree_path: None,
             last_run: None,
             next_run_at: None,
-            runs_today: 0,
-            runs_day: None,
         };
         assert!(routine_sessions(&routine).is_empty());
         routine.thread_chat_id = Some("standing".into());

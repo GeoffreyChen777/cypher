@@ -419,8 +419,8 @@ routines apart is where they run and what they can reach:
   for 10 minutes", "CI failed on main").
 - **Unattended:** a routine run never waits for approval. Permission prompts
   are denied automatically and the run settles as failed, with a notification.
-- **Budgets:** turns per run and runs per day per routine, and the bot's `paused` flag as a
-  kill switch for all of its routines.
+- **Limits:** the 15-minute minimum interval and the bot's `paused` flag as a kill switch
+  for all of its routines. There is no per-day run cap.
 - **Missed runs:** a device that slept through a schedule runs the job once on wake and
   skips the rest.
 - **Delivery:** the scheduler queues a durable command, so jobs run with no UI open.
@@ -432,7 +432,7 @@ As built (P3, engine). A routine is a registry row: `botRoutines` (`BotRoutine`)
 Owner devices write the definition and `runRequestedAt` ("Run now"); the host writes only
 `threadChatId` (the standing session), `manualChatId` (the latest Run now's session),
 `worktreePath` (a project routine's own worktree), `lastRun` (with `manual` set for a Run
-now), `nextRunAt`, `runsToday` and `runsDay`. A schedule is `{kind: "daily", time:
+now) and `nextRunAt`. A schedule is `{kind: "daily", time:
 "HH:MM", days?: [1–7]}`, `{kind: "interval", minutes ≥ 15}` or `{kind: "manual"}`, in the
 host's local time. Project tasks, an earlier separate record kind owned by a project,
 were folded into project routines before release.
@@ -451,10 +451,8 @@ while a run it started is going or a post waits, on session status changes. Per 
   next run is planned from now, so the rest are skipped.
 - **Never twice:** while the last run is `running`, a slot that comes due is skipped and a
   request waits for the run to end.
-- **Pause and budget:** a due routine of a paused bot, or one that already ran
-  `maxRunsPerDay` times today (`runsToday` on the local date `runsDay`), gets `lastRun`
-  `skipped` with the reason ("Skipped: the bot is paused."); a request is skipped the same
-  way. Tasks have neither.
+- **Pause:** a due routine of a paused bot gets `lastRun` `skipped` with the reason
+  ("Skipped: the workspace is paused."); a request is skipped the same way.
 - **Delivery survives restarts:** the run is recorded (`lastRun {at, outcome: running,
   chatId}`) before its Run command is queued in the chat's durable command ledger. A pass
   settles a running record from that command and the session: a command still pending is
@@ -903,8 +901,8 @@ duration bills while an object is awake (docs/operations/cloudflare-billing.md).
   workers', the same as running those sessions by hand.
 - **Search stays local.** Scanning or indexing reads stored snapshots and never holds
   chat2 rooms open.
-- **Bounded worst case.** Rate limits per connection, budgets per routine and limits per
-  orchestration cap a runaway loop.
+- **Bounded worst case.** Rate limits per connection, the routines' minimum interval
+  and limits per orchestration cap a runaway loop.
 
 Measure the network with `scripts/ops/edge-billing-local.mjs` against two dev engines
 before it ships.
@@ -996,7 +994,7 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 |---|---|---|
 | **Needs you** | Plans awaiting approval, workers asking or failed on an approval, tainted actions awaiting approval, and later review drafts | The item with its context and actions: the plan to approve, the question with the worker's recent messages and the bot's suggested answer, the action and why it needs approval |
 | **Work** | Running orchestrations with their current step, a step bar and elapsed time; the last few finished ones with a one-line result | The orchestration: every step with project, device, worker session link, state and duration; Stop; the result |
-| **Routines** | Its routines in order of next run: name, where and when it runs, next run, last result; today's budget use | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
+| **Routines** | Its routines in order of next run: name, where and when it runs, next run, last result | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
 | **Projects** | Each granted project with device, running and waiting sessions, and "works directly" or "via sessions" | The project's sessions in scope with status, the bot's worker sessions there, git state |
 | **Notebook** | The latest few entries, bot-written ones marked | All entries with their sources, editable and deletable |
 | **Network** (P4) | Connections with reply mode and last exchange; pending invites | A connection: its scope, reply mode, rate limits, exchanges, revoke |
@@ -1074,7 +1072,7 @@ As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is n
 | Any second kind of thread | One role-aware run profile; origin stamped by the engine on the chat row; the "transcript text is data" instruction in every bot prompt. |
 | *Work directly* | Owner threads only; permission control on with the bot's local checkouts as workspace roots; the taint rule. |
 | *Coordinate* | Capabilities checked per call; an audit log of every coordination call; worker sessions limited to the read scope; plan approval; Stop that reaches every started session; limits. |
-| Routines | A non-interactive run mode that denies approvals and settles as failed; budgets; the `paused` kill switch; no `ask_bot` from routines. |
+| Routines | A non-interactive run mode that denies approvals and settles as failed; the `paused` kill switch; no `ask_bot` from routines. |
 | Bot-written notes | Provenance on every entry and a notebook view to delete them. |
 | *Represent* | Peer threads read-only with no notebook, no network tools and no slash commands; scope ∩ connection scope; the outgoing scrub; rate limits. |
 | *Coordinate: steer* | The same as *Coordinate*, plus per-session confirmation for sessions the bot did not start. |

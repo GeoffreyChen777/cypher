@@ -250,20 +250,16 @@ impl Bots {
             None => {}
             Some(due) => {
                 let manual = due == schedule::Due::Requested;
-                let today = now.format("%Y-%m-%d").to_string();
-                let runs =
-                    schedule::runs_on(&today, routine.runs_today, routine.runs_day.as_deref());
                 next = after();
                 routine.next_run_at = next;
-                let reason = schedule::skip_reason(bot.paused, runs, routine.max_runs_per_day)
-                    .or_else(|| {
-                        routine.target.space_id().and_then(|id| {
-                            schedule::project_skip(
-                                bot.capabilities.coordinate,
-                                bot.scope.sees_space(id),
-                            )
-                        })
-                    });
+                let reason = schedule::skip_reason(bot.paused).or_else(|| {
+                    routine.target.space_id().and_then(|id| {
+                        schedule::project_skip(
+                            bot.capabilities.coordinate,
+                            bot.scope.sees_space(id),
+                        )
+                    })
+                });
                 match reason {
                     Some(reason) => {
                         routine.last_run = Some(RunRecord {
@@ -277,8 +273,6 @@ impl Bots {
                         self.write_routine(&mut routine)?;
                     }
                     None => {
-                        routine.runs_today = runs + 1;
-                        routine.runs_day = Some(today);
                         self.start_routine(bot, &mut routine, space, manual, now)
                             .await?;
                         watching = true;

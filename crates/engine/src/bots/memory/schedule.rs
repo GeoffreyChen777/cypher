@@ -82,28 +82,9 @@ pub(super) fn is_running(last_run: Option<&RunRecord>) -> bool {
     last_run.is_some_and(|run| run.outcome == RunOutcome::Running)
 }
 
-/// Runs already made on `today` (the host's local date), from the routine's
-/// counter for `runs_day`.
-pub(super) fn runs_on(today: &str, runs_today: u32, runs_day: Option<&str>) -> u32 {
-    if runs_day == Some(today) {
-        runs_today
-    } else {
-        0
-    }
-}
-
 /// Why a due routine is skipped instead of run, if it is.
-pub(super) fn skip_reason(paused: bool, runs_today: u32, max_runs_per_day: u32) -> Option<String> {
-    if paused {
-        Some("Skipped: the workspace is paused.".into())
-    } else if runs_today >= max_runs_per_day {
-        Some(format!(
-            "Skipped: today's budget of {max_runs_per_day} run{} is spent.",
-            if max_runs_per_day == 1 { "" } else { "s" }
-        ))
-    } else {
-        None
-    }
+pub(super) fn skip_reason(paused: bool) -> Option<String> {
+    paused.then(|| "Skipped: the workspace is paused.".into())
 }
 
 /// Why a due project routine is skipped: its bot lost *Coordinate*, or the
@@ -274,17 +255,10 @@ mod tests {
     }
 
     #[test]
-    fn budgets_and_pauses_skip_runs() {
-        assert_eq!(runs_on("2026-10-19", 3, Some("2026-10-19")), 3);
-        assert_eq!(runs_on("2026-10-19", 3, Some("2026-10-18")), 0, "a new day");
-        assert_eq!(runs_on("2026-10-19", 3, None), 0);
-        assert_eq!(skip_reason(false, 2, 3), None);
+    fn pauses_skip_runs() {
+        assert_eq!(skip_reason(false), None);
         assert_eq!(
-            skip_reason(false, 3, 3).as_deref(),
-            Some("Skipped: today's budget of 3 runs is spent.")
-        );
-        assert_eq!(
-            skip_reason(true, 0, 3).as_deref(),
+            skip_reason(true).as_deref(),
             Some("Skipped: the workspace is paused.")
         );
         assert!(is_running(Some(&run(1, RunOutcome::Running))));

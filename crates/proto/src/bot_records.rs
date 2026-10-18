@@ -483,7 +483,7 @@ pub enum RunOutcome {
     Running,
     Done,
     Failed,
-    /// Skipped: the bot was paused, or the day's budget was spent.
+    /// Skipped: the bot was paused, or can no longer run it there.
     Skipped,
 }
 
@@ -568,9 +568,6 @@ pub struct BotRoutine {
     /// Unattended: anything that would ask for approval fails the run.
     #[serde(default)]
     pub work_directly: bool,
-    /// Runs a day before the rest are skipped.
-    #[serde(default = "default_runs_per_day")]
-    pub max_runs_per_day: u32,
     pub created_at: i64,
     pub updated_at: i64,
     /// Owner-written: run once now.
@@ -591,11 +588,6 @@ pub struct BotRoutine {
     pub last_run: Option<RunRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_run_at: Option<i64>,
-    /// Runs on `runs_day` (the host's local date, "YYYY-MM-DD").
-    #[serde(default)]
-    pub runs_today: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runs_day: Option<String>,
 }
 
 impl BotRoutine {
@@ -606,8 +598,6 @@ impl BotRoutine {
         "worktreePath",
         "lastRun",
         "nextRunAt",
-        "runsToday",
-        "runsDay",
     ];
 
     pub fn clamp(&mut self) {
@@ -638,10 +628,6 @@ impl BotRoutine {
 
 fn yes() -> bool {
     true
-}
-
-fn default_runs_per_day() -> u32 {
-    24
 }
 
 // ── activity log (§4.4) ─────────────────────────────────────────────────────

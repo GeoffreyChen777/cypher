@@ -390,7 +390,6 @@ impl Bots {
                 .work_directly
                 .or(existing.as_ref().map(|r| r.work_directly))
                 .unwrap_or(false),
-            max_runs_per_day: existing.as_ref().map_or(24, |r| r.max_runs_per_day),
             created_at: existing.as_ref().map_or(now, |r| r.created_at),
             updated_at: now,
             run_requested_at: None,
@@ -399,8 +398,6 @@ impl Bots {
             worktree_path: None,
             last_run: None,
             next_run_at: None,
-            runs_today: 0,
-            runs_day: None,
         };
         routine.clamp();
         routine.validate().map_err(EngineError::Other)?;

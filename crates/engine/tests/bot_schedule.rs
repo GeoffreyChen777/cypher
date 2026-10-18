@@ -170,7 +170,6 @@ fn routine_def(id: &str, bot: &Bot, prompt: &str, schedule: Schedule) -> BotRout
         enabled: true,
         write_notes: false,
         work_directly: false,
-        max_runs_per_day: 24,
         created_at: 0,
         updated_at: 0,
         run_requested_at: None,
@@ -179,8 +178,6 @@ fn routine_def(id: &str, bot: &Bot, prompt: &str, schedule: Schedule) -> BotRout
         worktree_path: None,
         last_run: None,
         next_run_at: None,
-        runs_today: 0,
-        runs_day: None,
     }
 }
 
@@ -267,7 +264,6 @@ async fn a_due_routine_runs_in_its_thread_and_posts_to_the_bot_chat() {
         run.summary.as_deref(),
         Some("Report: Tell me what's stuck.")
     );
-    assert_eq!(done.runs_today, 1);
     assert!(
         done.next_run_at.unwrap() > p::now_ms() + 50 * 60_000,
         "the rest is skipped: the next run is planned from now"
@@ -426,15 +422,12 @@ async fn run_now_failures_and_the_pause_switch() {
         "no session, no run"
     );
 
-    // Resumed, a new request runs; a spent budget skips the next one.
+    // Resumed, a new request runs.
     mutate(
         &core,
         serde_json::json!({ "op": "setBotPaused", "botId": bot.id, "paused": false }),
     )
     .await;
-    let mut once = quiet.clone();
-    once.max_runs_per_day = 1;
-    save_routine(&core, &once).await;
     mutate(
         &core,
         serde_json::json!({ "op": "runBotRoutine", "routineId": "r-quiet" }),
@@ -445,25 +438,6 @@ async fn run_now_failures_and_the_pause_switch() {
         "the resumed run",
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    mutate(
-        &core,
-        serde_json::json!({ "op": "runBotRoutine", "routineId": "r-quiet" }),
-    )
-    .await;
-    wait_for(
-        || last_outcome(&core, "r-quiet") == Some(RunOutcome::Skipped),
-        "the over-budget run to be skipped",
-    )
-    .await;
-    assert_eq!(
-        routine(&core, "r-quiet")
-            .last_run
-            .unwrap()
-            .summary
-            .as_deref(),
-        Some("Skipped: today's budget of 1 run is spent.")
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

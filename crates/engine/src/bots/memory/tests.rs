@@ -194,7 +194,6 @@ fn the_schedule_lists_routines_and_where_they_run() {
         enabled: true,
         write_notes: true,
         work_directly: false,
-        max_runs_per_day: 24,
         created_at: 0,
         updated_at: 0,
         run_requested_at: None,
@@ -210,8 +209,6 @@ fn the_schedule_lists_routines_and_where_they_run() {
             manual: false,
         }),
         next_run_at: Some(nine.timestamp_millis()),
-        runs_today: 0,
-        runs_day: None,
     });
     let mut nightly = records.routines[0].clone();
     nightly.id = "r2".into();
