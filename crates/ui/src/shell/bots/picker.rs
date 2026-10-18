@@ -12,9 +12,10 @@ use super::*;
 use crate::widgets::text_input;
 use gpui::{FocusHandle, KeyDownEvent};
 
-/// The row's avatar, and the list rows' one.
-const AVATAR: f32 = 20.0;
-const LIST_AVATAR: f32 = 18.0;
+/// The row's bot face, and the list rows' one (bare glyphs: the row's own
+/// fill sets it apart).
+const AVATAR: f32 = 16.0;
+const LIST_AVATAR: f32 = 15.0;
 /// Bots before the list leads with a search field.
 const SEARCH_FROM: usize = 6;
 /// The list's height before it scrolls.
@@ -193,7 +194,7 @@ impl Shell {
         let bot = current.bot.clone();
         let key = "bot-switcher";
         let open = self.menus.bot_switcher.get().is_some();
-        let avatar = crate::appearance::bot_style::bot_avatar(
+        let avatar = crate::appearance::bot_style::bot_glyph(
             &bot.name,
             bot.icon.as_deref(),
             bot.color.as_deref(),
@@ -212,13 +213,15 @@ impl Shell {
             .items_center()
             .gap(px(7.0))
             .cursor_pointer()
+            // Always filled, so the switcher reads as a control above the
+            // cards; deeper on hover and while its list is open.
             .bg(if open {
-                crate::kit::theme::wash(0.08)
+                crate::kit::theme::wash(0.12)
             } else {
                 motion::hover_blend(
                     key,
-                    crate::kit::theme::wash(0.0),
-                    crate::kit::theme::wash(0.06),
+                    crate::kit::theme::wash(0.07),
+                    crate::kit::theme::wash(0.10),
                 )
             })
             .on_hover(motion::hover_listener(key))
@@ -240,9 +243,18 @@ impl Shell {
                     cx.notify();
                 }),
             )
-            // The avatar sits in the cards' 20px glyph box, so the name
+            // The face sits in the cards' 20px glyph box, so the name
             // shares the card titles' column below.
-            .child(div().flex_none().ml(px(-3.0)).child(avatar))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(20.0))
+                    .ml(px(-3.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(avatar),
+            )
             .child(
                 div()
                     .min_w_0()
@@ -381,7 +393,7 @@ impl Shell {
                             cx.notify();
                         }),
                     )
-                    .child(crate::appearance::bot_style::bot_avatar(
+                    .child(crate::appearance::bot_style::bot_glyph(
                         &bot.name,
                         bot.icon.as_deref(),
                         bot.color.as_deref(),

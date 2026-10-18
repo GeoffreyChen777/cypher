@@ -72,6 +72,33 @@ pub fn initial(name: &str) -> String {
         .unwrap_or_else(|| "·".into())
 }
 
+/// The bot's face alone, no square behind it, in its tint: for rows whose
+/// own surface already sets it apart (the Botboard's switcher). `size` is
+/// the glyph's box.
+pub fn bot_glyph(
+    name: &str,
+    icon_key: Option<&str>,
+    color_key: Option<&str>,
+    size: f32,
+    theme: &Theme,
+) -> Div {
+    let fg = crate::appearance::space_style::space_color(color_key, theme).unwrap_or(theme.text);
+    let cell = div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center();
+    match bot_icon(icon_key) {
+        Some(asset) => cell.child(icon(asset).size(px(size)).text_color(fg)),
+        None => cell
+            .text_size(px(size * 0.8))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(fg)
+            .child(SharedString::from(initial(name))),
+    }
+}
+
 /// A `size`-px avatar square. The tint colours the glyph; the square takes a
 /// faint wash of it.
 pub fn bot_avatar(
