@@ -1113,18 +1113,76 @@ impl RegistryDoc {
         Ok(bots)
     }
 
-    /// Tombstone the bot together with its chat and that chat's status row,
-    /// in one batch. Returns the bot's chat id when the bot existed.
-    pub fn delete_bot(&mut self, bot_id: &str) -> Result<Option<String>, DocError> {
+    /// Tombstone the bot with every chat it owns (its bot chat and hidden
+    /// threads) and their status rows, and its records, in one batch.
+    /// Connections and invites stay: the bot's host revokes them on the Edge
+    /// first. Returns the bot's chat ids (its bot chat first) when the bot
+    /// existed.
+    pub fn delete_bot(&mut self, bot_id: &str) -> Result<Option<Vec<String>>, DocError> {
         let Some(bot) = self.bot(bot_id)? else {
             return Ok(None);
         };
-        self.delete_row_ops(&[
-            (KIND_BOTS, bot_id),
-            (KIND_CHATS, &bot.chat_id),
-            (KIND_SESSIONS, &bot.chat_id),
-        ]);
-        Ok(Some(bot.chat_id))
+        let mut chat_ids = vec![bot.chat_id.clone()];
+        chat_ids.extend(
+            self.read_chats()?
+                .into_iter()
+                .filter(|c| c.id != bot.chat_id)
+                .filter(|c| c.bot.as_ref().is_some_and(|m| m.bot_id == bot_id))
+                .map(|c| c.id),
+        );
+        let records = self.read_bot_records();
+        let mut records_of: Vec<(&str, String)> = Vec::new();
+        use cypher_proto as p;
+        records_of.extend(
+            records
+                .work
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_WORK, r.id.clone())),
+        );
+        records_of.extend(
+            records
+                .notes
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_NOTES, r.id.clone())),
+        );
+        records_of.extend(
+            records
+                .routines
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_ROUTINES, r.id.clone())),
+        );
+        records_of.extend(
+            records
+                .activity
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_ACTIVITY, r.id.clone())),
+        );
+        records_of.extend(
+            records
+                .approvals
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_APPROVALS, r.id.clone())),
+        );
+        records_of.extend(
+            records
+                .exchanges
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_EXCHANGES, r.id.clone())),
+        );
+        let mut keys: Vec<(&str, &str)> = vec![(KIND_BOTS, bot_id)];
+        for chat_id in &chat_ids {
+            keys.push((KIND_CHATS, chat_id));
+            keys.push((KIND_SESSIONS, chat_id));
+        }
+        keys.extend(records_of.iter().map(|(kind, id)| (*kind, id.as_str())));
+        self.delete_row_ops(&keys);
+        Ok(Some(chat_ids))
     }
 
     // ── bot records (cypher_proto::bot_records) ─────────────────────────────

@@ -1083,19 +1083,43 @@ fn bots_round_trip_update_and_survive_a_snapshot() {
 }
 
 #[test]
-fn deleting_a_bot_removes_its_chat() {
+fn deleting_a_bot_removes_its_chats_and_records() {
+    use cypher_proto as p;
     let mut doc = RegistryDoc::new("dev-a");
     let mut own = chat("c1", "dev-a");
-    own.bot = Some(cypher_proto::BotChat::owner("b1"));
+    own.bot = Some(p::BotChat::owner("b1"));
     doc.upsert_chat(&own).unwrap();
+    let mut thread = chat("t1", "dev-a");
+    thread.bot = Some(p::BotChat::thread(
+        "b1",
+        p::BotOrigin::Routine,
+        p::BotThread::Routine {
+            routine_id: "r1".into(),
+        },
+    ));
+    doc.upsert_chat(&thread).unwrap();
     doc.upsert_chat(&chat("other", "dev-a")).unwrap();
     doc.upsert_bot(&bot("b1", "c1")).unwrap();
+    let mut note = serde_json::Map::new();
+    for (k, v) in [
+        ("id", json!("n1")),
+        ("botId", json!("b1")),
+        ("text", json!("x")),
+        ("createdAt", json!(1)),
+        ("updatedAt", json!(1)),
+    ] {
+        note.insert(k.into(), v);
+    }
+    doc.put_record(p::KIND_BOT_NOTES, "n1", note).unwrap();
     assert_eq!(
         doc.chat("c1").unwrap().unwrap().bot.unwrap().bot_id,
         "b1",
         "the chat marker round-trips"
     );
-    assert_eq!(doc.delete_bot("b1").unwrap().as_deref(), Some("c1"));
+    assert_eq!(
+        doc.delete_bot("b1").unwrap(),
+        Some(vec!["c1".to_string(), "t1".to_string()])
+    );
     assert_eq!(doc.delete_bot("b1").unwrap(), None);
     let all = doc.read_all().unwrap();
     assert!(all.bots.is_empty());
@@ -1103,6 +1127,7 @@ fn deleting_a_bot_removes_its_chat() {
         all.chats.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
         ["other"]
     );
+    assert!(doc.read_bot_records().notes.is_empty());
 }
 
 #[test]

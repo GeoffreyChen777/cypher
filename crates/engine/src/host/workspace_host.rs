@@ -287,6 +287,18 @@ impl WorkspaceHost {
     }
 
     pub fn notify_session_event(&self, session: &Session) {
+        // A bot's hidden threads (orchestrations, routines, peer questions)
+        // are never the owner's to be pinged about: their results reach the
+        // owner through the bot chat and the Botboard.
+        if self
+            .chat(&session.chat_id)
+            .ok()
+            .flatten()
+            .and_then(|chat| chat.bot)
+            .is_some_and(|marker| !marker.is_main())
+        {
+            return;
+        }
         if let Some(hook) = lock(&self.inner.notification_event).clone() {
             hook(session);
         }

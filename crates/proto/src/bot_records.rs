@@ -62,6 +62,8 @@ pub const STEP_SESSIONS_MAX: usize = 8;
 /// Limits the host enforces per bot (§6.6).
 pub const MAX_RUNNING_WORK: usize = 3;
 pub const MAX_SESSIONS_PER_WORK: usize = 8;
+/// How long an orchestration may run before the host stops it.
+pub const WORK_TIME_BUDGET_MS: i64 = 4 * 60 * 60 * 1000;
 /// Records the host keeps per bot before pruning the oldest.
 pub const KEEP_ACTIVITY: usize = 200;
 pub const KEEP_FINISHED_WORK: usize = 40;

@@ -171,8 +171,15 @@ impl Bots {
                         None => Ok(()),
                     },
                     WorkState::Running if w.stop_requested_at.is_some() => {
-                        self.stop_work(bot, w, &sessions)
+                        self.stop_work(bot, w, &sessions, None)
                     }
+                    // The time budget (§6.6) stops it like the owner would.
+                    WorkState::Running if over_budget(w, p::now_ms()) => self.stop_work(
+                        bot,
+                        w,
+                        &sessions,
+                        Some("It ran past its 4-hour time budget, so it was stopped."),
+                    ),
                     WorkState::Running => {
                         running += 1;
                         self.follow_work(bot, w, &sessions)
@@ -533,6 +540,7 @@ impl Bots {
         bot: &Bot,
         work: &BotWork,
         sessions: &HashMap<String, Session>,
+        reason: Option<&str>,
     ) -> Result<(), EngineError> {
         let docs = &self.inner.doc_host;
         if let Some(thread) = &work.thread_chat_id
@@ -561,6 +569,9 @@ impl Bots {
             }
             w.state = WorkState::Stopped;
             w.ended_at = Some(now);
+            if let Some(reason) = reason {
+                w.result = Some(reason.to_string());
+            }
             for step in &mut w.steps {
                 if !matches!(
                     step.state,
@@ -576,7 +587,10 @@ impl Bots {
             self.log(
                 &bot.id,
                 ActivityKind::WorkStopped,
-                format!("Stopped the plan: {}", work.title),
+                match reason {
+                    Some(_) => format!("Stopped the plan at its time budget: {}", work.title),
+                    None => format!("Stopped the plan: {}", work.title),
+                },
                 work.thread_chat_id.as_deref(),
                 Some(&work.id),
                 None,
@@ -584,6 +598,12 @@ impl Bots {
         }
         Ok(())
     }
+}
+
+/// Running work past [`p::WORK_TIME_BUDGET_MS`] since it started.
+fn over_budget(work: &BotWork, now_ms: i64) -> bool {
+    work.started_at
+        .is_some_and(|started| now_ms - started > p::WORK_TIME_BUDGET_MS)
 }
 
 #[cfg(test)]
@@ -623,6 +643,15 @@ mod tests {
             decision: None,
             stop_requested_at: None,
         }
+    }
+
+    #[test]
+    fn work_stops_at_its_time_budget() {
+        let mut work = work("w", WorkState::Running, 0);
+        assert!(!over_budget(&work, 10), "not started");
+        work.started_at = Some(1_000);
+        assert!(!over_budget(&work, 1_000 + p::WORK_TIME_BUDGET_MS));
+        assert!(over_budget(&work, 1_001 + p::WORK_TIME_BUDGET_MS));
     }
 
     #[test]

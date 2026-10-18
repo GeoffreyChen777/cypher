@@ -482,8 +482,9 @@ impl WorkspaceHost {
         })?)
     }
 
-    /// Tombstone the bot with its chat; the chat id when the bot existed.
-    pub fn delete_bot(&self, bot_id: &str) -> Result<Option<String>, EngineError> {
+    /// Tombstone the bot with its chats and records; its chat ids (the bot
+    /// chat first) when the bot existed.
+    pub fn delete_bot(&self, bot_id: &str) -> Result<Option<Vec<String>>, EngineError> {
         Ok(self.mutate(|doc| doc.delete_bot(bot_id))?)
     }
 

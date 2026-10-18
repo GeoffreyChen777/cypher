@@ -288,16 +288,20 @@ impl EngineRpc {
             | MutateParams::ReviewBotExchange { .. }) => self.mutate_bot_record(record),
             MutateParams::DeleteBot { bot_id } => {
                 let bot = self.workspace.bot(&bot_id).map_err(failed)?;
-                let Some(chat_id) = self.workspace.delete_bot(&bot_id).map_err(failed)? else {
+                let Some(chat_ids) = self.workspace.delete_bot(&bot_id).map_err(failed)? else {
                     return Ok(());
                 };
-                self.doc_host.purge_chat(&chat_id);
+                for chat_id in &chat_ids {
+                    self.doc_host.purge_chat(chat_id);
+                }
                 if bot.is_some_and(|b| b.host_device_id == self.doc_host.device_id()) {
                     let sessions = self.sessions.clone();
                     let bots = self.bots.clone();
                     tokio::spawn(async move {
-                        if let Err(err) = sessions.interrupt(&chat_id).await {
-                            tracing::debug!(chat = %chat_id, error = %err, "bot interrupt skipped");
+                        for chat_id in chat_ids {
+                            if let Err(err) = sessions.interrupt(&chat_id).await {
+                                tracing::debug!(chat = %chat_id, error = %err, "bot interrupt skipped");
+                            }
                         }
                         if let Some(bots) = bots {
                             bots.remove_folder(&bot_id);
