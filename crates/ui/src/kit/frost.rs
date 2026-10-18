@@ -47,6 +47,21 @@ pub fn frosted_always(corner_radius: f32, blur_radius: f32, child: impl IntoElem
     frosted_bar(Corners::all(px(corner_radius)), blur_radius, child)
 }
 
+/// [`frosted`] with its own corners: one slice of a glass shape several
+/// elements draw together, rounded only at the shape's ends.
+pub fn frosted_corners(
+    corners: Corners<Pixels>,
+    blur_radius: f32,
+    child: impl IntoElement,
+) -> Frosted {
+    Frosted {
+        corners,
+        blur_radius,
+        always: false,
+        child: child.into_any_element(),
+    }
+}
+
 /// [`frosted_always`] with its own corners: a glass bar pinned to one edge
 /// of a card (a dialog's header or footer over its scrolling body), rounded
 /// only where the card is.

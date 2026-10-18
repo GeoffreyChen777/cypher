@@ -336,85 +336,77 @@ impl Transcript {
         // them is drawn inside, so the card is one unbroken box.
         let (top_gap, inner) = match row.card {
             Some(slice) => {
-                let (bg, line) = if slice.failed {
-                    let edge = if theme.appearance.is_dark() {
-                        0.22
-                    } else {
-                        0.13
-                    };
-                    (theme.danger.opacity(0.05), theme.danger.opacity(edge))
-                } else {
-                    // Light mode's hairline scale runs dark; keep the edge soft.
-                    let edge = if theme.appearance.is_dark() {
-                        0.1
-                    } else {
-                        0.045
-                    };
+                // The composer pill's glass: its fill and border, frosted,
+                // with its soft lift drawn only outside the shape. Every
+                // slice draws its share; at a seam the shadow's shape runs
+                // on past the slice and is clipped to it, so slices join
+                // without a notch.
+                const RADIUS: f32 = 14.0;
+                const RUN_ON: f32 = 40.0;
+                let reach = crate::kit::soft_shadow::Reach {
+                    top: 3.0,
+                    side: 8.0,
+                    bottom: 14.0,
+                };
+                let (fill, line) = if slice.failed {
                     (
-                        crate::kit::theme::ink(0.035),
-                        crate::kit::theme::hairline(edge),
+                        theme.danger.opacity(0.06),
+                        theme.danger.opacity(if theme.appearance.is_dark() {
+                            0.22
+                        } else {
+                            0.16
+                        }),
                     )
+                } else {
+                    (theme.input_glass_bg(), theme.border)
                 };
-                // One shadow for the whole card: every slice draws it under
-                // itself, cast by a box that runs on past its own edges at
-                // a seam, and clips it to its own bounds, so the slices
-                // join without a notch.
-                const SHADE: f32 = 10.0;
-                const RUN_ON: f32 = 32.0;
-                let dark = theme.appearance.is_dark();
-                let shade = |blur: f32, y: f32, alpha: f32| gpui::BoxShadow {
-                    color: gpui::hsla(0.0, 0.0, 0.0, alpha),
-                    offset: gpui::point(px(0.0), px(y)),
-                    blur_radius: px(blur),
-                    spread_radius: px(-1.0),
-                    inset: false,
+                let corners = gpui::Corners {
+                    top_left: px(if slice.top { RADIUS } else { 0.0 }),
+                    top_right: px(if slice.top { RADIUS } else { 0.0 }),
+                    bottom_left: px(if slice.bottom { RADIUS } else { 0.0 }),
+                    bottom_right: px(if slice.bottom { RADIUS } else { 0.0 }),
                 };
-                let (near, far) = if dark { (0.28, 0.22) } else { (0.06, 0.05) };
-                // The caster is opaque (the chat's own ground), or the
-                // shadow would show through the card's translucent tint.
-                let mut ground = crate::appearance::chat_style::panel_background(
-                    crate::appearance::chat_style::settings(cx),
-                    crate::kit::theme::Theme::of(cx),
-                    true,
-                );
-                ground.a = 1.0;
-                let caster = div()
-                    .absolute()
-                    .left(px(SHADE))
-                    .right(px(SHADE))
-                    .top(px(if slice.top { SHADE } else { -RUN_ON }))
-                    .bottom(px(if slice.bottom { SHADE } else { -RUN_ON }))
-                    .bg(ground)
-                    .when(slice.top, |el| el.rounded_t(px(12.0)))
-                    .when(slice.bottom, |el| el.rounded_b(px(12.0)))
-                    .shadow(vec![shade(3.0, 1.0, near), shade(14.0, 4.0, far)]);
                 let face = div()
-                    .relative()
                     .w_full()
-                    .bg(bg)
+                    .bg(fill)
                     .border_l_1()
                     .border_r_1()
                     .border_color(line)
                     .px(px(16.0))
-                    .when(slice.top, |el| el.border_t_1().rounded_t(px(12.0)))
+                    .when(slice.top, |el| el.border_t_1().rounded_t(px(RADIUS)))
                     .when(!slice.top, |el| el.pt(px(top_gap)))
                     .when(slice.bottom, |el| {
-                        el.border_b_1().rounded_b(px(12.0)).pb(px(14.0))
+                        el.border_b_1().rounded_b(px(RADIUS)).pb(px(14.0))
                     })
                     .child(inner);
+                let face = crate::kit::frost::frosted_corners(corners, 16.0, face);
+                let run_top = if slice.top { 0.0 } else { RUN_ON };
+                let run_bottom = if slice.bottom { 0.0 } else { RUN_ON };
+                let lift = div()
+                    .absolute()
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .top(px(-run_top))
+                    .bottom(px(-run_bottom))
+                    .child(
+                        crate::kit::soft_shadow::outside_shadow(RADIUS, reach, theme.lift_shadow())
+                            .size_full(),
+                    );
                 let card = div()
                     .relative()
                     .overflow_hidden()
-                    .mx(px(-SHADE))
-                    .px(px(SHADE))
-                    .when(slice.top, |el| el.pt(px(SHADE)))
-                    .when(slice.bottom, |el| el.pb(px(SHADE)))
-                    .child(caster)
+                    .mx(px(-reach.side))
+                    .px(px(reach.side))
+                    .when(slice.top, |el| el.pt(px(reach.top)))
+                    .when(slice.bottom, |el| el.pb(px(reach.bottom)))
+                    // The lift is painted after the frost, so the blur never
+                    // samples it.
                     .child(face)
+                    .child(lift)
                     .into_any_element();
                 (
                     if slice.top {
-                        (top_gap + 6.0 - SHADE).max(0.0)
+                        (top_gap + 6.0 - reach.top).max(0.0)
                     } else {
                         0.0
                     },
