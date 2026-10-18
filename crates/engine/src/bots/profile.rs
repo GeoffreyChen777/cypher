@@ -7,7 +7,9 @@
 //! capabilities live in the profile.
 
 use cypher_harness::BotRunEnv;
-use cypher_proto::{Bot, BotOrigin, Chat, PermissionPromptKind, UserInputQuestion};
+use cypher_proto::{
+    Bot, BotOrigin, BotThread, Chat, PermissionPromptKind, SandboxLevel, UserInputQuestion,
+};
 
 use super::{memory, network, prompt, work};
 use crate::host::workspace_host::WorkspaceHost;
@@ -70,14 +72,23 @@ pub fn tools_for(marker: &cypher_proto::BotChat, bot: Option<&Bot>) -> Vec<Strin
     tools
 }
 
+/// The permission level a bot thread's run spawns with, decided by the
+/// engine whatever the chat row says: workspace-write for an owner thread
+/// with *Work directly* and checkouts on this device, read-only for every
+/// other bot thread (§4.4). `None` for other chats.
+pub fn run_sandbox(workspace: &WorkspaceHost, chat: &Chat) -> Option<SandboxLevel> {
+    work::run_sandbox(workspace, chat)
+}
+
 /// Whether nobody watches this chat's runs, so they must never wait for an
 /// answer: the engine denies every question and approval such a run asks
-/// and settles the run as failed (§8). Routine threads today; worker
-/// sessions an orchestration starts join them in P2.
+/// and settles the run as failed (§8). Routine threads, and orchestration
+/// threads, which are hidden: a permission prompt there would stall the
+/// work where nobody sees it, so it fails the work instead (§6.5).
 pub fn is_unattended(chat: &Chat) -> bool {
-    chat.bot
-        .as_ref()
-        .is_some_and(|marker| marker.origin == BotOrigin::Routine)
+    chat.bot.as_ref().is_some_and(|marker| {
+        marker.origin == BotOrigin::Routine || matches!(marker.thread, BotThread::Work { .. })
+    })
 }
 
 /// An unattended run the engine stopped because it asked for input. The
@@ -162,7 +173,14 @@ mod tests {
     }
 
     #[test]
-    fn only_routine_threads_are_unattended() {
+    fn only_routine_and_orchestration_threads_are_unattended() {
+        assert!(is_unattended(&chat(Some(BotChat::thread(
+            "b1",
+            BotOrigin::Owner,
+            BotThread::Work {
+                work_id: "w".into()
+            }
+        )))));
         assert!(!is_unattended(&chat(None)));
         assert!(!is_unattended(&chat(Some(BotChat::owner("b1")))));
         assert!(!is_unattended(&chat(Some(BotChat::new(

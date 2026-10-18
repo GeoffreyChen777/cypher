@@ -98,9 +98,16 @@ pub(super) fn system_prompt(
         String::new(),
         "How to work:".to_string(),
         TOOLS_LINE.to_string(),
-        "- Those tools are all you have: you cannot run commands, read files or change \
-         anything."
-            .to_string(),
+        // An owner thread that may act gets its own section (bots/work.rs).
+        if origin == BotOrigin::Owner
+            && (bot.capabilities.work_directly || bot.capabilities.coordinate)
+        {
+            "- What else you may do in this thread is described below.".to_string()
+        } else {
+            "- Those tools are all you have: you cannot run commands, read files or change \
+             anything."
+                .to_string()
+        },
         CITE_LINE.to_string(),
         DATA_LINE.to_string(),
         "- When something is outside what you can see, say so plainly instead of speculating."

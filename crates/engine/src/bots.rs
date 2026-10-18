@@ -41,6 +41,10 @@ mod tests;
 mod tools;
 mod work;
 
+/// The argument the `BotTool` RPC sets to the calling Pi tool call's id
+/// (the plan card is drawn at it); never taken from the model's arguments.
+pub const TOOL_CALL_ID_ARG: &str = "_toolCallId";
+
 /// `CreateBot` parameters (the target device is the bot's host).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -82,8 +86,9 @@ struct Inner {
     index: Arc<index::SearchIndex>,
     indexer: std::sync::Mutex<Option<Indexer>>,
     /// Threads that received another user's bot's answer (§4.3).
-    #[allow(dead_code)]
     taint: taint::Taint,
+    /// The work track's state (permission control, row edits).
+    work: work::WorkShared,
     /// Cancels the host loops (work, schedule, network) at shutdown.
     hosts_cancel: tokio_util::sync::CancellationToken,
     hosts: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -107,6 +112,7 @@ impl Bots {
                 index: Arc::new(index),
                 indexer: Default::default(),
                 taint: Default::default(),
+                work: Default::default(),
                 hosts_cancel: Default::default(),
                 hosts: Default::default(),
             }),
@@ -140,13 +146,11 @@ impl Bots {
     }
 
     /// Keep a host loop's task so shutdown can wait for it.
-    #[allow(dead_code)]
     fn keep_host_task(&self, task: tokio::task::JoinHandle<()>) {
         lock(&self.inner.hosts).push(task);
     }
 
     /// Cancelled at shutdown: host loops end when it fires.
-    #[allow(dead_code)]
     fn hosts_cancelled(&self) -> tokio_util::sync::CancellationToken {
         self.inner.hosts_cancel.clone()
     }

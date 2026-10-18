@@ -297,6 +297,18 @@ async fn a_bot_chat_runs_locked_down() {
     let core = common::engine_at(&tmp.path().join("data"), harness);
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
+    // A read-only bot: no capability beyond reading (tests/bot_work.rs
+    // covers the ones that act).
+    cypher_rpc::memory_client(core.rpc_service())
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "updateBot", "botId": bot.id, "name": bot.name,
+                "scope": billing_only(), "capabilities": {},
+            }),
+        )
+        .await
+        .expect("updateBot");
     let chat = core.workspace.chat(&bot.chat_id).unwrap().unwrap();
     // A data-directory restore can lose the folder; the run recreates it.
     std::fs::remove_dir(chat.cwd.as_deref().unwrap()).unwrap();
@@ -330,6 +342,11 @@ async fn a_bot_chat_runs_locked_down() {
     assert_eq!(env.origin, cypher_proto::BotOrigin::Owner);
     assert_eq!(env.tools, cypher_proto::BOT_TOOLS);
     assert!(env.workspace_roots.is_empty());
+    assert_eq!(
+        request.sandbox,
+        cypher_proto::SandboxLevel::ReadOnly,
+        "the engine's level, not the request's"
+    );
     assert!(env.system_prompt.contains("\"Billing bot\""));
     assert!(
         env.system_prompt.contains("sp-billing"),

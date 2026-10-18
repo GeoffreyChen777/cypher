@@ -9,6 +9,9 @@ struct BotToolParams {
     tool: String,
     #[serde(default)]
     args: serde_json::Value,
+    /// The Pi tool call this is (the plan card is drawn at it).
+    #[serde(default)]
+    tool_call_id: Option<String>,
 }
 
 pub(super) fn create_bot(rpc: &EngineRpc, params: serde_json::Value) -> Result<RpcReply, RpcError> {
@@ -24,11 +27,18 @@ pub(super) async fn bot_tool(
     params: serde_json::Value,
 ) -> Result<RpcReply, RpcError> {
     let p: BotToolParams = parse_params(params)?;
-    let args = if p.args.is_null() {
+    let mut args = if p.args.is_null() {
         serde_json::json!({})
     } else {
         p.args
     };
+    // Set from the call itself, over anything the model put in its args.
+    if let Some(object) = args.as_object_mut() {
+        object.remove(crate::bots::TOOL_CALL_ID_ARG);
+        if let Some(id) = p.tool_call_id.filter(|id| !id.is_empty()) {
+            object.insert(crate::bots::TOOL_CALL_ID_ARG.into(), id.into());
+        }
+    }
     let text = match rpc.bots()?.tool(&p.chat_id, &p.tool, args).await {
         Ok(text) => text,
         Err(err) => err.to_string(),

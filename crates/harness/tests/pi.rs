@@ -219,6 +219,7 @@ fn run_profiles_spawn_exact_args() {
         "PI_SUBAGENT_AGENT",
         "PI_SUBAGENT_CHILD_INDEX",
         "CYPHER_BOT_ID",
+        "CYPHER_BOT_WORKSPACE_ROOTS",
     ];
 
     let root = harness
@@ -267,6 +268,7 @@ fn run_profiles_spawn_exact_args() {
         ("PI_SUBAGENT_AGENT", Some("reviewer")),
         ("PI_SUBAGENT_CHILD_INDEX", Some("2")),
         ("CYPHER_BOT_ID", None),
+        ("CYPHER_BOT_WORKSPACE_ROOTS", None),
     ] {
         assert_eq!(env_of(&cmd, key), Some(value.map(String::from)), "{key}");
     }
@@ -310,9 +312,47 @@ fn run_profiles_spawn_exact_args() {
             );
         }
         for key in profile_env {
-            let value = (key == "CYPHER_BOT_ID").then(|| "bot-1".to_string());
+            let value = match key {
+                "CYPHER_BOT_ID" => Some("bot-1".to_string()),
+                // Always set for a bot, so stale roots are dropped.
+                "CYPHER_BOT_WORKSPACE_ROOTS" => Some("[]".to_string()),
+                _ => None,
+            };
             assert_eq!(env_of(&cmd, key), Some(value), "{origin:?} {key}");
         }
+    }
+
+    // The coordination tools are registered too (the allowlist decides
+    // which a thread is offered).
+    let extension = args_of(
+        &harness
+            .spawn_command(
+                None,
+                &RunHostContext {
+                    chat_id: Some("bot-chat".into()),
+                    profile: RunProfile::Bot(BotRunEnv {
+                        bot_id: "bot-1".into(),
+                        origin: BotOrigin::Owner,
+                        tools: Vec::new(),
+                        system_prompt: String::new(),
+                        workspace_roots: Vec::new(),
+                    }),
+                },
+                None,
+            )
+            .expect("command builds"),
+    );
+    let extension = extension
+        .windows(2)
+        .find(|pair| pair[0] == "-e")
+        .map(|pair| pair[1].clone())
+        .unwrap();
+    let source = std::fs::read_to_string(&extension).unwrap();
+    for tool in cypher_proto::BOT_WORK_TOOLS {
+        assert!(
+            source.contains(&format!("name: \"{tool}\"")),
+            "the extension registers {tool}"
+        );
     }
 
     // A bot thread with no tools still passes `--tools`: without it Pi
@@ -2225,4 +2265,58 @@ async fn self_started_run_is_probed_and_settles_with_a_done() {
             Some("build is green".into())
         ]
     );
+}
+
+/// A bot thread with *Work directly* spawns with Pi's own tools in its
+/// allowlist, its checkouts as `CYPHER_BOT_WORKSPACE_ROOTS` and the level
+/// the engine decided as `CYPHER_PERMISSION_LEVEL`; its cwd stays the bot's
+/// folder.
+#[test]
+fn a_bot_working_directly_gets_its_roots_and_level() {
+    let harness = harness();
+    let mut tools: Vec<String> = cypher_proto::BOT_TOOLS.map(String::from).to_vec();
+    tools.extend(cypher_proto::BOT_DIRECT_TOOLS.map(String::from));
+    let host = RunHostContext {
+        chat_id: Some("bot-chat".into()),
+        profile: RunProfile::Bot(BotRunEnv {
+            bot_id: "bot-1".into(),
+            origin: BotOrigin::Owner,
+            tools: tools.clone(),
+            system_prompt: "You are a bot.".into(),
+            workspace_roots: vec!["/work/billing".into(), "/work/web app".into()],
+        }),
+    };
+    let folder = std::env::temp_dir();
+    let request = cypher_proto::RunRequest {
+        prompt: "hi".into(),
+        harness: None,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        cwd: folder.display().to_string(),
+        sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
+        auto_approve: false,
+        attachments: Vec::new(),
+        pending_attachments: Vec::new(),
+        resume: None,
+        worktree: None,
+    };
+    let cmd = harness
+        .spawn_run_command(Some(&request.cwd), &host, None, &request)
+        .expect("command builds");
+    let args = args_of(&cmd);
+    assert!(
+        args.windows(2)
+            .any(|pair| pair[0] == "--tools" && pair[1] == tools.join(",")),
+        "{args:?}"
+    );
+    assert_eq!(
+        env_of(&cmd, "CYPHER_BOT_WORKSPACE_ROOTS"),
+        Some(Some(r#"["/work/billing","/work/web app"]"#.to_string()))
+    );
+    assert_eq!(
+        env_of(&cmd, "CYPHER_PERMISSION_LEVEL"),
+        Some(Some("workspace-write".to_string()))
+    );
+    assert_eq!(cmd.as_std().get_current_dir(), Some(folder.as_path()));
 }

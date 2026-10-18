@@ -37,6 +37,10 @@ const ENV_PACKAGE_DIR: &str = "PI_PACKAGE_DIR";
 /// Set only in agent-bot runs; the bot tools extension registers its tools
 /// only when it sees this.
 const ENV_CYPHER_BOT_ID: &str = "CYPHER_BOT_ID";
+/// A bot run's workspace roots (a JSON array of absolute paths): the bot
+/// tools extension records them as the permission extension's extra roots
+/// for this chat before that extension loads them, and removes stale ones.
+const ENV_CYPHER_BOT_WORKSPACE_ROOTS: &str = "CYPHER_BOT_WORKSPACE_ROOTS";
 /// The bot tools extension, written beside the engine client.
 const BOT_TOOLS_EXTENSION: &str = "cypher-bot-tools.ts";
 
@@ -45,13 +49,14 @@ const BOT_TOOLS_EXTENSION: &str = "cypher-bot-tools.ts";
 const MESSAGING_TOOLS: [&str; 3] = ["send_message", "read_inbox", "reply_message"];
 
 /// Every env var a [`RunProfile`] sets; each spawn clears them all first.
-const PROFILE_ENV: [&str; 6] = [
+const PROFILE_ENV: [&str; 7] = [
     ENV_ROLE,
     ENV_CHANNEL_ROOT,
     ENV_RUN_ID,
     ENV_AGENT,
     ENV_CHILD_INDEX,
     ENV_CYPHER_BOT_ID,
+    ENV_CYPHER_BOT_WORKSPACE_ROOTS,
 ];
 
 /// The CLI args and env one run profile adds to the pi command.
@@ -111,6 +116,12 @@ fn profile_launch(
                     .to_string(),
             );
             env.push((ENV_CYPHER_BOT_ID, bot.bot_id.clone()));
+            // Always set, even empty: the extension then drops roots an
+            // earlier run of this chat recorded.
+            env.push((
+                ENV_CYPHER_BOT_WORKSPACE_ROOTS,
+                serde_json::to_string(&bot.workspace_roots).unwrap_or_else(|_| "[]".to_string()),
+            ));
         }
     }
     if let Some(path) = append_prompt

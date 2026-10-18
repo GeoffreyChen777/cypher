@@ -29,12 +29,17 @@ function engine(): Promise<EngineClient> {
   return connecting;
 }
 
-async function botTool(tool: string, args: unknown, timeoutMs = CALL_TIMEOUT_MS): Promise<string> {
+async function botTool(
+  tool: string,
+  args: unknown,
+  timeoutMs = CALL_TIMEOUT_MS,
+  toolCallId?: string,
+): Promise<string> {
   const client = await engine();
   try {
     const reply = await client.call(
       "BotTool",
-      { chatId: process.env.CYPHER_CHAT_ID, tool, args },
+      { chatId: process.env.CYPHER_CHAT_ID, tool, args, toolCallId },
       { timeoutMs },
     );
     return typeof reply?.text === "string" ? reply.text : JSON.stringify(reply);
@@ -131,6 +136,126 @@ const TOOLS: ToolDef[] = [
   },
 
   // ── coordination (P2): plans, orchestration threads, worker sessions ──
+  {
+    name: "propose_plan",
+    label: "Propose a plan",
+    description:
+      "Propose a plan for work that takes more than a couple of steps or touches another device. It shows your owner a plan card to approve; once approved, an orchestration thread carries it out and reports back here. After proposing, stop and wait: end your turn.",
+    parameters: Type.Object({
+      title: Type.String({ description: "Short title of the task" }),
+      summary: Type.Optional(Type.String({ description: "One or two sentences: the approach and how the steps depend on each other" })),
+      steps: Type.Array(
+        Type.Object({
+          title: Type.String({ description: "What this step does" }),
+          project: Type.Optional(Type.String({ description: "Project id or name it works in" })),
+          detail: Type.Optional(Type.String({ description: "How: directly or in a session, worktree, how it gets another step's change (path, pushed branch, version)" })),
+        }),
+        { minItems: 1, maxItems: 10 },
+      ),
+    }),
+  },
+  {
+    name: "list_work",
+    label: "List work",
+    description: "List your plans and orchestrations, newest first: id, title, state, steps done and the result.",
+    parameters: Type.Object({}),
+  },
+  {
+    name: "get_work",
+    label: "Read work",
+    description: "Read one plan or orchestration: its steps with their state, projects and sessions (with status), and its result.",
+    parameters: Type.Object({
+      work_id: Type.String({ description: "Work id from list_work" }),
+    }),
+  },
+  {
+    name: "create_worktree",
+    label: "Create worktree",
+    description:
+      "Create a new git worktree (an isolated checkout on a fresh branch) in a project, on that project's device. Returns its path for start_session's cwd.",
+    parameters: Type.Object({
+      project: Type.String({ description: "Project id or name" }),
+      branch: Type.Optional(Type.String({ description: "Base branch or ref (default: the checkout's current HEAD)" })),
+    }),
+    timeoutMs: 11 * 60_000,
+  },
+  {
+    name: "start_session",
+    label: "Start session",
+    description:
+      "Start a coding session in a project for one step of the plan, with a self-contained prompt. Returns the session id; follow it with wait_for_session.",
+    parameters: Type.Object({
+      step: Type.String({ description: "The plan step id this session works on" }),
+      project: Type.String({ description: "Project id or name" }),
+      prompt: Type.String({ description: "The full task for the session: what to do, where, how to verify, what to report back" }),
+      title: Type.Optional(Type.String({ description: "Session title (default: the step's title)" })),
+      cwd: Type.Optional(Type.String({ description: "A worktree path from create_worktree (default: the project's folder)" })),
+      model: Type.Optional(Type.String({ description: "Model id (default: your own)" })),
+    }),
+    timeoutMs: 11 * 60_000,
+  },
+  {
+    name: "wait_for_session",
+    label: "Wait for session",
+    description:
+      "Wait until a session finishes, fails or asks a question, up to timeout_s. Returns its state, its last message and, when it asks, the question with its options.",
+    parameters: Type.Object({
+      session_id: Type.String({ description: "Session id" }),
+      timeout_s: Type.Optional(Type.Integer({ minimum: 1, maximum: 900, description: "Default 300, at most 900" })),
+    }),
+    timeoutMs: 16 * 60_000,
+  },
+  {
+    name: "answer_session",
+    label: "Answer session",
+    description:
+      "Answer the question a session is asking: pick option labels, or give free text.",
+    parameters: Type.Object({
+      session_id: Type.String({ description: "Session id" }),
+      answers: Type.Optional(Type.Array(Type.String(), { description: "Option labels to pick" })),
+      text: Type.Optional(Type.String({ description: "A free-text answer" })),
+    }),
+    timeoutMs: 11 * 60_000,
+  },
+  {
+    name: "steer_session",
+    label: "Steer session",
+    description: "Send a message to a running session; it reads it at its next step.",
+    parameters: Type.Object({
+      session_id: Type.String({ description: "Session id" }),
+      message: Type.String({ description: "What to tell it" }),
+    }),
+    timeoutMs: 11 * 60_000,
+  },
+  {
+    name: "stop_session",
+    label: "Stop session",
+    description: "Stop a session's current run.",
+    parameters: Type.Object({
+      session_id: Type.String({ description: "Session id" }),
+    }),
+    timeoutMs: 11 * 60_000,
+  },
+  {
+    name: "update_step",
+    label: "Update step",
+    description: "Record a plan step's progress, so your owner's progress card stays current.",
+    parameters: Type.Object({
+      step: Type.String({ description: "Step id" }),
+      state: Type.Union([Type.Literal("running"), Type.Literal("done"), Type.Literal("failed"), Type.Literal("skipped")]),
+      note: Type.Optional(Type.String({ description: "A short note: what happened" })),
+    }),
+  },
+  {
+    name: "finish_work",
+    label: "Finish work",
+    description:
+      "Finish the orchestration with its outcome and a concise result for your owner, citing sessions as cypher://session/<id> links. Call it once, at the end.",
+    parameters: Type.Object({
+      outcome: Type.Union([Type.Literal("done"), Type.Literal("failed")]),
+      result: Type.String({ description: "What was done, what was found, what needs the owner" }),
+    }),
+  },
 
   // ── end coordination ──
 
@@ -143,14 +268,93 @@ const TOOLS: ToolDef[] = [
   // ── end network ──
 ];
 
+// ── work directly (P2): workspace roots and the direct-tool gate ──
+
+/** The permission extension's root entry (pi-runtime cypher-permissions/grants.ts). */
+const ROOT_ENTRY = "cypher-permissions.root";
+/** Pi's own tools a bot gets with Work directly (cypher_proto::BOT_DIRECT_TOOLS). */
+const DIRECT_TOOLS = new Set(["bash", "read", "write", "edit", "grep", "find", "ls", "request_permission"]);
+/** The gate may wait on the owner's approval (up to 10 minutes). */
+const GATE_TIMEOUT_MS = 11 * 60_000;
+
+type Entry = { type: string; customType?: string; data?: unknown };
+
+/** The checkouts the engine gave this run (CYPHER_BOT_WORKSPACE_ROOTS). */
+function wantedRoots(): string[] {
+  try {
+    const parsed = JSON.parse(process.env.CYPHER_BOT_WORKSPACE_ROOTS ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((path): path is string => typeof path === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** This chat's extra roots, read the way the permission extension reads them. */
+function recordedRoots(entries: readonly Entry[], chatId: string | undefined): string[] {
+  const roots: string[] = [];
+  for (const entry of entries) {
+    if (entry.type !== "custom" || entry.customType !== ROOT_ENTRY) continue;
+    const data = entry.data as { path?: unknown; action?: unknown; chatId?: unknown } | undefined;
+    if (!data || typeof data.path !== "string") continue;
+    if (chatId && data.chatId !== chatId) continue;
+    const index = roots.indexOf(data.path);
+    if (data.action === "remove") {
+      if (index >= 0) roots.splice(index, 1);
+    } else if (index < 0) roots.push(data.path);
+  }
+  return roots;
+}
+
+function workDirectly(pi: ExtensionAPI): void {
+  // Pi loads `-e` extensions before the Runtime's and runs their handlers in
+  // that order, so these entries are on the branch when the permission
+  // extension reloads its roots in its own session_start, on a chat's first
+  // run too. The engine's list wins: roots it no longer grants are removed.
+  pi.on("session_start", async (_event: unknown, ctx: any) => {
+    const chatId = process.env.CYPHER_CHAT_ID || undefined;
+    const wanted = wantedRoots();
+    const current = recordedRoots((ctx.sessionManager?.getBranch() ?? []) as Entry[], chatId);
+    for (const path of current) {
+      if (!wanted.includes(path)) pi.appendEntry(ROOT_ENTRY, { path, action: "remove", chatId });
+    }
+    for (const path of wanted) {
+      if (!current.includes(path)) pi.appendEntry(ROOT_ENTRY, { path, action: "add", chatId });
+    }
+  });
+  // Every call of Pi's own tools asks the engine first: the bot may have
+  // lost Work directly, permission control may be off on this device, or the
+  // thread may be tainted, when the owner approves the call. Fails closed.
+  pi.on("tool_call", async (event: any) => {
+    if (!DIRECT_TOOLS.has(event.toolName)) return undefined;
+    const input = (event.input ?? {}) as Record<string, unknown>;
+    const field = (key: string) => (typeof input[key] === "string" ? (input[key] as string).slice(0, 2_000) : undefined);
+    try {
+      const verdict = await botTool(
+        "direct_tool",
+        { tool: event.toolName, command: field("command"), path: field("path") ?? field("file_path") },
+        GATE_TIMEOUT_MS,
+      );
+      return verdict === "allow" ? undefined : { block: true, reason: verdict };
+    } catch (error) {
+      return {
+        block: true,
+        reason: `Cypher couldn't check this call, so it didn't run: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  });
+}
+
+// ── end work directly ──
+
 export default function cypherBotTools(pi: ExtensionAPI): void {
   if (!process.env.CYPHER_BOT_ID) return;
+  workDirectly(pi);
   for (const tool of TOOLS) {
     pi.registerTool({
       ...tool,
-      execute: async (_id: string, params: unknown) => {
+      execute: async (id: string, params: unknown) => {
         try {
-          return text(await botTool(tool.name, params ?? {}, tool.timeoutMs));
+          return text(await botTool(tool.name, params ?? {}, tool.timeoutMs, id));
         } catch (error) {
           return text(`${tool.label} failed: ${error instanceof Error ? error.message : String(error)}`);
         }

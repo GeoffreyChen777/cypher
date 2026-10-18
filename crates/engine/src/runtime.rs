@@ -364,13 +364,15 @@ impl Engine {
                 Arc::new(default_registry_with_bridge_and_runtime(
                     pi_sessions_root,
                     engine_socket,
-                    Some(pi_runtime_paths),
+                    Some(pi_runtime_paths.clone()),
                 )),
                 config.default_harness,
                 edge.clone(),
             )?,
         };
         core.set_auth(auth.clone());
+        // Bots' shell and file tools run only under permission control.
+        core.bots.set_pi_runtime(pi_runtime_paths);
         if synced_scope {
             let mut evicted = core.workspace.watch_evicted();
             let auth_for_evict = auth.clone();
