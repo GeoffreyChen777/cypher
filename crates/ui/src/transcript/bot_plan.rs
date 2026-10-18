@@ -208,50 +208,207 @@ struct StepSession {
     status: cypher_proto::ChatIndicator,
 }
 
-/// The card's surface, shared with the placeholder.
-fn plan_surface() -> gpui::Div {
-    div()
+/// The card's corner radius.
+const PLAN_RADIUS: f32 = 14.0;
+
+/// The card's glass, the composer pill's like a routine's result card: its
+/// fill, border and frost, with its soft lift drawn only outside the shape.
+fn plan_surface(theme: &Theme, body: gpui::Div) -> AnyElement {
+    let reach = crate::kit::soft_shadow::Reach {
+        top: 3.0,
+        side: 8.0,
+        bottom: 14.0,
+    };
+    let face = div()
         .w_full()
-        .rounded(px(12.0))
+        .rounded(px(PLAN_RADIUS))
+        .bg(theme.input_glass_bg())
         .border_1()
-        .border_color(crate::kit::theme::hairline(0.08))
-        .bg(crate::kit::theme::ink(0.03))
-        .px(px(14.0))
-        .pt(px(10.0))
-        .pb(px(12.0))
+        .border_color(theme.border)
         .flex()
         .flex_col()
+        .child(body);
+    div()
+        .relative()
+        .w_full()
+        .child(crate::kit::frost::frosted(PLAN_RADIUS, 16.0, face))
+        .child(
+            div()
+                .absolute()
+                .top(px(-reach.top))
+                .bottom(px(-reach.bottom))
+                .left(px(-reach.side))
+                .right(px(-reach.side))
+                .child(
+                    crate::kit::soft_shadow::outside_shadow(
+                        PLAN_RADIUS,
+                        reach,
+                        theme.lift_shadow(),
+                    )
+                    .size_full(),
+                ),
+        )
+        .into_any_element()
 }
 
-/// The card's top line: the plan glyph, "Plan", and where it stands.
-fn plan_header(phase_text: String, tint: gpui::Hsla, theme: &Theme) -> gpui::Div {
+/// The phase's colour for the card's tile: amber while it waits on the
+/// owner, the accent while it works, green done, red failed.
+fn phase_tone(phase: PlanPhase, theme: &Theme) -> gpui::Hsla {
+    match phase {
+        PlanPhase::Awaiting => theme.warning,
+        PlanPhase::Starting | PlanPhase::Running | PlanPhase::Stopping => theme.accent,
+        PlanPhase::Done => theme.success,
+        PlanPhase::Failed => theme.danger,
+        PlanPhase::Cancelling | PlanPhase::Stopped | PlanPhase::Cancelled => theme.text_muted,
+    }
+}
+
+/// The header's status, at its right end with no background: how the plan
+/// stands and, once it has run, for how long.
+fn phase_status(
+    work: &BotWork,
+    phase: PlanPhase,
+    now_ms: i64,
+    theme: &Theme,
+    view: EntityId,
+) -> gpui::Div {
+    let took = |end: i64| {
+        work.started_at
+            .map(|start| format_span(end.saturating_sub(start)))
+    };
+    let ended = work.ended_at.unwrap_or(now_ms);
+    let with_time = |word: &str| match took(ended) {
+        Some(t) => format!("{word} · {t}"),
+        None => word.to_string(),
+    };
+    let (mark, text, color): (Option<AnyElement>, String, gpui::Hsla) = match phase {
+        PlanPhase::Awaiting => (
+            Some(
+                div()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(theme.warning)
+                    .into_any_element(),
+            ),
+            "Awaiting approval".into(),
+            theme.warning,
+        ),
+        PlanPhase::Starting => (None, "Starting…".into(), theme.text_muted),
+        PlanPhase::Cancelling => (None, "Cancelling…".into(), theme.text_muted),
+        PlanPhase::Running => (
+            Some(crate::kit::loaders::status_arc(theme.accent, 11.0, view).into_any_element()),
+            with_time("Running"),
+            theme.text,
+        ),
+        PlanPhase::Stopping => (None, "Stopping…".into(), theme.text_muted),
+        PlanPhase::Done => (
+            Some(
+                crate::kit::icons::icon(crate::kit::icons::CHECK)
+                    .size(px(11.0))
+                    .text_color(theme.success)
+                    .into_any_element(),
+            ),
+            with_time("Done"),
+            theme.success,
+        ),
+        PlanPhase::Failed => (
+            Some(
+                crate::kit::icons::icon(crate::kit::icons::DANGER_TRIANGLE)
+                    .size(px(11.0))
+                    .text_color(theme.danger)
+                    .into_any_element(),
+            ),
+            with_time("Failed"),
+            theme.danger,
+        ),
+        PlanPhase::Stopped => (None, with_time("Stopped"), theme.text_muted),
+        PlanPhase::Cancelled => (None, "Cancelled".into(), theme.text_muted),
+    };
     div()
-        .h(px(20.0))
+        .flex_none()
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(7.0))
-        .text_size(px(12.0))
-        .child(
-            crate::kit::icons::icon(crate::kit::icons::CHECKLIST)
-                .size(px(13.0))
-                .flex_none()
-                .text_color(theme.text_muted),
-        )
+        .gap(px(5.0))
+        .text_size(px(11.5))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(color)
+        .children(mark)
+        .child(SharedString::from(text))
+}
+
+/// The card's head: the plan's tile in its phase's colour, the title over
+/// "Plan · 4 steps · <where>", and its status at the right.
+fn plan_head(
+    title: &str,
+    sub: String,
+    tone: gpui::Hsla,
+    status: Option<gpui::Div>,
+    theme: &Theme,
+) -> gpui::Div {
+    div()
+        .px(px(16.0))
+        .pt(px(13.0))
+        .pb(px(12.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
         .child(
             div()
                 .flex_none()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text_muted)
-                .child(SharedString::from("Plan")),
+                .size(px(28.0))
+                .rounded(px(8.0))
+                .bg(tone.opacity(0.14))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    crate::kit::icons::icon(crate::kit::icons::CHECKLIST)
+                        .size(px(14.0))
+                        .text_color(tone),
+                ),
         )
         .child(
             div()
+                .flex_1()
                 .min_w_0()
-                .truncate()
-                .text_color(tint)
-                .child(SharedString::from(phase_text)),
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(13.5))
+                        .line_height(px(18.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(SharedString::from(title.to_owned())),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.5))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(sub)),
+                ),
         )
+        .children(status)
+}
+
+/// Whether a step names its own place: it has a project and the header
+/// couldn't name one for every step.
+fn place_shown(common: &Option<String>, project: &Option<StepProject>) -> bool {
+    common.is_none() && project.is_some()
+}
+
+/// A hairline between the card's sections.
+fn plan_rule() -> gpui::Div {
+    div()
+        .mx(px(16.0))
+        .h(px(1.0))
+        .bg(crate::kit::theme::hairline(0.07))
 }
 
 /// A plan whose record has not landed (or is gone): its title, and why
@@ -262,27 +419,11 @@ fn plan_placeholder(title: &str, resolved: bool, theme: &Theme) -> AnyElement {
     } else {
         "Writing the plan…"
     };
-    plan_surface()
-        .child(plan_header(String::new(), theme.text_muted, theme))
-        .when(!title.is_empty(), |el| {
-            el.child(
-                div()
-                    .mt(px(6.0))
-                    .text_size(px(14.5))
-                    .line_height(px(20.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(SharedString::from(title.to_owned())),
-            )
-        })
-        .child(
-            div()
-                .mt(px(4.0))
-                .text_size(px(12.5))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(note)),
-        )
-        .into_any_element()
+    let title = if title.is_empty() { "Plan" } else { title };
+    plan_surface(
+        theme,
+        div().child(plan_head(title, note.into(), theme.text_muted, None, theme)),
+    )
 }
 
 /// A step's state mark: its number while the plan waits, then how it went.
@@ -448,34 +589,6 @@ impl Transcript {
         };
         let phase = plan_phase(&work);
         let (done, total) = work.progress();
-        let mut card = plan_surface()
-            .child(plan_header(
-                phase_line(&work, now_ms),
-                phase.tint(theme),
-                theme,
-            ))
-            .child(
-                div()
-                    .mt(px(6.0))
-                    .text_size(px(14.5))
-                    .line_height(px(20.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(SharedString::from(work.title.clone())),
-            );
-        if let Some(summary) = work.summary.as_ref().filter(|s| !s.trim().is_empty()) {
-            card = card.child(
-                div()
-                    .mt(px(3.0))
-                    .text_size(px(13.0))
-                    .line_height(px(19.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(summary.clone())),
-            );
-        }
-        if matches!(phase, PlanPhase::Running | PlanPhase::Stopping) {
-            card = card.child(div().mt(px(10.0)).child(progress_bar(done, total, theme)));
-        }
         let numbered = matches!(
             phase,
             PlanPhase::Awaiting
@@ -483,6 +596,59 @@ impl Transcript {
                 | PlanPhase::Cancelling
                 | PlanPhase::Cancelled
         );
+        // Where it works, named once when every step shares the project.
+        let place_of = |project: &StepProject| match &project.device {
+            Some(device) => format!("{} · {device}", project.name),
+            None => project.name.clone(),
+        };
+        let places: Vec<Option<String>> = steps
+            .iter()
+            .map(|(project, _)| project.as_ref().map(place_of))
+            .collect();
+        let common = places
+            .first()
+            .cloned()
+            .flatten()
+            .filter(|first| places.iter().all(|p| p.as_deref() == Some(first.as_str())));
+        let mut sub = format!("Plan · {}", steps_word(total));
+        if let Some(place) = &common {
+            sub.push_str(&format!(" · {place}"));
+        }
+        let mut body = div()
+            .px(px(16.0))
+            .pt(px(12.0))
+            .pb(px(14.0))
+            .flex()
+            .flex_col();
+        if let Some(summary) = work.summary.as_ref().filter(|s| !s.trim().is_empty()) {
+            body = body.child(
+                div()
+                    .mb(px(12.0))
+                    .text_size(px(13.0))
+                    .line_height(px(19.0))
+                    .text_color(theme.text)
+                    .child(SharedString::from(summary.clone())),
+            );
+        }
+        if matches!(phase, PlanPhase::Running | PlanPhase::Stopping) {
+            body = body.child(
+                div()
+                    .mb(px(12.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(div().flex_1().child(progress_bar(done, total, theme)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(format!("{done} of {total}"))),
+                    ),
+            );
+        }
+        let last = work.steps.len().saturating_sub(1);
         let step_rows =
             work.steps
                 .iter()
@@ -490,13 +656,12 @@ impl Transcript {
                 .enumerate()
                 .map(|(ix, (step, (project, sessions)))| {
                     let span = (!numbered).then(|| step_span(step, now_ms)).flatten();
-                    let mut place: Vec<String> = Vec::new();
-                    if let Some(project) = &project {
-                        place.push(project.name.clone());
-                        if let Some(device) = &project.device {
-                            place.push(device.clone());
-                        }
-                    }
+                    // Its own place only when the header can't name one for all.
+                    let place = project
+                        .as_ref()
+                        .filter(|_| common.is_none())
+                        .map(|p| (p.glyph, p.tint, place_of(p)));
+                    let after_place = if place.is_some() { "· " } else { "" };
                     let sub = div()
                         .min_w_0()
                         .flex()
@@ -506,21 +671,14 @@ impl Transcript {
                         .text_size(px(11.5))
                         .line_height(px(15.0))
                         .text_color(theme.text_muted.opacity(0.85))
-                        .when_some(project.as_ref(), |el, project| {
+                        .when_some(place, |el, (glyph, tint, place)| {
                             el.child(
-                                crate::kit::icons::icon(project.glyph)
+                                crate::kit::icons::icon(glyph)
                                     .size(px(11.0))
                                     .flex_none()
-                                    .text_color(project.tint),
+                                    .text_color(tint),
                             )
-                        })
-                        .when(!place.is_empty(), |el| {
-                            el.child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(SharedString::from(place.join(" · "))),
-                            )
+                            .child(div().min_w_0().truncate().child(SharedString::from(place)))
                         })
                         .when_some(step.note.clone().filter(|_| !numbered), |el, note| {
                             el.child(
@@ -528,9 +686,15 @@ impl Transcript {
                                     .min_w_0()
                                     .truncate()
                                     .text_color(theme.text_faint)
-                                    .child(SharedString::from(format!("· {note}"))),
+                                    .child(SharedString::from(format!("{after_place}{note}"))),
                             )
                         });
+                    let has_sub =
+                        place_shown(&common, &project) || (!numbered && step.note.is_some());
+                    let detail = step
+                        .detail
+                        .clone()
+                        .filter(|d| !d.trim().is_empty() && numbered);
                     let session_rows = sessions.into_iter().enumerate().map(|(six, session)| {
                         let link = format!(
                             "{}{}",
@@ -587,21 +751,39 @@ impl Transcript {
                                     .text_color(theme.text_faint.opacity(motion::hover_t(&key))),
                             )
                     });
+                    // A timeline: each step's mark, joined to the next by a
+                    // hairline that runs the step's full height.
+                    let rail = div()
+                        .flex_none()
+                        .w(px(18.0))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .child(step_mark(step.state, ix + 1, numbered, theme, view))
+                        .when(ix < last, |el| {
+                            el.child(
+                                div()
+                                    .flex_1()
+                                    .w(px(1.0))
+                                    .mt(px(3.0))
+                                    .bg(crate::kit::theme::hairline(0.1)),
+                            )
+                        });
                     div()
                         .w_full()
-                        .py(px(5.0))
                         .flex()
                         .flex_row()
-                        .items_start()
+                        .items_stretch()
                         .gap(px(10.0))
-                        .child(step_mark(step.state, ix + 1, numbered, theme, view))
+                        .child(rail)
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
+                                .pb(px(if ix < last { 12.0 } else { 0.0 }))
                                 .flex()
                                 .flex_col()
-                                .gap(px(1.0))
+                                .gap(px(2.0))
                                 .child(
                                     div()
                                         .text_size(px(13.0))
@@ -613,7 +795,16 @@ impl Transcript {
                                         })
                                         .child(SharedString::from(step.title.clone())),
                                 )
-                                .child(sub)
+                                .when_some(detail, |el, detail| {
+                                    el.child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .line_height(px(17.0))
+                                            .text_color(theme.text_muted)
+                                            .child(SharedString::from(detail)),
+                                    )
+                                })
+                                .when(has_sub, |el| el.child(sub))
                                 .when(!numbered, |el| el.children(session_rows)),
                         )
                         .when_some(span, |el, span| {
@@ -627,16 +818,16 @@ impl Transcript {
                             )
                         })
                 });
-        card = card.child(div().mt(px(8.0)).flex().flex_col().children(step_rows));
+        body = body.child(div().flex().flex_col().children(step_rows));
         if phase.ended()
             && let Some(result) = work.result.as_ref().filter(|r| !r.trim().is_empty())
         {
-            card = card.child(
+            body = body.child(
                 div()
-                    .mt(px(8.0))
+                    .mt(px(14.0))
                     .px(px(12.0))
                     .py(px(9.0))
-                    .rounded(px(8.0))
+                    .rounded(px(9.0))
                     .bg(crate::kit::theme::ink(0.04))
                     .text_color(theme.text)
                     // Markdown like any answer: the result cites its
@@ -652,8 +843,24 @@ impl Transcript {
                     )),
             );
         }
+        let card = div()
+            .flex()
+            .flex_col()
+            .child(plan_head(
+                &work.title,
+                sub,
+                phase_tone(phase, theme),
+                Some(phase_status(&work, phase, now_ms, theme, view)),
+                theme,
+            ))
+            .child(plan_rule())
+            .child(body);
         let actions = self.plan_actions(row_id, &work, phase, theme, cx);
-        card.children(actions).into_any_element()
+        let card = match actions {
+            Some(actions) => card.child(plan_rule()).child(actions),
+            None => card,
+        };
+        plan_surface(theme, card)
     }
 
     /// Approve / Cancel while the plan waits; Stop (armed by a first click)
@@ -667,52 +874,62 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> Option<gpui::Div> {
         let row = div()
-            .mt(px(12.0))
+            .px(px(16.0))
+            .py(px(10.0))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.0));
+            .gap(px(6.0));
+        let hint = |text: &'static str| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(11.5))
+                .text_color(theme.text_muted)
+                .child(text)
+        };
         if phase.awaiting() {
             let (approve, cancel) = (work.id.clone(), work.id.clone());
             let (edit_id, edit_title) = (work.id.clone(), work.title.clone());
+            let approve_button = crate::kit::popover::btn_primary(theme, "Approve")
+                .id(SharedString::from(format!("{row_id}-approve")))
+                .py(px(5.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.bot_mutate(
+                        serde_json::json!({
+                            "op": "resolveBotPlan", "workId": approve, "approve": true,
+                        }),
+                        cx,
+                    )
+                }));
+            let edit_button =
+                crate::kit::popover::btn_ghost(theme, "Edit", format!("{row_id}-edit"))
+                    .id(SharedString::from(format!("{row_id}-edit")))
+                    .py(px(5.0))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(super::TranscriptEvent::EditBotPlan {
+                            work_id: edit_id.clone(),
+                            title: edit_title.clone(),
+                        })
+                    }));
+            let cancel_button =
+                crate::kit::popover::btn_ghost(theme, "Cancel", format!("{row_id}-cancel"))
+                    .id(SharedString::from(format!("{row_id}-cancel")))
+                    .py(px(5.0))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.bot_mutate(
+                            serde_json::json!({
+                                "op": "resolveBotPlan", "workId": cancel, "approve": false,
+                            }),
+                            cx,
+                        )
+                    }));
             return Some(
-                row.child(
-                    crate::kit::popover::btn_primary(theme, "Approve")
-                        .id(SharedString::from(format!("{row_id}-approve")))
-                        .py(px(5.0))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.bot_mutate(
-                                serde_json::json!({
-                                    "op": "resolveBotPlan", "workId": approve, "approve": true,
-                                }),
-                                cx,
-                            )
-                        })),
-                )
-                .child(
-                    crate::kit::popover::btn_ghost(theme, "Edit", format!("{row_id}-edit"))
-                        .id(SharedString::from(format!("{row_id}-edit")))
-                        .py(px(5.0))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(super::TranscriptEvent::EditBotPlan {
-                                work_id: edit_id.clone(),
-                                title: edit_title.clone(),
-                            })
-                        })),
-                )
-                .child(
-                    crate::kit::popover::btn_ghost(theme, "Cancel", format!("{row_id}-cancel"))
-                        .id(SharedString::from(format!("{row_id}-cancel")))
-                        .py(px(5.0))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.bot_mutate(
-                                serde_json::json!({
-                                    "op": "resolveBotPlan", "workId": cancel, "approve": false,
-                                }),
-                                cx,
-                            )
-                        })),
-                ),
+                row.child(hint("Nothing runs until you approve."))
+                    .child(cancel_button)
+                    .child(edit_button)
+                    .child(approve_button),
             );
         }
         if !phase.running() {
@@ -755,7 +972,10 @@ impl Transcript {
             } else {
                 "Stop"
             }));
-        Some(row.child(stop))
+        Some(
+            row.child(hint("Stop ends the work and every session it started."))
+                .child(stop),
+        )
     }
 
     /// First click arms Stop; a second within [`REWIND_ARM_MS`] stops the

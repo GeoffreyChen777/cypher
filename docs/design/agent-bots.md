@@ -932,10 +932,16 @@ Built:
   suggested questions. Bot tool calls read as what they did ("Read session · <title>";
   "Proposed a plan · read 2 sessions"), and cited `cypher://session/<id>` links open the
   session (a link to one of the bot's hidden threads opens it read-only in the panel).
-- **Plan card:** a `propose_plan` call draws the plan from its record: title, summary,
-  steps with their projects and devices, Approve / Edit / Cancel while it waits (Edit
-  cancels it and starts the owner's reply asking for the change), live step marks,
-  sessions and Stop while it runs, and the result rendered as markdown when it ends.
+- **Plan card:** a `propose_plan` call draws the plan from its record, in the composer
+  pill's glass like a routine's result card. Its head holds the plan's tile in its
+  phase's colour, the title over "Plan · N steps · <project · device>" (the place named
+  once when every step shares it, else under each step) and the status at the right
+  (Awaiting approval, Running · 12m, Done · 18m, Failed …). Under a hairline: the summary,
+  a progress bar while it runs, the steps as a timeline (numbered with their details
+  while it waits; then live marks, notes and sessions), and the result as markdown once
+  it ends. A footer holds "Nothing runs until you approve." with Cancel / Edit / Approve
+  while it waits (Edit cancels it and starts the owner's reply asking for the change),
+  and Stop while it runs.
 - **Routine posts and late answers** in the bot chat read under an attribution row
   (the routine's name, when it ran, Failed, Open session; "Answer from …" for another
   bot's late answer) over the text rendered like any answer.
