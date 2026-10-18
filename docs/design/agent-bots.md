@@ -110,7 +110,7 @@ nothing about the others.
 |---|---|---|
 | **Observe** | Read projects and sessions in scope | Always on (scope decides what) |
 | **Work directly** | Use Pi's shell and file tools in the bot's local projects | On for new bots; off gives a read-only reporting bot |
-| **Coordinate: start** | Create worktrees and start sessions in its projects, on any owner device | Off; one switch |
+| **Coordinate: start** | Create worktrees and start sessions in its projects, on any owner device | On for new bots (the core of the feature; every plan waits for approval) |
 | **Coordinate: steer** | Steer, answer or stop sessions it did not start | Off; ships after *start* |
 | **Report** | Run routines (§8) | Per routine |
 | **Represent** | Answer connected peers (§11) | Per connection |
@@ -910,7 +910,7 @@ Built:
   (project access, conversations, archived sessions) then acting (*Work directly*,
   *Coordinate*, *Steer others' sessions*), with an access summary under it;
   instructions), a "Run on device" rail on the right (fixed after creation), and a
-  Cancel / Save footer with Delete when editing. New bots start with *Work directly* on.
+  Cancel / Save footer with Delete when editing. New bots start with *Work directly* and *Coordinate* on.
 - **Bot conversation:** the Workspaces board's middle card, wearing the bot's avatar. A quiet
   access note over the composer ("invoice-demo · works directly · can start sessions")
   opens the bot's settings. A new bot opens on a start screen with a 2×2 grid of

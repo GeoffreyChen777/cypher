@@ -424,7 +424,7 @@ mod tests {
         acting.capabilities = cypher_proto::BotCapabilities::new_bot();
         assert_eq!(
             access_summary(&acting, &state),
-            "3 projects · titles and status only · works directly"
+            "3 projects · titles and status only · works directly · can start sessions"
         );
         acting.scope = BotScope::default();
         assert_eq!(access_summary(&acting, &state), "No access yet");

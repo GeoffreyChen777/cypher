@@ -106,12 +106,13 @@ pub struct BotCapabilities {
 }
 
 impl BotCapabilities {
-    /// What a new bot starts with: it may work in its local projects; it
-    /// coordinates only once the owner turns that on.
+    /// What a new bot starts with: it works in its local projects and
+    /// coordinates (every plan still waits for the owner's approval); it
+    /// steers others' sessions only once the owner turns that on.
     pub fn new_bot() -> Self {
         Self {
             work_directly: true,
-            coordinate: false,
+            coordinate: true,
             steer: false,
         }
     }
