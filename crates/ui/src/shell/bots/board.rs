@@ -1,8 +1,8 @@
-//! The Botboard sidebar under the header: the bot picker, then the current
-//! bot's cards, top to bottom (§13.1). This slice draws **Status** (who the
-//! bot is, where it runs, what it is doing and what it may read) and
-//! **Projects** (each granted project with its sessions in scope). A card
-//! with nothing to show is not drawn; with no bots the sidebar says so and
+//! The Botboard sidebar under the header: the bot picker, a notice line
+//! when something is off, then the current bot's cards, top to bottom
+//! (§13.1). This file holds the cards' shared shapes, the floating card,
+//! and **Projects** (each granted project with its sessions in scope). A
+//! card with nothing to show is not drawn; with no bots the sidebar says so and
 //! offers a new one. Cards hold no state: everything is read from the main
 //! state on render. A card's header opens its whole list in the detail
 //! panel ([`super::panel`]); a row opens that item, and stays highlighted
@@ -419,8 +419,8 @@ impl Shell {
         Some(card_with_rows(header, rows, theme))
     }
 
-    /// Whether `card` is the one floating: the open panel item's card,
-    /// else Status ([`focused_card`]).
+    /// Whether `card` is the one floating: the open panel item's card
+    /// ([`focused_card`]).
     pub(super) fn card_focused(&self, card: &str, cx: &App) -> bool {
         let wanted = self.board.panel.as_ref().map(|item| {
             let state = self.state.read(cx);
