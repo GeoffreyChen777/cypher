@@ -676,17 +676,6 @@ impl Shell {
             .flex_col()
             .gap(px(1.0))
             .child(actions);
-        if jobs.is_empty() {
-            body = body.child(parts::quiet_line(
-                theme,
-                format!(
-                    "A routine runs a prompt by hand or on a schedule: in this workspace, like \
-                     a morning summary, or as a session in one of its projects, like nightly \
-                     tests. {} posts each result in the chat.",
-                    bot.name
-                ),
-            ));
-        }
         for (job, space) in &jobs {
             let row = self.job_row(
                 format!("bot-panel-job-{}", job.id),
