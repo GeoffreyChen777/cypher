@@ -80,6 +80,13 @@ node "$SPEC/patches/pi-agent-squad-cypher-host.mjs" \
 node "$SPEC/patches/pi-agent-squad-prompt-options.mjs" \
   "$STAGE/npm/node_modules/pi-agent-squad"
 
+# A subagent's `--tools` allowlist dropped the permission extension's
+# request_permission, which every file-tool denial tells the agent to call. Add
+# it beside the file tools (see the patch header). Missing anchors fail the
+# build on purpose.
+node "$SPEC/patches/pi-agent-squad-permission-tool.mjs" \
+  "$STAGE/npm/node_modules/pi-agent-squad"
+
 # Cypher labels each answer with the model that wrote it. pi-ai's Responses
 # stream and pi-claude-bridge never recorded the model the provider says
 # answered (`responseModel`), so a substituted model was invisible there (see
@@ -220,6 +227,9 @@ PI_PACKAGE_DIR="$STAGE/pi" \
 # Loads the real squad and bridge in both orders: what reaches Claude Code.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
   "$STAGE/bin/node" --test "$SPEC/patches/pi-agent-squad-prompt-options.staged.test.mjs"
+# Runs each subagent allowlist the squad builds.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/patches/pi-agent-squad-permission-tool.staged.test.mjs"
 # Feeds the patched Responses stream; loads the patched bridge.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
   "$STAGE/bin/node" --test "$SPEC/patches/response-model.staged.test.mjs"

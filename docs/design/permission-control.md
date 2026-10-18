@@ -260,7 +260,7 @@ iOS builds included. Title generation runs `ReadOnly`.
 | AI `bash` | Landstrip with a policy compiled per command (§6.2) | **OS-enforced**, inherited by every child process |
 | Nested calls (codemode) | The same tools | Same |
 | MCP and extension tools | Tool-level decision: `allow` (default), `elevate` or `deny` | The tool's internals are not sandboxed |
-| Subagents (child chats) | The same extension in the child's Pi; dialogs reach the UI like any child question | Same |
+| Subagents (child chats) | The same extension in the child's Pi; dialogs reach the UI like any child question. A child's `--tools` allowlist that names a file tool also gets `request_permission`, which Pi would otherwise drop (the engine, and a Runtime patch for runs pi-agent-squad spawns itself) | Same |
 | User `!` / `!!` commands | Not intercepted (the user's own action) | — |
 | Pi itself, other extensions, MCP server processes | Not sandboxed | Out of scope (§11) |
 

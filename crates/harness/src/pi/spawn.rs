@@ -39,6 +39,15 @@ const ENV_PACKAGE_DIR: &str = "PI_PACKAGE_DIR";
 /// extension's `spawn.ts` appends the same trio).
 const MESSAGING_TOOLS: [&str; 3] = ["send_message", "read_inbox", "reply_message"];
 
+/// The file tools whose approvals go through `request_permission` (the
+/// permission extension's `OWN_TOOLS`, less `bash`, which escalates instead).
+const FILE_TOOLS: [&str; 6] = ["read", "write", "edit", "ls", "grep", "find"];
+/// Every file-tool denial tells the agent to call this, so it comes with any
+/// file tool: Pi drops a tool the allowlist does not name even when an
+/// extension registers it. With permission control off nothing registers it
+/// and Pi ignores the name.
+const PERMISSION_TOOL: &str = "request_permission";
+
 /// Write the child agent's persisted system prompt to a 0600 temp file
 /// (`--append-system-prompt` takes a path) and return it for later cleanup.
 pub(super) fn write_temp_prompt(agent: &str, prompt: &str) -> std::io::Result<PathBuf> {
@@ -190,7 +199,8 @@ impl PiHarness {
     ) -> Result<Command, HarnessError> {
         let (exe, mut args) = self.resolve_program()?;
         // Child-subagent semantics (Cypher-hosted child chats): restrict tools
-        // to the persisted agent allowlist plus the messaging tools, append
+        // to the persisted agent allowlist plus the messaging tools (and
+        // `request_permission` beside file tools), append
         // the persisted system prompt, preserve model/thinking. The child
         // profile is authoritative when it supplies either launch value;
         // otherwise the RunRequest value is used, just like a root chat.
@@ -208,7 +218,11 @@ impl PiHarness {
         });
         if let Some(child) = &host.child {
             let mut tools = child.tools.clone();
-            for tool in MESSAGING_TOOLS {
+            let file_tools = tools.iter().any(|t| FILE_TOOLS.contains(&t.as_str()));
+            for tool in MESSAGING_TOOLS
+                .into_iter()
+                .chain(file_tools.then_some(PERMISSION_TOOL))
+            {
                 if !tools.iter().any(|t| t == tool) {
                     tools.push(tool.to_string());
                 }
