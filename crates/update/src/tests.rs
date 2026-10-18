@@ -375,6 +375,25 @@ async fn partial_manifest_cannot_silently_skip_platform_checksum() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
+/// Write an executable the test then runs, from a child process. On Linux exec
+/// fails with ETXTBSY while any process holds the file open for writing, and a
+/// fork from another test thread inherits this process's descriptors until it
+/// execs; `sh` holds the only one, and has exited by the time the test runs it.
+#[cfg(unix)]
+fn write_executable(path: &Path, contents: &str) {
+    use std::io::Write;
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(contents.as_bytes()).unwrap();
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}
+
 #[cfg(unix)]
 fn archive(symlink: bool) -> (tempfile::TempDir, PathBuf, String) {
     use std::os::unix::fs::PermissionsExt;
@@ -449,11 +468,8 @@ fn archive_links_and_broken_binaries_cannot_be_activated() {
 #[cfg(unix)]
 #[test]
 fn binary_probe_has_a_deadline_and_reaps_the_child() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let binary = dir.path().join("cypher");
-    std::fs::write(&binary, "#!/bin/sh\nexec sleep 60\n").unwrap();
-    std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&dir.path().join("cypher"), "#!/bin/sh\nexec sleep 60\n");
     let start = std::time::Instant::now();
     assert!(!headless_binary_ready(dir.path()));
     assert!(start.elapsed() < std::time::Duration::from_secs(10));
@@ -561,7 +577,7 @@ fn versions_another_process_runs_from_are_never_pruned() {
     }
     // An old desktop app still running a superseded version.
     let binary = root.join("0.3.1").join("cypher");
-    std::fs::copy("/bin/sleep", &binary).unwrap();
+    run("cp", &["/bin/sleep", binary.to_str().unwrap()]).unwrap();
     let mut child = std::process::Command::new(&binary)
         .arg("30")
         .spawn()
@@ -760,10 +776,7 @@ fn headless_symlink_swap() {
     let app_root = tmp.path().join("app");
     for ver in ["0.1.0", "0.1.1"] {
         std::fs::create_dir_all(app_root.join(ver)).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let binary = app_root.join(ver).join("cypher");
-        std::fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&app_root.join(ver).join("cypher"), "#!/bin/sh\nexit 0\n");
     }
     apply_headless(&app_root, "0.1.0").unwrap();
     assert_eq!(
