@@ -48,6 +48,8 @@ const POST_WITHIN_MS: i64 = 24 * 3_600_000;
 #[derive(Default)]
 pub(in crate::bots) struct ScheduleState {
     wake: Notify,
+    /// One pass at a time: two would both start a due job.
+    pass: tokio::sync::Mutex<()>,
     /// Unattended stops by chat id, waiting for the pass that settles the run.
     stops: Mutex<HashMap<String, String>>,
     /// Post entry ids known to be in their bot chat.
@@ -132,6 +134,7 @@ impl Bots {
 
     /// One look at every job this device runs.
     async fn schedule_pass(&self) {
+        let _pass = self.inner.schedule.pass.lock().await;
         let workspace = &self.inner.workspace;
         let records = workspace.read_bot_records();
         let bots: HashMap<String, Bot> = workspace

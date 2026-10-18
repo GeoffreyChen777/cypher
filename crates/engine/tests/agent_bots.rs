@@ -328,7 +328,14 @@ async fn a_bot_chat_runs_locked_down() {
     let env = env.as_ref().expect("bot runs carry the bot env");
     assert_eq!(env.bot_id, bot.id);
     assert_eq!(env.origin, cypher_proto::BotOrigin::Owner);
-    assert_eq!(env.tools, cypher_proto::BOT_TOOLS);
+    assert_eq!(
+        env.tools[..cypher_proto::BOT_TOOLS.len()],
+        cypher_proto::BOT_TOOLS
+    );
+    // The notebook and routines are every owner bot chat's; tasks need
+    // Coordinate, which a new bot lacks.
+    assert!(env.tools.iter().any(|t| t == "write_note"));
+    assert!(!env.tools.iter().any(|t| t == "save_project_task"));
     assert!(env.workspace_roots.is_empty());
     assert!(env.system_prompt.contains("\"Billing bot\""));
     assert!(
