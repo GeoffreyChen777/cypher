@@ -453,16 +453,18 @@ impl Bots {
             .chat_id
             .as_deref()
             .and_then(|chat| lock(&self.inner.schedule.stops).remove(chat));
-        let failed = failed || stop.is_some() || result.aborted;
+        // A run with no answer was cut off (stopped, or the engine went
+        // down mid-run): there is nothing to deliver.
+        let silent = result.text.is_none();
+        let failed = failed || stop.is_some() || result.aborted || silent;
         let summary = if failed {
-            Some(
-                stop.or(reason)
-                    .or(result.error)
-                    .unwrap_or_else(|| match result.aborted {
-                        true => "The run was stopped before it finished.".into(),
-                        false => "The run failed.".into(),
-                    }),
-            )
+            Some(stop.or(reason).or(result.error).unwrap_or_else(|| {
+                if result.aborted || silent {
+                    "The run was stopped before it finished.".into()
+                } else {
+                    "The run failed.".into()
+                }
+            }))
         } else {
             result.text
         };
