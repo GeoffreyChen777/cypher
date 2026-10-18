@@ -86,6 +86,9 @@ pub(super) struct BoardUi {
     /// A form's buttons, pinned under the panel's scrolling body; set by
     /// the panel item while it renders and taken by the card.
     panel_footer: Option<AnyElement>,
+    /// An item's own buttons, in the panel header before the close button;
+    /// set and taken like `panel_footer`.
+    panel_actions: Option<AnyElement>,
 }
 
 /// One item on a bot's **Needs you** card: its conversation waiting on an

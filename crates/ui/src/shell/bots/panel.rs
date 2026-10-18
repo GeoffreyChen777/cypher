@@ -141,6 +141,7 @@ impl Shell {
             current_bot(&state.bots, self.settings.botboard_bot.as_deref()).cloned()
         }?;
         self.board.panel_footer = None;
+        self.board.panel_actions = None;
         let (head, body) = match item {
             PanelItem::Projects => self.render_projects_panel(&bot, &theme, cx),
             PanelItem::Project(space_id) => {
@@ -250,6 +251,7 @@ impl Shell {
                         )
                     }),
             )
+            .children(self.board.panel_actions.take())
             .child(close);
         // Replacing the content fades the new item in. A thread's
         // transcript scrolls itself, so its body fills the card unscrolled.

@@ -713,12 +713,11 @@ impl Shell {
             title: routine.name.clone(),
             subtitle: String::new(),
         };
-        let mut body = div()
-            .p(px(8.0))
-            .flex()
-            .flex_col()
-            .child(self.job_actions(&job, theme, cx))
-            .child(div().h(px(6.0)));
+        let mut body = div().p(px(8.0)).flex().flex_col();
+        self.board.panel_actions = Some(
+            self.job_actions(&routine, &job, theme, cx)
+                .into_any_element(),
+        );
         if bot.paused {
             body = body.child(
                 parts::quiet_line(
@@ -791,87 +790,25 @@ impl Shell {
         body = body
             .child(parts::section_label(theme, "Prompt"))
             .child(parts::well(theme, routine.prompt.clone()));
-        let mut settings = parts::group_box();
-        let mut first = true;
-        // A manual routine has no schedule to switch off.
-        if routine.schedule != Schedule::Manual {
-            let enabled = routine.clone();
-            settings = settings.child(
-                parts::switch_row(
-                    "bot-routine-enabled",
-                    "Enabled",
-                    "Runs on its schedule. When off, it runs only when you press Run now.",
-                    routine.enabled,
-                    true,
-                    theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let mut routine = enabled.clone();
-                    routine.enabled = !routine.enabled;
-                    this.save_routine_now(routine, cx);
-                })),
-            );
-            first = false;
-        }
-        match &routine.target {
-            RoutineTarget::Workspace => {
-                let (write_notes, direct) = (routine.clone(), routine.clone());
-                settings = settings
-                    .child(
-                        parts::switch_row(
-                            "bot-routine-notes",
-                            "May write notes",
-                            "Lets runs add to the notebook.",
-                            routine.write_notes,
-                            first,
-                            theme,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let mut routine = write_notes.clone();
-                            routine.write_notes = !routine.write_notes;
-                            this.save_routine_now(routine, cx);
-                        })),
-                    )
-                    .child(
-                        parts::switch_row(
-                            "bot-routine-direct",
-                            "May run commands",
-                            if bot.capabilities.work_directly {
-                                "In the workspace's projects on this device, e.g. to run tests."
-                            } else {
-                                "Needs the workspace's Work directly, which is off."
-                            },
-                            routine.work_directly,
-                            false,
-                            theme,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let mut routine = direct.clone();
-                            routine.work_directly = !routine.work_directly;
-                            this.save_routine_now(routine, cx);
-                        })),
-                    );
-            }
-            // Its checkout is chosen in the form (Edit).
-            RoutineTarget::Project { .. } => {}
-        }
-        let has_settings = !first || routine.target == RoutineTarget::Workspace;
-        if has_settings {
-            body = body
-                .child(parts::section_label(theme, "Settings"))
-                .child(settings);
-        }
         Some((head, body))
     }
 
-    /// Run now, Edit, the last run's session and Delete, as icons at the
-    /// row's right end.
-    fn job_actions(&self, job: &Job, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+    /// The header's buttons: the Enabled switch (for a routine on a
+    /// schedule), Run now, Edit, the last run's session and Delete. Its
+    /// other settings live in the form.
+    fn job_actions(
+        &self,
+        routine: &BotRoutine,
+        job: &Job,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let state = job.state();
         let busy = matches!(state, JobState::Running | JobState::Starting);
         let (run_id, edit_id, delete_id) = (job.id.clone(), job.id.clone(), job.id.clone());
         let name = job.name.clone();
         let button = super::items::icon_button;
+        let flip_tip = routine.enabled;
         let run = button(
             "bot-job-run",
             icons::PLAY,
@@ -920,13 +857,47 @@ impl Shell {
             let (id, name) = (delete_id.clone(), name.clone());
             this.ask_confirm(parts::Confirm::DeleteRoutine { id, name }, cx);
         }));
+        // A manual routine has no schedule to switch off.
+        let enabled = (routine.schedule != Schedule::Manual).then(|| {
+            let flip = routine.clone();
+            div()
+                .id("bot-routine-enabled")
+                .flex_none()
+                .h(px(28.0))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .tooltip(move |_, cx| {
+                    cx.new(|_| {
+                        super::super::session::FindTooltip(
+                            if flip_tip {
+                                "Enabled: runs on its schedule"
+                            } else {
+                                "Disabled: runs only when you press Run now"
+                            }
+                            .into(),
+                        )
+                    })
+                    .into()
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let mut routine = flip.clone();
+                    routine.enabled = !routine.enabled;
+                    this.save_routine_now(routine, cx);
+                }))
+                .child(crate::settings::widgets::toggle_switch(
+                    theme,
+                    routine.enabled,
+                ))
+        });
         div()
-            .px(px(4.0))
+            .flex_none()
             .flex()
             .flex_row()
             .items_center()
-            .justify_end()
             .gap(px(2.0))
+            .children(enabled)
             .child(run)
             .child(edit)
             .children(session)
