@@ -1041,8 +1041,9 @@ As built, beyond the table:
 - **A routine** can be granted *Work directly* ("May run commands"), only while the bot
   has it; unattended, anything that needs approval fails the run.
 - **Empty cards** for Routines, Notebook and Network show only their header with a quiet
-  hint and `+`, so the first routine, note or connection is one click away.
-- **Signed out**, the Network card says "Sign in to connect bots"; records stay visible.
+  hint; the header opens the panel, whose own button adds the first routine, note or
+  connection. No card carries a `+`.
+- **Signed out**, the Network card says "Sign in to connect"; records stay visible.
 
 ## 14. RPC
 

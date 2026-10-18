@@ -17,58 +17,21 @@ pub(super) enum Confirm {
     RevokeConnection { id: String, name: String },
 }
 
-/// A card for a section with nothing in it yet: its header alone, a quiet
-/// hint where the count would be, and `+` for the first item. The header
-/// opens the section's panel like any card's.
+/// A card for a section with nothing in it yet: its header alone, with a
+/// quiet hint where the count would be. The header opens the section's
+/// panel like any card's, and the panel offers the way to add the first.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn empty_card(
     key: &'static str,
     glyph: &'static str,
     title: &'static str,
     hint: &'static str,
-    add_label: &'static str,
     open: PanelItem,
-    add: fn(&mut Shell, &mut Window, &mut Context<Shell>),
     focused: bool,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> AnyElement {
-    let add_key = format!("{key}-add");
-    let tooltip = SharedString::from(add_label);
-    let plus = div()
-        .id(SharedString::from(add_key.clone()))
-        .flex_none()
-        .size(px(22.0))
-        .rounded(px(6.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .bg(motion::hover_blend(
-            &add_key,
-            crate::kit::theme::wash(0.0),
-            crate::kit::theme::wash(0.12),
-        ))
-        .on_hover(motion::hover_listener(add_key.clone()))
-        .tooltip(move |_, cx| {
-            cx.new(|_| super::super::session::FindTooltip(tooltip.clone()))
-                .into()
-        })
-        .on_click(cx.listener(move |this, _, window, cx| {
-            cx.stop_propagation();
-            add(this, window, cx);
-        }))
-        .child(
-            icon(icons::PLUS)
-                .size(px(12.0))
-                .text_color(motion::hover_blend(
-                    &add_key,
-                    theme.text_muted.opacity(0.8),
-                    theme.text,
-                )),
-        );
     let header = super::board::header_frame(key, glyph, title, focused, None, theme)
-        .pr(px(7.0))
         .cursor_pointer()
         .on_hover(motion::hover_listener(key))
         .on_click(cx.listener(move |this, _, _, cx| this.open_panel(open.clone(), cx)))
@@ -80,8 +43,7 @@ pub(super) fn empty_card(
                 .text_size(px(11.5))
                 .text_color(theme.text_muted.opacity(0.6))
                 .child(SharedString::from(hint)),
-        )
-        .child(plus);
+        );
     super::board::card(theme).child(header).into_any_element()
 }
 

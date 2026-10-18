@@ -297,9 +297,7 @@ impl Shell {
                 } else {
                     "Sign in to connect"
                 },
-                "Connect a workspace",
                 PanelItem::Network,
-                |this, _, cx| this.show_panel(PanelItem::Invite, cx),
                 self.card_focused("network", cx),
                 theme,
                 cx,

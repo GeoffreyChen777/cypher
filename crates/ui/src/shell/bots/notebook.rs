@@ -52,13 +52,6 @@ impl Shell {
         input
     }
 
-    /// Open the notebook with the add field focused (the empty card's `+`).
-    fn open_notebook_to_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = self.note_add_input(cx);
-        window.focus(&input.focus_handle(cx), cx);
-        self.show_panel(PanelItem::Notebook, cx);
-    }
-
     fn add_note(&mut self, cx: &mut Context<Self>) {
         let Some((input, _)) = &self.board.notebook.add else {
             return;
@@ -146,9 +139,7 @@ impl Shell {
                 icons::BOOK,
                 "Notebook",
                 "No notes yet",
-                "Add a note",
                 PanelItem::Notebook,
-                |this, window, cx| this.open_notebook_to_add(window, cx),
                 self.card_focused("notebook", cx),
                 theme,
                 cx,
