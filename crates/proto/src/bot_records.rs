@@ -709,7 +709,8 @@ impl ActivityKind {
             | Self::SessionAnswered
             | Self::SessionStopped
             | Self::WorktreeCreated => ActivityGroup::Sessions,
-            Self::NoteWritten | Self::RoutineRan | Self::TaskRan => ActivityGroup::Memory,
+            Self::RoutineRan | Self::TaskRan => ActivityGroup::Routines,
+            Self::NoteWritten => ActivityGroup::Notes,
             Self::PeerAsked
             | Self::PeerAnswered
             | Self::ConnectionAdded
@@ -723,7 +724,8 @@ impl ActivityKind {
 pub enum ActivityGroup {
     Plans,
     Sessions,
-    Memory,
+    Routines,
+    Notes,
     Network,
 }
 

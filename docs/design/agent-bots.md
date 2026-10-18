@@ -1005,7 +1005,7 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 | **Network** (P4) | Connections with reply mode and last exchange; pending invites | A connection: its scope, reply mode, rate limits, exchanges, revoke |
 
 There is no Activity card: it mostly repeated Work, Routines and Network. The full audit
-log, filterable by kind, opens from the chat header's activity button and from "View all
+log, filterable as Plans, Sessions, Routines, Notes or Network, opens from the chat header's activity button and from "View all
 activity" in the Work panel. A card with nothing to show is not drawn. **Needs you** always comes first, so attention
 items are never below the fold. One card floats at a time, the open panel item's; with
 the panel shut none does. A click on a card's header folds the card to that one row and back, as a project card's does (for this window only, like the project cards); the arrow at the header's end, shown on hover, opens its whole list; a row opens that item.

@@ -10,11 +10,12 @@ use super::*;
 use cypher_proto::{ActivityGroup, BotActivity};
 
 /// The filter chips, in order (`None` is All).
-const FILTERS: [Option<ActivityGroup>; 5] = [
+const FILTERS: [Option<ActivityGroup>; 6] = [
     None,
     Some(ActivityGroup::Plans),
     Some(ActivityGroup::Sessions),
-    Some(ActivityGroup::Memory),
+    Some(ActivityGroup::Routines),
+    Some(ActivityGroup::Notes),
     Some(ActivityGroup::Network),
 ];
 
@@ -39,7 +40,8 @@ pub(super) fn group_label(group: Option<ActivityGroup>) -> &'static str {
         None => "All",
         Some(ActivityGroup::Plans) => "Plans",
         Some(ActivityGroup::Sessions) => "Sessions",
-        Some(ActivityGroup::Memory) => "Memory",
+        Some(ActivityGroup::Routines) => "Routines",
+        Some(ActivityGroup::Notes) => "Notes",
         Some(ActivityGroup::Network) => "Network",
     }
 }
@@ -48,7 +50,8 @@ fn group_glyph(group: ActivityGroup) -> &'static str {
     match group {
         ActivityGroup::Plans => icons::CHECKLIST,
         ActivityGroup::Sessions => icons::CHAT_ROUND_LINE,
-        ActivityGroup::Memory => icons::BOOK,
+        ActivityGroup::Routines => icons::CLOCK,
+        ActivityGroup::Notes => icons::BOOK,
         ActivityGroup::Network => icons::USERS,
     }
 }
@@ -262,6 +265,7 @@ mod tests {
             entry("plan", ActivityKind::PlanProposed, 1),
             entry("session", ActivityKind::SessionStarted, 3),
             entry("note", ActivityKind::NoteWritten, 2),
+            entry("routine", ActivityKind::RoutineRan, 0),
             entry("peer", ActivityKind::PeerAsked, 4),
             entry("done", ActivityKind::WorkFinished, 5),
             other,
@@ -272,12 +276,17 @@ mod tests {
                 .map(|a| a.id.as_str())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(ids(None), ["done", "peer", "session", "note", "plan"]);
+        assert_eq!(
+            ids(None),
+            ["done", "peer", "session", "note", "plan", "routine"]
+        );
         assert_eq!(ids(Some(ActivityGroup::Plans)), ["done", "plan"]);
         assert_eq!(ids(Some(ActivityGroup::Sessions)), ["session"]);
-        assert_eq!(ids(Some(ActivityGroup::Memory)), ["note"]);
+        assert_eq!(ids(Some(ActivityGroup::Notes)), ["note"]);
+        assert_eq!(ids(Some(ActivityGroup::Routines)), ["routine"]);
         assert_eq!(ids(Some(ActivityGroup::Network)), ["peer"]);
-        assert_eq!(group_label(Some(ActivityGroup::Memory)), "Memory");
+        assert_eq!(group_label(Some(ActivityGroup::Routines)), "Routines");
+        assert_eq!(group_label(Some(ActivityGroup::Notes)), "Notes");
     }
 
     #[test]
