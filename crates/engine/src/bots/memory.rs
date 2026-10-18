@@ -140,9 +140,9 @@ fn args<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Result<T, 
 
 fn refuse(tool: &str) -> EngineError {
     EngineError::Other(match tool {
-        "write_note" => "This thread may read the notebook but not write to it.".into(),
+        "write_note" => "This session may read the notebook but not write to it.".into(),
         "save_routine" => "Routines are made in the workspace chat, when your owner asks.".into(),
-        _ => format!("{tool} isn't available in this thread."),
+        _ => format!("{tool} isn't available in this session."),
     })
 }
 
@@ -580,7 +580,7 @@ pub(super) fn notebook_section(notes: &[&BotNote], access: Access, bot_chat: boo
          (\"remember that…\", a decision, who owns what); keep each to one fact."
             .to_string()
     } else {
-        "- Notes are your memory across conversations. This thread may read them but not \
+        "- Notes are your memory across conversations. This session may read them but not \
          write new ones."
             .to_string()
     });

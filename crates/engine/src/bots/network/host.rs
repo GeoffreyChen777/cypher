@@ -458,7 +458,7 @@ impl Bots {
         if exchange.state == ExchangeState::Answered {
             self.inner
                 .taint
-                .mark(&chat.id, format!("{peer} answered in this thread"));
+                .mark(&chat.id, format!("{peer} answered in this session"));
         }
         Ok(())
     }

@@ -37,7 +37,7 @@ pub(super) fn prompt(bot: &Bot, role: &Role, roots: &[String]) -> Option<String>
                      propose_plan, stop: end your turn with one line saying the plan awaits \
                      approval. Don't ask in text whether to go ahead."
                         .to_string(),
-                    "- Once approved, an orchestration thread carries the plan out and its \
+                    "- Once approved, a background session carries the plan out and its \
                      result appears here. Use list_work and get_work to follow up on plans, \
                      their steps and their sessions."
                         .to_string(),
@@ -52,8 +52,8 @@ pub(super) fn prompt(bot: &Bot, role: &Role, roots: &[String]) -> Option<String>
         }
         Role::Work(_) => {
             lines.extend([
-                "You are carrying out one plan your owner approved, in an orchestration \
-                 thread of your own. Your first message is the brief: the plan, your owner's \
+                "You are carrying out one plan your owner approved, in a background \
+                 session of your own. Your first message is the brief: the plan, your owner's \
                  instruction and what you may do. Your owner follows the progress card and \
                  reads your result; nobody answers you here."
                     .to_string(),

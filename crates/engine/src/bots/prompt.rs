@@ -105,7 +105,7 @@ pub(super) fn system_prompt(
         if origin == BotOrigin::Owner
             && (bot.capabilities.work_directly || bot.capabilities.coordinate)
         {
-            "- What else you may do in this thread is described below.".to_string()
+            "- What else you may do in this session is described below.".to_string()
         } else {
             "- Those tools are all you have: you cannot run commands, read files or change \
              anything."

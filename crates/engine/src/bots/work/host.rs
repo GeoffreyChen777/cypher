@@ -468,7 +468,7 @@ impl Bots {
             let entries = handle.doc().read_entries()?;
             let last = last_answer(&entries);
             let error = (row.status == SessionStatus::Errored).then(|| {
-                last_error(&entries).unwrap_or_else(|| "The orchestration thread failed.".into())
+                last_error(&entries).unwrap_or_else(|| "The work's session failed.".into())
             });
             return self.settle_work(bot, work, error, last);
         }

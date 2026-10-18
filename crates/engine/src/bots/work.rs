@@ -311,7 +311,7 @@ impl Bots {
             _ => return "This workspace has been deleted, so it can't use any tools.".into(),
         };
         if role(marker) == Role::Other && !routine_works_directly(&self.inner.workspace, marker) {
-            return format!("{tool} isn't available in this thread.");
+            return format!("{tool} isn't available in this session.");
         }
         if !bot.capabilities.work_directly {
             return format!(

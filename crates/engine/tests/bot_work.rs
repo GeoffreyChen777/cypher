@@ -682,7 +682,7 @@ async fn limits_and_refusals_hold() {
         )
         .await;
     assert!(
-        in_main.contains("only works in an orchestration thread"),
+        in_main.contains("only works in a plan's background session"),
         "{in_main}"
     );
     let in_thread = rig
@@ -703,7 +703,7 @@ async fn limits_and_refusals_hold() {
     let from_peer = rig
         .tool("peer-thread", "list_work", serde_json::json!({}))
         .await;
-    assert_eq!(from_peer, "list_work isn't available in this thread.");
+    assert_eq!(from_peer, "list_work isn't available in this session.");
 
     // Sessions the work didn't start need Coordinate: steer.
     let other = rig
@@ -836,7 +836,7 @@ async fn approvals_gate_tainted_threads_and_others_sessions() {
     // A tainted thread asks before starting a session of its own.
     rig.core
         .bots
-        .taint_thread(&thread, "Alice's workspace answered in this thread");
+        .taint_thread(&thread, "Alice's workspace answered in this session");
     let client = rig.client();
     let call = {
         let thread = thread.clone();
@@ -852,7 +852,10 @@ async fn approvals_gate_tainted_threads_and_others_sessions() {
         })
     };
     let approval = wait_for_some("a taint approval", || pending(&rig)).await;
-    assert_eq!(approval.reason, "Alice's workspace answered in this thread");
+    assert_eq!(
+        approval.reason,
+        "Alice's workspace answered in this session"
+    );
     assert!(approval.action.starts_with("Start a session in sp-billing"));
     assert!(
         rig.work(&work_id).session_ids().next().is_none(),

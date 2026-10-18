@@ -836,7 +836,7 @@ async fn notes_follow_the_thread_that_writes_them() {
     .await;
     assert_eq!(
         refused,
-        "This thread may read the notebook but not write to it."
+        "This session may read the notebook but not write to it."
     );
     let mut writer = def.clone();
     writer.write_notes = true;

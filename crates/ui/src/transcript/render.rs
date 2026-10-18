@@ -1412,7 +1412,7 @@ fn bot_post_header(
             .on_click(move |_, window, cx| {
                 crate::markdown::session_link::open_link(&url, window, cx)
             })
-            .child(SharedString::from("Open thread"))
+            .child(SharedString::from("Open session"))
     });
     div()
         .pt(px(12.0))

@@ -500,7 +500,7 @@ impl Shell {
         if thread_listed {
             let thread = PanelItem::Thread(work.thread_chat_id.clone().unwrap_or_default());
             actions = actions.child(
-                popover::btn_ghost(theme, "View thread", "bot-work-thread")
+                popover::btn_ghost(theme, "View session", "bot-work-thread")
                     .id("bot-work-thread")
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.open_panel(thread.clone(), cx)),
@@ -576,7 +576,7 @@ impl Shell {
         let head = PanelHead {
             glyph: icons::CHAT_ROUND_LINE,
             tint: None,
-            title: "Thread".into(),
+            title: "Session".into(),
             subtitle,
         };
         let back_key = "bot-thread-back";

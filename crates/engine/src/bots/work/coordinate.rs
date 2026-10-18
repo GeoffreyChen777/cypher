@@ -466,7 +466,7 @@ impl Bots {
     ) -> Result<String, EngineError> {
         let role = role(marker);
         if role == Role::Other {
-            return Err(refuse(format!("{tool} isn't available in this thread.")));
+            return Err(refuse(format!("{tool} isn't available in this session.")));
         }
         let view = self.view(&chat.id)?;
         if !view.bot.capabilities.coordinate {
@@ -484,7 +484,7 @@ impl Bots {
                  approved plan.",
             )),
             (Role::Main, _) => Err(refuse(format!(
-                "{tool} only works in an orchestration thread. Propose a plan with \
+                "{tool} only works in a plan's background session. Propose a plan with \
                  propose_plan; once your owner approves it, the thread it starts can use {tool}."
             ))),
             (Role::Work(work_id), _) => {
@@ -696,7 +696,7 @@ impl Bots {
         Ok(format!(
             "The plan \"{}\" (work {}) is waiting for your owner's approval in a card in this \
              chat.{waiting} Stop here: end your turn with one line saying it awaits approval. \
-             Once approved, an orchestration thread carries it out and its result appears \
+             Once approved, a background session carries it out and its result appears \
              here; list_work and get_work show where it stands.",
             work.title, work.id
         ))

@@ -140,7 +140,7 @@ const TOOLS: ToolDef[] = [
     name: "propose_plan",
     label: "Propose a plan",
     description:
-      "Propose a plan for work that takes more than a couple of steps or touches another device. It shows your owner a plan card to approve; once approved, an orchestration thread carries it out and reports back here. After proposing, stop and wait: end your turn.",
+      "Propose a plan for work that takes more than a couple of steps or touches another device. It shows your owner a plan card to approve; once approved, a background session carries it out and reports back here. After proposing, stop and wait: end your turn.",
     parameters: Type.Object({
       title: Type.String({ description: "Short title of the task" }),
       summary: Type.Optional(Type.String({ description: "One or two sentences: the approach and how the steps depend on each other" })),
@@ -273,7 +273,7 @@ const TOOLS: ToolDef[] = [
     name: "write_note",
     label: "Write note",
     description:
-      "Add one note to your notebook: a short fact or decision worth remembering in later conversations (\"the release is blocked on the migration\", \"Alice owns auth\"). One fact per note, at most 1000 characters. The note records which thread wrote it.",
+      "Add one note to your notebook: a short fact or decision worth remembering in later conversations (\"the release is blocked on the migration\", \"Alice owns auth\"). One fact per note, at most 1000 characters. The note records which session wrote it.",
     parameters: Type.Object({
       text: Type.String({ description: "The note" }),
     }),
@@ -289,7 +289,7 @@ const TOOLS: ToolDef[] = [
     name: "save_routine",
     label: "Save routine",
     description:
-      "Create or change a routine: a job run by hand or on a schedule, unattended; its result is posted in this chat. It runs either as you, in its own thread, reading everything you read (\"every morning, tell me what's stuck\"), or, with `project`, as an ordinary session in that project that can change its code (\"every night, run the tests and fix anything flaky\"; needs the Coordinate permission). Scheduled runs continue one session; each run by hand starts a fresh one. Pass `id` to change an existing routine (list_schedule shows ids). The schedule is one of {\"kind\":\"daily\",\"time\":\"09:00\",\"days\":[1,2,3,4,5]} (days 1 = Monday … 7 = Sunday; leave out for every day), {\"kind\":\"interval\",\"minutes\":60} (at least 15) or {\"kind\":\"manual\"} (only when run by hand), in the host device's local time. Returns what was saved and the next run.",
+      "Create or change a routine: a job run by hand or on a schedule, unattended; its result is posted in this chat. It runs either as you, in its own session, reading everything you read (\"every morning, tell me what's stuck\"), or, with `project`, as an ordinary session in that project that can change its code (\"every night, run the tests and fix anything flaky\"; needs the Coordinate permission). Scheduled runs continue one session; each run by hand starts a fresh one. Pass `id` to change an existing routine (list_schedule shows ids). The schedule is one of {\"kind\":\"daily\",\"time\":\"09:00\",\"days\":[1,2,3,4,5]} (days 1 = Monday … 7 = Sunday; leave out for every day), {\"kind\":\"interval\",\"minutes\":60} (at least 15) or {\"kind\":\"manual\"} (only when run by hand), in the host device's local time. Returns what was saved and the next run.",
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: "The routine to change; leave out to create one" })),
       name: Type.String({ description: "A short name, e.g. Morning brief" }),

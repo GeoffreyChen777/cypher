@@ -493,7 +493,7 @@ async fn a_peer_thread_reads_through_the_connection_scope() {
         serde_json::json!({ "bot": "Release bot", "question": "relay this" }),
     )
     .await;
-    assert_eq!(relayed, "ask_bot isn't available in this thread.");
+    assert_eq!(relayed, "ask_bot isn't available in this session.");
 }
 
 #[tokio::test(flavor = "multi_thread")]

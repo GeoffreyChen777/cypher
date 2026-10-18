@@ -73,7 +73,7 @@ tree); coordination between sessions goes through the bot.
 |---|---|
 | **Bot** | A named agent owned by one user: definition, scope, capabilities, host device and its chats. A user may own many, one per area or audience. |
 | **Host device** | The Mac or Linux engine that runs the bot, picked at creation. iOS devices cannot host. |
-| **Thread** | One of the bot's chats. Every thread has an **origin** that fixes its permissions (§4). |
+| **Thread** | One of the bot's chats. Every thread has an **origin** that fixes its permissions (§4). Users see every thread as a *session* ("Open session", the Session panel); *thread* is the engineering name. |
 | **Bot chat** | The owner's main conversation with the bot (origin *owner*). |
 | **Orchestration thread** | A hidden child chat of the bot chat that carries out one large task (origin *owner*), §6. |
 | **Routine thread** | A hidden chat in which one routine runs (origin *routine*), §8. |
@@ -484,7 +484,7 @@ part. `from` is a `BotPost`: `{kind: "routine", routineId, name, outcome: "done"
 "failed", runAt, threadChatId?}`; a kind from a newer engine reads as `unknown`. The
 Workspaces board draws each post as a card: a tinted, bordered box (red-tinted when the
 run failed) whose head holds the routine's mark, its name over "Routine · <when>", a Done
-or Failed badge and Open thread, with the result's markdown under a divider. The head and
+or Failed mark and Open session, with the result's markdown under a divider. The head and
 the result's rows each draw their slice of the box (`transcript::rows::CardSlice`).
 
 **Project routine runs.** A project routine runs on the device of its project's space (a
@@ -934,7 +934,7 @@ Built:
   cancels it and starts the owner's reply asking for the change), live step marks,
   sessions and Stop while it runs, and the result rendered as markdown when it ends.
 - **Routine posts and late answers** in the bot chat read under an attribution row
-  (the routine's name, when it ran, Failed, Open thread; "Answer from …" for another
+  (the routine's name, when it ran, Failed, Open session; "Answer from …" for another
   bot's late answer) over the text rendered like any answer.
 - **Worker sessions:** a quiet "by <bot>" on their sidebar row and tab in Projects mode.
 
