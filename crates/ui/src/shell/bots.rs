@@ -66,6 +66,12 @@ pub(super) struct BoardUi {
     stop_disarm: Option<Task<()>>,
     /// The Activity panel's kind filter; `None` shows everything.
     activity_filter: Option<cypher_proto::ActivityGroup>,
+    /// The one floating plate under the focused card (the project
+    /// sidebar's [`super::spaces::CardPlate`]): the card whose item the
+    /// panel shows, else Status. The previous card and the 0→1 glide.
+    plate: super::spaces::CardPlate,
+    focused_card: Option<&'static str>,
+    focus_tween: Option<WidthTween>,
     /// The Schedule, Notebook and Network panels' forms and drafts.
     schedule: schedule::ScheduleUi,
     notebook: notebook::NotebookUi,

@@ -201,14 +201,48 @@ fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
 
-/// The cards' shared surface: the sidebar's focused-project card.
-pub(super) fn card(theme: &Theme) -> gpui::Div {
-    div()
-        .rounded(px(CARD_RADIUS))
-        .bg(theme.sidebar_card_fill(1.0))
-        .shadow(theme.sidebar_card_shadows())
-        .flex()
-        .flex_col()
+/// A card's shape. Like the project sidebar's groups, cards are bare: one
+/// plate floats under the focused card ([`focused_card`]) and glides when
+/// focus moves.
+pub(super) fn card(_theme: &Theme) -> gpui::Div {
+    div().rounded(px(CARD_RADIUS)).flex().flex_col()
+}
+
+/// The card a panel item belongs to (its row or header opened it). Hidden
+/// threads go to what owns them; `thread_kind` reads a thread chat's kind.
+pub(super) fn card_of(
+    item: &PanelItem,
+    thread_kind: impl Fn(&str) -> Option<cypher_proto::BotThread>,
+) -> &'static str {
+    match item {
+        PanelItem::Projects | PanelItem::Project(_) => "projects",
+        PanelItem::NeedsYou
+        | PanelItem::Plan(_)
+        | PanelItem::Approval(_)
+        | PanelItem::Asking { .. }
+        | PanelItem::Review(_) => "needs",
+        PanelItem::Work | PanelItem::WorkItem(_) => "work",
+        PanelItem::Schedule
+        | PanelItem::Routine(_)
+        | PanelItem::Task(_)
+        | PanelItem::NewRoutine
+        | PanelItem::NewTask => "schedule",
+        PanelItem::Notebook => "notebook",
+        PanelItem::Activity => "activity",
+        PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => "network",
+        PanelItem::Thread(chat_id) => match thread_kind(chat_id) {
+            Some(cypher_proto::BotThread::Routine { .. }) => "schedule",
+            Some(cypher_proto::BotThread::Peer { .. }) => "network",
+            _ => "work",
+        },
+    }
+}
+
+/// The card that floats: the open panel item's, else Status (the bot chat
+/// beside it, as the project sidebar floats the selected session's
+/// project). A card not drawn (Needs you emptied) hands it back to Status.
+pub(super) fn focused_card(wanted: Option<&'static str>, drawn: &[&'static str]) -> &'static str {
+    wanted.filter(|key| drawn.contains(key)).unwrap_or("status")
 }
 
 impl Shell {
@@ -234,27 +268,68 @@ impl Shell {
         {
             column = column.child(picker);
         }
-        match bot {
-            Some(bot) => {
-                // §13.1's order: Needs you right under Status, so attention
-                // is never below the fold. A card with nothing to show is
-                // `None` and not drawn.
-                column = column.child(self.render_status_card(&bot, theme, cx));
-                let cards = [
-                    self.render_needs_card(&bot, theme, cx),
-                    self.render_work_card(&bot, theme, cx),
-                    self.render_schedule_card(&bot, theme, cx),
-                    self.render_projects_card(&bot, theme, cx),
-                    self.render_notebook_card(&bot, theme, cx),
-                    self.render_activity_card(&bot, theme, cx),
-                    self.render_network_card(&bot, theme, cx),
-                ];
-                column = column.children(cards.into_iter().flatten());
+        self.board.plate.begin_render();
+        // §13.1's order: Needs you right under Status, so attention is never
+        // below the fold. A card with nothing to show is `None` and not drawn.
+        let cards: Vec<(&'static str, AnyElement)> = match bot {
+            Some(bot) => [
+                ("status", Some(self.render_status_card(&bot, theme, cx))),
+                ("needs", self.render_needs_card(&bot, theme, cx)),
+                ("work", self.render_work_card(&bot, theme, cx)),
+                ("schedule", self.render_schedule_card(&bot, theme, cx)),
+                ("projects", self.render_projects_card(&bot, theme, cx)),
+                ("notebook", self.render_notebook_card(&bot, theme, cx)),
+                ("activity", self.render_activity_card(&bot, theme, cx)),
+                ("network", self.render_network_card(&bot, theme, cx)),
+            ]
+            .into_iter()
+            .filter_map(|(key, card)| card.map(|card| (key, card)))
+            .collect(),
+            None if synced => vec![("status", render_board_empty(theme, cx))],
+            None => Vec::new(),
+        };
+        let wanted = self.board.panel.as_ref().map(|item| {
+            let state = self.state.read(cx);
+            card_of(item, |chat_id| {
+                state
+                    .chats
+                    .iter()
+                    .find(|c| c.id == chat_id)
+                    .and_then(|c| c.bot.as_ref())
+                    .map(|marker| marker.thread.clone())
+            })
+        });
+        let drawn: Vec<&'static str> = cards.iter().map(|(key, _)| *key).collect();
+        let focused = (!drawn.is_empty()).then(|| focused_card(wanted, &drawn));
+        if focused != self.board.focused_card {
+            let previous = std::mem::replace(&mut self.board.focused_card, focused);
+            // Never on first paint: the plate appears where it belongs.
+            if previous.is_some() {
+                self.board.focus_tween = Some(WidthTween::new(0.0, 1.0));
+                self.board.plate.begin_glide();
             }
-            None if synced => column = column.child(render_board_empty(theme, cx)),
-            None => {}
         }
-        column.into_any_element()
+        let plate = self.board.plate.element(
+            self.board.focused_card.map(str::to_string),
+            self.eval_tween_with(self.board.focus_tween, 1.0, super::super::RESORT),
+            theme.clone(),
+        );
+        let list = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .gap(px(GROUP_CARD_GAP))
+            // First, so it paints under every card after they all
+            // prepainted.
+            .child(plate)
+            .children(cards.into_iter().map(|(key, card)| {
+                div()
+                    .relative()
+                    .child(self.board.plate.probe(key.to_string()))
+                    .child(card)
+                    .into_any_element()
+            }));
+        column.child(list).into_any_element()
     }
 
     /// Who the bot is, where it runs, what it is doing, and what it may
@@ -780,6 +855,29 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn one_card_floats_the_open_items_else_status() {
+        let none = |_: &str| None;
+        assert_eq!(card_of(&PanelItem::Project("a".into()), none), "projects");
+        assert_eq!(card_of(&PanelItem::Plan("w".into()), none), "needs");
+        assert_eq!(card_of(&PanelItem::Routine("r".into()), none), "schedule");
+        let routine = |_: &str| {
+            Some(cypher_proto::BotThread::Routine {
+                routine_id: "r".into(),
+            })
+        };
+        assert_eq!(card_of(&PanelItem::Thread("t".into()), routine), "schedule");
+        assert_eq!(card_of(&PanelItem::Thread("t".into()), none), "work");
+        let drawn = ["status", "work", "projects"];
+        assert_eq!(focused_card(None, &drawn), "status");
+        assert_eq!(focused_card(Some("work"), &drawn), "work");
+        assert_eq!(
+            focused_card(Some("needs"), &drawn),
+            "status",
+            "a card no longer drawn hands focus back"
+        );
     }
 
     #[test]
