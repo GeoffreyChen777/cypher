@@ -13,7 +13,7 @@ src/
   router.ts             RouteContext, forward() into a DO, WebSocket check, shared helpers
   public-routes.ts      /health, /install.sh, /releases/*
   revoke-route.ts       POST /notifications/revoke (unauthenticated, revocation only)
-  room-routes.ts        declarative table: /chat2/*, /registry/*, /device/* → Durable Objects
+  room-routes.ts        declarative table: /chat2/*, /registry/*, /device/*, /bots/* → Durable Objects
   blob-route.ts         GET|HEAD /blob/:chatId/:partId (read-only R2)
   identifiers.ts        identifier patterns for URL segments and notification payloads
   env.ts                the Env bindings, AUTH_USER_HEADER, json()
@@ -24,6 +24,7 @@ src/
   chat/                 ChatRoom DO, its SQLite log, the chat2 frame codec
   registry/             RegistryRoom DO and the pure merge core
   device/               DeviceRoom DO and its frame codec
+  bots/                 BotRoom DO (the bot network) and its frame codec
   notifications/        the registry-side state machine, PushDevice DO, APNs sender
   legacy/               SessionRoom (410 stub, still bound) and the retired attachments PUT
 test/
@@ -39,6 +40,17 @@ bearer verification (401 without it), then room routes, the blob route and the
 retired attachments PUT, then 404. Each handler answers `Response | undefined`;
 `undefined` passes the request to the next one. A new room sub-route is one
 entry in the `ROOM_ROUTES` table in `room-routes.ts`.
+
+## Bot network
+
+`BotRoom` (`bots/bot-room.ts`, binding `BOT_ROOMS`, room `bot1/{botRoomId}`) is one
+room per networked agent bot (docs/design/agent-bots.md §11). The owner routes are
+`POST publish`, `GET inbox`, `POST invites`, `DELETE invites/:id`, `POST connect`,
+`DELETE connections/:id`, `POST ask`, `POST answer`, `POST state` and `POST ack` under
+`/bots/:botRoomId/`; the first publish claims the room. Rooms talk to each other DO to
+DO on `/peer/*`, which the Worker never routes. A room that queues an entry for its host
+sends the host's DeviceRoom `POST /nudge {botRoomId}`, delivered as a `bots` device frame
+or queued until the host joins.
 
 The Durable Object class names and bindings in `wrangler.jsonc` are part of the
 deployment: renaming or moving a class file is safe, but changing an exported
@@ -56,7 +68,8 @@ On top of the TypeScript rules in
 - Identifier patterns come from `identifiers.ts`; the registry wire
   validators in `registry-core.ts` stay with the code that the Rust and Swift
   clients mirror.
-- Wire codecs (`chat/chat-frames.ts`, `device/device-frame.ts`) are
+- Wire codecs (`chat/chat-frames.ts`, `device/device-frame.ts`,
+  `bots/bot-frames.ts`) are
   import-free, so scripts load them directly through Node type stripping
   instead of keeping copies.
 - `tsconfig.json` is strict, with `verbatimModuleSyntax`, `noImplicitOverride`

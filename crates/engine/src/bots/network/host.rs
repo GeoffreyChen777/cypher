@@ -102,6 +102,26 @@ impl Bots {
             }
             self.resume_incoming(bot);
         }
+        self.expire_stale(&bots);
+    }
+
+    /// Questions the Edge has expired by now (7 days after they were sent)
+    /// but whose expiry never reached this host: a draft nobody reviewed, or
+    /// a room that is gone.
+    fn expire_stale(&self, bots: &[Bot]) {
+        let cutoff = cypher_proto::now_ms() - cypher_proto::EXCHANGE_TTL_MS - 3_600_000;
+        let records = self.inner.workspace.read_bot_records();
+        for exchange in records.exchanges.iter().filter(|e| {
+            !is_settled(e.state)
+                && e.asked_at < cutoff
+                && bots.iter().any(|b| b.id == e.bot_id)
+                && !lock(&self.inner.network.working).contains(&e.id)
+        }) {
+            let mut expired = exchange.clone();
+            expired.state = ExchangeState::Expired;
+            expired.answered_at = Some(cypher_proto::now_ms());
+            let _ = self.put_exchange(&expired);
+        }
     }
 
     // ── owner edits ─────────────────────────────────────────────────────────
@@ -241,7 +261,8 @@ impl Bots {
                     sent_at,
                 } => {
                     if self.on_ask(bot, &exchange_id, &connection_id, &text, sent_at)? {
-                        incoming.push(exchange_id.clone());
+                        // The row holds a clip; the run gets the whole question.
+                        incoming.push((exchange_id.clone(), text));
                     }
                     ack.asks.push(exchange_id);
                 }
@@ -268,8 +289,8 @@ impl Bots {
         if !ack.is_empty() {
             edge.ack(room, &ack).await.map_err(net)?;
         }
-        for exchange_id in incoming {
-            self.spawn_incoming(bot.id.clone(), exchange_id);
+        for (exchange_id, text) in incoming {
+            self.spawn_incoming(bot.id.clone(), exchange_id, Some(text));
         }
         Ok(())
     }
@@ -453,23 +474,23 @@ impl Bots {
                 && matches!(e.state, ExchangeState::Delivered | ExchangeState::Working)
         }) {
             if !lock(&self.inner.network.working).contains(&exchange.id) {
-                self.spawn_incoming(bot.id.clone(), exchange.id.clone());
+                self.spawn_incoming(bot.id.clone(), exchange.id.clone(), None);
             }
         }
     }
 
-    fn spawn_incoming(&self, bot_id: String, exchange_id: String) {
+    fn spawn_incoming(&self, bot_id: String, exchange_id: String, question: Option<String>) {
         if !lock(&self.inner.network.working).insert(exchange_id.clone()) {
             return;
         }
         let bots = self.clone();
         tokio::spawn(async move {
-            bots.answer_incoming(&bot_id, &exchange_id).await;
+            bots.answer_incoming(&bot_id, &exchange_id, question).await;
             lock(&bots.inner.network.working).remove(&exchange_id);
         });
     }
 
-    async fn answer_incoming(&self, bot_id: &str, exchange_id: &str) {
+    async fn answer_incoming(&self, bot_id: &str, exchange_id: &str, question: Option<String>) {
         let Some(exchange) = self.exchange(exchange_id) else {
             return;
         };
@@ -510,7 +531,11 @@ impl Bots {
             working.state = ExchangeState::Working;
             let _ = self.put_exchange(&working);
         }
-        let reply = match self.run_peer_question(&bot, &connection, &exchange).await {
+        let question = question.unwrap_or_else(|| exchange.question.clone());
+        let reply = match self
+            .run_peer_question(&bot, &connection, &exchange, &question)
+            .await
+        {
             Ok(reply) => reply,
             Err(err) => {
                 tracing::warn!(exchange = %exchange.id, error = %err, "peer question failed");
@@ -624,6 +649,7 @@ impl Bots {
         bot: &Bot,
         connection: &BotConnection,
         exchange: &BotExchange,
+        question: &str,
     ) -> Result<String, EngineError> {
         let thread = self.peer_thread(bot, connection)?;
         let handle = self.inner.doc_host.open(&thread.id)?;
@@ -635,7 +661,7 @@ impl Bots {
             .any(|e| e.id == message_id);
         if !asked_already {
             let asking = peer_label(&connection.peer);
-            let prompt = format!("Question from {asking}:\n\n{}", exchange.question);
+            let prompt = format!("Question from {asking}:\n\n{question}");
             self.inner.doc_host.queue_command(
                 &thread.id,
                 SessionCommandPayload::Run {

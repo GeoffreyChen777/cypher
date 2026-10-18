@@ -5,7 +5,8 @@ chat and its read tools, the palette). P1: engine-stamped origins, the role-awar
 profile, per-origin prompts with the untrusted-data rule, slash commands by origin, the
 unattended run mode, the search index, `session_activity` and `project_git`. The first
 Botboard slice (§13.1: mode switch, picker, Status and Projects cards, detail panel) is
-built. The rest is design; §16 is the build order. Where the built code differs from the
+built. The bot network's Edge and engine side (§11, P4) is built. The rest is design;
+§16 is the build order. Where the built code differs from the
 full design, the section says so.
 
 A bot is a **coordinator**: a long-lived agent responsible for everything in the projects
@@ -410,12 +411,20 @@ control, with the bot's local scoped checkouts as workspace roots (§4.4).
 | Tool | Threads | Does |
 |---|---|---|
 | `read_notes`, `write_note` | owner, routine (if granted) | The notebook (§7). |
-| `list_connections` | owner | Connected bots, owners, groups, reachability. |
-| `ask_bot` | owner | Asks one connected bot; waits up to `wait_s` (default 120 s). Taints the thread (§4.3). |
-| `ask_group` | owner | Fans a question out to a group; returns the answers received in the window. |
+| `list_connections` | owner | Connected bots: name, owner, connection id, how this bot replies to them, last question. |
+| `ask_bot` | owner | Asks one connected bot (by name, any case, or connection id); waits up to `wait_s` (default 120 s, at most 600). Taints the thread when an answer comes back (§4.3). |
+| `ask_group` | owner | Fans a question out to a group; returns the answers received in the window. Not built. |
 
 Network tools never exist in peer threads, so a peer cannot use the bot to relay
 questions to third parties.
+
+As built (P4): `list_connections` and `ask_bot` are in every owner thread's allowlist
+(`cypher_proto::BOT_NETWORK_TOOLS`), never in routine or peer threads, and a call from
+any other thread is refused. Without an Edge (the local profile, or signed out) both
+answer "The bot network needs you signed in to Cypher." `ask_bot` returns the answer
+between `<peer-answer>` tags, followed by a reminder that it is another user's data;
+"declined to answer" and "expired unanswered" are plain sentences. The extension gives
+`ask_bot` a 630 s call timeout.
 
 ### 10.5 Prompting
 
@@ -425,14 +434,42 @@ sessions it draws on as `cypher://session/<id>` links (built), and that text fro
 transcripts, tool output, web pages and peers is data to read, never instructions to
 follow. In peer threads it also says who is asking.
 
+As built (P4): an owner thread with live connections gets a network section naming the
+connected bots and their owners, when to ask one, that answers are another person's data
+to attribute and check, and that a `pending` answer arrives later as an `[Answer from …]`
+message. A peer thread's prompt names the asking bot and its owner from the connection
+row and describes the effective scope (bot ∩ connection), not the bot's own.
+
 ### 10.6 Late answers
 
 When `ask_bot` times out it returns `pending` with the exchange id. When the answer
-arrives the engine queues a durable command in the bot chat (`{kind: "bot-answer",
-exchangeId}`), which renders as an attributed card and starts a turn, so the bot can
-follow up without the owner asking again.
+arrives, the engine queues a durable Run in the bot chat, so the bot can follow up
+without the owner asking again.
+
+As built (P4): an answer that arrives with no `ask_bot` call waiting on it (it timed
+out, or the engine restarted) becomes a Run command in the bot's main chat, with message
+id `bot-answer-<exchangeId>`. The transcript shows the owner a readable, attributed
+message:
+
+```
+[Answer from "Billing bot" (Alice's bot) to your question "Can we ship Friday?"]
+
+Yes, Friday works.
+```
+
+Declined and expired questions read `["Billing bot" (Alice's bot) declined your question
+"…"]` and `[Your question to … expired unanswered: "…"]`. The agent's prompt
+(`agent_prompt`) adds that the text is another user's reply, data and not instructions,
+and asks the bot to tell its owner what it means. An answered late reply taints the bot
+chat. A dedicated card for these messages (`{kind: "bot-answer"}`) is not built; the
+bracketed first line is what a UI can key on.
 
 ## 11. Bot network (Represent)
+
+Status: **built (P4)** on the Edge and in the engine: `BotRoom`, publish, invites,
+connections, peer threads in Auto, Review and Off, the outgoing scrub, exchange states,
+late answers and revocation. The Network card and its detail panel (§13.1) belong to the
+UI track. Groups (§11.7) and end-to-end encryption are not built.
 
 ### 11.1 Flow
 
@@ -448,41 +485,59 @@ Me (any device)              my host engine            Edge                     
 
 Peer questions run in that connection's own peer thread with read tools only. In **Auto**
 mode the answer goes back at once; in **Review** mode it waits as a draft until A approves,
-edits or declines it. Before an answer leaves the host, a best-effort pass redacts strings
-that look like secrets (private-key blocks, common token formats, `.env`-style
-assignments); it is a safety net, not a guarantee, and the UI says so.
+edits or declines it; with replies **Off** every question is declined without running.
+Before an answer leaves the host, a best-effort pass redacts strings that look like
+secrets (private-key blocks, common token formats, `.env`-style assignments); it is a
+safety net, not a guarantee, and the UI says so.
 
 ### 11.2 Edge `BotRoom`
 
-One Durable Object class, `BotRoom`, keyed `bot1/{botRoomId}` and bound as `BOT_ROOMS`
-(wrangler migration `new_sqlite_classes: ["BotRoom"]`), one room per networked bot:
+One Durable Object class, `BotRoom` (`apps/edge/src/bots/bot-room.ts`), keyed
+`bot1/{botRoomId}` and bound as `BOT_ROOMS` (wrangler migration `v7`,
+`new_sqlite_classes: ["BotRoom"]`), one room per networked bot. The host engine mints
+the room id. The room learns it from `?room=`, which the Worker adds to every forwarded
+request.
 
 | Table | Contents |
 |---|---|
-| `meta` | owner user id (claimed on publish, owner-only after), public profile `{name, ownerName}`, host device id, `paused` |
-| `invites` | `sha256(secret)`, created/expiry, max uses, uses |
-| `connections` | `connectionId`, peer `botRoomId`, peer profile, created, revoked, per-side rate counters |
-| `inbox` | exchanges addressed to this bot that the host has not acknowledged |
-| `outbox` | exchanges this bot asked, with state and, once received, the answer, until acknowledged |
+| `meta` | `owner` (user id, claimed on the first publish), `room`, `profile` `{name, ownerName}`, `host` (device id), `paused` |
+| `invites` | id, `sha256(secret)` (hex), created, expires, max uses, uses, revoked |
+| `connections` | id, peer room id, peer name and owner name, created, revoked, the invite it came from, and `link_pending` (`added` or `revoked`, until the host acks it) |
+| `inbox` | questions addressed to this bot: exchange id, connection, `text` (dropped once the host acks it), state, sent, acked |
+| `outbox` | questions this bot asked: exchange id, connection, state, the answer `text` (dropped once acked), answered, the state the host last acked |
 
-Bodies are kept only until the receiving host acknowledges them, or 7 days for undelivered
-ones (then `expired`).
+The per-connection limits count `inbox` and `outbox` rows, so there are no separate
+counters: settled rows stay a day without bodies, then go. An exchange not settled 7
+days after it was sent expires in both rooms (both use the asker's `sentAt`); an alarm
+fires at the next such deadline, and every request sweeps first. A settled answer the
+host never pulls is dropped after 7 days. Expired invites are dropped after 30 days.
 
 ### 11.3 Routes
 
-All routes sit behind bearer verification as one `ROOM_ROUTES` entry with prefix `bots`:
+All routes sit behind bearer verification as one `ROOM_ROUTES` entry with prefix `bots`
+(closed: anything else under `/bots/:id/` answers 404):
 
 | Route | Caller | Does |
 |---|---|---|
-| `POST /bots/:id/publish` | owner | Claims the room and sets the public profile. |
-| `GET /bots/:id/inbox` | owner's host | Pulls undelivered inbox and outbox entries. |
-| `POST /bots/:id/invites` | owner | Creates an invite; returns `code = <botRoomId>.<secret>` once. |
-| `DELETE /bots/:id/invites/:inviteId` | owner | Revokes an unused invite. |
-| `POST /bots/:id/connect` | owner of `:id` | Redeems a peer's invite code on behalf of bot `:id`. |
+| `POST /bots/:id/publish` | owner | Claims the room on first use; sets `{name, ownerName, hostDeviceId, paused}`. |
+| `GET /bots/:id/inbox` | owner's host | `{entries: [frame…]}`: pending link changes, unacked questions, and the states and answers of its own questions (at most 100 of each). |
+| `POST /bots/:id/invites` | owner | `{ttlMs?, maxUses?}` (defaults 7 days and 1; clamped to 10 min–30 days and 1–100) → `{inviteId, code, createdAt, expiresAt, maxUses}`, `code = <botRoomId>.<secret>` once. |
+| `DELETE /bots/:id/invites/:inviteId` | owner | Revokes an invite. |
+| `POST /bots/:id/connect` | owner of `:id` | `{code}` → `{connectionId, peer, createdAt}`: redeems a peer's invite on behalf of bot `:id`. |
 | `DELETE /bots/:id/connections/:cid` | owner | Revokes a connection on both sides. |
-| `POST /bots/:id/ask` | owner of `:id` | Sends a question on one of `:id`'s connections. |
-| `POST /bots/:id/answer` | owner of `:id` | Answers (or declines) an exchange in `:id`'s inbox. |
-| `POST /bots/:id/ack` | owner of `:id` | Acknowledges delivered entries. |
+| `POST /bots/:id/ask` | owner of `:id` | `{exchangeId, connectionId, text}` → `{exchangeId, sentAt}`. The engine mints the exchange id, so a retry is the same exchange. |
+| `POST /bots/:id/answer` | owner of `:id` | `{exchangeId, status: "answered"\|"declined", text?}` → `{delivered}`. |
+| `POST /bots/:id/state` | owner of `:id` | `{exchangeId, state: "working"\|"awaiting_review"}`: progress, forwarded to the asker. |
+| `POST /bots/:id/ack` | owner of `:id` | `{asks?: [exchangeId], states?: [{exchangeId, state}], links?: [connectionId]}`. Acking an ask marks it `delivered` for the asker. |
+
+Errors are `{error, message}`: `not_published` and `no_connection`/`no_exchange` (404),
+`forbidden` and `same_owner` (403), `invite_invalid` (404, one answer for wrong, expired,
+revoked and used-up codes), `already_connected` and `settled` (409), `too_large` (413),
+`too_many_in_flight` and `rate_limited` (429), `paused` (503).
+
+The rooms call each other at `/peer/redeem`, `/peer/ask`, `/peer/answer`, `/peer/state`
+and `/peer/revoke`. No `ROOM_ROUTES` entry reaches these paths, and a room refuses them
+on any request that carries the Worker's user header.
 
 ### 11.4 Trust chain
 
@@ -493,24 +548,41 @@ limits on both sides before queueing; `connect` redeems the hashed secret in the
 revocation deletes both sides. Neither user's bearer reaches the other's room, and a peer
 cannot address a room it is not connected to.
 
+As built: every peer call names the calling room, and the callee accepts it only for a
+live connection it recorded with that room. `connect` refuses a code from a room of the
+same owner (bots of different people only) and a second live connection between the same
+two rooms. A room nudges devices as its owner, and a DeviceRoom accepts only its own
+owner, so a room published onto someone else's device id nudges nothing. A peer that
+can't be reached on revoke keeps a dangling connection, but the revoking room refuses
+every question on it.
+
 ### 11.5 Delivery and wire shapes
 
 Bots open no socket of their own. A BotRoom that queues an entry sends the host's
 DeviceRoom a durable nudge, and the host pulls with `GET /bots/:id/inbox`; entries stay
-until acked after the engine has appended them to the peer thread. Exchange state flows
-back as `queued → delivered → working → (awaiting_review) → answered | declined |
-expired`.
+until acked after the engine has written them down. Exchange state flows back as
+`queued → delivered → working → (awaiting_review) → answered | declined | expired`.
 
 ```
 ask      {t:"ask", exchangeId, connectionId, text, sentAt}
 answer   {t:"answer", exchangeId, connectionId, status:"answered"|"declined"|"expired", text?, answeredAt}
 state    {t:"state", exchangeId, state}
-link     {t:"link", connectionId, op:"added"|"revoked", peer?:{botRoomId, name, ownerName}}
+link     {t:"link", connectionId, op:"added"|"revoked", peer?:{botRoomId, name, ownerName}, inviteId?}
 ```
 
-The codec is mirrored in Rust and listed in `protocol/README.md` with shared vectors.
-Limits: question ≤ 8 KiB, answer ≤ 64 KiB; per connection 30 questions an hour, 200 a
-day, 3 in flight.
+`inviteId` names the invite a peer redeemed, on the inviting side. The codec is
+`cypher_proto::bot_wire` and `apps/edge/src/bots/bot-frames.ts`, both pinned by
+`protocol/vectors/bot-frames-v1.json`. Limits: question ≤ 8 KiB, answer ≤ 64 KiB (UTF-8
+bytes); per connection 30 questions an hour, 200 a day, 3 in flight, checked by both
+rooms.
+
+As built: the nudge is `POST /nudge {botRoomId}` on the host's DeviceRoom (sent DO to DO
+as the room's owner). It reaches the host as a device frame of kind `bots` with payload
+`{botRoomId}` (`cypher_rpc::device_room::BOTS_NUDGE_KIND`; older engines skip the unknown
+kind) or, while the host is offline, waits in `pending_bot_nudges` (at most 64) and is
+replayed when the host joins. The host relay hands it to `Bots::bots_nudged`
+(`HostRelayConfig::with_bots_nudge`). A room nudges on a new link, question or answer;
+progress states don't nudge.
 
 ### 11.6 Privacy
 
@@ -518,12 +590,69 @@ Bodies cross the Edge in plaintext and rest in DO SQLite until acked or expired,
 transcripts do today, and the UI says so. End-to-end encryption with per-bot X25519 keys
 exchanged at redeem time is a later phase; it needs no new routes, only opaque `text`.
 
+As built, the scrub (`bots/network/scrub.rs`) redacts PEM private-key blocks (an
+unterminated one to the end), AWS key ids, GitHub, Slack, `sk-` (OpenAI, Anthropic),
+Stripe and Google API keys, JWTs, `Bearer`/`token` values of 20+ characters, URL
+credentials, `.env` lines whose name contains secret, token, password, api key, private
+key, credential or access key, and quoted JSON/YAML values under such names. Names stay;
+values become `[redacted]`. Review drafts are scrubbed before the owner sees them; the
+owner's edited text is sent as written.
+
 ### 11.7 Groups
 
 First a group is the owner's label over their own connections (a `botGroups` registry
 row), which `ask_group` fans out to. Later a `GroupRoom` DO holds shared membership:
 joining by one invite connects a bot to every member, with the group's default policy,
-which each member can narrow.
+which each member can narrow. Not built.
+
+### 11.8 The host engine (as built)
+
+`crates/engine/src/bots/network.rs` and `network/` serve the bots hosted on this device.
+`EngineCore` attaches the Edge client (`HttpBotEdge`, a fresh bearer per request) when
+the engine has an Edge; tests attach a fake through the `BotEdge` trait. The owner name
+peers see is the signed-in profile's name, else its email.
+
+- **Room.** A bot's room id lives in `<store>/bots-network/<botId>.json` with the profile
+  last published, beside the bot folders, so it survives a recreated folder. The first
+  `CreateBotInvite` or `RedeemBotInvite` mints and publishes it; a rename or pause
+  republishes. A room id someone else already claimed is replaced once.
+- **Invite.** `CreateBotInvite {botId}` publishes, creates the invite on the Edge and
+  writes a `BotInvite` row (never the code). `RedeemBotInvite {botId, code}` publishes,
+  calls `connect`, and writes the `BotConnection` row (reply mode Auto, no narrowed scope)
+  with a `ConnectionAdded` activity. The inviting host writes its own row from the
+  `link added` entry and counts the invite's use.
+- **Loop.** One host task wakes on a nudge, on any bot record change (debounced 300 ms)
+  and every 60 s. Each pass acts on owner edits, then pulls a room when it was nudged,
+  at engine start, or when it has live connections or waiting questions and was last
+  pulled a minute ago. Pulls run one at a time, and every handler is idempotent, so a
+  replayed entry is harmless. Entries are acked only after their rows are written.
+- **A peer's question.** `ask` writes an Incoming `BotExchange` (Delivered) and is acked;
+  then, unless replies are Off (declined at once, no run), the host posts `working`,
+  creates the connection's peer thread on first use (a hidden chat with
+  `BotChat::thread(bot, Peer, Peer{connectionId})`, the bot folder as cwd and the bot
+  chat's config with a read-only sandbox, recorded as the connection's `threadChatId`)
+  and queues a Run there: `Question from "<bot>" (<owner>'s bot):` and the question, with
+  message id `peer-<exchangeId>`. The reply is the turn's last assistant text, once a
+  later question started or the session row settled after it. A failed or
+  10-minute-long run is declined. The reply is scrubbed, then sent (Auto, `Answered` and
+  a `PeerAnswered` activity) or stored as the draft with `awaiting_review` (Review).
+  Questions left Delivered or Working by a restart are picked up again, and a question
+  already in the thread is not asked twice.
+- **Review.** When the owner writes `review` on an awaiting exchange (`reviewBotExchange`),
+  the host sends the edited text, or the draft, or declines. An answer the Edge refuses as
+  gone (404/409) settles the row as Expired; a network failure retries on the next pass.
+- **Revoke.** `revokeRequestedAt` on a connection makes the host call `DELETE
+  connections/:cid`, set `revokedAt`, log `ConnectionRevoked` and expire its waiting
+  questions. A `link revoked` entry does the same on the other side. A deleted bot's
+  live connections are revoked by its old host, which still holds the room file. An
+  invite's `revokeRequestedAt` makes the host revoke it on the Edge and set `revokedAt`.
+- **Asking.** `ask_bot` publishes if needed, posts `ask`, writes the Outgoing exchange
+  (`PeerAsked` activity), and waits for the pull that settles it, pulling itself every
+  15 s in case a nudge is lost. An answer marks the calling thread tainted
+  (`Taint::mark`, "<bot> answered in this thread").
+- **Bounds.** Rows are clamped before every write (answers to `ANSWER_MAX` characters);
+  at most `KEEP_EXCHANGES` exchanges and `KEEP_ACTIVITY` activity entries per bot, the
+  oldest settled ones going first.
 
 ## 12. Cost
 
@@ -532,6 +661,10 @@ duration bills while an object is awake (docs/operations/cloudflare-billing.md).
 
 - **No idle cost.** No per-bot socket or heartbeat: one exchange is about 6–10 billed
   requests and 15–25 rows written, and nothing bills between exchanges.
+  As built, one deviation: besides the nudge, the host pulls each room with live
+  connections once a minute (§11.8), a safety net for a lost nudge that costs one
+  request per networked bot per minute while its host is online (about 1,440 a day).
+  Dropping it, or stretching it, leaves delivery to the durable nudge alone.
 - **The real cost is the runs.** Every thread syncs through chat2 like any chat. A peer
   question costs about two agent turns; an orchestration costs its own turns plus its
   workers', the same as running those sessions by hand.
@@ -672,10 +805,13 @@ Each method is one constant plus one `SPECS` entry in `cypher_rpc::methods`.
 | `StopBotThread` | unary, forwardable | P2 | Stops an orchestration or routine thread and the sessions it started. |
 | `WatchBotWork` | stream, forwardable | P2 | Orchestrations, their steps and sessions, for the progress cards and *Work* pane. |
 | `SaveBotRoutine`, `DeleteBotRoutine`, `SaveProjectTask`, `DeleteProjectTask` | unary, forwardable | P3 | Routine and recurring-task definitions (registry rows). |
-| `BotAsk` | stream, local | P4 | `ask_bot` / `ask_group`: exchange states until answered or `wait_s`. |
-| `CreateBotInvite`, `RevokeBotInvite`, `RedeemBotInvite` | unary, forwardable | P4 | |
-| `UpdateBotConnection`, `RevokeBotConnection` | unary, forwardable | P4 | Reply mode, connection scope, rate limits. |
-| `WatchBotActivity`, `ResolveBotReview` | stream / unary, forwardable | P5 | Exchanges and review drafts. |
+| `CreateBotInvite` | unary, forwardable | P4 (built) | Runs on the bot's host: `{botId}` → `{inviteId, code, expiresAt}`; publishes the room first. The code is shown once. |
+| `RedeemBotInvite` | unary, forwardable | P4 (built) | Runs on the bot's host: `{botId, code}` → the new `BotConnection`. |
+| `Mutate revokeBotInvite`, `updateBotConnection`, `revokeBotConnection`, `reviewBotExchange` | unary | P4 (built) | Owner fields on the rows (`revokeRequestedAt`, `replyMode`, `scope`, `review`); the host acts on them. |
+| `WatchBotRecords` | stream | built | Connections, invites, exchanges and activity, with the other records. |
+
+As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is no
+`BotAsk` stream, and exchanges and reviews ride `WatchBotRecords` and `Mutate`.
 
 ## 15. What must be true before each step ships
 
@@ -697,8 +833,8 @@ Each method is one constant plus one `SPECS` entry in `cypher_rpc::methods`.
 | **P1: foundation** | Role-aware run profiles with engine-stamped origins; the untrusted-data prompt; the non-interactive run mode; the FTS index, `session_activity` and `project_git`. |
 | **P2: coordinator** | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; plan, progress and result cards; Stop; limits; audit log. |
 | **P3: memory and routines** | The notebook (owner notes first, then bot notes with provenance); the scheduler; routines and recurring project tasks; the attention inbox ("what needs me"). |
-| **P4: network** | `BotRoom`, publish, invites, connections, peer threads, `ask_bot` in Auto mode, exchange states, late answers, the Connections and Activity panes. |
-| **P5: review and control** | Review mode, the outgoing scrub, notifications for reviews, plans and connections; *Coordinate: steer*. |
+| **P4: network** | `BotRoom`, publish, invites, connections, peer threads, `ask_bot` in Auto mode, exchange states, late answers, the Connections and Activity panes. Built on the Edge and in the engine, with Review mode and the scrub from P5; the panes are the UI track's. |
+| **P5: review and control** | Review mode, the outgoing scrub (both built with P4), notifications for reviews, plans and connections; *Coordinate: steer*. |
 | **P6: groups, iPhone, E2E** | Owner groups, then shared groups; the iOS bot surfaces; end-to-end encrypted exchanges. |
 
 P2 comes before the network because a coordinator is useful to a single user on day one,
@@ -708,7 +844,13 @@ Tests follow the repository's tiers: unit tests for scope, origin and capability
 (including the "not found" rule, bot-chat exclusion and the taint rule), engine
 integration tests with the mock harness driving bot tools and orchestrations, workerd
 tests for `BotRoom` (ownership, redeem, revoke, cross-room delivery, rate limits, expiry),
-shared frame vectors, and `scripts/e2e-smoke.sh` extended to two users with one bot each.
+shared frame vectors, and a two-user smoke with one bot each.
+
+As built for P4: `apps/edge/test/workerd/bot-room.workerd.test.ts` (real BotRoom and
+DeviceRoom objects behind the route table), `bot-frames.test.ts` and
+`crates/proto/src/bot_wire.rs` on the shared vectors, `crates/engine/tests/bot_network.rs`
+(two engines as two users through an in-process fake Edge), and `scripts/e2e-bots.sh`
+(local `wrangler dev`, two headless engines, `crates/rpc/examples/bot_network_driver.rs`).
 
 ## 17. Open questions
 
