@@ -131,7 +131,23 @@ pub(super) fn work_prompt(
 ) -> Option<String> {
     let role = role(marker);
     if role == Role::Other {
-        return None;
+        let roots = workspace_roots(workspace, bot, marker);
+        if roots.is_empty() {
+            return None;
+        }
+        // A routine granted Work directly (§8).
+        return Some(format!(
+            "This routine may run commands and edit files with bash, read, write, edit, grep, \
+             find and ls, under your owner's permission rules, in these local checkouts:\n{}\n\
+             Nobody is watching: a command that would need approval fails the run, so stay \
+             inside these folders and the sandbox. Change files only when the routine asks you \
+             to.",
+            roots
+                .iter()
+                .map(|root| format!("- {root}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
     }
     let roots = workspace_roots(workspace, bot, marker);
     text::prompt(bot, &role, &roots)
@@ -146,7 +162,7 @@ pub(super) fn workspace_roots(
     bot: &Bot,
     marker: &BotChat,
 ) -> Vec<String> {
-    if role(marker) == Role::Other || !bot.capabilities.work_directly {
+    if !works_directly(workspace, bot, marker) {
         return Vec::new();
     }
     let mut roots: Vec<String> = Vec::new();
@@ -162,6 +178,30 @@ pub(super) fn workspace_roots(
         }
     }
     roots
+}
+
+/// Whether a thread gets Pi's own tools: an owner thread while the bot has
+/// *Work directly*, and a routine's thread when its routine was granted it
+/// too (never more than an owner thread, §4.1).
+pub(super) fn works_directly(workspace: &WorkspaceHost, bot: &Bot, marker: &BotChat) -> bool {
+    if !bot.capabilities.work_directly {
+        return false;
+    }
+    match role(marker) {
+        Role::Main | Role::Work(_) => true,
+        Role::Other => routine_works_directly(workspace, marker),
+    }
+}
+
+/// A routine thread whose routine may work directly.
+fn routine_works_directly(workspace: &WorkspaceHost, marker: &BotChat) -> bool {
+    let (BotOrigin::Routine, BotThread::Routine { routine_id }) = (marker.origin, &marker.thread)
+    else {
+        return false;
+    };
+    workspace
+        .record::<p::BotRoutine>(p::KIND_BOT_ROUTINES, routine_id)
+        .is_some_and(|routine| routine.bot_id == marker.bot_id && routine.work_directly)
 }
 
 /// The permission level a bot thread's run spawns with, whatever its chat
@@ -270,7 +310,7 @@ impl Bots {
             Ok(Some(bot)) => bot,
             _ => return "This bot has been deleted, so it can't use any tools.".into(),
         };
-        if role(marker) == Role::Other {
+        if role(marker) == Role::Other && !routine_works_directly(&self.inner.workspace, marker) {
             return format!("{tool} isn't available in this thread.");
         }
         if !bot.capabilities.work_directly {

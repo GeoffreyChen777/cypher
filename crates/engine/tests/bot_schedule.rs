@@ -167,6 +167,7 @@ fn routine_def(id: &str, bot: &Bot, prompt: &str, schedule: Schedule) -> BotRout
         schedule,
         enabled: true,
         write_notes: false,
+        work_directly: false,
         max_runs_per_day: 24,
         created_at: 0,
         updated_at: 0,
@@ -945,4 +946,53 @@ async fn wait_for_settled(core: &EngineCore, id: &str) -> RunOutcome {
     )
     .await;
     outcome.unwrap()
+}
+
+/// A routine granted Work directly gets Pi's own tools and the bot's local
+/// checkouts as roots, but only while the bot itself works directly.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_routine_granted_work_directly_runs_with_pi_tools() {
+    let rig = rig().await;
+    let core = &rig.core;
+    let bot: Bot = serde_json::from_value(
+        cypher_rpc::memory_client(core.rpc_service())
+            .call(
+                cypher_rpc::methods::CREATE_BOT,
+                serde_json::json!({
+                    "targetDeviceId": core.device_id,
+                    "name": "Tester",
+                    "scope": BotScope {
+                        projects: ProjectGrant::Selected { space_ids: vec!["sp-web".into()] },
+                        ..Default::default()
+                    },
+                    "capabilities": { "workDirectly": true },
+                }),
+            )
+            .await
+            .expect("CreateBot"),
+    )
+    .unwrap();
+    let mut routine = routine_def("r-tests", &bot, "Run the tests", Schedule::Manual);
+    routine.work_directly = true;
+    save_routine(core, &routine).await;
+    let thread = cypher_proto::Chat {
+        bot: Some(cypher_proto::BotChat::thread(
+            bot.id.clone(),
+            cypher_proto::BotOrigin::Routine,
+            cypher_proto::BotThread::Routine {
+                routine_id: "r-tests".into(),
+            },
+        )),
+        ..core.workspace.chat(&bot.chat_id).unwrap().unwrap()
+    };
+    let env = cypher_engine::bots::profile::bot_env(&core.workspace, &thread).unwrap();
+    assert!(env.tools.iter().any(|t| t == "bash"), "{:?}", env.tools);
+    assert!(!env.workspace_roots.is_empty());
+    assert!(env.system_prompt.contains("This routine may run commands"));
+    // Not granted: read tools only.
+    routine.work_directly = false;
+    save_routine(core, &routine).await;
+    let env = cypher_engine::bots::profile::bot_env(&core.workspace, &thread).unwrap();
+    assert!(!env.tools.iter().any(|t| t == "bash"), "{:?}", env.tools);
+    assert!(env.workspace_roots.is_empty());
 }

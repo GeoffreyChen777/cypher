@@ -519,6 +519,11 @@ pub struct BotRoutine {
     /// May write to the notebook (it always reads it).
     #[serde(default)]
     pub write_notes: bool,
+    /// May use Pi's shell and file tools in the bot's local projects, like
+    /// an owner thread with *Work directly* (and only while the bot has it).
+    /// Unattended: anything that would ask for approval fails the run.
+    #[serde(default)]
+    pub work_directly: bool,
     /// Runs a day before the rest are skipped.
     #[serde(default = "default_runs_per_day")]
     pub max_runs_per_day: u32,

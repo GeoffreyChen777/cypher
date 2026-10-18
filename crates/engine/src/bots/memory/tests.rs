@@ -197,6 +197,7 @@ fn the_schedule_lists_routines_and_the_tasks_of_granted_projects() {
         },
         enabled: true,
         write_notes: true,
+        work_directly: false,
         max_runs_per_day: 24,
         created_at: 0,
         updated_at: 0,

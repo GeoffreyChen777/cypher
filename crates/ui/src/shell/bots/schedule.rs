@@ -332,6 +332,7 @@ pub(super) struct JobForm {
     every: Entity<TextInput>,
     draft: ScheduleDraft,
     write_notes: bool,
+    work_directly: bool,
     worktree: bool,
     space_id: Option<String>,
     error: Option<SharedString>,
@@ -814,7 +815,7 @@ impl Shell {
             ))
             .child(parts::section_label(theme, "Prompt"))
             .child(parts::well(theme, routine.prompt.clone()));
-        let (enabled, write_notes) = (routine.clone(), routine.clone());
+        let (enabled, write_notes, direct) = (routine.clone(), routine.clone(), routine.clone());
         body = body.child(parts::section_label(theme, "Settings")).child(
             parts::group_box()
                 .child(
@@ -850,6 +851,25 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let mut routine = write_notes.clone();
                         routine.write_notes = !routine.write_notes;
+                        this.save_routine_now(routine, cx);
+                    })),
+                )
+                .child(
+                    parts::switch_row(
+                        "bot-routine-direct",
+                        "May run commands",
+                        if bot.capabilities.work_directly {
+                            "In the bot's projects on this device, e.g. to run tests."
+                        } else {
+                            "Needs the bot's Work directly, which is off."
+                        },
+                        routine.work_directly,
+                        false,
+                        theme,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let mut routine = direct.clone();
+                        routine.work_directly = !routine.work_directly;
                         this.save_routine_now(routine, cx);
                     })),
                 ),
@@ -1187,6 +1207,7 @@ impl Shell {
             prompt: String,
             schedule: Schedule,
             write_notes: bool,
+            work_directly: bool,
             worktree: bool,
             space_id: Option<String>,
         }
@@ -1199,6 +1220,7 @@ impl Shell {
                     prompt: String::new(),
                     schedule: Schedule::default(),
                     write_notes: false,
+                    work_directly: false,
                     worktree: true,
                     space_id: None,
                 },
@@ -1207,6 +1229,7 @@ impl Shell {
                     prompt: String::new(),
                     schedule: Schedule::default(),
                     write_notes: false,
+                    work_directly: false,
                     worktree: true,
                     space_id: state
                         .spaces_sorted()
@@ -1221,6 +1244,7 @@ impl Shell {
                         prompt: r.prompt.clone(),
                         schedule: r.schedule.clone(),
                         write_notes: r.write_notes,
+                        work_directly: r.work_directly,
                         worktree: true,
                         space_id: None,
                     }
@@ -1232,6 +1256,7 @@ impl Shell {
                         prompt: t.prompt.clone(),
                         schedule: t.schedule.clone(),
                         write_notes: false,
+                        work_directly: false,
                         worktree: t.worktree,
                         space_id: Some(t.space_id.clone()),
                     }
@@ -1289,6 +1314,7 @@ impl Shell {
             every,
             draft,
             write_notes: seed.write_notes,
+            work_directly: seed.work_directly,
             worktree: seed.worktree,
             space_id: seed.space_id,
             error: None,
@@ -1339,6 +1365,7 @@ impl Shell {
                     schedule,
                     enabled: existing.is_none_or(|r| r.enabled),
                     write_notes: form.write_notes,
+                    work_directly: form.work_directly,
                     max_runs_per_day: existing.map_or(24, |r| r.max_runs_per_day),
                     created_at: existing.map_or(now, |r| r.created_at),
                     updated_at: now,
@@ -1649,6 +1676,22 @@ impl Shell {
                             }
                             cx.notify();
                         })),
+                    )
+                    .child(
+                        parts::switch_row(
+                            "bot-form-direct",
+                            "May run commands",
+                            "In the bot's projects on this device, e.g. to run tests. Anything that needs approval fails the run.",
+                            form.work_directly,
+                            false,
+                            theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(form) = this.board.schedule.form.as_mut() {
+                                form.work_directly = !form.work_directly;
+                            }
+                            cx.notify();
+                        })),
                     ),
             );
         } else {
@@ -1951,6 +1994,7 @@ mod tests {
             schedule: Schedule::default(),
             enabled: true,
             write_notes: false,
+            work_directly: false,
             max_runs_per_day: 24,
             created_at: 0,
             updated_at: 0,

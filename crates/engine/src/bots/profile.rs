@@ -55,10 +55,22 @@ pub fn bot_env(workspace: &WorkspaceHost, chat: &Chat) -> Option<BotRunEnv> {
         }
         workspace_roots = work::workspace_roots(workspace, bot, marker);
     }
+    let mut tools = tools_for(marker, bot.as_ref());
+    // A routine granted Work directly gets Pi's own tools too; the bot row
+    // and the routine are re-read on every call (the direct-tool gate).
+    if let Some(bot) = &bot
+        && work::works_directly(workspace, bot, marker)
+    {
+        for tool in cypher_proto::BOT_DIRECT_TOOLS {
+            if !tools.iter().any(|t| t == tool) {
+                tools.push(tool.to_string());
+            }
+        }
+    }
     Some(BotRunEnv {
         bot_id: marker.bot_id.clone(),
         origin: marker.origin,
-        tools: tools_for(marker, bot.as_ref()),
+        tools,
         system_prompt,
         workspace_roots,
     })

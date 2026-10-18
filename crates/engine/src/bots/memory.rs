@@ -123,6 +123,8 @@ struct SaveRoutine {
     #[serde(default)]
     write_notes: Option<bool>,
     #[serde(default)]
+    work_directly: Option<bool>,
+    #[serde(default)]
     enabled: Option<bool>,
 }
 
@@ -345,6 +347,10 @@ impl Bots {
                 .write_notes
                 .or(existing.as_ref().map(|r| r.write_notes))
                 .unwrap_or(false),
+            work_directly: args
+                .work_directly
+                .or(existing.as_ref().map(|r| r.work_directly))
+                .unwrap_or(false),
             max_runs_per_day: existing.as_ref().map_or(24, |r| r.max_runs_per_day),
             created_at: existing.as_ref().map_or(now, |r| r.created_at),
             updated_at: now,
@@ -374,6 +380,17 @@ impl Bots {
         out.push("It runs unattended in its own thread and posts its result in this chat.".into());
         if routine.write_notes {
             out.push("It may write to your notebook.".into());
+        }
+        if routine.work_directly {
+            out.push(if bot.capabilities.work_directly {
+                "It may run commands and edit files in your local projects; anything that \
+                 needs approval fails the run."
+                    .into()
+            } else {
+                "It asks to work directly, but your owner turned Work directly off for you, \
+                 so it reads only."
+                    .into()
+            });
         }
         if !routine.enabled {
             out.push("It is turned off: it runs only when started by hand.".into());

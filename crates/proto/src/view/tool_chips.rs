@@ -283,6 +283,65 @@ fn bot_chip_content(
     }
 }
 
+/// What a bot's acting tool did, for a turn's summary line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BotAction {
+    Plan,
+    Worktree,
+    Session,
+    Answer,
+    Steer,
+    Stop,
+    Step,
+    Finish,
+    Note,
+    Routine,
+    Task,
+    Ask,
+}
+
+impl BotAction {
+    fn phrase(self, n: usize) -> String {
+        let (one, many): (&str, &str) = match self {
+            Self::Plan => ("proposed a plan", "proposed {n} plans"),
+            Self::Worktree => ("created a worktree", "created {n} worktrees"),
+            Self::Session => ("started a session", "started {n} sessions"),
+            Self::Answer => ("answered a session", "answered {n} questions"),
+            Self::Steer => ("steered a session", "steered sessions {n} times"),
+            Self::Stop => ("stopped a session", "stopped {n} sessions"),
+            Self::Step => ("updated a step", "updated {n} steps"),
+            Self::Finish => ("finished the task", "finished {n} tasks"),
+            Self::Note => ("wrote a note", "wrote {n} notes"),
+            Self::Routine => ("saved a routine", "saved {n} routines"),
+            Self::Task => ("saved a project task", "saved {n} project tasks"),
+            Self::Ask => ("asked a bot", "asked bots {n} times"),
+        };
+        if n == 1 {
+            one.to_string()
+        } else {
+            many.replace("{n}", &n.to_string())
+        }
+    }
+}
+
+fn bot_action(kind: BotToolKind) -> Option<BotAction> {
+    Some(match kind {
+        BotToolKind::ProposePlan => BotAction::Plan,
+        BotToolKind::CreateWorktree => BotAction::Worktree,
+        BotToolKind::StartSession => BotAction::Session,
+        BotToolKind::AnswerSession => BotAction::Answer,
+        BotToolKind::SteerSession => BotAction::Steer,
+        BotToolKind::StopSession => BotAction::Stop,
+        BotToolKind::UpdateStep => BotAction::Step,
+        BotToolKind::FinishWork => BotAction::Finish,
+        BotToolKind::WriteNote => BotAction::Note,
+        BotToolKind::SaveRoutine => BotAction::Routine,
+        BotToolKind::SaveProjectTask => BotAction::Task,
+        BotToolKind::AskBot => BotAction::Ask,
+        _ => return None,
+    })
+}
+
 /// Per-kind chip label + one-line detail. Labels match zeron's `describeTool`
 /// (tool-chip.tsx) exactly, so the two viewports name a tool identically.
 pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
@@ -399,6 +458,7 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
     let mut sessions_read = 0usize;
     let mut git_reads = 0usize;
     let mut other = 0usize;
+    let mut acted: std::collections::BTreeMap<BotAction, usize> = Default::default();
     let mut failed = 0usize;
     for (call, is_error) in tools {
         if *is_error {
@@ -437,12 +497,20 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
                 | BotToolKind::ReadNotes
                 | BotToolKind::ListSchedule
                 | BotToolKind::ListConnections => listings += 1,
-                _ => other += 1,
+                kind => match bot_action(kind) {
+                    Some(verb) => *acted.entry(verb).or_default() += 1,
+                    None => other += 1,
+                },
             },
             ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => other += 1,
         }
     }
     let mut segments: Vec<String> = Vec::new();
+    // A bot's acts read as what it did: "proposed a plan", "started 2
+    // sessions", in the order of the vocabulary.
+    for (verb, count) in &acted {
+        segments.push(verb.phrase(*count));
+    }
     // Commands and scripts share one verb: "ran 2 commands and 1 script".
     let ran: Vec<String> = [
         (commands > 0).then(|| plural(commands, "command", "commands")),
@@ -515,6 +583,30 @@ mod tests {
             name: name.into(),
             input: Some(input),
         }
+    }
+
+    #[test]
+    fn a_bots_acts_read_as_what_it_did() {
+        let call = |name: &str| {
+            (
+                crate::ToolCall::Unknown {
+                    name: name.into(),
+                    input: Some(serde_json::json!({})),
+                },
+                false,
+            )
+        };
+        assert_eq!(
+            work_summary(&[call("propose_plan"), call("read_session")], 0),
+            "Proposed a plan · read 1 session"
+        );
+        assert_eq!(
+            work_summary(
+                &[call("write_note"), call("write_note"), call("save_routine")],
+                1
+            ),
+            "Wrote 2 notes · saved a routine · 1 thought"
+        );
     }
 
     #[test]

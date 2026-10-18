@@ -304,6 +304,7 @@ const TOOLS: ToolDef[] = [
         { description: "When it runs" },
       ),
       write_notes: Type.Optional(Type.Boolean({ description: "Whether its runs may write to your notebook (default off)" })),
+      work_directly: Type.Optional(Type.Boolean({ description: "Whether its runs may run commands and edit files in your local projects, e.g. to run tests (default off; needs your own Work directly). Runs are unattended: anything that would ask for approval fails the run." })),
       enabled: Type.Optional(Type.Boolean({ description: "Off keeps it but runs it only by hand (default on)" })),
     }),
   },
