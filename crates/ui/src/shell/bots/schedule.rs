@@ -14,6 +14,12 @@ use super::*;
 use chrono::{DateTime, Local, TimeZone};
 use cypher_proto::{BotRoutine, ProjectTask, RunOutcome, RunRecord, Schedule, Space};
 
+/// Each kind of job wears its own mark, apart from the card's clock: a
+/// routine repeats in the bot's colour, a project task is code work in the
+/// project's colour.
+const ROUTINE_GLYPH: &str = icons::REFRESH;
+const TASK_GLYPH: &str = icons::CODE;
+
 // ── the rows ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -408,11 +414,11 @@ impl Shell {
     ) -> gpui::Stateful<gpui::Div> {
         let (glyph, tint) = match space {
             Some(space) => (
-                crate::appearance::space_style::space_icon(space.icon.as_deref()),
+                TASK_GLYPH,
                 crate::appearance::space_style::space_color(space.color.as_deref(), theme)
                     .unwrap_or(theme.text_muted),
             ),
-            None => (icons::CLOCK, bot_tint),
+            None => (ROUTINE_GLYPH, bot_tint),
         };
         let state = job.state();
         let note_color = match state {
@@ -502,11 +508,11 @@ impl Shell {
     ) -> gpui::Stateful<gpui::Div> {
         let (glyph, tint) = match space {
             Some(space) => (
-                crate::appearance::space_style::space_icon(space.icon.as_deref()),
+                TASK_GLYPH,
                 crate::appearance::space_style::space_color(space.color.as_deref(), theme)
                     .unwrap_or(theme.text_muted),
             ),
-            None => (icons::CLOCK, bot_tint),
+            None => (ROUTINE_GLYPH, bot_tint),
         };
         let state = job.state();
         let corner = match state {
@@ -802,7 +808,7 @@ impl Shell {
         let now = Local::now();
         let job = Job::routine(&routine, &now);
         let head = PanelHead {
-            glyph: icons::CLOCK,
+            glyph: ROUTINE_GLYPH,
             tint: Some(bot_tint(bot, theme)),
             title: routine.name.clone(),
             subtitle: format!("Routine · {}", routine.schedule.describe()),
@@ -946,7 +952,7 @@ impl Shell {
         let now = Local::now();
         let job = Job::task(&task, &now);
         let head = PanelHead {
-            glyph: crate::appearance::space_style::space_icon(space.icon.as_deref()),
+            glyph: TASK_GLYPH,
             tint: crate::appearance::space_style::space_color(space.color.as_deref(), theme),
             title: task.name.clone(),
             subtitle: format!("{} · {}", space.display_name(), task.schedule.describe()),
@@ -1506,7 +1512,7 @@ impl Shell {
         let projects = self.task_projects(bot, cx);
         let routine = target.routine();
         let head = PanelHead {
-            glyph: icons::CLOCK,
+            glyph: if routine { ROUTINE_GLYPH } else { TASK_GLYPH },
             tint: routine.then(|| bot_tint(bot, theme)),
             title: match &target {
                 FormTarget::NewRoutine => "New routine",

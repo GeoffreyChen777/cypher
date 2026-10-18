@@ -318,7 +318,7 @@ impl Shell {
             _ => format!("{} projects", rows.len()),
         };
         let head = PanelHead {
-            glyph: icons::FOLDER,
+            glyph: icons::WIDGET,
             tint: None,
             title: "Projects".into(),
             subtitle: format!("{} reads {reach}", bot.name),

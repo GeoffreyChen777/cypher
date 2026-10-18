@@ -595,7 +595,7 @@ impl Shell {
         let open = self.board.panel.clone();
         let header = section_header(
             "bot-projects-header",
-            icons::FOLDER,
+            icons::WIDGET,
             "Projects",
             rows.len(),
             open == Some(PanelItem::Projects),
