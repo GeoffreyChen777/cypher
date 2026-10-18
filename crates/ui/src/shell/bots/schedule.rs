@@ -864,94 +864,73 @@ impl Shell {
         Some((head, body))
     }
 
-    /// Run now, Edit and Delete.
+    /// Run now, Edit, the last run's session and Delete, as icons at the
+    /// row's right end.
     fn job_actions(&self, job: &Job, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
-        let busy = matches!(job.state(), JobState::Running | JobState::Starting);
+        let state = job.state();
+        let busy = matches!(state, JobState::Running | JobState::Starting);
         let (run_id, edit_id, delete_id) = (job.id.clone(), job.id.clone(), job.id.clone());
         let name = job.name.clone();
-        // The session the latest run happened in, to read or watch.
-        let session = job.last.as_ref().and_then(|run| {
-            let chat_id = run.chat_id.clone()?;
-            let label = if run.outcome == RunOutcome::Running {
-                "Watch run"
-            } else {
-                "Open session"
-            };
-            Some(
-                parts::action(
-                    "bot-job-session",
-                    icons::CHAT_ROUND_LINE,
-                    label,
-                    theme.text_muted,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx))),
-            )
-        });
-        // The palette's primary button, led by a play glyph.
-        let run = div()
-            .id("bot-job-run")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .pl(px(10.0))
-            .pr(px(12.0))
-            .py(px(5.0))
-            .rounded(px(8.0))
-            .bg(theme.text)
-            .text_size(px(13.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(theme.on_solid)
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.9))
-            .when(!busy, |el| {
-                el.child(icon(icons::PLAY).size(px(11.0)).text_color(theme.on_solid))
-            })
-            .child(SharedString::from(match job.state() {
+        let button = super::items::icon_button;
+        let run = button(
+            "bot-job-run",
+            icons::PLAY,
+            match state {
                 JobState::Running => "Running…",
                 JobState::Starting => "Starting…",
                 _ => "Run now",
+            },
+            theme,
+        )
+        .when(busy, |el| el.opacity(0.45).cursor_default())
+        .when(!busy, |el| {
+            el.on_click(cx.listener(move |this, _, _, cx| {
+                this.board_mutate(
+                    serde_json::json!({ "op": "runBotRoutine", "routineId": run_id }),
+                    cx,
+                );
             }))
-            .when(busy, |el| el.opacity(0.55).cursor_default())
-            .when(!busy, |el| {
-                el.on_click(cx.listener(move |this, _, _, cx| {
-                    this.board_mutate(
-                        serde_json::json!({ "op": "runBotRoutine", "routineId": run_id }),
-                        cx,
-                    );
-                }))
-            });
+        });
+        let edit = button("bot-job-edit", icons::PEN, "Edit", theme).on_click(cx.listener(
+            move |this, _, window, cx| {
+                this.open_job_form(FormTarget::Routine(edit_id.clone()), Some(window), cx);
+            },
+        ));
+        // The session the latest run happened in, to read or watch.
+        let session = job.last.as_ref().and_then(|run| {
+            let chat_id = run.chat_id.clone()?;
+            let tip = if run.outcome == RunOutcome::Running {
+                "Watch the run"
+            } else {
+                "Open the last run's session"
+            };
+            Some(
+                button("bot-job-session", icons::CHAT_ROUND_LINE, tip, theme).on_click(
+                    cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)),
+                ),
+            )
+        });
+        let delete = button(
+            "bot-job-delete",
+            icons::TRASH_BIN_MINIMALISTIC,
+            "Delete",
+            theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let (id, name) = (delete_id.clone(), name.clone());
+            this.ask_confirm(parts::Confirm::DeleteRoutine { id, name }, cx);
+        }));
         div()
-            .px(px(8.0))
-            .pt(px(4.0))
-            .pb(px(2.0))
+            .px(px(4.0))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(4.0))
+            .justify_end()
+            .gap(px(2.0))
             .child(run)
-            .child(div().w(px(4.0)))
-            .child(
-                parts::action("bot-job-edit", icons::PEN, "Edit", theme.text_muted).on_click(
-                    cx.listener(move |this, _, window, cx| {
-                        this.open_job_form(FormTarget::Routine(edit_id.clone()), Some(window), cx);
-                    }),
-                ),
-            )
+            .child(edit)
             .children(session)
-            .child(div().flex_1())
-            .child(
-                parts::action(
-                    "bot-job-delete",
-                    icons::TRASH_BIN_MINIMALISTIC,
-                    "Delete",
-                    theme.danger,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let (id, name) = (delete_id.clone(), name.clone());
-                    this.ask_confirm(parts::Confirm::DeleteRoutine { id, name }, cx);
-                })),
-            )
+            .child(delete)
     }
 
     /// The last run: its outcome and time (and whether it was run by
