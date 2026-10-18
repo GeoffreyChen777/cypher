@@ -279,8 +279,8 @@ const TOOLS: ToolDef[] = [
     }),
   },
   {
-    name: "list_schedule",
-    label: "Checked schedule",
+    name: "list_routines",
+    label: "Checked routines",
     description:
       "List your routines: name, id, where each runs, schedule, next run and the last run's result. Times are the host device's local time.",
     parameters: Type.Object({}),
@@ -289,7 +289,7 @@ const TOOLS: ToolDef[] = [
     name: "save_routine",
     label: "Save routine",
     description:
-      "Create or change a routine: a job run by hand or on a schedule, unattended; its result is posted in this chat. It runs either as you, in its own session, reading everything you read (\"every morning, tell me what's stuck\"), or, with `project`, as an ordinary session in that project that can change its code (\"every night, run the tests and fix anything flaky\"; needs the Coordinate permission). Scheduled runs continue one session; each run by hand starts a fresh one. Pass `id` to change an existing routine (list_schedule shows ids). The schedule is one of {\"kind\":\"daily\",\"time\":\"09:00\",\"days\":[1,2,3,4,5]} (days 1 = Monday … 7 = Sunday; leave out for every day), {\"kind\":\"interval\",\"minutes\":60} (at least 15) or {\"kind\":\"manual\"} (only when run by hand), in the host device's local time. Returns what was saved and the next run.",
+      "Create or change a routine: a job run by hand or on a schedule, unattended; its result is posted in this chat. It runs either as you, in its own session, reading everything you read (\"every morning, tell me what's stuck\"), or, with `project`, as an ordinary session in that project that can change its code (\"every night, run the tests and fix anything flaky\"; needs the Coordinate permission). Scheduled runs continue one session; each run by hand starts a fresh one. Pass `id` to change an existing routine (list_routines shows ids). The schedule is one of {\"kind\":\"daily\",\"time\":\"09:00\",\"days\":[1,2,3,4,5]} (days 1 = Monday … 7 = Sunday; leave out for every day), {\"kind\":\"interval\",\"minutes\":60} (at least 15) or {\"kind\":\"manual\"} (only when run by hand), in the host device's local time. Returns what was saved and the next run.",
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: "The routine to change; leave out to create one" })),
       name: Type.String({ description: "A short name, e.g. Morning brief" }),

@@ -645,7 +645,7 @@ thread gets the rest (§6.7).
 |---|---|---|
 | `read_notes {query?}` | owner, routine | The bot's notes, newest first, each with its source and date; `query` keeps notes containing every word (any case). |
 | `write_note {text}` | owner, routine (if its routine allows) | Adds one note with the thread as its source (§7). |
-| `list_schedule` | owner, routine | The bot's routines: name, id, where each runs, schedule in words, next run, last result. |
+| `list_routines` | owner, routine | The bot's routines: name, id, where each runs, schedule in words, next run, last result. |
 | `save_routine {id?, name, prompt, schedule, write_notes?, work_directly?, enabled?, project?, worktree?, model?}` | bot chat | Creates or changes a routine; with `project` (a project in scope, and *Coordinate*) it runs as a session there. Validates it and answers with what was saved and its next run. |
 | `list_connections` | owner | Connected bots: name, owner, connection id, how this bot replies to them, last question. |
 | `ask_bot` | owner | Asks one connected bot (by name, any case, or connection id); waits up to `wait_s` (default 120 s, at most 600). Taints the thread when an answer comes back (§4.3). |

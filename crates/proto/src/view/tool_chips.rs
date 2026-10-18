@@ -128,7 +128,7 @@ pub enum BotToolKind {
     FinishWork,
     ReadNotes,
     WriteNote,
-    ListSchedule,
+    ListRoutines,
     SaveRoutine,
     SaveProjectTask,
     ListConnections,
@@ -150,7 +150,7 @@ impl BotToolKind {
                 | Self::ListWork
                 | Self::GetWork
                 | Self::ReadNotes
-                | Self::ListSchedule
+                | Self::ListRoutines
                 | Self::ListConnections
         )
     }
@@ -181,7 +181,8 @@ pub fn bot_tool_kind(call: &crate::ToolCall) -> Option<BotToolKind> {
         "finish_work" => BotToolKind::FinishWork,
         "read_notes" => BotToolKind::ReadNotes,
         "write_note" => BotToolKind::WriteNote,
-        "list_schedule" => BotToolKind::ListSchedule,
+        // `list_schedule` is its name before routines were one kind.
+        "list_routines" | "list_schedule" => BotToolKind::ListRoutines,
         "save_routine" => BotToolKind::SaveRoutine,
         "save_project_task" => BotToolKind::SaveProjectTask,
         "list_connections" => BotToolKind::ListConnections,
@@ -272,7 +273,7 @@ fn bot_chip_content(
         BotToolKind::FinishWork => ("Finished task", arg("outcome").unwrap_or_default()),
         BotToolKind::ReadNotes => ("Read notes", String::new()),
         BotToolKind::WriteNote => ("Wrote a note", arg("text").unwrap_or_default()),
-        BotToolKind::ListSchedule => ("Checked schedule", String::new()),
+        BotToolKind::ListRoutines => ("Checked routines", String::new()),
         BotToolKind::SaveRoutine => ("Saved routine", arg("name").unwrap_or_default()),
         BotToolKind::SaveProjectTask => (
             "Saved project task",
@@ -495,7 +496,7 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
                 BotToolKind::ListWork
                 | BotToolKind::GetWork
                 | BotToolKind::ReadNotes
-                | BotToolKind::ListSchedule
+                | BotToolKind::ListRoutines
                 | BotToolKind::ListConnections => listings += 1,
                 kind => match bot_action(kind) {
                     Some(verb) => *acted.entry(verb).or_default() += 1,
@@ -616,6 +617,13 @@ mod tests {
             chip("list_projects", serde_json::json!({})),
             ("List projects", String::new())
         );
+        for name in ["list_routines", "list_schedule"] {
+            assert_eq!(
+                chip(name, serde_json::json!({})),
+                ("Checked routines", String::new()),
+                "{name}: old transcripts keep their chip"
+            );
+        }
         assert_eq!(
             chip(
                 "list_sessions",

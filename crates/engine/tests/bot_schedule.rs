@@ -634,7 +634,7 @@ async fn a_project_routine_runs_as_a_plain_session_in_its_own_worktree() {
         core.workspace.chat(&second).unwrap().is_some(),
         "scheduled runs leave the manual one"
     );
-    let schedule = tool(&core, &bot.chat_id, "list_schedule", serde_json::json!({})).await;
+    let schedule = tool(&core, &bot.chat_id, "list_routines", serde_json::json!({})).await;
     assert!(
         schedule.contains("a session in web on") && schedule.contains("its own worktree"),
         "{schedule}"
@@ -879,7 +879,7 @@ async fn notes_follow_the_thread_that_writes_them() {
         },
     ));
     core.workspace.import_chat_row(&peer).unwrap();
-    for name in ["read_notes", "write_note", "list_schedule"] {
+    for name in ["read_notes", "write_note", "list_routines"] {
         let refused = tool(
             &core,
             "peer-thread",

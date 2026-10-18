@@ -9,7 +9,7 @@ use cypher_proto::{
     NoteSource, ProjectGrant, RoutineTarget, RunOutcome, RunRecord, Schedule, Space,
 };
 
-use super::{Access, access, memory_tools, notebook_section, render_schedule};
+use super::{Access, access, memory_tools, notebook_section, render_routines};
 
 fn bot(coordinate: bool) -> Bot {
     Bot {
@@ -58,7 +58,7 @@ fn peer_thread() -> BotChat {
 #[test]
 fn owner_threads_keep_the_notebook_and_peers_never_see_it() {
     let main = access(&BotChat::owner("b1"), &bot(false), false);
-    assert!(main.read_notes && main.write_notes && main.list_schedule && main.save_routine);
+    assert!(main.read_notes && main.write_notes && main.list_routines && main.save_routine);
 
     let work = BotChat::thread(
         "b1",
@@ -72,7 +72,7 @@ fn owner_threads_keep_the_notebook_and_peers_never_see_it() {
     assert!(!orchestration.save_routine, "the workspace chat only");
 
     let routine = access(&routine_thread(), &bot(true), false);
-    assert!(routine.read_notes && routine.list_schedule);
+    assert!(routine.read_notes && routine.list_routines);
     assert!(!routine.write_notes, "only when the routine says so");
     assert!(access(&routine_thread(), &bot(true), true).write_notes);
     assert!(!routine.save_routine);
@@ -94,12 +94,12 @@ fn allowlists_follow_the_access() {
     );
     assert_eq!(
         memory_tools(&BotChat::owner("b1"), Some(&bot(false))),
-        ["read_notes", "write_note", "list_schedule", "save_routine"]
+        ["read_notes", "write_note", "list_routines", "save_routine"]
     );
     // The call checks the routine's write_notes; the allowlist can't.
     assert_eq!(
         memory_tools(&routine_thread(), Some(&bot(true))),
-        ["read_notes", "write_note", "list_schedule"]
+        ["read_notes", "write_note", "list_routines"]
     );
     assert!(memory_tools(&BotChat::owner("b1"), None).is_empty());
 }
@@ -241,7 +241,7 @@ fn the_schedule_lists_routines_and_where_they_run() {
         space("sp-web", "/code/web"),
         space("sp-secret", "/code/secret"),
     ];
-    let text = render_schedule(&bot(true), &records, &spaces, |_| "Studio".into(), now);
+    let text = render_routines(&bot(true), &records, &spaces, |_| "Studio".into(), now);
     assert!(text.starts_with("Times are Studio's local time"), "{text}");
     assert!(
         text.contains(
@@ -261,7 +261,7 @@ fn the_schedule_lists_routines_and_where_they_run() {
 
     let mut paused = bot(false);
     paused.paused = true;
-    let empty = render_schedule(
+    let empty = render_routines(
         &paused,
         &BotRecords::default(),
         &[],

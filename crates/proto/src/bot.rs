@@ -64,7 +64,7 @@ pub const BOT_DIRECT_TOOLS: [&str; 8] = [
 
 /// Notebook and schedule tools (P3).
 pub const BOT_MEMORY_TOOLS: [&str; 4] =
-    ["read_notes", "write_note", "list_schedule", "save_routine"];
+    ["read_notes", "write_note", "list_routines", "save_routine"];
 
 /// Network tools (P4), owner threads only.
 pub const BOT_NETWORK_TOOLS: [&str; 2] = ["list_connections", "ask_bot"];

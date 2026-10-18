@@ -36,7 +36,7 @@ const ANSWER_MAX_CHARS: usize = 48_000;
 pub(super) struct Access {
     pub read_notes: bool,
     pub write_notes: bool,
-    pub list_schedule: bool,
+    pub list_routines: bool,
     pub save_routine: bool,
 }
 
@@ -50,19 +50,19 @@ pub(super) fn access(marker: &BotChat, _bot: &Bot, routine_writes_notes: bool) -
         (BotOrigin::Owner, BotThread::Main) => Access {
             read_notes: true,
             write_notes: true,
-            list_schedule: true,
+            list_routines: true,
             save_routine: true,
         },
         (BotOrigin::Owner, BotThread::Work { .. }) => Access {
             read_notes: true,
             write_notes: true,
-            list_schedule: true,
+            list_routines: true,
             ..Access::default()
         },
         (BotOrigin::Routine, BotThread::Routine { .. }) => Access {
             read_notes: true,
             write_notes: routine_writes_notes,
-            list_schedule: true,
+            list_routines: true,
             ..Access::default()
         },
         _ => Access::default(),
@@ -74,7 +74,7 @@ impl Access {
         match tool {
             "read_notes" => self.read_notes,
             "write_note" => self.write_notes,
-            "list_schedule" => self.list_schedule,
+            "list_routines" => self.list_routines,
             "save_routine" => self.save_routine,
             _ => false,
         }
@@ -196,7 +196,7 @@ impl Bots {
         match tool {
             "read_notes" => Ok(self.read_notes(&bot, args::<ReadNotes>(raw)?)),
             "write_note" => self.write_note(&bot, chat, args::<WriteNote>(raw)?),
-            "list_schedule" => self.list_schedule(&chat.id),
+            "list_routines" => self.list_routines(&chat.id),
             "save_routine" => self.save_routine(&bot, &chat.id, args::<SaveRoutine>(raw)?),
             _ => Err(refuse(tool)),
         }
@@ -292,10 +292,10 @@ impl Bots {
         })
     }
 
-    fn list_schedule(&self, chat_id: &str) -> Result<String, EngineError> {
+    fn list_routines(&self, chat_id: &str) -> Result<String, EngineError> {
         let view = self.view(chat_id)?;
         let records = self.inner.workspace.read_bot_records();
-        Ok(render_schedule(
+        Ok(render_routines(
             &view.bot,
             &records,
             &view.spaces,
@@ -319,7 +319,7 @@ impl Bots {
                     .record::<BotRoutine>(p::KIND_BOT_ROUTINES, id)
                     .filter(|r| r.bot_id == bot.id)
                     .ok_or_else(|| {
-                        EngineError::Other(format!("No routine {id}. Use list_schedule."))
+                        EngineError::Other(format!("No routine {id}. Use list_routines."))
                     })?,
             ),
             None => None,
@@ -609,7 +609,7 @@ pub(super) fn notebook_section(notes: &[&BotNote], access: Access, bot_chat: boo
              runs either as you, in its own thread (\"every morning, tell me what's stuck\"), or \
              as an ordinary session in one of your projects (\"every night, run the tests and \
              fix anything flaky\"). When your owner asks for something recurring, save it with \
-             save_routine; list_schedule shows your routines with their last results."
+             save_routine; list_routines shows your routines with their last results."
                 .to_string(),
         );
     }
@@ -621,9 +621,9 @@ pub(super) fn notebook_section(notes: &[&BotNote], access: Access, bot_chat: boo
     lines.join("\n")
 }
 
-/// The `list_schedule` answer: this bot's routines, each with where it
+/// The `list_routines` answer: this bot's routines, each with where it
 /// runs, its schedule, next run and last result.
-pub(super) fn render_schedule(
+pub(super) fn render_routines(
     bot: &Bot,
     records: &p::BotRecords,
     spaces: &[p::Space],
