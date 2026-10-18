@@ -155,6 +155,10 @@ icon_assets![
     (USERS, "users"),
     (PULSE, "pulse"),
     (BOOK, "book"),
+    // The Botboard's Schedule and Network: a clock for routines and tasks
+    // (Run now uses PLAY below), and two linked rings for a connection.
+    (CLOCK, "clock-circle"),
+    (LINK, "link"),
     (WIFI_OFF, "wifi-off"),
     (CLOSE_CIRCLE, "close-circle"),
     // Hand-drawn info glyph in the Solar Linear style (like the terminal/
@@ -204,7 +208,8 @@ icon_assets![
     (BOT_HELMET, "bot-helmet"),
     (BOT_TV, "bot-tv"),
     (BOT_SLEEPY, "bot-sleepy"),
-    // A bot's pause switch, hand-drawn in the Solar Linear style.
+    // A bot's pause switch and a routine's Run now, hand-drawn in the Solar
+    // Linear style.
     (PAUSE, "pause"),
     (PLAY, "play"),
     // Harness brand marks (icons.tsx).

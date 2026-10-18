@@ -24,6 +24,7 @@ mod needs;
 mod network;
 mod notebook;
 mod panel;
+mod parts;
 mod picker;
 mod schedule;
 mod work;
@@ -65,6 +66,12 @@ pub(super) struct BoardUi {
     stop_disarm: Option<Task<()>>,
     /// The Activity panel's kind filter; `None` shows everything.
     activity_filter: Option<cypher_proto::ActivityGroup>,
+    /// The Schedule, Notebook and Network panels' forms and drafts.
+    schedule: schedule::ScheduleUi,
+    notebook: notebook::NotebookUi,
+    network: network::NetworkUi,
+    /// A delete or revoke waiting on the owner's yes.
+    confirm: Option<parts::Confirm>,
 }
 
 /// One item on a bot's **Needs you** card: its conversation waiting on an
@@ -357,6 +364,7 @@ impl Shell {
             self.render_bot_menu(&theme, cx),
             self.render_bot_dialog(viewport, &theme, window, cx),
             self.render_delete_bot_dialog(viewport, &theme, cx),
+            self.render_board_confirm(viewport, &theme, cx),
         ]
         .into_iter()
         .flatten()
