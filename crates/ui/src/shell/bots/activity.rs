@@ -3,14 +3,11 @@
 //! (plans, sessions, memory, network); a row opens the work or session it
 //! names.
 
-use super::board::{card_corner, card_glyph, card_item, card_with_rows, section_header};
+use super::board::{card_corner, card_glyph, card_item};
 use super::items::{ago, glyph, item_row, mark_cell, trailing};
 use super::panel::{PanelHead, PanelItem};
 use super::*;
 use cypher_proto::{ActivityGroup, BotActivity};
-
-/// Entries the card shows.
-const CARD_ENTRIES: usize = 4;
 
 /// The filter chips, in order (`None` is All).
 const FILTERS: [Option<ActivityGroup>; 5] = [
@@ -139,55 +136,6 @@ impl Shell {
                 transcript::single_line(&entry.text)
             })))
             .child(trailing(ago(entry.at, now), theme.text_faint))
-    }
-
-    /// The sidebar card; `None` when there is nothing to show.
-    pub(super) fn render_activity_card(
-        &self,
-        bot: &Bot,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let (entries, total) = {
-            let state = self.state.read(cx);
-            let all = activity_of(&state.bot_records, &bot.id, None);
-            let total = all.len();
-            let entries: Vec<(BotActivity, Link)> = all
-                .into_iter()
-                .take(CARD_ENTRIES)
-                .map(|a| {
-                    let link = link_of(a, |id| state.chats.iter().any(|c| c.id == id));
-                    (a.clone(), link)
-                })
-                .collect();
-            (entries, total)
-        };
-        if entries.is_empty() {
-            return None;
-        }
-        let open = self.board.panel == Some(PanelItem::Activity);
-        let header = section_header(
-            "bot-activity-header",
-            icons::PULSE,
-            "Activity",
-            total,
-            open,
-            self.card_focused("activity", cx),
-            theme,
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Activity, cx)));
-        let mut rows = Vec::new();
-        for (entry, link) in entries {
-            rows.push(self.activity_row(
-                format!("bot-activity-{}", entry.id),
-                &entry,
-                link,
-                false,
-                theme,
-                cx,
-            ));
-        }
-        Some(card_with_rows(header, rows, theme))
     }
 
     /// The detail panel for this card's items; `None` when the item no

@@ -986,10 +986,11 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 | **Schedule** | Routines and its projects' recurring tasks, in order of next run: name, trigger, next run, last result; today's budget use | The routine or task: trigger, prompt, permissions, run history with links, pause, edit, run now |
 | **Projects** | Each granted project with device, running and waiting sessions, and "works directly" or "via sessions" | The project's sessions in scope with status, the bot's worker sessions there, git state |
 | **Notebook** | The latest few entries, bot-written ones marked | All entries with their sources, editable and deletable |
-| **Activity** | The last few things the bot did | The full audit log, filterable by kind |
 | **Network** (P4) | Connections with reply mode and last exchange; pending invites | A connection: its scope, reply mode, rate limits, exchanges, revoke |
 
-A card with nothing to show is not drawn. **Needs you** always comes first, so attention
+There is no Activity card: it mostly repeated Work, Schedule and Network. The full audit
+log, filterable by kind, opens from the chat header's activity button and from "View all
+activity" in the Work panel. A card with nothing to show is not drawn. **Needs you** always comes first, so attention
 items are never below the fold. One card floats at a time, the open panel item's; with
 the panel shut none does. A card's header opens its whole list; a row opens that item.
 

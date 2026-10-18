@@ -122,9 +122,9 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The bot's own actions where a tile keeps its own: pause (or resume)
-    /// and settings. A press here never starts the window drag the header
-    /// is.
+    /// The bot's own actions where a tile keeps its own: the activity log,
+    /// pause (or resume) and settings. A press here never starts the window
+    /// drag the header is.
     fn render_board_actions(&self, bot: &Bot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let edit_id = bot.id.clone();
         let settings = super::items::icon_button(
@@ -137,6 +137,14 @@ impl Shell {
         .on_click(
             cx.listener(move |this, _, _, cx| this.open_bot_dialog(Some(edit_id.clone()), cx)),
         );
+        let activity = super::items::icon_button(
+            "bot-header-activity",
+            icons::PULSE,
+            "Activity: everything it did",
+            theme,
+        )
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Activity, cx)));
         let (glyph, tip) = if bot.paused {
             (icons::PLAY, "Resume: let it run routines and start work")
         } else {
@@ -159,6 +167,7 @@ impl Shell {
             .flex_row()
             .items_center()
             .gap(px(2.0))
+            .child(activity)
             .child(pause)
             .child(settings)
             .into_any_element()

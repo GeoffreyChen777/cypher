@@ -330,6 +330,13 @@ impl Shell {
                 theme.text_muted,
             )));
         }
+        // The full log lives here, not in a card of its own.
+        body =
+            body.child(div().px(px(10.0)).pt(px(12.0)).text_size(px(12.0)).child(
+                super::parts::link("bot-work-all-activity", "View all activity", theme).on_click(
+                    cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Activity, cx)),
+                ),
+            ));
         (head, body)
     }
 

@@ -145,7 +145,8 @@ pub(super) fn card_of(
         | PanelItem::NewRoutine
         | PanelItem::NewTask => "schedule",
         PanelItem::Notebook => "notebook",
-        PanelItem::Activity => "activity",
+        // The log opens from the Work panel and the chat header.
+        PanelItem::Activity => "work",
         PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => "network",
         PanelItem::Thread(chat_id) => match thread_kind(chat_id) {
             Some(cypher_proto::BotThread::Routine { .. }) => "schedule",
@@ -206,7 +207,6 @@ impl Shell {
                 ("schedule", self.render_schedule_card(&bot, theme, cx)),
                 ("projects", self.render_projects_card(&bot, theme, cx)),
                 ("notebook", self.render_notebook_card(&bot, theme, cx)),
-                ("activity", self.render_activity_card(&bot, theme, cx)),
                 ("network", self.render_network_card(&bot, theme, cx)),
             ]
             .into_iter()
