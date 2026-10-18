@@ -355,7 +355,41 @@ impl Transcript {
                         crate::kit::theme::hairline(edge),
                     )
                 };
-                let card = div()
+                // One shadow for the whole card: every slice draws it under
+                // itself, cast by a box that runs on past its own edges at
+                // a seam, and clips it to its own bounds, so the slices
+                // join without a notch.
+                const SHADE: f32 = 10.0;
+                const RUN_ON: f32 = 32.0;
+                let dark = theme.appearance.is_dark();
+                let shade = |blur: f32, y: f32, alpha: f32| gpui::BoxShadow {
+                    color: gpui::hsla(0.0, 0.0, 0.0, alpha),
+                    offset: gpui::point(px(0.0), px(y)),
+                    blur_radius: px(blur),
+                    spread_radius: px(-1.0),
+                    inset: false,
+                };
+                let (near, far) = if dark { (0.28, 0.22) } else { (0.06, 0.05) };
+                // The caster is opaque (the chat's own ground), or the
+                // shadow would show through the card's translucent tint.
+                let mut ground = crate::appearance::chat_style::panel_background(
+                    crate::appearance::chat_style::settings(cx),
+                    crate::kit::theme::Theme::of(cx),
+                    true,
+                );
+                ground.a = 1.0;
+                let caster = div()
+                    .absolute()
+                    .left(px(SHADE))
+                    .right(px(SHADE))
+                    .top(px(if slice.top { SHADE } else { -RUN_ON }))
+                    .bottom(px(if slice.bottom { SHADE } else { -RUN_ON }))
+                    .bg(ground)
+                    .when(slice.top, |el| el.rounded_t(px(12.0)))
+                    .when(slice.bottom, |el| el.rounded_b(px(12.0)))
+                    .shadow(vec![shade(3.0, 1.0, near), shade(14.0, 4.0, far)]);
+                let face = div()
+                    .relative()
                     .w_full()
                     .bg(bg)
                     .border_l_1()
@@ -367,9 +401,25 @@ impl Transcript {
                     .when(slice.bottom, |el| {
                         el.border_b_1().rounded_b(px(12.0)).pb(px(14.0))
                     })
-                    .child(inner)
+                    .child(inner);
+                let card = div()
+                    .relative()
+                    .overflow_hidden()
+                    .mx(px(-SHADE))
+                    .px(px(SHADE))
+                    .when(slice.top, |el| el.pt(px(SHADE)))
+                    .when(slice.bottom, |el| el.pb(px(SHADE)))
+                    .child(caster)
+                    .child(face)
                     .into_any_element();
-                (if slice.top { top_gap + 6.0 } else { 0.0 }, card)
+                (
+                    if slice.top {
+                        (top_gap + 6.0 - SHADE).max(0.0)
+                    } else {
+                        0.0
+                    },
+                    card,
+                )
             }
             None => (top_gap, inner),
         };
