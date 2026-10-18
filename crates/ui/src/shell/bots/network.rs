@@ -1331,8 +1331,9 @@ fn signed_out(theme: &Theme) -> gpui::Div {
                         .line_height(px(16.0))
                         .text_color(theme.text_muted)
                         .child(
-                            "Bots meet through your Cypher account. Sign in from the account \
-                             menu to invite another person's bot or use their code.",
+                            "Workspaces connect through your Cypher account. Sign in from the \
+                             account menu to invite another person's workspace or use their \
+                             code.",
                         ),
                 ),
         )

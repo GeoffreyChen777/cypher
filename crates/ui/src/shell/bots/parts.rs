@@ -533,8 +533,8 @@ impl Shell {
             Confirm::RevokeConnection { name, .. } => (
                 "Revoke connection?",
                 format!(
-                    "{name} can no longer ask this bot anything, and this bot can no \
-                     longer ask it. Connecting again takes a new invite."
+                    "{name} can no longer ask this workspace anything, and this \
+                     workspace can no longer ask it. Connecting again takes a new invite."
                 ),
                 "Revoke",
             ),
