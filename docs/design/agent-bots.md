@@ -5,7 +5,9 @@ chat and its read tools, the palette). P1: engine-stamped origins, the role-awar
 profile, per-origin prompts with the untrusted-data rule, slash commands by origin, the
 unattended run mode, the search index, `session_activity` and `project_git`. The first
 Botboard slice (§13.1: mode switch, picker, Status and Projects cards, detail panel) is
-built. The rest is design; §16 is the build order. Where the built code differs from the
+built. P2's engine side, the coordinator, is built: *Work directly*, plans, orchestration
+threads, worker sessions, Stop, limits, approvals and the activity log (§4.3, §4.4, §6.7,
+§10.2, §10.3); its cards are UI work. The rest is design; §16 is the build order. Where the built code differs from the
 full design, the section says so.
 
 A bot is a **coordinator**: a long-lived agent responsible for everything in the projects
@@ -124,6 +126,16 @@ these can carry injected instructions. So:
   that would otherwise run silently (commands outside the sandbox, writes outside its
   projects, starting or steering sessions) require the owner's approval.
 
+As built (P2): the taint set lives in memory (`bots/taint.rs`); the network track marks a
+thread when `ask_bot` returns a peer's answer. In a tainted thread every acting
+coordination call (`create_worktree`, `start_session`, `answer_session`, `steer_session`,
+`stop_session`) and every `bash`, `write`, `edit` or `request_permission` call writes a
+`botApprovals` row with the action in plain words and the reason, and waits up to 10
+minutes for the owner's decision (`Mutate resolveBotApproval`). Declined or unanswered,
+nothing happens and the model is told so. Reads are not gated. The work host clears a
+thread's taint once its run settles after the taint was set. Approvals are also how a
+thread with *Coordinate: steer* answers, steers or stops a session its work didn't start.
+
 ### 4.4 Enforcement
 
 - **Spawn time** fixes what a run *can* call: the tool allowlist, the extensions, the
@@ -144,9 +156,36 @@ these can carry injected instructions. So:
 As built (P1): the origin rides the chat row's `bot` marker (`{botId, origin}`; a missing
 origin reads as owner, an unknown one as peer). Only the engine writes it: `CreateBot`
 stamps owner, and no `Mutate` op, `CreateChat`, fork or side-chat path takes or copies a
-marker. `bots/profile.rs` derives the run profile from (chat, bot row, origin). Every
-origin gets the read tools for now, and `workspace_roots` stays empty until *Work directly*
-ships.
+marker. `bots/profile.rs` derives the run profile from (chat, bot row, origin).
+
+As built (P2), `bots/work.rs`:
+
+- **Tools.** Routine and peer threads get the read tools only. An owner thread with *Work
+  directly* adds Pi's `bash`, `read`, `write`, `edit`, `grep`, `find`, `ls` and
+  `request_permission`. With *Coordinate*, the bot chat adds `propose_plan`, `list_work`
+  and `get_work`, and an orchestration thread adds every other coordination tool (§10.3).
+- **Roots.** The paths of the bot's granted spaces on this device, canonical. The run gets
+  them as `CYPHER_BOT_WORKSPACE_ROOTS` (JSON); the bot tools extension writes each as the
+  permission extension's `cypher-permissions.root` entry for the chat in its own
+  `session_start`, and removes roots the engine no longer grants. Pi loads `-e`
+  extensions before the Runtime's and runs their handlers in that order, so the entries
+  are on the branch when the permission extension reloads its roots, on a chat's first
+  run too. Checked on a real Pi run (Runtime 1.1.0.8): a new bot chat's first `write` and
+  `bash` into its project ran without any approval, while a write outside the roots
+  needed one.
+- **Level.** The engine decides a bot thread's permission level whatever its chat row
+  says: workspace-write for an owner thread with *Work directly* and at least one root,
+  read-only for every other bot thread (`profile::run_sandbox`, applied at dispatch and to
+  the steer path's launch config, so a parked run isn't retired over the row's level).
+- **The gate.** Pi's own tools run inside Pi, so before each call the bot tools extension
+  asks the engine (`BotTool` with the engine-only tool `direct_tool`) and blocks the call
+  unless the answer is `allow`; it fails closed. The engine refuses when the bot no longer
+  has *Work directly*, when permission control is off on this device (it is off by
+  default) or Landstrip can't enforce there, and applies the taint rule (§4.3).
+- **Limits of the approach.** The bot's folder is inside the profile store, which
+  permission control protects as Cypher's own data, so a shell started there prints a
+  harmless `getcwd` warning (the prompt says so), and a checkout under `~/.cypher*` can't
+  be worked in directly.
 
 ## 5. Scope
 
@@ -265,6 +304,62 @@ owner. Nothing stalls silently.
 - Orchestration threads survive engine restarts like any chat: their transcript and the
   durable command queue carry the state.
 
+### 6.7 As built (P2)
+
+- **The plan** is a `botWork` registry row (`cypher_proto::BotWork`). `propose_plan`
+  writes it as proposed, with the bot chat and the tool call that draws its card (the
+  `BotTool` RPC passes Pi's tool call id), the steps (ids 1 to n, at most 10, projects
+  resolved within the scope) and the owner's newest message in the bot chat as the
+  instruction. Its answer tells the model to stop.
+- **Who writes what.** Owner devices write only `decision` (`Mutate resolveBotPlan`) and
+  `stopRequestedAt` (`Mutate stopBotWork`); the host writes the rest, always leaving those
+  two fields alone. Every text is clamped before it is written.
+- **The work host** (`bots/work/host.rs`) runs on the bot's host. It reconciles on every
+  change of the bot records, bot rows and session rows, and every 5 seconds:
+
+  ```text
+  proposed ── decision cancel, or Stop ───────────────────────────► cancelled
+     │ approved, bot not paused, Coordinate on, fewer than 3 running
+     ▼
+  running ── finish_work ──────────────────────────────────────────► done | failed
+     ├─ the thread's run settles without finish_work ──────────────► done (its last
+     │                                                                message) | failed
+     ├─ Stop: Interrupt the thread and its sessions that still run,
+     │  skip the steps not done ───────────────────────────────────► stopped
+     └─ a worker waits on an answer: its step is asking, then running again
+  ```
+
+  Starting means writing the item running first, then a hidden thread chat (marker
+  `{origin: owner, thread: {kind: work, workId}}`, the bot's folder, the bot chat's
+  config, the plan's title), then queueing its first run, the brief, under a message id
+  fixed per item. After a restart the same pass repairs what a crash left: a running item
+  whose thread row or first run is missing gets them. It keeps 40 finished items, 200
+  activity lines and 100 resolved approvals per bot, deleting the oldest (with a pruned
+  item's thread chat), and expires approvals nobody waits for any more.
+- **The thread runs unattended** (§8): it is hidden, so a permission prompt there fails
+  the work with the reason instead of stalling where nobody looks. Its worker sessions are
+  attended: their questions reach the thread through `wait_for_session` and the owner
+  through *Needs you*. A thread may answer a question but never a permission prompt;
+  only the owner approves a session's commands.
+- **The brief** (`bots/work/text.rs`) carries the plan with step ids, projects and
+  devices, the instruction verbatim in quotes, and what the thread may do in plain words.
+  Notebook entries join it with the memory track.
+- **Sessions.** Everything a thread does to a session is a durable command
+  (`DocHost::queue_command`: Run, Steer, Interrupt, RespondInput), the same for a session
+  on this device and one on another owner device. A worker is an ordinary chat in its
+  project (the `createChat` path), titled with the step, at workspace-write, on the bot
+  chat's model unless the call names one; its step records it before its run is queued. A
+  session's cwd is its project's folder or a worktree the same work created there (read
+  back from the `worktreeCreated` activity line). The plan's projects bound where it may
+  work. "Started by" marking reads `BotRecords::started_by` instead of a chat-row field.
+- **Limits.** 3 running orchestrations per bot (more approved plans wait for a slot), 8
+  sessions per orchestration, 8 per step, 10 steps per plan. The bot's `paused` flag keeps
+  approved plans waiting and refuses new worktrees and sessions. Turn and time budgets
+  are not built.
+- **The activity log** gets a `botActivity` row for each proposal, start, cancel, finish,
+  failure, Stop, worktree, session started, answered, steered or stopped, and approval
+  asked.
+
 ## 7. Memory
 
 - **The notebook** is a small file in the bot's private folder, read at the start of each
@@ -368,6 +463,14 @@ device. As built:
   for approval to …. It stopped.", the status ends Errored, and the engine hands an
   `UnattendedStop` (chat id, reason) to its unattended-stop listener, where the owner's
   notification goes once routines exist (§8).
+- **Coordination (built in P2).** `bots/work.rs` decides each thread's extra tools, its
+  workspace roots and its permission level, answers the direct-tool gate, asks for
+  approvals and writes the activity log (§4.3, §4.4). `bots/work/coordinate.rs` holds the
+  coordination tools and `bots/work/host.rs` the work host, one loop per engine started
+  with the other host loops (§6.7). Orchestration threads run unattended like routine
+  threads; their worker sessions don't. `Bots::set_pi_runtime` hands the work track the
+  Pi runtime, whose permission settings and Landstrip status the gate reads (the status
+  is cached for 10 minutes, since `doctor` spawns a process).
 
 ## 10. Bot tools
 
@@ -391,19 +494,27 @@ are plain text, bounded to 48 KiB.
 
 ### 10.2 Direct work (owner threads with *Work directly*)
 
-Pi's own tools (`bash`, `read`, `write`, `edit`, `grep`, `find`, `ls`) under permission
-control, with the bot's local scoped checkouts as workspace roots (§4.4).
+Pi's own tools (`bash`, `read`, `write`, `edit`, `grep`, `find`, `ls`, and
+`request_permission`) under permission control, with the bot's local scoped checkouts as
+workspace roots and the engine's permission level; the engine checks each call first
+(§4.4). Built.
 
 ### 10.3 Coordination (owner threads with *Coordinate*)
 
+All built. The bot chat gets `propose_plan`, `list_work` and `get_work`; an orchestration
+thread gets the rest (§6.7).
+
 | Tool | Does |
 |---|---|
-| `propose_plan` | Puts a plan card in the bot chat; approval starts an orchestration thread. Bot chat only. |
-| `create_worktree` | A new worktree in a granted project, on that project's device. |
-| `start_session` | A session in a granted project or worktree, with a prompt, model and sandbox; returns its id. |
-| `wait_for_session` | Waits until a session settles or asks something, up to a timeout; returns its state and last answer. |
-| `answer_session` | Answers a question a session it started is asking. |
-| `steer_session`, `stop_session` | For sessions it started; for others only with *Coordinate: steer*. |
+| `propose_plan {title, summary?, steps: [{title, project?, detail?}]}` | Writes the plan; its card waits for the owner's approval, which starts an orchestration thread. Bot chat only. |
+| `list_work`, `get_work {work_id}` | The bot's plans with state and progress; one plan's steps, their sessions with status and links, and its result. |
+| `create_worktree {project, branch?}` | A new `cypher/<name>` worktree in one of the plan's projects, off `branch` (default HEAD), on that project's device: locally through the engine's repos, on another device through its forwardable `CreateWorktree` within 30 s. Returns the path. |
+| `start_session {step, project, prompt, title?, cwd?, model?}` | A session in one of the plan's projects or a worktree from `create_worktree`, recorded on the step; returns its id. |
+| `wait_for_session {session_id, timeout_s?}` | Waits (default 300 s, at most 900) until a session settles or asks; returns its state, its last message and any question with its options, as quoted data. |
+| `answer_session {session_id, answers? \| text?}` | Answers the question a session is asking (never a permission prompt). |
+| `steer_session {session_id, message}`, `stop_session {session_id}` | For sessions this work started; for others only with *Coordinate: steer* and the owner's approval of each action. |
+| `update_step {step, state, note?}` | Running, done, failed or skipped, for the progress card. |
+| `finish_work {outcome, result}` | Done or failed, with the result the owner reads, citing sessions. |
 
 ### 10.4 Memory and network
 
@@ -647,7 +758,7 @@ another row replaces its content; the opened row stays highlighted in the sideba
 
 Behaviour:
 
-- Cards update live from the engine (`WatchBotWork`, the routine and notebook rows, the
+- Cards update live from the engine (`WatchBotRecords`: work, routines, notes, the
   audit log); they hold no state of their own. Resolving an item anywhere updates every
   count: the card, the Status line, the picker and the Projects-mode logo badge.
 - Settings stay in the palette; no card edits permissions itself.
@@ -666,11 +777,10 @@ Each method is one constant plus one `SPECS` entry in `cypher_rpc::methods`.
 |---|---|---|---|
 | `CreateBot` | unary, forwardable | P0 | Runs on the host: folder, bot chat and row in one batch. |
 | `WatchBots` | stream | P0 | The registry's bot rows. |
-| `BotTool` | unary, local | P0 | The extension's entry point; refusals come back as text for the model. |
+| `BotTool` | unary, local | P0 | The extension's entry point; refusals come back as text for the model. Carries the Pi tool call's id (P2), and serves the engine-only `direct_tool` gate. |
 | `Mutate updateBot` / `deleteBot` | unary | P0 | LWW edits; delete takes the bot's chats with it (and later its connections and room). |
-| `ResolveBotPlan` | unary, forwardable | P2 | Approve, edit or cancel a plan card. |
-| `StopBotThread` | unary, forwardable | P2 | Stops an orchestration or routine thread and the sessions it started. |
-| `WatchBotWork` | stream, forwardable | P2 | Orchestrations, their steps and sessions, for the progress cards and *Work* pane. |
+| `Mutate resolveBotPlan` / `stopBotWork` / `resolveBotApproval` | unary | P2 | An owner device writes the control field (`decision`, `stopRequestedAt`, an approval's `decision`); the registry syncs it to the bot's host, whose work host acts on it. Built. |
+| `WatchBotRecords` | stream | P2 | Every bot record (work, activity, approvals, notes, routines, network), for the cards and panes. Built. |
 | `SaveBotRoutine`, `DeleteBotRoutine`, `SaveProjectTask`, `DeleteProjectTask` | unary, forwardable | P3 | Routine and recurring-task definitions (registry rows). |
 | `BotAsk` | stream, local | P4 | `ask_bot` / `ask_group`: exchange states until answered or `wait_s`. |
 | `CreateBotInvite`, `RevokeBotInvite`, `RedeemBotInvite` | unary, forwardable | P4 | |
@@ -695,7 +805,7 @@ Each method is one constant plus one `SPECS` entry in `cypher_rpc::methods`.
 |---|---|
 | **P0: local bot** (done) | `bots` rows, the bot chat, the bot spawn mode with tool allowlist, four read tools (bounded scan), scope enforcement, the strip, palette and conversation UI, use from other owner devices. |
 | **P1: foundation** | Role-aware run profiles with engine-stamped origins; the untrusted-data prompt; the non-interactive run mode; the FTS index, `session_activity` and `project_git`. |
-| **P2: coordinator** | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; plan, progress and result cards; Stop; limits; audit log. |
+| **P2: coordinator** (engine built) | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; plan, progress and result cards; Stop; limits; audit log. Built in the engine: all of it but the cards, plus approvals for tainted threads and *Coordinate: steer*'s per-action approval. Not built: turn and time budgets, plan editing. |
 | **P3: memory and routines** | The notebook (owner notes first, then bot notes with provenance); the scheduler; routines and recurring project tasks; the attention inbox ("what needs me"). |
 | **P4: network** | `BotRoom`, publish, invites, connections, peer threads, `ask_bot` in Auto mode, exchange states, late answers, the Connections and Activity panes. |
 | **P5: review and control** | Review mode, the outgoing scrub, notifications for reviews, plans and connections; *Coordinate: steer*. |

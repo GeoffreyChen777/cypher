@@ -117,7 +117,8 @@ fn direct_lines(work_directly: bool, roots: &[String]) -> Vec<String> {
             format!(
                 "- You may work directly, with shell and file tools under permission control, \
                  in these checkouts on this device: {}. Your working directory is your own \
-                 empty folder, so use absolute paths or cd into a checkout.",
+                 private folder, so use absolute paths or cd into a checkout; the shell's \
+                 \"getcwd\" warning about that folder is harmless.",
                 roots.join(", ")
             ),
             "- Work directly only for quick, small things: run a test, read a file, check \

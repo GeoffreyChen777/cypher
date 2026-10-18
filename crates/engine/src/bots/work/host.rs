@@ -52,7 +52,7 @@ pub(super) async fn run(bots: Bots, cancel: CancellationToken) {
     bots.expire_approvals(true);
     let mut tick = tokio::time::interval(TICK);
     loop {
-        if let Err(err) = bots.reconcile_work().await {
+        if let Err(err) = bots.reconcile_work() {
             tracing::warn!(error = %err, "bot work pass failed");
         }
         tokio::select! {
@@ -129,7 +129,7 @@ pub(super) fn prune(work: &[&BotWork], activity: &[&BotActivity]) -> (Vec<String
 
 impl Bots {
     /// One pass over the work of every bot hosted here.
-    async fn reconcile_work(&self) -> Result<(), EngineError> {
+    fn reconcile_work(&self) -> Result<(), EngineError> {
         let ws = &self.inner.workspace;
         let sessions: HashMap<String, Session> = ws
             .read_sessions()?
@@ -157,22 +157,30 @@ impl Bots {
             work.sort_by_key(|w| w.created_at);
             let mut running = 0;
             let mut approved = Vec::new();
+            // One item's failure (a doc that won't open) never holds up
+            // the rest; the next pass retries it.
             for w in &work {
-                match w.state {
+                let step = match w.state {
                     WorkState::Proposed => match &w.decision {
-                        _ if w.stop_requested_at.is_some() => self.cancel_plan(bot, w)?,
-                        Some(decision) if !decision.approve => self.cancel_plan(bot, w)?,
-                        Some(decision) => approved.push((decision.at, *w)),
-                        None => {}
+                        _ if w.stop_requested_at.is_some() => self.cancel_plan(bot, w),
+                        Some(decision) if !decision.approve => self.cancel_plan(bot, w),
+                        Some(decision) => {
+                            approved.push((decision.at, *w));
+                            Ok(())
+                        }
+                        None => Ok(()),
                     },
                     WorkState::Running if w.stop_requested_at.is_some() => {
-                        self.stop_work(bot, w, &sessions)?;
+                        self.stop_work(bot, w, &sessions)
                     }
                     WorkState::Running => {
                         running += 1;
-                        self.follow_work(bot, w, &sessions).await?;
+                        self.follow_work(bot, w, &sessions)
                     }
-                    _ => {}
+                    _ => Ok(()),
+                };
+                if let Err(err) = step {
+                    tracing::warn!(work = %w.id, error = %err, "bot work item pass failed");
                 }
             }
             // Approved plans start oldest decision first, while the bot may
@@ -182,7 +190,9 @@ impl Bots {
                 if bot.paused || !bot.capabilities.coordinate || running >= p::MAX_RUNNING_WORK {
                     break;
                 }
-                self.start_work(bot, w)?;
+                if let Err(err) = self.start_work(bot, w) {
+                    tracing::warn!(work = %w.id, error = %err, "could not start bot work");
+                }
                 running += 1;
             }
             let activity: Vec<&BotActivity> = records
@@ -196,8 +206,9 @@ impl Bots {
                     .iter()
                     .find(|w| &w.id == id)
                     .and_then(|w| w.thread_chat_id.as_deref())
+                    && let Err(err) = ws.delete_chat(thread)
                 {
-                    ws.delete_chat(thread)?;
+                    tracing::warn!(chat = %thread, error = %err, "could not delete a pruned thread");
                 }
             }
             ws.delete_records(p::KIND_BOT_WORK, &work_ids);
@@ -406,7 +417,7 @@ impl Bots {
 
     /// A running orchestration: repair a missing thread or first run, settle
     /// it once its run ends, and follow its sessions' questions.
-    async fn follow_work(
+    fn follow_work(
         &self,
         bot: &Bot,
         work: &BotWork,
