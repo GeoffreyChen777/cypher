@@ -190,6 +190,8 @@ impl EngineCore {
             repos.clone(),
             profile.store_root().join("bots"),
         );
+        // A routine or task run stopped for asking settles as failed.
+        sessions.add_unattended_listener(bots.unattended_listener());
         // Worktree materialization for Run commands carrying a WorktreeSpec
         // happens on the HOST at drain time (see `DocHost::materialize_worktree`).
         doc_host.set_repos(repos.clone());

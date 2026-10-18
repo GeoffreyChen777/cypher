@@ -698,6 +698,12 @@ fn serialize_context_entry(entry: &SessionMessageEntry) -> Option<String> {
                     body.push(text.clone());
                 }
             }
+            // A routine's output posted into a bot chat.
+            MessagePart::Post { text, .. } => {
+                if !text.trim().is_empty() {
+                    body.push(text.clone());
+                }
+            }
             MessagePart::Tool { call, is_error, .. } => {
                 let kind = tool_call_label(call);
                 body.push(if *is_error {

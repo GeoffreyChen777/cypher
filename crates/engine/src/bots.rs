@@ -92,6 +92,8 @@ struct Inner {
     /// Cancels the host loops (work, schedule, network) at shutdown.
     hosts_cancel: tokio_util::sync::CancellationToken,
     hosts: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// The scheduler's in-memory state (routines and recurring tasks).
+    schedule: memory::ScheduleState,
 }
 
 struct Indexer {
@@ -115,6 +117,7 @@ impl Bots {
                 work: Default::default(),
                 hosts_cancel: Default::default(),
                 hosts: Default::default(),
+                schedule: Default::default(),
             }),
         }
     }

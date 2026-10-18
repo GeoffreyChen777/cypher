@@ -918,7 +918,7 @@ fn render_entry(index: usize, entry: &SessionMessageEntry, now: DateTime<Utc>) -
     let mut text = String::new();
     for part in &entry.parts {
         match part {
-            MessagePart::Text { text: body, .. } => {
+            MessagePart::Text { text: body, .. } | MessagePart::Post { text: body, .. } => {
                 if !text.is_empty() {
                     text.push('\n');
                 }

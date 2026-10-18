@@ -477,6 +477,30 @@ pub enum RunOutcome {
     Skipped,
 }
 
+/// Who posted a message into a bot chat outside any turn (the doc's `post`
+/// message part): a routine's output, attributed to the routine (§8).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum BotPost {
+    /// One routine run's output (or why it failed).
+    #[serde(rename_all = "camelCase")]
+    Routine {
+        routine_id: String,
+        /// The routine's name when it ran.
+        name: String,
+        /// `Done` or `Failed`.
+        outcome: RunOutcome,
+        /// When the run started.
+        run_at: i64,
+        /// The routine's thread, where the whole run can be read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_chat_id: Option<String>,
+    },
+    /// A source from a newer engine: shown as plain text.
+    #[serde(other)]
+    Unknown,
+}
+
 /// A bot job on a schedule, run unattended in its own thread; its output is
 /// a message in the bot chat.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

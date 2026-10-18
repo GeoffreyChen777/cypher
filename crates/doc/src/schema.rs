@@ -15,7 +15,7 @@
 use loro::{ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use cypher_proto::{AnsweredModel, ContextRecovery, TurnChanges};
+use cypher_proto::{AnsweredModel, BotPost, ContextRecovery, TurnChanges};
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::SESSION_SCHEMA_VERSION;
@@ -133,6 +133,10 @@ struct DocPartJson {
     /// older than the kind fall back to a text part built from `text`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning: Option<String>,
+    /// Who posted a post part (additive); its body is `text`, so older
+    /// readers show the post as text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     call: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -239,6 +243,13 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             reasoning: Some(text.clone()),
             ..Default::default()
         },
+        MessagePart::Post { id, text, from } => DocPartJson {
+            id: id.clone(),
+            kind: "post".into(),
+            text: Some(text.clone()),
+            from: Some(serde_json::to_value(from)?),
+            ..Default::default()
+        },
     })
 }
 
@@ -282,6 +293,14 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         "reasoning" => MessagePart::Reasoning {
             id: p.id,
             text: p.reasoning.unwrap_or_default(),
+        },
+        "post" => MessagePart::Post {
+            id: p.id,
+            text: p.text.unwrap_or_default(),
+            from: p
+                .from
+                .and_then(|f| serde_json::from_value(f).ok())
+                .unwrap_or(BotPost::Unknown),
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -915,6 +934,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     }
     if let Some(call) = &doc_part.call {
         map.insert("call", loro_value_from_json(call))?;
+    }
+    if let Some(from) = &doc_part.from {
+        map.insert("from", loro_value_from_json(from))?;
     }
     if let Some(is_error) = doc_part.is_error {
         map.insert("isError", is_error)?;

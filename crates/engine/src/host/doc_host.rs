@@ -522,7 +522,7 @@ impl DocHost {
 
     /// The sessions engine, once wired. `None` before assembly or after
     /// `shutdown_workers` — callers treat both as "executor unavailable".
-    fn sessions(&self) -> Option<SessionsEngine> {
+    pub(crate) fn sessions(&self) -> Option<SessionsEngine> {
         lock(&self.inner.sessions).clone()
     }
 
