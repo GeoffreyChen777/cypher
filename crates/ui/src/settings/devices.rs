@@ -43,11 +43,11 @@ pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) ->
 /// workspace and must not imply that account device metadata is already live.
 pub fn devices_subtitle(scope: Option<WorkspaceScope>) -> &'static str {
     match scope {
-        Some(WorkspaceScope::Local) => "Manage device details stored in this local workspace.",
+        Some(WorkspaceScope::Local) => "Manage device details stored locally on this device.",
         Some(WorkspaceScope::Synced | WorkspaceScope::Development) => {
             "Rename devices or remove machines you no longer use."
         }
-        None => "Manage device names for this workspace.",
+        None => "Manage device names for your account.",
     }
 }
 
@@ -995,7 +995,7 @@ mod tests {
     #[test]
     fn local_subtitle_does_not_claim_synced_metadata() {
         let copy = devices_subtitle(Some(WorkspaceScope::Local));
-        assert!(copy.contains("local workspace"));
+        assert!(copy.contains("locally on this device"));
         assert!(!copy.contains("synced"));
         assert!(!copy.contains("remove"));
     }

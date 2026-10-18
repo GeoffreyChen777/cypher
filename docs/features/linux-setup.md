@@ -21,7 +21,7 @@ In an interactive SSH shell:
 3. Setup installs Pi Runtime with progress, using the same verified Runtime
    manager as the desktop application.
 4. Setup installs/starts the systemd user service and checks the engine's
-   identity and readiness. Remote success also requires the synced workspace
+   identity and readiness. Remote success also requires the synced account
    connection to be established.
 5. Select this device in Cypher desktop and configure Providers/MCP there.
 

@@ -139,7 +139,7 @@ impl ProvidersPage {
                 } else {
                     "Add provider"
                 },
-                "Connect models to your workspace.",
+                "Connect models to Cypher.",
                 cx,
             ))
             .child(

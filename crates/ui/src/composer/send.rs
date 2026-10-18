@@ -280,7 +280,7 @@ impl Composer {
                     self.failure = None;
                 }
                 None => {
-                    self.failure = Some("Pick a level: /permissions ask, workspace or full".into());
+                    self.failure = Some("Pick a level: /permissions ask, project or full".into());
                 }
             }
             cx.notify();

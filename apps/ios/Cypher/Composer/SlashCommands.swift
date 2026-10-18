@@ -97,13 +97,13 @@ struct PermissionLevel: Equatable {
     var label: String
     var description: String
 
-    /// Strictest first; Edit workspace is the default.
+    /// Strictest first; Edit project is the default.
     static let all = [
         PermissionLevel(
             sandbox: "read-only", value: "ask", label: "Ask before edits",
             description: "Reads freely; every change needs your OK"),
         PermissionLevel(
-            sandbox: "workspace-write", value: "workspace", label: "Edit workspace",
+            sandbox: "workspace-write", value: "project", label: "Edit project",
             description: "Edits this project; asks before touching anything else"),
         PermissionLevel(
             sandbox: "danger-full-access", value: "full", label: "Full access",
@@ -120,6 +120,8 @@ struct PermissionLevel: Equatable {
     /// slash_menu.rs `permission_for`: a typed level, by value or label.
     static func named(_ text: String) -> PermissionLevel? {
         let text = text.trimmingCharacters(in: .whitespaces).lowercased()
+        // The level's name before Workspaces meant something else.
+        if text == "workspace" { return all[1] }
         return all.first { $0.value == text || $0.label.lowercased() == text }
     }
 }

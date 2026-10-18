@@ -92,6 +92,11 @@ const PERMISSION_CHOICES: [Choice; 3] = [
 /// The level a `/permissions` choice (or a typed value) stands for.
 pub fn permission_for(value: &str) -> Option<SandboxLevel> {
     let value = value.trim().to_lowercase();
+    // `workspace` was this level's name before Workspaces meant something
+    // else; typed out of habit, it still sets it.
+    if value == "workspace" {
+        return Some(SandboxLevel::WorkspaceWrite);
+    }
     PERMISSION_LEVELS
         .iter()
         .find(|entry| entry.value == value || entry.label.to_lowercase() == value)
@@ -704,10 +709,7 @@ mod tests {
                 _ => "",
             })
             .collect();
-        assert_eq!(
-            titles,
-            ["Ask before edits", "Edit workspace", "Full access"]
-        );
+        assert_eq!(titles, ["Ask before edits", "Edit project", "Full access"]);
         let checked: Vec<bool> = PERMISSION_CHOICES
             .iter()
             .map(|choice| choice_in_effect(PERMISSIONS, choice, &facts))
@@ -715,7 +717,7 @@ mod tests {
         assert_eq!(checked, [false, true, false]);
         assert_eq!(
             choice_summary(PERMISSIONS, &facts).as_deref(),
-            Some("Now: Edit workspace")
+            Some("Now: Edit project")
         );
         // Typed by value or by label.
         assert_eq!(choice_level(PERMISSIONS, "fu").rows.len(), 1);
@@ -726,6 +728,11 @@ mod tests {
             Some(SandboxLevel::ReadOnly)
         );
         assert_eq!(permission_for("everything"), None);
+        assert_eq!(
+            permission_for("workspace"),
+            Some(SandboxLevel::WorkspaceWrite),
+            "the old name still works"
+        );
     }
 
     #[test]
@@ -736,7 +743,7 @@ mod tests {
         };
         assert_eq!(
             action_badge(Action::Permissions, &at(SandboxLevel::WorkspaceWrite)),
-            Some(badge("Edit workspace", Tone::Neutral))
+            Some(badge("Edit project", Tone::Neutral))
         );
         assert_eq!(
             action_badge(Action::Permissions, &at(SandboxLevel::DangerFullAccess)),

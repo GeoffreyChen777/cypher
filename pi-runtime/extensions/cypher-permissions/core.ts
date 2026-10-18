@@ -159,7 +159,7 @@ const DOMAIN_ONCE = "Allow for this command";
 const RUN_ONCE = "Run once";
 
 const ESCALATE_HINT =
-  "If the command needs what the sandbox withholds (files outside the workspace, credentials, keys, the keychain, other processes, system services), run it again with `escalate`: a reviewing model or the user decides whether it runs outside the sandbox.";
+  "If the command needs what the sandbox withholds (files outside the project folders, credentials, keys, the keychain, other processes, system services), run it again with `escalate`: a reviewing model or the user decides whether it runs outside the sandbox.";
 
 /** What command rules say about one bash call. */
 export type CommandCheck =
@@ -960,10 +960,10 @@ export class Permissions {
       lines.push(`Permission control is OFF on this device: ${this.status.error ?? "the OS sandbox does not work"}.`);
       return lines.join("\n");
     }
-    const levelName = { "read-only": "Ask before edits", standard: "Edit workspace", "full-access": "Full access (no restrictions)" }[this.level];
+    const levelName = { "read-only": "Ask before edits", standard: "Edit project", "full-access": "Full access (no restrictions)" }[this.level];
     lines.push(`Level: ${levelName} (change it with /permissions)`);
     lines.push(`Sandbox: Landstrip (${this.status.implementation ?? "available"})`);
-    lines.push("", "Workspace roots:", ...this.roots.map((root) => `  ${root}`));
+    lines.push("", "Project folders:", ...this.roots.map((root) => `  ${root}`));
     const matrix = this.config.levels[this.level];
     lines.push("", "Defaults:");
     for (const zone of ["workspace", "external", "sensitive"] as const) {
@@ -1114,7 +1114,7 @@ export class Permissions {
       for (const denial of denials.slice(0, 10)) lines.push(`- ${denial.operation} ${denial.target}`);
     } else {
       lines.push(
-        "Writes outside the workspace, protected files (.git/config, git hooks, shell startup files), Cypher's own data and sensitive files (.env, keys, ~/.ssh and other credentials) are blocked.",
+        "Writes outside the project folders, protected files (.git/config, git hooks, shell startup files), Cypher's own data and sensitive files (.env, keys, ~/.ssh and other credentials) are blocked.",
       );
     }
     if (compiled.policy.network.httpProxyPort !== undefined) {
@@ -1246,7 +1246,7 @@ function approvalTitle(
         ? "change Cypher's own data"
         : first?.guard === "protected"
           ? "write a protected file"
-          : `${request.capability} outside the workspace`;
+          : `${request.capability} outside the project folders`;
   for (const item of request.classifications) lines.push(fact("Path", displayPath(item.path, home)));
   const matches = [...new Set(request.classifications.map((item) => item.match).filter((match): match is string => Boolean(match)))];
   if (matches.length) lines.push(fact("Matches", matches.join(", ")));

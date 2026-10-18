@@ -69,7 +69,7 @@ struct ModelChip: View {
 
 /// The chat's permission level at Full access: an amber shield beside the
 /// model chip that opens the levels (pickers/render.rs; Ask before edits and
-/// Edit workspace show nothing). Picking one sets it for the chat.
+/// Edit project show nothing). Picking one sets it for the chat.
 struct PermissionLevelChip: View {
     let level: PermissionLevel
     let onPick: (PermissionLevel) -> Void

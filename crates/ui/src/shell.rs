@@ -376,7 +376,7 @@ impl SettingsSection {
     pub const NAV_GROUPS: [(&'static str, &'static [Self]); 3] = [
         ("Device settings", &Self::DEVICE_SETTINGS),
         ("Client settings", &Self::CLIENT_SETTINGS),
-        ("Workspace", &Self::WORKSPACE_SETTINGS),
+        ("Account", &Self::WORKSPACE_SETTINGS),
     ];
 
     #[cfg(test)]

@@ -355,10 +355,10 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
     }) as unknown as typeof baseBash.parameters,
     promptGuidelines: [
       ...(baseBash.promptGuidelines ?? []),
-      "bash runs in a sandbox: the workspace is writable, the rest of the machine is readable except sensitive files (.env, keys, ~/.ssh keys, credentials), and the network is open. Commands that need more (ssh, git push with credentials, gh, cloud CLIs, writing outside the workspace, the keychain, other processes, launchctl, simulators) fail in it.",
+      "bash runs in a sandbox: the project folders are writable, the rest of the machine is readable except sensitive files (.env, keys, ~/.ssh keys, credentials), and the network is open. Commands that need more (ssh, git push with credentials, gh, cloud CLIs, writing outside the project folders, the keychain, other processes, launchctl, simulators) fail in it.",
       "When a command needs more than the sandbox gives, run it again with `escalate` (label and reason). A reviewing model or the user decides whether it runs outside the sandbox; the user can allow similar commands for the chat. Make the label and reason say plainly how it serves what the user asked. Commands the user already allowed run outside without asking. Do not work around the sandbox in other ways.",
       "Commands that may leave the sandbox read best plainly: name programs directly, not through `bash -c`, `eval`, `env` or an interpreter, which no rule can allow, so each such run needs its own approval.",
-      "Escalate only the part that needs it: write its output to a file in the workspace, or pipe it to plain filters (grep, sort, uniq, wc, cut, tr, head, tail, awk and sed programs that only print), and do other work in later commands in the sandbox. A line that also runs a script, an interpreter or other commands outside can only be approved once, so the user is asked again every time.",
+      "Escalate only the part that needs it: write its output to a file in the project folder, or pipe it to plain filters (grep, sort, uniq, wc, cut, tr, head, tail, awk and sed programs that only print), and do other work in later commands in the sandbox. A line that also runs a script, an interpreter or other commands outside can only be approved once, so the user is asked again every time.",
     ],
     async execute(id, params, signal, onUpdate, ctx) {
       const st = state(ctx);
@@ -467,10 +467,10 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
     name: "request_permission",
     label: "Request permission",
     description:
-      "Ask for file access the permission rules do not give the file tools (read, write, edit, ls, grep, find) by default: writing outside the workspace, writing protected files (.git/config, git hooks, shell startup files), or reading/writing sensitive files (.env, keys, credentials). Not for bash: a command that needs more runs again with `escalate`.",
+      "Ask for file access the permission rules do not give the file tools (read, write, edit, ls, grep, find) by default: writing outside the project folders, writing protected files (.git/config, git hooks, shell startup files), or reading/writing sensitive files (.env, keys, credentials). Not for bash: a command that needs more runs again with `escalate`.",
     promptSnippet: "Request file access beyond the permission defaults (then retry the file tool)",
     promptGuidelines: [
-      "File tools run under permission rules: the workspace is readable and writable; other paths are readable but not writable; sensitive files (.env, keys, credentials) are neither. Protected files such as .git/config and git hooks need approval to write.",
+      "File tools run under permission rules: the project folders are readable and writable; other paths are readable but not writable; sensitive files (.env, keys, credentials) are neither. Protected files such as .git/config and git hooks need approval to write.",
       "When a file tool fails with a permission denial, call request_permission with the paths, then retry the same call. Do not try to work around a denial.",
     ],
     parameters: Type.Object({
@@ -560,7 +560,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
   // --- Commands ----------------------------------------------------------------------
 
   pi.registerCommand("perm", {
-    description: "Show permission control status: level, workspace roots, approval modes, grants",
+    description: "Show permission control status: level, project folders, approval modes, grants",
     handler: async (_args, ctx) => {
       const st = state(ctx);
       st.reload(ctx.cwd, ctx.sessionManager.getBranch());
@@ -588,13 +588,13 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("perm-root", {
-    description: "Add or remove an extra workspace root for this chat: /perm-root add|remove <path>",
+    description: "Add or remove an extra project folder for this chat: /perm-root add|remove <path>",
     handler: async (args, ctx) => {
       const st = state(ctx);
       const [action, ...rest] = (args ?? "").trim().split(/\s+/);
       const target = rest.join(" ");
       if ((action !== "add" && action !== "remove") || !target) {
-        ctx.ui.notify(`Workspace roots:\n${st.roots.join("\n")}\n\nUsage: /perm-root add|remove <path>`, "info");
+        ctx.ui.notify(`Project folders:\n${st.roots.join("\n")}\n\nUsage: /perm-root add|remove <path>`, "info");
         return;
       }
       const canonical = st.paths.canonical(target, ctx.cwd);
@@ -605,7 +605,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
         st.removeRoot(canonical);
       }
       st.reload(ctx.cwd, ctx.sessionManager.getBranch());
-      ctx.ui.notify(`Workspace roots:\n${st.roots.join("\n")}`, "info");
+      ctx.ui.notify(`Project folders:\n${st.roots.join("\n")}`, "info");
     },
   });
 

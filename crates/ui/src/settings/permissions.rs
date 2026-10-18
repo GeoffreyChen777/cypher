@@ -54,7 +54,7 @@ impl ApprovalKey {
 
     fn title(self) -> &'static str {
         match self {
-            Self::ExternalWrite => "Writing outside the workspace",
+            Self::ExternalWrite => "Writing outside the project",
             Self::ProtectedWrite => "Writing protected files",
             Self::SensitiveRead => "Reading sensitive files",
             Self::SensitiveWrite => "Writing sensitive files",
@@ -1075,7 +1075,7 @@ impl PermissionsPage {
                     .child(Self::list_field(
                         theme,
                         "More writable folders",
-                        "Folders shell commands may write besides the workspace and temp. The npm, Cargo, Go and Gradle caches are built in.",
+                        "Folders shell commands may write besides the project and temp. The npm, Cargo, Go and Gradle caches are built in.",
                         &self.lists.writable,
                     ))
                     .child(Self::list_field(
@@ -1331,7 +1331,7 @@ impl Render for PermissionsPage {
                     page.child(Self::section_heading(
                         &theme,
                         "Approvals",
-                        "Inside the workspace, agents read and write freely; they read everything else except sensitive files. Anything more is a request, decided here.",
+                        "Inside the project folder, agents read and write freely; they read everything else except sensitive files. Anything more is a request, decided here.",
                     ))
                     .child(self.approvals_card(&settings, &theme, cx))
                     .child(self.judge_card(&settings, &theme, cx))

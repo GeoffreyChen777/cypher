@@ -284,7 +284,7 @@ impl EngineRpc {
     fn local_importer(&self) -> Result<&crate::host::local_import::LocalImporter, RpcError> {
         self.local_import
             .as_ref()
-            .ok_or_else(|| RpcError::Failed("local import requires a synced workspace".into()))
+            .ok_or_else(|| RpcError::Failed("local import requires a synced account".into()))
     }
 
     /// Config changes the active MCP / provider sign-in would race.

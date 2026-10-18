@@ -90,7 +90,7 @@ export function judgePrompt(request: JudgeRequest): string {
   if (request.tool) lines.push(`- tool: ${request.tool}`);
 
   lines.push(`- permission level: ${request.level}`);
-  lines.push(`- workspace: ${request.workspaceRoots.join(", ")}`);
+  lines.push(`- project folders: ${request.workspaceRoots.join(", ")}`);
   if (request.command) lines.push("", "## The command", untrusted(clip(request.command, 3000)));
   if (request.input) lines.push("", "## The tool's input", untrusted(clip(request.input, 3000)));
   if (request.diff) lines.push("", "## The change", untrusted(clip(request.diff, 4000)));

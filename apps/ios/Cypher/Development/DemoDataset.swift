@@ -770,7 +770,7 @@ final class DemoDataset {
                         isError: false, resolved: true),
                     prompt(
                         "q-4",
-                        "Allow the agent to write outside the workspace?\n\nContext:\nPath: ~/Developer/shared/deploy-notes.md\nTool: edit",
+                        "Allow the agent to write outside the project?\n\nContext:\nPath: ~/Developer/shared/deploy-notes.md\nTool: edit",
                         options: accessOptions, kind: "access", call: "perm-4"),
                     .text(id: "t5", text: "The app is back up. Then the release steps:"),
                     command("perm-5", "cat .env", .blocked),

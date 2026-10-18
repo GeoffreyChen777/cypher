@@ -347,7 +347,7 @@ impl ShortcutGroup {
     pub fn label(self) -> &'static str {
         match self {
             ShortcutGroup::General => "General",
-            ShortcutGroup::Workspace => "Workspace",
+            ShortcutGroup::Workspace => "Layout",
         }
     }
 }

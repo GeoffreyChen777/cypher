@@ -253,7 +253,7 @@ struct HomeView: View {
                 try? await Task.sleep(for: .seconds(12))
                 guard !Task.isCancelled, model.notifications.pendingNavigation?.id == pending.id else { return }
                 model.notifications.pendingNavigation = nil
-                model.notifications.navigationError = "This session isn't available in the current workspace."
+                model.notifications.navigationError = "This session isn't available in this account."
             }
         }
     }
