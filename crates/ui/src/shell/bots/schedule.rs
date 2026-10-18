@@ -730,7 +730,7 @@ impl Shell {
             body = body.child(parts::fact(
                 theme,
                 "Last run",
-                self.last_run_value(routine.last_run.as_ref(), theme, cx),
+                self.last_run_value(routine.last_run.as_ref(), theme),
             ));
         }
         body = body
@@ -829,6 +829,24 @@ impl Shell {
         let busy = matches!(job.state(), JobState::Running | JobState::Starting);
         let (run_id, edit_id, delete_id) = (job.id.clone(), job.id.clone(), job.id.clone());
         let name = job.name.clone();
+        // The session the latest run happened in, to read or watch.
+        let session = job.last.as_ref().and_then(|run| {
+            let chat_id = run.chat_id.clone()?;
+            let label = if run.outcome == RunOutcome::Running {
+                "Watch run"
+            } else {
+                "Open session"
+            };
+            Some(
+                parts::action(
+                    "bot-job-session",
+                    icons::CHAT_ROUND_LINE,
+                    label,
+                    theme.text_muted,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx))),
+            )
+        });
         // The palette's primary button, led by a play glyph.
         let run = div()
             .id("bot-job-run")
@@ -880,6 +898,7 @@ impl Shell {
                     }),
                 ),
             )
+            .children(session)
             .child(div().flex_1())
             .child(
                 parts::action(
@@ -896,13 +915,8 @@ impl Shell {
     }
 
     /// The last run: its outcome and time (and whether it was run by
-    /// hand), a link to the session it ran in, and its summary.
-    fn last_run_value(
-        &self,
-        run: Option<&RunRecord>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// hand), and its summary. Its session opens from the actions.
+    fn last_run_value(&self, run: Option<&RunRecord>, theme: &Theme) -> AnyElement {
         let Some(run) = run else {
             return div()
                 .text_color(theme.text_muted)
@@ -947,20 +961,7 @@ impl Shell {
                         parts::past_full_ms(run.at),
                         if run.manual { " · run by hand" } else { "" }
                     ))),
-            )
-            .when_some(run.chat_id.clone(), |el, chat_id| {
-                let link_label = if run.outcome == RunOutcome::Running {
-                    "Watch"
-                } else {
-                    "Open session"
-                };
-                el.child(div().text_color(theme.text_faint).child("·"))
-                    .child(
-                        parts::link("bot-job-last-link", link_label, theme).on_click(
-                            cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)),
-                        ),
-                    )
-            });
+            );
         div()
             .flex()
             .flex_col()
