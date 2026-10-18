@@ -658,6 +658,7 @@ impl Transcript {
             .gap(px(8.0));
         if phase.awaiting() {
             let (approve, cancel) = (work.id.clone(), work.id.clone());
+            let (edit_id, edit_title) = (work.id.clone(), work.title.clone());
             return Some(
                 row.child(
                     crate::kit::popover::btn_primary(theme, "Approve")
@@ -670,6 +671,17 @@ impl Transcript {
                                 }),
                                 cx,
                             )
+                        })),
+                )
+                .child(
+                    crate::kit::popover::btn_ghost(theme, "Edit", format!("{row_id}-edit"))
+                        .id(SharedString::from(format!("{row_id}-edit")))
+                        .py(px(5.0))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(super::TranscriptEvent::EditBotPlan {
+                                work_id: edit_id.clone(),
+                                title: edit_title.clone(),
+                            })
                         })),
                 )
                 .child(

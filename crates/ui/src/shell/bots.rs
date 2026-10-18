@@ -343,6 +343,34 @@ impl Shell {
         }
     }
 
+    /// A plan card's Edit: cancel the proposal and start a reply asking for
+    /// the change, so the bot proposes a revised plan.
+    pub(super) fn edit_bot_plan(
+        &mut self,
+        sid: SlotId,
+        work_id: &str,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.mutate(
+            serde_json::json!({ "op": "resolveBotPlan", "workId": work_id, "approve": false }),
+            cx,
+        );
+        let Some(slot) = self.tiles.slots.get(&sid) else {
+            return;
+        };
+        let (composer, chat_id) = (slot.composer.clone(), slot.tab.chat_id().map(str::to_owned));
+        if let Some(chat_id) = chat_id {
+            let text = format!(
+                "Change the plan \u{201C}{}\u{201D}: ",
+                transcript::single_line(title)
+            );
+            composer.update(cx, |composer, cx| composer.seed_draft(&chat_id, text, cx));
+        }
+        self.tiles.focus_pending = true;
+        cx.notify();
+    }
+
     fn confirm_delete_bot(&mut self, bot_id: String, cx: &mut Context<Self>) {
         self.dialogs.delete_bot = None;
         self.mutate(

@@ -116,6 +116,15 @@ pub enum RowKind {
         title: SharedString,
         resolved: bool,
     },
+    /// The attribution over a routine's output posted into a bot chat (§8):
+    /// the routine's name, when it ran, a failed mark, and its thread. The
+    /// output itself follows as ordinary text rows.
+    BotPost {
+        name: SharedString,
+        failed: bool,
+        run_at: i64,
+        thread: Option<SharedString>,
+    },
     /// The toggle over a reasoning part: "Thinking…" while it streams,
     /// "Thought" once it settled. The `blocks` [`RowKind::ThoughtBlock`] rows
     /// that follow are dropped while it is closed, the default (see
@@ -287,6 +296,7 @@ pub(super) fn row_match_count(row: &Row, query: &str) -> u32 {
         | RowKind::InputChip { .. }
         | RowKind::ErrorChip { .. }
         | RowKind::BotPlan { .. }
+        | RowKind::BotPost { .. }
         | RowKind::Thought { .. }
         | RowKind::ThoughtBlock { .. } => 0,
     };
@@ -349,6 +359,9 @@ pub enum TranscriptEvent {
         changes: Arc<cypher_proto::TurnChanges>,
         path: Option<String>,
     },
+    /// A plan card's Edit: cancel the proposal and start the owner's reply
+    /// asking for the change in the composer.
+    EditBotPlan { work_id: String, title: String },
 }
 
 impl EventEmitter<TranscriptEvent> for Transcript {}
@@ -698,11 +711,35 @@ pub fn rows_for_entry(
                 text,
                 agent_text,
             } => cx.push_text_rows(&mut rows, part_id, text, agent_text.as_deref(), parse),
-            // A routine's output posted into a bot chat: its text for now;
-            // the Botboard draws it as a card attributed to the routine.
+            // A routine's output posted into a bot chat: an attribution row,
+            // then its text as any answer's.
             MessagePart::Post {
-                id: part_id, text, ..
-            } => cx.push_text_rows(&mut rows, part_id, text, None, parse),
+                id: part_id,
+                text,
+                from,
+            } => {
+                if let cypher_proto::BotPost::Routine {
+                    name,
+                    outcome,
+                    run_at,
+                    thread_chat_id,
+                    ..
+                } = from
+                {
+                    let failed = *outcome == cypher_proto::RunOutcome::Failed;
+                    rows.push(cx.row(
+                        format!("{}#{}#post", entry.id, part_id),
+                        fnv1a(name.as_bytes()) ^ (*run_at as u64) ^ u64::from(failed),
+                        RowKind::BotPost {
+                            name: name.clone().into(),
+                            failed,
+                            run_at: *run_at,
+                            thread: thread_chat_id.clone().map(Into::into),
+                        },
+                    ));
+                }
+                cx.push_text_rows(&mut rows, part_id, text, None, parse)
+            }
             MessagePart::Reasoning { id: part_id, text } => {
                 run.get_or_insert_with(|| (rows.len(), part_id.clone()));
                 // Still thinking: the reasoning is the live tail.

@@ -577,6 +577,12 @@ impl Transcript {
                 title,
                 resolved,
             } => self.render_bot_plan(&row.id, call_id, title, *resolved, theme, cx),
+            RowKind::BotPost {
+                name,
+                failed,
+                run_at,
+                thread,
+            } => bot_post_header(&row.id, name, *failed, *run_at, thread.clone(), theme),
             RowKind::Worked { label } => worked_rule(label.clone(), theme),
             RowKind::TurnChanges { changes } => {
                 self.render_turn_changes(&row.id, changes, theme, cx)
@@ -1267,6 +1273,96 @@ fn user_bubble_text(
 /// message WRAPS instead of truncating: startup-crash errors carry the
 /// agent's exit status and stderr, and a one-line ellipsis was exactly what
 /// made zeronsh/comet#95 undiagnosable from the screenshot.
+/// The attribution over a routine's output in a bot chat: clock, the
+/// routine's name, when it ran, Failed when it failed, and a link to the
+/// thread it ran in (opened in the Botboard's panel).
+fn bot_post_header(
+    row_id: &SharedString,
+    name: &SharedString,
+    failed: bool,
+    run_at: i64,
+    thread: Option<SharedString>,
+    theme: &Theme,
+) -> AnyElement {
+    use crate::kit::icons::{CLOCK, icon};
+    let when = chrono::DateTime::from_timestamp_millis(run_at)
+        .map(|at| {
+            let local = at.with_timezone(&chrono::Local);
+            if local.date_naive() == chrono::Local::now().date_naive() {
+                local.format("%H:%M").to_string()
+            } else {
+                local.format("%b %-d, %H:%M").to_string()
+            }
+        })
+        .unwrap_or_default();
+    let link_key: SharedString = format!("{row_id}-thread").into();
+    div()
+        .pt(px(10.0))
+        .pb(px(2.0))
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(12.0))
+        .child(
+            icon(CLOCK)
+                .size(px(13.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(name.clone()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_color(theme.text_muted)
+                .child(SharedString::from(format!("· routine · {when}"))),
+        )
+        .when(failed, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .rounded(px(5.0))
+                    .bg(theme.danger.opacity(0.1))
+                    .text_size(px(11.0))
+                    .text_color(theme.danger)
+                    .child(SharedString::from("Failed")),
+            )
+        })
+        .when_some(thread, |el, thread| {
+            let url = format!(
+                "{}{thread}",
+                crate::markdown::session_link::SESSION_LINK_PREFIX
+            );
+            el.child(div().flex_1()).child(
+                div()
+                    .id(link_key.clone())
+                    .flex_none()
+                    .cursor_pointer()
+                    .text_color(crate::kit::motion::hover_blend(
+                        &link_key,
+                        theme.text_muted,
+                        theme.text,
+                    ))
+                    .on_hover(crate::kit::motion::hover_listener(link_key.clone()))
+                    .on_click(move |_, window, cx| {
+                        crate::markdown::session_link::open_link(&url, window, cx)
+                    })
+                    .child(SharedString::from("Open thread")),
+            )
+        })
+        .into_any_element()
+}
+
 fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
     let red_300 = theme.danger_muted; // tailwind red-300
     let danger = theme.danger; // red-400

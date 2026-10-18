@@ -18,8 +18,6 @@ pub(super) struct Taint {
     threads: Mutex<HashMap<String, (String, i64)>>,
 }
 
-// `mark` is the network track's (ask_bot); the work track reads and clears.
-#[allow(dead_code)]
 impl Taint {
     pub(super) fn mark(&self, chat_id: &str, reason: impl Into<String>) {
         lock(&self.threads).insert(chat_id.to_string(), (reason.into(), cypher_proto::now_ms()));
@@ -30,10 +28,6 @@ impl Taint {
         lock(&self.threads)
             .get(chat_id)
             .map(|(reason, _)| reason.clone())
-    }
-
-    pub(super) fn clear(&self, chat_id: &str) {
-        lock(&self.threads).remove(chat_id);
     }
 
     /// Clear every thread whose run settled after it was marked;
@@ -51,13 +45,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn taint_lasts_until_cleared() {
+    fn taint_reads_back_its_reason() {
         let taint = Taint::default();
         assert!(taint.reason("t").is_none());
         taint.mark("t", "a peer answered");
         assert_eq!(taint.reason("t").as_deref(), Some("a peer answered"));
-        taint.clear("t");
-        assert!(taint.reason("t").is_none());
     }
 
     #[test]

@@ -461,7 +461,7 @@ impl Shell {
             any = true;
         }
         if thread_listed {
-            let thread = PanelItem::Thread(work.id.clone());
+            let thread = PanelItem::Thread(work.thread_chat_id.clone().unwrap_or_default());
             actions = actions.child(
                 popover::btn_ghost(theme, "View thread", "bot-work-thread")
                     .id("bot-work-thread")
@@ -489,31 +489,59 @@ impl Shell {
 
     /// The orchestration's thread, read-only, with the way back to its work.
     /// The panel draws its body unscrolled: the transcript scrolls itself.
+    /// A hidden thread's transcript, read-only, with a way back to what
+    /// owns it: its work item, routine or connection.
     fn render_thread(
         &mut self,
-        work_id: &str,
+        thread: &str,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
-        let (title, thread) = {
+        let (subtitle, back_item, back_label) = {
             let state = self.state.read(cx);
-            let work = state.bot_records.work.iter().find(|w| w.id == work_id)?;
-            let thread = work
-                .thread_chat_id
-                .clone()
-                .filter(|id| state.chats.iter().any(|c| c.id == *id))?;
-            (work.title.clone(), thread)
+            let chat = state.chats.iter().find(|c| c.id == thread)?;
+            let marker = chat.bot.as_ref()?;
+            let records = &state.bot_records;
+            match &marker.thread {
+                cypher_proto::BotThread::Work { work_id } => {
+                    let work = records.work.iter().find(|w| &w.id == work_id)?;
+                    (
+                        work.title.clone(),
+                        PanelItem::WorkItem(work.id.clone()),
+                        "Back to the work",
+                    )
+                }
+                cypher_proto::BotThread::Routine { routine_id } => {
+                    let routine = records.routines.iter().find(|r| &r.id == routine_id)?;
+                    (
+                        routine.name.clone(),
+                        PanelItem::Routine(routine.id.clone()),
+                        "Back to the routine",
+                    )
+                }
+                cypher_proto::BotThread::Peer { connection_id } => {
+                    let connection = records
+                        .connections
+                        .iter()
+                        .find(|c| &c.id == connection_id)?;
+                    (
+                        format!("Questions from {}", connection.peer.name),
+                        PanelItem::Connection(connection.id.clone()),
+                        "Back to the connection",
+                    )
+                }
+                cypher_proto::BotThread::Main | cypher_proto::BotThread::Unknown => return None,
+            }
         };
-        self.peek(&thread, true, cx);
+        self.peek(thread, true, cx);
         let view = self.board.peek.as_ref()?.transcript.clone()?;
         let head = PanelHead {
             glyph: icons::CHAT_ROUND_LINE,
             tint: None,
             title: "Thread".into(),
-            subtitle: title,
+            subtitle,
         };
         let back_key = "bot-thread-back";
-        let back_item = PanelItem::WorkItem(work_id.to_string());
         let back = div()
             .id(back_key)
             .flex_none()
@@ -541,7 +569,7 @@ impl Shell {
                     .size(px(12.0))
                     .text_color(theme.text_muted),
             )
-            .child(SharedString::from("Back to the work"));
+            .child(SharedString::from(back_label));
         let body = div()
             .size_full()
             .flex()

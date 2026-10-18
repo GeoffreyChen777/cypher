@@ -8,8 +8,6 @@ use super::*;
 
 /// What the panel shows: a card's whole list (its header) or one item (a
 /// row). Ids are record ids unless named otherwise.
-// The cards that open the later items are being built out.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::shell) enum PanelItem {
     /// Every project the bot reads (the Projects card's header).
@@ -33,7 +31,8 @@ pub(in crate::shell) enum PanelItem {
     Work,
     /// One orchestration (work id).
     WorkItem(String),
-    /// An orchestration's thread, read-only (work id).
+    /// One of the bot's hidden threads, read-only (its chat id): an
+    /// orchestration's, a routine's or a connection's.
     Thread(String),
     /// Routines and project tasks, by next run.
     Schedule,

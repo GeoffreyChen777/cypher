@@ -296,11 +296,25 @@ impl Shell {
 
     /// [`Self::open_chat`], or with `split` (⌘-click) in a new tile to the
     /// right of the focused one. A bot's conversation shows on the Botboard
-    /// instead; any other session switches the main window to Projects.
+    /// instead, and one of its hidden threads (an orchestration's, a
+    /// routine's, a peer's) in the Botboard's panel; any other session
+    /// switches the main window to Projects.
     pub(super) fn open_chat_with(&mut self, chat_id: String, split: bool, cx: &mut Context<Self>) {
         if let Some(bot_id) = self.bot_of_chat(&chat_id, cx) {
             self.route = Route::Chat;
-            return self.open_bot(&bot_id, cx);
+            let hidden = self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .find(|c| c.id == chat_id)
+                .and_then(|c| c.bot.as_ref())
+                .is_some_and(|marker| !marker.is_main());
+            self.open_bot(&bot_id, cx);
+            if hidden && self.board.panel != Some(bots::PanelItem::Thread(chat_id.clone())) {
+                self.open_panel(bots::PanelItem::Thread(chat_id), cx);
+            }
+            return;
         }
         self.set_window_mode(crate::prefs::WindowMode::Projects, cx);
         self.route = Route::Chat;

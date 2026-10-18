@@ -152,6 +152,9 @@ impl Shell {
                         crate::transcript::TranscriptEvent::OpenTurnDiff { changes, path } => {
                             this.open_turn_diff(sid, changes.clone(), path.clone(), cx);
                         }
+                        crate::transcript::TranscriptEvent::EditBotPlan { work_id, title } => {
+                            this.edit_bot_plan(sid, work_id, title, cx);
+                        }
                     }
                 },
             ),
