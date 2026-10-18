@@ -332,6 +332,36 @@ impl Transcript {
         } else {
             (top_gap, inner)
         };
+        // A card's rows each draw their slice of it; the gap between two of
+        // them is drawn inside, so the card is one unbroken box.
+        let (top_gap, inner) = match row.card {
+            Some(slice) => {
+                let (bg, line) = if slice.failed {
+                    (theme.danger.opacity(0.05), theme.danger.opacity(0.22))
+                } else {
+                    (
+                        crate::kit::theme::ink(0.035),
+                        crate::kit::theme::hairline(0.1),
+                    )
+                };
+                let card = div()
+                    .w_full()
+                    .bg(bg)
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(line)
+                    .px(px(16.0))
+                    .when(slice.top, |el| el.border_t_1().rounded_t(px(12.0)))
+                    .when(!slice.top, |el| el.pt(px(top_gap)))
+                    .when(slice.bottom, |el| {
+                        el.border_b_1().rounded_b(px(12.0)).pb(px(14.0))
+                    })
+                    .child(inner)
+                    .into_any_element();
+                (if slice.top { top_gap + 6.0 } else { 0.0 }, card)
+            }
+            None => (top_gap, inner),
+        };
 
         let strip = self.render_timestamp_strip(&row, &theme, cx);
         let entry_id = row.entry_id.clone();
@@ -1270,9 +1300,10 @@ fn user_bubble_text(
 /// message WRAPS instead of truncating: startup-crash errors carry the
 /// agent's exit status and stderr, and a one-line ellipsis was exactly what
 /// made zeronsh/comet#95 undiagnosable from the screenshot.
-/// The attribution over a routine's output in a bot chat: clock, the
-/// routine's name, when it ran, Failed when it failed, and a link to the
-/// thread it ran in (opened in the Botboard's panel).
+/// The head of a routine's result card in a bot chat: the routine's mark,
+/// its name over "Routine · <when>", the outcome, and a way into the
+/// thread it ran in (opened in the Workspaces board's panel). The card
+/// itself is drawn around this row and the result's rows ([`Row::card`]).
 fn bot_post_header(
     row_id: &SharedString,
     name: &SharedString,
@@ -1281,82 +1312,123 @@ fn bot_post_header(
     thread: Option<SharedString>,
     theme: &Theme,
 ) -> AnyElement {
-    use crate::kit::icons::{CLOCK, icon};
+    use crate::kit::icons::{CHECK, DANGER_TRIANGLE, REFRESH, icon};
     let when = chrono::DateTime::from_timestamp_millis(run_at)
         .map(|at| {
             let local = at.with_timezone(&chrono::Local);
             if local.date_naive() == chrono::Local::now().date_naive() {
-                local.format("%H:%M").to_string()
+                format!("Today {}", local.format("%H:%M"))
             } else {
                 local.format("%b %-d, %H:%M").to_string()
             }
         })
         .unwrap_or_default();
+    let tone = if failed { theme.danger } else { theme.accent };
+    let (status_glyph, status_word, status_color) = if failed {
+        (DANGER_TRIANGLE, "Failed", theme.danger)
+    } else {
+        (CHECK, "Done", theme.success)
+    };
     let link_key: SharedString = format!("{row_id}-thread").into();
+    let open = thread.map(|thread| {
+        let url = format!(
+            "{}{thread}",
+            crate::markdown::session_link::SESSION_LINK_PREFIX
+        );
+        div()
+            .id(link_key.clone())
+            .flex_none()
+            .h(px(26.0))
+            .px(px(9.0))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .text_size(px(12.0))
+            .text_color(crate::kit::motion::hover_blend(
+                &link_key,
+                theme.text_muted,
+                theme.text,
+            ))
+            .bg(crate::kit::motion::hover_blend(
+                &link_key,
+                crate::kit::theme::wash(0.0),
+                crate::kit::theme::wash(0.08),
+            ))
+            .on_hover(crate::kit::motion::hover_listener(link_key.clone()))
+            .on_click(move |_, window, cx| {
+                crate::markdown::session_link::open_link(&url, window, cx)
+            })
+            .child(SharedString::from("Open thread"))
+    });
     div()
-        .pt(px(10.0))
-        .pb(px(2.0))
+        .pt(px(12.0))
+        .pb(px(10.0))
         .w_full()
+        .border_b_1()
+        .border_color(if failed {
+            theme.danger.opacity(0.16)
+        } else {
+            crate::kit::theme::hairline(0.08)
+        })
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(6.0))
-        .text_size(px(12.0))
+        .gap(px(10.0))
         .child(
-            icon(CLOCK)
-                .size(px(13.0))
+            div()
                 .flex_none()
-                .text_color(theme.text_muted),
+                .size(px(28.0))
+                .rounded(px(8.0))
+                .bg(tone.opacity(0.14))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(REFRESH).size(px(14.0)).text_color(tone)),
         )
         .child(
             div()
+                .flex_1()
                 .min_w_0()
-                .truncate()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(name.clone()),
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(13.5))
+                        .line_height(px(18.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(name.clone()),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.5))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(format!("Routine · {when}"))),
+                ),
         )
         .child(
             div()
                 .flex_none()
-                .text_color(theme.text_muted)
-                .child(SharedString::from(format!("· routine · {when}"))),
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .px(px(7.0))
+                .py(px(2.0))
+                .rounded(px(6.0))
+                .bg(status_color.opacity(0.1))
+                .text_size(px(11.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(status_color)
+                .child(icon(status_glyph).size(px(11.0)).text_color(status_color))
+                .child(SharedString::from(status_word)),
         )
-        .when(failed, |el| {
-            el.child(
-                div()
-                    .flex_none()
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .rounded(px(5.0))
-                    .bg(theme.danger.opacity(0.1))
-                    .text_size(px(11.0))
-                    .text_color(theme.danger)
-                    .child(SharedString::from("Failed")),
-            )
-        })
-        .when_some(thread, |el, thread| {
-            let url = format!(
-                "{}{thread}",
-                crate::markdown::session_link::SESSION_LINK_PREFIX
-            );
-            el.child(div().flex_1()).child(
-                div()
-                    .id(link_key.clone())
-                    .flex_none()
-                    .cursor_pointer()
-                    .text_color(crate::kit::motion::hover_blend(
-                        &link_key,
-                        theme.text_muted,
-                        theme.text,
-                    ))
-                    .on_hover(crate::kit::motion::hover_listener(link_key.clone()))
-                    .on_click(move |_, window, cx| {
-                        crate::markdown::session_link::open_link(&url, window, cx)
-                    })
-                    .child(SharedString::from("Open thread")),
-            )
-        })
+        .children(open)
         .into_any_element()
 }
 

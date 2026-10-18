@@ -206,6 +206,17 @@ pub struct Row {
     /// Shift-clicked it to read the original — and the other side's rows are
     /// dropped ([`show_translation_side`]). `None` for everything else.
     pub translation: Option<TranslationSide>,
+    /// A slice of a card several rows draw together (a routine's post):
+    /// which edges this row closes. `None` for ordinary rows.
+    pub card: Option<CardSlice>,
+}
+
+/// One row's part of a multi-row card ([`Row::card`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardSlice {
+    pub top: bool,
+    pub bottom: bool,
+    pub failed: bool,
 }
 
 /// One version of a translated text part ([`Row::translation`]).
@@ -737,6 +748,7 @@ pub fn rows_for_entry(
                 } = from
                 {
                     let failed = *outcome == cypher_proto::RunOutcome::Failed;
+                    let header = rows.len();
                     rows.push(cx.row(
                         format!("{}#{}#post", entry.id, part_id),
                         fnv1a(name.as_bytes()) ^ (*run_at as u64) ^ u64::from(failed),
@@ -747,8 +759,19 @@ pub fn rows_for_entry(
                             thread: thread_chat_id.clone().map(Into::into),
                         },
                     ));
+                    cx.push_text_rows(&mut rows, part_id, text, None, parse);
+                    // The header and its text draw one card together.
+                    let last = rows.len() - 1;
+                    for (ix, row) in rows.iter_mut().enumerate().skip(header) {
+                        row.card = Some(CardSlice {
+                            top: ix == header,
+                            bottom: ix == last,
+                            failed,
+                        });
+                    }
+                } else {
+                    cx.push_text_rows(&mut rows, part_id, text, None, parse)
                 }
-                cx.push_text_rows(&mut rows, part_id, text, None, parse)
             }
             MessagePart::Reasoning { id: part_id, text } => {
                 run.get_or_insert_with(|| (rows.len(), part_id.clone()));
@@ -924,6 +947,7 @@ fn user_row(entry: &SessionMessageEntry, pending: bool) -> Row {
         timestamp: Some(entry.created_at),
         answered: None,
         translation: None,
+        card: None,
     }
 }
 
@@ -1191,6 +1215,7 @@ impl EntryRows<'_> {
             timestamp: None,
             answered: None,
             translation: None,
+            card: None,
         }
     }
 

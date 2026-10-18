@@ -63,6 +63,7 @@ pub(super) fn fold_work_run(
             timestamp: None,
             answered: None,
             translation: None,
+            card: None,
         },
     );
 }
@@ -310,6 +311,7 @@ pub fn cap_work_runs(
             timestamp: None,
             answered: None,
             translation: None,
+            card: None,
         };
         rows.splice(start..cut, [overflow]);
         ix = end - (cut - start) + 1;

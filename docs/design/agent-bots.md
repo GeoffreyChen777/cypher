@@ -482,8 +482,10 @@ The `post` part (`cypher_doc::MessagePart::Post`) is additive: `{id, kind: "post
 from}`, with the body under `text` so readers that predate the kind show it as a text
 part. `from` is a `BotPost`: `{kind: "routine", routineId, name, outcome: "done" |
 "failed", runAt, threadChatId?}`; a kind from a newer engine reads as `unknown`. The
-desktop transcript renders the body like text for now; the Workspaces board draws a card with the
-routine's name, the time, a failed badge and a link to the thread.
+Workspaces board draws each post as a card: a tinted, bordered box (red-tinted when the
+run failed) whose head holds the routine's mark, its name over "Routine · <when>", a Done
+or Failed badge and Open thread, with the result's markdown under a divider. The head and
+the result's rows each draw their slice of the box (`transcript::rows::CardSlice`).
 
 **Project routine runs.** A project routine runs on the device of its project's space (a
 workspace routine on its bot's host). Its session is a chat in the space, marked `{botId,
