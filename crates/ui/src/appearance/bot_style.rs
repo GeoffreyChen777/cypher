@@ -27,16 +27,47 @@ pub const BOT_FACES: &[(&str, &str)] = &[
     ("bot-sleepy", icons::BOT_SLEEPY),
 ];
 
-/// Symbols for a bot named after what it does: (key, asset). `None` (the
-/// fallback) is the name's initial.
+/// Symbols for a workspace named after what it is about: (key, asset), in
+/// rows of work, building software, making and learning, and everyday life.
+/// `None` (the fallback) is the name's initial.
 pub const BOT_SYMBOLS: &[(&str, &str)] = &[
-    ("bolt", icons::BOLT),
-    ("lightbulb", icons::LIGHTBULB),
+    ("briefcase", icons::CASE_MINIMALISTIC),
+    ("chart", icons::GRAPH_UP),
+    ("dollar", icons::DOLLAR_MINIMALISTIC),
+    ("cart", icons::CART_LARGE_MINIMALISTIC),
+    ("buildings", icons::BUILDINGS),
+    ("calendar", icons::CALENDAR),
+    ("mail", icons::LETTER),
+    ("team", icons::USERS_GROUP_ROUNDED),
     ("code", icons::CODE),
     ("terminal", icons::TERMINAL),
+    ("server", icons::SERVER),
+    ("database", icons::DATABASE),
+    ("bug", icons::BUG),
+    ("rocket", icons::ROCKET),
+    ("magic", icons::MAGIC_STICK),
+    ("bolt", icons::BOLT),
+    ("lightbulb", icons::LIGHTBULB),
+    ("palette", icons::PALETTE),
+    ("camera", icons::CAMERA),
+    ("music", icons::MUSIC_NOTE),
     ("book", icons::BOOK),
-    ("chat", icons::CHAT_ROUND_LINE),
+    ("academic", icons::ACADEMIC_CAP),
+    ("flask", icons::TEST_TUBE),
+    ("health", icons::HEALTH),
     ("checklist", icons::CHECKLIST),
+    ("chat", icons::CHAT_ROUND_LINE),
+    ("home", icons::HOME_SMILE),
+    ("heart", icons::HEART),
+    ("leaf", icons::LEAF),
+    ("fire", icons::FIRE),
+    ("coffee", icons::CUP_HOT),
+    ("gamepad", icons::GAMEPAD),
+    ("place", icons::MAP_POINT),
+    ("plane", icons::PLANE),
+    ("target", icons::TARGET),
+    ("planet", icons::PLANET),
+    ("sun", icons::SUN),
     ("star", icons::STAR),
 ];
 
