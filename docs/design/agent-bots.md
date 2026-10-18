@@ -3,7 +3,7 @@
 Status: **P0–P4 built, with Review mode, the outgoing scrub and *Coordinate: steer*
 from P5, and the whole Workspaces (§13.1).** A bot reads its projects (P0, P1), works in
 them directly, plans work that runs in orchestration threads and worker sessions on any
-owner device (P2), keeps a notebook and runs routines and recurring project tasks (P3),
+owner device (P2), keeps a notebook and runs routines (P3),
 and answers other users' bots by invite (P4). Not built: event triggers for routines,
 groups (§11.7), the iPhone surfaces and end-to-end encrypted exchanges (P6). Where the
 built code differs from the design below, the section says so.
@@ -82,7 +82,6 @@ tree); coordination between sessions goes through the bot.
 | **Capabilities** | Independent switches for what the bot may do beyond reading (§4.2). |
 | **Notebook** | The bot's durable memory: notes it reads at the start of each owner turn (§7). |
 | **Routine** | A scheduled or event-triggered bot job whose output is a message (§8). |
-| **Recurring task** | A scheduled job on a project whose every run starts a fresh session (§8). |
 | **Connection** | A mutual link between two bots of different users, created by invite (§11). |
 | **Exchange** | One question from a peer bot and its answer. Audited on the answering side. |
 
@@ -399,20 +398,26 @@ and routine threads carries a "Your notebook:" section with the newest 40 notes
 finds the rest; peer threads get no section. A routine thread's section says whether it
 may write.
 
-## 8. Routines and recurring tasks
+## 8. Routines
 
-Two kinds of scheduled job, run by one engine scheduler on the host:
+A routine is a job the bot runs by hand or on a schedule. Every routine belongs to its bot:
+it shows on that bot's Routines card, pauses with it and is deleted with it. What sets two
+routines apart is where they run and what they can reach:
 
-| | Routine (bot) | Recurring task (project) |
+| | Runs in this workspace | Runs in a project |
 |---|---|---|
 | Example | "Every morning: what moved, what's stuck, what needs me" | "Every night: run the tests and fix anything flaky" |
-| Runs in | The routine's own hidden thread | A fresh session per run, ideally in a new worktree ("Nightly tests · Oct 15") |
-| Output | A message card in the bot chat, optionally a notification | Changes in a checkout, reviewed like any session |
-| Permissions | Granted per routine, never more than an owner thread; no `ask_bot` | The task's own model, sandbox and checkout settings |
+| Runs as | The bot's own agent, in a hidden thread | An ordinary coding session in that project, hidden and opened from the routine |
+| Reaches | Everything the bot reads, the notebook; commands in its local projects if allowed | That project's checkout, or its own worktree |
+| Output | A post in the bot chat | Changes in the checkout or worktree, and a post in the bot chat |
+| Needs | Nothing beyond the bot | *Coordinate*, and the project in the bot's scope |
 
+- **Sessions:** scheduled runs continue one standing session per routine, so each run sees
+  the ones before it. Each Run now starts a fresh session, kept until the next Run now
+  replaces (and deletes) it. Both can be opened from the routine to watch a run.
 - **Triggers:** a schedule, and later events ("a session errors", "a session waits on you
   for 10 minutes", "CI failed on main").
-- **Unattended:** a routine or recurring run never waits for approval. Permission prompts
+- **Unattended:** a routine run never waits for approval. Permission prompts
   are denied automatically and the run settles as failed, with a notification.
 - **Budgets:** turns per run and runs per day per routine, and the bot's `paused` flag as a
   kill switch for all of its routines.
@@ -422,12 +427,15 @@ Two kinds of scheduled job, run by one engine scheduler on the host:
 - Hidden routine threads sync through chat2 like any chat; each run has the cost of one
   agent turn or more.
 
-As built (P3, engine). Definitions are registry rows: `botRoutines` (`BotRoutine`) and
-`projectTasks` (`ProjectTask`). Owner devices write the definition and `runRequestedAt`
-("Run now"); the host writes only `threadChatId`, `lastRun`, `nextRunAt`, `runsToday` and
-`runsDay` (a routine) or `lastRun` and `nextRunAt` (a task). A schedule is `{kind:
-"daily", time: "HH:MM", days?: [1–7]}`, `{kind: "interval", minutes ≥ 15}` or `{kind:
-"manual"}`, in the host's local time.
+As built (P3, engine). A routine is a registry row: `botRoutines` (`BotRoutine`), with a
+`target` of `{kind: "workspace"}` or `{kind: "project", spaceId, worktree, model?}`.
+Owner devices write the definition and `runRequestedAt` ("Run now"); the host writes only
+`threadChatId` (the standing session), `manualChatId` (the latest Run now's session),
+`worktreePath` (a project routine's own worktree), `lastRun` (with `manual` set for a Run
+now), `nextRunAt`, `runsToday` and `runsDay`. A schedule is `{kind: "daily", time:
+"HH:MM", days?: [1–7]}`, `{kind: "interval", minutes ≥ 15}` or `{kind: "manual"}`, in the
+host's local time. Project tasks, an earlier separate record kind owned by a project,
+were folded into project routines before release.
 
 **The scheduler** (`bots/memory/host.rs`, rules in `bots/memory/schedule.rs`) runs the
 routines of bots hosted on this device and the tasks of spaces on this device. One pass at
@@ -479,25 +487,30 @@ part. `from` is a `BotPost`: `{kind: "routine", routineId, name, outcome: "done"
 desktop transcript renders the body like text for now; the Workspaces board draws a card with the
 routine's name, the time, a failed badge and a link to the thread.
 
-**Recurring task runs.** On the space's device each run creates a fresh session in the
-project (`createChat` with the space), titled "<task name> · <Mon D>", records `lastRun`,
-then queues a Run with the task's prompt and model. With `worktree` set, the Run carries a
-`WorktreeSpec` (the space's folder, its current branch as the base), so the host creates
-the worktree at drain time exactly as the composer's isolated sessions do. The agent's
-copy of the prompt says the run is unattended. On settle, `lastRun` is updated and every
-bot that sees the project gets a `taskRan` activity entry (only the task's `createdBy` bot
-when set). Task sessions are ordinary sessions: they show in their project, and a
-failure surfaces like any errored session.
+**Project routine runs.** A project routine runs on the device of its project's space (a
+workspace routine on its bot's host). Its session is a chat in the space, marked `{botId,
+origin: "routine", thread: {kind: "routineSession", routineId}}`: the marker hides it from
+the sidebar, chimes and pushes and makes its runs unattended, but
+`BotChat::is_bot_thread` is false for it, so `bot_env` gives it none of the bot's profile
+and it runs as a plain session with the routine's model, workspace-write sandbox and
+permission control. The visible prompt is the routine header and prompt; the agent's copy
+also says the run is unattended. With `worktree` set, the first run carries a
+`WorktreeSpec` (the space's folder, its current branch as the base) so the host creates
+the worktree at drain time, and the scheduler records the session's new cwd as
+`worktreePath`; later runs, scheduled or by hand, work there (a missing worktree is made
+again). Without it, runs work in the project's checkout. A due project routine is skipped
+with a reason when its bot lost *Coordinate* or the project left its scope. Deleting a
+routine deletes its sessions, never the worktree.
 
-**Unattended runs.** `bots::profile::is_unattended(workspace, chat)` covers routine
-threads and a task session while the scheduled run it was started for is `running`
-(the owner's later messages there run attended). The engine hands every unattended stop
+**Unattended runs.** `bots::profile::is_unattended(workspace, chat)` covers every chat
+with a routine origin (workspace routine threads and project routine sessions) and
+orchestration threads. The engine hands every unattended stop
 to its listeners (`SessionsEngine::add_unattended_listener`); the scheduler's records the
 reason and settles the run `failed` with it.
 
 **Notifications.** There is no new notification path. A failed routine run raises
-attention through its post (unread bot chat on every device) and Needs you; a failed task
-run is an errored session in its project, which notifies like any other.
+attention through its post (unread bot chat on every device) and Needs you, whichever
+target it ran in.
 
 ## 9. Bot runtime on the host device
 
@@ -573,9 +586,9 @@ device. As built:
   threads; their worker sessions don't. `Bots::set_pi_runtime` hands the work track the
   Pi runtime, whose permission settings and Landstrip status the gate reads (the status
   is cached for 10 minutes, since `doctor` spawns a process).
-- **Scheduler (built in P3).** One host loop (`bots/memory/host.rs`) runs the routines of
-  the bots hosted here and the recurring tasks of this device's spaces. All of its state
-  is in the `botRoutines` and `projectTasks` rows and the chats' command ledgers, so a
+- **Scheduler (built in P3).** One host loop (`bots/memory/host.rs`) runs the workspace
+  routines of the bots hosted here and the project routines of this device's spaces. All
+  of its state is in the `botRoutines` rows and the chats' command ledgers, so a
   restart loses nothing: the next pass settles runs the old engine left running. Its
   rules are in §8.
 
@@ -629,9 +642,8 @@ thread gets the rest (§6.7).
 |---|---|---|
 | `read_notes {query?}` | owner, routine | The bot's notes, newest first, each with its source and date; `query` keeps notes containing every word (any case). |
 | `write_note {text}` | owner, routine (if its routine allows) | Adds one note with the thread as its source (§7). |
-| `list_schedule` | owner, routine | The bot's routines and its projects' recurring tasks: name, id, schedule in words, next run, last result (and the task's last session). |
-| `save_routine {id?, name, prompt, schedule, write_notes?, enabled?}` | bot chat | Creates or changes a routine; validates it and answers with what was saved and its next run. |
-| `save_project_task {id?, project, name, prompt, schedule, worktree?}` | bot chat, with *Coordinate* | Creates or changes a recurring task on a project in scope; `createdBy` is the bot. |
+| `list_schedule` | owner, routine | The bot's routines: name, id, where each runs, schedule in words, next run, last result. |
+| `save_routine {id?, name, prompt, schedule, write_notes?, work_directly?, enabled?, project?, worktree?, model?}` | bot chat | Creates or changes a routine; with `project` (a project in scope, and *Coordinate*) it runs as a session there. Validates it and answers with what was saved and its next run. |
 | `list_connections` | owner | Connected bots: name, owner, connection id, how this bot replies to them, last question. |
 | `ask_bot` | owner | Asks one connected bot (by name, any case, or connection id); waits up to `wait_s` (default 120 s, at most 600). Taints the thread when an answer comes back (§4.3). |
 | `ask_group` | owner | Fans a question out to a group; returns the answers received in the window. Not built. |
@@ -952,7 +964,7 @@ Workspaces mode
 │ ⏸ Bob is paused    ││  the bot; plan,       ││ steps,     │
 │ ┌ Needs you (2) ─┐ ││  progress and result  ││ sessions,  │
 │ ┌ Work ──────────┐ ││  cards inline         ││ Stop       │
-│ ┌ Schedule ──────┐ ││                       ││            │
+│ ┌ Routines ──────┐ ││                       ││            │
 │ ┌ Projects … ────┐ ││  [ Ask Bob…         ] ││        [×] │
 └────────────────────┘└───────────────────────┘└────────────┘
 ```
@@ -984,12 +996,12 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 |---|---|---|
 | **Needs you** | Plans awaiting approval, workers asking or failed on an approval, tainted actions awaiting approval, and later review drafts | The item with its context and actions: the plan to approve, the question with the worker's recent messages and the bot's suggested answer, the action and why it needs approval |
 | **Work** | Running orchestrations with their current step, a step bar and elapsed time; the last few finished ones with a one-line result | The orchestration: every step with project, device, worker session link, state and duration; Stop; the result |
-| **Schedule** | Routines and its projects' recurring tasks, in order of next run: name, trigger, next run, last result; today's budget use | The routine or task: trigger, prompt, permissions, run history with links, pause, edit, run now |
+| **Routines** | Its routines in order of next run: name, where and when it runs, next run, last result; today's budget use | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
 | **Projects** | Each granted project with device, running and waiting sessions, and "works directly" or "via sessions" | The project's sessions in scope with status, the bot's worker sessions there, git state |
 | **Notebook** | The latest few entries, bot-written ones marked | All entries with their sources, editable and deletable |
 | **Network** (P4) | Connections with reply mode and last exchange; pending invites | A connection: its scope, reply mode, rate limits, exchanges, revoke |
 
-There is no Activity card: it mostly repeated Work, Schedule and Network. The full audit
+There is no Activity card: it mostly repeated Work, Routines and Network. The full audit
 log, filterable by kind, opens from the chat header's activity button and from "View all
 activity" in the Work panel. A card with nothing to show is not drawn. **Needs you** always comes first, so attention
 items are never below the fold. One card floats at a time, the open panel item's; with
@@ -1028,7 +1040,7 @@ As built, beyond the table:
   read-only with a way back to its work item, routine or connection.
 - **A routine** can be granted *Work directly* ("May run commands"), only while the bot
   has it; unattended, anything that needs approval fails the run.
-- **Empty cards** for Schedule, Notebook and Network show only their header with a quiet
+- **Empty cards** for Routines, Notebook and Network show only their header with a quiet
   hint and `+`, so the first routine, note or connection is one click away.
 - **Signed out**, the Network card says "Sign in to connect bots"; records stay visible.
 
@@ -1045,8 +1057,7 @@ Each method is one constant plus one `SPECS` entry in `cypher_rpc::methods`.
 | `Mutate resolveBotPlan` / `stopBotWork` / `resolveBotApproval` | unary | P2 | An owner device writes the control field (`decision`, `stopRequestedAt`, an approval's `decision`); the registry syncs it to the bot's host, whose work host acts on it. Built. |
 | `WatchBotRecords` | stream | P2 | Every bot record (work, activity, approvals, notes, routines, network), for the cards and panes. Built. |
 | `Mutate saveBotNote` / `deleteBotNote` | unary | P3 | Owner notes (source `owner`) and deleting any note. |
-| `Mutate saveBotRoutine` / `deleteBotRoutine` / `runBotRoutine` | unary | P3 | A routine's definition (the host's fields are left alone), and "Run now" (`runRequestedAt`). |
-| `Mutate saveProjectTask` / `deleteProjectTask` / `runProjectTask` | unary | P3 | A recurring task's definition, and "Run now". |
+| `Mutate saveBotRoutine` / `deleteBotRoutine` / `runBotRoutine` | unary | P3 | A routine's definition (the host's fields are left alone; a project target needs *Coordinate* and the project in scope), deleting it with its sessions, and "Run now" (`runRequestedAt`). |
 | `Mutate setBotPaused` | unary | P3 | The kill switch: due routines are recorded as skipped. |
 | `CreateBotInvite` | unary, forwardable | P4 (built) | Runs on the bot's host: `{botId}` → `{inviteId, code, expiresAt}`; publishes the room first. The code is shown once. |
 | `RedeemBotInvite` | unary, forwardable | P4 (built) | Runs on the bot's host: `{botId, code}` → the new `BotConnection`. |
@@ -1062,7 +1073,7 @@ As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is n
 | Any second kind of thread | One role-aware run profile; origin stamped by the engine on the chat row; the "transcript text is data" instruction in every bot prompt. |
 | *Work directly* | Owner threads only; permission control on with the bot's local checkouts as workspace roots; the taint rule. |
 | *Coordinate* | Capabilities checked per call; an audit log of every coordination call; worker sessions limited to the read scope; plan approval; Stop that reaches every started session; limits. |
-| Routines and recurring tasks | A non-interactive run mode that denies approvals and settles as failed; budgets; the `paused` kill switch; no `ask_bot` from routines. |
+| Routines | A non-interactive run mode that denies approvals and settles as failed; budgets; the `paused` kill switch; no `ask_bot` from routines. |
 | Bot-written notes | Provenance on every entry and a notebook view to delete them. |
 | *Represent* | Peer threads read-only with no notebook, no network tools and no slash commands; scope ∩ connection scope; the outgoing scrub; rate limits. |
 | *Coordinate: steer* | The same as *Coordinate*, plus per-session confirmation for sessions the bot did not start. |
@@ -1074,7 +1085,7 @@ As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is n
 | **P0: local bot** (built) | `bots` rows, the bot chat, the bot spawn mode with tool allowlist, four read tools (bounded scan), scope enforcement, palette and conversation UI, use from other owner devices. |
 | **P1: foundation** (built) | Role-aware run profiles with engine-stamped origins; the untrusted-data prompt; the non-interactive run mode; the FTS index, `session_activity` and `project_git`. |
 | **P2: coordinator** (built) | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; plan, progress and result cards; Stop; limits including a 4-hour time budget; audit log; approvals for tainted threads. Not built: per-worker turn budgets. |
-| **P3: memory and routines** (built) | The notebook (owner and bot notes with provenance); the scheduler; routines (optionally working directly) and recurring project tasks; their posts in the bot chat; the Schedule and Notebook cards; Needs you. Not built: event triggers. |
+| **P3: memory and routines** (built) | The notebook (owner and bot notes with provenance); the scheduler; routines in the workspace (optionally working directly) or as sessions in a project; their posts in the bot chat; the Routines and Notebook cards; Needs you. Not built: event triggers. |
 | **P4: network** (built) | `BotRoom`, publish, invites, connections, peer threads, `ask_bot`, exchange states, late answers, the Network card and panels. |
 | **P5: review and control** (built but notifications) | Review mode and the outgoing scrub, reviews in Needs you; *Coordinate: steer* with a per-action approval. Not built: push notifications for reviews, plans and connections. |
 | **P6: groups, iPhone, E2E** | Owner groups, then shared groups; the iOS bot surfaces; end-to-end encrypted exchanges. |

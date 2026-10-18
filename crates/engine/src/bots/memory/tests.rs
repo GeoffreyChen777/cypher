@@ -6,7 +6,7 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 
 use cypher_proto::{
     Bot, BotCapabilities, BotChat, BotNote, BotOrigin, BotRecords, BotRoutine, BotScope, BotThread,
-    NoteSource, ProjectGrant, ProjectTask, RunOutcome, RunRecord, Schedule, Space,
+    NoteSource, ProjectGrant, RoutineTarget, RunOutcome, RunRecord, Schedule, Space,
 };
 
 use super::{Access, access, memory_tools, notebook_section, render_schedule};
@@ -59,8 +59,6 @@ fn peer_thread() -> BotChat {
 fn owner_threads_keep_the_notebook_and_peers_never_see_it() {
     let main = access(&BotChat::owner("b1"), &bot(false), false);
     assert!(main.read_notes && main.write_notes && main.list_schedule && main.save_routine);
-    assert!(!main.save_task, "tasks start sessions: Coordinate only");
-    assert!(access(&BotChat::owner("b1"), &bot(true), false).save_task);
 
     let work = BotChat::thread(
         "b1",
@@ -71,16 +69,13 @@ fn owner_threads_keep_the_notebook_and_peers_never_see_it() {
     );
     let orchestration = access(&work, &bot(true), false);
     assert!(orchestration.read_notes && orchestration.write_notes);
-    assert!(
-        !orchestration.save_routine && !orchestration.save_task,
-        "the workspace chat only"
-    );
+    assert!(!orchestration.save_routine, "the workspace chat only");
 
     let routine = access(&routine_thread(), &bot(true), false);
     assert!(routine.read_notes && routine.list_schedule);
     assert!(!routine.write_notes, "only when the routine says so");
     assert!(access(&routine_thread(), &bot(true), true).write_notes);
-    assert!(!routine.save_routine && !routine.save_task);
+    assert!(!routine.save_routine);
 
     // Peers get nothing, whatever a row claims.
     assert_eq!(access(&peer_thread(), &bot(true), true), Access::default());
@@ -182,7 +177,7 @@ fn local(ms: i64) -> DateTime<Local> {
 }
 
 #[test]
-fn the_schedule_lists_routines_and_the_tasks_of_granted_projects() {
+fn the_schedule_lists_routines_and_where_they_run() {
     let now = Local.with_ymd_and_hms(2026, 10, 19, 8, 0, 0).unwrap();
     let nine = Local.with_ymd_and_hms(2026, 10, 19, 9, 0, 0).unwrap();
     let mut records = BotRecords::default();
@@ -191,6 +186,7 @@ fn the_schedule_lists_routines_and_the_tasks_of_granted_projects() {
         bot_id: "b1".into(),
         name: "Morning brief".into(),
         prompt: "What's stuck?".into(),
+        target: RoutineTarget::Workspace,
         schedule: Schedule::Daily {
             time: "09:00".into(),
             days: vec![1, 2, 3, 4, 5],
@@ -203,34 +199,33 @@ fn the_schedule_lists_routines_and_the_tasks_of_granted_projects() {
         updated_at: 0,
         run_requested_at: None,
         thread_chat_id: None,
+        manual_chat_id: None,
+        worktree_path: None,
         last_run: Some(RunRecord {
             at: nine.timestamp_millis() - 3 * 86_400_000,
             ended_at: None,
             outcome: RunOutcome::Failed,
             summary: Some("This run is unattended, so it\ncouldn't ask.".into()),
             chat_id: None,
+            manual: false,
         }),
         next_run_at: Some(nine.timestamp_millis()),
         runs_today: 0,
         runs_day: None,
     });
-    let task = |id: &str, space: &str| ProjectTask {
-        id: id.into(),
-        space_id: space.into(),
-        name: format!("{id} task"),
-        prompt: "Run the tests".into(),
-        schedule: Schedule::Manual,
-        enabled: true,
+    let mut nightly = records.routines[0].clone();
+    nightly.id = "r2".into();
+    nightly.name = "Nightly tests".into();
+    nightly.schedule = Schedule::Manual;
+    nightly.write_notes = false;
+    nightly.last_run = None;
+    nightly.next_run_at = None;
+    nightly.target = RoutineTarget::Project {
+        space_id: "sp-web".into(),
         worktree: true,
         model: None,
-        created_by: None,
-        created_at: 0,
-        updated_at: 0,
-        run_requested_at: None,
-        last_run: None,
-        next_run_at: None,
     };
-    records.tasks = vec![task("nightly", "sp-web"), task("hidden", "sp-secret")];
+    records.routines.push(nightly);
     let space = |id: &str, path: &str| Space {
         id: id.into(),
         device_id: "dev".into(),
@@ -253,18 +248,18 @@ fn the_schedule_lists_routines_and_the_tasks_of_granted_projects() {
     assert!(
         text.contains(
             "- \"Morning brief\" (id r1) · Weekdays 09:00 · next Mon Oct 19 09:00 · last run \
-             Fri Oct 16 09:00 failed: This run is unattended, so it couldn't ask. · writes notes"
+             Fri Oct 16 09:00 failed: This run is unattended, so it couldn't ask. · runs as you · \
+             writes notes"
         ),
         "{text}"
     );
     assert!(
         text.contains(
-            "- \"nightly task\" in web on Studio (id nightly) · Manual · runs by hand · never \
-             run · new worktree each run"
+            "- \"Nightly tests\" (id r2) · Manual · runs by hand · never run · a session in web \
+             on Studio, in its own worktree"
         ),
         "{text}"
     );
-    assert!(!text.contains("hidden"), "out of scope: {text}");
 
     let mut paused = bot(false);
     paused.paused = true;
@@ -277,8 +272,4 @@ fn the_schedule_lists_routines_and_the_tasks_of_granted_projects() {
     );
     assert!(empty.contains("This workspace is paused"), "{empty}");
     assert!(empty.contains("No routines yet."), "{empty}");
-    assert!(
-        empty.contains("No recurring tasks in your projects."),
-        "{empty}"
-    );
 }

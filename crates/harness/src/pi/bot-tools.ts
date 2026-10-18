@@ -282,14 +282,14 @@ const TOOLS: ToolDef[] = [
     name: "list_schedule",
     label: "Checked schedule",
     description:
-      "List your routines and the recurring tasks of your projects: name, id, schedule, next run and the last run's result. Times are the host device's local time.",
+      "List your routines: name, id, where each runs, schedule, next run and the last run's result. Times are the host device's local time.",
     parameters: Type.Object({}),
   },
   {
     name: "save_routine",
     label: "Save routine",
     description:
-      "Create or change a routine: a job you run on a schedule, unattended, in its own thread; its result is posted in this chat. Use it when your owner asks for something recurring (\"every morning, tell me what's stuck\"). Pass `id` to change an existing routine (list_schedule shows ids). The schedule is one of {\"kind\":\"daily\",\"time\":\"09:00\",\"days\":[1,2,3,4,5]} (days 1 = Monday … 7 = Sunday; leave out for every day), {\"kind\":\"interval\",\"minutes\":60} (at least 15) or {\"kind\":\"manual\"} (only when run by hand), in the host device's local time. Returns what was saved and the next run.",
+      "Create or change a routine: a job run by hand or on a schedule, unattended; its result is posted in this chat. It runs either as you, in its own thread, reading everything you read (\"every morning, tell me what's stuck\"), or, with `project`, as an ordinary session in that project that can change its code (\"every night, run the tests and fix anything flaky\"; needs the Coordinate permission). Scheduled runs continue one session; each run by hand starts a fresh one. Pass `id` to change an existing routine (list_schedule shows ids). The schedule is one of {\"kind\":\"daily\",\"time\":\"09:00\",\"days\":[1,2,3,4,5]} (days 1 = Monday … 7 = Sunday; leave out for every day), {\"kind\":\"interval\",\"minutes\":60} (at least 15) or {\"kind\":\"manual\"} (only when run by hand), in the host device's local time. Returns what was saved and the next run.",
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: "The routine to change; leave out to create one" })),
       name: Type.String({ description: "A short name, e.g. Morning brief" }),
@@ -303,35 +303,14 @@ const TOOLS: ToolDef[] = [
         },
         { description: "When it runs" },
       ),
-      write_notes: Type.Optional(Type.Boolean({ description: "Whether its runs may write to your notebook (default off)" })),
-      work_directly: Type.Optional(Type.Boolean({ description: "Whether its runs may run commands and edit files in your local projects, e.g. to run tests (default off; needs your own Work directly). Runs are unattended: anything that would ask for approval fails the run." })),
+      write_notes: Type.Optional(Type.Boolean({ description: "Runs as you only: whether its runs may write to your notebook (default off)" })),
+      work_directly: Type.Optional(Type.Boolean({ description: "Runs as you only: whether its runs may run commands and edit files in your local projects (default off; needs your own Work directly). Runs are unattended: anything that would ask for approval fails the run." })),
       enabled: Type.Optional(Type.Boolean({ description: "Off keeps it but runs it only by hand (default on)" })),
+      project: Type.Optional(Type.String({ description: "Run as a session in this project (id or name) instead of as you; \"\" moves it back to you; leave out to keep where it runs" })),
+      worktree: Type.Optional(Type.Boolean({ description: "project only: run in its own worktree, kept across runs, instead of the project's checkout (default off)" })),
+      model: Type.Optional(Type.String({ description: "project only: the model its sessions run on, e.g. claude-bridge/claude-haiku-5-5 (default: the project's)" })),
     }),
   },
-  {
-    name: "save_project_task",
-    label: "Save project task",
-    description:
-      "Create or change a recurring task on one of your projects: every run starts a fresh session there, unattended, on the project's device (\"every night, run the tests and fix anything flaky\"). Needs the Coordinate permission. Pass `id` to change an existing task. The schedule takes the same shapes as save_routine: {\"kind\":\"daily\",\"time\":\"02:00\",\"days\":[1,2,3,4,5]}, {\"kind\":\"interval\",\"minutes\":60} or {\"kind\":\"manual\"}, in that device's local time.",
-    parameters: Type.Object({
-      id: Type.Optional(Type.String({ description: "The task to change; leave out to create one" })),
-      project: Type.String({ description: "Project id or name" }),
-      name: Type.String({ description: "A short name; sessions are titled \"<name> · <date>\"" }),
-      prompt: Type.String({ description: "The instruction each run's session gets" }),
-      schedule: Type.Object(
-        {
-          kind: Type.Union([Type.Literal("daily"), Type.Literal("interval"), Type.Literal("manual")]),
-          time: Type.Optional(Type.String({ description: "daily: HH:MM, 24-hour" })),
-          days: Type.Optional(Type.Array(Type.Integer({ minimum: 1, maximum: 7 }), { description: "daily: 1 = Monday … 7 = Sunday" })),
-          minutes: Type.Optional(Type.Integer({ minimum: 15, description: "interval: minutes between runs" })),
-        },
-        { description: "When it runs" },
-      ),
-      worktree: Type.Optional(Type.Boolean({ description: "Run each session in a new worktree (default off)" })),
-      model: Type.Optional(Type.String({ description: "The model each session runs on, e.g. claude-bridge/claude-haiku-5-5 (default: the project's)" })),
-    }),
-  },
-
   // ── end memory ──
 
   // ── network (P4): connections, ask_bot ──

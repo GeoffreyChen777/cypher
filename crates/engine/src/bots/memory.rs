@@ -1,17 +1,17 @@
 //! Memory and routines (docs/design/agent-bots.md §7–§8, P3): the
-//! notebook, the scheduler, routines and recurring project tasks.
+//! notebook, the scheduler and routines.
 //!
-//! Notes, routines and tasks are registry rows (`cypher_proto::bot_records`).
-//! The tools here read and write them for a bot's threads; what a thread may
-//! do follows its origin and thread kind ([`access`]), checked on every call.
-//! The scheduler that runs routines and tasks is [`host`].
+//! Notes and routines are registry rows (`cypher_proto::bot_records`). The
+//! tools here read and write them for a bot's threads; what a thread may do
+//! follows its origin and thread kind ([`access`]), checked on every call.
+//! The scheduler that runs routines is [`host`].
 
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
 
 use cypher_proto::{
     self as p, ActivityKind, Bot, BotActivity, BotChat, BotNote, BotOrigin, BotRoutine, BotThread,
-    Chat, NoteSource, ProjectTask, Schedule,
+    Chat, NoteSource, RoutineTarget, Schedule,
 };
 
 use super::Bots;
@@ -38,22 +38,20 @@ pub(super) struct Access {
     pub write_notes: bool,
     pub list_schedule: bool,
     pub save_routine: bool,
-    pub save_task: bool,
 }
 
 /// Owner threads (the bot chat and orchestration threads) read and write the
 /// notebook; routine threads read it and write only when their routine says
 /// so; peer threads get nothing, so a peer can neither read the owner's notes
-/// nor plant one. Routines and tasks are made in the bot chat only, tasks
-/// only with *Coordinate*, since every task run starts a session.
-pub(super) fn access(marker: &BotChat, bot: &Bot, routine_writes_notes: bool) -> Access {
+/// nor plant one. Routines are made in the bot chat only; one that runs in a
+/// project also needs *Coordinate* ([`Bots::save_routine`]).
+pub(super) fn access(marker: &BotChat, _bot: &Bot, routine_writes_notes: bool) -> Access {
     match (marker.origin, &marker.thread) {
         (BotOrigin::Owner, BotThread::Main) => Access {
             read_notes: true,
             write_notes: true,
             list_schedule: true,
             save_routine: true,
-            save_task: bot.capabilities.coordinate,
         },
         (BotOrigin::Owner, BotThread::Work { .. }) => Access {
             read_notes: true,
@@ -78,7 +76,6 @@ impl Access {
             "write_note" => self.write_notes,
             "list_schedule" => self.list_schedule,
             "save_routine" => self.save_routine,
-            "save_project_task" => self.save_task,
             _ => false,
         }
     }
@@ -126,16 +123,10 @@ struct SaveRoutine {
     work_directly: Option<bool>,
     #[serde(default)]
     enabled: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SaveProjectTask {
+    /// Where it runs: a project's name or id; empty for this workspace;
+    /// left out, as before (a new routine runs in the workspace).
     #[serde(default)]
-    id: Option<String>,
-    project: String,
-    name: String,
-    prompt: String,
-    schedule: Schedule,
+    project: Option<String>,
     #[serde(default)]
     worktree: Option<bool>,
     #[serde(default)]
@@ -151,11 +142,6 @@ fn refuse(tool: &str) -> EngineError {
     EngineError::Other(match tool {
         "write_note" => "This thread may read the notebook but not write to it.".into(),
         "save_routine" => "Routines are made in the workspace chat, when your owner asks.".into(),
-        "save_project_task" => {
-            "Recurring project tasks need the Coordinate permission and are made in the workspace \
-             chat, when your owner asks."
-                .into()
-        }
         _ => format!("{tool} isn't available in this thread."),
     })
 }
@@ -211,8 +197,7 @@ impl Bots {
             "read_notes" => Ok(self.read_notes(&bot, args::<ReadNotes>(raw)?)),
             "write_note" => self.write_note(&bot, chat, args::<WriteNote>(raw)?),
             "list_schedule" => self.list_schedule(&chat.id),
-            "save_routine" => self.save_routine(&bot, args::<SaveRoutine>(raw)?),
-            "save_project_task" => self.save_project_task(&bot, &chat.id, args(raw)?),
+            "save_routine" => self.save_routine(&bot, &chat.id, args::<SaveRoutine>(raw)?),
             _ => Err(refuse(tool)),
         }
     }
@@ -319,8 +304,14 @@ impl Bots {
         ))
     }
 
-    fn save_routine(&self, bot: &Bot, args: SaveRoutine) -> Result<String, EngineError> {
+    fn save_routine(
+        &self,
+        bot: &Bot,
+        chat_id: &str,
+        args: SaveRoutine,
+    ) -> Result<String, EngineError> {
         let workspace = &self.inner.workspace;
+        let view = self.view(chat_id)?;
         let now = p::now_ms();
         let existing = match args.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(id) => Some(
@@ -333,6 +324,51 @@ impl Bots {
             ),
             None => None,
         };
+        let model = args
+            .model
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty());
+        let target = match args.project.as_deref().map(str::trim) {
+            Some("") => RoutineTarget::Workspace,
+            Some(project) => {
+                let spaces = view.resolve_project(Some(project))?.unwrap_or_default();
+                let [space_id] = spaces.as_slice() else {
+                    return Err(EngineError::Other(format!(
+                        "Several projects are named \"{project}\"; pass the project id."
+                    )));
+                };
+                let previous = existing.as_ref().and_then(|r| match &r.target {
+                    RoutineTarget::Project {
+                        worktree, model, ..
+                    } => Some((*worktree, model.clone())),
+                    RoutineTarget::Workspace => None,
+                });
+                RoutineTarget::Project {
+                    space_id: space_id.clone(),
+                    worktree: args
+                        .worktree
+                        .or(previous.as_ref().map(|p| p.0))
+                        .unwrap_or(false),
+                    model: model.or_else(|| previous.and_then(|p| p.1)),
+                }
+            }
+            None => existing
+                .as_ref()
+                .map(|r| r.target.clone())
+                .unwrap_or_default(),
+        };
+        if let Some(space_id) = target.space_id() {
+            if !bot.capabilities.coordinate {
+                return Err(EngineError::Other(
+                    "Running a routine in a project needs the workspace's Coordinate \
+                     permission. Ask your owner to turn it on, or run it in this workspace."
+                        .into(),
+                ));
+            }
+            if view.space(Some(space_id)).is_none() {
+                return Err(EngineError::Other("No such project.".into()));
+            }
+        }
         let mut routine = BotRoutine {
             id: existing
                 .as_ref()
@@ -340,6 +376,7 @@ impl Bots {
             bot_id: bot.id.clone(),
             name: args.name,
             prompt: args.prompt,
+            target,
             schedule: args.schedule,
             enabled: args
                 .enabled
@@ -358,6 +395,8 @@ impl Bots {
             updated_at: now,
             run_requested_at: None,
             thread_chat_id: None,
+            manual_chat_id: None,
+            worktree_path: None,
             last_run: None,
             next_run_at: None,
             runs_today: 0,
@@ -379,7 +418,30 @@ impl Bots {
             routine.schedule.describe(),
             next_words(&routine.schedule, routine.enabled, Local::now()),
         )];
-        out.push("It runs unattended in its own thread and posts its result in this chat.".into());
+        out.push(match &routine.target {
+            RoutineTarget::Workspace => "It runs unattended as you, in its own thread, and posts \
+                 its result in this chat."
+                .to_string(),
+            RoutineTarget::Project {
+                space_id, worktree, ..
+            } => {
+                let space = view.space(Some(space_id));
+                format!(
+                    "It runs unattended as an ordinary session in {} on {}, {}; scheduled runs \
+                     continue one session and Run now starts a fresh one. Its result is posted \
+                     in this chat.",
+                    space.map(super::prompt::space_name).unwrap_or_default(),
+                    space
+                        .map(|s| view.device(&s.device_id).to_string())
+                        .unwrap_or_default(),
+                    if *worktree {
+                        "in its own worktree"
+                    } else {
+                        "in the project's checkout"
+                    }
+                )
+            }
+        });
         if routine.write_notes {
             out.push("It may write to your notebook.".into());
         }
@@ -402,98 +464,6 @@ impl Bots {
                 "This workspace is paused, so its routines are skipped until it resumes.".into(),
             );
         }
-        Ok(out.join(" "))
-    }
-
-    fn save_project_task(
-        &self,
-        bot: &Bot,
-        chat_id: &str,
-        args: SaveProjectTask,
-    ) -> Result<String, EngineError> {
-        let workspace = &self.inner.workspace;
-        let view = self.view(chat_id)?;
-        let spaces = view
-            .resolve_project(Some(&args.project))?
-            .unwrap_or_default();
-        let [space_id] = spaces.as_slice() else {
-            return Err(EngineError::Other(format!(
-                "Several projects are named \"{}\"; pass the project id.",
-                args.project.trim()
-            )));
-        };
-        let space = view
-            .space(Some(space_id))
-            .ok_or_else(|| EngineError::Other("No such project.".into()))?;
-        let now = p::now_ms();
-        let existing = match args.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(id) => Some(
-                workspace
-                    .record::<ProjectTask>(p::KIND_PROJECT_TASKS, id)
-                    .filter(|task| view.space(Some(&task.space_id)).is_some())
-                    .ok_or_else(|| {
-                        EngineError::Other(format!("No task {id}. Use list_schedule."))
-                    })?,
-            ),
-            None => None,
-        };
-        let mut task = ProjectTask {
-            id: existing
-                .as_ref()
-                .map_or_else(new_id, |task| task.id.clone()),
-            space_id: space.id.clone(),
-            name: args.name,
-            prompt: args.prompt,
-            schedule: args.schedule,
-            enabled: existing.as_ref().is_none_or(|t| t.enabled),
-            worktree: args
-                .worktree
-                .or(existing.as_ref().map(|t| t.worktree))
-                .unwrap_or(false),
-            model: args
-                .model
-                .map(|m| m.trim().to_string())
-                .filter(|m| !m.is_empty())
-                .or_else(|| existing.as_ref().and_then(|t| t.model.clone())),
-            created_by: existing
-                .as_ref()
-                .map_or(Some(bot.id.clone()), |t| t.created_by.clone()),
-            created_at: existing.as_ref().map_or(now, |t| t.created_at),
-            updated_at: now,
-            run_requested_at: None,
-            last_run: None,
-            next_run_at: None,
-        };
-        task.clamp();
-        task.validate().map_err(EngineError::Other)?;
-        workspace.put_record(
-            p::KIND_PROJECT_TASKS,
-            &task.id,
-            &task,
-            Fields::Except(&[ProjectTask::HOST_FIELDS, &["runRequestedAt"]].concat()),
-        )?;
-        self.wake_schedule();
-        let place = format!(
-            "{} on {}",
-            super::prompt::space_name(space),
-            view.device(&space.device_id)
-        );
-        let mut out = vec![format!(
-            "Saved task \"{}\" in {place} (id {}): {}{}.",
-            task.name,
-            task.id,
-            task.schedule.describe(),
-            next_words(&task.schedule, task.enabled, Local::now()),
-        )];
-        out.push(if task.worktree {
-            "Each run starts a fresh session in a new worktree.".into()
-        } else {
-            "Each run starts a fresh session in the project's checkout.".into()
-        });
-        out.push(format!(
-            "Runs happen on {} and need it to be on.",
-            view.device(&space.device_id)
-        ));
         Ok(out.join(" "))
     }
 }
@@ -626,10 +596,11 @@ pub(super) fn notebook_section(notes: &[&BotNote], access: Access, bot_chat: boo
     }
     if bot_chat {
         lines.push(
-            "- Routines run on a schedule in their own threads and post their results in this \
-             chat. When your owner asks for something recurring (\"every morning, tell me \
-             what's stuck\"), save it with save_routine; list_schedule shows your routines and \
-             your projects' recurring tasks with their last results."
+            "- Routines run by hand or on a schedule and post their results in this chat. One \
+             runs either as you, in its own thread (\"every morning, tell me what's stuck\"), or \
+             as an ordinary session in one of your projects (\"every night, run the tests and \
+             fix anything flaky\"). When your owner asks for something recurring, save it with \
+             save_routine; list_schedule shows your routines with their last results."
                 .to_string(),
         );
     }
@@ -641,8 +612,8 @@ pub(super) fn notebook_section(notes: &[&BotNote], access: Access, bot_chat: boo
     lines.join("\n")
 }
 
-/// The `list_schedule` answer: this bot's routines and the recurring tasks
-/// of its projects, each with its schedule, next run and last result.
+/// The `list_schedule` answer: this bot's routines, each with where it
+/// runs, its schedule, next run and last result.
 pub(super) fn render_schedule(
     bot: &Bot,
     records: &p::BotRecords,
@@ -712,41 +683,31 @@ pub(super) fn render_schedule(
                 next(r.enabled, &r.schedule, r.next_run_at),
                 last(r.last_run.as_ref())
             );
+            line.push_str(&match &r.target {
+                RoutineTarget::Workspace => " · runs as you".to_string(),
+                RoutineTarget::Project {
+                    space_id, worktree, ..
+                } => {
+                    let place = spaces.iter().find(|s| &s.id == space_id).map_or_else(
+                        || "a project you can't see".to_string(),
+                        |s| {
+                            format!(
+                                "{} on {}",
+                                super::prompt::space_name(s),
+                                device(&s.device_id)
+                            )
+                        },
+                    );
+                    let checkout = if *worktree {
+                        "its own worktree"
+                    } else {
+                        "the project's checkout"
+                    };
+                    format!(" · a session in {place}, in {checkout}")
+                }
+            });
             if r.write_notes {
                 line.push_str(" · writes notes");
-            }
-            out.push(line);
-        }
-    }
-    let mut tasks: Vec<(&ProjectTask, &p::Space)> = records
-        .tasks
-        .iter()
-        .filter_map(|t| {
-            let space = spaces.iter().find(|s| s.id == t.space_id)?;
-            bot.scope.sees_space(&space.id).then_some((t, space))
-        })
-        .collect();
-    tasks.sort_by(|a, b| a.0.name.cmp(&b.0.name));
-    if tasks.is_empty() {
-        out.push("No recurring tasks in your projects.".into());
-    } else {
-        out.push("Recurring tasks in your projects:".into());
-        for (t, space) in tasks {
-            let mut line = format!(
-                "- \"{}\" in {} on {} (id {}) · {} · {} · {}",
-                t.name,
-                super::prompt::space_name(space),
-                device(&space.device_id),
-                t.id,
-                t.schedule.describe(),
-                next(t.enabled, &t.schedule, t.next_run_at),
-                last(t.last_run.as_ref())
-            );
-            if let Some(chat) = t.last_run.as_ref().and_then(|r| r.chat_id.as_deref()) {
-                line.push_str(&format!(" · session {chat}"));
-            }
-            if t.worktree {
-                line.push_str(" · new worktree each run");
             }
             out.push(line);
         }

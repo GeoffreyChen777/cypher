@@ -209,7 +209,7 @@ fn routine_works_directly(workspace: &WorkspaceHost, marker: &BotChat) -> bool {
 /// owner thread working directly in local checkouts, read-only for every
 /// other bot thread. `None` for other chats.
 pub(super) fn run_sandbox(workspace: &WorkspaceHost, chat: &Chat) -> Option<SandboxLevel> {
-    let marker = chat.bot.as_ref()?;
+    let marker = chat.bot.as_ref().filter(|m| m.is_bot_thread())?;
     let writes = workspace
         .bot(&marker.bot_id)
         .ok()

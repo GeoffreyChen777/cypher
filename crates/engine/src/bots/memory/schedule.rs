@@ -106,6 +106,18 @@ pub(super) fn skip_reason(paused: bool, runs_today: u32, max_runs_per_day: u32) 
     }
 }
 
+/// Why a due project routine is skipped: its bot lost *Coordinate*, or the
+/// project left its scope.
+pub(super) fn project_skip(coordinate: bool, sees_project: bool) -> Option<String> {
+    if !coordinate {
+        Some("Skipped: running in a project needs the workspace's Coordinate permission.".into())
+    } else if !sees_project {
+        Some("Skipped: the workspace no longer has access to this project.".into())
+    } else {
+        None
+    }
+}
+
 /// How far a started run has got, from its Run command and the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Progress {
@@ -180,6 +192,7 @@ mod tests {
             outcome,
             summary: None,
             chat_id: None,
+            manual: false,
         }
     }
 
@@ -247,6 +260,17 @@ mod tests {
         assert_eq!(due(None, Some(5_000), Some(&after), now), None);
         assert_eq!(due(Some(20_000), None, None, now), None);
         assert_eq!(due(Some(9_000), None, None, now), Some(Due::Scheduled));
+    }
+
+    #[test]
+    fn project_routines_need_coordinate_and_their_project() {
+        assert_eq!(project_skip(true, true), None);
+        assert!(project_skip(false, true).unwrap().contains("Coordinate"));
+        assert!(
+            project_skip(true, false)
+                .unwrap()
+                .contains("no longer has access")
+        );
     }
 
     #[test]

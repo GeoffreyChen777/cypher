@@ -416,12 +416,6 @@ pub(super) enum MutateParams {
     /// Run a routine once now.
     #[serde(rename_all = "camelCase")]
     RunBotRoutine { routine_id: String },
-    #[serde(rename_all = "camelCase")]
-    SaveProjectTask { task: cypher_proto::ProjectTask },
-    #[serde(rename_all = "camelCase")]
-    DeleteProjectTask { task_id: String },
-    #[serde(rename_all = "camelCase")]
-    RunProjectTask { task_id: String },
     /// A connection's reply mode and narrowed scope.
     #[serde(rename_all = "camelCase")]
     UpdateBotConnection {

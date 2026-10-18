@@ -63,13 +63,8 @@ pub const BOT_DIRECT_TOOLS: [&str; 8] = [
 ];
 
 /// Notebook and schedule tools (P3).
-pub const BOT_MEMORY_TOOLS: [&str; 5] = [
-    "read_notes",
-    "write_note",
-    "list_schedule",
-    "save_routine",
-    "save_project_task",
-];
+pub const BOT_MEMORY_TOOLS: [&str; 4] =
+    ["read_notes", "write_note", "list_schedule", "save_routine"];
 
 /// Network tools (P4), owner threads only.
 pub const BOT_NETWORK_TOOLS: [&str; 2] = ["list_connections", "ask_bot"];
@@ -160,6 +155,13 @@ impl BotChat {
     /// The marker of a thread the owner instructs (the bot chat).
     pub fn owner(bot_id: impl Into<String>) -> Self {
         Self::new(bot_id, BotOrigin::Owner)
+    }
+
+    /// A thread the bot itself runs in: every marked chat except a project
+    /// routine's session, which the marker only hides (it runs as a plain
+    /// session).
+    pub fn is_bot_thread(&self) -> bool {
+        !matches!(self.thread, crate::BotThread::RoutineSession { .. })
     }
 
     pub fn new(bot_id: impl Into<String>, origin: BotOrigin) -> Self {

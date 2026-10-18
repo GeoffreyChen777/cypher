@@ -1,10 +1,11 @@
-//! The scheduler (docs/design/agent-bots.md §8): runs this device's routines
-//! and recurring project tasks.
+//! The scheduler (docs/design/agent-bots.md §8): runs this device's routines.
 //!
 //! Everything it knows lives in the rows, so it survives restarts: a pass
-//! reads the routines of bots hosted here and the tasks of spaces on this
-//! device, writes each one's `nextRunAt`, starts what is due by queueing a
-//! durable Run command, and settles runs that ended. It wakes every 30 s, on
+//! reads the routines this device runs (a workspace routine where its bot is
+//! hosted, a project routine where its project is), writes each one's
+//! `nextRunAt`, starts what is due by queueing a durable Run command, and
+//! settles runs that ended. A scheduled run continues the routine's standing
+//! session; a Run now gets a fresh one, which replaces the last. It wakes every 30 s, on
 //! record and bot changes, when a tool saves a job, and while a run it
 //! started is in flight, on session status changes.
 
@@ -23,7 +24,7 @@ use cypher_doc::{
 };
 use cypher_proto::{
     self as p, ActivityKind, Bot, BotChat, BotOrigin, BotPost, BotRoutine, BotThread, Chat,
-    ProjectTask, RunOutcome, RunRecord, SessionStatus, Space,
+    RoutineTarget, RunOutcome, RunRecord, SessionStatus, Space,
 };
 
 use super::super::Bots;
@@ -71,8 +72,8 @@ struct RunResult {
 }
 
 impl Bots {
-    /// The engine's unattended-stop listener: a routine or task run that
-    /// asked for input is settled as failed with the reason.
+    /// The engine's unattended-stop listener: a routine run that asked for
+    /// input is settled as failed with the reason.
     pub fn unattended_listener(&self) -> UnattendedListener {
         let inner = Arc::downgrade(&self.inner);
         Arc::new(move |stop| {
@@ -150,26 +151,21 @@ impl Bots {
             let Some(bot) = bots.get(&routine.bot_id) else {
                 continue;
             };
-            if bot.host_device_id != self.device_id() {
-                continue;
-            }
-            match self.tend_routine(bot, routine, &now).await {
+            // A workspace routine runs where its bot is hosted, a project
+            // routine where its project is.
+            let space = match routine.target.space_id() {
+                None if bot.host_device_id == self.device_id() => None,
+                None => continue,
+                Some(id) => match spaces.iter().find(|s| s.id == id) {
+                    Some(space) if space.device_id == self.device_id() => Some(space),
+                    _ => continue,
+                },
+            };
+            match self.tend_routine(bot, routine, space, &now).await {
                 Ok(watch) => watching |= watch,
                 Err(err) => {
                     tracing::warn!(routine = %routine.id, error = %err, "routine pass failed")
                 }
-            }
-        }
-        for task in &records.tasks {
-            let Some(space) = spaces.iter().find(|s| s.id == task.space_id) else {
-                continue;
-            };
-            if space.device_id != self.device_id() {
-                continue;
-            }
-            match self.tend_task(space, task, &bots, &now).await {
-                Ok(watch) => watching |= watch,
-                Err(err) => tracing::warn!(task = %task.id, error = %err, "task pass failed"),
             }
         }
         self.inner
@@ -184,11 +180,12 @@ impl Bots {
         &self,
         bot: &Bot,
         routine: &BotRoutine,
+        space: Option<&Space>,
         now: &DateTime<Local>,
     ) -> Result<bool, EngineError> {
         let now_ms = now.timestamp_millis();
         let mut routine = routine.clone();
-        let mut write = false;
+        let mut write = self.learn_worktree(&mut routine, space);
         let mut watching = false;
         if let Some(run) = routine
             .last_run
@@ -251,27 +248,39 @@ impl Bots {
             Some(schedule::Due::Scheduled) if running => next = after(),
             Some(_) if running => {}
             None => {}
-            Some(_) => {
+            Some(due) => {
+                let manual = due == schedule::Due::Requested;
                 let today = now.format("%Y-%m-%d").to_string();
                 let runs =
                     schedule::runs_on(&today, routine.runs_today, routine.runs_day.as_deref());
                 next = after();
                 routine.next_run_at = next;
-                match schedule::skip_reason(bot.paused, runs, routine.max_runs_per_day) {
+                let reason = schedule::skip_reason(bot.paused, runs, routine.max_runs_per_day)
+                    .or_else(|| {
+                        routine.target.space_id().and_then(|id| {
+                            schedule::project_skip(
+                                bot.capabilities.coordinate,
+                                bot.scope.sees_space(id),
+                            )
+                        })
+                    });
+                match reason {
                     Some(reason) => {
                         routine.last_run = Some(RunRecord {
                             at: now_ms,
                             ended_at: Some(now_ms),
                             outcome: RunOutcome::Skipped,
                             summary: Some(reason),
-                            chat_id: routine.thread_chat_id.clone(),
+                            chat_id: None,
+                            manual,
                         });
                         self.write_routine(&mut routine)?;
                     }
                     None => {
                         routine.runs_today = runs + 1;
                         routine.runs_day = Some(today);
-                        self.start_routine(bot, &mut routine, now)?;
+                        self.start_routine(bot, &mut routine, space, manual, now)
+                            .await?;
                         watching = true;
                     }
                 }
@@ -298,22 +307,74 @@ impl Bots {
         )
     }
 
-    /// Start one routine run in its thread: record it, then queue the Run.
-    fn start_routine(
+    /// A project routine's own worktree, learned from its session once the
+    /// run that made it has started (the drain points the chat at it).
+    /// `true` when the row needs writing.
+    fn learn_worktree(&self, routine: &mut BotRoutine, space: Option<&Space>) -> bool {
+        let (Some(space), RoutineTarget::Project { worktree: true, .. }) = (space, &routine.target)
+        else {
+            return false;
+        };
+        if routine
+            .worktree_path
+            .as_deref()
+            .is_some_and(|path| std::path::Path::new(path).is_dir())
+        {
+            return false;
+        }
+        let Some(cwd) = routine
+            .last_run
+            .as_ref()
+            .and_then(|run| run.chat_id.as_deref())
+            .and_then(|id| self.inner.workspace.chat(id).ok().flatten())
+            .and_then(|chat| chat.cwd)
+            .filter(|cwd| *cwd != space.path && std::path::Path::new(cwd).is_dir())
+        else {
+            return false;
+        };
+        routine.worktree_path = Some(cwd);
+        true
+    }
+
+    /// Start one run: a scheduled one in the routine's standing session, a
+    /// Run now in a fresh one that replaces (and deletes) the last. Record
+    /// it, then queue the Run.
+    async fn start_routine(
         &self,
         bot: &Bot,
         routine: &mut BotRoutine,
+        space: Option<&Space>,
+        manual: bool,
         now: &DateTime<Local>,
     ) -> Result<(), EngineError> {
         let now_ms = now.timestamp_millis();
-        let thread = self.routine_thread(bot, routine)?;
-        routine.thread_chat_id = Some(thread.clone());
+        let standing = if manual {
+            None
+        } else {
+            routine.thread_chat_id.clone()
+        };
+        let session = match space {
+            None => self.routine_thread(bot, routine, standing.as_deref())?,
+            Some(space) => self.routine_session(bot, routine, space, standing.as_deref())?,
+        };
+        if manual {
+            let previous = routine.manual_chat_id.replace(session.clone());
+            if let Some(previous) = previous.filter(|id| {
+                *id != session && routine.thread_chat_id.as_deref() != Some(id.as_str())
+            }) && let Err(err) = self.inner.workspace.delete_chat(&previous)
+            {
+                tracing::warn!(chat = %previous, error = %err, "old manual run not deleted");
+            }
+        } else {
+            routine.thread_chat_id = Some(session.clone());
+        }
         routine.last_run = Some(RunRecord {
             at: now_ms,
             ended_at: None,
             outcome: RunOutcome::Running,
             summary: None,
-            chat_id: Some(thread.clone()),
+            chat_id: Some(session.clone()),
+            manual,
         });
         self.write_routine(routine)?;
         let prompt = format!(
@@ -322,21 +383,27 @@ impl Bots {
             now.format("%A %B %-d, %Y, %H:%M"),
             routine.prompt
         );
-        let queued = self
-            .inner
-            .doc_host
-            .request_from_chat_row(&thread, &prompt)
-            .ok_or_else(|| EngineError::Other("the routine thread has no row".into()))
-            .and_then(|request| {
-                self.inner.doc_host.queue_command(
-                    &thread,
-                    SessionCommandPayload::Run {
-                        request,
-                        message_id: new_id(),
-                        agent_prompt: None,
-                    },
-                )
-            });
+        let queued = match space {
+            None => self
+                .inner
+                .doc_host
+                .request_from_chat_row(&session, &prompt)
+                .ok_or_else(|| EngineError::Other("the routine thread has no row".into()))
+                .map(|request| (request, None)),
+            Some(space) => Ok(self
+                .project_request(routine, space, &session, &prompt)
+                .await),
+        }
+        .and_then(|(request, agent_prompt)| {
+            self.inner.doc_host.queue_command(
+                &session,
+                SessionCommandPayload::Run {
+                    request,
+                    message_id: new_id(),
+                    agent_prompt,
+                },
+            )
+        });
         if let Err(err) = queued {
             tracing::warn!(routine = %routine.id, error = %err, "routine run did not queue");
             let run = routine.last_run.clone().expect("just recorded");
@@ -348,15 +415,94 @@ impl Bots {
             ));
             self.write_routine(routine)?;
         } else {
-            tracing::info!(routine = %routine.id, thread = %thread, "routine run queued");
+            tracing::info!(routine = %routine.id, chat = %session, manual, "routine run queued");
         }
         Ok(())
     }
 
-    /// The routine's hidden thread, created on its first run: origin
-    /// routine, in the bot's folder with the bot chat's settings, titled
-    /// with the routine's name.
-    fn routine_thread(&self, bot: &Bot, routine: &BotRoutine) -> Result<String, EngineError> {
+    /// A project routine's Run: an ordinary unattended session's request,
+    /// in the routine's own worktree (made by this run when it has none yet)
+    /// or the project's checkout.
+    async fn project_request(
+        &self,
+        routine: &BotRoutine,
+        space: &Space,
+        session: &str,
+        prompt: &str,
+    ) -> (p::RunRequest, Option<String>) {
+        let (worktree, model) = match &routine.target {
+            RoutineTarget::Project {
+                worktree, model, ..
+            } => (*worktree, model.clone()),
+            RoutineTarget::Workspace => (false, None),
+        };
+        let own = routine
+            .worktree_path
+            .clone()
+            .filter(|path| std::path::Path::new(path).is_dir());
+        let (cwd, spec) = match (worktree, own) {
+            (true, Some(path)) => (path, None),
+            (true, None) => {
+                let base = self
+                    .inner
+                    .repos
+                    .current_branch(std::path::Path::new(&space.path))
+                    .await
+                    .ok()
+                    .filter(|b| !b.is_empty() && b != "HEAD")
+                    .unwrap_or_else(|| "HEAD".into());
+                (
+                    space.path.clone(),
+                    Some(p::WorktreeSpec {
+                        repo_path: space.path.clone(),
+                        base_ref: base,
+                        name_hint: Some(routine.name.clone()),
+                    }),
+                )
+            }
+            (false, _) => (space.path.clone(), None),
+        };
+        // A standing session follows the routine's current checkout.
+        if spec.is_none()
+            && let Ok(Some(chat)) = self.inner.workspace.chat(session)
+            && chat.cwd.as_deref() != Some(cwd.as_str())
+            && let Err(err) = self.inner.workspace.set_chat_cwd(session, &cwd)
+        {
+            tracing::warn!(chat = %session, error = %err, "routine session cwd not moved");
+        }
+        let request = p::RunRequest {
+            prompt: prompt.to_string(),
+            harness: None,
+            model,
+            reasoning: None,
+            model_options: Default::default(),
+            cwd,
+            sandbox: p::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            attachments: Vec::new(),
+            pending_attachments: Vec::new(),
+            resume: None,
+            worktree: spec,
+        };
+        let agent_prompt = format!(
+            "This is a run of the routine \"{}\". Nobody is watching it: you cannot ask \
+             questions or wait for an approval, and anything that would ask stops the run as \
+             failed. When something is unclear, make the reasonable choice and say what you \
+             assumed.\n\n{}",
+            routine.name, routine.prompt
+        );
+        (request, Some(agent_prompt))
+    }
+
+    /// A workspace routine's hidden thread: `standing` while it is still
+    /// this routine's, else a new one (origin routine, in the bot's folder
+    /// with the bot chat's settings, titled with the routine's name).
+    fn routine_thread(
+        &self,
+        bot: &Bot,
+        routine: &BotRoutine,
+        standing: Option<&str>,
+    ) -> Result<String, EngineError> {
         let workspace = &self.inner.workspace;
         let marker = BotChat::thread(
             &bot.id,
@@ -365,44 +511,81 @@ impl Bots {
                 routine_id: routine.id.clone(),
             },
         );
-        if let Some(id) = &routine.thread_chat_id
-            && let Some(chat) = workspace.chat(id)?
-            && chat.bot.as_ref() == Some(&marker)
-        {
-            if chat.title.as_deref() != Some(routine.name.as_str()) {
-                workspace.rename_chat(id, &routine.name)?;
-            }
-            return Ok(chat.id);
+        if let Some(id) = self.reusable(standing, &marker, &routine.name)? {
+            return Ok(id);
         }
         let folder = self.inner.root.join(&bot.id);
         super::super::create_private_dir(&folder)?;
         let config = workspace.chat(&bot.chat_id)?.and_then(|chat| chat.config);
-        let now = Utc::now();
-        let chat = Chat {
-            id: new_id(),
-            device_id: self.device_id().to_string(),
-            title: Some(routine.name.clone()),
-            archived: false,
-            pinned: false,
-            cwd: Some(folder.to_string_lossy().into_owned()),
-            branch: None,
-            checkout_id: None,
+        let chat = hidden_chat(
+            self.device_id(),
+            &routine.name,
+            folder.to_string_lossy().into_owned(),
+            None,
             config,
-            last_message_preview: None,
-            last_message_at: None,
-            created_at: now,
-            harness_session_id: None,
-            harness_session_cwd: None,
-            space_id: None,
-            last_seen_at: Some(now),
-            room_gen: Some(2),
-            child: None,
-            bot: Some(marker),
-        };
+            marker,
+        );
         // The plain row write: only the engine writes a thread's marker.
         workspace.import_chat_row(&chat)?;
         tracing::info!(routine = %routine.id, thread = %chat.id, "routine thread created");
         Ok(chat.id)
+    }
+
+    /// A project routine's session: `standing` while it is still this
+    /// routine's, else a new ordinary session in the project, hidden by its
+    /// marker and run as a plain session ([`super::super::profile::bot_env`]
+    /// gives it none of the bot's).
+    fn routine_session(
+        &self,
+        bot: &Bot,
+        routine: &BotRoutine,
+        space: &Space,
+        standing: Option<&str>,
+    ) -> Result<String, EngineError> {
+        let marker = BotChat::thread(
+            &bot.id,
+            BotOrigin::Routine,
+            BotThread::RoutineSession {
+                routine_id: routine.id.clone(),
+            },
+        );
+        if let Some(id) = self.reusable(standing, &marker, &routine.name)? {
+            return Ok(id);
+        }
+        let chat = hidden_chat(
+            self.device_id(),
+            &routine.name,
+            space.path.clone(),
+            Some(space.id.clone()),
+            None,
+            marker,
+        );
+        self.inner.workspace.import_chat_row(&chat)?;
+        tracing::info!(routine = %routine.id, session = %chat.id, "routine session created");
+        Ok(chat.id)
+    }
+
+    /// `standing` when it is still a chat with `marker`, renamed to `name`.
+    fn reusable(
+        &self,
+        standing: Option<&str>,
+        marker: &BotChat,
+        name: &str,
+    ) -> Result<Option<String>, EngineError> {
+        let workspace = &self.inner.workspace;
+        let Some(id) = standing else {
+            return Ok(None);
+        };
+        let Some(chat) = workspace.chat(id)? else {
+            return Ok(None);
+        };
+        if chat.bot.as_ref() != Some(marker) {
+            return Ok(None);
+        }
+        if chat.title.as_deref() != Some(name) {
+            workspace.rename_chat(id, name)?;
+        }
+        Ok(Some(chat.id))
     }
 
     /// How far a recorded run has got.
@@ -481,6 +664,7 @@ impl Bots {
             },
             summary,
             chat_id: run.chat_id.clone(),
+            manual: run.manual,
         };
         settled.clamp();
         tracing::info!(chat = ?settled.chat_id, outcome = ?settled.outcome, "scheduled run ended");
@@ -585,184 +769,38 @@ impl Bots {
         lock(&self.inner.schedule.posted).insert(entry_id);
         false
     }
-
-    /// Settle, plan and start one recurring task.
-    async fn tend_task(
-        &self,
-        space: &Space,
-        task: &ProjectTask,
-        bots: &HashMap<String, Bot>,
-        now: &DateTime<Local>,
-    ) -> Result<bool, EngineError> {
-        let now_ms = now.timestamp_millis();
-        let mut task = task.clone();
-        let mut write = false;
-        let mut watching = false;
-        if let Some(run) = task
-            .last_run
-            .clone()
-            .filter(|r| r.outcome == RunOutcome::Running)
-        {
-            match self.run_progress(&run, now_ms) {
-                Progress::Waiting => watching = true,
-                Progress::Ended { failed, reason } => {
-                    let settled = self.settle(&run, failed, reason, now_ms);
-                    let text = match settled.outcome {
-                        RunOutcome::Failed => format!(
-                            "Task \"{}\" failed: {}",
-                            task.name,
-                            settled.summary.as_deref().unwrap_or_default()
-                        ),
-                        _ => format!("Task \"{}\" ran", task.name),
-                    };
-                    for bot in task_bots(&task, bots) {
-                        record_activity(
-                            &self.inner.workspace,
-                            &bot.id,
-                            ActivityKind::TaskRan,
-                            &text,
-                            settled.chat_id.as_deref(),
-                            Some(&space.id),
-                        );
-                    }
-                    task.last_run = Some(settled);
-                    write = true;
-                }
-            }
-        }
-        let running = schedule::is_running(task.last_run.as_ref());
-        let mut next = schedule::planned_next(&task.schedule, task.enabled, task.next_run_at, now);
-        let after = || {
-            task.schedule
-                .next_after(now)
-                .filter(|_| task.enabled)
-                .map(|at| at.timestamp_millis())
-        };
-        match schedule::due(next, task.run_requested_at, task.last_run.as_ref(), now_ms) {
-            Some(schedule::Due::Scheduled) if running => next = after(),
-            Some(_) if running => {}
-            None => {}
-            Some(_) => {
-                task.next_run_at = after();
-                self.start_task(space, &mut task, now).await?;
-                return Ok(true);
-            }
-        }
-        if next != task.next_run_at {
-            task.next_run_at = next;
-            write = true;
-        }
-        if write {
-            self.write_task(&mut task)?;
-        }
-        Ok(watching)
-    }
-
-    fn write_task(&self, task: &mut ProjectTask) -> Result<(), EngineError> {
-        task.clamp();
-        self.inner.workspace.put_record(
-            p::KIND_PROJECT_TASKS,
-            &task.id,
-            &*task,
-            Fields::Only(ProjectTask::HOST_FIELDS),
-        )
-    }
-
-    /// Start one task run: a fresh session in the project (in a new worktree
-    /// when the task asks), recorded before its Run is queued, so the run
-    /// is unattended from its first turn.
-    async fn start_task(
-        &self,
-        space: &Space,
-        task: &mut ProjectTask,
-        now: &DateTime<Local>,
-    ) -> Result<(), EngineError> {
-        let workspace = &self.inner.workspace;
-        let chat_id = new_id();
-        workspace.create_chat(&chat_id, Some(&space.id), None, None, None)?;
-        workspace.rename_chat(
-            &chat_id,
-            &format!("{} · {}", task.name, now.format("%b %-d")),
-        )?;
-        task.last_run = Some(RunRecord {
-            at: now.timestamp_millis(),
-            ended_at: None,
-            outcome: RunOutcome::Running,
-            summary: None,
-            chat_id: Some(chat_id.clone()),
-        });
-        self.write_task(task)?;
-        let worktree = if task.worktree {
-            let base = self
-                .inner
-                .repos
-                .current_branch(std::path::Path::new(&space.path))
-                .await
-                .ok()
-                .filter(|b| !b.is_empty() && b != "HEAD")
-                .unwrap_or_else(|| "HEAD".into());
-            Some(p::WorktreeSpec {
-                repo_path: space.path.clone(),
-                base_ref: base,
-                name_hint: Some(task.name.clone()),
-            })
-        } else {
-            None
-        };
-        let request = p::RunRequest {
-            prompt: task.prompt.clone(),
-            harness: None,
-            model: task.model.clone(),
-            reasoning: None,
-            model_options: Default::default(),
-            cwd: space.path.clone(),
-            sandbox: p::SandboxLevel::WorkspaceWrite,
-            auto_approve: false,
-            attachments: Vec::new(),
-            pending_attachments: Vec::new(),
-            resume: None,
-            worktree,
-        };
-        let agent_prompt = format!(
-            "This is a scheduled run of the recurring task \"{}\". Nobody is watching it: you \
-             cannot ask questions or wait for an approval, and anything that would ask stops \
-             the run as failed. When something is unclear, make the reasonable choice and say \
-             what you assumed.\n\n{}",
-            task.name, task.prompt
-        );
-        if let Err(err) = self.inner.doc_host.queue_command(
-            &chat_id,
-            SessionCommandPayload::Run {
-                request,
-                message_id: new_id(),
-                agent_prompt: Some(agent_prompt),
-            },
-        ) {
-            tracing::warn!(task = %task.id, error = %err, "task run did not queue");
-            let run = task.last_run.clone().expect("just recorded");
-            task.last_run = Some(self.settle(
-                &run,
-                true,
-                Some(format!("The run couldn't start: {err}.")),
-                p::now_ms(),
-            ));
-            self.write_task(task)?;
-        } else {
-            tracing::info!(task = %task.id, chat = %chat_id, "task run queued");
-        }
-        Ok(())
-    }
 }
 
-/// The bots whose activity log a task run goes to: the bot that made the
-/// task, else every bot that sees its project.
-fn task_bots<'a>(task: &ProjectTask, bots: &'a HashMap<String, Bot>) -> Vec<&'a Bot> {
-    match task.created_by.as_deref().and_then(|id| bots.get(id)) {
-        Some(bot) => vec![bot],
-        None => bots
-            .values()
-            .filter(|bot| bot.scope.sees_space(&task.space_id))
-            .collect(),
+/// A hidden routine chat row on this device.
+fn hidden_chat(
+    device_id: &str,
+    title: &str,
+    cwd: String,
+    space_id: Option<String>,
+    config: Option<p::ChatConfig>,
+    marker: BotChat,
+) -> Chat {
+    let now = Utc::now();
+    Chat {
+        id: new_id(),
+        device_id: device_id.to_string(),
+        title: Some(title.to_string()),
+        archived: false,
+        pinned: false,
+        cwd: Some(cwd),
+        branch: None,
+        checkout_id: None,
+        config,
+        last_message_preview: None,
+        last_message_at: None,
+        created_at: now,
+        harness_session_id: None,
+        harness_session_cwd: None,
+        space_id,
+        last_seen_at: Some(now),
+        room_gen: Some(2),
+        child: None,
+        bot: Some(marker),
     }
 }
 
@@ -897,57 +935,5 @@ mod tests {
         assert!(result.aborted);
         assert!(result.error.unwrap().starts_with("This run is unattended"));
         assert!(run_result(vec![], 10).text.is_none());
-    }
-
-    #[test]
-    fn task_runs_are_logged_for_their_maker_or_every_bot_that_sees_them() {
-        let bot = |id: &str, grant: p::ProjectGrant| Bot {
-            id: id.into(),
-            name: id.into(),
-            icon: None,
-            color: None,
-            host_device_id: "dev".into(),
-            chat_id: format!("{id}-chat"),
-            instructions: None,
-            scope: p::BotScope {
-                projects: grant,
-                ..Default::default()
-            },
-            capabilities: Default::default(),
-            paused: false,
-            created_at: Utc::now(),
-        };
-        let bots: HashMap<String, Bot> = [
-            bot("all", p::ProjectGrant::All),
-            bot("none", p::ProjectGrant::None),
-        ]
-        .into_iter()
-        .map(|b| (b.id.clone(), b))
-        .collect();
-        let mut task = ProjectTask {
-            id: "t".into(),
-            space_id: "sp".into(),
-            name: "Nightly".into(),
-            prompt: "Run the tests".into(),
-            schedule: p::Schedule::Manual,
-            enabled: true,
-            worktree: false,
-            model: None,
-            created_by: None,
-            created_at: 0,
-            updated_at: 0,
-            run_requested_at: None,
-            last_run: None,
-            next_run_at: None,
-        };
-        let ids = |task: &ProjectTask| {
-            task_bots(task, &bots)
-                .into_iter()
-                .map(|b| b.id.clone())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(ids(&task), ["all"]);
-        task.created_by = Some("none".into());
-        assert_eq!(ids(&task), ["none"]);
     }
 }

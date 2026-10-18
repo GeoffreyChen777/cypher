@@ -1,6 +1,6 @@
 //! The records behind the Botboard (docs/design/agent-bots.md §6–§13.1):
 //! a bot's plans and orchestrations, notebook, routines, its projects'
-//! recurring tasks, its activity log, approvals, and its network.
+//! routines, its activity log, approvals, and its network.
 //!
 //! Each record is a registry row of its own kind, synced to every owner
 //! device like the `bots` rows. Rows are LWW **per field**, so every field
@@ -25,7 +25,6 @@ use crate::BotScope;
 pub const KIND_BOT_WORK: &str = "botWork";
 pub const KIND_BOT_NOTES: &str = "botNotes";
 pub const KIND_BOT_ROUTINES: &str = "botRoutines";
-pub const KIND_PROJECT_TASKS: &str = "projectTasks";
 pub const KIND_BOT_ACTIVITY: &str = "botActivity";
 pub const KIND_BOT_APPROVALS: &str = "botApprovals";
 pub const KIND_BOT_CONNECTIONS: &str = "botConnections";
@@ -33,11 +32,10 @@ pub const KIND_BOT_INVITES: &str = "botInvites";
 pub const KIND_BOT_EXCHANGES: &str = "botExchanges";
 
 /// Every record kind, in [`BotRecords`] order.
-pub const BOT_RECORD_KINDS: [&str; 9] = [
+pub const BOT_RECORD_KINDS: [&str; 8] = [
     KIND_BOT_WORK,
     KIND_BOT_NOTES,
     KIND_BOT_ROUTINES,
-    KIND_PROJECT_TASKS,
     KIND_BOT_ACTIVITY,
     KIND_BOT_APPROVALS,
     KIND_BOT_CONNECTIONS,
@@ -133,6 +131,11 @@ pub enum BotThread {
     /// Where one routine runs.
     #[serde(rename_all = "camelCase")]
     Routine { routine_id: String },
+    /// A project routine's session: an ordinary coding session in the
+    /// project that the routine owns. Hidden like the bot's threads, but it
+    /// runs as a plain session, not as the bot.
+    #[serde(rename_all = "camelCase")]
+    RoutineSession { routine_id: String },
     /// Where one connection's questions run.
     #[serde(rename_all = "camelCase")]
     Peer { connection_id: String },
@@ -343,7 +346,7 @@ pub enum NoteSource {
     },
 }
 
-// ── schedules, routines and recurring tasks (§8) ────────────────────────────
+// ── schedules and routines (§8) ─────────────────────────────────────────────
 
 /// When a routine or task runs, in the host device's local time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,7 +452,7 @@ impl Schedule {
     }
 }
 
-/// One run of a routine or task.
+/// One run of a routine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRecord {
@@ -462,6 +465,10 @@ pub struct RunRecord {
     /// The thread or session the run happened in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<String>,
+    /// Started by hand (Run now) in a fresh session, rather than by the
+    /// schedule in the routine's standing one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manual: bool,
 }
 
 impl RunRecord {
@@ -504,8 +511,42 @@ pub enum BotPost {
     Unknown,
 }
 
-/// A bot job on a schedule, run unattended in its own thread; its output is
-/// a message in the bot chat.
+/// Where a routine runs and what it can reach.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RoutineTarget {
+    /// The bot's own agent, in a hidden thread: it reads everything the bot
+    /// reads and posts its output in the bot chat.
+    #[default]
+    Workspace,
+    /// An ordinary coding session in one of the bot's projects, hidden and
+    /// opened from the routine; it can change that project's code. Runs on
+    /// the project's device and needs the bot's *Coordinate*.
+    #[serde(rename_all = "camelCase")]
+    Project {
+        space_id: String,
+        /// Its own worktree (made on the first run, kept for the rest)
+        /// rather than the project's checkout.
+        #[serde(default)]
+        worktree: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+}
+
+impl RoutineTarget {
+    pub fn space_id(&self) -> Option<&str> {
+        match self {
+            Self::Workspace => None,
+            Self::Project { space_id, .. } => Some(space_id),
+        }
+    }
+}
+
+/// A bot job run by hand or on a schedule, unattended. Scheduled runs reuse
+/// one standing session (`threadChatId`); each Run now gets a fresh one
+/// (`manualChatId`), kept until the next replaces it. Its output is posted
+/// in the bot chat either way.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotRoutine {
@@ -514,10 +555,12 @@ pub struct BotRoutine {
     pub name: String,
     pub prompt: String,
     #[serde(default)]
+    pub target: RoutineTarget,
+    #[serde(default)]
     pub schedule: Schedule,
     #[serde(default = "yes")]
     pub enabled: bool,
-    /// May write to the notebook (it always reads it).
+    /// May write to the notebook (it always reads it). A workspace routine's.
     #[serde(default)]
     pub write_notes: bool,
     /// May use Pi's shell and file tools in the bot's local projects, like
@@ -533,9 +576,17 @@ pub struct BotRoutine {
     /// Owner-written: run once now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_requested_at: Option<i64>,
-    // Host-written:
+    // Host-written (the bot's device for a workspace routine, the
+    // project's for a project routine):
+    /// The standing session scheduled runs reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_chat_id: Option<String>,
+    /// The latest Run now's session; the next one replaces and deletes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_chat_id: Option<String>,
+    /// A project routine's own worktree, once its first run made it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<RunRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -551,6 +602,8 @@ impl BotRoutine {
     /// The fields the host writes; everything else is the owner's.
     pub const HOST_FIELDS: &'static [&'static str] = &[
         "threadChatId",
+        "manualChatId",
+        "worktreePath",
         "lastRun",
         "nextRunAt",
         "runsToday",
@@ -572,6 +625,13 @@ impl BotRoutine {
         if self.prompt.trim().is_empty() {
             return Err("Say what the routine should do.".into());
         }
+        if self
+            .target
+            .space_id()
+            .is_some_and(|id| id.trim().is_empty())
+        {
+            return Err("Pick the project it runs in.".into());
+        }
         self.schedule.validate()
     }
 }
@@ -582,59 +642,6 @@ fn yes() -> bool {
 
 fn default_runs_per_day() -> u32 {
     24
-}
-
-/// A recurring job on a project: every run starts a fresh session there.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectTask {
-    pub id: String,
-    pub space_id: String,
-    pub name: String,
-    pub prompt: String,
-    #[serde(default)]
-    pub schedule: Schedule,
-    #[serde(default = "yes")]
-    pub enabled: bool,
-    /// Each run in a new worktree.
-    #[serde(default)]
-    pub worktree: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// The bot that created it, when one did.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_by: Option<String>,
-    pub created_at: i64,
-    pub updated_at: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_requested_at: Option<i64>,
-    // Host-written (the project's device):
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_run: Option<RunRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_run_at: Option<i64>,
-}
-
-impl ProjectTask {
-    pub const HOST_FIELDS: &'static [&'static str] = &["lastRun", "nextRunAt"];
-
-    pub fn clamp(&mut self) {
-        self.name = clip(&self.name, TITLE_MAX);
-        self.prompt = clip(&self.prompt, PROMPT_MAX);
-        if let Some(run) = &mut self.last_run {
-            run.clamp();
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        if self.name.trim().is_empty() {
-            return Err("Name the task.".into());
-        }
-        if self.prompt.trim().is_empty() {
-            return Err("Say what each run should do.".into());
-        }
-        self.schedule.validate()
-    }
 }
 
 // ── activity log (§4.4) ─────────────────────────────────────────────────────
@@ -931,7 +938,6 @@ pub struct BotRecords {
     pub work: Vec<BotWork>,
     pub notes: Vec<BotNote>,
     pub routines: Vec<BotRoutine>,
-    pub tasks: Vec<ProjectTask>,
     pub activity: Vec<BotActivity>,
     pub approvals: Vec<BotApproval>,
     pub connections: Vec<BotConnection>,

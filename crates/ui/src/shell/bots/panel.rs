@@ -34,14 +34,11 @@ pub(in crate::shell) enum PanelItem {
     /// One of the bot's hidden threads, read-only (its chat id): an
     /// orchestration's, a routine's or a connection's.
     Thread(String),
-    /// Routines and project tasks, by next run.
+    /// Routines, by next run.
     Schedule,
     Routine(String),
-    Task(String),
     /// The new-routine form.
     NewRoutine,
-    /// The new-project-task form.
-    NewTask,
     /// Every note, editable.
     Notebook,
     /// The full audit log.
@@ -156,11 +153,9 @@ impl Shell {
             PanelItem::Work | PanelItem::WorkItem(_) | PanelItem::Thread(_) => {
                 self.render_work_panel(&bot, item, &theme, cx)?
             }
-            PanelItem::Schedule
-            | PanelItem::Routine(_)
-            | PanelItem::Task(_)
-            | PanelItem::NewRoutine
-            | PanelItem::NewTask => self.render_schedule_panel(&bot, item, &theme, cx)?,
+            PanelItem::Schedule | PanelItem::Routine(_) | PanelItem::NewRoutine => {
+                self.render_schedule_panel(&bot, item, &theme, cx)?
+            }
             PanelItem::Notebook => self.render_notebook_panel(&bot, item, &theme, cx)?,
             PanelItem::Activity => self.render_activity_panel(&bot, item, &theme, cx)?,
             PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => {

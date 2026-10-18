@@ -1,22 +1,23 @@
-//! The **Schedule** card (§13.1): routines and the bot's projects' recurring
-//! tasks by next run, their panels and the new-routine and new-task forms.
+//! The **Routines** card (§13.1): the bot's routines by next run, their
+//! panels and the routine form.
 //!
-//! A routine is the bot's own job, run in its hidden thread; a task belongs
-//! to one of the bot's projects and starts a session there each run (§8).
-//! The definition fields are the owner's and go out whole in one Mutate;
-//! the run state (last run, next run, runs today) is the host's and only
-//! read here.
+//! A routine runs by hand or on a schedule, either in the workspace (the
+//! bot's own agent, in a hidden thread) or as an ordinary session in one of
+//! its projects (§8). Scheduled runs continue one standing session; each Run
+//! now gets a fresh one, kept until the next. The definition fields are the
+//! owner's and go out whole in one Mutate; the run state (last run, next
+//! run, runs today, its sessions) is the host's and only read here.
 
 use super::board::{card_corner, card_glyph, card_item, two_lines};
 use super::panel::{PanelHead, PanelItem};
 use super::parts::{self, CallError};
 use super::*;
 use chrono::{DateTime, Local, TimeZone};
-use cypher_proto::{BotRoutine, ProjectTask, RunOutcome, RunRecord, Schedule, Space};
+use cypher_proto::{BotRoutine, RoutineTarget, RunOutcome, RunRecord, Schedule, Space};
 
-/// Each kind of job wears its own mark, apart from the card's clock: a
-/// routine repeats in the bot's colour, a project task is code work in the
-/// project's colour.
+/// Each kind of routine wears its own mark, apart from the card's clock: one
+/// in the workspace repeats in the bot's colour, one in a project is code
+/// work in the project's colour.
 const ROUTINE_GLYPH: &str = icons::REFRESH;
 const TASK_GLYPH: &str = icons::CODE;
 
@@ -24,12 +25,13 @@ const TASK_GLYPH: &str = icons::CODE;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum JobKind {
-    Routine,
-    Task { space_id: String },
+    /// Runs as the bot, in its hidden thread.
+    Workspace,
+    /// Runs as an ordinary session in this project.
+    Project { space_id: String },
 }
 
-/// One row of the Schedule: a routine of the bot, or a recurring task of
-/// one of its projects.
+/// One row of the Routines card and panel.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Job {
     pub kind: JobKind,
@@ -76,7 +78,12 @@ pub(super) fn next_run<Tz: TimeZone>(
 impl Job {
     fn routine<Tz: TimeZone>(r: &BotRoutine, now: &DateTime<Tz>) -> Self {
         Self {
-            kind: JobKind::Routine,
+            kind: match &r.target {
+                RoutineTarget::Workspace => JobKind::Workspace,
+                RoutineTarget::Project { space_id, .. } => JobKind::Project {
+                    space_id: space_id.clone(),
+                },
+            },
             id: r.id.clone(),
             name: r.name.clone(),
             schedule: r.schedule.clone(),
@@ -87,26 +94,8 @@ impl Job {
         }
     }
 
-    fn task<Tz: TimeZone>(t: &ProjectTask, now: &DateTime<Tz>) -> Self {
-        Self {
-            kind: JobKind::Task {
-                space_id: t.space_id.clone(),
-            },
-            id: t.id.clone(),
-            name: t.name.clone(),
-            schedule: t.schedule.clone(),
-            enabled: t.enabled,
-            next: next_run(&t.schedule, t.enabled, t.next_run_at, now),
-            last: t.last_run.clone(),
-            run_requested_at: t.run_requested_at,
-        }
-    }
-
     pub(super) fn item(&self) -> PanelItem {
-        match self.kind {
-            JobKind::Routine => PanelItem::Routine(self.id.clone()),
-            JobKind::Task { .. } => PanelItem::Task(self.id.clone()),
-        }
+        PanelItem::Routine(self.id.clone())
     }
 
     pub(super) fn state(&self) -> JobState {
@@ -164,11 +153,12 @@ pub(super) fn order_jobs(jobs: &mut [Job]) {
     });
 }
 
-/// A row's sub-line: "Routine · Daily 09:00", "<project> · Weekdays 18:30".
+/// A row's sub-line, where it runs and when: "This workspace · Daily
+/// 09:00", "<project> · Weekdays 18:30".
 pub(super) fn job_sub(job: &Job, project: Option<&str>) -> String {
     let lead = match job.kind {
-        JobKind::Routine => "Routine",
-        JobKind::Task { .. } => project.unwrap_or("Project"),
+        JobKind::Workspace => "This workspace",
+        JobKind::Project { .. } => project.unwrap_or("A project"),
     };
     format!("{lead} · {}", job.schedule.describe())
 }
@@ -318,15 +308,7 @@ pub(super) fn normalize_time(text: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum FormTarget {
     NewRoutine,
-    NewTask,
     Routine(String),
-    Task(String),
-}
-
-impl FormTarget {
-    fn routine(&self) -> bool {
-        matches!(self, Self::NewRoutine | Self::Routine(_))
-    }
 }
 
 pub(super) struct JobForm {
@@ -339,14 +321,18 @@ pub(super) struct JobForm {
     draft: ScheduleDraft,
     write_notes: bool,
     work_directly: bool,
-    worktree: bool,
+    /// Where it runs: a project, or `None` for the workspace.
     space_id: Option<String>,
+    /// A project routine's own worktree rather than the project checkout.
+    worktree: bool,
+    /// Kept from the record: the form doesn't edit it.
+    model: Option<String>,
     error: Option<SharedString>,
     busy: bool,
     _events: Vec<Subscription>,
 }
 
-/// The Schedule panels' own state: the open form, and an item just saved
+/// The Routines panels' own state: the open form, and an item just saved
 /// whose row has not landed yet.
 #[derive(Default)]
 pub(super) struct ScheduleUi {
@@ -358,32 +344,27 @@ impl Shell {
     fn schedule_jobs(&self, bot: &Bot, cx: &App) -> Vec<(Job, Option<Space>)> {
         let now = Local::now();
         let state = self.state.read(cx);
-        let records = &state.bot_records;
-        let routines = records
+        let mut jobs: Vec<Job> = state
+            .bot_records
             .routines
             .iter()
             .filter(|r| r.bot_id == bot.id)
-            .map(|r| (Job::routine(r, &now), None));
-        let tasks = records.tasks.iter().filter_map(|t| {
-            if !bot.scope.sees_space(&t.space_id) {
-                return None;
-            }
-            let space = state.space_row(&t.space_id)?.clone();
-            Some((Job::task(t, &now), Some(space)))
-        });
-        let mut jobs: Vec<(Job, Option<Space>)> = routines.chain(tasks).collect();
-        let mut ordered: Vec<Job> = jobs.iter().map(|(job, _)| job.clone()).collect();
-        order_jobs(&mut ordered);
-        jobs.sort_by_key(|(job, _)| {
-            ordered
-                .iter()
-                .position(|o| o.kind == job.kind && o.id == job.id)
-        });
-        jobs
+            .map(|r| Job::routine(r, &now))
+            .collect();
+        order_jobs(&mut jobs);
+        jobs.into_iter()
+            .map(|job| {
+                let space = match &job.kind {
+                    JobKind::Project { space_id } => state.space_row(space_id).cloned(),
+                    JobKind::Workspace => None,
+                };
+                (job, space)
+            })
+            .collect()
     }
 
-    /// The bot's projects a task may run in, in sidebar order.
-    fn task_projects(&self, bot: &Bot, cx: &App) -> Vec<(Space, String)> {
+    /// The bot's projects a routine may run in, in sidebar order.
+    fn routine_projects(&self, bot: &Bot, cx: &App) -> Vec<(Space, String)> {
         let state = self.state.read(cx);
         state
             .spaces_sorted()
@@ -399,8 +380,8 @@ impl Shell {
             .collect()
     }
 
-    /// One schedule row: the routine's clock in the bot's colour or the
-    /// task's project glyph, name over trigger, and the next run.
+    /// One routine row: its mark (the workspace's or the project's), name
+    /// over where and when it runs, and the next run.
     #[allow(clippy::too_many_arguments)]
     fn job_row(
         &self,
@@ -412,14 +393,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let (glyph, tint) = match space {
-            Some(space) => (
-                TASK_GLYPH,
-                crate::appearance::space_style::space_color(space.color.as_deref(), theme)
-                    .unwrap_or(theme.text_muted),
-            ),
-            None => (ROUTINE_GLYPH, bot_tint),
-        };
+        let (glyph, tint) = job_mark(job, space, bot_tint, theme);
         let state = job.state();
         let note_color = match state {
             JobState::Running => theme.text,
@@ -506,14 +480,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let (glyph, tint) = match space {
-            Some(space) => (
-                TASK_GLYPH,
-                crate::appearance::space_style::space_color(space.color.as_deref(), theme)
-                    .unwrap_or(theme.text_muted),
-            ),
-            None => (ROUTINE_GLYPH, bot_tint),
-        };
+        let (glyph, tint) = job_mark(job, space, bot_tint, theme);
         let state = job.state();
         let corner = match state {
             JobState::Running => super::super::render::status_mark(
@@ -555,7 +522,7 @@ impl Shell {
             return Some(parts::empty_card(
                 "bot-schedule-empty",
                 icons::CLOCK,
-                "Schedule",
+                "Routines",
                 "No routines yet",
                 "New routine",
                 PanelItem::Schedule,
@@ -571,7 +538,7 @@ impl Shell {
             "schedule",
             "bot-schedule-header",
             icons::CLOCK,
-            "Schedule",
+            "Routines",
             jobs.len(),
             PanelItem::Schedule,
             None,
@@ -603,21 +570,12 @@ impl Shell {
             PanelItem::NewRoutine => {
                 Some(self.render_job_form(bot, FormTarget::NewRoutine, theme, cx))
             }
-            PanelItem::NewTask => Some(self.render_job_form(bot, FormTarget::NewTask, theme, cx)),
             PanelItem::Routine(id) => {
                 let target = FormTarget::Routine(id.clone());
                 if self.form_open(&target) {
                     return Some(self.render_job_form(bot, target, theme, cx));
                 }
                 self.render_routine(bot, id, theme, cx)
-                    .or_else(|| self.render_saving(id))
-            }
-            PanelItem::Task(id) => {
-                let target = FormTarget::Task(id.clone());
-                if self.form_open(&target) {
-                    return Some(self.render_job_form(bot, target, theme, cx));
-                }
-                self.render_task(bot, id, theme, cx)
                     .or_else(|| self.render_saving(id))
             }
             _ => None,
@@ -648,7 +606,7 @@ impl Shell {
         })
     }
 
-    /// Every job, routines then project tasks, with the ways to add one.
+    /// Every routine, with the way to add one.
     fn render_schedule_list(
         &mut self,
         bot: &Bot,
@@ -656,12 +614,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> (PanelHead, gpui::Div) {
         let jobs = self.schedule_jobs(bot, cx);
-        let has_projects = !self.task_projects(bot, cx).is_empty();
         let tint = bot_tint(bot, theme);
-        let (routines, tasks): (Vec<_>, Vec<_>) = jobs
-            .iter()
-            .partition(|(job, _)| job.kind == JobKind::Routine);
-        let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
         // Today's budget use across the bot's routines that are on.
         let budget = {
             let today = Local::now().format("%Y-%m-%d").to_string();
@@ -684,87 +637,45 @@ impl Shell {
         let head = PanelHead {
             glyph: icons::CLOCK,
             tint: None,
-            title: "Schedule".into(),
+            title: "Routines".into(),
             subtitle: {
-                let mut line = format!(
-                    "{} · {}",
-                    plural(routines.len(), "routine"),
-                    plural(tasks.len(), "project task")
-                );
+                let n = jobs.len();
+                let mut line = format!("{n} routine{}", if n == 1 { "" } else { "s" });
                 if let Some((used, budget)) = budget {
-                    line.push_str(&format!(" · {used} of {budget} routine runs today"));
+                    line.push_str(&format!(" · {used} of {budget} runs today"));
                 }
                 line
             },
         };
-        let actions = div()
-            .px(px(4.0))
-            .pt(px(2.0))
-            .flex()
-            .flex_row()
-            .gap(px(4.0))
-            .child(
-                parts::action(
-                    "bot-schedule-new-routine",
-                    icons::PLUS,
-                    "New routine",
-                    theme.text,
-                )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_job_form(FormTarget::NewRoutine, Some(window), cx)
-                })),
+        let actions = div().px(px(4.0)).pt(px(2.0)).flex().flex_row().child(
+            parts::action(
+                "bot-schedule-new-routine",
+                icons::PLUS,
+                "New routine",
+                theme.text,
             )
-            .when(has_projects, |el| {
-                el.child(
-                    parts::action("bot-schedule-new-task", icons::PLUS, "New task", theme.text)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_job_form(FormTarget::NewTask, Some(window), cx)
-                        })),
-                )
-            });
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_job_form(FormTarget::NewRoutine, Some(window), cx)
+            })),
+        );
         let mut body = div()
             .p(px(8.0))
             .flex()
             .flex_col()
             .gap(px(1.0))
-            .child(actions)
-            .child(parts::section_label(theme, "Routines"));
-        if routines.is_empty() {
+            .child(actions);
+        if jobs.is_empty() {
             body = body.child(parts::quiet_line(
                 theme,
                 format!(
-                    "A routine runs a prompt on a schedule, like a morning summary, \
-                     and {} posts the result here in the chat.",
+                    "A routine runs a prompt by hand or on a schedule: in this workspace, like \
+                     a morning summary, or as a session in one of its projects, like nightly \
+                     tests. {} posts each result in the chat.",
                     bot.name
                 ),
             ));
         }
-        for (job, space) in &routines {
-            let row = self.job_row(
-                format!("bot-panel-job-{}", job.id),
-                job,
-                space.as_ref(),
-                tint,
-                false,
-                theme,
-                cx,
-            );
-            body = body.child(row.py(px(8.0)));
-        }
-        body = body.child(parts::section_label(theme, "Project tasks"));
-        if tasks.is_empty() {
-            body = body.child(parts::quiet_line(
-                theme,
-                if has_projects {
-                    "A recurring task starts a fresh session in a project each run, \
-                     like nightly tests."
-                        .to_string()
-                } else {
-                    format!("Give {} a project to schedule tasks there.", bot.name)
-                },
-            ));
-        }
-        for (job, space) in &tasks {
+        for (job, space) in &jobs {
             let row = self.job_row(
                 format!("bot-panel-job-{}", job.id),
                 job,
@@ -779,7 +690,7 @@ impl Shell {
         (head, body)
     }
 
-    // ── one routine or task ─────────────────────────────────────────────────
+    // ── one routine ─────────────────────────────────────────────────────────
 
     fn render_routine(
         &mut self,
@@ -806,20 +717,33 @@ impl Shell {
         {
             self.board.schedule.saving = None;
         }
+        let (space, device) = {
+            let state = self.state.read(cx);
+            match routine.target.space_id() {
+                Some(id) => {
+                    let space = state.space_row(id).cloned();
+                    let device = space.as_ref().map(|s| {
+                        state
+                            .device_name(&s.device_id)
+                            .unwrap_or("Unknown device")
+                            .to_string()
+                    });
+                    (space, device)
+                }
+                None => (None, None),
+            }
+        };
         let now = Local::now();
         let job = Job::routine(&routine, &now);
+        let (glyph, tint) = job_mark(&job, space.as_ref(), bot_tint(bot, theme), theme);
         let head = PanelHead {
-            glyph: ROUTINE_GLYPH,
-            tint: Some(bot_tint(bot, theme)),
+            glyph,
+            tint: Some(tint),
             title: routine.name.clone(),
-            subtitle: format!("Routine · {}", routine.schedule.describe()),
+            subtitle: job_sub(&job, space.as_ref().map(|s| s.display_name())),
         };
         let today = now.format("%Y-%m-%d").to_string();
         let used = runs_today(routine.runs_today, routine.runs_day.as_deref(), &today);
-        let thread = routine
-            .last_run
-            .as_ref()
-            .and(routine.thread_chat_id.clone());
         let mut body = div()
             .p(px(8.0))
             .flex()
@@ -834,13 +758,40 @@ impl Shell {
                 .text_color(theme.warning),
             );
         }
+        let runs_in = match &routine.target {
+            RoutineTarget::Workspace => "This workspace, as its own agent".to_string(),
+            RoutineTarget::Project { worktree, .. } => format!(
+                "{} · {} · {}",
+                space
+                    .as_ref()
+                    .map_or("A project it can't see", |s| s.display_name()),
+                device.as_deref().unwrap_or("Unknown device"),
+                if *worktree {
+                    "its own worktree"
+                } else {
+                    "the project's checkout"
+                }
+            ),
+        };
         body = body
             .child(parts::section_label(theme, "Runs"))
+            .child(parts::fact(theme, "Runs in", SharedString::from(runs_in)));
+        if let RoutineTarget::Project {
+            model: Some(model), ..
+        } = &routine.target
+        {
+            body = body.child(parts::fact(
+                theme,
+                "Model",
+                SharedString::from(model.clone()),
+            ));
+        }
+        body = body
             .child(parts::fact(theme, "Next run", next_value(&job, &now)))
             .child(parts::fact(
                 theme,
                 "Last run",
-                self.last_run_value(routine.last_run.as_ref(), thread, "Open thread", theme, cx),
+                self.last_run_value(routine.last_run.as_ref(), theme, cx),
             ))
             .child(parts::fact(
                 theme,
@@ -854,188 +805,135 @@ impl Shell {
                         "s"
                     }
                 )),
-            ))
-            .child(parts::section_label(theme, "Prompt"))
-            .child(parts::well(theme, routine.prompt.clone()));
-        let (enabled, write_notes, direct) = (routine.clone(), routine.clone(), routine.clone());
-        body = body.child(parts::section_label(theme, "Settings")).child(
-            parts::group_box()
-                .child(
-                    parts::switch_row(
-                        "bot-routine-enabled",
-                        "On schedule",
-                        "Off keeps it, and Run now still works.",
-                        routine.enabled,
-                        true,
-                        theme,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let mut routine = enabled.clone();
-                        routine.enabled = !routine.enabled;
-                        this.save_routine_now(routine, cx);
-                    })),
-                )
-                .child(parts::grant_row(
-                    theme,
-                    "Reads the notebook",
-                    "Always, at the start of each run.",
-                    false,
-                ))
-                .child(
-                    parts::switch_row(
-                        "bot-routine-notes",
-                        "May write notes",
-                        "Lets runs add to the notebook.",
-                        routine.write_notes,
-                        false,
-                        theme,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let mut routine = write_notes.clone();
-                        routine.write_notes = !routine.write_notes;
-                        this.save_routine_now(routine, cx);
-                    })),
-                )
-                .child(
-                    parts::switch_row(
-                        "bot-routine-direct",
-                        "May run commands",
-                        if bot.capabilities.work_directly {
-                            "In the workspace's projects on this device, e.g. to run tests."
-                        } else {
-                            "Needs the workspace's Work directly, which is off."
-                        },
-                        routine.work_directly,
-                        false,
-                        theme,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let mut routine = direct.clone();
-                        routine.work_directly = !routine.work_directly;
-                        this.save_routine_now(routine, cx);
-                    })),
-                ),
-        );
-        Some((head, body))
-    }
-
-    fn render_task(
-        &mut self,
-        bot: &Bot,
-        id: &str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<(PanelHead, gpui::Div)> {
-        let (task, space, device) = {
-            let state = self.state.read(cx);
-            let task = state
-                .bot_records
-                .tasks
-                .iter()
-                .find(|t| t.id == id && bot.scope.sees_space(&t.space_id))
-                .cloned()?;
-            let space = state.space_row(&task.space_id)?.clone();
-            let device = state
-                .device_name(&space.device_id)
-                .unwrap_or("Unknown device")
-                .to_string();
-            (task, space, device)
-        };
-        if self
-            .board
-            .schedule
-            .saving
-            .as_ref()
-            .is_some_and(|(saving, _)| saving == id)
-        {
-            self.board.schedule.saving = None;
-        }
-        let now = Local::now();
-        let job = Job::task(&task, &now);
-        let head = PanelHead {
-            glyph: TASK_GLYPH,
-            tint: crate::appearance::space_style::space_color(space.color.as_deref(), theme),
-            title: task.name.clone(),
-            subtitle: format!("{} · {}", space.display_name(), task.schedule.describe()),
-        };
-        let session = task.last_run.as_ref().and_then(|run| run.chat_id.clone());
-        let mut body = div()
-            .p(px(8.0))
-            .flex()
-            .flex_col()
-            .child(self.job_actions(&job, theme, cx))
-            .child(parts::section_label(theme, "Runs"))
-            .child(parts::fact(
-                theme,
-                "Project",
-                SharedString::from(format!("{} · {device}", space.display_name())),
-            ))
-            .child(parts::fact(theme, "Next run", next_value(&job, &now)))
-            .child(parts::fact(
-                theme,
-                "Last run",
-                self.last_run_value(task.last_run.as_ref(), session, "Open session", theme, cx),
             ));
-        if let Some(model) = &task.model {
-            body = body.child(parts::fact(
-                theme,
-                "Model",
-                SharedString::from(model.clone()),
-            ));
+        if let Some(sessions) = self.session_links(&routine, theme, cx) {
+            body = body.child(parts::fact(theme, "Sessions", sessions));
         }
-        if task.created_by.as_deref() == Some(bot.id.as_str()) {
-            body = body.child(parts::fact(
-                theme,
-                "Made by",
-                SharedString::from(bot.name.clone()),
-            ));
-        }
-        let (enabled, worktree) = (task.clone(), task.clone());
         body = body
             .child(parts::section_label(theme, "Prompt"))
-            .child(parts::well(theme, task.prompt.clone()))
-            .child(parts::section_label(theme, "Settings"))
-            .child(
-                parts::group_box()
+            .child(parts::well(theme, routine.prompt.clone()));
+        let enabled = routine.clone();
+        let mut settings = parts::group_box().child(
+            parts::switch_row(
+                "bot-routine-enabled",
+                "On schedule",
+                "Off keeps it, and Run now still works.",
+                routine.enabled,
+                true,
+                theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let mut routine = enabled.clone();
+                routine.enabled = !routine.enabled;
+                this.save_routine_now(routine, cx);
+            })),
+        );
+        match &routine.target {
+            RoutineTarget::Workspace => {
+                let (write_notes, direct) = (routine.clone(), routine.clone());
+                settings = settings
+                    .child(parts::grant_row(
+                        theme,
+                        "Reads the notebook",
+                        "Always, at the start of each run.",
+                        false,
+                    ))
                     .child(
                         parts::switch_row(
-                            "bot-task-enabled",
-                            "On schedule",
-                            "Off keeps it, and Run now still works.",
-                            task.enabled,
-                            true,
-                            theme,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let mut task = enabled.clone();
-                            task.enabled = !task.enabled;
-                            this.save_task_now(task, cx);
-                        })),
-                    )
-                    .child(
-                        parts::switch_row(
-                            "bot-task-worktree",
-                            "New worktree each run",
-                            "Runs never touch your checkout.",
-                            task.worktree,
+                            "bot-routine-notes",
+                            "May write notes",
+                            "Lets runs add to the notebook.",
+                            routine.write_notes,
                             false,
                             theme,
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            let mut task = worktree.clone();
-                            task.worktree = !task.worktree;
-                            this.save_task_now(task, cx);
+                            let mut routine = write_notes.clone();
+                            routine.write_notes = !routine.write_notes;
+                            this.save_routine_now(routine, cx);
                         })),
-                    ),
-            );
+                    )
+                    .child(
+                        parts::switch_row(
+                            "bot-routine-direct",
+                            "May run commands",
+                            if bot.capabilities.work_directly {
+                                "In the workspace's projects on this device, e.g. to run tests."
+                            } else {
+                                "Needs the workspace's Work directly, which is off."
+                            },
+                            routine.work_directly,
+                            false,
+                            theme,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let mut routine = direct.clone();
+                            routine.work_directly = !routine.work_directly;
+                            this.save_routine_now(routine, cx);
+                        })),
+                    );
+            }
+            RoutineTarget::Project { worktree, .. } => {
+                let flip = routine.clone();
+                settings = settings.child(
+                    parts::switch_row(
+                        "bot-routine-worktree",
+                        "Its own worktree",
+                        "Made on the first run and kept, so runs never touch your checkout.",
+                        *worktree,
+                        false,
+                        theme,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let mut routine = flip.clone();
+                        if let RoutineTarget::Project { worktree, .. } = &mut routine.target {
+                            *worktree = !*worktree;
+                        }
+                        this.save_routine_now(routine, cx);
+                    })),
+                );
+            }
+        }
+        body = body
+            .child(parts::section_label(theme, "Settings"))
+            .child(settings);
         Some((head, body))
+    }
+
+    /// Links to where its runs happen: the standing session scheduled runs
+    /// continue, and the last Run now's. `None` before any run.
+    fn session_links(
+        &self,
+        routine: &BotRoutine,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let links = routine_sessions(routine);
+        if links.is_empty() {
+            return None;
+        }
+        let mut line = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap(px(5.0));
+        for (i, (key, label, chat_id)) in links.into_iter().enumerate() {
+            if i > 0 {
+                line = line.child(div().text_color(theme.text_faint).child("·"));
+            }
+            line =
+                line.child(parts::link(key, label, theme).on_click(
+                    cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)),
+                ));
+        }
+        Some(line.into_any_element())
     }
 
     /// Run now, Edit and Delete.
     fn job_actions(&self, job: &Job, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let busy = matches!(job.state(), JobState::Running | JobState::Starting);
         let (run_id, edit_id, delete_id) = (job.id.clone(), job.id.clone(), job.id.clone());
-        let routine = job.kind == JobKind::Routine;
         let name = job.name.clone();
         // The palette's primary button, led by a play glyph.
         let run = div()
@@ -1065,12 +963,10 @@ impl Shell {
             .when(busy, |el| el.opacity(0.55).cursor_default())
             .when(!busy, |el| {
                 el.on_click(cx.listener(move |this, _, _, cx| {
-                    let op = if routine {
-                        serde_json::json!({ "op": "runBotRoutine", "routineId": run_id })
-                    } else {
-                        serde_json::json!({ "op": "runProjectTask", "taskId": run_id })
-                    };
-                    this.board_mutate(op, cx);
+                    this.board_mutate(
+                        serde_json::json!({ "op": "runBotRoutine", "routineId": run_id }),
+                        cx,
+                    );
                 }))
             });
         div()
@@ -1086,12 +982,7 @@ impl Shell {
             .child(
                 parts::action("bot-job-edit", icons::PEN, "Edit", theme.text_muted).on_click(
                     cx.listener(move |this, _, window, cx| {
-                        let target = if routine {
-                            FormTarget::Routine(edit_id.clone())
-                        } else {
-                            FormTarget::Task(edit_id.clone())
-                        };
-                        this.open_job_form(target, Some(window), cx);
+                        this.open_job_form(FormTarget::Routine(edit_id.clone()), Some(window), cx);
                     }),
                 ),
             )
@@ -1105,25 +996,16 @@ impl Shell {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let (id, name) = (delete_id.clone(), name.clone());
-                    this.ask_confirm(
-                        if routine {
-                            parts::Confirm::DeleteRoutine { id, name }
-                        } else {
-                            parts::Confirm::DeleteTask { id, name }
-                        },
-                        cx,
-                    );
+                    this.ask_confirm(parts::Confirm::DeleteRoutine { id, name }, cx);
                 })),
             )
     }
 
-    /// The last run: its outcome and time, a link to where it ran, and
-    /// its summary.
+    /// The last run: its outcome and time (and whether it was run by
+    /// hand), a link to the session it ran in, and its summary.
     fn last_run_value(
         &self,
         run: Option<&RunRecord>,
-        chat_id: Option<String>,
-        link_label: &'static str,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1167,11 +1049,17 @@ impl Shell {
                 div()
                     .text_color(theme.text_muted)
                     .child(SharedString::from(format!(
-                        "· {}",
-                        parts::past_full_ms(run.at)
+                        "· {}{}",
+                        parts::past_full_ms(run.at),
+                        if run.manual { " · run by hand" } else { "" }
                     ))),
             )
-            .when_some(chat_id, |el, chat_id| {
+            .when_some(run.chat_id.clone(), |el, chat_id| {
+                let link_label = if run.outcome == RunOutcome::Running {
+                    "Watch"
+                } else {
+                    "Open session"
+                };
                 el.child(div().text_color(theme.text_faint).child("·"))
                     .child(
                         parts::link("bot-job-last-link", link_label, theme).on_click(
@@ -1203,13 +1091,6 @@ impl Shell {
         );
     }
 
-    fn save_task_now(&mut self, task: ProjectTask, cx: &mut Context<Self>) {
-        self.board_mutate(
-            serde_json::json!({ "op": "saveProjectTask", "task": task }),
-            cx,
-        );
-    }
-
     // ── forms ───────────────────────────────────────────────────────────────
 
     /// Open `target`'s form in the panel. A new-item form keeps its draft
@@ -1231,9 +1112,7 @@ impl Shell {
         }
         let item = match &target {
             FormTarget::NewRoutine => PanelItem::NewRoutine,
-            FormTarget::NewTask => PanelItem::NewTask,
             FormTarget::Routine(id) => PanelItem::Routine(id.clone()),
-            FormTarget::Task(id) => PanelItem::Task(id.clone()),
         };
         self.show_panel(item, cx);
         cx.notify();
@@ -1250,12 +1129,12 @@ impl Shell {
             schedule: Schedule,
             write_notes: bool,
             work_directly: bool,
-            worktree: bool,
             space_id: Option<String>,
+            worktree: bool,
+            model: Option<String>,
         }
         let seed = {
             let state = self.state.read(cx);
-            let records = &state.bot_records;
             match &target {
                 FormTarget::NewRoutine => Seed {
                     name: String::new(),
@@ -1263,69 +1142,36 @@ impl Shell {
                     schedule: Schedule::default(),
                     write_notes: false,
                     work_directly: false,
-                    worktree: true,
                     space_id: None,
-                },
-                FormTarget::NewTask => Seed {
-                    name: String::new(),
-                    prompt: String::new(),
-                    schedule: Schedule::default(),
-                    write_notes: false,
-                    work_directly: false,
                     worktree: true,
-                    space_id: state
-                        .spaces_sorted()
-                        .into_iter()
-                        .find(|s| bot.scope.sees_space(&s.id))
-                        .map(|s| s.id.clone()),
+                    model: None,
                 },
                 FormTarget::Routine(id) => {
-                    let r = records.routines.iter().find(|r| r.id == *id)?;
+                    let r = state.bot_records.routines.iter().find(|r| r.id == *id)?;
+                    let (space_id, worktree, model) = match &r.target {
+                        RoutineTarget::Workspace => (None, true, None),
+                        RoutineTarget::Project {
+                            space_id,
+                            worktree,
+                            model,
+                        } => (Some(space_id.clone()), *worktree, model.clone()),
+                    };
                     Seed {
                         name: r.name.clone(),
                         prompt: r.prompt.clone(),
                         schedule: r.schedule.clone(),
                         write_notes: r.write_notes,
                         work_directly: r.work_directly,
-                        worktree: true,
-                        space_id: None,
-                    }
-                }
-                FormTarget::Task(id) => {
-                    let t = records.tasks.iter().find(|t| t.id == *id)?;
-                    Seed {
-                        name: t.name.clone(),
-                        prompt: t.prompt.clone(),
-                        schedule: t.schedule.clone(),
-                        write_notes: false,
-                        work_directly: false,
-                        worktree: t.worktree,
-                        space_id: Some(t.space_id.clone()),
+                        space_id,
+                        worktree,
+                        model,
                     }
                 }
             }
         };
-        let routine = target.routine();
-        let name = cx.new(|cx| {
-            TextInput::settings_field(
-                if routine {
-                    "Morning summary"
-                } else {
-                    "Nightly tests"
-                },
-                false,
-                cx,
-            )
-        });
+        let name = cx.new(|cx| TextInput::settings_field("Morning summary", false, cx));
         let prompt = cx.new(|cx| {
-            TextInput::settings_prompt_field(
-                if routine {
-                    "What moved, what's stuck, and what needs me?"
-                } else {
-                    "Run the tests and fix anything flaky."
-                },
-                cx,
-            )
+            TextInput::settings_prompt_field("What moved, what's stuck, and what needs me?", cx)
         });
         let time = cx.new(|cx| TextInput::settings_field("09:00", false, cx));
         let every = cx.new(|cx| TextInput::settings_field("2", false, cx));
@@ -1357,8 +1203,9 @@ impl Shell {
             draft,
             write_notes: seed.write_notes,
             work_directly: seed.work_directly,
-            worktree: seed.worktree,
             space_id: seed.space_id,
+            worktree: seed.worktree,
+            model: seed.model,
             error: None,
             busy: false,
             _events: events,
@@ -1371,10 +1218,8 @@ impl Shell {
         };
         match form.target {
             // An edit goes back to the item; a new one back to the list.
-            FormTarget::Routine(_) | FormTarget::Task(_) => {}
-            FormTarget::NewRoutine | FormTarget::NewTask => {
-                self.show_panel(PanelItem::Schedule, cx)
-            }
+            FormTarget::Routine(_) => {}
+            FormTarget::NewRoutine => self.show_panel(PanelItem::Schedule, cx),
         }
         cx.notify();
     }
@@ -1393,70 +1238,52 @@ impl Shell {
             .build(form.time.read(cx).text(), form.every.read(cx).text());
         let now = cypher_proto::now_ms();
         let records = self.state.read(cx).bot_records.clone();
-        let op = built.and_then(|schedule| match &form.target {
-            FormTarget::NewRoutine | FormTarget::Routine(_) => {
-                let existing = match &form.target {
-                    FormTarget::Routine(id) => records.routines.iter().find(|r| r.id == *id),
-                    _ => None,
-                };
-                let routine = BotRoutine {
-                    id: existing.map_or_else(|| uuid::Uuid::new_v4().to_string(), |r| r.id.clone()),
-                    bot_id: form.bot_id.clone(),
-                    name: name.clone(),
-                    prompt,
-                    schedule,
-                    enabled: existing.is_none_or(|r| r.enabled),
-                    write_notes: form.write_notes,
-                    work_directly: form.work_directly,
-                    max_runs_per_day: existing.map_or(24, |r| r.max_runs_per_day),
-                    created_at: existing.map_or(now, |r| r.created_at),
-                    updated_at: now,
-                    run_requested_at: None,
-                    thread_chat_id: None,
-                    last_run: None,
-                    next_run_at: None,
-                    runs_today: 0,
-                    runs_day: None,
-                };
-                routine.validate()?;
-                Ok((
-                    routine.id.clone(),
-                    PanelItem::Routine(routine.id.clone()),
-                    serde_json::json!({ "op": "saveBotRoutine", "routine": routine }),
-                ))
+        let coordinate = {
+            let state = self.state.read(cx);
+            state
+                .bots
+                .iter()
+                .find(|b| b.id == form.bot_id)
+                .is_some_and(|b| b.capabilities.coordinate)
+        };
+        let op = built.and_then(|schedule| {
+            let existing = match &form.target {
+                FormTarget::Routine(id) => records.routines.iter().find(|r| r.id == *id),
+                FormTarget::NewRoutine => None,
+            };
+            let routine = BotRoutine {
+                id: existing.map_or_else(|| uuid::Uuid::new_v4().to_string(), |r| r.id.clone()),
+                bot_id: form.bot_id.clone(),
+                name: name.clone(),
+                prompt,
+                target: form_target(form.space_id.clone(), form.worktree, form.model.clone()),
+                schedule,
+                enabled: existing.is_none_or(|r| r.enabled),
+                write_notes: form.write_notes,
+                work_directly: form.work_directly,
+                max_runs_per_day: existing.map_or(24, |r| r.max_runs_per_day),
+                created_at: existing.map_or(now, |r| r.created_at),
+                updated_at: now,
+                run_requested_at: None,
+                thread_chat_id: None,
+                manual_chat_id: None,
+                worktree_path: None,
+                last_run: None,
+                next_run_at: None,
+                runs_today: 0,
+                runs_day: None,
+            };
+            routine.validate()?;
+            if routine.target.space_id().is_some() && !coordinate {
+                return Err(
+                    "Running in a project needs Coordinate in workspace settings.".to_string(),
+                );
             }
-            FormTarget::NewTask | FormTarget::Task(_) => {
-                let existing = match &form.target {
-                    FormTarget::Task(id) => records.tasks.iter().find(|t| t.id == *id),
-                    _ => None,
-                };
-                let space_id = form
-                    .space_id
-                    .clone()
-                    .ok_or_else(|| "Pick the project it runs in.".to_string())?;
-                let task = ProjectTask {
-                    id: existing.map_or_else(|| uuid::Uuid::new_v4().to_string(), |t| t.id.clone()),
-                    space_id,
-                    name: name.clone(),
-                    prompt,
-                    schedule,
-                    enabled: existing.is_none_or(|t| t.enabled),
-                    worktree: form.worktree,
-                    model: existing.and_then(|t| t.model.clone()),
-                    created_by: existing.and_then(|t| t.created_by.clone()),
-                    created_at: existing.map_or(now, |t| t.created_at),
-                    updated_at: now,
-                    run_requested_at: None,
-                    last_run: None,
-                    next_run_at: None,
-                };
-                task.validate()?;
-                Ok((
-                    task.id.clone(),
-                    PanelItem::Task(task.id.clone()),
-                    serde_json::json!({ "op": "saveProjectTask", "task": task }),
-                ))
-            }
+            Ok((
+                routine.id.clone(),
+                PanelItem::Routine(routine.id.clone()),
+                serde_json::json!({ "op": "saveBotRoutine", "routine": routine }),
+            ))
         });
         let form = self.board.schedule.form.as_mut().expect("checked above");
         let (id, item, op) = match op {
@@ -1510,23 +1337,16 @@ impl Shell {
                 self.board.schedule.form = Some(form);
             }
         }
-        let projects = self.task_projects(bot, cx);
-        let routine = target.routine();
+        let projects = self.routine_projects(bot, cx);
         let head = PanelHead {
-            glyph: if routine { ROUTINE_GLYPH } else { TASK_GLYPH },
-            tint: routine.then(|| bot_tint(bot, theme)),
+            glyph: ROUTINE_GLYPH,
+            tint: Some(bot_tint(bot, theme)),
             title: match &target {
                 FormTarget::NewRoutine => "New routine",
-                FormTarget::NewTask => "New project task",
                 FormTarget::Routine(_) => "Edit routine",
-                FormTarget::Task(_) => "Edit project task",
             }
             .into(),
-            subtitle: if routine {
-                format!("Runs in its own thread; {} posts the result", bot.name)
-            } else {
-                "Each run starts a fresh session in the project".into()
-            },
+            subtitle: format!("Runs unattended; {} posts each result", bot.name),
         };
         let Some(form) = self.board.schedule.form.as_ref() else {
             return (head, div());
@@ -1540,14 +1360,7 @@ impl Shell {
             .flex_col()
             .child(parts::field_label(theme, "Name"))
             .child(parts::field(&form.name))
-            .child(parts::field_label(
-                theme,
-                if routine {
-                    "What it does each run"
-                } else {
-                    "What each session is asked"
-                },
-            ))
+            .child(parts::field_label(theme, "What it does each run"))
             .child(parts::field(&form.prompt));
 
         // ── the schedule editor ──
@@ -1693,145 +1506,191 @@ impl Shell {
                 ),
         );
 
-        // ── what the job may do, and where it runs ──
-        if routine {
-            body = body.child(parts::field_label(theme, "Permissions")).child(
-                parts::group_box()
-                    .child(parts::grant_row(
-                        theme,
-                        "Reads what the workspace reads",
-                        "Its projects, and the notebook.",
-                        true,
-                    ))
-                    .child(
-                        parts::switch_row(
-                            "bot-form-notes",
-                            "May write notes",
-                            "Lets runs add to the notebook.",
-                            form.write_notes,
-                            false,
-                            theme,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(form) = this.board.schedule.form.as_mut() {
-                                form.write_notes = !form.write_notes;
-                            }
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        parts::switch_row(
-                            "bot-form-direct",
-                            "May run commands",
-                            "In the workspace's projects on this device, e.g. to run tests. Anything that needs approval fails the run.",
-                            form.work_directly,
-                            false,
-                            theme,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(form) = this.board.schedule.form.as_mut() {
-                                form.work_directly = !form.work_directly;
-                            }
-                            cx.notify();
-                        })),
-                    ),
-            );
-        } else {
-            let rows = projects.iter().map(|(space, device)| {
-                let on = form.space_id.as_deref() == Some(space.id.as_str());
-                let pick = space.id.clone();
-                let glyph = crate::appearance::space_style::space_icon(space.icon.as_deref());
-                let tint =
-                    crate::appearance::space_style::space_color(space.color.as_deref(), theme)
-                        .unwrap_or(theme.text_muted);
-                div()
-                    .id(SharedString::from(format!("bot-form-project-{}", space.id)))
-                    .h(px(30.0))
-                    .px(px(10.0))
-                    .rounded(px(7.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(9.0))
-                    .cursor_pointer()
-                    .when(on, |el| {
-                        el.bg(crate::kit::theme::card_selected_bg())
-                            .shadow(crate::kit::theme::card_selected_shadows())
-                    })
-                    .when(!on, |el| el.hover(|s| s.bg(theme.element_hover)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+        // ── where it runs, and what it may do there ──
+        let coordinate = bot.capabilities.coordinate;
+        let place_row = |key: String,
+                         glyph: &'static str,
+                         tint: gpui::Hsla,
+                         title: String,
+                         note: String,
+                         on: bool,
+                         enabled: bool,
+                         pick: Option<String>,
+                         cx: &mut Context<Self>| {
+            div()
+                .id(SharedString::from(key))
+                .h(px(30.0))
+                .px(px(10.0))
+                .rounded(px(7.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(9.0))
+                .when(on, |el| {
+                    el.bg(crate::kit::theme::card_selected_bg())
+                        .shadow(crate::kit::theme::card_selected_shadows())
+                })
+                .when(!enabled, |el| el.opacity(0.45))
+                .when(enabled && !on, |el| {
+                    el.cursor_pointer().hover(|s| s.bg(theme.element_hover))
+                })
+                .when(enabled, |el| {
+                    el.on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(form) = this.board.schedule.form.as_mut() {
-                            form.space_id = Some(pick.clone());
+                            form.space_id = pick.clone();
+                            form.error = None;
                         }
                         cx.notify();
                     }))
-                    .child(icon(glyph).size(px(14.0)).text_color(tint))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12.5))
-                            .text_color(theme.text)
-                            .child(SharedString::from(space.display_name().to_string())),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(device.clone())),
-                    )
-                    .when(on, |el| {
-                        el.child(icon(icons::CHECK).size(px(12.0)).text_color(theme.text))
-                    })
-            });
-            body = body
-                .child(parts::field_label(theme, "Project"))
+                })
+                .child(icon(glyph).size(px(14.0)).text_color(tint))
                 .child(
                     div()
-                        .mx(px(8.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .children(rows)
-                        .when(projects.is_empty(), |el| {
-                            el.child(parts::quiet_line(
-                                theme,
-                                format!("{} has no projects yet.", bot.name),
-                            ))
-                        }),
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .text_color(theme.text)
+                        .child(SharedString::from(title)),
                 )
-                .child(div().h(px(10.0)))
                 .child(
-                    parts::group_box().child(
-                        parts::switch_row(
-                            "bot-form-worktree",
-                            "New worktree each run",
-                            "Runs never touch your checkout.",
-                            form.worktree,
-                            true,
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(note)),
+                )
+                .when(on, |el| {
+                    el.child(icon(icons::CHECK).size(px(12.0)).text_color(theme.text))
+                })
+        };
+        let mut places = vec![place_row(
+            "bot-form-place-workspace".into(),
+            ROUTINE_GLYPH,
+            bot_tint(bot, theme),
+            "This workspace".into(),
+            "as its agent".into(),
+            form.space_id.is_none(),
+            true,
+            None,
+            cx,
+        )];
+        for (space, device) in &projects {
+            let glyph = crate::appearance::space_style::space_icon(space.icon.as_deref());
+            let tint = crate::appearance::space_style::space_color(space.color.as_deref(), theme)
+                .unwrap_or(theme.text_muted);
+            let on = form.space_id.as_deref() == Some(space.id.as_str());
+            places.push(place_row(
+                format!("bot-form-project-{}", space.id),
+                glyph,
+                tint,
+                space.display_name().to_string(),
+                device.clone(),
+                on,
+                coordinate || on,
+                Some(space.id.clone()),
+                cx,
+            ));
+        }
+        body = body
+            .child(parts::field_label(theme, "Runs in"))
+            .child(
+                div()
+                    .mx(px(8.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .children(places),
+            )
+            .when(!coordinate && !projects.is_empty(), |el| {
+                el.child(div().mx(px(8.0)).mt(px(6.0)).child(parts::quiet_line(
+                    theme,
+                    "Running in a project needs Coordinate in workspace settings.",
+                )))
+            });
+        match &form.space_id {
+            None => {
+                body = body.child(parts::field_label(theme, "Permissions")).child(
+                    parts::group_box()
+                        .child(parts::grant_row(
                             theme,
+                            "Reads what the workspace reads",
+                            "Its projects, and the notebook.",
+                            true,
+                        ))
+                        .child(
+                            parts::switch_row(
+                                "bot-form-notes",
+                                "May write notes",
+                                "Lets runs add to the notebook.",
+                                form.write_notes,
+                                false,
+                                theme,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(form) = this.board.schedule.form.as_mut() {
+                                    form.write_notes = !form.write_notes;
+                                }
+                                cx.notify();
+                            })),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .child(
+                            parts::switch_row(
+                                "bot-form-direct",
+                                "May run commands",
+                                "In the workspace's projects on this device, e.g. to run tests. \
+                                 Anything that needs approval fails the run.",
+                                form.work_directly,
+                                false,
+                                theme,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(form) = this.board.schedule.form.as_mut() {
+                                    form.work_directly = !form.work_directly;
+                                }
+                                cx.notify();
+                            })),
+                        ),
+                );
+            }
+            Some(_) => {
+                body = body
+                    .child(parts::field_label(theme, "Checkout"))
+                    .child(div().mx(px(8.0)).child(parts::segmented(
+                        "bot-form-checkout",
+                        &[(true, "Its own worktree"), (false, "Project checkout")],
+                        form.worktree,
+                        |this, worktree, cx| {
                             if let Some(form) = this.board.schedule.form.as_mut() {
-                                form.worktree = !form.worktree;
+                                form.worktree = worktree;
                             }
                             cx.notify();
-                        })),
-                    ),
-                );
+                        },
+                        theme,
+                        cx,
+                    )))
+                    .child(div().mx(px(8.0)).mt(px(8.0)).child(parts::quiet_line(
+                        theme,
+                        if form.worktree {
+                            "A worktree made on the first run and kept, so runs never touch \
+                             your checkout. Scheduled runs continue one session; Run now \
+                             starts a fresh one."
+                        } else {
+                            "Runs work in the project's own folder. Scheduled runs continue \
+                             one session; Run now starts a fresh one."
+                        },
+                    )));
+            }
         }
 
-        let new = matches!(target, FormTarget::NewRoutine | FormTarget::NewTask);
+        let new = target == FormTarget::NewRoutine;
         let (footer, cancel, save) = parts::form_footer(
             theme,
             "bot-form",
             form.error.clone(),
             match (new, form.busy) {
                 (_, true) => "Saving…",
-                (true, false) if routine => "Create routine",
-                (true, false) => "Create task",
+                (true, false) => "Create routine",
                 (false, false) => "Save",
             },
             form.busy,
@@ -1864,6 +1723,52 @@ fn lower_first(text: &str) -> String {
     }
 }
 
+/// A routine's mark: the workspace's repeat in the bot's colour, or code
+/// work in its project's colour.
+fn job_mark(
+    job: &Job,
+    space: Option<&Space>,
+    bot_tint: gpui::Hsla,
+    theme: &Theme,
+) -> (&'static str, gpui::Hsla) {
+    match job.kind {
+        JobKind::Workspace => (ROUTINE_GLYPH, bot_tint),
+        JobKind::Project { .. } => (
+            TASK_GLYPH,
+            space
+                .and_then(|s| {
+                    crate::appearance::space_style::space_color(s.color.as_deref(), theme)
+                })
+                .unwrap_or(theme.text_muted),
+        ),
+    }
+}
+
+/// Where a routine's runs can be watched: the standing session scheduled
+/// runs continue, and the last Run now's, as (key, label, chat id).
+pub(super) fn routine_sessions(routine: &BotRoutine) -> Vec<(&'static str, &'static str, String)> {
+    let mut links = Vec::new();
+    if let Some(chat) = &routine.thread_chat_id {
+        links.push(("bot-routine-scheduled", "Scheduled runs", chat.clone()));
+    }
+    if let Some(chat) = &routine.manual_chat_id {
+        links.push(("bot-routine-manual", "Last run by hand", chat.clone()));
+    }
+    links
+}
+
+/// The routine target a form describes.
+fn form_target(space_id: Option<String>, worktree: bool, model: Option<String>) -> RoutineTarget {
+    match space_id {
+        None => RoutineTarget::Workspace,
+        Some(space_id) => RoutineTarget::Project {
+            space_id,
+            worktree,
+            model,
+        },
+    }
+}
+
 /// The bot's own colour (routines wear it), the muted ink without one.
 fn bot_tint(bot: &Bot, theme: &Theme) -> gpui::Hsla {
     crate::appearance::space_style::space_color(bot.color.as_deref(), theme)
@@ -1888,7 +1793,7 @@ mod tests {
 
     fn job(id: &str, schedule: Schedule, enabled: bool, next: Option<i64>) -> Job {
         Job {
-            kind: JobKind::Routine,
+            kind: JobKind::Workspace,
             id: id.into(),
             name: id.into(),
             schedule,
@@ -1906,6 +1811,7 @@ mod tests {
             outcome,
             summary: None,
             chat_id: None,
+            manual: false,
         }
     }
 
@@ -1959,14 +1865,15 @@ mod tests {
     #[test]
     fn rows_name_their_trigger_and_next_run() {
         let routine = job("r", daily("09:00", vec![]), true, None);
-        assert_eq!(job_sub(&routine, None), "Routine · Daily 09:00");
-        let task = Job {
-            kind: JobKind::Task {
+        assert_eq!(job_sub(&routine, None), "This workspace · Daily 09:00");
+        let project = Job {
+            kind: JobKind::Project {
                 space_id: "web".into(),
             },
             ..job("t", daily("18:30", vec![1, 2, 3, 4, 5]), true, None)
         };
-        assert_eq!(job_sub(&task, Some("Web")), "Web · Weekdays 18:30");
+        assert_eq!(job_sub(&project, Some("Web")), "Web · Weekdays 18:30");
+        assert_eq!(project.item(), PanelItem::Routine("t".into()));
         let now = at("2026-10-18T10:00:00+01:00");
         let next = at("2026-10-19T02:00:00+01:00").timestamp_millis();
         assert_eq!(state_note(JobState::Next(next), &now), "Mon");
@@ -2033,6 +1940,7 @@ mod tests {
             bot_id: "b".into(),
             name: " ".into(),
             prompt: "Summarize".into(),
+            target: RoutineTarget::Workspace,
             schedule: Schedule::default(),
             enabled: true,
             write_notes: false,
@@ -2042,11 +1950,69 @@ mod tests {
             updated_at: 0,
             run_requested_at: None,
             thread_chat_id: None,
+            manual_chat_id: None,
+            worktree_path: None,
             last_run: None,
             next_run_at: None,
             runs_today: 0,
             runs_day: None,
         };
         assert_eq!(routine.validate(), Err("Name the routine.".into()));
+    }
+
+    #[test]
+    fn forms_say_where_a_routine_runs() {
+        assert_eq!(form_target(None, true, None), RoutineTarget::Workspace);
+        let target = form_target(Some("web".into()), false, Some("haiku".into()));
+        assert_eq!(
+            serde_json::to_value(&target).unwrap(),
+            serde_json::json!({
+                "kind": "project", "spaceId": "web", "worktree": false, "model": "haiku",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(RoutineTarget::Workspace).unwrap(),
+            serde_json::json!({ "kind": "workspace" })
+        );
+    }
+
+    #[test]
+    fn its_sessions_link_the_scheduled_and_the_manual_run() {
+        let mut routine = BotRoutine {
+            id: "r".into(),
+            bot_id: "b".into(),
+            name: "n".into(),
+            prompt: "p".into(),
+            target: RoutineTarget::Workspace,
+            schedule: Schedule::Manual,
+            enabled: true,
+            write_notes: false,
+            work_directly: false,
+            max_runs_per_day: 24,
+            created_at: 0,
+            updated_at: 0,
+            run_requested_at: None,
+            thread_chat_id: None,
+            manual_chat_id: None,
+            worktree_path: None,
+            last_run: None,
+            next_run_at: None,
+            runs_today: 0,
+            runs_day: None,
+        };
+        assert!(routine_sessions(&routine).is_empty());
+        routine.thread_chat_id = Some("standing".into());
+        routine.manual_chat_id = Some("fresh".into());
+        let links: Vec<(&str, String)> = routine_sessions(&routine)
+            .into_iter()
+            .map(|(_, label, chat)| (label, chat))
+            .collect();
+        assert_eq!(
+            links,
+            [
+                ("Scheduled runs", "standing".to_string()),
+                ("Last run by hand", "fresh".to_string())
+            ]
+        );
     }
 }

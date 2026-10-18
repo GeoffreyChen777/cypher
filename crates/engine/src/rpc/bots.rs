@@ -172,6 +172,24 @@ impl EngineRpc {
             MutateParams::SaveBotRoutine { mut routine } => {
                 routine.clamp();
                 routine.validate().map_err(RpcError::BadParams)?;
+                if let Some(space_id) = routine.target.space_id() {
+                    let bot = ws
+                        .bot(&routine.bot_id)
+                        .map_err(failed)?
+                        .ok_or_else(|| missing("workspace"))?;
+                    if !bot.capabilities.coordinate {
+                        return Err(RpcError::BadParams(
+                            "Running a routine in a project needs the workspace's Coordinate \
+                             permission."
+                                .into(),
+                        ));
+                    }
+                    if !bot.scope.sees_space(space_id) {
+                        return Err(RpcError::BadParams(
+                            "The workspace has no access to that project.".into(),
+                        ));
+                    }
+                }
                 routine.updated_at = now;
                 ws.put_record(
                     p::KIND_BOT_ROUTINES,
@@ -182,7 +200,17 @@ impl EngineRpc {
                 .map_err(failed)?;
             }
             MutateParams::DeleteBotRoutine { routine_id } => {
+                // Its sessions go with it; a worktree it made stays on disk.
+                let sessions = ws
+                    .record::<p::BotRoutine>(p::KIND_BOT_ROUTINES, &routine_id)
+                    .map(|r| [r.thread_chat_id, r.manual_chat_id])
+                    .unwrap_or_default();
                 ws.delete_records(p::KIND_BOT_ROUTINES, &[routine_id]);
+                for chat in sessions.into_iter().flatten() {
+                    if let Err(err) = ws.delete_chat(&chat) {
+                        tracing::warn!(chat = %chat, error = %err, "routine session not deleted");
+                    }
+                }
             }
             MutateParams::RunBotRoutine { routine_id } => {
                 if !ws
@@ -194,33 +222,6 @@ impl EngineRpc {
                     .map_err(failed)?
                 {
                     return Err(missing("routine"));
-                }
-            }
-            MutateParams::SaveProjectTask { mut task } => {
-                task.clamp();
-                task.validate().map_err(RpcError::BadParams)?;
-                task.updated_at = now;
-                ws.put_record(
-                    p::KIND_PROJECT_TASKS,
-                    &task.id.clone(),
-                    &task,
-                    Fields::Except(&[p::ProjectTask::HOST_FIELDS, &["runRequestedAt"]].concat()),
-                )
-                .map_err(failed)?;
-            }
-            MutateParams::DeleteProjectTask { task_id } => {
-                ws.delete_records(p::KIND_PROJECT_TASKS, &[task_id]);
-            }
-            MutateParams::RunProjectTask { task_id } => {
-                if !ws
-                    .update_record(
-                        p::KIND_PROJECT_TASKS,
-                        &task_id,
-                        fields(&[("runRequestedAt", now.into())]),
-                    )
-                    .map_err(failed)?
-                {
-                    return Err(missing("task"));
                 }
             }
             MutateParams::UpdateBotConnection {

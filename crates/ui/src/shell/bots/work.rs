@@ -548,7 +548,8 @@ impl Shell {
                         "Back to the work",
                     )
                 }
-                cypher_proto::BotThread::Routine { routine_id } => {
+                cypher_proto::BotThread::Routine { routine_id }
+                | cypher_proto::BotThread::RoutineSession { routine_id } => {
                     let routine = records.routines.iter().find(|r| &r.id == routine_id)?;
                     (
                         routine.name.clone(),

@@ -1247,7 +1247,6 @@ impl RegistryDoc {
             work: self.read_records(p::KIND_BOT_WORK),
             notes: self.read_records(p::KIND_BOT_NOTES),
             routines: self.read_records(p::KIND_BOT_ROUTINES),
-            tasks: self.read_records(p::KIND_PROJECT_TASKS),
             activity: self.read_records(p::KIND_BOT_ACTIVITY),
             approvals: self.read_records(p::KIND_BOT_APPROVALS),
             connections: self.read_records(p::KIND_BOT_CONNECTIONS),
@@ -1263,9 +1262,6 @@ impl RegistryDoc {
             .sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.id.cmp(&b.id)));
         records
             .routines
-            .sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
-        records
-            .tasks
             .sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
         records
             .activity

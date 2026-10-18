@@ -14,10 +14,11 @@ use cypher_proto::{
 use super::{memory, network, prompt, work};
 use crate::host::workspace_host::WorkspaceHost;
 
-/// The run env for a bot thread; `None` for every other chat. A thread whose
-/// bot row is gone still runs locked down, seeing nothing.
+/// The run env for a bot thread; `None` for every other chat, a project
+/// routine's session included. A thread whose bot row is gone still runs
+/// locked down, seeing nothing.
 pub fn bot_env(workspace: &WorkspaceHost, chat: &Chat) -> Option<BotRunEnv> {
-    let marker = chat.bot.as_ref()?;
+    let marker = chat.bot.as_ref().filter(|m| m.is_bot_thread())?;
     let mut bot = workspace.bot(&marker.bot_id).ok().flatten();
     // A peer thread describes the scope it reads (bot ∩ connection) and
     // who is asking.
@@ -111,22 +112,12 @@ pub fn run_sandbox(workspace: &WorkspaceHost, chat: &Chat) -> Option<SandboxLeve
 /// answer: the engine denies every question and approval such a run asks
 /// and settles the run as failed (§8). Routine threads; orchestration
 /// threads, which are hidden: a permission prompt there would stall the
-/// work where nobody sees it, so it fails the work instead (§6.5); and a
-/// recurring project task's session while the scheduled run it was started
-/// for is going (a later message from the owner runs attended).
-pub fn is_unattended(workspace: &WorkspaceHost, chat: &Chat) -> bool {
-    if let Some(marker) = &chat.bot {
-        return marker.origin == BotOrigin::Routine
-            || matches!(marker.thread, BotThread::Work { .. });
-    }
-    chat.space_id.is_some()
-        && chat.child.is_none()
-        && workspace.read_bot_records().tasks.iter().any(|task| {
-            task.last_run.as_ref().is_some_and(|run| {
-                run.outcome == cypher_proto::RunOutcome::Running
-                    && run.chat_id.as_deref() == Some(chat.id.as_str())
-            })
-        })
+/// work where nobody sees it, so it fails the work instead (§6.5). A project
+/// routine's session is a routine's too (origin routine).
+pub fn is_unattended(_workspace: &WorkspaceHost, chat: &Chat) -> bool {
+    chat.bot.as_ref().is_some_and(|marker| {
+        marker.origin == BotOrigin::Routine || matches!(marker.thread, BotThread::Work { .. })
+    })
 }
 
 /// An unattended run the engine stopped because it asked for input. The
@@ -248,7 +239,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routine_threads_and_running_task_sessions_are_unattended() {
+    async fn routine_threads_and_routine_sessions_are_unattended() {
         let dir = tempfile::tempdir().unwrap();
         let ws = WorkspaceHost::open(
             std::sync::Arc::new(cypher_sync::DocsStore::open(dir.path()).unwrap()),
@@ -284,50 +275,17 @@ mod tests {
             )))
         ));
 
-        // A task session, while the run it was started for is going.
-        let session = Chat {
-            space_id: Some("sp".into()),
-            ..chat(None)
-        };
-        let mut task = cypher_proto::ProjectTask {
-            id: "t".into(),
-            space_id: "sp".into(),
-            name: "Nightly".into(),
-            prompt: "Run the tests".into(),
-            schedule: cypher_proto::Schedule::Manual,
-            enabled: true,
-            worktree: false,
-            model: None,
-            created_by: None,
-            created_at: 0,
-            updated_at: 0,
-            run_requested_at: None,
-            last_run: Some(cypher_proto::RunRecord {
-                at: 1,
-                ended_at: None,
-                outcome: cypher_proto::RunOutcome::Running,
-                summary: None,
-                chat_id: Some("c1".into()),
-            }),
-            next_run_at: None,
-        };
-        let put = |task: &cypher_proto::ProjectTask| {
-            ws.put_record(
-                cypher_proto::KIND_PROJECT_TASKS,
-                &task.id,
-                task,
-                crate::host::workspace_host::Fields::All,
-            )
-            .unwrap()
-        };
-        put(&task);
+        // A project routine's session: unattended, but a plain session.
+        let session = chat(Some(BotChat::thread(
+            "b1",
+            BotOrigin::Routine,
+            BotThread::RoutineSession {
+                routine_id: "r".into(),
+            },
+        )));
         assert!(is_unattended(&ws, &session));
-        task.last_run.as_mut().unwrap().outcome = cypher_proto::RunOutcome::Done;
-        put(&task);
-        assert!(
-            !is_unattended(&ws, &session),
-            "the owner's later messages run attended"
-        );
+        assert!(bot_env(&ws, &session).is_none());
+        assert!(run_sandbox(&ws, &session).is_none());
     }
 
     #[test]

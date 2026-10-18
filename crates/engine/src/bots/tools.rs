@@ -307,7 +307,11 @@ impl Bots {
         let workspace = &self.inner.workspace;
         let not_a_bot = || EngineError::Other("This chat is not a workspace's agent.".into());
         let chat = workspace.chat(chat_id)?.ok_or_else(not_a_bot)?;
-        let marker = chat.bot.as_ref().ok_or_else(not_a_bot)?;
+        let marker = chat
+            .bot
+            .as_ref()
+            .filter(|m| m.is_bot_thread())
+            .ok_or_else(not_a_bot)?;
         if chat.device_id != workspace.device_id() {
             return Err(not_a_bot());
         }

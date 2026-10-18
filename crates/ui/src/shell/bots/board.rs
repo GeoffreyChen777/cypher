@@ -139,17 +139,16 @@ pub(super) fn card_of(
         | PanelItem::Asking { .. }
         | PanelItem::Review(_) => "needs",
         PanelItem::Work | PanelItem::WorkItem(_) => "work",
-        PanelItem::Schedule
-        | PanelItem::Routine(_)
-        | PanelItem::Task(_)
-        | PanelItem::NewRoutine
-        | PanelItem::NewTask => "schedule",
+        PanelItem::Schedule | PanelItem::Routine(_) | PanelItem::NewRoutine => "schedule",
         PanelItem::Notebook => "notebook",
         // The log opens from the Work panel and the chat header.
         PanelItem::Activity => "work",
         PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => "network",
         PanelItem::Thread(chat_id) => match thread_kind(chat_id) {
-            Some(cypher_proto::BotThread::Routine { .. }) => "schedule",
+            Some(
+                cypher_proto::BotThread::Routine { .. }
+                | cypher_proto::BotThread::RoutineSession { .. },
+            ) => "schedule",
             Some(cypher_proto::BotThread::Peer { .. }) => "network",
             _ => "work",
         },
@@ -842,6 +841,12 @@ mod tests {
             })
         };
         assert_eq!(card_of(&PanelItem::Thread("t".into()), routine), "schedule");
+        let session = |_: &str| {
+            Some(cypher_proto::BotThread::RoutineSession {
+                routine_id: "r".into(),
+            })
+        };
+        assert_eq!(card_of(&PanelItem::Thread("t".into()), session), "schedule");
         assert_eq!(card_of(&PanelItem::Thread("t".into()), none), "work");
         let drawn = ["needs", "work", "projects"];
         assert_eq!(focused_card(None, &drawn), None, "nothing floats");

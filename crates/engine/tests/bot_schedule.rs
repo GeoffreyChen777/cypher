@@ -1,7 +1,8 @@
 //! Memory and routines against a real engine (docs/design/agent-bots.md
 //! §7–§8): the notebook tools by origin, routines that run in their own
 //! thread and post into the bot chat, failures, run-now, the pause switch,
-//! and recurring project tasks that start sessions (in a worktree when asked).
+//! and project routines that run as plain sessions (in their own worktree
+//! when asked).
 
 mod common;
 
@@ -16,8 +17,8 @@ use cypher_doc::MessagePart;
 use cypher_engine::EngineCore;
 use cypher_proto::{
     self as p, Bot, BotChat, BotOrigin, BotPost, BotRoutine, BotScope, BotThread, HarnessId,
-    PermissionPrompt, PermissionPromptKind, ProjectGrant, ProjectTask, RunOutcome, RunRequest,
-    Schedule, UserInputQuestion,
+    PermissionPrompt, PermissionPromptKind, ProjectGrant, RunOutcome, RunRequest, Schedule,
+    UserInputQuestion,
 };
 
 use common::{TestHarness, wait_for_within};
@@ -164,6 +165,7 @@ fn routine_def(id: &str, bot: &Bot, prompt: &str, schedule: Schedule) -> BotRout
         bot_id: bot.id.clone(),
         name: "Morning brief".into(),
         prompt: prompt.into(),
+        target: p::RoutineTarget::Workspace,
         schedule,
         enabled: true,
         write_notes: false,
@@ -173,6 +175,8 @@ fn routine_def(id: &str, bot: &Bot, prompt: &str, schedule: Schedule) -> BotRout
         updated_at: 0,
         run_requested_at: None,
         thread_chat_id: None,
+        manual_chat_id: None,
+        worktree_path: None,
         last_run: None,
         next_run_at: None,
         runs_today: 0,
@@ -192,12 +196,6 @@ fn routine(core: &EngineCore, id: &str) -> BotRoutine {
     core.workspace
         .record(p::KIND_BOT_ROUTINES, id)
         .expect("the routine row")
-}
-
-fn task(core: &EngineCore, id: &str) -> ProjectTask {
-    core.workspace
-        .record(p::KIND_PROJECT_TASKS, id)
-        .expect("the task row")
 }
 
 async fn wait_for(predicate: impl FnMut() -> bool, what: &str) {
@@ -423,7 +421,10 @@ async fn run_now_failures_and_the_pause_switch() {
         skipped.last_run.unwrap().summary.as_deref(),
         Some("Skipped: the workspace is paused.")
     );
-    assert!(skipped.thread_chat_id.is_none(), "no thread, no run");
+    assert!(
+        skipped.thread_chat_id.is_none() && skipped.manual_chat_id.is_none(),
+        "no session, no run"
+    );
 
     // Resumed, a new request runs; a spent budget skips the next one.
     mutate(
@@ -466,7 +467,7 @@ async fn run_now_failures_and_the_pause_switch() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_project_task_starts_a_session_in_a_new_worktree() {
+async fn a_project_routine_runs_as_a_plain_session_in_its_own_worktree() {
     let Rig {
         core, runs, dir, ..
     } = rig().await;
@@ -474,66 +475,59 @@ async fn a_project_task_starts_a_session_in_a_new_worktree() {
     let saved = tool(
         &core,
         &bot.chat_id,
-        "save_project_task",
+        "save_routine",
         serde_json::json!({
             "project": "web",
             "name": "Nightly tests",
             "prompt": "Run the tests and fix anything flaky",
-            "schedule": { "kind": "manual" },
+            "schedule": { "kind": "interval", "minutes": 60 },
             "worktree": true,
         }),
     )
     .await;
-    assert!(
-        saved.starts_with("Saved task \"Nightly tests\" in web"),
-        "{saved}"
-    );
-    let task_id = core.workspace.read_bot_records().tasks[0].id.clone();
+    assert!(saved.contains("an ordinary session in web"), "{saved}");
+    let id = core.workspace.read_bot_records().routines[0].id.clone();
     assert_eq!(
-        task(&core, &task_id).created_by.as_deref(),
-        Some(bot.id.as_str())
+        routine(&core, &id).target,
+        p::RoutineTarget::Project {
+            space_id: "sp-web".into(),
+            worktree: true,
+            model: None,
+        }
     );
 
+    // Run now: a fresh session in the project, hidden, run as a plain one.
     mutate(
         &core,
-        serde_json::json!({ "op": "runProjectTask", "taskId": task_id }),
+        serde_json::json!({ "op": "runBotRoutine", "routineId": id }),
     )
     .await;
     wait_for(
-        || {
-            task(&core, &task_id)
-                .last_run
-                .is_some_and(|r| r.outcome == RunOutcome::Done)
-        },
-        "the task run to finish",
+        || last_outcome(&core, &id) == Some(RunOutcome::Done),
+        "the manual run",
     )
     .await;
-    let run = task(&core, &task_id).last_run.unwrap();
-    let session_id = run.chat_id.clone().expect("its session");
-    assert_eq!(
-        run.summary.as_deref(),
-        Some("Report: Run the tests and fix anything flaky")
-    );
-    let session = core.workspace.chat(&session_id).unwrap().unwrap();
+    let first = routine(&core, &id);
+    let run = first.last_run.clone().unwrap();
+    assert!(run.manual);
+    let manual = first.manual_chat_id.clone().expect("its manual session");
+    assert_eq!(run.chat_id.as_deref(), Some(manual.as_str()));
+    assert!(first.thread_chat_id.is_none(), "no scheduled run yet");
+    let session = core.workspace.chat(&manual).unwrap().unwrap();
     assert_eq!(session.space_id.as_deref(), Some("sp-web"));
-    assert!(session.bot.is_none(), "an ordinary session");
-    assert!(
-        session
-            .title
-            .as_deref()
-            .is_some_and(|t| t.starts_with("Nightly tests · ")),
-        "{:?}",
-        session.title
+    assert_eq!(
+        session.bot,
+        Some(BotChat::thread(
+            &bot.id,
+            BotOrigin::Routine,
+            BotThread::RoutineSession {
+                routine_id: id.clone()
+            }
+        ))
     );
     let worktrees = dir.path().canonicalize().unwrap().join("worktrees");
     let cwd = session.cwd.clone().unwrap();
     assert!(Path::new(&cwd).starts_with(&worktrees), "{cwd}");
-    assert!(
-        session
-            .branch
-            .as_deref()
-            .is_some_and(|b| b.starts_with("cypher/"))
-    );
     let (request, env) = runs
         .lock()
         .unwrap()
@@ -541,66 +535,206 @@ async fn a_project_task_starts_a_session_in_a_new_worktree() {
         .find(|(r, _)| r.prompt.contains("Run the tests"))
         .cloned()
         .expect("the run reached the harness");
-    assert!(env.is_none(), "a plain session, not a bot thread");
+    assert!(env.is_none(), "a plain session, not a workspace thread");
     assert_eq!(request.cwd, cwd);
-
-    let activity = core.workspace.read_bot_records().activity;
     assert!(
-        activity.iter().any(|a| a.kind == p::ActivityKind::TaskRan
-            && a.bot_id == bot.id
-            && a.chat_id.as_deref() == Some(session_id.as_str())),
-        "{activity:?}"
+        request
+            .prompt
+            .starts_with("This is a run of the routine \"Nightly tests\""),
+        "the agent is told nobody watches: {}",
+        request.prompt
     );
-    let schedule = tool(&core, &bot.chat_id, "list_schedule", serde_json::json!({})).await;
-    assert!(schedule.contains("\"Nightly tests\" in web"), "{schedule}");
-    assert!(
-        schedule.contains(&format!("session {session_id}")),
-        "{schedule}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_task_run_that_asks_fails_unattended() {
-    let Rig {
-        core, dir: _dir, ..
-    } = rig().await;
-    let now = p::now_ms();
-    let def = ProjectTask {
-        id: "t-ask".into(),
-        space_id: "sp-web".into(),
-        name: "Cleanup".into(),
-        prompt: "ASK to delete the build folder".into(),
-        schedule: Schedule::Manual,
-        enabled: true,
-        worktree: false,
-        model: None,
-        created_by: None,
-        created_at: now,
-        updated_at: now,
-        run_requested_at: None,
-        last_run: None,
-        next_run_at: None,
-    };
-    mutate(
-        &core,
-        serde_json::json!({ "op": "saveProjectTask", "task": def }),
-    )
-    .await;
-    mutate(
-        &core,
-        serde_json::json!({ "op": "runProjectTask", "taskId": "t-ask" }),
+    let shown = common::entries(&core, &manual)
+        .into_iter()
+        .flat_map(|e| e.parts)
+        .find_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .expect("the run's prompt in the session");
+    assert!(shown.starts_with("Routine \"Nightly tests\" · "), "{shown}");
+    wait_for(
+        || routine(&core, &id).worktree_path.as_deref() == Some(cwd.as_str()),
+        "the routine to keep its worktree",
     )
     .await;
     wait_for(
         || {
-            task(&core, "t-ask")
-                .last_run
-                .is_some_and(|r| r.outcome == RunOutcome::Failed)
+            posts(&core, &bot.chat_id).iter().any(|(_, from)| {
+                matches!(from, BotPost::Routine { thread_chat_id: Some(chat), .. } if *chat == manual)
+            })
         },
-        "the task run to fail",
+        "the result posted to the workspace chat",
     )
     .await;
-    let run = task(&core, "t-ask").last_run.unwrap();
+
+    // Run now again: another fresh session in the same worktree; the last
+    // manual one is deleted.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    mutate(
+        &core,
+        serde_json::json!({ "op": "runBotRoutine", "routineId": id }),
+    )
+    .await;
+    wait_for(
+        || {
+            routine(&core, &id)
+                .manual_chat_id
+                .is_some_and(|chat| chat != manual)
+                && last_outcome(&core, &id) == Some(RunOutcome::Done)
+        },
+        "the second manual run",
+    )
+    .await;
+    let second = routine(&core, &id).manual_chat_id.unwrap();
+    assert!(
+        core.workspace.chat(&manual).unwrap().is_none(),
+        "the last manual run's session is replaced"
+    );
+    let again = core.workspace.chat(&second).unwrap().unwrap();
+    assert_eq!(
+        again.cwd.as_deref(),
+        Some(cwd.as_str()),
+        "the same worktree"
+    );
+
+    // Scheduled runs continue one standing session.
+    let due = || {
+        let fields = serde_json::json!({ "nextRunAt": p::now_ms() - 60_000 });
+        core.workspace
+            .update_record(
+                p::KIND_BOT_ROUTINES,
+                &id,
+                fields.as_object().unwrap().clone(),
+            )
+            .unwrap();
+    };
+    due();
+    wait_for(
+        || {
+            let r = routine(&core, &id);
+            r.thread_chat_id.is_some()
+                && r.last_run
+                    .is_some_and(|run| !run.manual && run.outcome == RunOutcome::Done)
+        },
+        "the scheduled run",
+    )
+    .await;
+    let standing = routine(&core, &id).thread_chat_id.unwrap();
+    assert_ne!(standing, second);
+    let at = routine(&core, &id).last_run.unwrap().at;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    due();
+    wait_for(
+        || {
+            routine(&core, &id)
+                .last_run
+                .is_some_and(|run| run.at > at && run.outcome == RunOutcome::Done)
+        },
+        "the next scheduled run",
+    )
+    .await;
+    let after = routine(&core, &id);
+    assert_eq!(after.thread_chat_id.as_deref(), Some(standing.as_str()));
+    assert_eq!(
+        after.last_run.unwrap().chat_id.as_deref(),
+        Some(standing.as_str())
+    );
+    assert_eq!(
+        core.workspace
+            .chat(&standing)
+            .unwrap()
+            .unwrap()
+            .cwd
+            .as_deref(),
+        Some(cwd.as_str())
+    );
+    assert!(
+        core.workspace.chat(&second).unwrap().is_some(),
+        "scheduled runs leave the manual one"
+    );
+    let schedule = tool(&core, &bot.chat_id, "list_schedule", serde_json::json!({})).await;
+    assert!(
+        schedule.contains("a session in web on") && schedule.contains("its own worktree"),
+        "{schedule}"
+    );
+
+    // Deleting the routine deletes its sessions.
+    mutate(
+        &core,
+        serde_json::json!({ "op": "deleteBotRoutine", "routineId": id }),
+    )
+    .await;
+    assert!(core.workspace.chat(&standing).unwrap().is_none());
+    assert!(core.workspace.chat(&second).unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_routines_need_coordinate_and_run_unattended() {
+    let Rig {
+        core, dir: _dir, ..
+    } = rig().await;
+    let client = cypher_rpc::memory_client(core.rpc_service());
+
+    // Without Coordinate, neither the agent nor the owner can make one.
+    let reader = create_bot(&core, false).await;
+    let refused = client
+        .call(
+            cypher_rpc::methods::BOT_TOOL,
+            serde_json::json!({
+                "chatId": reader.chat_id,
+                "tool": "save_routine",
+                "args": {
+                    "project": "web",
+                    "name": "Cleanup",
+                    "prompt": "Delete the build folder",
+                    "schedule": { "kind": "manual" },
+                },
+            }),
+        )
+        .await;
+    let text = match refused {
+        Ok(reply) => reply["text"].as_str().unwrap_or_default().to_string(),
+        Err(err) => err.to_string(),
+    };
+    assert!(text.contains("Coordinate"), "{text}");
+    let mut def = routine_def(
+        "r-clean",
+        &reader,
+        "ASK to delete the build folder",
+        Schedule::Manual,
+    );
+    def.target = p::RoutineTarget::Project {
+        space_id: "sp-web".into(),
+        worktree: false,
+        model: None,
+    };
+    let owner = client
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "saveBotRoutine", "routine": def }),
+        )
+        .await;
+    assert!(
+        owner.is_err_and(|err| err.to_string().contains("Coordinate")),
+        "the owner op refuses it too"
+    );
+
+    // With it, a run that asks fails unattended in the project's checkout.
+    let bot = create_bot(&core, true).await;
+    def.bot_id = bot.id.clone();
+    save_routine(&core, &def).await;
+    mutate(
+        &core,
+        serde_json::json!({ "op": "runBotRoutine", "routineId": "r-clean" }),
+    )
+    .await;
+    wait_for(
+        || last_outcome(&core, "r-clean") == Some(RunOutcome::Failed),
+        "the asking run to fail",
+    )
+    .await;
+    let run = routine(&core, "r-clean").last_run.unwrap();
     assert!(
         run.summary
             .as_deref()
@@ -608,6 +742,12 @@ async fn a_task_run_that_asks_fails_unattended() {
         "{run:?}"
     );
     let session = run.chat_id.unwrap();
+    let web = core.workspace.space("sp-web").unwrap().unwrap();
+    assert_eq!(
+        core.workspace.chat(&session).unwrap().unwrap().cwd,
+        Some(web.path.clone()),
+        "the project's checkout"
+    );
     let parts: Vec<MessagePart> = common::entries(&core, &session)
         .into_iter()
         .flat_map(|e| e.parts)
@@ -616,6 +756,24 @@ async fn a_task_run_that_asks_fails_unattended() {
         !parts.iter().any(|p| matches!(p, MessagePart::Input { .. })),
         "no approval card waits in the session: {parts:?}"
     );
+
+    // Pausing the workspace skips its project routines too.
+    mutate(
+        &core,
+        serde_json::json!({ "op": "setBotPaused", "botId": bot.id, "paused": true }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    mutate(
+        &core,
+        serde_json::json!({ "op": "runBotRoutine", "routineId": "r-clean" }),
+    )
+    .await;
+    wait_for(
+        || last_outcome(&core, "r-clean") == Some(RunOutcome::Skipped),
+        "the paused run to be skipped",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -781,11 +939,11 @@ async fn notes_follow_the_thread_that_writes_them() {
     )
     .await;
     assert_eq!(bad, "Run at most every 15 minutes.");
-    // Tasks need Coordinate.
+    // A routine in a project needs Coordinate.
     let refused = tool(
         &core,
         &bot.chat_id,
-        "save_project_task",
+        "save_routine",
         serde_json::json!({
             "project": "web", "name": "n", "prompt": "p", "schedule": { "kind": "manual" },
         }),
@@ -904,7 +1062,7 @@ async fn a_run_cut_off_by_a_restart_settles_on_the_next_start() {
     wait_for(
         || {
             routine(&core, "r-cut")
-                .thread_chat_id
+                .manual_chat_id
                 .is_some_and(|t| common::status(&core, &t) == Some(p::SessionStatus::Working))
         },
         "the routine run to start",
