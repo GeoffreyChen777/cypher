@@ -1280,7 +1280,7 @@ fn redispatch_orphans(scope: &RunScope<'_>, orphans: Vec<RoutedSteer>) {
             };
             request.prompt = steer.prompt.clone();
             request.resume = None;
-            request.attachments = Vec::new();
+            request.attachments = steer.attachments.clone();
             tracing::info!(chat = %chat, "re-dispatching steer orphaned by a dying run");
             if let Err(err) = engine
                 .dispatch_augmented(

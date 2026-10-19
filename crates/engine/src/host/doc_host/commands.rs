@@ -212,8 +212,17 @@ impl DocHost {
         if let Some(wanted) = &wanted {
             sessions.retire_stale_run(chat_id, wanted).await?;
         }
+        // Steer has no attachments field: every client sends the staged
+        // paths only as the prompt's refs trailer.
+        let attachments = cypher_proto::attachment_refs::paths(prompt);
         match sessions
-            .steer_augmented(chat_id, prompt, agent_prompt.clone(), message_id.clone())
+            .steer_augmented(
+                chat_id,
+                prompt,
+                agent_prompt.clone(),
+                attachments.clone(),
+                message_id.clone(),
+            )
             .await?
         {
             SteerOutcome::Accepted => Ok((SessionCommandStatus::Applied, None)),
@@ -238,10 +247,9 @@ impl DocHost {
                     wanted.apply_to(&mut request);
                 }
                 request.resume = None; // dispatch re-derives the harness session
-                // A reused config must not re-inline the PREVIOUS
-                // turn's images; this steer's own refs (if any) already
-                // ride the prompt text.
-                request.attachments = Vec::new();
+                // This steer's own attachments — never the PREVIOUS turn's
+                // a reused config carries.
+                request.attachments = attachments;
                 let harness = self.harness_for_request(chat_id, &request);
                 sessions
                     .dispatch_augmented(

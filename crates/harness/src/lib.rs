@@ -30,6 +30,9 @@ pub enum HarnessError {
 pub struct SteerMessage {
     pub prompt: String,
     pub message_id: Option<String>,
+    /// This message's own attachments, as [`RunRequest::attachments`]: their
+    /// refs already ride `prompt`, and the harness inlines the images.
+    pub attachments: Vec<String>,
 }
 
 /// Private, ephemeral UI channel for settings commands. Never journal these
