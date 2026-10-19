@@ -267,6 +267,7 @@ async fn accepted_steer_delivers_agent_prompt_but_keeps_visible_entry() {
             CHAT,
             visible_steer,
             Some(augmented_steer.to_string()),
+            Vec::new(),
             Some("msg-2".to_string()),
         )
         .await
@@ -399,6 +400,7 @@ async fn accepted_steer_records_its_comments_and_strips_alignment() {
             CHAT,
             "follow-up",
             Some(augmented.clone()),
+            Vec::new(),
             Some("msg-2".to_string()),
         )
         .await

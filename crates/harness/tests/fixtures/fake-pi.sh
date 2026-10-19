@@ -375,6 +375,39 @@ while read -r line; do
       emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"steer\",\"success\":false,\"error\":\"mid-turn message must ride an atomic prompt\"}"
       exit 1
       ;;
+    *scenario:mailbox-images*)
+      # Every mailbox message inlines its OWN images, not just the run's
+      # first prompt: the routed mid-turn prompt and the parked restart are
+      # each refused without an `images` block.
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}"
+      emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+      emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"first"}}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"first"}],"stopReason":"toolUse"}}'
+      emit '{"type":"tool_execution_start","toolCallId":"t1","toolName":"read","args":{"path":"x"}}'
+      emit '{"type":"tool_execution_end","toolCallId":"t1","toolName":"read","result":{"content":[{"type":"text","text":"x"}]},"isError":false}'
+      next_cmd steerline || exit 1
+      if has "$steerline" '"type":"prompt"' && has "$steerline" '"streamingBehavior":"steer"' && has "$steerline" 'live shot' && has "$steerline" '"mimeType":"image/png"'; then
+        emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"queued\"}}"
+        emit '{"type":"message_start","message":{"role":"assistant","id":"m2","content":[]}}'
+        emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"steered"}}'
+        emit '{"type":"message_end","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"steered"}],"stopReason":"stop"}}'
+        emit '{"type":"agent_settled"}'
+        next_cmd parked || exit 1
+        if has "$parked" '"type":"prompt"' && has "$parked" '"streamingBehavior":"steer"' && has "$parked" 'parked shot' && has "$parked" '"mimeType":"image/png"'; then
+          emit "{\"id\":$(rid "$parked"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}"
+          emit '{"type":"agent_start"}'
+          emit '{"type":"message_start","message":{"role":"assistant","id":"m3","content":[]}}'
+          emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"parked reply"}}'
+          emit '{"type":"message_end","message":{"role":"assistant","id":"m3","content":[{"type":"text","text":"parked reply"}],"stopReason":"stop"}}'
+          emit '{"type":"agent_settled"}'
+          exit 0
+        fi
+        emit "{\"id\":$(rid "$parked"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"the parked message must inline its image\"}"
+        exit 1
+      fi
+      emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"the routed message must inline its image\"}"
+      exit 1
+      ;;
     *scenario:routed-settled*)
       # The settle race: pi settles the turn before it reads the routed
       # message, so the prompt STARTS a fresh run — and its response follows

@@ -1019,9 +1019,7 @@ impl ContextRecoveryService {
         LaunchConfig::of_chat(config).apply_to(&mut request);
         // The prompt's own attachments ride its trailer; whatever the last
         // request carried belonged to another prompt.
-        request.attachments = attachment_refs::find_marker(&raw)
-            .map(|(_, refs)| attachment_refs::parse_refs(&raw, refs))
-            .unwrap_or_default();
+        request.attachments = attachment_refs::paths(&raw);
         request.pending_attachments = Vec::new();
         request.resume = None;
         request.worktree = None;

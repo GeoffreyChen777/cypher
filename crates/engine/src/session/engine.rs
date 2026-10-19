@@ -769,11 +769,13 @@ impl SessionsEngine {
                 ledger.push_back(RoutedSteer {
                     prompt: request.prompt.clone(),
                     agent_prompt: agent_prompt.clone(),
+                    attachments: request.attachments.clone(),
                     message_id: user_id.clone(),
                 });
                 let message = SteerMessage {
                     prompt: effective.clone(),
                     message_id: message_id.clone(),
+                    attachments: request.attachments.clone(),
                 };
                 let ok = steer_tx.try_send(message).is_ok();
                 if !ok {

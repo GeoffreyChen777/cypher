@@ -102,6 +102,14 @@ pub fn parse_refs(content: &str, refs_start: usize) -> Vec<String> {
         .collect()
 }
 
+/// Every path the trailer lists — the message's attachments, rebuilt from
+/// the text that persists them. Empty without a trailer.
+pub fn paths(content: &str) -> Vec<String> {
+    find_marker(content)
+        .map(|(_, refs_start)| parse_refs(content, refs_start))
+        .unwrap_or_default()
+}
+
 /// The visible prompt with any trailer removed (the header alone suffices —
 /// matches how prompt mapping has always normalized both sides).
 pub fn strip(content: &str) -> &str {
@@ -141,6 +149,8 @@ mod tests {
             parse_refs(&mixed, refs_start),
             ["/u/a.png", "/u/report.pdf"]
         );
+        assert_eq!(paths(&mixed), ["/u/a.png", "/u/report.pdf"]);
+        assert!(paths("no trailer\n- /u/a.png").is_empty());
     }
 
     #[test]

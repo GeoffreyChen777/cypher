@@ -4,7 +4,9 @@ use super::setup::{
     BUILTIN_TEXT_KEY, InterceptOutcome, builtin_match, compact_params, compact_summary,
     intercept_builtin, refresh_context_usage, setup_session,
 };
-use super::steer::{Disposition, NextTurn, disposition, emit_boundaries, requeue_stranded};
+use super::steer::{
+    Disposition, MailboxMessage, NextTurn, disposition, emit_boundaries, requeue_stranded,
+};
 use super::*;
 use crate::CancellationToken;
 use crate::process::StderrTail;
@@ -76,7 +78,7 @@ pub(super) async fn park_turn(
     client: &PiClient,
     assistant_message_id: &mut String,
     handled_steers: &mut usize,
-    steers_queued: &mut VecDeque<String>,
+    steers_queued: &mut VecDeque<MailboxMessage>,
     prompt_backlog: &mut VecDeque<NextTurn>,
     last_assistant_text: &str,
     status: DoneStatus,
@@ -155,8 +157,8 @@ impl PiRun {
             self.progress_ended.clear();
             self.throughput.start_turn();
             self.had_ui = false;
-            let text = match turn {
-                NextTurn::Prompt(text) => text,
+            let message = match turn {
+                NextTurn::Prompt(message) => message,
                 NextTurn::Accepted => {
                     // Already accepted: arm the grace as the prompt arm
                     // would. A fresh run's first event disarms it; a
@@ -172,7 +174,7 @@ impl PiRun {
             // branch disabled while the request is in flight; the resolution
             // re-arms it once accepted (lifecycle events that landed first
             // disarm it via agent_started).
-            self.prompt_is_command = text.trim_start().starts_with('/');
+            self.prompt_is_command = message.text.trim_start().starts_with('/');
             let prompt_client = self.client.clone();
             // A parked `/compact` is the built-in too: pi's `prompt` never
             // runs TUI built-ins and would hand the text to the model. The
@@ -181,7 +183,7 @@ impl PiRun {
             let compact = self
                 .intercept
                 .compact
-                .then(|| builtin_match(&text, "compact"))
+                .then(|| builtin_match(&message.text, "compact"))
                 .flatten()
                 .map(|instructions| compact_params(instructions));
             self.idle_prompt = Some(match compact {
@@ -190,8 +192,7 @@ impl PiRun {
                     Ok(json!({ BUILTIN_TEXT_KEY: compact_summary(&data) }))
                 }),
                 None => {
-                    let mut params = Map::new();
-                    params.insert("message".into(), Value::String(text));
+                    let mut params = message.params();
                     // `streamingBehavior:"steer"` makes the parked restart
                     // atomic: an idle pi starts a fresh turn, a
                     // still-streaming pi queues the message as a steer — a
@@ -1147,12 +1148,18 @@ async fn handshake(
     Err(Some(error))
 }
 
-/// The first prompt's params. Attachments are inlined ONLY here: routed
-/// mailbox messages carry none, and re-sending them would duplicate.
+/// The first prompt's params: the request's prompt and its attachments.
+/// Each later turn's mailbox message carries its own.
 fn first_prompt(request: &RunRequest) -> Map<String, Value> {
+    message_params(&request.prompt, &request.attachments)
+}
+
+/// `prompt` / `steer` params for one user message: its text, plus its image
+/// attachments inlined as `images` blocks.
+pub(super) fn message_params(text: &str, attachments: &[String]) -> Map<String, Value> {
     let mut params = Map::new();
-    params.insert("message".into(), Value::String(request.prompt.clone()));
-    if let Some(images) = inline_images(&request.attachments) {
+    params.insert("message".into(), Value::String(text.to_owned()));
+    if let Some(images) = inline_images(attachments) {
         params.insert("images".into(), images);
     }
     params

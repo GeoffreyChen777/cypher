@@ -15,7 +15,7 @@ pub(super) use setup::BuiltinIntercept;
 #[cfg(test)]
 pub(super) use {run::inline_images, setup::builtin_match, ui::ui_response_payload};
 
-use steer::{NextTurn, RoutedSteer};
+use steer::{MailboxMessage, NextTurn, RoutedSteer};
 
 pub(super) struct Session {
     pub(super) child: Child,
@@ -115,10 +115,10 @@ struct PiRun {
     in_turn: bool,
     steering_open: bool,
     /// Steers pi has QUEUED but not yet delivered (one per assistant message;
-    /// pi's default steering mode is one-at-a-time). Texts are kept so a steer
-    /// the turn settles before delivering can be retried as an idle prompt
-    /// (an idle pi only QUEUES steers).
-    steers_queued: VecDeque<String>,
+    /// pi's default steering mode is one-at-a-time). The messages are kept so
+    /// a steer the turn settles before delivering can be retried as an idle
+    /// prompt (an idle pi only QUEUES steers).
+    steers_queued: VecDeque<MailboxMessage>,
     /// Routed messages an extension consumed mid-turn (`handled`). Each still
     /// owes the engine its Steered boundary: at the next assistant message (the
     /// next step's output belongs below the message), or before the turn's Done.
@@ -126,7 +126,7 @@ struct PiRun {
     /// The in-flight routed steer (its response arrives in order on
     /// `incoming`), plus followers awaiting their turn.
     steer_call: Option<RoutedSteer>,
-    steer_backlog: VecDeque<String>,
+    steer_backlog: VecDeque<MailboxMessage>,
     /// Whether this pi reports dispositions (≥ 0.99), learned from the first
     /// prompt's response — which always resolves before any mid-turn routing.
     /// Mid-turn messages then ride an atomic `prompt` instead of a raw `steer`.

@@ -14,24 +14,28 @@ pub enum SteerOutcome {
 
 /// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
 /// `prompt` is the VISIBLE prompt (the doc user entry); `agent_prompt` the
-/// optional EFFECTIVE override the harness should receive.
+/// optional EFFECTIVE override the harness should receive; `attachments` the
+/// message's own staged paths.
 #[derive(Debug, Clone)]
 pub(super) struct RoutedSteer {
     pub(super) prompt: String,
     pub(super) agent_prompt: Option<String>,
+    pub(super) attachments: Vec<String>,
     pub(super) message_id: String,
 }
 
 impl SessionsEngine {
-    /// Push a steer prompt into the live run's mailbox. `NotSteerable` when no live
-    /// steerable run exists — the caller (command executor) dispatches a new turn.
+    /// Push a steer prompt into the live run's mailbox, with the attachments
+    /// its refs trailer lists. `NotSteerable` when no live steerable run
+    /// exists — the caller (command executor) dispatches a new turn.
     pub async fn steer(
         &self,
         chat_id: &str,
         prompt: &str,
         message_id: Option<String>,
     ) -> Result<SteerOutcome, EngineError> {
-        self.steer_augmented(chat_id, prompt, None, message_id)
+        let attachments = cypher_proto::attachment_refs::paths(prompt);
+        self.steer_augmented(chat_id, prompt, None, attachments, message_id)
             .await
     }
 }
@@ -40,12 +44,14 @@ impl SessionsEngine {
     /// [`Self::steer`] with an EFFECTIVE harness prompt override (the Comment
     /// feature): the doc entry keeps `prompt` while the harness mailbox
     /// receives `agent_prompt` when present — alignment stripped for any
-    /// running harness but Pi ([`agent_prompt_for`]).
+    /// running harness but Pi ([`agent_prompt_for`]). `attachments` are the
+    /// message's own staged paths, inlined by the harness.
     pub async fn steer_augmented(
         &self,
         chat_id: &str,
         prompt: &str,
         agent_prompt: Option<String>,
+        attachments: Vec<String>,
         message_id: Option<String>,
     ) -> Result<SteerOutcome, EngineError> {
         let target = lock(&self.inner.runs)
@@ -82,11 +88,13 @@ impl SessionsEngine {
             ledger.push_back(RoutedSteer {
                 prompt: prompt.to_string(),
                 agent_prompt: agent_prompt.clone(),
+                attachments: attachments.clone(),
                 message_id: user_id.clone(),
             });
             let message = SteerMessage {
                 prompt: effective,
                 message_id: message_id.clone(),
+                attachments,
             };
             let ok = steer_tx.try_send(message).is_ok();
             if !ok {
