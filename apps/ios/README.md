@@ -103,12 +103,21 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   same native gesture/bounce window but may retarget its own spring. Negative
   bottom distance during a bounce is not treated as a broken/blank layout.
   Idle reflows and keyboard-end corrections remain enabled after settling.
-- **Long transcripts:** a session opens at its latest message and renders
-  the most recent 200 rows; **Show earlier messages** at the top prepends 200
-  more and keeps the row you were reading in place. The reveal reaches the
-  bottom by jumping to the last row's id, never to an estimated offset, so
-  opening doesn't lay out the rows in between (3,000 rows: ~0.3s, down from
-  3–4s of hidden loader on iOS 26–27).
+- **Long transcripts:** a session loads from its end. Opening one reads,
+  decodes and parses only its last 40 messages — message by message off the
+  main thread, never the whole doc — so its length doesn't change what
+  opening or a streamed update costs (3,000 messages on the simulator: ~30ms
+  in the background and ~3ms of rows, where the whole transcript took ~1s,
+  mostly on the main thread). Scrolling back reads the 40 above while the
+  reader is still two screens away and shows them once the scroll rests,
+  holding the row being read where it is on screen; **Loading earlier
+  messages** marks the top until the first message (a tap or VoiceOver loads
+  at once). The turn scrubber still reaches every round: it knows the prompts
+  above what's loaded and reads down to the one it jumps to. Leaving the
+  session drops the pages loaded on the way back. The reveal reaches the
+  bottom by jumping to the last row's id, never to an estimated offset. Demo:
+  `-big` (120 turns), `-huge` (600), `-turns N`; `-slow-pages` makes a page
+  land 20s after it's asked for.
 - **Session actions:** long-press a session row (or swipe) to Rename, Archive or
   Delete; the session's top-right menu has the same. Delete asks first, tells
   the host (`Mutate deleteChat`, which also removes its subagent children and

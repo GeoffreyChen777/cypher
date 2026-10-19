@@ -1,64 +1,80 @@
 import XCTest
 
-/// Long transcripts: `-big` is 120 synthetic turns (~1,200 rows), so only the
-/// last 200-row window renders on open.
+/// Long transcripts: `-big` is 120 synthetic turns (240 messages, ~840 rows).
+/// A session opens on its last page of messages (turns 100–119) and reads
+/// earlier pages as the reader scrolls back.
 @MainActor
 final class TranscriptWindowUITests: XCTestCase {
-    private func launchBig() -> (XCUIApplication, XCUIElement) {
-        let app = XCUIApplication.launchDemo(["-route", "chat:chat-veil", "-big"])
+    private func launchBig(_ extra: [String] = []) -> (XCUIApplication, XCUIElement) {
+        let app = XCUIApplication.launchDemo(["-route", "chat:chat-veil", "-big"] + extra)
         let transcript = app.scrollViews.matching(identifier: "chat-transcript").firstMatch
         XCTAssertTrue(transcript.waitForExistence(timeout: 10))
         return (app, transcript)
     }
 
-    private func turn(_ app: XCUIApplication, _ prefix: String) -> XCUIElement {
+    private func element(_ app: XCUIApplication, _ format: String, _ text: String) -> XCUIElement {
         app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label BEGINSWITH %@ OR value BEGINSWITH %@", prefix, prefix))
+            .matching(NSPredicate(format: "label \(format) %@ OR value \(format) %@", text, text))
             .firstMatch
+    }
+
+    private func turn(_ app: XCUIApplication, _ prefix: String) -> XCUIElement {
+        element(app, "BEGINSWITH", prefix)
+    }
+
+    /// One drag toward the top, flung or let go at rest.
+    private func scrollBack(_ transcript: XCUIElement) {
+        transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
+            .press(
+                forDuration: 0.01,
+                thenDragTo: transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)),
+                withVelocity: .fast, thenHoldForDuration: 0)
     }
 
     func testLongTranscriptOpensAtItsTail() {
         let (app, _) = launchBig()
         // The reveal used to give up with the view parked near the top. The
         // last turn's closing paragraph is the transcript's final row.
-        let last = app.descendants(matching: .any)
-            .matching(
-                NSPredicate(
-                    format: "label CONTAINS %@ OR value CONTAINS %@",
-                    "Landed the pass-119", "Landed the pass-119")
-            )
-            .firstMatch
+        let last = element(app, "CONTAINS", "Landed the pass-119")
         XCTAssertTrue(last.waitForHittable(timeout: 10), "A long transcript must open at its latest reply")
-        XCTAssertFalse(app.buttons["transcript-show-earlier"].isHittable)
+        XCTAssertFalse(app.buttons["transcript-loading-earlier"].isHittable)
     }
 
-    func testShowEarlierKeepsTheReadersPlace() {
+    func testScrollingBackLoadsEarlierPages() {
         let (app, transcript) = launchBig()
         XCTAssertTrue(turn(app, "Turn 119:").waitForExistence(timeout: 10))
         XCTAssertTrue(transcript.waitForHittable(timeout: 10))
-        let button = app.buttons["transcript-show-earlier"]
+        // Turns 60–79 are two pages above the one the session opened on.
+        let older = element(app, "MATCHES", "Turn [67][0-9]:.*")
         var swipes = 0
-        while !(button.exists && button.isHittable), swipes < 60 {
-            transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
-                .press(
-                    forDuration: 0.01,
-                    thenDragTo: transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)),
-                    withVelocity: .fast, thenHoldForDuration: 0)
+        while !older.exists, swipes < 80 {
+            scrollBack(transcript)
             swipes += 1
         }
-        XCTAssertTrue(button.isHittable, "Scrolling up must reach the window's top")
-        sleep(1)  // any fling has settled; the tap happens at rest
-        // The first turn visible under the button is the reader's place.
-        let visible = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label BEGINSWITH 'Turn ' OR value BEGINSWITH 'Turn '"))
-            .allElementsBoundByIndex.first { $0.isHittable }
-        let place = try? XCTUnwrap(visible)
-        let placeText = (place?.label.isEmpty == false ? place?.label : place?.value as? String) ?? ""
-        let prefix = String(placeText.prefix { $0 != ":" }) + ":"
-        XCTAssertTrue(prefix.hasPrefix("Turn "), "Found no turn under the button")
-        button.tap()
+        XCTAssertTrue(older.exists, "Scrolling back must keep loading earlier messages")
+    }
+
+    func testAPageLandsAboveTheReaderWithoutMovingThem() {
+        // Pages take 20s to land, so this one lands with the reader at rest
+        // on the first page's top.
+        let (app, transcript) = launchBig(["-slow-pages"])
+        XCTAssertTrue(turn(app, "Turn 119:").waitForExistence(timeout: 10))
+        XCTAssertTrue(transcript.waitForHittable(timeout: 10))
+        let loader = app.buttons["transcript-loading-earlier"]
+        var swipes = 0
+        while !(loader.exists && loader.isHittable), swipes < 60 {
+            scrollBack(transcript)
+            swipes += 1
+        }
+        XCTAssertTrue(loader.isHittable, "Scrolling back must reach the top of the loaded messages")
+        let landed = element(app, "CONTAINS", "Landed the pass-99")
+        XCTAssertFalse(landed.exists, "The page above is still on its way")
+        let first = turn(app, "Turn 100:")
+        XCTAssertTrue(first.isHittable)
+        let before = first.frame.minY
+        XCTAssertTrue(landed.waitForExistence(timeout: 30), "The page lands above the reader")
         sleep(1)
-        XCTAssertTrue(turn(app, prefix).isHittable, "\(prefix) must stay in view after the page lands")
-        XCTAssertFalse(button.isHittable, "The view must not jump to the new page's top")
+        XCTAssertTrue(first.isHittable, "The reader's place must stay in view")
+        XCTAssertEqual(first.frame.minY, before, accuracy: 2, "Nothing on screen moves when the page lands")
     }
 }

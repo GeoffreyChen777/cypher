@@ -295,12 +295,15 @@ enum TranscriptRowBuilder {
         return rows
     }
 
+    /// The leading gap of a transcript's first row.
+    static let firstGap = TranscriptView.gapTurn + 10
+
     private static func gap(
         for row: TranscriptRow,
         previous: TranscriptRow?,
         isFirst: Bool
     ) -> CGFloat {
-        if isFirst { return TranscriptView.gapTurn + 10 }
+        if isFirst { return firstGap }
         // Separate exchanges without pulling a user's prompt away from its
         // reply. Pending sends follow this same path as confirmed messages.
         if case .user(_, let isSteer, _) = row.kind {

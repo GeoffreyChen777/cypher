@@ -57,15 +57,19 @@ struct TranscriptView: View {
     /// Tags this view's pad reports: the ScrollState outlives view identities,
     /// and another identity's pad frame must never count as ours.
     @State private var padOwner = UUID()
-    /// Rows hidden above the rendered window; nil until the first rows fix it.
-    /// Only ever lowered ("Show earlier messages"), so streamed appends never
-    /// drop rows off the top under a reader.
-    @State private var windowFloor: Int?
-    /// Rendered tail on open, and each page "Show earlier" adds. Bounds what
-    /// the lazy stack can realize: jumping to the bottom of an estimated
-    /// transcript made iOS 26 lay out every row on the way (3,000 rows:
-    /// ~1,800 text views, seconds of main thread), which no scroll API avoids.
-    static let windowRows = 200
+    /// The first entry this view shows; nil until the first rows fix it. The
+    /// store's window holds one page on open (bounding what the lazy stack
+    /// can realize, and what opening reads and parses) and grows a page at a
+    /// time as the reader nears the top. A page that lands stays hidden above
+    /// this entry until the scroll rests (`pageEarlier`): rows landing above
+    /// a moving scroll would shove the reader's place, and SwiftUI drops a
+    /// correcting scroll under a finger.
+    @State private var shownFrom: String?
+    @State private var windowHold = TranscriptWindowHold()
+    /// A scrubber jump to a round above the window, waiting for its page.
+    @State private var pendingRound: String?
+    /// How near the top, in viewports, the page above is read.
+    static let earlierPrefetchViewports: CGFloat = 2
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -73,34 +77,31 @@ struct TranscriptView: View {
         // off-main), so opening a chat assembles rows from settled parses
         // instead of re-parsing the whole transcript on the main thread.
         let allRows = transcriptRows()
-        let floor = windowStart(of: allRows)
-        let rows = floor > 0 ? Array(allRows[floor...]) : allRows
-        let rounds = store.transcriptCache.rounds
+        let floor = shownStart(of: allRows)
+        let rows = shownRows(allRows, from: floor)
+        let rounds = allRounds
+        let earlierRoundCount = store.earlierRounds.count
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                if floor > 0 {
-                    // Explicit, not load-on-reach: reaching the top is always
-                    // mid-gesture, and SwiftUI drops a programmatic scroll
-                    // under the finger — the reader's place couldn't be held.
-                    Button {
-                        loadEarlierRows()
-                    } label: {
-                        Text("Show earlier messages")
-                            .font(Theme.sans(13, weight: .medium, relativeTo: .subheadline))
-                            .foregroundStyle(Theme.textMuted)
-                            .padding(.horizontal, 14)
-                            .frame(height: 32)
-                            .background(whiteAlpha(0.06), in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("transcript-show-earlier")
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 8)
-                    .padding(.bottom, 4)
+                if floor > 0 || store.hasEarlier {
+                    // Reached mid-gesture as a rule: the page above shows once
+                    // the scroll rests. A tap (or VoiceOver) asks at once.
+                    EarlierMessagesLoader { pageEarlier(now: true) }
+                        .onGeometryChange(for: CGFloat.self) {
+                            $0.frame(in: .global).maxY
+                        } action: { [scroll] in
+                            scroll.loaderMaxY = $0
+                        }
+                        .onDisappear { [scroll] in scroll.loaderMaxY = nil }
                 }
                 let lastEntryId = allRows.last?.entryId
+                // Set before the reveal that re-renders this body.
+                let revealAnchor = scroll.revealAnchorId
                 ForEach(rows) { row in
-                    rowView(row, lastEntryId: lastEntryId).id(row.id)
+                    rowView(
+                        row, lastEntryId: lastEntryId, earlierRounds: earlierRoundCount,
+                        revealAnchor: revealAnchor
+                    ).id(row.id)
                 }
                 Color.clear.frame(height: 44)  // bottom pad clears the fade + floating status strip
                     // The pad's on-screen frame is the one bottom-position
@@ -159,6 +160,7 @@ struct TranscriptView: View {
         }
         .background(Theme.bg)
         .task {
+            windowHold.engage(store)
             // SessionView calls this on keyboard didShow/didHide — the one
             // forced correction that ends each keyboard transition.
             scroll.requestCorrection = { correctPin(force: true) }
@@ -166,6 +168,7 @@ struct TranscriptView: View {
             // never fires for an initial value — this is the only hook for them.
             fixWindow()
             await settleToBottom()
+            pageEarlier()  // a first page shorter than the screen
         }
         .onChange(of: allRows.isEmpty) { _, isEmpty in
             // Projection is off-main, so a cached transcript usually lands after
@@ -186,16 +189,32 @@ struct TranscriptView: View {
             // moved to report again (a full-budget loader).
             scroll.padGlobalMaxY = 0
             hydrationTask?.cancel()
-            hydrationTask = Task { await settleToBottom() }
+            hydrationTask = Task {
+                await settleToBottom()
+                pageEarlier()
+            }
+        }
+        // A page the store read above the shown rows: shown at once if the
+        // reader is resting near the top.
+        .onChange(of: allRows.first?.id) {
+            if !landPendingRound() { pageEarlier() }
         }
         .onScrollGeometryChange(for: CGFloat.self) {
             $0.contentSize.height
         } action: { [scroll] old, new in
             scroll.contentHeight = new
-            if let id = scroll.restoreTopRowId, new > old {
-                // The previous page just landed above the reader.
-                scroll.restoreTopRowId = nil
-                scrollPosition.scrollTo(id: id, anchor: .top)
+            if scroll.revealPending, new != old {
+                // The page above just laid out. Every row the reader had moved
+                // down by its height, so the offset follows by the same and
+                // nothing on screen moves. A short transcript sits on the
+                // bottom edge, not at an offset: re-pin it there instead.
+                scroll.revealPending = false
+                if scroll.pinned, old <= scroll.viewportHeight {
+                    scroll.revealAnchorId = nil
+                    jumpToBottomRow()
+                } else {
+                    revealScroll(to: scroll.scrollY + new - old)
+                }
             }
             // Estimated row heights keep resolving after the settle, and a
             // SHRINK leaves the held offset past the content — a black
@@ -219,6 +238,8 @@ struct TranscriptView: View {
         } action: { [scroll] _, new in
             scroll.scrollY = new
             scroll.motion.geometryChanged(now: Date().timeIntervalSinceReferenceDate)
+            if scroll.revealAnchorId != nil { queueRevealSettle() }
+            if new < scroll.viewportHeight * Self.earlierPrefetchViewports { pageEarlier() }
         }
         .onScrollGeometryChange(for: CGFloat.self) {
             $0.containerSize.height + $0.contentInsets.bottom
@@ -258,6 +279,7 @@ struct TranscriptView: View {
             // catch it — clamp here or the viewport stays blank.
             if newPhase == .idle {
                 correctPin()  // self-gates: pinned re-glue or stranded clamp
+                pageEarlier()  // self-gates too: trails the bounce's quiet
             }
         }
         .onScrollGeometryChange(for: CGFloat.self) { geo in
@@ -315,6 +337,8 @@ struct TranscriptView: View {
             // later correctPin. `hydrated` covers the first rows arriving
             // before the rows-arrived handler has flipped `settled`.
             guard settled, hydrated else { return }
+            // A page shown above: the reveal positions for it.
+            guard !scroll.revealPending else { return }
             guard scroll.pinned else { return }
             guard !scroll.keyboardTransitioning,
                 !scroll.motion.blocksContentFollowing(now: Date().timeIntervalSinceReferenceDate)
@@ -478,29 +502,129 @@ struct TranscriptView: View {
             pendingSends: store.pendingSends, togglePins: togglePins)
     }
 
-    private func windowStart(of rows: [TranscriptRow]) -> Int {
-        min(windowFloor ?? max(0, rows.count - Self.windowRows), rows.count)
+    /// Index of the first shown row: the first of `shownFrom`'s entry, or 0
+    /// once that entry is gone (a rewind).
+    private func shownStart(of rows: [TranscriptRow]) -> Int {
+        guard let shownFrom else { return 0 }
+        return rows.firstIndex { $0.entryId == shownFrom } ?? 0
     }
 
-    /// Pins the window's start at the first rows this view renders.
+    /// The rows from `floor` on. The first keeps a first row's gap while the
+    /// page above it waits: that page landing must not move it (a reveal
+    /// holds the row's content, not its gap).
+    private func shownRows(_ rows: [TranscriptRow], from floor: Int) -> [TranscriptRow] {
+        guard floor > 0, floor < rows.count else { return rows }
+        var shown = Array(rows[floor...])
+        shown[0].topGap = TranscriptRowBuilder.firstGap
+        return shown
+    }
+
+    /// Pins the shown rows' start at the first entries this view renders.
     private func fixWindow() {
-        guard windowFloor == nil else { return }
-        let rows = transcriptRows()
-        guard !rows.isEmpty else { return }
-        windowFloor = max(0, rows.count - Self.windowRows)
+        guard shownFrom == nil else { return }
+        shownFrom = store.entries.first?.id
     }
 
-    /// Prepends the previous page, keeping the row that was first (just
-    /// under the button) at the top — by id, once the page has laid out (it's
-    /// realized, so no walk). The bottom scroll anchor does NOT hold a
-    /// reader's place here: it kept the top offset, showing the new page.
-    private func loadEarlierRows() {
+    /// Pages toward the start. Near the top it asks the store for the page
+    /// above (read and parsed off the main thread while the reader keeps
+    /// scrolling); once that page has landed and the scroll rests, it shows
+    /// it. `now`: the loader was tapped — the scroll is the reader's to give.
+    ///
+    /// The reveal holds the reader's place: the bottom scroll anchor doesn't
+    /// (it keeps the top offset, which would show the new page). The
+    /// content-height handler moves the offset by the page's height once it
+    /// lays out — by offset, not by row: the rows on screen are realized and
+    /// stay so, and the page above stays estimated — and `settleReveal` takes
+    /// out what the page's rows near the screen measure differently.
+    private func pageEarlier(now: Bool = false) {
+        guard settled, hydrated, !scroll.revealPending else { return }
+        guard now || scroll.scrollY < scroll.viewportHeight * Self.earlierPrefetchViewports else { return }
         let rows = transcriptRows()
-        let floor = windowStart(of: rows)
-        guard floor > 0, floor < rows.count else { return }
-        windowFloor = max(0, floor - Self.windowRows)
-        // Restored once the prepended rows have laid out (content height).
-        scroll.restoreTopRowId = rows[floor].id
+        let floor = shownStart(of: rows)
+        guard floor > 0 else {
+            store.loadEarlier()
+            return
+        }
+        // The loader sits on the first shown row: realized, it says where
+        // that row is, which is what the reveal holds.
+        guard let anchorY = scroll.loaderMaxY, floor < rows.count else { return }
+        if !now {
+            let clock = Date().timeIntervalSinceReferenceDate
+            guard !scroll.keyboardTransitioning, !scroll.motion.isMoving else { return }
+            if scroll.motion.blocksPositioning(now: clock) {
+                schedulePaging(after: scroll.motion.quietUntil - clock)
+                return
+            }
+        }
+        scroll.revealPending = true
+        scroll.revealGeneration &+= 1
+        scroll.revealAnchorId = rows[floor].id
+        scroll.revealAnchorY = anchorY + TranscriptRowBuilder.firstGap
+        scroll.revealAnchorSeen = nil
+        scroll.revealTarget = scroll.scrollY
+        // Long enough for the offset jump to land on a slow layout; each
+        // landing extends it (`settleReveal`).
+        scroll.revealSettleUntil = Date().timeIntervalSinceReferenceDate + 1.5
+        shownFrom = rows.first?.entryId
+        // A page that leaves the content's height as it was (a row exactly
+        // the loader's height) must not leave the handler armed.
+        let generation = scroll.revealGeneration
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(500))
+            if generation == scroll.revealGeneration { scroll.revealPending = false }
+        }
+    }
+
+    /// A reveal's scroll, once per target.
+    private func revealScroll(to y: CGFloat) {
+        if let target = scroll.revealTarget, abs(target - y) <= 0.5 { return }
+        scroll.revealTarget = y
+        scrollPosition.scrollTo(y: y)
+    }
+
+    /// Checks the anchor once the current layout pass has reported both its
+    /// row and the offset: within a pass the two arrive in either order.
+    private func queueRevealSettle() {
+        guard !scroll.revealSettleQueued else { return }
+        scroll.revealSettleQueued = true
+        Task { @MainActor in
+            scroll.revealSettleQueued = false
+            settleReveal()
+        }
+    }
+
+    /// The rows of a shown page near the screen measure as they realize, and
+    /// the scroll view keeps its offset while they do — moving the reader by
+    /// however far their estimated heights were off. So once the offset jump
+    /// has landed, the anchor row goes back to where it was on screen. Only a
+    /// landed layout with the row on screen counts: a pass mid-insertion
+    /// places it by other estimates. A touch ends it.
+    private func settleReveal() {
+        guard scroll.revealAnchorId != nil, !scroll.revealPending else { return }
+        let now = Date().timeIntervalSinceReferenceDate
+        guard now < scroll.revealSettleUntil, !scroll.userScrolling else {
+            scroll.revealAnchorId = nil
+            return
+        }
+        guard let target = scroll.revealTarget, abs(scroll.scrollY - target) <= 0.5,
+            let seen = scroll.revealAnchorSeen, seen > 0,
+            scroll.insetTopGlobalY <= 0 || seen < scroll.insetTopGlobalY
+        else { return }
+        scroll.revealSettleUntil = max(scroll.revealSettleUntil, now + 0.5)
+        let error = seen - scroll.revealAnchorY
+        guard abs(error) > 0.5 else { return }
+        revealScroll(to: scroll.scrollY + error)
+    }
+
+    /// One trailing paging check after a bounce's quiet window; the next
+    /// touch invalidates it, like `scheduleCorrection`.
+    private func schedulePaging(after delay: TimeInterval) {
+        let generation = scroll.correctionGeneration
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(max(0.01, delay)))
+            guard !Task.isCancelled, generation == scroll.correctionGeneration else { return }
+            pageEarlier()
+        }
     }
 
     /// Puts a round's prompt at the top. Takes the scroll from the pin (a
@@ -508,7 +632,7 @@ struct TranscriptView: View {
     /// only short hops: an animated scroll renders every row it passes.
     private func jumpToRound(_ index: Int) {
         let rows = transcriptRows()
-        let rounds = store.transcriptCache.rounds
+        let rounds = allRounds
         guard rounds.indices.contains(index) else { return }
         let target = rounds[index]
         let fromRow =
@@ -516,13 +640,25 @@ struct TranscriptView: View {
             ?? rows.count
         scroll.pinned = false
         turns.set(index)
-        let floor = windowStart(of: rows)
-        if target.rowIndex < floor {
-            // Above the rendered window: open it down to the target (same
-            // update as the scroll, so the id resolves against the new rows).
-            windowFloor = max(0, min(floor - Self.windowRows, target.rowIndex))
+        // The jump positions by id; a page reveal's offset shift would undo it.
+        scroll.revealPending = false
+        scroll.revealAnchorId = nil
+        scroll.turnJump &+= 1
+        guard let targetRow = target.rowIndex else {
+            // Above the loaded window: read it down to the prompt, and land
+            // once its rows are in (`landPendingRound`).
+            pendingRound = target.rowId
+            if let messageIndex = target.messageIndex { store.loadEarlier(through: messageIndex) }
+            return
         }
-        let glide = !reduceMotion && target.rowIndex >= floor && abs(target.rowIndex - fromRow) <= 40
+        pendingRound = nil
+        let floor = shownStart(of: rows)
+        if targetRow < floor {
+            // In a page that landed but isn't shown yet: show it (same update
+            // as the scroll, so the id resolves against the new rows).
+            shownFrom = rows.first?.entryId
+        }
+        let glide = !reduceMotion && targetRow >= floor && abs(targetRow - fromRow) <= 40
         scroll.animatingUntil = Date().timeIntervalSinceReferenceDate + (glide ? 0.4 : 0)
         if glide {
             withAnimation(.smooth(duration: 0.3)) {
@@ -534,13 +670,30 @@ struct TranscriptView: View {
         // A glide aims at the lazy stack's ESTIMATED offset for rows it hasn't
         // measured, and a fast scrub retargets mid-flight — either can leave
         // it rounds short. Once motion ends, land the latest target by id.
-        scroll.turnJump &+= 1
         let jump = scroll.turnJump
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(glide ? 380 : 120))
             guard jump == scroll.turnJump, !scroll.userScrolling else { return }
             scrollPosition.scrollTo(id: target.rowId, anchor: .top)
         }
+    }
+
+    /// The rounds above the store's window, then the loaded ones — the same
+    /// rounds in the same order as pages load, so an index keeps its round.
+    /// Read after `transcriptRows()`, which rebuilds the loaded ones.
+    private var allRounds: [TranscriptRound] {
+        store.earlierRounds + store.transcriptCache.rounds
+    }
+
+    /// Finishes a jump to a round above the window once its rows are in.
+    /// Returns whether it did.
+    private func landPendingRound() -> Bool {
+        guard let pendingRound,
+            let index = allRounds.firstIndex(where: { $0.rowId == pendingRound }),
+            allRounds[index].rowIndex != nil
+        else { return false }
+        jumpToRound(index)
+        return true
     }
 
     /// The bottom pad's measured global maxY, if THIS view reported it since
@@ -633,7 +786,11 @@ struct TranscriptView: View {
 
     // MARK: Row rendering
 
-    private func rowView(_ row: TranscriptRow, lastEntryId: String?) -> some View {
+    /// `earlierRounds`: rounds above the store's window, which come first in
+    /// the scrubber's numbering. `revealAnchor`: the row a page reveal holds.
+    private func rowView(
+        _ row: TranscriptRow, lastEntryId: String?, earlierRounds: Int, revealAnchor: String?
+    ) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             rowContent(row)
                 // A work run's thought text sits under its chip, lined up
@@ -651,7 +808,29 @@ struct TranscriptView: View {
             \.transcriptEntry,
             TranscriptEntryContext(entryId: row.entryId, role: row.role, settled: row.settled)
         )
-        .modifier(TurnAnchor(round: store.transcriptCache.roundIndex[row.id], tracker: turns, scroll: scroll))
+        .modifier(
+            TurnAnchor(
+                round: store.transcriptCache.roundIndex[row.id].map { $0 + earlierRounds },
+                tracker: turns, scroll: scroll)
+        )
+        // Only the row a reveal holds watches its frame (a geometry observer
+        // on every row is work on every scroll frame); in a background, so
+        // the row keeps its identity when it starts or stops.
+        .background {
+            if row.id == revealAnchor {
+                Color.clear.onGeometryChange(for: CGFloat.self) {
+                    $0.frame(in: .global).minY
+                } action: { [scroll] y in
+                    // Its content, not its frame: the row's gap grows once the
+                    // page above it shows.
+                    scroll.revealAnchorSeen = y + row.topGap
+                    // This report is fresh: settled in this pass if the jump
+                    // has landed, else once the pass's offset report is in.
+                    settleReveal()
+                    queueRevealSettle()
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -731,5 +910,47 @@ struct TranscriptView: View {
                 }
             }
         }
+    }
+}
+
+/// The top of a transcript with earlier messages: the page above appears
+/// here once the reader comes to rest.
+private struct EarlierMessagesLoader: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                WorkingSpinner()
+                Text("Loading earlier messages")
+                    .font(Theme.sans(13, weight: .medium, relativeTo: .subheadline))
+                    .foregroundStyle(Theme.textMuted)
+            }
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Load earlier messages")
+        .accessibilityIdentifier("transcript-loading-earlier")
+    }
+}
+
+/// A transcript's hold on its store's window (`SessionStore.holdWindow`).
+/// Let go when the view's state goes, not on disappear: a screen pushed over
+/// the session disappears it too, and its reader comes back expecting the
+/// pages they had loaded.
+@MainActor
+final class TranscriptWindowHold {
+    private var store: SessionStore?
+
+    func engage(_ store: SessionStore) {
+        guard self.store !== store else { return }
+        self.store?.releaseWindow()
+        self.store = store
+        store.holdWindow()
+    }
+
+    isolated deinit {
+        store?.releaseWindow()
     }
 }
