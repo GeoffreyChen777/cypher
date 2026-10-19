@@ -45,20 +45,32 @@
                 return
             }
             result("desktop-received", "desktop transcript decoded by iOS")
-            let assistants = store.entries.filter { $0.role == .assistant }.count
             // A nonce proves this run was not just the previous cached transcript.
             let marker = "ios-dev-interop-" + UUID().uuidString.lowercased()
             guard store.sendRun(prompt: marker, chat: chat) else {
                 result("failed", "iOS command not enqueued")
                 return
             }
-            guard await wait({ store.entries.filter { $0.role == .assistant && !$0.parts.isEmpty }.count > assistants })
-            else {
+            // An answer after the prompt, not a count: the transcript is a
+            // window on the session's tail, which can keep its size.
+            guard await wait({ answered(marker, in: store.entries) }) else {
                 result("failed", "desktop did not answer the iOS command")
                 return
             }
             result("passed", marker)
         }
+        private static func answered(_ prompt: String, in entries: [MessageEntry]) -> Bool {
+            let asked = entries.lastIndex { entry in
+                entry.role == .user
+                    && entry.parts.contains { part in
+                        if case .text(_, let text, _) = part { return text == prompt }
+                        return false
+                    }
+            }
+            guard let asked else { return false }
+            return entries[(asked + 1)...].contains { $0.role == .assistant && !$0.parts.isEmpty }
+        }
+
         private static func wait(_ condition: () -> Bool) async -> Bool {
             let deadline = Date().addingTimeInterval(45)
             while Date() < deadline {

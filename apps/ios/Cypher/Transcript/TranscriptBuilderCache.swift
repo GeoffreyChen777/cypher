@@ -50,12 +50,35 @@ final class TranscriptBuilderCache {
         return cachedRows
     }
 
-    /// Parse every settled part OFF the main thread and merge into the memo,
-    /// so the first `rows()` of a freshly hydrated long session assembles from
-    /// memo hits instead of parsing the whole transcript inside body — that
-    /// synchronous parse was the "empty transcript for a while" on open.
-    func prewarm(entries: [MessageEntry]) {
-        guard !prewarming else { return }
+    /// The settled parses so far: a projection's off-main parse skips them.
+    var settledParses: [String: CompletedParse] { completed }
+
+    /// Parses the settled parts of `entries` that `memo` lacks, for `adopt`.
+    /// The doc projection runs this in its background task, so the rows of a
+    /// page it publishes assemble from memo hits, never parsing on the main
+    /// thread.
+    nonisolated static func parseSettled(
+        _ entries: [MessageEntry], memo: [String: CompletedParse]
+    ) -> [String: CompletedParse] {
+        var parsed: [String: CompletedParse] = [:]
+        for job in settledJobs(entries, memo: memo) {
+            parsed[job.key] = CompletedParse(source: job.text, blocks: MarkdownParser.parse(job.text))
+        }
+        return parsed
+    }
+
+    /// Takes in parses made off the main thread.
+    func adopt(_ parsed: [String: CompletedParse]) {
+        for (key, parse) in parsed where completed[key]?.source != parse.source {
+            completed[key] = parse
+        }
+    }
+
+    /// The settled text parts of `entries` without a parse in `memo`. A
+    /// streaming tail is the incremental parser's.
+    nonisolated private static func settledJobs(
+        _ entries: [MessageEntry], memo: [String: CompletedParse]
+    ) -> [(key: String, text: String)] {
         var jobs: [(key: String, text: String)] = []
         for entry in entries where entry.role != .user {
             let streaming = entry.status == .streaming
@@ -70,13 +93,22 @@ final class TranscriptBuilderCache {
                     continue
                 }
                 guard !text.isEmpty else { continue }
-                if streaming && ix == lastIx { continue }  // live tail: incremental parser's job
+                if streaming && ix == lastIx { continue }
                 let key = "\(entry.id)#\(partId)"
-                if completed[key]?.source != text {
+                if memo[key]?.source != text {
                     jobs.append((key, text))
                 }
             }
         }
+        return jobs
+    }
+
+    /// Parse every settled part OFF the main thread and merge into the memo,
+    /// so the first `rows()` of fed entries (`SessionStore.setEntries`)
+    /// assembles from memo hits instead of parsing inside body.
+    func prewarm(entries: [MessageEntry]) {
+        guard !prewarming else { return }
+        let jobs = Self.settledJobs(entries, memo: completed)
         guard !jobs.isEmpty else { return }
         prewarming = true
         Task { @MainActor [weak self] in

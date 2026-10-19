@@ -54,7 +54,7 @@ extension DemoDataset: WorkspaceData {
     /// Copies the transcript up to the anchor into a new chat; forking before
     /// a user message hands its text back as the draft.
     func fork(_ chat: Chat, anchor: MessageEntry, requestId: String) async throws -> ForkResponse {
-        let entries = sessionStore(for: chat.id).entries
+        let entries = sessionStore(for: chat.id).fedEntries
         guard let ix = entries.firstIndex(where: { $0.id == anchor.id }) else {
             return .unavailable(message: "Message not found")
         }
@@ -84,7 +84,7 @@ extension DemoDataset: WorkspaceData {
     /// comes back as the draft.
     func rewind(_ chat: Chat, anchor: MessageEntry) async throws -> RewindResponse {
         let store = sessionStore(for: chat.id)
-        let entries = store.entries
+        let entries = store.fedEntries
         guard let ix = entries.firstIndex(where: { $0.id == anchor.id }), ix + 1 < entries.count else {
             return .unavailable(message: "Nothing to remove after the last message.")
         }

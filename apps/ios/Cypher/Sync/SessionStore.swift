@@ -10,6 +10,11 @@
 // `roomGen` says. The local doc is always the chat2 lineage; a cached pre-chat2
 // snapshot is never read (unrelated Loro histories would duplicate every
 // message).
+//
+// The doc syncs whole, but `entries` is a window on its tail: a transcript
+// opens on its last page of messages and reads earlier pages as its reader
+// scrolls back (`loadEarlier`), so a long session costs one page to open and
+// to keep up to date, not its whole history.
 
 import Foundation
 import Loro
@@ -43,6 +48,30 @@ final class SessionStore {
     private(set) var connected = false
     /// Client-minted ids of sends the host hasn't materialized yet.
     private(set) var pendingSends: [PendingSend] = []
+    /// Messages precede the loaded window: the transcript can page back.
+    private(set) var hasEarlier = false
+    /// The rounds above the loaded window, for the turn scrubber: it reaches
+    /// every round of a long session without the messages between them.
+    private(set) var earlierRounds: [TranscriptRound] = []
+    /// The doc's prompts, read once and kept across projections.
+    @ObservationIgnored private var outline = RoundOutline()
+    /// The prompts above a long session's window are being read, after the
+    /// window itself was shown.
+    @ObservationIgnored private var outlineReading = false
+    /// The whole transcript a store fed through `setEntries` holds, of which
+    /// `entries` is the window. Empty for a doc-backed store.
+    @ObservationIgnored private(set) var fedEntries: [MessageEntry] = []
+    @ObservationIgnored private var fed = false
+    /// Where the window starts — an index into the doc's `messages` (or
+    /// `fedEntries`); nil until a projection with messages fixes it. Ahead of
+    /// `shownStart` while a requested page is on its way.
+    @ObservationIgnored private var windowStart: Int?
+    /// Where the published `entries` start.
+    @ObservationIgnored private var shownStart = 0
+    /// Transcripts on screen (`holdWindow`). With none the window follows the
+    /// tail, so a store kept warm in the background stays one page; with one
+    /// it only grows, so nothing drops off the top under a reader.
+    @ObservationIgnored private var windowHolds = 0
     /// Questions this device answered whose part the host hasn't resolved
     /// yet: request id → the respondInput command id ("" over a direct
     /// transport). The panel retires on the tap instead of waiting out the
@@ -106,18 +135,105 @@ final class SessionStore {
 
     // MARK: Lifecycle
 
-    /// Demo-mode injection point (also used by SwiftUI previews).
+    /// Demo-mode injection point (also used by SwiftUI previews and side
+    /// chats): the whole transcript, windowed like a doc's.
     func setEntries(_ new: [MessageEntry]) {
-        durableEntries = new
-        entries = new
+        fed = true
+        fedEntries = new
+        publishFed()
+    }
+
+    private func publishFed() {
+        let start = Self.windowStart(held: heldStart, count: fedEntries.count)
+        windowStart = start
+        setShownStart(start)
+        let earlier = fedEntries[..<start].enumerated().compactMap { TranscriptRound.prompt($1, at: $0) }
+        if earlierRounds != earlier { earlierRounds = earlier }
+        let window = start > 0 ? Array(fedEntries[start...]) : fedEntries
+        durableEntries = window
+        entries = window
         // Echoes whose real entry has landed are done.
         if !pendingSends.isEmpty {
-            let ids = Set(new.map(\.id))
+            let ids = Set(window.map(\.id))
             pendingSends.removeAll { ids.contains($0.messageId) }
         }
         settleAnsweredInputs()
         revision &+= 1
         transcriptCache.prewarm(entries: entries)
+    }
+
+    // MARK: Window
+
+    /// The messages a transcript opens with, and how many more each
+    /// `loadEarlier` adds.
+    nonisolated static let pageMessages = 40
+
+    /// Where a window over `count` messages starts: the last page, or from
+    /// `held` while a reader holds it — never less than a page, and back to
+    /// the last page if the messages it started at are gone (a rewind).
+    nonisolated static func windowStart(held: Int?, count: Int) -> Int {
+        let tail = max(0, count - pageMessages)
+        guard let held, held < count else { return tail }
+        return min(held, tail)
+    }
+
+    private var heldStart: Int? { windowHolds > 0 ? windowStart : nil }
+
+    private func setShownStart(_ start: Int) {
+        shownStart = start
+        if hasEarlier != (start > 0) { hasEarlier = start > 0 }
+    }
+
+    /// Reads the page above the window; its entries land with the next
+    /// projection. A no-op while a page is on its way, with nothing above,
+    /// or with no transcript holding the window.
+    func loadEarlier() {
+        guard windowHolds > 0, let start = windowStart, start == shownStart, start > 0 else { return }
+        windowStart = max(0, start - Self.pageMessages)
+        readPage()
+    }
+
+    /// Reads the window down to message `index`: a jump to one of the
+    /// `earlierRounds`.
+    func loadEarlier(through index: Int) {
+        guard windowHolds > 0, let start = windowStart, index < start else { return }
+        windowStart = max(0, index)
+        readPage()
+    }
+
+    /// Demo rig (`-slow-pages`): how long a fed store's page takes to land,
+    /// so it can land under a reader at rest.
+    @ObservationIgnored var fedPageDelay: Duration?
+
+    private func readPage() {
+        if fed, let fedPageDelay {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: fedPageDelay)
+                self?.publishFed()
+            }
+        } else {
+            refreshWindow()
+        }
+    }
+
+    /// A transcript went on screen: until it lets go, the window only grows.
+    func holdWindow() {
+        windowHolds += 1
+    }
+
+    /// A transcript went away for good. With none left, the window follows
+    /// the tail again and drops the pages its reader loaded.
+    func releaseWindow() {
+        windowHolds = max(0, windowHolds - 1)
+        if windowHolds == 0 { refreshWindow() }
+    }
+
+    private func refreshWindow() {
+        if fed {
+            publishFed()
+        } else if started {
+            project()
+        }
     }
 
     @ObservationIgnored private var saver: DocSaver?
@@ -313,18 +429,20 @@ final class SessionStore {
     @ObservationIgnored private var projecting = false
     @ObservationIgnored private var projectPending = false
 
-    /// Re-derive `entries` from the doc, off the main thread.
+    /// Re-derive `entries` from the window on the doc, off the main thread.
     ///
-    /// `getDeepValue()` materializes the WHOLE doc and the decode walks every
-    /// message and every part, so this is O(transcript) — tens of ms on a big
-    /// session, and it runs on every remote update. On the main actor that
-    /// stalled the first frame of a cached session and janked streaming.
-    /// Reading the doc from a background task is the access class the design
-    /// already has: `ChatRoomClient` applies through main-actor closures, but
-    /// the doc remains concurrently readable today regardless.
+    /// The read and the decode are O(window), not O(transcript): messages are
+    /// read one by one from the window's start, never through the whole doc's
+    /// `getDeepValue()`, and the window's settled markdown is parsed in the
+    /// same background task, so the rows assemble from memo hits. This runs on
+    /// every remote update. Reading the doc from a background task is the
+    /// access class the design already has: `ChatRoomClient` applies through
+    /// main-actor closures, but the doc remains concurrently readable
+    /// regardless; a read torn by an import is redone by the trailing re-run
+    /// that import queues.
     ///
     /// Overlapping calls coalesce to a single trailing re-run — a streaming
-    /// burst must not queue one whole-doc projection per token.
+    /// burst must not queue one projection per token.
     private func project() {
         guard !projecting else {
             projectPending = true
@@ -332,25 +450,145 @@ final class SessionStore {
         }
         projecting = true
         let doc = self.doc
+        let held = heldStart
+        let memo = transcriptCache.settledParses
+        let outline = outlineReading ? nil : self.outline
         Task { @MainActor [weak self] in
-            let projection = await Task.detached(priority: .userInitiated) {
-                () -> ([MessageEntry]?, PreviewCoverage?, [String: String]) in
-                guard let root = doc.getDeepValue().mapValue else { return (nil, nil, [:]) }
-                let marker = root["meta"]?.mapValue?["previewCoverage"]?.stringValue
-                let coverage = marker.flatMap { try? JSONDecoder().decode(PreviewCoverage.self, from: Data($0.utf8)) }
-                return (Self.decodeEntries(root: root), coverage, Self.inputCommandOutcomes(root: root))
+            let read = await Task.detached(priority: .userInitiated) {
+                let read = Self.readWindow(of: doc, held: held)
+                // Up to a page of prompts inline; a long history's outline
+                // must not hold up its first page (`readOutline`).
+                let rounds = outline.flatMap {
+                    Self.extendOutline($0, of: doc, to: read.start, steers: read.steers, limit: Self.pageMessages)
+                }
+                return (read, rounds, TranscriptBuilderCache.parseSettled(read.entries, memo: memo))
             }.value
             guard let self else { return }
             self.projecting = false
-            if let decoded = projection.0 {
-                self.inputCommandOutcomes = projection.2
-                self.apply(decoded, coverage: projection.1)
+            self.transcriptCache.adopt(read.2)
+            self.inputCommandOutcomes = read.0.inputOutcomes
+            if let rounds = read.1 {
+                self.outline = rounds
+                if self.earlierRounds != rounds.rounds { self.earlierRounds = rounds.rounds }
+            } else if !self.outlineReading {
+                self.readOutline(to: read.0.start, steers: read.0.steers)
             }
+            // A page requested meanwhile stays requested (the re-run below
+            // reads it); without a reader the window is wherever the tail is.
+            if self.windowHolds > 0, let start = self.windowStart {
+                self.windowStart = min(start, read.0.start)
+            } else {
+                self.windowStart = read.0.start
+            }
+            self.setShownStart(read.0.start)
+            self.apply(read.0.entries, coverage: read.0.coverage)
             if self.projectPending {
                 self.projectPending = false
                 self.project()
             }
         }
+    }
+
+    /// One projection's read of the doc.
+    struct WindowRead {
+        /// The window's entries, continuations joined.
+        var entries: [MessageEntry]
+        /// The index in `messages` the window starts at.
+        var start: Int
+        var coverage: PreviewCoverage?
+        var inputOutcomes: [String: String]
+        /// The messages steer commands sent.
+        var steers: Set<String>
+    }
+
+    /// The prompts among the doc's first `upTo` messages. A light read — a
+    /// message's role, and a prompt's own fields — made once for the messages
+    /// above the first window, then trimmed as the window grows over them.
+    struct RoundOutline {
+        var rounds: [TranscriptRound] = []
+        var upTo = 0
+    }
+
+    /// Reads the prompts above the window off the main thread after the
+    /// window itself is shown, then projects again to bring them up to where
+    /// the window is by then. Outlining a long history takes longer than
+    /// reading its last page (3,000 messages: ~100ms on the simulator).
+    private func readOutline(to start: Int, steers: Set<String>) {
+        outlineReading = true
+        let doc = self.doc
+        let outline = self.outline
+        Task { @MainActor [weak self] in
+            let read = await Task.detached(priority: .utility) {
+                Self.extendOutline(outline, of: doc, to: start, steers: steers)
+            }.value
+            guard let self else { return }
+            self.outlineReading = false
+            if let read { self.outline = read }
+            self.project()
+        }
+    }
+
+    /// `outline` brought up to message `start` (trimmed when the window grew
+    /// over it), or nil if that means reading more than `limit` messages.
+    nonisolated static func extendOutline(
+        _ outline: RoundOutline, of doc: LoroDoc, to start: Int, steers: Set<String>, limit: Int = .max
+    ) -> RoundOutline? {
+        let messages = doc.getList(id: "messages")
+        var outline = outline
+        if Int(messages.len()) < outline.upTo { outline = RoundOutline() }  // rewound into it
+        if start < outline.upTo {
+            outline.rounds.removeAll { ($0.messageIndex ?? 0) >= start }
+        } else {
+            guard start - outline.upTo <= limit else { return nil }
+            outline.rounds += (outline.upTo..<start).compactMap { prompt(at: $0, in: messages, steers: steers) }
+        }
+        outline.upTo = start
+        return outline
+    }
+
+    /// Decodes the window from `held` (see `windowStart(held:count:)`) to the
+    /// end of the doc's `messages`.
+    nonisolated static func readWindow(of doc: LoroDoc, held: Int?) -> WindowRead {
+        let messages = doc.getList(id: "messages")
+        let count = Int(messages.len())
+        var start = windowStart(held: held, count: count)
+        var raw = (start..<count).compactMap { message(at: $0, in: messages) }
+        // A continuation joins its root, which an older doc can hold above
+        // the page: reach back to it (current hosts write no continuations).
+        var missing = Set(raw.compactMap(\.continuationOf)).subtracting(raw.map(\.id))
+        var above: [MessageEntry] = []
+        while !missing.isEmpty, start > 0 {
+            start -= 1
+            guard let entry = message(at: start, in: messages) else { continue }
+            missing.remove(entry.id)
+            above.append(entry)
+        }
+        raw.insert(contentsOf: above.reversed(), at: 0)
+        let commands = doc.getList(id: "commands").getDeepValue().listValue ?? []
+        let steers = steerMessageIDs(commands: commands)
+        let marker = doc.getMap(id: "meta").getDeepValue().mapValue?["previewCoverage"]?.stringValue
+        return WindowRead(
+            entries: decodeEntries(raw, steers: steers), start: start,
+            coverage: marker.flatMap { try? JSONDecoder().decode(PreviewCoverage.self, from: Data($0.utf8)) },
+            inputOutcomes: inputCommandOutcomes(commands: commands), steers: steers)
+    }
+
+    nonisolated private static func message(at index: Int, in messages: LoroList) -> MessageEntry? {
+        guard let item = messages.get(index: UInt32(index)) else { return nil }
+        return (item.asLoroMap()?.getDeepValue() ?? item.asValue()).flatMap(entryFrom)
+    }
+
+    /// The round message `index` starts, reading a reply no further than its
+    /// role.
+    nonisolated private static func prompt(
+        at index: Int, in messages: LoroList, steers: Set<String>
+    ) -> TranscriptRound? {
+        guard let map = messages.get(index: UInt32(index))?.asLoroMap(),
+            map.get(key: "role")?.asValue()?.stringValue == MessageRole.user.rawValue,
+            var entry = entryFrom(map.getDeepValue())
+        else { return nil }
+        entry.isSteer = steers.contains(entry.id)
+        return TranscriptRound.prompt(entry, at: index)
     }
 
     private func apply(_ decoded: [MessageEntry], coverage: PreviewCoverage? = nil) {
@@ -375,13 +613,34 @@ final class SessionStore {
     }
 
     nonisolated static func decodeEntries(root: [String: LoroValue]) -> [MessageEntry] {
-        // Commands are append-only and sync with the transcript. Join explicit
-        // steer message IDs instead of guessing from timing/status, so the
-        // optimistic echo and a reopened/cross-device transcript agree.
-        // "applied" only means routed/queued, not consumed: don't expose it as
-        // a delivery receipt. Old messages without a matching ID stay normal.
-        let steerIDs = Set(
-            (root["commands"]?.listValue ?? []).compactMap { command -> String? in
+        decodeEntries(
+            (root["messages"]?.listValue ?? []).compactMap(entryFrom),
+            commands: root["commands"]?.listValue ?? [])
+    }
+
+    /// Raw (unjoined) message entries as the transcript shows them.
+    nonisolated static func decodeEntries(_ raw: [MessageEntry], commands: [LoroValue]) -> [MessageEntry] {
+        decodeEntries(raw, steers: steerMessageIDs(commands: commands))
+    }
+
+    nonisolated private static func decodeEntries(_ raw: [MessageEntry], steers: Set<String>) -> [MessageEntry] {
+        let marked = raw.map { entry in
+            var entry = entry
+            entry.isSteer = entry.role == .user && steers.contains(entry.id)
+            return entry
+        }
+        return joinContinuations(marked)
+    }
+
+    /// The messages steer commands sent. Commands are append-only and sync
+    /// with the transcript. Join explicit steer message IDs instead of
+    /// guessing from timing/status, so the optimistic echo and a
+    /// reopened/cross-device transcript agree. "applied" only means
+    /// routed/queued, not consumed: don't expose it as a delivery receipt.
+    /// Old messages without a matching ID stay normal.
+    nonisolated static func steerMessageIDs(commands: [LoroValue]) -> Set<String> {
+        Set(
+            commands.compactMap { command -> String? in
                 guard let command = command.mapValue,
                     command["kind"]?.stringValue == "steer",
                     let payload = command["payload"]?.mapValue,
@@ -390,18 +649,16 @@ final class SessionStore {
                 else { return nil }
                 return id
             })
-        let raw = (root["messages"]?.listValue ?? []).compactMap(entryFrom).map { entry in
-            var entry = entry
-            entry.isSteer = entry.role == .user && steerIDs.contains(entry.id)
-            return entry
-        }
-        return joinContinuations(raw)
     }
 
     /// Settled respondInput commands: command id → host status.
     nonisolated static func inputCommandOutcomes(root: [String: LoroValue]) -> [String: String] {
+        inputCommandOutcomes(commands: root["commands"]?.listValue ?? [])
+    }
+
+    nonisolated static func inputCommandOutcomes(commands: [LoroValue]) -> [String: String] {
         var outcomes: [String: String] = [:]
-        for command in root["commands"]?.listValue ?? [] {
+        for command in commands {
             guard let command = command.mapValue,
                 command["kind"]?.stringValue == "respondInput",
                 let id = command["id"]?.stringValue,

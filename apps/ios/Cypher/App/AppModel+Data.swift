@@ -231,7 +231,7 @@ extension AppModel {
 
     private func referenceContext(_ chat: Chat) async throws -> String {
         if let demo {
-            let entries = SessionReferences.entries(demo.sessionStore(for: chat.id).entries)
+            let entries = SessionReferences.entries(demo.sessionStore(for: chat.id).fedEntries)
             return SessionReferences.boundedContext(entries) ?? ""
         }
         guard let store = warmSessionStore(for: chat) else {

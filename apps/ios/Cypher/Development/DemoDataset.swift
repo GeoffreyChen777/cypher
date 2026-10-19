@@ -843,7 +843,7 @@ final class DemoDataset {
     private func simulateTurn(store: SessionStore, chatId: String, prompt: String, isSteer: Bool) {
         streamTask?.cancel()
         let now = nowMs()
-        var entries = store.entries
+        var entries = store.fedEntries
         entries.append(
             MessageEntry(
                 id: "u-\(now)", role: .user,
@@ -907,7 +907,7 @@ final class DemoDataset {
             for parts in toolPhases {
                 if Task.isCancelled { return }
                 guard let store else { return }
-                var current = store.entries
+                var current = store.fedEntries
                 guard let last = current.indices.last, current[last].id == liveId else { return }
                 current[last].parts = parts
                 store.setEntries(current)
@@ -919,14 +919,14 @@ final class DemoDataset {
                 if Task.isCancelled { return }
                 text += (ix == 0 ? "" : " ") + word
                 guard let store else { return }
-                var current = store.entries
+                var current = store.fedEntries
                 guard let last = current.indices.last, current[last].id == liveId else { return }
                 current[last].parts = tools + [.text(id: "t0", text: text)]
                 store.setEntries(current)
                 try? await Task.sleep(nanoseconds: UInt64.random(in: 30_000_000...140_000_000))
             }
             guard let self, let store else { return }
-            var current = store.entries
+            var current = store.fedEntries
             if let last = current.indices.last, current[last].id == liveId {
                 current[last].status = .complete
                 store.setEntries(current)
