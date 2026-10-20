@@ -5,9 +5,9 @@
  * be hostile).
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { isCommandRule } from "./commands.ts";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { isCommandRule, patternError } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
 
 export type Decision = "allow" | "elevate" | "deny";
@@ -28,6 +28,8 @@ export interface Rule {
   capability: "read" | "write";
   path: string;
   createdAt: string;
+  /** The project it applies in (`projectIdentity`); every project when absent. */
+  project?: string;
 }
 
 export interface PermissionsConfig {
@@ -54,6 +56,14 @@ export interface PermissionsConfig {
     allowDomains: string[];
   };
   tools: { mcp: Decision; overrides: Record<string, Decision> };
+  /**
+   * Names that make a command dangerous wherever they appear: kube contexts,
+   * cloud profiles and projects, ssh hosts, branches, database hosts
+   * (globs, case-insensitive; risk.ts).
+   */
+  protectedTargets: string[];
+  /** The user's own inspection entries: patterns that run outside the sandbox without asking (risk.ts R0). */
+  inspect: string[][];
   rules: Rule[];
   /**
    * Commands that run outside the sandbox (`allow`), ask first (`ask`) or
@@ -162,13 +172,39 @@ export const DEFAULT_PROTECTED: readonly string[] = [
  * Cypher's and Pi's own data: policy, settings, extensions and the Runtime.
  * Readable (the shell runs the Runtime's binaries), but only a human may
  * approve a write: the judge must not approve edits to its own policy.
+ *
+ * Only the instance that is running (`selfPatterns`) and the installed app
+ * are guarded: another instance's data (a development copy the agent starts
+ * and tests) is ordinary external data. Its secrets stay sensitive through
+ * the `~/.cypher*` patterns above.
  */
 export const DEFAULT_SELF: readonly string[] = [
-  "~/.cypher*/**",
-  "!~/.cypher*/worktrees/**",
-  "!~/.cypher*/*/worktrees/**",
+  "~/.cypher/**",
+  "!~/.cypher/worktrees/**",
   "~/.pi/**",
 ];
+
+/**
+ * The running instance's own data root: the Pi agent directory is
+ * `<root>/pi-runtime/agent` in a Cypher data directory, and is itself the
+ * root anywhere else.
+ */
+export function instanceRoot(agentDir: string): string {
+  const parent = dirname(agentDir);
+  const root = basename(agentDir) === "agent" && basename(parent) === "pi-runtime" ? dirname(parent) : agentDir;
+  try {
+    return realpathSync.native(root);
+  } catch {
+    return root;
+  }
+}
+
+/** The self list for the instance whose agent directory this is. */
+export function selfPatterns(agentDir: string | undefined): string[] {
+  if (!agentDir) return [...DEFAULT_SELF];
+  const root = instanceRoot(agentDir);
+  return [...new Set([`${root}/**`, `!${root}/worktrees/**`, ...DEFAULT_SELF])];
+}
 
 export const DEFAULT_WRITABLE_SUPPORT: readonly string[] = [
   "~/.npm/**",
@@ -181,6 +217,31 @@ export const DEFAULT_WRITABLE_SUPPORT: readonly string[] = [
   "~/.pnpm-store/**",
   "~/.bun/install/cache/**",
   "~/.yarn/berry/cache/**",
+  // Toolchains and SDKs: what builds download and generate outside the
+  // project. Not the places that hold programs run later from PATH or at
+  // login (~/.cargo/bin, ~/.local/bin, ~/go/bin, a global npm prefix):
+  // installing there is dangerous (risk.ts).
+  "~/.rustup/toolchains/**",
+  "~/.rustup/downloads/**",
+  "~/.rustup/tmp/**",
+  "~/.m2/repository/**",
+  "~/.gradle/wrapper/**",
+  "~/.gradle/daemon/**",
+  "~/.gradle/native/**",
+  "~/.nuget/packages/**",
+  "~/.local/share/pnpm/store/**",
+  "~/.deno/**",
+  "~/.pub-cache/**",
+  "~/.cocoapods/repos/**",
+  "~/Library/Developer/Xcode/DerivedData/**",
+  "~/Library/Developer/CoreSimulator/Caches/**",
+  "~/.android/avd/**",
+  "~/.android/cache/**",
+  "~/.expo/**",
+  "~/.virtualenvs/**",
+  "~/.local/share/virtualenvs/**",
+  "~/.local/share/uv/**",
+  "~/.pyenv/versions/**",
   // ssh records a new host here.
   "~/.ssh/known_hosts",
 ];
@@ -206,6 +267,9 @@ export const DEFAULT_ALLOW_DOMAINS: readonly string[] = [
   "*.rubygems.org",
   "registry-1.docker.io",
 ];
+
+/** Target names that are production unless the user says otherwise. */
+export const DEFAULT_PROTECTED_TARGETS: readonly string[] = ["prod", "prod-*", "prod_*", "*-prod", "*_prod", "*.prod", "prod.*", "production", "*-production", "production-*", "prd", "live"];
 
 export const DEFAULT_ENV_SCRUB: readonly string[] = [
   "*_TOKEN",
@@ -244,9 +308,11 @@ export const DEFAULT_LEVELS: Record<LevelName, LevelMatrix> = {
 };
 
 /**
- * Model first everywhere: the reviewing model approves what plainly serves
- * the user's request and asks them about the rest. Writes to Cypher's own
- * data (`self.write`) are a human's alone (`approvalMode`).
+ * Model first for what is not dangerous: the reviewing model approves what
+ * plainly serves the user's request and asks them about the rest. Writes to
+ * Cypher's own data (`self.write`) and protected files (`protected.write`)
+ * are a human's alone (`approvalMode`), as is every dangerous command
+ * (risk.ts).
  */
 export const DEFAULT_APPROVAL: Record<string, ApprovalMode> = {
   "external.write": "assisted",
@@ -258,7 +324,7 @@ export const DEFAULT_APPROVAL: Record<string, ApprovalMode> = {
   escalate: "assisted",
 };
 
-export function defaultConfig(): PermissionsConfig {
+export function defaultConfig(agentDir?: string): PermissionsConfig {
   return {
     version: 1,
     defaultLevel: "standard",
@@ -268,11 +334,13 @@ export function defaultConfig(): PermissionsConfig {
     ask: { timeoutMs: null },
     sensitive: [...DEFAULT_SENSITIVE],
     protected: [...DEFAULT_PROTECTED],
-    self: [...DEFAULT_SELF],
+    self: selfPatterns(agentDir),
     writableSupport: [...DEFAULT_WRITABLE_SUPPORT],
     envScrub: [...DEFAULT_ENV_SCRUB],
     network: { localBinding: true, unixSockets: [], mode: "open", allowDomains: [...DEFAULT_ALLOW_DOMAINS] },
     tools: { mcp: "allow", overrides: {} },
+    protectedTargets: [...DEFAULT_PROTECTED_TARGETS],
+    inspect: [],
     rules: [],
     commands: [],
   };
@@ -287,7 +355,7 @@ const ZONES: readonly Zone[] = ["workspace", "external", "sensitive"];
 const DECISION_RANK: Record<Decision, number> = { allow: 0, elevate: 1, deny: 2 };
 const MODE_RANK: Record<ApprovalMode, number> = { assisted: 0, ask: 1, deny: 2 };
 
-type Json = Record<string, unknown>;
+export type Json = Record<string, unknown>;
 
 function isObject(value: unknown): value is Json {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -383,13 +451,16 @@ export function mergeUserConfig(base: PermissionsConfig, raw: unknown): Permissi
     applyToolOverrides(config.tools.overrides, raw.tools.overrides, false, config.tools.mcp);
   }
   if (Array.isArray(raw.commands)) config.commands = raw.commands.filter(isCommandRule);
+  config.protectedTargets = editList(config.protectedTargets, raw.protectedTargets);
+  if (Array.isArray(raw.inspect)) config.inspect = raw.inspect.filter((pattern): pattern is string[] => patternError(pattern) === undefined);
   if (Array.isArray(raw.rules)) {
     config.rules = raw.rules.filter(
       (rule): rule is Rule =>
         isObject(rule) &&
         (rule.capability === "read" || rule.capability === "write") &&
         typeof rule.path === "string" &&
-        (rule.path.startsWith("/") || rule.path.startsWith("tool:") || rule.path.startsWith("net:")),
+        (rule.path.startsWith("/") || rule.path.startsWith("tool:") || rule.path.startsWith("net:")) &&
+        (rule.project === undefined || typeof rule.project === "string"),
     );
   }
   return config;
@@ -406,6 +477,7 @@ export function mergeProjectConfig(base: PermissionsConfig, raw: unknown): Permi
   ];
   config.sensitive = tighten(config.sensitive, raw.sensitive);
   config.protected = tighten(config.protected, raw.protected);
+  config.protectedTargets = tighten(config.protectedTargets, raw.protectedTargets);
   applyLevels(config.levels, raw.levels, true);
   applyApproval(config.approval, raw.approval, true);
   // A project may ask for the filtered network, never for the open one.
@@ -451,7 +523,7 @@ export interface LoadedConfig {
 export function loadConfig(agentDir: string, projectRoots: readonly string[]): LoadedConfig {
   const warnings: string[] = [];
   const userPath = join(agentDir, CONFIG_FILE);
-  let config = defaultConfig();
+  let config = defaultConfig(agentDir);
   if (existsSync(userPath)) {
     const raw = readJson(userPath);
     if (raw === undefined) warnings.push(`${userPath} is not valid JSON; using the defaults`);
@@ -478,16 +550,29 @@ export function appendCommandRule(agentDir: string, rule: CommandRule): void {
 }
 
 function appendTo(agentDir: string, key: "rules" | "commands", entry: Rule | CommandRule): void {
+  editUserConfig(agentDir, (root) => {
+    const list = Array.isArray(root[key]) ? (root[key] as unknown[]) : [];
+    list.push(entry);
+    root[key] = list;
+  });
+}
+
+/** Edit the user's file in place, keeping everything the edit does not touch. */
+export function editUserConfig(agentDir: string, edit: (root: Json) => void): void {
   const path = join(agentDir, CONFIG_FILE);
   const raw = readJson(path);
   const root: Json = isObject(raw) ? raw : { version: 1 };
-  const list = Array.isArray(root[key]) ? (root[key] as unknown[]) : [];
-  list.push(entry);
-  root[key] = list;
+  edit(root);
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.tmp-${process.pid}`;
   writeFileSync(temporary, `${JSON.stringify(root, null, 2)}\n`, { mode: 0o600 });
   renameSync(temporary, path);
+}
+
+/** The user's file as written, for a migration. */
+export function readUserConfig(agentDir: string): Json | undefined {
+  const raw = readJson(join(agentDir, CONFIG_FILE));
+  return isObject(raw) ? raw : undefined;
 }
 
 const LEVEL_FROM_SANDBOX: Record<string, LevelName> = {
@@ -510,6 +595,8 @@ export function resolveLevel(env: string | undefined, config: PermissionsConfig)
  */
 export function approvalMode(config: PermissionsConfig, key: string): ApprovalMode {
   const mode = config.approval[key] ?? "ask";
-  if (key === "self.write") return mode === "deny" ? "deny" : "ask";
+  // A protected write runs code later (a hook, a shell startup file): it is
+  // dangerous (risk.ts R2), so the model never approves one either.
+  if (key === "self.write" || key === "protected.write") return mode === "deny" ? "deny" : "ask";
   return mode;
 }

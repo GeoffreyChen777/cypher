@@ -130,15 +130,17 @@ pub fn option_roles(options: &[String]) -> Vec<OptionRole> {
         .collect()
 }
 
-/// The letter that picks each option: Y the narrowest approval, C an
-/// approval for this chat, A always, N deny, S deny and stop. ⌘↵ also picks
-/// the narrowest approval; number keys still pick by position.
+/// The letter that picks each option: Y the first approval, O a "Once"
+/// beside a lasting one ("Always in <project>", Once), C an approval for
+/// this chat, A always, N deny, S deny and stop. ⌘↵ also picks the first
+/// approval; number keys still pick by position.
 pub fn shortcut_keys(options: &[String]) -> Vec<Option<&'static str>> {
     option_roles(options)
         .into_iter()
         .zip(options)
         .map(|(role, label)| match role {
             OptionRole::Primary => Some("y"),
+            OptionRole::Secondary if label == "Once" => Some("o"),
             OptionRole::Secondary if label.starts_with("Always") => Some("a"),
             OptionRole::Secondary if label.ends_with("this chat") => Some("c"),
             OptionRole::Secondary => None,
@@ -483,6 +485,14 @@ mod tests {
             None,
             "no Always here"
         );
+        let local = labels(&["Always in cypher", "Once", "Deny", "Deny and stop"]);
+        assert_eq!(
+            shortcut_keys(&local),
+            [Some("y"), Some("o"), Some("n"), Some("s")],
+            "local work: kept for the project, or once"
+        );
+        let dangerous = labels(&["Allow for this task", "Deny", "Deny and stop"]);
+        assert_eq!(shortcut_keys(&dangerous), [Some("y"), Some("n"), Some("s")]);
     }
 
     #[test]

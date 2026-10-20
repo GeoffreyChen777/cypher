@@ -77,7 +77,13 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
     return permissions;
   };
 
-  const requestContext = (ctx: ExtensionContext, signal: AbortSignal | undefined, toolCallId?: string): RequestContext => ({
+  const requestContext = (ctx: ExtensionContext, signal: AbortSignal | undefined, toolCallId?: string): RequestContext => {
+    // A task grant lasts until the user's next message.
+    permissions?.setTurn(ctx.sessionManager.getBranch());
+    return requestContextFor(ctx, signal, toolCallId);
+  };
+
+  const requestContextFor = (ctx: ExtensionContext, signal: AbortSignal | undefined, toolCallId?: string): RequestContext => ({
     toolCallId,
     cwd: ctx.cwd,
     hasUI: ctx.hasUI,
@@ -355,20 +361,26 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
     }) as unknown as typeof baseBash.parameters,
     promptGuidelines: [
       ...(baseBash.promptGuidelines ?? []),
-      "bash runs in a sandbox: the workspace is writable, the rest of the machine is readable except sensitive files (.env, keys, ~/.ssh keys, credentials), and the network is open. Commands that need more (ssh, git push with credentials, gh, cloud CLIs, writing outside the workspace, the keychain, other processes, launchctl, simulators) fail in it.",
-      "When a command needs more than the sandbox gives, run it again with `escalate` (label and reason). A reviewing model or the user decides whether it runs outside the sandbox; the user can allow similar commands for the chat. Make the label and reason say plainly how it serves what the user asked. Commands the user already allowed run outside without asking. Do not work around the sandbox in other ways.",
-      "Commands that may leave the sandbox read best plainly: name programs directly, not through `bash -c`, `eval`, `env` or an interpreter, which no rule can allow, so each such run needs its own approval.",
-      "Escalate only the part that needs it: write its output to a file in the workspace, or pipe it to plain filters (grep, sort, uniq, wc, cut, tr, head, tail, awk and sed programs that only print), and do other work in later commands in the sandbox. A line that also runs a script, an interpreter or other commands outside can only be approved once, so the user is asked again every time.",
+      "bash runs in a sandbox: the workspace, temp directories, toolchain caches and (in a git worktree) the repository's objects and refs are writable; the rest of the machine is readable except sensitive files (.env, keys, ~/.ssh keys, credentials); the network is open. Commands that need more (credentials for ssh, git push, gh or cloud CLIs; other processes; the keychain; launchctl; simulators; Docker's socket) fail in it.",
+      "Commands that only inspect what the sandbox cannot reach (lsof, gh run/pr view and list, git fetch, docker ps and logs, kubectl get, cloud describe and list, launchctl list) run outside it on their own, without escalate. So does stopping a process this chat started, by its pid.",
+      "Try a command in the sandbox first unless it obviously needs credentials, other processes or system services. When it needs more, run it again with `escalate` (label and reason). The reviewing model approves what plainly serves the user's request and remembers it for the chat; otherwise the user decides, and can keep it for the project. Dangerous commands (publishing, deploying, pushing to the default branch or tags, deleting outside the workspace, stopping processes this chat did not start, installing system-wide, reading secrets) always ask the user. Make the label and reason say plainly how it serves what the user asked. Do not work around the sandbox in other ways.",
+      "Commands that may leave the sandbox read best plainly: name programs directly, not through `bash -c`, `eval` or an interpreter, which no rule can allow. `NAME=value cmd`, `nohup`, `timeout`, `nice` and a trailing `&` are fine. Write paths and pids literally (not `$(pwd)` or `$(pgrep …)`): a word known only when the line runs counts as the worst it could be.",
+      "Escalate only the part that needs it: write its output to a file in the workspace or temp, or pipe it to plain filters (grep, sort, uniq, wc, cut, tr, head, tail, awk and sed programs that only print), and do other work in later commands in the sandbox. A line that also runs a script, an interpreter or other commands outside can only be approved once, so the user is asked again every time.",
     ],
     async execute(id, params, signal, onUpdate, ctx) {
       const st = state(ctx);
       const { shellPath, commandPrefix, shell } = shellSettings();
       const { escalate, ...bashParams } = params as typeof params & { escalate?: { label?: string; reason?: string; patterns?: string[][] } };
-      const outside = () => createBashToolDefinition(ctx.cwd, { shellPath, commandPrefix });
+      // Every command carries the chat's marker, so its processes can be told from the user's (`ownsProcesses`).
+      const marker = st.processMarker;
+      const marked = (env: NodeJS.ProcessEnv) => (marker ? { ...env, [marker.name]: marker.value } : env);
+      const outside = () =>
+        createBashToolDefinition(ctx.cwd, { shellPath, commandPrefix, spawnHook: (context) => ({ ...context, env: marked(context.env) }) });
       if (!st.enforcing) return outside().execute(id, bashParams, signal, onUpdate, ctx);
       const command = String(params.command ?? "");
       st.shellPrefix = Boolean(commandPrefix);
-      const check = st.checkCommand(command, ctx.cwd);
+      st.setTurn(ctx.sessionManager.getBranch());
+      const check = st.checkCommand(command, ctx.cwd, { escalated: escalate !== undefined });
       const purpose = escalate?.label?.trim() || undefined;
       if (check.kind === "deny") {
         st.audit.write({ tool: "bash", command, capability: "escalate", decision: "deny", decidedBy: "rule", reason: check.reason });
@@ -378,21 +390,29 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       // user approves the agent's request now.
       let ranOutside: { note: string; record: PermissionRecord } | undefined;
       if (check.kind === "outside") {
-        st.audit.write({ tool: "bash", command, capability: "escalate", decision: "allow", decidedBy: "rule" });
-        const rules = check.rules.map((rule) => describePattern(rule.match));
+        const rules = [...new Set(check.rules.map((rule) => describePattern(rule.match)))];
+        st.audit.write({ tool: "bash", command, capability: "escalate", decision: "allow", decidedBy: rules.length ? "rule" : "inspect", tier: check.tier, prompted: false });
+        const why = [...(check.inspected ? ["it only inspects"] : []), ...(rules.length ? [`allowed by ${rules.map((rule) => `\`${rule}\``).join(", ")}`] : [])];
         ranOutside = {
-          note: `allowed by ${rules.map((rule) => `\`${rule}\``).join(", ")}`,
-          record: { outcome: "outside", scope: "rule", rule: rules.join(", "), purpose: check.rules.find((rule) => rule.label)?.label },
+          note: why.join("; "),
+          record: { outcome: "outside", scope: "rule", rule: rules.length ? rules.join(", ") : "inspection", purpose: check.rules.find((rule) => rule.label)?.label },
         };
       } else if (escalate) {
         const outcome = await st.requestEscalation(command, escalate, requestContext(ctx, signal, id));
         if (!outcome.ok) return refused(outcome.reason, { purpose }) as never;
+        const by = outcome.by === "judge" ? " by the reviewing model" : "";
         ranOutside = {
           note:
             outcome.scope === "once"
-              ? `approved once${outcome.by === "judge" ? " by the reviewing model" : ""}${outcome.onceOnly ? `; it could not be allowed for the chat, because ${outcome.onceOnly}. Next time, escalate only the command that needs it and do the rest in the sandbox` : ""}`
-              : `approved ${outcome.scope === "chat" ? "for this chat" : "always"}`,
-          record: { outcome: "outside", scope: outcome.scope, purpose },
+              ? `approved once${by}${outcome.by === "judge" ? " (it remembers this kind of command for the chat)" : ""}${outcome.onceOnly ? `; no rule could cover it, because ${outcome.onceOnly}. Next time, escalate only the command that needs it and do the rest in the sandbox` : ""}`
+              : outcome.scope === "rule"
+                ? "allowed by an approval given meanwhile"
+                : outcome.scope === "task"
+                  ? "approved for this task: commands like it with the same danger run until the user's next message"
+                  : outcome.scope === "project"
+                    ? `approved always in ${st.projectName}`
+                    : `approved ${outcome.scope === "chat" ? "for this chat" : "always"}`,
+          record: { outcome: "outside", scope: outcome.scope === "project" ? "always" : outcome.scope === "task" ? "once" : outcome.scope, purpose },
         };
       }
       if (ranOutside) {
@@ -419,7 +439,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
         spawnHook: (context) => ({
           command: wrapCommand(binary, policy.path, shell, context.command),
           cwd: context.cwd,
-          env: { ...scrubEnv(context.env, st.config.envScrub), ...(viaProxy !== undefined ? st.proxyEnv(viaProxy) : {}) },
+          env: marked({ ...scrubEnv(context.env, st.config.envScrub), ...(viaProxy !== undefined ? st.proxyEnv(viaProxy) : {}) }),
         }),
       });
       const forward = onUpdate
@@ -524,6 +544,19 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
     const st = state(ctx);
     st.reload(ctx.cwd, ctx.sessionManager.getBranch());
     st.noticeUnavailable(ctx.sessionManager.getBranch(), ctx.ui);
+    if (!st.enforcing) return;
+    // Once: rules from before risk tiers that no longer help.
+    const migrated = st.migrateRules();
+    if (migrated?.removed.length) {
+      ctx.ui.notify(
+        [
+          "Permission control now asks only about dangerous commands; inspections run on their own and local work is approved once per project.",
+          `Removed ${migrated.removed.length} saved command rule(s) (backup: ${migrated.backup}):`,
+          ...migrated.removed.map((item) => `  ${item.rule} — ${item.why}`),
+        ].join("\n"),
+        "info",
+      );
+    }
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -610,9 +643,13 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("perm-log", {
-    description: "Show this chat's recent permission decisions",
-    handler: async (_args, ctx) => {
+    description: "Show this chat's recent permission decisions; `/perm-log --stats` counts questions by tier and reason over 7 days",
+    handler: async (args, ctx) => {
       const st = state(ctx);
+      if ((args ?? "").trim() === "--stats") {
+        ctx.ui.notify(st.audit.stats(), "info");
+        return;
+      }
       const records = st.audit.recent(20);
       ctx.ui.notify(
         records.length

@@ -46,5 +46,6 @@ export function describe(classification: Classification): string {
   if (zone === "sensitive") return `${path} (sensitive)`;
   if (guard === "self") return `${path} (Cypher's own data)`;
   if (guard === "protected") return `${path} (protected: a write here runs code later)`;
+  if (classification.scratch) return `${path} (scratch space)`;
   return `${path} (${zone === "workspace" ? "inside" : "outside"} the workspace)`;
 }

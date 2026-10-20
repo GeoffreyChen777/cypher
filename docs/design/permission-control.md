@@ -1,5 +1,11 @@
 # Permission control (cypher-permissions)
 
+> **2026-10-20:** who approves a command outside the sandbox now depends on its risk tier
+> (inspect, local, dangerous), approvals of local work are kept per project, and
+> dangerous work always asks a human for at most the current task. See
+> [permission-friction.md](permission-friction.md); the sections below that it changes
+> (§3.5, §6.3, §7.2–7.5) are summarized there.
+
 Status: **phases 0–4 implemented** (Runtime 1.1.0.2; off by default since 1.1.0.3; leaving the sandbox since 1.1.0.4, which needs Cypher 0.3.49; §10).
 
 The Runtime extension `pi-runtime/extensions/cypher-permissions.ts` (modules in
@@ -450,9 +456,11 @@ rules (`commands.ts`, in `permissions.json`'s `commands`, a project's
   …`). The model first (`approval.escalate`, `assisted` by default): it may run the
   command once, with no dialog and no rule left behind; otherwise the dialog shows its
   `Review` and the user decides. Without a UI, what the model does not approve is denied.
-- **What an approval leaves behind**: Run once, nothing. Allow for this chat, one chat
-  grant per pattern (§7.5). Always allow, one `allow` rule per pattern in
-  `permissions.json`.
+- **What an approval leaves behind** (since 2026-10-20, permission-friction.md §7): Once,
+  nothing. Always in `<project>`, one `allow` rule per pattern in `permissions.json`, with
+  the project and the variables it saw assigned. Allow for this task (dangerous commands),
+  a task grant per pattern until the user's next message. A reviewing model's approval, a
+  chat grant per pattern (`approvedBy: "judge"`).
 - A project's file may add `ask` and `deny` rules, never `allow`.
 - The level still applies inside the sandbox; outside it nothing does. Full access runs
   everything outside without asking.
@@ -793,6 +801,11 @@ Decided (2026-10-11):
 - **D10.** (2026-10-15) The model judges first for every kind of request except writes to
   Cypher's own data: sensitive files, commands outside the sandbox and MCP/extension tools
   included. Its approvals stay one-off; the user is asked about the rest.
+- **D11.** (2026-10-20, permission-friction.md) Risk tiers replace "outside means ask":
+  inspections run outside without asking, local work goes to the model (whose approval is
+  remembered for the chat) and is kept per project when a human approves it, dangerous
+  work (and protected writes) always asks a human, for the task at most. D10's "model
+  first" now excludes dangerous work.
 
 Open:
 
