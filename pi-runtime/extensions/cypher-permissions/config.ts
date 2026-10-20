@@ -147,6 +147,18 @@ export const DEFAULT_PROTECTED: readonly string[] = [
   "**/.git/config",
   "**/.git/config.worktree",
   "**/.git/hooks/**",
+  "**/.git/modules/**/config",
+  "**/.git/modules/**/hooks/**",
+  // Another Cypher instance's policy, settings, extensions and Runtime: a
+  // write there runs code in that instance later. The running one is `self`.
+  "~/.cypher*/pi-runtime/agent/permissions.json",
+  "~/.cypher*/*/pi-runtime/agent/permissions.json",
+  "~/.cypher*/pi-runtime/agent/settings.json",
+  "~/.cypher*/*/pi-runtime/agent/settings.json",
+  "~/.cypher*/pi-runtime/agent/extensions/**",
+  "~/.cypher*/*/pi-runtime/agent/extensions/**",
+  "~/.cypher*/pi-runtime/versions/**",
+  "~/.cypher*/*/pi-runtime/versions/**",
   "<root>/.gitmodules",
   "<root>/.envrc",
   "<root>/.vscode/tasks.json",
@@ -269,7 +281,13 @@ export const DEFAULT_ALLOW_DOMAINS: readonly string[] = [
 ];
 
 /** Target names that are production unless the user says otherwise. */
-export const DEFAULT_PROTECTED_TARGETS: readonly string[] = ["prod", "prod-*", "prod_*", "*-prod", "*_prod", "*.prod", "prod.*", "production", "*-production", "production-*", "prd", "live"];
+export const DEFAULT_PROTECTED_TARGETS: readonly string[] = [
+  "prod", "production", "prd",
+  "prod-*", "prod_*", "prod.*",
+  "*-prod", "*_prod", "*.prod",
+  "*-prod-*", "*_prod_*", "*.prod.*",
+  "*-production", "*.production",
+];
 
 export const DEFAULT_ENV_SCRUB: readonly string[] = [
   "*_TOKEN",

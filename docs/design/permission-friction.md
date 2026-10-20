@@ -500,6 +500,42 @@ Decided while implementing:
 - **Migration (§10)** decides each rule by its tier: `git tag **` stays (creating a tag is
   local; pushing one is R2). It runs once (`rulesVersion: 2`), with a backup.
 
+Review fixes (2026-10-21):
+
+- **Redirections are checked on every command**, inert builtins and filters too: `echo x
+  >> ~/.zshrc` is R2, never the model's.
+- **Repository trust**: a `.git` directory counts only when it is the chat's own or lives
+  where sandboxed commands cannot write; a worktree's git directory must point back at it
+  (`gitdir`, or a submodule's `core.worktree`) before it gives the checkout a project or
+  trust. Submodules' configs and hooks are protected.
+- **No build tools in R0** (§3.3's JavaScript, Python, Rust, Go and JVM rows, `xcodebuild`,
+  `terraform validate`): each reads project configuration that can name a program it runs,
+  and all of them work in the sandbox. R0 refuses options that point a CLI at a config or
+  server the line names (`--kubeconfig`, `helm --registry-config`, `aws --endpoint-url`,
+  `docker -H/--config`, `systemctl -H`); `docker compose config` (it prints `.env`) and
+  `aws` services whose listings carry environment variables (Lambda, ECS, …) are not R0.
+- **Commands inside commands**: `ssh [options] host '…'`, `exec`, `command`, `xargs`,
+  `script`, `env -S`, wrappers with options `unwrap` does not read, and compound commands in
+  opaque lines are read for what they run.
+- **Code-running options are R2**: `git -c`/`clone --config` with a key outside a short list
+  of harmless ones, `--config-env`, `--exec-path`, `--git-dir`; ssh options `ruleCannotVouch`
+  names. `git config` writing a harmless key (`user.email`) is R1.
+- **More of §3.2**: `docker system prune`, secret managers (`gpg` secret exports and
+  decryption, `sops`, `bw`, `doppler`, `infisical`, `chamber`, `aws-vault`, `git
+  credential`), chat CLIs, `osascript` (it drives Mail and Messages), `open` with a link to
+  another host, `gh auth status --show-token`, `git reflog expire`, `git gc --prune`,
+  `git prune`, history rewrites, `git worktree remove` of a worktree outside the workspace,
+  download-then-run through a file (`-o`, `-O`, `>`, `wget`).
+- **The model's memo** covers the commands' own categories only, and the prompt lists them;
+  patterns the agent proposed are never remembered by it.
+- **Protected targets**: `gh`/`glab` are matched by their repository and host options and
+  URLs only; the defaults dropped `live` and `production-*` and gained `*-prod-*`.
+- The migration keeps rules with `acknowledgeDanger`.
+
+Accepted risks: a process can change between the ownership check and the kill (pid reuse,
+a new match for `pkill -f`); `kubectl get configmap` and `describe pod` may show values a
+team treats as secret.
+
 Not done:
 
 - §5.2's project-shipped rule for Cypher's dev instances: the general mechanism (a write

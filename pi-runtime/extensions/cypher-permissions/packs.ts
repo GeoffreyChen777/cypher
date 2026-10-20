@@ -147,31 +147,43 @@ const notLocalHost = (url: string) => !/^(https?:\/\/)?(localhost|127\.\d+\.\d+\
 // --- Inspection (R0) ---------------------------------------------------------------
 
 /**
- * `ps` without the options that print each process's environment (`e`, `E`,
- * `-e` on BSD). Conservative: any word of letters holding one is refused,
- * except the value of an option that takes one (`-o etime`).
+ * `ps` without the options that print each process's environment: on
+ * macOS `e`, `E` and `-e`; on Linux the BSD-style `e` (`ps aux e`, `ps eww`),
+ * while `-e` there only means every process. The value of an option that
+ * takes one (`-o etime`) is not an option.
  */
 function psReadsNoEnvironment(view: CommandView): boolean {
+  const linux = process.platform === "linux";
   for (let i = 0; i < view.args.length; i++) {
     const word = view.args[i];
-    if (/^-[oOpgGtuUM]$/.test(word)) {
+    if (/^-[oOpgGtuUMq]$/.test(word)) {
       i++;
       continue;
     }
-    if (/^-?[A-Za-z]+$/.test(word) && /[eE]/.test(word)) return false;
+    if (/^-?[A-Za-z]+$/.test(word) && /[eE]/.test(word)) {
+      if (linux && word.startsWith("-") && !/E/.test(word) && !/[oOpgGtuUMq][A-Za-z]*e/.test(word.slice(1))) continue;
+      return false;
+    }
   }
   return true;
 }
 
+/** Options that point a CLI at a config or server the line names: the config can run a program (a kubeconfig's exec plugin). */
+const refuses =
+  (...options: string[]) =>
+  (view: CommandView) =>
+    !view.args.some((word) => options.some((option) => word === option || word.startsWith(`${option}=`)));
+
 export const INSPECT: readonly InspectEntry[] = [
   // core: processes, files by name, the machine.
   { pack: "core", program: "ps", check: psReadsNoEnvironment },
-  { pack: "core", program: "pgrep" },
+  // Not -l or -a: they print command lines.
+  { pack: "core", program: "pgrep", check: (view) => !view.args.some((word) => /^-[A-Za-z]*[la]/.test(word) || word === "--list-name" || word === "--list-full") },
   { outside: true, pack: "core", program: "lsof" },
   { pack: "core", program: ["ls", "stat", "readlink", "realpath", "du", "df", "which", "whoami", "id", "uname", "hostname", "sw_vers", "uptime", "date", "basename", "dirname"] },
   { outside: true, pack: "core", program: "launchctl", sub: ["list"] },
   { pack: "core", program: "crontab", check: (view) => view.args.length === 1 && view.args[0] === "-l" },
-  { outside: true, pack: "core", program: "systemctl", sub: ["status|list-units|list-timers|is-active|is-enabled|is-failed"] },
+  { outside: true, pack: "core", program: "systemctl", sub: ["status|list-units|list-timers|is-active|is-enabled|is-failed"], check: refuses("-H", "--host", "-M", "--machine") },
   // git hosting: read-only verbs. Not `gh api`, which can write.
   { outside: true, pack: "git hosting", program: "gh", sub: ["run", "list|view|watch"] },
   { outside: true, pack: "git hosting", program: "gh", sub: ["pr", "list|view|checks|status|diff"] },
@@ -197,33 +209,26 @@ export const INSPECT: readonly InspectEntry[] = [
   { pack: "git", program: "git", sub: ["remote"], check: (view) => view.positionals.length === 1 && view.args.every((word) => word === "remote" || word === "-v" || word === "--verbose") },
   { pack: "git", program: "git", sub: ["worktree|stash", "list"] },
   { pack: "git", program: "git", sub: ["reflog"], check: (view) => view.positionals.length === 1 || view.positionals[1] === "show" },
-  // JavaScript, Python, Rust, Go, JVM: queries about dependencies.
-  { pack: "javascript", program: "npm", sub: ["ls|list|view|info|outdated|why|explain|ping|whoami|config"], check: (view) => view.positionals[0] !== "config" || ["get", "list", "ls"].includes(view.positionals[1] ?? "") },
-  { pack: "javascript", program: ["pnpm", "yarn"], sub: ["ls|list|why|outdated|info"] },
-  { pack: "python", program: ["pip", "pip3"], sub: ["list|show|freeze|check"] },
-  { pack: "python", program: "uv", sub: ["tree|version"] },
-  { pack: "rust", program: "cargo", sub: ["tree|metadata|version|search"] },
-  { pack: "go", program: "go", sub: ["list|env|version"], check: (view) => !view.args.some((word) => word.startsWith("-w") || word === "-u") },
-  { pack: "jvm", program: ["mvn", "./mvnw", "mvnw"], sub: ["dependency:tree|help:effective-pom|-v|--version"] },
+  // No build tools: each reads the project's configuration, which can name
+  // a program it runs (a rustc, a toolexec, a yarnPath, a Maven extension, a
+  // Terraform provider), and they all run in the sandbox anyway.
   // Apple and Android.
   { outside: true, pack: "apple", program: "xcrun", sub: ["simctl", "list"] },
-  { pack: "apple", program: "xcodebuild", check: (view) => view.args.every((word) => /^(-list|-showsdks|-version|-showBuildSettings|-project|-workspace|-scheme|-json|.*\.xcodeproj|.*\.xcworkspace)$/.test(word) || !word.startsWith("-")) && view.args.some((word) => /^-(list|showsdks|version|showBuildSettings)$/.test(word)) },
   { outside: true, pack: "android", program: "adb", sub: ["devices|version"] },
   // Containers: not `docker inspect`, which prints containers' environments.
-  { outside: true, pack: "containers", program: ["docker", "podman"], sub: ["ps|images|version|info|logs|stats|top|port|history"] },
+  { outside: true, pack: "containers", program: ["docker", "podman"], sub: ["ps|images|version|info|logs|stats|top|port|history"], check: refuses("-H", "--host", "--config", "-c", "--context") },
   { outside: true, pack: "containers", program: ["docker", "podman"], sub: ["system", "df"] },
   { outside: true, pack: "containers", program: ["docker", "podman"], sub: ["context|volume|network|image|container", "ls|list"] },
-  { outside: true, pack: "containers", program: ["docker", "podman"], sub: ["compose", "ps|ls|logs|config|images|top"], check: (view) => !view.args.some((word) => word === "--environment") },
+  { outside: true, pack: "containers", program: ["docker", "podman"], sub: ["compose", "ps|ls|logs|images|top"], check: refuses("-H", "--host", "--config", "--context", "--env-file") },
   { outside: true, pack: "containers", program: "colima", sub: ["list|status|version"] },
   // Kubernetes and infrastructure: reads, never secrets.
-  { outside: true, pack: "kubernetes", program: "kubectl", sub: ["get|describe|logs|top|explain|api-resources|api-versions|version|cluster-info"], check: (view) => !view.positionals.some((word) => /^(secrets?|secret\/.*|secrets\/.*)$/.test(word)) },
-  { outside: true, pack: "kubernetes", program: "kubectl", sub: ["config", "get-contexts|current-context"] },
-  { outside: true, pack: "kubernetes", program: "helm", sub: ["list|ls|status|history|version"] },
-  { pack: "infrastructure", program: ["terraform", "tofu"], sub: ["validate|version|providers|fmt"], check: (view) => view.positionals[0] !== "fmt" || view.args.includes("-check") },
+  { outside: true, pack: "kubernetes", program: "kubectl", sub: ["get|describe|logs|top|explain|api-resources|api-versions|version|cluster-info"], check: (view) => !view.positionals.some((word) => /^(secrets?|secret\/.*|secrets\/.*)$/.test(word)) && refuses("--kubeconfig", "--server", "-s", "--token", "--as", "--user", "--cluster")(view) },
+  { outside: true, pack: "kubernetes", program: "kubectl", sub: ["config", "get-contexts|current-context"], check: refuses("--kubeconfig") },
+  { outside: true, pack: "kubernetes", program: "helm", sub: ["list|ls|status|history|version"], check: refuses("--kubeconfig", "--registry-config", "--repository-config", "--repository-cache", "--kube-apiserver", "--kube-token") },
   // Cloud: describe and list verbs, not get-* (several read secrets).
-  { outside: true, pack: "cloud", program: "aws", sub: ["*", "describe-*|list-*"], check: (view) => view.positionals[0] !== "secretsmanager" && view.positionals[0] !== "ssm" },
-  { outside: true, pack: "cloud", program: "aws", sub: ["sts", "get-caller-identity"] },
-  { outside: true, pack: "cloud", program: "aws", sub: ["s3", "ls"] },
+  { outside: true, pack: "cloud", program: "aws", sub: ["*", "describe-*|list-*"], check: (view) => !/^(secretsmanager|ssm|lambda|ecs|apprunner|elasticbeanstalk|amplify|codebuild)$/.test(view.positionals[0] ?? "") && refuses("--endpoint-url", "--cli-input-json", "--cli-input-yaml", "--ca-bundle")(view) },
+  { outside: true, pack: "cloud", program: "aws", sub: ["sts", "get-caller-identity"], check: refuses("--endpoint-url", "--ca-bundle") },
+  { outside: true, pack: "cloud", program: "aws", sub: ["s3", "ls"], check: refuses("--endpoint-url", "--ca-bundle") },
   { outside: true, pack: "cloud", program: "gcloud", check: (view) => /^(list|describe)$/.test(view.positionals.at(-1) ?? "") && !view.positionals.includes("secrets") },
   { outside: true, pack: "cloud", program: "gcloud", sub: ["config", "list"] },
 ];
@@ -235,6 +240,9 @@ const DEPLOY = "deploys or changes a remote service";
 const INSTALL = "installs software for the whole machine";
 const SECRET = "reads a secret";
 const SEND = "sends a message or data to other people";
+
+/** Variable names that hold secrets. */
+const SECRET_NAME = /TOKEN|SECRET|PASSW|KEY|CREDENTIAL|AUTH|COOKIE|SESSION|PRIVATE/i;
 const SYSTEM = "changes how this machine runs";
 
 /** `curl`/`wget` sending a body or a non-GET method to a host other than this machine. */
@@ -248,11 +256,9 @@ function sendsData(view: CommandView): boolean | string {
       const word = view.args[i];
       if (word === UNKNOWN) return true;
       if (/^(-d|--data.*|-F|--form.*|-T|--upload-file|--json)(=|$)/.test(word) || /^-[A-Za-z]*[dFT]$/.test(word) && word.length > 2) return true;
-      if (/^(-X|--request)$/.test(word)) {
-        const method = view.args[i + 1];
-        if (method === undefined || method === UNKNOWN || !/^(GET|HEAD|OPTIONS)$/i.test(method)) return true;
-      }
-      if (/^(-X|--request=)(?!GET$|HEAD$|OPTIONS$)\S+$/i.test(word)) return true;
+      // `-X POST`, `-sX POST`, `-XPOST`, `--request=POST`.
+      const method = /^--request=(.*)$/.exec(word)?.[1] ?? (/^-[A-Za-z]*X$/.test(word) || word === "--request" ? (view.args[i + 1] ?? UNKNOWN) : /^-[A-Za-z]*X(.+)$/.exec(word)?.[1]);
+      if (method !== undefined && (method === UNKNOWN || !/^(GET|HEAD|OPTIONS)$/i.test(method))) return true;
     }
     return false;
   }
@@ -280,28 +286,28 @@ export const DANGER: readonly DangerEntry[] = [
   { pack: "core", program: "dd", kind: "writes raw data", when: (view) => view.args.some((word) => word === UNKNOWN || word.startsWith("of=")) },
   // Secrets.
   { pack: "core", program: "security", sub: ["find-generic-password|find-internet-password|dump-keychain|export|unlock-keychain|find-certificate|add-generic-password|add-internet-password|delete-*|set-*"], kind: SECRET, when: (view) => view.positionals[0] !== "find-certificate" || has(view, "-p") },
-  { pack: "core", program: ["printenv"], kind: "prints the environment, which holds secrets" },
+  { pack: "core", program: ["printenv"], kind: "prints the environment, which holds secrets", when: (view) => view.positionals.length === 0 || view.positionals.some((word) => word === UNKNOWN || SECRET_NAME.test(word)) },
   { pack: "core", program: ["env"], kind: "prints the environment, which holds secrets", when: (view) => view.positionals.length === 0 || view.positionals.every((word) => /^[A-Za-z_]\w*=/.test(word)) },
   { pack: "core", program: ["op"], sub: ["read|item|document|inject|run|signin|account"], kind: SECRET },
   { pack: "core", program: ["pass", "gopass"], kind: SECRET, when: (view) => !/^(ls|list|find|search)$/.test(view.positionals[0] ?? "ls") || view.positionals.length > 1 && view.positionals[0] !== "find" },
   { pack: "core", program: "vault", sub: ["read|kv|write|delete|token|login|secrets|policy|auth"], kind: SECRET },
+  { pack: "core", program: ["gpg", "gpg2"], kind: SECRET, when: (view) => view.args.some((word) => word === UNKNOWN || /^--(export-secret-keys|export-secret-subkeys|decrypt|export-ownertrust|delete-secret-keys|delete-secret-and-public-keys)$/.test(word) || /^-[A-Za-z]*d[A-Za-z]*$/.test(word)) },
+  { pack: "core", program: "sops", kind: SECRET, when: (view) => view.args.some((word) => word === UNKNOWN || /^(-d|--decrypt|exec-env|exec-file|decrypt|edit|-i|--in-place|set|unset)$/.test(word)) || view.positionals.length === 1 },
+  { pack: "core", program: ["bw", "rbw"], sub: ["get|list|export|unlock|login|serve|send|sync"], kind: SECRET },
+  { pack: "core", program: "doppler", sub: ["secrets|run|configs"], kind: SECRET },
+  { pack: "core", program: "infisical", sub: ["secrets|run|export|login"], kind: SECRET },
+  { pack: "core", program: ["chamber", "aws-vault", "envchain", "berglas", "teller"], kind: SECRET },
+  { pack: "core", program: "keyring", sub: ["get|set|del"], kind: SECRET },
+  { pack: "git", program: "git", sub: ["credential", "fill|approve|reject"], kind: SECRET },
   // Send.
   { pack: "core", program: ["mail", "mailx", "sendmail", "mutt", "msmtp", "neomutt"], kind: SEND },
+  { pack: "core", program: ["slack", "slackcat", "slack-cli", "telegram-send", "signal-cli", "matrix-commander", "discord-send", "twilio", "ntfy", "apprise", "pushover"], kind: SEND, when: (view) => !view.args.every((word) => /^(-h|--help|--version|help)$/.test(word)) || view.args.length === 0 },
+  { pack: "core", program: "osascript", kind: "controls apps on this machine (it can send mail and messages)" },
+  { pack: "core", program: ["open", "xdg-open"], kind: "opens a link, which can send data to a site", when: (view) => view.positionals.some((word) => word === UNKNOWN || (/^[a-z][\w+.-]*:/i.test(word) && !/^file:/i.test(word) && !/^(https?:\/\/)?(localhost|127\.\d+\.\d+\.\d+|\[::1\])([:/]|$)/i.test(word))) },
   { pack: "core", program: ["curl", "wget"], kind: "sends data to a server", when: sendsData },
   { pack: "core", program: ["scp", "rsync", "sftp"], kind: "copies files to another machine", when: (view) => (view.program === "sftp" ? true : copiesToRemote(view)) },
   // Git: publishing and destroying are decided in risk.ts (they need the repository).
-  {
-    pack: "git",
-    program: "git",
-    sub: ["config"],
-    kind: "changes git's configuration, which can run code later",
-    when: (view) => {
-      const rest = view.positionals.slice(1);
-      if (has(view, "--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section", "--edit", "-e")) return true;
-      if (rest.includes(UNKNOWN) || /^(set|unset|rename-section|remove-section|edit)$/.test(rest[0] ?? "")) return true;
-      return rest.length >= 2 && !/^(get|list)$/.test(rest[0]) && !view.args.some((word) => /^(--get.*|--list|-l)$/.test(word));
-    },
-  },
+  // `git config` is decided in risk.ts: by the key it sets.
   { pack: "git", program: "git", sub: ["remote", "add|set-url|rename|remove|rm|set-head|set-branches"], kind: "changes the repository's remotes" },
   { pack: "git", program: "git", sub: ["stash", "drop|clear"], kind: "drops stashed work, which every worktree of the repository shares" },
   { pack: "git", program: "git", sub: ["send-email|request-pull|svn|p4"], kind: SEND },
@@ -313,6 +319,7 @@ export const DANGER: readonly DangerEntry[] = [
   { pack: "git hosting", program: "gh", sub: ["gist", "create|edit|delete|clone"], kind: "publishes a gist", when: (view) => view.positionals[1] !== "clone" },
   { pack: "git hosting", program: "gh", sub: ["ssh-key|gpg-key", "add|delete"], kind: "changes the account's keys" },
   { pack: "git hosting", program: "gh", sub: ["auth", "login|logout|refresh|token|setup-git|switch"], kind: SECRET },
+  { pack: "git hosting", program: "gh", sub: ["auth", "status"], kind: SECRET, when: (view) => view.args.some((word) => word === UNKNOWN || word === "--show-token" || /^-[A-Za-z]*t/.test(word)) },
   { pack: "git hosting", program: "gh", sub: ["api"], kind: "writes through the GitHub API", when: (view) => has(view, "-f", "-F", "--field", "--raw-field", "--input") || view.args.some((word, i) => (word === "-X" || word === "--method") && !/^GET$/i.test(view.args[i + 1] ?? "")) || view.args.some((word) => /^(-X|--method=)(?!GET$)\S+/i.test(word) && word !== "-X") },
   { pack: "git hosting", program: "gh", sub: ["workflow", "enable|disable"], kind: DEPLOY },
   { pack: "git hosting", program: "glab", sub: ["mr|issue", "create|merge|note|close|reopen|update|delete|approve"], kind: "changes a merge request or issue other people see" },
@@ -352,7 +359,7 @@ export const DANGER: readonly DangerEntry[] = [
   // Containers.
   { pack: "containers", program: ["docker", "podman"], sub: ["push|login|logout"], kind: PUBLISH, when: (view) => (view.positionals[0] === "push" ? true : SECRET) },
   { pack: "containers", program: ["docker", "podman"], sub: ["volume", "rm|prune"], kind: "deletes container volumes and their data" },
-  { pack: "containers", program: ["docker", "podman"], sub: ["system", "prune|reset"], kind: "deletes containers, images and volumes", when: (view) => view.positionals[1] === "reset" || has(view, "--volumes", "-a", "--all") },
+  { pack: "containers", program: ["docker", "podman"], sub: ["system", "prune|reset"], kind: "deletes containers, images and volumes" },
   { pack: "containers", program: ["docker", "podman"], sub: ["buildx|build", "*"], kind: PUBLISH, when: (view) => has(view, "--push") },
   { pack: "containers", program: ["docker", "podman"], sub: ["compose", "push|down"], kind: "deletes container volumes and their data", when: (view) => (view.positionals.includes("push") ? PUBLISH : has(view, "-v", "--volumes")) },
   {

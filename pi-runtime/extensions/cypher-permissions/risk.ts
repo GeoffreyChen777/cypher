@@ -19,7 +19,7 @@
 
 import { basename, isAbsolute } from "node:path";
 
-import { patternMatches } from "./commands.ts";
+import { patternMatches, ruleCannotVouch, sshHostIndex, unwrap } from "./commands.ts";
 import { DANGER, dangerMatches, INSPECT, inspectMatches, viewOf } from "./packs.ts";
 import type { CommandView, PackFacts } from "./packs.ts";
 import type { Classification } from "./paths.ts";
@@ -129,10 +129,17 @@ function targetNames(word: string): string[] {
   return names;
 }
 
+/** gh and glab name what they reach with these options (or a URL); their other words are titles, labels, searches. */
+const HOSTING_TARGET_OPTIONS = /^(-R|--repo|--hostname|-H)$/;
+
 function protectedTarget(view: CommandView, facts: RiskFacts): string | undefined {
   if (!REMOTE.has(view.program) && view.program !== "git") return undefined;
   if (view.program === "git" && view.positionals[0] !== "push") return undefined;
-  for (const word of view.args) {
+  const words =
+    view.program === "gh" || view.program === "glab"
+      ? view.args.filter((word, i) => HOSTING_TARGET_OPTIONS.test(view.args[i - 1] ?? "") || /^(--repo|--hostname)=/.test(word) || /:\/\//.test(word))
+      : view.args;
+  for (const word of words) {
     if (word === UNKNOWN) continue;
     for (const name of targetNames(word)) {
       if (facts.protectedTargets.some((glob) => globMatches(glob, name))) return `reaches ${name}, a protected target`;
@@ -146,17 +153,29 @@ function pathWords(words: readonly string[]): string[] {
   return words.filter((word) => word !== UNKNOWN && !word.startsWith("-") && (word.startsWith("/") || word.startsWith("~") || word.startsWith(".") || word.includes("/")) && !/^[a-z][\w+.-]*:\/\//i.test(word));
 }
 
-function pathDanger(command: RiskCommand, view: CommandView, facts: RiskFacts): string | undefined {
+/**
+ * What a command's redirections make dangerous, whatever the command: `echo
+ * x >> ~/.zshrc` changes a file that runs code later, `cat < key` reads a
+ * secret. Every command is checked, inert builtins and filters too.
+ */
+export function redirectDanger(command: Pick<RiskCommand, "reads" | "writes" | "cwd">, facts: RiskFacts): string | undefined {
   for (const path of command.reads) {
     const classification = facts.classify(path, command.cwd);
-    if (!classification || classification.zone === "sensitive") return `reads ${classification ? "a secret" : `${path}, in a directory known only when it runs`}`;
+    if (!classification) return `reads ${path}, in a directory known only when it runs`;
+    if (classification.zone === "sensitive") return `reads a secret (${path})`;
   }
   for (const path of command.writes) {
     const classification = facts.classify(path, command.cwd);
     if (!classification) return `writes ${path}, in a directory known only when it runs`;
     const why = writeDanger(classification);
-    if (why) return why;
+    if (why) return `${why} (${path})`;
   }
+  return undefined;
+}
+
+function pathDanger(command: RiskCommand, view: CommandView, facts: RiskFacts): string | undefined {
+  const redirected = redirectDanger(command, facts);
+  if (redirected) return redirected;
   const words = view.args;
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
@@ -186,9 +205,25 @@ function destroyDanger(command: RiskCommand, view: CommandView, facts: RiskFacts
   let operands: string[] = [];
   if (DESTROYERS.has(view.program)) operands = view.args.filter((word) => word === UNKNOWN || !word.startsWith("-"));
   else if (view.program === "rsync" && view.args.some((word) => word === UNKNOWN || word.startsWith("--delete") || word === "--remove-source-files")) operands = view.positionals.filter((word) => !/^[\w.-]*@?[\w.-]+:/.test(word));
-  else if (view.program === "find" && view.args.some((word) => word === UNKNOWN || word === "-delete" || word === "-exec" || word === "-execdir" || word === "-ok")) {
-    for (const word of view.args) {
-      if (word.startsWith("-") || word === "!" || word === "(") break;
+  else if (view.program === "find" && view.args.some((word) => word === UNKNOWN || word === "-delete" || word === "-exec" || word === "-execdir" || word === "-ok" || word === "-okdir")) {
+    // Options before the paths (`find -L dir`), BSD's `-f path` among them.
+    let i = 0;
+    for (; i < view.args.length; i++) {
+      const word = view.args[i];
+      if (/^-[HLPEXdsx]+$/.test(word) || /^-O\d$/.test(word) || word === "-D") {
+        if (word === "-D") i++;
+        continue;
+      }
+      if (word === "-f") {
+        const path = view.args[++i];
+        if (path !== undefined) operands.push(path);
+        continue;
+      }
+      break;
+    }
+    for (; i < view.args.length; i++) {
+      const word = view.args[i];
+      if (word !== UNKNOWN && (word.startsWith("-") || word === "!" || word === "(")) break;
       operands.push(word);
     }
     if (operands.length === 0) operands = ["."];
@@ -321,16 +356,90 @@ function gitDirectory(command: RiskCommand, view: CommandView): string | undefin
   return dir;
 }
 
+/**
+ * Configuration keys that only tune what git prints or how it names things:
+ * setting them runs nothing. Any other key may name a program git runs
+ * (`core.fsmonitor`, `core.hooksPath`, `core.sshCommand`, `alias.*`,
+ * filters, credential helpers) or where it fetches from.
+ */
+const HARMLESS_GIT_KEYS =
+  /^(user\.(name|email|signingkey)|color\..*|core\.(autocrlf|quotepath|ignorecase|filemode|eol|safecrlf|precomposeunicode|longpaths|compression|abbrev|whitespace)|init\.defaultbranch|pull\.(rebase|ff)|push\.(default|autosetupremote|followtags)|fetch\.(prune|prunetags|parallel)|advice\..*|merge\.(conflictstyle|ff|log)|rerere\.(enabled|autoupdate)|log\..*|diff\.(colormoved|algorithm|noprefix|renames|mnemonicprefix|relative|context|interhunkcontext)|status\..*|commit\.(verbose|cleanup|status)|branch\.[^.]+\.(remote|merge|rebase)|branch\.(autosetupmerge|autosetuprebase|sort)|tag\.sort|column\..*|gc\.auto|maintenance\.auto|help\.autocorrect|blame\..*|grep\..*|format\.(pretty|subjectprefix)|i18n\..*|protocol\.version|submodule\.recurse|checkout\.defaultremote)$/i;
+
+/**
+ * Options that make git run a program, or read a repository the line
+ * names: the global ones before the subcommand, and `clone -c`/`--config`.
+ * (`git commit -c <commit>` reuses a message: not configuration.)
+ */
+function gitOptionDanger(view: CommandView): string | undefined {
+  const args = view.args;
+  let sub: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i];
+    if (sub === undefined && !word.startsWith("-")) {
+      sub = word;
+      continue;
+    }
+    const global = sub === undefined;
+    if (global && (word === "--config-env" || word.startsWith("--config-env=") || word === "--exec-path" || word.startsWith("--exec-path="))) return "makes git run a program the line names";
+    if (global && (word === "--git-dir" || word.startsWith("--git-dir="))) return "points git at a repository whose config could run a program";
+    if (global && word === "-C") {
+      i++;
+      continue;
+    }
+    if (!global && sub !== "clone" && sub !== UNKNOWN) continue;
+    let setting: string | undefined;
+    if (word === "-c" || (!global && word === "--config")) setting = args[++i];
+    else if (!global && word.startsWith("--config=")) setting = word.slice("--config=".length);
+    else if (global && /^-c.+=/.test(word)) setting = word.slice(2);
+    if (setting === undefined) continue;
+    if (setting === UNKNOWN) return "sets git configuration known only when it runs";
+    const key = setting.split("=")[0];
+    if (!HARMLESS_GIT_KEYS.test(key)) return `sets ${key}, which can make git run a program`;
+  }
+  return undefined;
+}
+
+/** `git config` writing a key that can run a program later. */
+function gitConfigDanger(view: CommandView): string | undefined {
+  if (view.positionals[0] !== "config") return undefined;
+  const rest = view.positionals.slice(1);
+  const reads = view.args.some((word) => /^(--get.*|--list|-l|--show-.*)$/.test(word)) || /^(get|list)$/.test(rest[0] ?? "");
+  const verb = /^(set|unset|rename-section|remove-section|edit)$/.test(rest[0] ?? "") ? rest.shift() : undefined;
+  const edits = verb !== undefined || view.args.some((word) => /^(--unset|--unset-all|--add|--replace-all|--rename-section|--remove-section|--edit|-e)$/.test(word)) || (!reads && rest.length >= 2);
+  if (!edits) return undefined;
+  if (verb === "edit" || view.args.some((word) => /^(--edit|-e|--rename-section|--remove-section)$/.test(word)) || /section$/.test(verb ?? "")) return "changes git's configuration, which can run code later";
+  const key = rest[0];
+  if (key === undefined || key === UNKNOWN || !HARMLESS_GIT_KEYS.test(key)) return "changes git's configuration, which can run code later";
+  return undefined;
+}
+
+/** Throwing away history git could otherwise bring back. */
+function gitHistoryDanger(view: CommandView): string | undefined {
+  const [sub, next] = view.positionals;
+  if (sub === "reflog" && /^(expire|delete)$/.test(next ?? "")) return "deletes git history the reflog could bring back";
+  if (sub === "gc" && view.args.some((word) => /^--prune(=now|=all)?$/.test(word) || word === "--aggressive")) return "deletes git history the reflog could bring back";
+  if (sub === "prune" || (sub === "filter-branch") || (sub === "filter-repo")) return "deletes or rewrites git history";
+  return undefined;
+}
+
 /** Discarding work in a checkout that is not the chat's. */
 function gitDiscardDanger(command: RiskCommand, view: CommandView, facts: RiskFacts): string | undefined {
   const [sub] = view.positionals;
+  if (sub === "worktree" && view.positionals[1] === "remove") {
+    // The worktree it removes, not where it runs.
+    const target = view.positionals[2];
+    const dir = gitDirectory(command, view);
+    if (target === undefined || target === UNKNOWN) return "removes a worktree known only when it runs";
+    const classification = facts.classify(target, dir);
+    if (!classification || !facts.inWorkspace(classification.path)) return `removes a worktree outside this chat's workspace (${target})`;
+    return undefined;
+  }
   const discards =
     (sub === "reset" && view.args.some((word) => word === "--hard" || word === "--merge" || word === "--keep")) ||
     (sub === "clean" && view.args.some((word) => /^-[A-Za-z]*f/.test(word) || word === "--force")) ||
     (sub === "checkout" && (view.args.includes("--") || view.args.includes(".") || view.args.some((word) => /^-[A-Za-z]*f/.test(word)))) ||
     (sub === "restore" && !view.args.includes("--staged")) ||
     (sub === "switch" && view.args.some((word) => word === "--discard-changes" || word === "-f" || word === "--force")) ||
-    (sub === "worktree" && view.positionals[1] === "remove") ||
     (sub === "branch" && view.args.some((word) => /^-[A-Za-z]*D/.test(word)));
   if (!discards) return undefined;
   const dir = gitDirectory(command, view);
@@ -351,7 +460,78 @@ function innerLine(view: CommandView): { line: string; where?: string } | undefi
     return line === undefined ? undefined : { line };
   }
   if (view.program === "eval" || view.program === "watch") return { line: view.positionals.join(" ") };
-  if (view.program === "ssh" && view.positionals.length > 1) return { line: view.positionals.slice(1).join(" "), where: view.positionals[0] };
+  if (view.program === "ssh") {
+    const host = sshHostIndex(view.words);
+    if (host === undefined) return undefined;
+    const remote = view.words.slice(host + 1);
+    return remote.length ? { line: remote.join(" "), where: view.words[host] } : undefined;
+  }
+  if (view.program === "script") {
+    const at = view.args.indexOf("-c");
+    if (at >= 0 && view.args[at + 1] !== undefined) return { line: view.args[at + 1] };
+  }
+  if (view.program === "env") {
+    const at = view.args.findIndex((word) => word === "-S" || word.startsWith("--split-string"));
+    if (at >= 0) return { line: view.args[at].includes("=") ? view.args[at].split("=").slice(1).join("=") : (view.args[at + 1] ?? UNKNOWN) };
+  }
+  return undefined;
+}
+
+const XARGS_VALUES = new Set(["-I", "-J", "-L", "-n", "-P", "-s", "-E", "-d", "-a", "-R", "-S", "--max-args", "--max-procs", "--delimiter", "--arg-file", "--eof", "--replace", "--max-lines", "--max-chars"]);
+
+/**
+ * The command a runner runs with the rest of its words: `exec npm
+ * publish`, `command npm publish`, `xargs rm -rf` (with words known only
+ * when it runs), `env`, `nohup` or `timeout` with options `unwrap` does not
+ * read, `script file cmd`. Undefined when it runs nothing (`command -v`).
+ */
+function runsNext(view: CommandView): string[] | undefined {
+  const args = view.args;
+  const after = (start: number) => {
+    const rest = args.slice(start);
+    return rest.length ? rest : undefined;
+  };
+  switch (view.program) {
+    case "exec": {
+      let i = 0;
+      while (i < args.length && /^-[cl]+$|^-a$/.test(args[i])) i += args[i] === "-a" ? 2 : 1;
+      return after(i);
+    }
+    case "command":
+    case "builtin": {
+      if (args.some((word) => /^-[A-Za-z]*[vV]/.test(word))) return undefined;
+      let i = 0;
+      while (i < args.length && /^-p$/.test(args[i])) i++;
+      return after(i);
+    }
+    case "xargs": {
+      let i = 0;
+      for (; i < args.length && args[i].startsWith("-"); i++) {
+        if (XARGS_VALUES.has(args[i])) i++;
+      }
+      const rest = after(i);
+      // Its input adds words.
+      return rest ? [...rest, UNKNOWN] : undefined;
+    }
+    case "script": {
+      let i = 0;
+      for (; i < args.length && args[i].startsWith("-"); i++) if (/^-[Ft]$/.test(args[i])) i++;
+      // `script [file [command …]]`
+      return after(i + 1);
+    }
+    case "nohup":
+    case "time":
+    case "nice":
+    case "timeout":
+    case "caffeinate":
+    case "env": {
+      const unwrapped = unwrap(view.words);
+      if (unwrapped) return unwrapped.words;
+      // Options `unwrap` does not read: the first word that is no option, value or duration.
+      const at = args.findIndex((word, i) => !word.startsWith("-") && !/^\d+(\.\d+)?[smhd]?$/.test(word) && !/^[A-Za-z_]\w*=/.test(word) && !/^-[nsktw]$/.test(args[i - 1] ?? ""));
+      return at >= 0 ? after(at) : undefined;
+    }
+  }
   return undefined;
 }
 
@@ -369,13 +549,26 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
       return { tier: "danger", kind, key: kind };
     }
   }
+  // Options that run a program on this computer (`ssh -o ProxyCommand=…`, `-F file`).
+  const vouch = ruleCannotVouch(words);
+  if (vouch) return { tier: "danger", kind: `runs a program on this computer (${vouch.replace(/ is given an option that can run a command on this computer$/, " options")})`, key: "ssh-options" };
+  const next = runsNext(view);
+  if (next) {
+    const assessment = assessCommand({ ...command, words: next, reads: [], writes: [] }, facts);
+    if (assessment.tier === "danger") return assessment;
+    const redirected = redirectDanger(command, facts);
+    if (redirected) return { tier: "danger", kind: redirected, key: dangerKey(redirected) };
+    return { tier: "local", kind: assessment.kind ?? `runs ${basename(next[0] ?? "a program")} through ${view.program}` };
+  }
   const kill = killAssessment(view, facts);
   if (kill?.tier === "danger") return kill;
   const danger =
     pathDanger(command, view, facts) ??
     destroyDanger(command, view, facts) ??
     protectedTarget(view, facts) ??
-    (view.program === "git" ? (gitPushDanger(command, view, facts) ?? gitDiscardDanger(command, view, facts)) : undefined) ??
+    (view.program === "git"
+      ? (gitOptionDanger(view) ?? gitConfigDanger(view) ?? gitPushDanger(command, view, facts) ?? gitDiscardDanger(command, view, facts) ?? gitHistoryDanger(view))
+      : undefined) ??
     DANGER.map((entry) => dangerMatches(entry, view, facts)).find((kind) => kind !== undefined);
   if (danger) return { tier: "danger", kind: danger, key: dangerKey(danger) };
   if (kill) return kill;
@@ -386,17 +579,54 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
   return { tier: "local" };
 }
 
-/** A line that downloads code and runs it: a downloader beside an interpreter reading its input or a file the download wrote. */
-export function downloadsAndRuns(commands: readonly { words: readonly string[] }[]): boolean {
-  const downloads = commands.filter((command) => DOWNLOADERS.has(basename(command.words[0] ?? "")));
-  if (downloads.length === 0) return false;
-  const written = new Set(downloads.flatMap((command) => command.words.filter((_, i) => /^(-o|--output|-O)$/.test(command.words[i - 1] ?? ""))));
-  return commands.some((command) => {
-    const name = basename(command.words[0] ?? "");
-    if (!INTERPRETERS.test(name)) return false;
+/** The files a download writes: `-o`/`-O` values, a redirection, or the URL's file name (`curl -O`, `wget`). */
+function downloadedFiles(command: { words: readonly string[]; writes?: readonly string[] }): string[] {
+  const words = command.words;
+  const name = basename(words[0] ?? "");
+  const files = [...(command.writes ?? [])];
+  const urls = words.slice(1).filter((word) => /^[a-z][\w+.-]*:\/\//i.test(word) || word === UNKNOWN);
+  const fromUrl = () => urls.map((url) => (url === UNKNOWN ? UNKNOWN : basename(url.replace(/[?#].*$/, ""))));
+  for (let i = 1; i < words.length; i++) {
+    const word = words[i];
+    if (name === "curl" && (word === "-o" || word === "--output")) files.push(words[++i] ?? UNKNOWN);
+    else if (name === "curl" && /^-[A-Za-z]*o$/.test(word) && word.length > 2) files.push(words[++i] ?? UNKNOWN);
+    else if (name === "curl" && (/^-[A-Za-z]*O[A-Za-z]*$/.test(word) || word === "--remote-name" || word === "--remote-name-all")) files.push(...fromUrl());
+    else if (name === "wget" && (word === "-O" || word === "--output-document")) files.push(words[++i] ?? UNKNOWN);
+    else if (name === "wget" && word.startsWith("--output-document=")) files.push(word.slice("--output-document=".length));
+  }
+  if (name === "wget" && !words.some((word) => word === "-O" || word.startsWith("--output-document"))) files.push(...fromUrl());
+  return files;
+}
+
+/**
+ * A line that downloads code and runs it: after a download, an interpreter
+ * reading its input (`curl … | sh`) or a downloaded file (`sh i.sh`), or a
+ * downloaded file run as a program (`./i.sh`, `source i.sh`).
+ */
+export function downloadsAndRuns(commands: readonly { words: readonly string[]; writes?: readonly string[] }[]): boolean {
+  let downloaded = false;
+  const written = new Set<string>();
+  for (const command of commands) {
+    const program = command.words[0] ?? "";
+    const name = basename(program);
+    if (DOWNLOADERS.has(name)) {
+      downloaded = true;
+      for (const file of downloadedFiles(command)) written.add(file === UNKNOWN ? UNKNOWN : basename(file));
+      continue;
+    }
+    if (!downloaded) continue;
+    const isWritten = (word: string) => word === UNKNOWN || written.has(UNKNOWN) || written.has(basename(word));
+    if (program !== UNKNOWN && program.includes("/") && isWritten(program)) return true;
+    if (program !== UNKNOWN && written.has(name)) return true;
     const operands = command.words.slice(1).filter((word) => !word.startsWith("-"));
-    return operands.length === 0 || operands[0] === UNKNOWN || operands.some((word) => written.has(word) || word === "/dev/stdin");
-  });
+    if (name === "source" || name === ".") {
+      if (operands.some(isWritten)) return true;
+      continue;
+    }
+    if (!INTERPRETERS.test(name)) continue;
+    if (operands.length === 0 || operands[0] === UNKNOWN || operands.some((word) => isWritten(word) || word === "/dev/stdin")) return true;
+  }
+  return false;
 }
 
 /**
@@ -418,7 +648,15 @@ export function assessOpaque(line: string, facts: RiskFacts): Assessment {
   }
   for (const segment of segments) {
     let start = 0;
-    while (start < segment.length && /^[A-Za-z_]\w*=/.test(segment[start])) start++;
+    // Assignments and the words of compound commands (`{ npm publish; }`, `if x; then …`).
+    for (;;) {
+      const word = segment[start];
+      if (word === undefined) break;
+      if (/^[A-Za-z_]\w*=/.test(word) || OPAQUE_KEYWORDS.has(word)) start++;
+      else if (word === "function") start += 2;
+      else if (/^[A-Za-z_][\w-]*\(\)$/.test(word)) start++;
+      else break;
+    }
     for (let at = start; at < segment.length; at++) {
       const words = segment.slice(at);
       // Wrappers and runners hand their words to the next program.
@@ -429,6 +667,8 @@ export function assessOpaque(line: string, facts: RiskFacts): Assessment {
   }
   return { tier: "local", kind: "a command line rules can't read" };
 }
+
+const OPAQUE_KEYWORDS: ReadonlySet<string> = new Set(["{", "}", "!", "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "case", "esac", "select", "coproc", "time", "[[", "]]"]);
 
 function tokens(text: string): string[] {
   return text

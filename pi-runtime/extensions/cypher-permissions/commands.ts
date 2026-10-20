@@ -462,7 +462,7 @@ export function isCommandRule(value: unknown): value is CommandRule {
  * so no rule can vouch for it and the reader treats the line as opaque.
  */
 const DANGEROUS_ENV =
-  /^(PATH|\w*PATH|LD_\w*|DYLD_\w*|\w*_OPTIONS|\w*OPTS|\w*FLAGS|\w*_HOME|\w*ROOT|PYTHON\w*|RUBY\w*|PERL\w*|NODE_\w*|NPM_CONFIG_\w*|YARN_\w*|BUNDLE_\w*|BASH_ENV|ENV|IFS|HOME|XDG_\w*|SHELL|SHELLOPTS|BASHOPTS|EDITOR|VISUAL|\w*PAGER|GIT_\w*|SSH_\w*|\w*_PROXY|\w*_COMMAND|\w*_WRAPPER|RUSTC\w*|CARGO_\w*|CC|CXX|CPP|LD|AR|MAKE|MAKEFLAGS|LESSOPEN|LESSCLOSE|TMPDIR|PROMPT_COMMAND|PS4|CDPATH|GLOBIGNORE|HISTFILE|BROWSER|TERMINFO|\w*ASKPASS|DEVELOPER_DIR|SDKROOT|TOOLCHAINS|DOCKER_\w*|COMPOSE_\w*|KUBE\w*|AWS_\w*|GOOGLE_\w*|CLOUDSDK_\w*|AZURE_\w*|\w*TOKEN\w*|\w*SECRET\w*|\w*PASSWORD\w*|\w*_KEY)$/i;
+  /^(PATH|\w*PATH|LD_\w*|DYLD_\w*|\w*_OPTIONS|\w*OPTS|\w*FLAGS|\w*_HOME|\w*ROOT|PYTHON\w*|RUBY\w*|PERL\w*|NODE_\w*|NPM_CONFIG_\w*|YARN_\w*|BUNDLE_\w*|BASH_ENV|ENV|IFS|HOME|XDG_\w*|SHELL|SHELLOPTS|BASHOPTS|EDITOR|VISUAL|\w*PAGER|GIT_\w*|SSH_\w*|\w*_PROXY|\w*_COMMAND|\w*_WRAPPER|RUSTC\w*|CARGO_\w*|CC|CXX|CPP|LD|AR|MAKE|MAKEFLAGS|LESSOPEN|LESSCLOSE|TMPDIR|PROMPT_COMMAND|PS4|CDPATH|GLOBIGNORE|HISTFILE|BROWSER|TERMINFO|\w*ASKPASS|DEVELOPER_DIR|SDKROOT|TOOLCHAINS|DOCKER_\w*|COMPOSE_\w*|KUBE\w*|AWS_\w*|GOOGLE_\w*|CLOUDSDK_\w*|AZURE_\w*|RUSTUP_\w*|DOTNET_\w*|\w*_HOOKS?|\w*PRELOAD\w*|\w*_PLUGINS?|GRADLE_\w*|MAVEN_\w*|TF_\w*|HELM_\w*|ANSIBLE_\w*|PIP_\w*|UV_\w*|POETRY_\w*|CONDA_\w*|VIRTUAL_ENV|GEM_\w*|GO\w*|\w*TOKEN\w*|\w*SECRET\w*|\w*PASSWORD\w*|\w*_KEY)$/i;
 
 /** Common settings that only tune output or a build, in families the list above names. */
 const BENIGN_ENV =
@@ -727,6 +727,21 @@ function anyCommand(program: string): string {
 
 function computed(program: string): string {
   return `\`${program}\` is given words known only when it runs`;
+}
+
+/** Where `ssh [options] host [command …]` names its host; undefined when it names none. */
+export function sshHostIndex(words: readonly string[]): number | undefined {
+  let i = 1;
+  for (; i < words.length && words[i] !== UNKNOWN && words[i].startsWith("-") && words[i] !== "-"; i++) {
+    if (words[i] === "--") {
+      i++;
+      break;
+    }
+    const flags = words[i].slice(1);
+    const at = [...flags].findIndex((flag) => SSH_VALUE_OPTIONS.includes(flag));
+    if (at === flags.length - 1) i++;
+  }
+  return i < words.length ? i : undefined;
 }
 
 /** `ssh [options] host …`: the options as written, the host, any command. */

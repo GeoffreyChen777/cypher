@@ -33,6 +33,8 @@ export interface JudgeRequest {
   tier?: string;
   /** Why the classifier put it there. */
   tierReason?: string;
+  /** Patterns an approval also allows for the rest of the chat. */
+  remembers?: readonly string[];
   userMessages: readonly string[];
   recentToolCalls: readonly string[];
 }
@@ -99,6 +101,9 @@ export function judgePrompt(request: JudgeRequest): string {
   lines.push(`- permission level: ${request.level}`);
   lines.push(`- workspace: ${request.workspaceRoots.join(", ")}`);
   if (request.command) lines.push("", "## The command", untrusted(clip(request.command, 3000)));
+  if (request.remembers?.length) {
+    lines.push("", "## An approval also allows, for the rest of this chat, commands matching", ...request.remembers.map((pattern) => `- ${pattern}`), "(`…` stands for any words.) Approve only if those are fine too.");
+  }
   if (request.input) lines.push("", "## The tool's input", untrusted(clip(request.input, 3000)));
   if (request.diff) lines.push("", "## The change", untrusted(clip(request.diff, 4000)));
   if (request.justification) lines.push("", "## The agent's justification", untrusted(clip(request.justification, 1500)));

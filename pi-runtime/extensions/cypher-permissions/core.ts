@@ -7,7 +7,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { open, mkdir, access as fsAccess, stat as fsStat, readdir as fsReaddir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
@@ -38,7 +38,7 @@ import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs }
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
 import { benignEnv, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
-import { assessCommand, assessOpaque, downloadsAndRuns, TIER_RANK } from "./risk.ts";
+import { assessCommand, assessOpaque, downloadsAndRuns, redirectDanger, TIER_RANK } from "./risk.ts";
 import type { Assessment, GitFacts, KillTarget, RiskFacts, Tier } from "./risk.ts";
 import { INSPECT, inspectMatches, viewOf } from "./packs.ts";
 import { parseShell, UNKNOWN } from "./shell.ts";
@@ -193,6 +193,8 @@ interface Offered {
   env: string[];
   /** Dangers it covers (a task grant). */
   dangers: string[];
+  /** The agent proposed it, rather than it being a command's category. */
+  proposed?: boolean;
 }
 
 /** A line's tier, with its commands as read. */
@@ -214,6 +216,34 @@ function describeScope(scope: Scope, project: string): string {
   if (scope === "project") return `always in ${project}`;
   if (scope === "task") return "for this task";
   return scope;
+}
+
+/** The git directories of a repository's submodules (`modules/<name>`, a name with slashes nested, and their own submodules). */
+function submoduleGitDirs(gitDir: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string, depth: number) => {
+    if (depth > 6) return;
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const child = join(dir, name);
+      try {
+        if (!statSync(child).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      if (existsSync(join(child, "HEAD"))) {
+        out.push(child);
+        walk(join(child, "modules"), depth + 1);
+      } else walk(child, depth + 1);
+    }
+  };
+  walk(join(gitDir, "modules"), 0);
+  return out;
 }
 
 /** The user messages on a branch. */
@@ -308,10 +338,39 @@ function gitRoots(cwd: string): { top?: string; gitDirs: string[]; gitDir?: stri
         return undefined;
       }
     };
-    const own = resolveDir(gitDir);
-    const shared = resolveDir(common);
+    let own = resolveDir(gitDir);
+    let shared = resolveDir(common);
+    const root = resolveDir(top);
+    // A linked worktree's git directory points back at it (`gitdir`): a
+    // `.git` file that names another repository's directory without that
+    // back-pointer is not this checkout's, and earns none of its trust.
+    if (own && root && own !== join(root, ".git")) {
+      const resolved = (path: string | undefined) => {
+        try {
+          return path ? realpathSync.native(resolvePath(own!, path)) : undefined;
+        } catch {
+          return undefined;
+        }
+      };
+      let back: string | undefined;
+      try {
+        back = resolved(dirname(readFileSync(join(own, "gitdir"), "utf8").trim()));
+      } catch {
+        // A submodule's git directory names its checkout in core.worktree instead.
+        try {
+          back = resolved(/^\s*worktree\s*=\s*(.+)$/m.exec(readFileSync(join(own, "config"), "utf8"))?.[1]?.trim());
+        } catch {
+          back = undefined;
+        }
+      }
+      if (back !== root) {
+        own = undefined;
+        shared = undefined;
+      }
+    }
+    if (!own) return { gitDirs: [] };
     return {
-      top: resolveDir(top),
+      top: root,
       gitDir: own,
       common: shared,
       gitDirs: [...new Set([own, shared].filter((dir): dir is string => dir !== undefined))],
@@ -425,8 +484,8 @@ export class Permissions {
 
   private readStamp(): string {
     try {
-      const stat = statSync(join(this.agentDir, CONFIG_FILE));
-      return `${stat.mtimeMs}:${stat.size}`;
+      const stat = statSync(join(this.agentDir, CONFIG_FILE), { bigint: true });
+      return `${stat.mtimeNs}:${stat.ctimeNs}:${stat.ino}:${stat.size}`;
     } catch {
       return "";
     }
@@ -637,6 +696,7 @@ export class Permissions {
         appendRule(this.agentDir, rule);
         this.config.rules.push(rule);
       }
+      this.configStamp = this.readStamp();
       return;
     }
     const grant = newGrant({ capability, paths, sensitive: sensitive || undefined, scope, approvedBy: by, chatId: this.chatId, ...(scope === "task" ? { turn: this.grants.turn } : {}) });
@@ -912,6 +972,7 @@ export class Permissions {
       const rule = { capability: "read" as const, path: key, createdAt: new Date().toISOString(), ...(scope === "project" ? { project: this.project } : {}) };
       appendRule(this.agentDir, rule);
       this.config.rules.push(rule);
+      this.configStamp = this.readStamp();
     } else if (scope === "chat" || scope === "task") {
       const grant = newGrant({ capability: "read", paths: [key], scope, approvedBy: by, chatId: this.chatId, ...(scope === "task" ? { turn: this.grants.turn } : {}) });
       this.grants.add(grant);
@@ -990,7 +1051,17 @@ export class Permissions {
         if (dirname(current) === current) return true;
         continue;
       }
-      if (stat.isDirectory()) return true;
+      if (stat.isDirectory()) {
+        // The chat's own repository, or one sandboxed commands cannot have
+        // made: a `.git` directory created in the workspace could hold any config.
+        let real: string;
+        try {
+          real = realpathSync.native(marker);
+        } catch {
+          return false;
+        }
+        return this.gitDirs.includes(real) || !writable.some((root) => isUnder(real, root));
+      }
       let target: string;
       try {
         const pointer = /^gitdir:\s*(.+)$/m.exec(readFileSync(marker, "utf8"))?.[1]?.trim();
@@ -1117,7 +1188,12 @@ export class Permissions {
     if (parsed.kind === "opaque") return { ...assessOpaque(command, this.riskFacts()), commands: [], parsed };
     const commands = this.commandsOf(parsed.commands, cwd);
     const facts = this.riskFacts();
-    const assessments = commands.map((item) => (item.inert ? { tier: "inspect" as const } : assessCommand(item, facts)));
+    // An inert builtin or a filter needs no rule, but its redirections can still be dangerous (`echo x >> ~/.zshrc`).
+    const assessments = commands.map((item): Assessment => {
+      if (!item.inert) return assessCommand(item, facts);
+      const redirected = redirectDanger(item, facts);
+      return redirected ? { tier: "danger", kind: redirected, key: redirected } : { tier: "inspect" };
+    });
     let worst: Assessment = { tier: "inspect" };
     for (const assessment of assessments) if (TIER_RANK[assessment.tier] > TIER_RANK[worst.tier]) worst = assessment;
     if (downloadsAndRuns(commands)) worst = { tier: "danger", kind: "downloads code and runs it", key: "download-run" };
@@ -1203,8 +1279,14 @@ export class Permissions {
       return { ok: false, reason };
     }
     const check = this.checkCommand(command, ctx.cwd, { escalated: true });
-    if (check.kind === "deny") return { ok: false, reason: check.reason };
-    if (check.kind === "outside") return { ok: true, scope: "rule", by: "rule" };
+    if (check.kind === "deny") {
+      finish({ decidedBy: "rule", reason: check.reason, prompted: false });
+      return { ok: false, reason: check.reason };
+    }
+    if (check.kind === "outside") {
+      finish({ decision: "allow", decidedBy: check.rules.length ? "rule" : "inspect", prompted: false });
+      return { ok: true, scope: "rule", by: "rule" };
+    }
     const dangerous = line.tier === "danger";
     // Patterns, each with the pin for a program in a writable place.
     const patterns: Offered[] = [];
@@ -1232,7 +1314,7 @@ export class Permissions {
         if (!matched) return { ok: false, reason: `The pattern \`${describePattern(pattern)}\` does not match this command; propose patterns that cover it.` };
         const pin = pinned(matched.words[0], matched.cwd);
         if (!pin) return { ok: false, reason: `\`${matched.words[0]}\` was not found.` };
-        patterns.push({ match: pattern, ...pin, env: [...matched.env], dangers: [] });
+        patterns.push({ match: pattern, ...pin, env: [...matched.env], dangers: [], proposed: true });
       }
       const rules = this.commandRules();
       onceOnly = commands.map((item) => this.redirectProblem(item)).find(Boolean);
@@ -1291,14 +1373,26 @@ export class Permissions {
       let review: string | undefined;
       if (mode === "assisted" && !dangerous) {
         const purpose = [proposal.label && `Purpose: ${proposal.label}`, proposal.reason && `Reason: ${proposal.reason}`].filter(Boolean).join("\n");
+        // An approval is remembered for the commands' own categories, never for patterns the agent proposed.
+        const memo = patterns.filter((pattern) => !pattern.proposed);
         const verdict = await this.review(
-          { capability: "escalate", paths: [], zone: "outside the sandbox", command, tool: "bash", justification: purpose || undefined, tier: line.tier, tierReason: line.kind },
+          {
+            capability: "escalate",
+            paths: [],
+            zone: "outside the sandbox",
+            command,
+            tool: "bash",
+            justification: purpose || undefined,
+            tier: line.tier,
+            tierReason: line.kind,
+            remembers: memo.map((pattern) => describePattern(pattern.match)),
+          },
           ctx,
         );
         audit.judge = verdict.state;
         if (verdict.decision === "approve") {
-          for (const pattern of patterns) this.addCommandGrant(pattern, "chat", "judge", label);
-          finish({ decision: "allow", decidedBy: "judge", reason: verdict.reason, scope: patterns.length ? "chat" : "once", prompted: false });
+          for (const pattern of memo) this.addCommandGrant(pattern, "chat", "judge", label);
+          finish({ decision: "allow", decidedBy: "judge", reason: verdict.reason, scope: memo.length ? "chat" : "once", prompted: false });
           return { ok: true, scope: "once", by: "judge", ...(onceOnly ? { onceOnly } : {}) } as const;
         }
         review = verdict.reason;
@@ -1406,7 +1500,7 @@ export class Permissions {
     const removed: { rule: string; why: string }[] = [];
     const facts = this.riskFacts();
     const kept = commands.filter((rule) => {
-      const why = rule.decision === "allow" && Array.isArray(rule.match) ? this.ruleFate(rule, facts) : undefined;
+      const why = rule.decision === "allow" && Array.isArray(rule.match) && rule.acknowledgeDanger !== true ? this.ruleFate(rule, facts) : undefined;
       if (why) removed.push({ rule: describePattern(rule.match), why });
       return !why;
     });
@@ -1642,6 +1736,8 @@ export class Permissions {
     for (const gitDir of this.gitDirs) {
       // `commondir` and `gitdir` say where the repository is: rewritten, they could point git at a config the agent wrote.
       for (const name of ["config", "config.worktree", "hooks", "commondir", "gitdir", "info"]) protectedPaths.push(join(gitDir, name));
+      // Submodules keep their repositories under modules/: each its own config and hooks.
+      for (const module of submoduleGitDirs(gitDir)) for (const name of ["config", "hooks", "info"]) protectedPaths.push(join(module, name));
     }
     const nested = guarded.anywhere.length ? await listMatching(ripgrepGlobs(guarded.anywhere), roots, { rg, signal, timeoutMs: 15_000 }) : [];
     protectedPaths.push(...anchorDirectories(nested, guarded.anywhere));
