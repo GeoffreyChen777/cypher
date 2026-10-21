@@ -26,6 +26,12 @@ export interface CommandRule {
   /** The program's contents, for a program that lives in a writable place. */
   sha256?: string;
   createdAt?: string;
+  /** The project it applies in (`projectIdentity` in core.ts); every project when absent. */
+  project?: string;
+  /** Variables an `allow` may see assigned in front of the command (`NAME=value cmd`). */
+  env?: string[];
+  /** Set by the user in Settings: the rule may vouch for a dangerous command (risk.ts). */
+  acknowledgeDanger?: boolean;
 }
 
 export const MAX_PATTERN_WORDS = 32;
@@ -441,8 +447,108 @@ export function isCommandRule(value: unknown): value is CommandRule {
     (rule.decision === "allow" || rule.decision === "ask" || rule.decision === "deny") &&
     patternError(rule.match) === undefined &&
     (rule.label === undefined || typeof rule.label === "string") &&
-    (rule.sha256 === undefined || (typeof rule.sha256 === "string" && /^[0-9a-f]{64}$/.test(rule.sha256)))
+    (rule.sha256 === undefined || (typeof rule.sha256 === "string" && /^[0-9a-f]{64}$/.test(rule.sha256))) &&
+    (rule.project === undefined || (typeof rule.project === "string" && rule.project.startsWith("/"))) &&
+    (rule.env === undefined || (Array.isArray(rule.env) && rule.env.every((name) => typeof name === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)))) &&
+    (rule.acknowledgeDanger === undefined || typeof rule.acknowledgeDanger === "boolean")
   );
+}
+
+// --- Environment and wrappers ------------------------------------------------------
+
+/**
+ * Variables that change how programs load or run code, or where they look
+ * for it: assigning one in front of a command changes what the command is,
+ * so no rule can vouch for it and the reader treats the line as opaque.
+ */
+const DANGEROUS_ENV =
+  /^(PATH|\w*PATH|LD_\w*|DYLD_\w*|\w*_OPTIONS|\w*OPTS|\w*FLAGS|\w*_HOME|\w*ROOT|PYTHON\w*|RUBY\w*|PERL\w*|NODE_\w*|NPM_CONFIG_\w*|YARN_\w*|BUNDLE_\w*|BASH_ENV|ENV|IFS|HOME|XDG_\w*|SHELL|SHELLOPTS|BASHOPTS|EDITOR|VISUAL|\w*PAGER|GIT_\w*|SSH_\w*|\w*_PROXY|\w*_COMMAND|\w*_WRAPPER|RUSTC\w*|CARGO_\w*|CC|CXX|CPP|LD|AR|MAKE|MAKEFLAGS|LESSOPEN|LESSCLOSE|TMPDIR|PROMPT_COMMAND|PS4|CDPATH|GLOBIGNORE|HISTFILE|BROWSER|TERMINFO|\w*ASKPASS|DEVELOPER_DIR|SDKROOT|TOOLCHAINS|DOCKER_\w*|COMPOSE_\w*|KUBE\w*|AWS_\w*|GOOGLE_\w*|CLOUDSDK_\w*|AZURE_\w*|RUSTUP_\w*|DOTNET_\w*|\w*_HOOKS?|\w*PRELOAD\w*|\w*_PLUGINS?|GRADLE_\w*|MAVEN_\w*|TF_\w*|HELM_\w*|ANSIBLE_\w*|PIP_\w*|UV_\w*|POETRY_\w*|CONDA_\w*|VIRTUAL_ENV|GEM_\w*|GO\w*|\w*TOKEN\w*|\w*SECRET\w*|\w*PASSWORD\w*|\w*_KEY)$/i;
+
+/** Common settings that only tune output or a build, in families the list above names. */
+const BENIGN_ENV =
+  /^(NODE_ENV|NODE_NO_WARNINGS|RUST_LOG|RUST_BACKTRACE|RUST_MIN_STACK|CARGO_INCREMENTAL|CARGO_TERM_\w+|CARGO_TARGET_DIR|CARGO_BUILD_JOBS|CARGO_PROFILE_\w+_(DEBUG|OPT_LEVEL|INCREMENTAL|CODEGEN_UNITS|LTO|STRIP|SPLIT_DEBUGINFO)|PYTHONUNBUFFERED|PYTHONDONTWRITEBYTECODE|PYTHONIOENCODING|PYTHONHASHSEED|GIT_TERMINAL_PROMPT)$/;
+
+/** Whether a variable may stand assigned in front of a command: it does not change how programs load or run. */
+export function benignEnv(name: string): boolean {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return false;
+  return BENIGN_ENV.test(name) || !DANGEROUS_ENV.test(name);
+}
+
+/** A command seen through the wrappers that only run it (`nohup`, `timeout 30`, `env NAME=value`). */
+export interface Unwrapped {
+  words: string[];
+  /** The wrappers' program words, outermost first. */
+  wrappers: string[];
+  /** Variables `env` assigns. */
+  env: string[];
+}
+
+const TIMEOUT_VALUES = new Set(["-s", "--signal", "-k", "--kill-after"]);
+
+/**
+ * The command a wrapper runs, when it only runs it: `nohup`, `time [-p]`,
+ * `nice [-n N]`, `timeout [options] DURATION`, `caffeinate [-dimsu] [-t N]
+ * [-w PID]`, `env [-i] [-u NAME] [NAME=value]…`. Undefined when the wrapper
+ * does more (`env -S` splits a string into a command), its words are not
+ * all known, or `env` assigns a variable that changes how programs run.
+ * The caller checks that each wrapper is the system's program.
+ */
+export function unwrap(words: readonly string[]): Unwrapped | undefined {
+  let rest = [...words];
+  const wrappers: string[] = [];
+  const env: string[] = [];
+  for (let depth = 0; depth < 8; depth++) {
+    const program = rest[0];
+    if (program === undefined || program === UNKNOWN) return undefined;
+    const name = basename(program);
+    let i = 1;
+    switch (name) {
+      case "nohup":
+        break;
+      case "time":
+        while (rest[i] === "-p") i++;
+        break;
+      case "nice":
+        if (rest[i] === "-n") i += 2;
+        else if (/^(-\d+|-n\d+|--adjustment=-?\d+)$/.test(rest[i] ?? "")) i++;
+        break;
+      case "timeout":
+        for (; i < rest.length && rest[i].startsWith("-"); i++) {
+          if (TIMEOUT_VALUES.has(rest[i])) i++;
+          else if (!/^(--preserve-status|--foreground|-v|--verbose|--signal=\S+|--kill-after=\S+|-s\S+|-k\S+)$/.test(rest[i])) return undefined;
+        }
+        if (!/^\d+(\.\d+)?[smhd]?$/.test(rest[i] ?? "")) return undefined;
+        i++;
+        break;
+      case "caffeinate":
+        for (; i < rest.length && rest[i].startsWith("-"); i++) {
+          if (rest[i] === "-t" || rest[i] === "-w") i++;
+          else if (!/^-[dimsu]+$/.test(rest[i])) return undefined;
+        }
+        break;
+      case "env":
+        for (; i < rest.length; i++) {
+          const word = rest[i];
+          if (word === "-i" || word === "-" || word === "--ignore-environment") continue;
+          if (word === "-u" || word === "--unset") {
+            i++;
+            continue;
+          }
+          if (word === UNKNOWN || word.startsWith("-")) return undefined;
+          const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(word);
+          if (!assignment) break;
+          if (!benignEnv(assignment[1])) return undefined;
+          env.push(assignment[1]);
+        }
+        break;
+      default:
+        return depth === 0 ? undefined : { words: rest, wrappers, env };
+    }
+    if (rest.slice(1, i).includes(UNKNOWN)) return undefined;
+    wrappers.push(program);
+    rest = rest.slice(i);
+  }
+  return undefined;
 }
 
 function wordMatches(glob: string, word: string): boolean {
@@ -544,6 +650,11 @@ const SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
   tmux: ["-L", "-S", "-f"],
 };
 
+/** The options before a CLI's subcommand that take a value (`git -C dir push`). */
+export function globalValueOptions(program: string): readonly string[] {
+  return SUBCOMMANDS[program] ?? [];
+}
+
 /**
  * Subcommands whose next word picks what runs (`npm run build`, `uv run
  * pytest`): their category includes that word too. `xcrun` runs the tool
@@ -616,6 +727,21 @@ function anyCommand(program: string): string {
 
 function computed(program: string): string {
   return `\`${program}\` is given words known only when it runs`;
+}
+
+/** Where `ssh [options] host [command …]` names its host; undefined when it names none. */
+export function sshHostIndex(words: readonly string[]): number | undefined {
+  let i = 1;
+  for (; i < words.length && words[i] !== UNKNOWN && words[i].startsWith("-") && words[i] !== "-"; i++) {
+    if (words[i] === "--") {
+      i++;
+      break;
+    }
+    const flags = words[i].slice(1);
+    const at = [...flags].findIndex((flag) => SSH_VALUE_OPTIONS.includes(flag));
+    if (at === flags.length - 1) i++;
+  }
+  return i < words.length ? i : undefined;
 }
 
 /** `ssh [options] host …`: the options as written, the host, any command. */

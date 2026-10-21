@@ -68,7 +68,7 @@ impl ApprovalKey {
         match self {
             Self::ExternalWrite => "Other projects and folders. Reading them is always allowed.",
             Self::ProtectedWrite => {
-                "Git config and hooks, shell startup files, launch agents: a write there runs code later."
+                "Git config and hooks, shell startup files, launch agents: a write there runs code later, so the reviewing model never approves one."
             }
             Self::SensitiveRead => {
                 "Keys, .env files and credentials, for the file tools. Sandboxed commands never read them."
@@ -77,7 +77,7 @@ impl ApprovalKey {
             Self::Network => "With the filtered network: a domain not on the list.",
             Self::Tools => "MCP and extension tools whose setting below is Ask.",
             Self::Escalate => {
-                "A command that needs more than the sandbox (ssh, git push, gh, other processes) runs as you once you allow it."
+                "A command that needs more than the sandbox (ssh, gh, other processes) runs as you. Inspections run without asking; dangerous commands (publishing, deleting outside the workspace, secrets) always ask you."
             }
         }
     }
@@ -684,15 +684,23 @@ impl PermissionsPage {
     ) -> AnyElement {
         let mut card = widgets::section_card(theme).mt(px(12.0));
         for (index, key) in ApprovalKey::ALL.into_iter().enumerate() {
-            let options = vec![
+            let mut options = vec![
                 (mode_label(ApprovalMode::Deny), ApprovalMode::Deny),
                 (mode_label(ApprovalMode::Ask), ApprovalMode::Ask),
                 (mode_label(ApprovalMode::Assisted), ApprovalMode::Assisted),
             ];
+            // A protected write is a human's: the extension reads "Model first" as "Ask me".
+            let mut current = key.get(&settings.approval);
+            if key == ApprovalKey::ProtectedWrite {
+                options.pop();
+                if current == ApprovalMode::Assisted {
+                    current = ApprovalMode::Ask;
+                }
+            }
             let control = self.segmented(
                 format!("permissions-approval-{}", key.id()),
                 options,
-                key.get(&settings.approval),
+                current,
                 theme,
                 cx,
                 move |page, mode, cx| {
@@ -1138,7 +1146,7 @@ impl PermissionsPage {
                         .text_size(px(12.5))
                         .text_color(theme.text_muted)
                         .child(
-                            "Nothing yet. Choosing Always allow when the agent asks to run a command outside the sandbox adds it here.",
+                            "Nothing yet. Choosing Always in a project when the agent asks to run a command outside the sandbox adds it here.",
                         ),
                 )
                 .into_any_element();
@@ -1151,11 +1159,23 @@ impl PermissionsPage {
                 CommandDecision::Ask => "Always asks",
                 CommandDecision::Deny => "Never runs",
             };
-            let pinned = if rule.sha256.is_some() {
-                " · pinned to its current contents"
-            } else {
-                ""
-            };
+            let mut notes = String::new();
+            if let Some(project) = &rule.project {
+                let name = project
+                    .rsplit('/')
+                    .find(|part| !part.is_empty())
+                    .unwrap_or(project);
+                notes.push_str(&format!(" · in {name}"));
+            }
+            if !rule.env.is_empty() {
+                notes.push_str(&format!(" · with {}", rule.env.join(", ")));
+            }
+            if rule.sha256.is_some() {
+                notes.push_str(" · pinned to its current contents");
+            }
+            if rule.acknowledge_danger {
+                notes.push_str(" · even when dangerous");
+            }
             let target = rule.clone();
             card = card.child(
                 widgets::card_row(theme, index == 0)
@@ -1178,7 +1198,7 @@ impl PermissionsPage {
                                     .mt(px(2.0))
                                     .text_size(px(12.0))
                                     .text_color(theme.text_muted)
-                                    .child(SharedString::from(format!("{decision}{pinned}"))),
+                                    .child(SharedString::from(format!("{decision}{notes}"))),
                             ),
                     )
                     .child(
@@ -1224,7 +1244,7 @@ impl PermissionsPage {
                         .text_size(px(12.5))
                         .text_color(theme.text_muted)
                         .child(
-                            "Nothing yet. Choosing Always allow in an approval adds the path here.",
+                            "Nothing yet. Choosing Always in a project, or Always allow, in an approval adds the path here.",
                         ),
                 )
                 .into_any_element();
@@ -1244,6 +1264,16 @@ impl PermissionsPage {
                         "Read".to_string()
                     },
                 ),
+            };
+            let detail = match &rule.project {
+                Some(project) => {
+                    let name = project
+                        .rsplit('/')
+                        .find(|part| !part.is_empty())
+                        .unwrap_or(project);
+                    format!("{detail} · in {name}")
+                }
+                None => detail,
             };
             let target = rule.clone();
             card = card.child(

@@ -29,6 +29,12 @@ export interface JudgeRequest {
   /** A tool call's input. */
   input?: string;
   justification?: string;
+  /** The deterministic classifier's tier (risk.ts): the judge sees only `local` requests and secrets. */
+  tier?: string;
+  /** Why the classifier put it there. */
+  tierReason?: string;
+  /** Patterns an approval also allows for the rest of the chat. */
+  remembers?: readonly string[];
   userMessages: readonly string[];
   recentToolCalls: readonly string[];
 }
@@ -52,6 +58,8 @@ You have exactly two answers:
 - "ask-user": you cannot approve it automatically, so the user is asked. This is not a rejection; the user decides.
 
 You cannot reject anything. Whenever you are unsure, answer "ask-user".
+
+A deterministic classifier has already sent every dangerous operation (publishing, deploying, deleting outside the workspace, other people's processes, persistence, secrets in commands) straight to the user; "tier: local" means it found nothing dangerous in the operation itself. Your job is intent: does the user's request call for this, at this scope?
 
 Answer "ask-user" in particular when:
 - the user never asked for anything that needs this access;
@@ -89,9 +97,13 @@ export function judgePrompt(request: JudgeRequest): string {
   if (request.guardReason) lines.push(`- why the path is guarded: ${request.guardReason}`);
   if (request.tool) lines.push(`- tool: ${request.tool}`);
 
+  if (request.tier) lines.push(`- tier: ${request.tier}${request.tierReason ? ` (${request.tierReason})` : ""}`);
   lines.push(`- permission level: ${request.level}`);
   lines.push(`- workspace: ${request.workspaceRoots.join(", ")}`);
   if (request.command) lines.push("", "## The command", untrusted(clip(request.command, 3000)));
+  if (request.remembers?.length) {
+    lines.push("", "## An approval also allows, for the rest of this chat, commands matching", ...request.remembers.map((pattern) => `- ${pattern}`), "(`…` stands for any words.) Approve only if those are fine too.");
+  }
   if (request.input) lines.push("", "## The tool's input", untrusted(clip(request.input, 3000)));
   if (request.diff) lines.push("", "## The change", untrusted(clip(request.diff, 4000)));
   if (request.justification) lines.push("", "## The agent's justification", untrusted(clip(request.justification, 1500)));

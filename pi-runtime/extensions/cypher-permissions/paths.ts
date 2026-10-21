@@ -4,7 +4,8 @@
  * path that does not exist yet) before it is classified:
  *
  *   sensitive  matches a sensitive pattern (checked first, always wins)
- *   workspace  under a workspace root
+ *   workspace  under a workspace root, or in the temp directories: the
+ *              scratch space sandboxed commands write too (`scratch`)
  *   external   otherwise
  *
  * On top of the zone, a path may be write-guarded: `protected` (a write runs
@@ -62,6 +63,8 @@ export interface Classification {
   guard?: Guard;
   /** The pattern that made the path sensitive or guarded, for dialogs and the audit. */
   match?: string;
+  /** In the temp directories, which count as workspace. */
+  scratch?: boolean;
 }
 
 /**
@@ -110,6 +113,8 @@ export interface PathContextInput {
   protectedPatterns: readonly string[];
   self: readonly string[];
   writableSupport: readonly string[];
+  /** Temp directories: scratch space, writable like the workspace. */
+  scratch?: readonly string[];
   home?: string;
 }
 
@@ -120,8 +125,10 @@ export class PathContext {
   readonly protectedPatterns: CompiledPattern[];
   readonly self: CompiledPattern[];
   readonly writableSupport: CompiledPattern[];
+  readonly scratch: readonly string[];
 
   constructor(input: PathContextInput) {
+    this.scratch = input.scratch ?? [];
     this.home = input.home ?? homedir();
     this.roots = input.roots;
     this.sensitive = compilePatterns(input.sensitive, input.roots, this.home);
@@ -142,14 +149,19 @@ export class PathContext {
     return matchPatterns(path, this.writableSupport) !== undefined;
   }
 
+  inScratch(path: string): boolean {
+    return this.scratch.some((root) => isUnder(path, root));
+  }
+
   classify(path: string): Classification {
     const sensitive = matchPatterns(path, this.sensitive);
     if (sensitive) return { path, zone: "sensitive", match: sensitive };
-    const zone: Zone = this.inWorkspace(path) ? "workspace" : "external";
+    const scratch = !this.inWorkspace(path) && this.inScratch(path);
+    const zone: Zone = scratch || this.inWorkspace(path) ? "workspace" : "external";
     const self = matchPatterns(path, this.self);
     if (self) return { path, zone, guard: "self", match: self };
     const guarded = matchPatterns(path, this.protectedPatterns);
     if (guarded) return { path, zone, guard: "protected", match: guarded };
-    return { path, zone };
+    return scratch ? { path, zone, scratch } : { path, zone };
   }
 }

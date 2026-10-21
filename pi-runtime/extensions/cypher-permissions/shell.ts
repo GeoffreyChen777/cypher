@@ -13,17 +13,22 @@
  *   `for NAME in …; do`, `!` and `[[ … ]]`: every command in them is read as
  *   one that may run;
  * - `$(…)` and backticks: the commands inside are read too;
- * - a `NAME=value` assignment standing alone, when `assignable(NAME)`.
+ * - a `NAME=value` assignment standing alone, when `assignable(NAME)`;
+ * - `NAME=value` assignments in front of a command, when
+ *   `prefixAllowed(NAME)` for each: the command reports their names
+ *   (`env`);
+ * - `&` after a command: it runs in the background, apart from the line's
+ *   shell (`scoped`).
  *
  * A word whose text is known only when it runs (a parameter, a
  * substitution, an unquoted glob or brace list) becomes [`UNKNOWN`]: it may
  * stand for any words, so in a pattern only `**` matches it.
  *
- * Everything else (subshells, groups, background jobs, `case`, functions,
- * arithmetic, process substitution, a substitution inside `${…}` or an
- * unquoted heredoc, an assignment in front of a command) makes the line
- * opaque: no rule can match it, so it runs in the sandbox unless it is
- * approved as written.
+ * Everything else (subshells, groups, `case`, functions, arithmetic,
+ * process substitution, a substitution inside `${…}` or an unquoted
+ * heredoc, an assignment in front of a command that changes how programs
+ * run) makes the line opaque: no rule can match it, so it runs in the
+ * sandbox unless it is approved as written.
  */
 
 /** A word known only when the line runs. */
@@ -44,6 +49,8 @@ export interface SimpleCommand {
   scoped: boolean;
   /** Inside a loop: a `cd` here moves every command of the loop. */
   loop: boolean;
+  /** Variables assigned in front of it (`NAME=value cmd`), by name. */
+  env: string[];
 }
 
 export type ParsedLine = { kind: "simple"; commands: SimpleCommand[] } | { kind: "opaque"; reason: string };
@@ -51,6 +58,8 @@ export type ParsedLine = { kind: "simple"; commands: SimpleCommand[] } | { kind:
 export interface ParseOptions {
   /** Whether `NAME=value` alone on a command may stand (it changes nothing a program sees). */
   assignable?: (name: string) => boolean;
+  /** Whether `NAME=value` in front of a command may stand (it does not change how programs load or run code). */
+  prefixAllowed?: (name: string) => boolean;
 }
 
 /** Words that open or close a compound command bash has and this reader does not. */
@@ -90,6 +99,8 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
   let reads: string[] = [];
   let writes: string[] = [];
   let assigns: string[] = [];
+  /** Assignments in front of the command's program. */
+  let env: string[] = [];
   let redirect: Redirect | undefined;
   /** The command after `&&`, `||` or `|`. */
   let chained = false;
@@ -194,11 +205,15 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
         return;
       }
     }
-    if (assigns.length) throw new Opaque("a variable assignment in front of a command");
+    if (assigns.length) {
+      if (!assigns.every((name) => options.prefixAllowed?.(name))) throw new Opaque("a variable assignment in front of a command");
+      env = assigns;
+      assigns = [];
+    }
     words.push(known ? text : UNKNOWN);
   };
 
-  const endCommand = (next: "and-or" | "pipe" | "end") => {
+  const endCommand = (next: "and-or" | "pipe" | "background" | "end") => {
     endWord();
     if (redirect) throw new Opaque("a redirection without a target");
     if (test) throw new Opaque("an unfinished `[[`");
@@ -209,13 +224,14 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
     }
     if (words.length || reads.length || writes.length) {
       const loop = blocks.includes("loop");
-      out.push({ words, reads, writes, loop, scoped: nested || chained || next === "pipe" || blocks.length > 0 });
+      out.push({ words, reads, writes, loop, env, scoped: nested || chained || next === "pipe" || next === "background" || blocks.length > 0 });
     }
     words = [];
     reads = [];
     writes = [];
     assigns = [];
-    chained = next !== "end";
+    env = [];
+    chained = next === "and-or" || next === "pipe";
   };
 
   /** Skip `$…` at `i` (in or out of double quotes); returns the index of its last character. */
@@ -323,7 +339,10 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
           i += source[i + 2] === ">" ? 2 : 1;
           if (source[i + 1] === "(") throw new Opaque("process substitution");
         } else {
-          throw new Opaque("a background job");
+          // In the background: it runs apart from the line's shell, and
+          // what follows runs whether it does or not.
+          if (inWord || words.length || reads.length || writes.length || redirect) endCommand("background");
+          else throw new Opaque("a background job");
         }
         break;
       case "|":
