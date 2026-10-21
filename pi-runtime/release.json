@@ -1,5 +1,5 @@
 {
-  "version": "1.1.0.9",
-  "minimumCypherVersion": "0.3.54",
+  "version": "1.1.0.10",
+  "minimumCypherVersion": "0.3.59",
   "nodeVersion": "24.19.0"
 }
