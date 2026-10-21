@@ -265,15 +265,6 @@ function sendsData(view: CommandView): boolean | string {
   return view.args.some((word) => word === UNKNOWN || /^--(post-data|post-file|body-data|body-file|method)(=|$)/.test(word));
 }
 
-/** The last operand names another machine (`host:path`, `user@host:path`). */
-function copiesToRemote(view: CommandView): boolean | string {
-  const target = view.positionals.at(-1);
-  if (target === undefined || view.positionals.length < 2) return false;
-  if (target === UNKNOWN) return true;
-  const remote = /^(?:[\w.-]+@)?([\w.-]+):/.exec(target);
-  return remote ? `copies files to ${remote[1]}` : false;
-}
-
 export const DANGER: readonly DangerEntry[] = [
   // Persistence and system.
   { pack: "core", program: ["sudo", "doas", "su", "pkexec"], kind: "runs as the administrator" },
@@ -305,7 +296,7 @@ export const DANGER: readonly DangerEntry[] = [
   { pack: "core", program: "osascript", kind: "controls apps on this machine (it can send mail and messages)" },
   { pack: "core", program: ["open", "xdg-open"], kind: "opens a link, which can send data to a site", when: (view) => view.positionals.some((word) => word === UNKNOWN || (/^[a-z][\w+.-]*:/i.test(word) && !/^file:/i.test(word) && !/^(https?:\/\/)?(localhost|127\.\d+\.\d+\.\d+|\[::1\])([:/]|$)/i.test(word))) },
   { pack: "core", program: ["curl", "wget"], kind: "sends data to a server", when: sendsData },
-  { pack: "core", program: ["scp", "rsync", "sftp"], kind: "copies files to another machine", when: (view) => (view.program === "sftp" ? true : copiesToRemote(view)) },
+  // scp and rsync are decided in risk.ts: by the machines and local files they copy between.
   // Git: publishing and destroying are decided in risk.ts (they need the repository).
   // `git config` is decided in risk.ts: by the key it sets.
   { pack: "git", program: "git", sub: ["remote", "add|set-url|rename|remove|rm|set-head|set-branches"], kind: "changes the repository's remotes" },
