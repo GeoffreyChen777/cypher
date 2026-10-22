@@ -157,6 +157,55 @@ describe("notification outbox on real Durable Object SQLite", () => {
     });
   });
 
+  it("announces every question of one turn once, whichever path reports it", async () => {
+    const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("notifications-repeat-input"));
+    await runInDurableObject(stub, async (_, state) => {
+      const start = Date.now(), sends: unknown[] = [];
+      const rows = new Map<string, Row>([
+        ["chats/chat", row("chats", "chat", { deviceId: "host", spaceId: "project" })],
+        ["spaces/project", row("spaces", "project", {})]
+      ]);
+      const service = new Notifications(state, recordingPushEnv(sends), (kind, id) => rows.get(`${kind}/${id}`), () => {});
+      seedRecipient(state.storage.sql, start);
+      // The host keeps `startedAt` across awaitingInput → working: one run.
+      const session = (status: string, at: number) =>
+        row("sessions", "chat", { chatId: "chat", deviceId: "host", status, startedAt: start, updatedAt: at });
+      const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+      const event = async (status: string, at: number) => {
+        clock.mockReturnValue(at);
+        const response = await service.fetch(new Request("https://test", { method: "POST", body: JSON.stringify({
+          chatId: "chat", deviceId: "host", status, startedAt: start, updatedAt: at }) }), "event");
+        return response.json();
+      };
+      const mirror = (from: string, to: string, at: number, sentAt = at) => {
+        clock.mockReturnValue(sentAt);
+        service.observe([{ before: session(from, at - 1), after: session(to, at) }], "host");
+      };
+      const flush = async (at: number) => { clock.mockReturnValue(at); await service.flush(); };
+      try {
+        await event("working", start);
+        expect(await event("awaitingInput", start + 1_000)).toMatchObject({ queued: true });
+        mirror("working", "awaitingInput", start + 1_000);
+        await flush(start + 12_000); expect(sends).toHaveLength(1);
+
+        await event("working", start + 20_000);
+        // The first question's mirror lands late, after it was answered.
+        mirror("working", "awaitingInput", start + 1_000, start + 21_000);
+        expect(await event("awaitingInput", start + 30_000)).toMatchObject({ queued: true });
+        mirror("awaitingInput", "working", start + 20_000, start + 31_000);
+        mirror("working", "awaitingInput", start + 30_000, start + 32_000);
+        await flush(start + 42_000); expect(sends).toHaveLength(2);
+
+        // A third question reported only by the registry mirror.
+        mirror("awaitingInput", "working", start + 50_000);
+        rows.set("sessions/chat", session("awaitingInput", start + 60_000));
+        mirror("working", "awaitingInput", start + 60_000);
+        await flush(start + 72_000); expect(sends).toHaveLength(3);
+        await flush(start + 90_000); expect(sends).toHaveLength(3);
+      } finally { clock.mockRestore(); }
+    });
+  });
+
   it("ignores baseline snapshots, non-host replication and short runs", async () => {
     const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("notifications-baseline"));
     await runInDurableObject(stub, async (_, state) => {
