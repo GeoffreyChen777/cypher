@@ -112,6 +112,16 @@ node "$SPEC/patches/pi-claude-bridge-context-files.mjs" \
 node "$SPEC/patches/pi-claude-bridge-session-cleanup.mjs" \
   "$STAGE/npm/node_modules/pi-claude-bridge"
 
+# A Claude model could not use Claude Code's own WebSearch: the bridge runs
+# Claude Code without builtin tools and pi-web-search has no claude-bridge API.
+# The bridge now runs a WebSearch-only one-off query, and pi-web-search uses it
+# when the pinned search model is a Claude Code one (see the patch headers).
+# Missing anchors fail the build on purpose.
+node "$SPEC/patches/pi-claude-bridge-web-search.mjs" \
+  "$STAGE/npm/node_modules/pi-claude-bridge"
+node "$SPEC/patches/pi-web-search-claude-code.mjs" \
+  "$STAGE/npm/node_modules/pi-web-search"
+
 # The permission extension runs ripgrep (behind `grep`) inside Landstrip and
 # checks apply_patch's file access at the operation (see the patch headers).
 # Missing anchors fail the build on purpose.
@@ -240,6 +250,10 @@ CYPHER_PI_RUNTIME_STAGE="$STAGE" \
 # killed one's, and nothing the bridge did not record is touched.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
   "$STAGE/bin/node" --test "$SPEC/patches/session-cleanup.staged.test.mjs"
+# The pinned search model decides whether web_search runs through Claude Code;
+# a stand-in replaces Claude Code itself.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/patches/web-search.staged.test.mjs"
 # Language gating decides whether a message costs a translation request at all,
 # so it is covered here rather than only through a live session.
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-translation.test.mjs"
