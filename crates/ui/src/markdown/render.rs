@@ -25,7 +25,8 @@ use crate::kit::theme::{
     MonoStyled, Theme, code_block_background, inline_code_text, inline_code_wash,
 };
 
-use super::parser::{Block, BlockTree, InlineRun, TableAlign};
+use super::math::{self, GlueWidths, MathMetrics};
+use super::parser::{Block, BlockTree, InlineRun, InlineStyle, MathKind, TableAlign};
 use super::veil::{RowVeil, apply_veil};
 
 /// Gap between markdown blocks inside one message (zeron mdBlockGap).
@@ -260,18 +261,41 @@ pub fn render_block(
 ) -> AnyElement {
     let (ix, theme) = (ctx.ix, ctx.theme);
     match block {
-        Block::Paragraph { runs } => text_element(
-            runs,
-            theme.markdown.body_size,
-            theme.markdown.body_line_height,
-            false,
-            ctx,
-        ),
+        Block::Paragraph { runs } => match paragraph_segments(runs) {
+            None => text_element(
+                runs,
+                theme.markdown.body_size,
+                theme.markdown.body_line_height,
+                false,
+                ctx,
+                window,
+            ),
+            // Display formulas get rows of their own between the prose.
+            Some(segments) => div()
+                .flex()
+                .flex_col()
+                .gap(px(theme.markdown.block_gap))
+                .children(segments.iter().enumerate().map(|(si, segment)| {
+                    let ctx = ctx.nested(ix * 100 + si);
+                    match segment {
+                        Segment::Prose(runs) => text_element(
+                            runs,
+                            theme.markdown.body_size,
+                            theme.markdown.body_line_height,
+                            false,
+                            ctx,
+                            window,
+                        ),
+                        Segment::Display(tex) => render_display_math(tex, ctx, window),
+                    }
+                }))
+                .into_any_element(),
+        },
         Block::Heading { level, runs } => {
             let (size, line) = heading_metrics(*level);
             let size = size * theme.markdown.body_size / MD_TEXT_SIZE;
             let line = line * theme.markdown.body_line_height / MD_LINE_HEIGHT;
-            text_element(runs, size, line, true, ctx)
+            text_element(runs, size, line, true, ctx, window)
         }
         Block::CodeBlock { language, code }
             if super::diff_fence::is_diff_fence(language.as_deref()) =>
@@ -368,6 +392,108 @@ pub fn render_block(
             .bg(theme.border)
             .into_any_element(),
     }
+}
+
+/// One piece of a paragraph cut at its display formulas.
+enum Segment<'a> {
+    Prose(Vec<InlineRun>),
+    Display(&'a str),
+}
+
+/// A paragraph's runs cut at its display formulas, or `None` when it has
+/// none (the common case renders as one text element, as before). Whitespace
+/// left at a cut — the soft breaks around a `$$` on its own line — is
+/// dropped, and a prose piece with nothing else left vanishes.
+fn paragraph_segments(runs: &[InlineRun]) -> Option<Vec<Segment<'_>>> {
+    if !runs
+        .iter()
+        .any(|run| run.style.math == Some(MathKind::Display))
+    {
+        return None;
+    }
+    fn flush<'a>(out: &mut Vec<Segment<'a>>, prose: &mut Vec<InlineRun>) {
+        let mut runs = std::mem::take(prose);
+        if let Some(first) = runs.first_mut()
+            && first.style.math.is_none()
+        {
+            first.text = first.text.trim_start().to_string();
+        }
+        if let Some(last) = runs.last_mut()
+            && last.style.math.is_none()
+        {
+            last.text = last.text.trim_end().to_string();
+        }
+        runs.retain(|run| !run.text.is_empty());
+        if !runs.is_empty() {
+            out.push(Segment::Prose(runs));
+        }
+    }
+    let mut out = Vec::new();
+    let mut prose = Vec::new();
+    for run in runs {
+        if run.style.math == Some(MathKind::Display) {
+            flush(&mut out, &mut prose);
+            out.push(Segment::Display(&run.text));
+        } else {
+            prose.push(run.clone());
+        }
+    }
+    flush(&mut out, &mut prose);
+    Some(out)
+}
+
+/// A display formula on its own row, centered; a formula wider than the
+/// column scrolls sideways like a code block. It is one text element whose
+/// single line is as tall as the formula, so it selects and copies (as its
+/// `$$` source) with the prose around it. TeX RaTeX cannot typeset shows as
+/// a `latex` code block instead.
+fn render_display_math(tex: &str, ctx: BlockCtx, window: &Window) -> AnyElement {
+    let BlockCtx {
+        top_ix,
+        ix,
+        opts,
+        theme,
+    } = ctx;
+    let Some(metrics) = math::metrics(tex, MathKind::Display) else {
+        return render_code_block(Some("latex"), tex.trim(), ctx, None);
+    };
+    let size = theme.markdown.body_size;
+    let em_px = size * math::MATH_SCALE;
+    let line_height = ((metrics.height + metrics.depth) * em_px + 2.0 * math::DISPLAY_PAD_Y)
+        .max(theme.markdown.body_line_height);
+    let runs = [InlineRun {
+        text: tex.to_string(),
+        style: InlineStyle {
+            math: Some(MathKind::Display),
+            ..InlineStyle::default()
+        },
+    }];
+    let env = MathEnv::new(window, theme, size);
+    let flat = flatten_cached(
+        &runs,
+        FontWeight::NORMAL,
+        top_ix,
+        ix,
+        opts,
+        theme,
+        Some(&env),
+    );
+    let scroll_id: SharedString = format!("{}-math{ix}", opts.row_key).into();
+    horizontal_scroller(scroll_id)
+        .w_full()
+        .flex()
+        .flex_row()
+        .child(
+            // Auto margins center a narrow formula and collapse to zero for
+            // a wide one, so its left edge stays reachable by scrolling.
+            div()
+                .mx_auto()
+                .flex_none()
+                .text_size(px(size))
+                .line_height(px(line_height))
+                .child(flat_text_element(&flat, ix, opts, theme)),
+        )
+        .into_any_element()
 }
 
 /// Tight monochrome heading scale (zeron: h2 ≈ 16px semibold; headings step
@@ -467,7 +593,16 @@ fn render_table(
                 out.push(None);
                 continue;
             };
-            let flat = flatten_cached(runs, weight, top_ix, table_cell_ix(ix, r, c), opts, theme);
+            let env = has_math(runs).then(|| MathEnv::new(window, theme, theme.markdown.body_size));
+            let flat = flatten_cached(
+                runs,
+                weight,
+                top_ix,
+                table_cell_ix(ix, r, c),
+                opts,
+                theme,
+                env.as_ref(),
+            );
             if !flat.text.is_empty() {
                 // Cell sources are single-line; guard anyway (same byte count,
                 // so the runs still cover the text exactly).
@@ -593,6 +728,101 @@ pub struct FlatText {
     pub runs: Vec<TextRun>,
     pub links: Vec<(Range<usize>, String)>,
     pub code_ranges: Vec<Range<usize>>,
+    /// Formulas, each painted over the glue text at its range.
+    pub math: Vec<MathSpan>,
+    /// What the formulas' ranges copy as (their TeX source); `None` without
+    /// formulas. Built once with the flat text so the selection registry
+    /// can recognize an unchanged element by pointer.
+    pub copy_sources: Option<CopySources>,
+}
+
+/// Byte ranges of a flat text that copy as a different string.
+pub type CopySources = std::sync::Arc<[(Range<usize>, String)]>;
+
+/// One formula in a flat text: its glue placeholder's byte range and width,
+/// and what to typeset over it.
+#[derive(Clone)]
+pub struct MathSpan {
+    pub range: Range<usize>,
+    pub tex: SharedString,
+    pub kind: MathKind,
+    pub metrics: MathMetrics,
+    /// Math font size, px per em.
+    pub em_px: f32,
+    /// The glue's actual width (the formula centers in it).
+    pub glue_width: f32,
+}
+
+/// What flattening a formula needs from the window: the element's text size
+/// and its prose font's glue widths at that size.
+pub struct MathEnv {
+    pub font_size: f32,
+    pub glue: GlueWidths,
+}
+
+impl MathEnv {
+    pub fn new(window: &Window, theme: &Theme, font_size: f32) -> Self {
+        thread_local! {
+            static GLUE: RefCell<HashMap<(SharedString, u32), GlueWidths>> =
+                RefCell::new(HashMap::new());
+        }
+        let key = (theme.font_sans.clone(), font_size.to_bits());
+        let glue = GLUE.with(|cache| {
+            if let Some(hit) = cache.borrow().get(&key) {
+                return *hit;
+            }
+            let measure = |c: char| {
+                let text: SharedString = c.to_string().into();
+                let run = TextRun {
+                    len: text.len(),
+                    font: font(theme.font_sans.clone()),
+                    color: theme.text,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                f32::from(
+                    window
+                        .text_system()
+                        .shape_line(text, px(font_size), &[run], None)
+                        .width(),
+                )
+            };
+            let glue = GlueWidths {
+                nbsp: measure(math::NBSP),
+                narrow: measure(math::NARROW_NBSP),
+            };
+            let mut cache = cache.borrow_mut();
+            if cache.len() > 64 {
+                cache.clear();
+            }
+            cache.insert(key.clone(), glue);
+            glue
+        });
+        Self { font_size, glue }
+    }
+}
+
+fn has_math(runs: &[InlineRun]) -> bool {
+    runs.iter().any(|run| run.style.math.is_some())
+}
+
+/// A formula RaTeX cannot typeset reads as inline code of its source, so a
+/// typo still shows what the model wrote. Applied identically by the
+/// flattener and [`runs_text`], which must agree.
+fn settle_math(run: &InlineRun) -> std::borrow::Cow<'_, InlineRun> {
+    match run.style.math {
+        Some(kind) if math::metrics(&run.text, kind).is_none() => {
+            std::borrow::Cow::Owned(InlineRun {
+                text: run.text.trim().to_string(),
+                style: InlineStyle {
+                    code: true,
+                    ..InlineStyle::default()
+                },
+            })
+        }
+        _ => std::borrow::Cow::Borrowed(run),
+    }
 }
 
 /// Rounded-wash geometry: small radius on a box sized from the font, not the
@@ -620,6 +850,10 @@ const INLINE_CODE_MARGIN: &str = "\u{2009}";
 /// this beside the flattener it mirrors — and pinned to it by
 /// [`tests::runs_text_matches_the_flattened_text`] — is what makes the
 /// offscreen counts and the painted highlights agree.
+///
+/// A formula's glue is sized by the font, which offscreen counting cannot
+/// measure, so it counts as ONE no-break space: the rendered text holds a
+/// run of them, and queries do not contain them, so the counts still agree.
 pub fn runs_text(runs: &[InlineRun]) -> String {
     let mut text = String::new();
     let mut previous_was_code = None;
@@ -627,10 +861,15 @@ pub fn runs_text(runs: &[InlineRun]) -> String {
         if run.text.is_empty() {
             continue;
         }
+        let run = settle_math(run);
         if previous_was_code.is_some_and(|was_code| was_code != run.style.code) {
             text.push_str(INLINE_CODE_MARGIN);
         }
-        text.push_str(&run.text);
+        if run.style.math.is_some() {
+            text.push(math::NBSP);
+        } else {
+            text.push_str(&run.text);
+        }
         previous_was_code = Some(run.style.code);
     }
     text
@@ -648,7 +887,20 @@ pub fn count_block_matches(block: &Block, query: &str) -> usize {
             .sum()
     };
     match block {
-        Block::Paragraph { runs } | Block::Heading { runs, .. } => {
+        Block::Paragraph { runs } => match paragraph_segments(runs) {
+            None => crate::markdown::find::count_matches(&runs_text(runs), query),
+            // Element by element, as the paragraph renders.
+            Some(segments) => segments
+                .iter()
+                .map(|segment| match segment {
+                    Segment::Prose(runs) => {
+                        crate::markdown::find::count_matches(&runs_text(runs), query)
+                    }
+                    Segment::Display(_) => 0,
+                })
+                .sum(),
+        },
+        Block::Heading { runs, .. } => {
             crate::markdown::find::count_matches(&runs_text(runs), query)
         }
         // A diff fence selects line by line, markers excluded.
@@ -680,16 +932,41 @@ pub fn count_block_matches(block: &Block, query: &str) -> usize {
 /// Flatten inline runs into shaped-text inputs with an explicit base weight
 /// (table headers are 700 per zeron's `table.headerWeight`; strong runs never
 /// drop below semibold). Pure given a theme.
+#[cfg(test)]
 fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWeight) -> FlatText {
+    flatten_runs_math(runs, theme, base_weight, None)
+}
+
+/// [`flatten_runs_weighted`] with formulas: given the window-measured
+/// `math` env each formula becomes glue its typeset width wide; without one
+/// (nothing to measure with) it reads as inline code of its source.
+fn flatten_runs_math(
+    runs: &[InlineRun],
+    theme: &Theme,
+    base_weight: FontWeight,
+    math_env: Option<&MathEnv>,
+) -> FlatText {
     let mut text = String::new();
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
     let mut code_ranges: Vec<Range<usize>> = Vec::new();
+    let mut math_spans: Vec<MathSpan> = Vec::new();
     let mut previous_was_code = None;
     for run in runs {
         if run.text.is_empty() {
             continue;
         }
+        let mut run = settle_math(run);
+        if run.style.math.is_some() && math_env.is_none() {
+            run = std::borrow::Cow::Owned(InlineRun {
+                text: run.text.trim().to_string(),
+                style: InlineStyle {
+                    code: true,
+                    ..InlineStyle::default()
+                },
+            });
+        }
+        let run = run.as_ref();
         // CSS-like separation without making the wash itself larger: a thin
         // space sits outside the code range at each prose/code boundary.
         if previous_was_code.is_some_and(|was_code| was_code != run.style.code) {
@@ -704,6 +981,33 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
                 underline: None,
                 strikethrough: None,
             });
+        }
+        if let (Some(kind), Some(env)) = (run.style.math, math_env)
+            && let Some(metrics) = math::metrics(&run.text, kind)
+        {
+            let em_px = env.font_size * math::MATH_SCALE;
+            let (glue, glue_width) = math::glue(metrics.width * em_px, env.glue);
+            let start = text.len();
+            text.push_str(&glue);
+            // Plain prose font: the glue widths were measured in it.
+            out.push(TextRun {
+                len: glue.len(),
+                font: font(theme.font_sans.clone()),
+                color: theme.text,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+            math_spans.push(MathSpan {
+                range: start..text.len(),
+                tex: run.text.clone().into(),
+                kind,
+                metrics,
+                em_px,
+                glue_width,
+            });
+            previous_was_code = Some(false);
+            continue;
         }
         let start = text.len();
         text.push_str(&run.text);
@@ -779,6 +1083,13 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         runs: out,
         links,
         code_ranges,
+        copy_sources: (!math_spans.is_empty()).then(|| {
+            math_spans
+                .iter()
+                .map(|span| (span.range.clone(), math::copy_source(&span.tex, span.kind)))
+                .collect()
+        }),
+        math: math_spans,
     }
 }
 
@@ -792,7 +1103,9 @@ fn flatten_cached(
     ix: usize,
     opts: &RenderOptions,
     theme: &Theme,
+    math_env: Option<&MathEnv>,
 ) -> Rc<FlatText> {
+    let build = || Rc::new(flatten_runs_math(runs, theme, base_weight, math_env));
     match &opts.cache {
         Some(cache) => {
             let mut cache = cache.borrow_mut();
@@ -800,10 +1113,10 @@ fn flatten_cached(
             cache
                 .flats
                 .entry((opts.row_key.clone(), top_ix, ix))
-                .or_insert_with(|| Rc::new(flatten_runs_weighted(runs, theme, base_weight)))
+                .or_insert_with(build)
                 .clone()
         }
-        None => Rc::new(flatten_runs_weighted(runs, theme, base_weight)),
+        None => build(),
     }
 }
 
@@ -860,9 +1173,12 @@ fn flat_text_element(
         &flat.text,
     );
     let find_washes = find_wash(theme);
+    let math_spans = flat.math.clone();
+    let math_color = theme.text;
+    let copy_sources = flat.copy_sources.clone();
     let underlay = canvas(
         |_, _, _| (),
-        move |_, _, window, _| {
+        move |_, _, window, cx| {
             let line_height = f32::from(layout.line_height());
             for range in &code_ranges {
                 let inset_y = layout
@@ -897,6 +1213,13 @@ fn flat_text_element(
                     ));
                 }
             }
+            // Formulas over their glue, above the washes like glyphs are.
+            for span in &math_spans {
+                paint_math(window, cx, &layout, span, math_color);
+            }
+            if let Some(sources) = &copy_sources {
+                super::selection::set_copy_sources(&sel_key, &flat_text, sources.clone());
+            }
             // Register this element into the frame's document-ordered
             // registry (paint order IS document order), then the frame's
             // mouse listeners.
@@ -917,6 +1240,56 @@ fn flat_text_element(
         .child(underlay)
         .child(text_el)
         .into_any_element()
+}
+
+/// Paint one formula over its glue. Inline math sits on the text baseline
+/// (the line's own ascent/descent place it, as gpui places glyphs); display
+/// math centers in its element's single, formula-tall line. The raster is
+/// pixel-snapped so its device pixels land 1:1.
+fn paint_math(
+    window: &mut Window,
+    cx: &mut gpui::App,
+    layout: &gpui::TextLayout,
+    span: &MathSpan,
+    color: Hsla,
+) {
+    let Some(rect) = range_rects(layout, &span.range, 0.0, 0.0)
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    let scale = window.scale_factor();
+    let mut evicted = Vec::new();
+    let raster = math::raster(&span.tex, span.kind, span.em_px, scale, color, &mut evicted);
+    for image in evicted {
+        cx.drop_image(image, Some(window));
+    }
+    let Some(raster) = raster else {
+        return;
+    };
+    let line_height = f32::from(layout.line_height());
+    let line_top = f32::from(rect.top());
+    let ink_width = span.metrics.width * span.em_px;
+    let left = f32::from(rect.left()) + (span.glue_width - ink_width) / 2.0 - math::RASTER_PAD;
+    let top = match span.kind {
+        MathKind::Display => line_top + (line_height - raster.height) / 2.0,
+        MathKind::Inline => {
+            let Some(line) = layout.line_layout_for_index(span.range.start) else {
+                return;
+            };
+            let ascent = f32::from(line.unwrapped_layout.ascent);
+            let descent = f32::from(line.unwrapped_layout.descent);
+            let baseline = line_top + (line_height - ascent - descent) / 2.0 + ascent;
+            baseline - span.metrics.height * span.em_px - math::RASTER_PAD
+        }
+    };
+    let snap = |v: f32| (v * scale).round() / scale;
+    let bounds = Bounds::new(
+        point(px(snap(left)), px(snap(top))),
+        size(px(raster.width), px(raster.height)),
+    );
+    let _ = window.paint_image(bounds, gpui::Corners::default(), raster.image, 0, false);
 }
 
 /// Selection tint: the accent hue under the glyphs, dark-panel strength.
@@ -1353,6 +1726,7 @@ fn text_element(
     line_height: f32,
     bold_default: bool,
     ctx: BlockCtx,
+    window: &Window,
 ) -> AnyElement {
     let BlockCtx {
         top_ix,
@@ -1365,7 +1739,8 @@ fn text_element(
     } else {
         FontWeight::NORMAL
     };
-    let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme);
+    let env = has_math(runs).then(|| MathEnv::new(window, theme, size));
+    let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme, env.as_ref());
     let inner = flat_text_element(&flat, ix, opts, theme);
     div()
         .text_size(px(size))
@@ -1411,6 +1786,8 @@ fn flatten_code(code: &str, highlight: CodeHighlight, theme: &Theme) -> FlatText
         runs,
         links: Vec::new(),
         code_ranges: Vec::new(),
+        math: Vec::new(),
+        copy_sources: None,
     }
 }
 

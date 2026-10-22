@@ -11,9 +11,10 @@
 //! untouched, so a marker that genuinely never closes settles honestly — one
 //! flip when the row completes — instead of jittering throughout.
 //!
-//! Repairs, in the spirit of remend's handler set (its katex/html/comparison
-//! handlers don't apply here — zeron renders raw HTML literally and has no
-//! math):
+//! Repairs, in the spirit of remend's handler set (its html/comparison
+//! handlers don't apply here — zeron renders raw HTML literally — and math is
+//! left alone: a closed `$…$` / `\(…\)` is opaque content, and an unclosed
+//! one ends the scan, since everything after it may still be TeX):
 //! - emphasis parity: `**a`→`**a**`, `*a`→`*a*`, `_a`/`__a`, `~~a`, nested
 //!   closers innermost-first (`**a *b` → `**a *b***`), half-streamed closers
 //!   completed (`**a*` → `**a**`);
@@ -75,6 +76,21 @@ pub fn close_hanging(text: &str) -> Option<String> {
     let mut i = 0;
     while i < n {
         let c = cs[i].1;
+        if code.is_none() {
+            match math_at(&cs, i) {
+                // A closed formula is opaque content: `_`/`*` inside it are
+                // TeX, not emphasis.
+                Some(Some(end)) => {
+                    last_content = Some(end - 1);
+                    i = end;
+                    continue;
+                }
+                // A formula still streaming swallows the rest of the block;
+                // nothing after its opener is markdown to mend.
+                Some(None) => break,
+                None => {}
+            }
+        }
         if code.is_none() && c == '\\' {
             // Escaped char: both literal; the escapee still counts as content.
             if i + 1 < n {
@@ -205,6 +221,49 @@ pub fn close_hanging(text: &str) -> Option<String> {
     Some(format!("{}{closers}{}", &text[..end], &text[end..]))
 }
 
+/// A math opener at char `i` — `$`, `$$`, `\(` or `\[` — and where its
+/// formula ends: `Some(Some(past the closer))`, `Some(None)` while the closer
+/// has not streamed in, `None` when `i` opens no formula. Mirrors pulldown's
+/// dollar rules closely enough for display: an inline `$` opens before
+/// non-space and closes after it, and a lone `$` before a digit with no
+/// closer is a price (`$5`), not a formula.
+fn math_at(cs: &[(usize, char)], i: usize) -> Option<Option<usize>> {
+    let at = |i: usize| cs.get(i).map(|&(_, c)| c);
+    match (at(i)?, at(i + 1)) {
+        ('\\', Some(open @ ('(' | '['))) => {
+            let close = if open == '(' { ')' } else { ']' };
+            let end = (i + 2..cs.len().saturating_sub(1))
+                .find(|&j| at(j) == Some('\\') && at(j + 1) == Some(close));
+            Some(end.map(|j| j + 2))
+        }
+        ('$', _) => {
+            let run = run_len(cs, i);
+            let next = at(i + run);
+            if run > 2 || next.is_none_or(char::is_whitespace) && run == 1 {
+                return None;
+            }
+            let mut j = i + run;
+            while j < cs.len() {
+                if at(j) == Some('$') {
+                    let close = run_len(cs, j);
+                    let tight = run == 2 || at(j - 1).is_some_and(|c| !c.is_whitespace());
+                    if close == run && tight {
+                        return Some(Some(j + run));
+                    }
+                    j += close;
+                } else {
+                    j += 1;
+                }
+            }
+            if run == 1 && next.is_some_and(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            Some(None)
+        }
+        _ => None,
+    }
+}
+
 fn run_len(cs: &[(usize, char)], i: usize) -> usize {
     let c = cs[i].1;
     cs[i..].iter().take_while(|&&(_, x)| x == c).count()
@@ -301,6 +360,20 @@ mod tests {
         stays("a **b** and *c* and `d` and ~~e~~");
         stays("[docs](https://x.dev) done");
         stays("");
+    }
+
+    #[test]
+    fn math_is_opaque_to_emphasis() {
+        // `_`/`*` inside a closed formula are TeX, never hanging markers.
+        stays("where $a_1 * b_2$ holds");
+        stays(r"where \(a_1\) holds");
+        stays("$$x_1$$ and $y_2$");
+        mends("$a_1$ then **bold", "$a_1$ then **bold**");
+        // A formula still streaming leaves everything after it alone.
+        stays("so $a_1 + b_");
+        stays(r"so \[a_1 **b");
+        // A price is not a formula: markers after it still mend.
+        mends("costs $5 for **bold", "costs $5 for **bold**");
     }
 
     #[test]

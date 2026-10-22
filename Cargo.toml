@@ -125,6 +125,13 @@ notify = "7"
 portable-pty = "0.8"
 alacritty_terminal = "0.26"
 pulldown-cmark = "0.12"
+# LaTeX math in chat markdown: RaTeX is a pure-Rust KaTeX port (parse → layout
+# → tiny-skia raster). `embed-fonts` bundles the KaTeX TTFs (~1MB), so formulas
+# render identically without a TeX install or a JS engine.
+ratex-parser = "0.1.15"
+ratex-layout = "0.1.15"
+ratex-types = "0.1.15"
+ratex-render = { version = "0.1.15", features = ["embed-fonts"] }
 unicode-segmentation = "1"
 # `rustls-tls` alone is webpki-roots only: the bundled CA list never consults the
 # OS trust store, so a corporate TLS-inspecting proxy's CA — installed in the

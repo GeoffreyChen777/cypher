@@ -30,6 +30,8 @@ const CORPORA: &[&str] = &[
     "    indented code line one\n    line two\n\npara\n",
     "para with <span>inline html</span> inside\n\n<div>\nblock html\n</div>\n",
     "###### deep heading\n\n#### h4\n",
+    "Euler: $e^{i\\pi} + 1 = 0$ holds.\n\n$$\n\\int_0^1 x\\,dx = \\tfrac12\n$$\n\nafter $a_1$ and $b_2$\n",
+    "TeX delimiters \\(x_1\\) and\n\\[\n\\sum_k k\n\\]\nthen prose, prices $5 and $10\n",
 ];
 
 #[test]
@@ -403,4 +405,126 @@ fn empty_and_whitespace_sources() {
     let mut p = IncrementalParser::default();
     p.append("");
     assert!(p.tree().is_empty());
+}
+
+fn math_run(tex: &str, kind: MathKind) -> InlineRun {
+    InlineRun {
+        text: tex.into(),
+        style: InlineStyle {
+            math: Some(kind),
+            ..Default::default()
+        },
+    }
+}
+
+fn prose_run(text: &str) -> InlineRun {
+    InlineRun {
+        text: text.into(),
+        style: InlineStyle::default(),
+    }
+}
+
+fn blocks(source: &str) -> Vec<Block> {
+    parse_full(source)
+        .blocks
+        .into_iter()
+        .map(|b| b.block)
+        .collect()
+}
+
+#[test]
+fn inline_math_is_its_own_run() {
+    assert_eq!(
+        blocks("where $x_1$ and $y$ hold"),
+        vec![Block::Paragraph {
+            runs: vec![
+                prose_run("where "),
+                math_run("x_1", MathKind::Inline),
+                prose_run(" and "),
+                math_run("y", MathKind::Inline),
+                prose_run(" hold"),
+            ]
+        }]
+    );
+    // Adjacent formulas never merge into one.
+    assert_eq!(
+        blocks("$a$$b$"),
+        vec![Block::Paragraph {
+            runs: vec![
+                math_run("a", MathKind::Inline),
+                math_run("b", MathKind::Inline)
+            ]
+        }]
+    );
+}
+
+#[test]
+fn display_math_stays_a_run_of_its_paragraph() {
+    // One paragraph stays one block (the incremental parser's unit); the
+    // renderer gives the formula its own row.
+    assert_eq!(
+        blocks("so\n$$x$$\nthus"),
+        vec![Block::Paragraph {
+            runs: vec![
+                prose_run("so "),
+                math_run("x", MathKind::Display),
+                prose_run(" thus"),
+            ]
+        }]
+    );
+    assert_eq!(
+        blocks("$$\nE = mc^2\n$$"),
+        vec![Block::Paragraph {
+            runs: vec![math_run("\nE = mc^2\n", MathKind::Display)]
+        }]
+    );
+}
+
+#[test]
+fn tex_delimiters_read_as_math() {
+    assert_eq!(
+        blocks(r"a \(x\) b"),
+        vec![Block::Paragraph {
+            runs: vec![
+                prose_run("a "),
+                math_run("x", MathKind::Inline),
+                prose_run(" b"),
+            ]
+        }]
+    );
+    assert_eq!(
+        blocks("\\[\n\\frac{a}{b}\n\\]"),
+        vec![Block::Paragraph {
+            runs: vec![math_run("\n\\frac{a}{b}\n", MathKind::Display)]
+        }]
+    );
+    // The rewrite keeps every offset: ranges still index the real source.
+    let source = "intro\n\n\\[x\\]\n\nend";
+    let tree = parse_full(source);
+    assert_eq!(source[tree.blocks[1].range.clone()].trim_end(), "\\[x\\]");
+}
+
+#[test]
+fn tex_delimiters_stay_literal_where_they_are_not_math() {
+    // Unpaired, escaped-backslash, inside code, or split across blocks.
+    let text = |source: &str| -> String { blocks(source).iter().map(flat).collect() };
+    assert_eq!(text(r"just \( a paren"), "just ( a paren");
+    assert_eq!(text(r"\\(not\\)"), r"\(not\)");
+    assert_eq!(text(r"`\(code\)`"), r"\(code\)");
+    assert_eq!(text("\\(a\n\n b\\)"), "(ab)");
+    assert!(
+        blocks("```\n\\[x\\]\n```")
+            .iter()
+            .all(|b| matches!(b, Block::CodeBlock { code, .. } if code == "\\[x\\]"))
+    );
+}
+
+#[test]
+fn dollar_prices_stay_prose() {
+    assert_eq!(
+        blocks("costs $5 and $10 today"),
+        vec![Block::Paragraph {
+            runs: vec![prose_run("costs $5 and $10 today")]
+        }]
+    );
 }

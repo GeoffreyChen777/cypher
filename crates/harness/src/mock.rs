@@ -13,11 +13,13 @@ use crate::{Harness, HarnessError, RunControls};
 
 mod changes;
 mod diffs;
+mod math;
 mod permissions;
 mod translation;
 
 pub use changes::{MARKER as CHANGES_MARKER, ROUNDS as CHANGES_ROUNDS};
 pub use diffs::MARKER as DIFFS_MARKER;
+pub use math::MARKER as MATH_MARKER;
 pub use permissions::{
     CARD_MARKER as PERMISSION_CARD_MARKER,
     MULTILINE_CARD_MARKER as MULTILINE_PERMISSION_CARD_MARKER, STORY_MARKER as PERMISSIONS_MARKER,
@@ -281,11 +283,11 @@ impl Harness for MockHarness {
                 delay,
             ));
         }
-        // Diff fence and translation showcases ([`DIFFS_MARKER`],
-        // [`TRANSLATION_MARKER`]): their reply replaces the script's text and
-        // tools. `CYPHER_MOCK_TRANSLATION=1` (or `replace`) answers every
-        // prompt with the translation showcase, so a message typed into the
-        // demo translates too.
+        // Diff fence, math and translation showcases ([`DIFFS_MARKER`],
+        // [`MATH_MARKER`], [`TRANSLATION_MARKER`]): their reply replaces the
+        // script's text and tools. `CYPHER_MOCK_TRANSLATION=1` (or `replace`)
+        // answers every prompt with the translation showcase, so a message
+        // typed into the demo translates too.
         let translation_mode = translation::mode_of(&request.prompt).or_else(|| {
             cypher_env::var("MOCK_TRANSLATION")
                 .filter(|v| !v.is_empty() && v != "0")
@@ -299,6 +301,8 @@ impl Harness for MockHarness {
         });
         let showcase = if request.prompt.contains(DIFFS_MARKER) {
             Some(diffs::reply())
+        } else if request.prompt.contains(MATH_MARKER) {
+            Some(math::reply())
         } else {
             translation_mode.map(translation::reply)
         };

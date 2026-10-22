@@ -286,7 +286,7 @@ fn plain(blocks: &[Block]) -> String {
     for block in blocks {
         match block {
             Block::Paragraph { runs } | Block::Heading { runs, .. } => {
-                out.push(runs.iter().map(|run| run.text.as_str()).collect());
+                out.push(prose(runs));
             }
             Block::CodeBlock { code, .. } => out.push(code.clone()),
             Block::BlockQuote { children } => out.push(plain(children)),
@@ -298,7 +298,7 @@ fn plain(blocks: &[Block]) -> String {
             Block::Table { header, rows, .. } => {
                 for row in std::iter::once(header).chain(rows) {
                     for cell in row {
-                        out.push(cell.iter().map(|run| run.text.as_str()).collect());
+                        out.push(prose(cell));
                     }
                 }
             }
@@ -306,6 +306,15 @@ fn plain(blocks: &[Block]) -> String {
         }
     }
     out.join("\n")
+}
+
+/// Runs concatenated as rendered text, formulas left out: they render as
+/// glue spaces, which `squash` drops.
+fn prose(runs: &[parser::InlineRun]) -> String {
+    runs.iter()
+        .filter(|run| run.style.math.is_none())
+        .map(|run| run.text.as_str())
+        .collect()
 }
 
 /// Text with every whitespace character removed — the renderer inserts thin

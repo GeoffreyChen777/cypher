@@ -13,4 +13,11 @@ queries are consumed from the pinned Rust crates listed in `Cargo.lock`.
 | Tree-sitter Python, Go, JSON, Bash, HTML, CSS, C, C++, C#, Java, Ruby and PHP grammars and queries | pinned in `Cargo.lock` | MIT | https://github.com/tree-sitter |
 | Tree-sitter TOML, Markdown, YAML, Kotlin, Swift, SQL, Lua, Nix, Make and Containerfile grammars and queries | pinned in `Cargo.lock` | MIT-compatible; see each crate | Crate repositories recorded in `Cargo.lock` |
 
+Math in chat markdown is typeset with the following components.
+
+| Component | Version | License | Source |
+| --- | --- | --- | --- |
+| RaTeX (parser, layout, raster renderer) | 0.1.15 | MIT | https://github.com/erweixin/RaTeX |
+| KaTeX fonts (`KaTeX_*.ttf`, embedded via `ratex-katex-fonts`) | 0.1.15 | SIL Open Font License 1.1 | https://github.com/KaTeX/KaTeX |
+
 The full Cypher distribution remains licensed under the terms in `LICENSE`.

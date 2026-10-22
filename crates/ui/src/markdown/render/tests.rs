@@ -367,11 +367,11 @@ fn inline_color_changes_refresh_cached_runs() {
     }];
     let mut theme = Theme::dark();
     theme.text_style_revision = 1;
-    let before = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
+    let before = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme, None);
     theme.inline_code_text = Some(gpui::rgb(0xffcc88).into());
     theme.inline_code_background = Some(gpui::rgb(0x332200).into());
     theme.text_style_revision = 2;
-    let after = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
+    let after = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme, None);
     assert!(!Rc::ptr_eq(&before, &after));
     assert_eq!(after.runs[0].color, theme.inline_code_text.unwrap());
     assert_eq!(
@@ -485,12 +485,12 @@ fn chat_style_revision_invalidates_cached_fonts_and_colors() {
     }];
     let mut old = Theme::dark();
     old.text_style_revision = 1;
-    let before = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &old);
+    let before = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &old, None);
     let mut new = old.clone();
     new.text_style_revision = 2;
     new.font_sans = "Test Serif".into();
     new.markdown_link = Some(gpui::rgb(0x3388cc).into());
-    let after = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &new);
+    let after = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &new, None);
     assert!(!Rc::ptr_eq(&before, &after));
     assert_eq!(after.runs[0].font.family.as_ref(), "Test Serif");
     assert_eq!(after.runs[0].color, new.markdown_link.unwrap());
@@ -810,4 +810,114 @@ fn wide_blocks_scroll_sideways_only_on_sideways_gestures(cx: &mut gpui::TestAppC
         touch_phase: TouchPhase::Moved,
     });
     assert_eq!(block.offset().x, block_x);
+}
+
+#[test]
+fn formulas_flatten_to_code_without_a_window_and_count_as_one_space() {
+    let math = |tex: &str| InlineRun {
+        text: tex.into(),
+        style: InlineStyle {
+            math: Some(MathKind::Inline),
+            ..Default::default()
+        },
+    };
+    let prose = |text: &str| InlineRun {
+        text: text.into(),
+        style: InlineStyle::default(),
+    };
+    let theme = Theme::dark();
+    // No window to measure glue with: the source reads as inline code.
+    let flat = flatten_runs(&[prose("so "), math("x^2")], &theme, false);
+    assert_eq!(flat.text.as_ref(), format!("so {INLINE_CODE_MARGIN}x^2"));
+    assert_eq!(flat.code_ranges.len(), 1);
+    assert!(flat.math.is_empty());
+    // Find counts a typeset formula as one glue space, and TeX that does
+    // not typeset as the code it renders as.
+    assert_eq!(runs_text(&[prose("a "), math("x")]), "a \u{a0}");
+    assert_eq!(
+        runs_text(&[prose("a "), math(r"\frac{x")]),
+        format!("a {INLINE_CODE_MARGIN}\\frac{{x")
+    );
+}
+
+#[test]
+fn formulas_flatten_to_glue_with_a_math_env() {
+    let theme = Theme::dark();
+    let env = MathEnv {
+        font_size: 14.0,
+        glue: GlueWidths {
+            nbsp: 3.9,
+            narrow: 2.6,
+        },
+    };
+    let runs = [
+        InlineRun {
+            text: "x ".into(),
+            style: InlineStyle::default(),
+        },
+        InlineRun {
+            text: r"\alpha^2".into(),
+            style: InlineStyle {
+                math: Some(MathKind::Inline),
+                ..Default::default()
+            },
+        },
+    ];
+    let flat = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, Some(&env));
+    let [span] = flat.math.as_slice() else {
+        panic!("one formula");
+    };
+    assert_eq!(&flat.text[..2], "x ");
+    assert_eq!(span.range.start, 2);
+    assert_eq!(span.range.end, flat.text.len());
+    assert!(
+        flat.text[span.range.clone()]
+            .chars()
+            .all(|c| c == math::NBSP || c == math::NARROW_NBSP)
+    );
+    let ink = span.metrics.width * span.em_px;
+    assert!(
+        (span.glue_width - ink).abs() < 1.5,
+        "{} vs {ink}",
+        span.glue_width
+    );
+    assert_eq!(
+        flat.runs.iter().map(|r| r.len).sum::<usize>(),
+        flat.text.len()
+    );
+    let sources = flat.copy_sources.expect("formulas copy as source");
+    assert_eq!(sources[0], (span.range.clone(), r"$\alpha^2$".to_string()));
+}
+
+#[test]
+fn display_formulas_cut_a_paragraph_into_rows() {
+    let run = |text: &str, math: Option<MathKind>| InlineRun {
+        text: text.into(),
+        style: InlineStyle {
+            math,
+            ..Default::default()
+        },
+    };
+    let plain = [run("no display ", None), run("x", Some(MathKind::Inline))];
+    assert!(paragraph_segments(&plain).is_none());
+    let runs = [
+        run("so ", None),
+        run("x", Some(MathKind::Display)),
+        run(" thus ", None),
+        run("y", Some(MathKind::Display)),
+    ];
+    let segments = paragraph_segments(&runs).expect("has display math");
+    let shape: Vec<String> = segments
+        .iter()
+        .map(|segment| match segment {
+            Segment::Prose(runs) => format!("p:{}", runs_text(runs)),
+            Segment::Display(tex) => format!("m:{tex}"),
+        })
+        .collect();
+    assert_eq!(shape, ["p:so", "m:x", "p:thus", "m:y"]);
+    // Find counts element by element, as the rows render.
+    let block = Block::Paragraph {
+        runs: runs.to_vec(),
+    };
+    assert_eq!(count_block_matches(&block, "s"), 2);
 }
