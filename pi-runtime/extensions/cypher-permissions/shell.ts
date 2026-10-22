@@ -18,7 +18,12 @@
  *   `prefixAllowed(NAME)` for each: the command reports their names
  *   (`env`);
  * - `&` after a command: it runs in the background, apart from the line's
- *   shell (`scoped`).
+ *   shell (`scoped`);
+ * - `$NAME` and `${NAME}` after `NAME=value` set to a literal earlier in the
+ *   line, where it surely ran (not after `&&` or `||`, in a pipeline, `if`,
+ *   loop or substitution) and nothing since could have changed it (`read`,
+ *   `export`, `declare`, `eval`, `source`, a program known only when it
+ *   runs, …): the value, when expanding it cannot split or glob.
  *
  * A word whose text is known only when it runs (a parameter, a
  * substitution, an unquoted glob or brace list) becomes [`UNKNOWN`]: it may
@@ -69,10 +74,21 @@ const NO_FILE = new Set(["/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"
 
 class Opaque extends Error {}
 
+/** Variables the line set to a literal (undefined: set to something not known), and whether any could have changed since. */
+interface Variables {
+  values: Map<string, string | undefined>;
+  poisoned: boolean;
+}
+
+/** Builtins that set variables in ways the reader does not follow. */
+const SETS_VARIABLES: ReadonlySet<string> = new Set([
+  "read", "mapfile", "readarray", "export", "declare", "typeset", "local", "readonly", "let", "getopts", "unset", "eval", "source", ".", "builtin", "command", "wait", "set",
+]);
+
 export function parseShell(line: string, home: string, options: ParseOptions = {}): ParsedLine {
   try {
     const commands: SimpleCommand[] = [];
-    read(line, home, options, commands, false);
+    read(line, home, options, commands, false, { values: new Map(), poisoned: false });
     return { kind: "simple", commands };
   } catch (error) {
     if (error instanceof Opaque) return { kind: "opaque", reason: error.message };
@@ -83,7 +99,7 @@ export function parseShell(line: string, home: string, options: ParseOptions = {
 type Redirect = "read" | "write" | "readwrite" | "copy" | "herestring" | "heredoc" | "heredoc-tabs";
 
 /** Read `source` into `out`: the commands of a line, or of a substitution (`nested`). */
-function read(source: string, home: string, options: ParseOptions, out: SimpleCommand[], nested: boolean): void {
+function read(source: string, home: string, options: ParseOptions, out: SimpleCommand[], nested: boolean, vars: Variables): void {
   // The word being read.
   let word = "";
   let inWord = false;
@@ -99,6 +115,8 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
   let reads: string[] = [];
   let writes: string[] = [];
   let assigns: string[] = [];
+  /** Each assignment's value, when it is a literal. */
+  let assignValues: (string | undefined)[] = [];
   /** Assignments in front of the command's program. */
   let env: string[] = [];
   let redirect: Redirect | undefined;
@@ -157,6 +175,7 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
     if (words.length === 0 && plain) {
       if (forHeader === 1) {
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) throw new Opaque("`for`");
+        vars.values.set(text, undefined);
         forHeader = 2;
         return;
       }
@@ -202,6 +221,8 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
       const assignment = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/.exec(unquoted);
       if (assignment && text.startsWith(assignment[0])) {
         assigns.push(assignment[1]);
+        // `+=` appends, and `~` after `=` or `:` expands in an assignment.
+        assignValues.push(known && !assignment[0].endsWith("+=") && !unquoted.includes("~") ? text.slice(assignment[0].length) : undefined);
         return;
       }
     }
@@ -209,6 +230,7 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
       if (!assigns.every((name) => options.prefixAllowed?.(name))) throw new Opaque("a variable assignment in front of a command");
       env = assigns;
       assigns = [];
+      assignValues = [];
     }
     words.push(known ? text : UNKNOWN);
   };
@@ -222,16 +244,45 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
     for (const name of assigns) {
       if (!options.assignable?.(name)) throw new Opaque("a variable assignment");
     }
+    const scoped = nested || chained || next === "pipe" || next === "background" || blocks.length > 0;
+    // A value is known after an assignment that surely ran in the line's shell.
+    if (words.length === 0) assigns.forEach((name, index) => vars.values.set(name, scoped ? undefined : assignValues[index]));
+    const program = words[0];
+    if (program !== undefined && (program === UNKNOWN || SETS_VARIABLES.has(program) || (program === "printf" && words.some((word) => word === UNKNOWN || word.startsWith("-v"))))) {
+      vars.poisoned = true;
+    }
     if (words.length || reads.length || writes.length) {
       const loop = blocks.includes("loop");
-      out.push({ words, reads, writes, loop, env, scoped: nested || chained || next === "pipe" || next === "background" || blocks.length > 0 });
+      out.push({ words, reads, writes, loop, env, scoped });
     }
     words = [];
     reads = [];
     writes = [];
     assigns = [];
+    assignValues = [];
     env = [];
     chained = next === "and-or" || next === "pipe";
+  };
+
+  /**
+   * A variable's value, when the line set it to a literal and expanding it
+   * here gives exactly that word: in double quotes always, unquoted when it
+   * cannot split, glob or vanish. Never in a heredoc's delimiter, which is
+   * not expanded.
+   */
+  const knownValue = (name: string, inQuotes: boolean): string | undefined => {
+    if (vars.poisoned || redirect === "heredoc" || redirect === "heredoc-tabs") return undefined;
+    const value = vars.values.get(name);
+    if (value === undefined) return undefined;
+    if (!inQuotes && (value === "" || /[\s*?[\]]/.test(value))) return undefined;
+    return value;
+  };
+
+  /** A known variable's value joins the word; it is not a keyword, an assignment or a glob there. */
+  const expand = (value: string) => {
+    word += value;
+    quoted = true;
+    inWord = true;
   };
 
   /** Skip `$…` at `i` (in or out of double quotes); returns the index of its last character. */
@@ -240,7 +291,7 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
     if (next === "(") {
       if (source[i + 2] === "(") throw new Opaque("arithmetic");
       const close = closingParen(source, i + 2);
-      read(source.slice(i + 2, close), home, options, out, true);
+      read(source.slice(i + 2, close), home, options, out, true, vars);
       unknown = true;
       inWord = true;
       return close;
@@ -249,14 +300,19 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
       const close = source.indexOf("}", i + 2);
       if (close < 0) throw new Opaque("an unterminated `${`");
       if (/[$`(]/.test(source.slice(i + 2, close))) throw new Opaque("a substitution inside `${…}`");
-      unknown = true;
+      const name = source.slice(i + 2, close);
+      const value = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? knownValue(name, inQuotes) : undefined;
+      if (value !== undefined) expand(value);
+      else unknown = true;
       inWord = true;
       return close;
     }
     if (next !== undefined && /[A-Za-z_]/.test(next)) {
       let j = i + 1;
       while (j + 1 < source.length && /[A-Za-z0-9_]/.test(source[j + 1])) j++;
-      unknown = true;
+      const value = knownValue(source.slice(i + 1, j + 1), inQuotes);
+      if (value !== undefined) expand(value);
+      else unknown = true;
       inWord = true;
       return j;
     }
@@ -282,7 +338,7 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
       inner += source[j];
     }
     if (j >= source.length) throw new Opaque("an unterminated backtick");
-    read(inner, home, options, out, true);
+    read(inner, home, options, out, true, vars);
     unknown = true;
     inWord = true;
     return j;

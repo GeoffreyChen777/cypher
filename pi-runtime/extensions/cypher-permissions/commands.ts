@@ -676,7 +676,7 @@ const RUNS_NEXT: Readonly<Record<string, ReadonlySet<string>>> = {
 const AS_WRITTEN: ReadonlySet<string> = new Set([
   "rm", "rmdir", "mv", "cp", "ln", "install", "chmod", "chown", "chgrp", "chflags", "xattr", "dd", "truncate", "shred", "srm", "tee", "touch", "mkdir",
   "cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "ag", "strings", "xxd", "hexdump", "od", "base64", "sqlite3", "plutil", "zip", "unzip", "tar", "gzip", "gunzip", "ditto",
-  "curl", "wget", "nc", "ncat", "socat", "telnet", "ftp", "scp", "sftp", "rsync",
+  "curl", "wget", "nc", "ncat", "socat", "telnet", "ftp", "sftp",
   "kill", "pkill", "killall", "open", "pbcopy", "pbpaste", "screencapture", "tccutil", "csrutil", "diskutil", "mount", "umount", "hdiutil", "crontab", "at",
   "gpg", "ssh-add", "ssh-keygen", "openssl", "printenv", "op", "pass", "vault", "keychain",
 ]);
@@ -698,7 +698,8 @@ export function categoryPattern(words: readonly string[]): string[] | string {
   if (BANNED_PROGRAMS.has(basename(program))) return anyCommand(program);
   if (program.includes("/")) return [program, "**"];
   if (INERT_PROGRAMS.has(program)) return `\`${program}\` never needs to leave the sandbox`;
-  if (program === "ssh") return sshCategory(words);
+  if (program === "ssh") return sshCategory(quietSsh(words));
+  if (program === "scp" || program === "rsync") return copyCategory(words);
   if (AS_WRITTEN.has(program)) return asWritten(words);
   const valueOptions = SUBCOMMANDS[program];
   if (!valueOptions) return [program, "**"];
@@ -744,6 +745,35 @@ export function sshHostIndex(words: readonly string[]): number | undefined {
   return i < words.length ? i : undefined;
 }
 
+/** `ssh -o` settings that change nothing on this computer: how long to wait, whether to prompt, how much to log. */
+const QUIET_SSH_SETTINGS = /^(ConnectTimeout|ConnectionAttempts|BatchMode|ServerAliveInterval|ServerAliveCountMax|TCPKeepAlive|LogLevel|Compression|RequestTTY|IdentitiesOnly|StrictHostKeyChecking|PasswordAuthentication|NumberOfPasswordPrompts|ForwardAgent|ForwardX11)=[^\s]*$/i;
+
+/**
+ * An ssh command without the options that change nothing on this computer
+ * (`-q`, `-T`, `-o ConnectTimeout=20`, `-o BatchMode=yes`), so a rule for
+ * `ssh web …` covers it with or without them. Other commands as they are.
+ */
+export function quietSsh(words: readonly string[]): string[] {
+  if (basename(words[0] ?? "") !== "ssh") return [...words];
+  const out = [words[0]];
+  let i = 1;
+  for (; i < words.length; i++) {
+    const word = words[i];
+    if (word === UNKNOWN || !word.startsWith("-") || word === "-" || word === "--") break;
+    if (/^-[qTtnxCv46]+$/.test(word)) continue;
+    if (word === "-o" && words[i + 1] !== undefined && QUIET_SSH_SETTINGS.test(words[i + 1])) {
+      i++;
+      continue;
+    }
+    if (/^-o/.test(word) && QUIET_SSH_SETTINGS.test(word.slice(2))) continue;
+    out.push(word);
+    const flags = word.slice(1);
+    const at = [...flags].findIndex((flag) => SSH_VALUE_OPTIONS.includes(flag));
+    if (at === flags.length - 1 && words[i + 1] !== undefined) out.push(words[++i]);
+  }
+  return [...out, ...words.slice(i)];
+}
+
 /** `ssh [options] host …`: the options as written, the host, any command. */
 function sshCategory(words: readonly string[]): string[] | string {
   const prefix = [words[0]];
@@ -777,12 +807,13 @@ function literal(words: readonly string[]): boolean {
  */
 export function ruleCannotVouch(words: readonly string[]): string | undefined {
   const name = basename(words[0] ?? "");
+  if (name === "rsync") return rsyncCannotVouch(words);
   if (name !== "ssh" && name !== "scp" && name !== "sftp") return undefined;
   const risky = `${name} is given an option that can run a command on this computer`;
   for (let i = 1; i < words.length; i++) {
     const word = words[i];
     if (word === "--") break;
-    if (word === UNKNOWN) return risky;
+    if (word === UNKNOWN) return `${name} is given a word known only when it runs, which could be an option that runs a command on this computer`;
     if (!word.startsWith("-") || word === "-") {
       if (name !== "ssh") continue;
       // ssh reads options again straight after the host.
@@ -805,6 +836,107 @@ export function ruleCannotVouch(words: readonly string[]): string | undefined {
     }
   }
   return undefined;
+}
+
+// --- scp and rsync ------------------------------------------------------------------
+
+/** scp options that take a value. */
+const SCP_VALUES = "cFiJloPSDX";
+
+/** rsync short options that take a value, and long ones that may take it as the next word. */
+const RSYNC_SHORT_VALUES = "BefMT@";
+const RSYNC_LONG_VALUES = new Set([
+  "--rsh", "--rsync-path", "--filter", "--exclude", "--include", "--exclude-from", "--include-from", "--files-from", "--temp-dir", "--partial-dir",
+  "--compare-dest", "--copy-dest", "--link-dest", "--backup-dir", "--suffix", "--chmod", "--chown", "--usermap", "--groupmap", "--timeout",
+  "--contimeout", "--port", "--sockopts", "--log-file", "--log-file-format", "--password-file", "--bwlimit", "--max-size", "--min-size",
+  "--max-delete", "--block-size", "--out-format", "--info", "--debug", "--stop-after", "--stop-at", "--iconv", "--checksum-choice",
+  "--compress-choice", "--compress-level", "--skip-compress", "--address", "--write-batch", "--only-write-batch", "--read-batch",
+  "--protocol", "--remote-option", "--outbuf", "--modify-window", "--max-alloc", "--copy-as", "--early-input",
+]);
+
+/** The machine an scp or rsync operand names (`host:path`, `user@host:path`, `rsync://host/…`), with its prefix as written; undefined for a local path. */
+export function remoteOperand(word: string): { host: string; prefix: string } | undefined {
+  const url = /^(rsync|scp):\/\/(?:[^@/]*@)?(\[[^\]]+\]|[^/:]+)/i.exec(word);
+  if (url) return { host: url[2], prefix: url[0] };
+  if (word.startsWith("/") || word.startsWith(".") || word.startsWith("~")) return undefined;
+  const remote = /^((?:[^@/:\s]+@)?(\[[^\]]+\]|[A-Za-z0-9_.-]+)):/.exec(word);
+  return remote ? { host: remote[2], prefix: `${remote[1]}:` } : undefined;
+}
+
+/**
+ * An scp or rsync line's operands: what it copies and where to. Undefined
+ * when a word is known only when it runs, or there is nothing to copy.
+ */
+export function copyOperands(words: readonly string[]): { sources: string[]; dest: string } | undefined {
+  const name = basename(words[0] ?? "");
+  const operands: string[] = [];
+  for (let i = 1; i < words.length; i++) {
+    const word = words[i];
+    if (word === UNKNOWN) return undefined;
+    if (word === "--") {
+      operands.push(...words.slice(i + 1));
+      break;
+    }
+    if (!word.startsWith("-") || word === "-") {
+      operands.push(word);
+      continue;
+    }
+    if (word.startsWith("--")) {
+      if (name === "rsync" && !word.includes("=") && RSYNC_LONG_VALUES.has(word)) i++;
+      continue;
+    }
+    const values = name === "rsync" ? RSYNC_SHORT_VALUES : SCP_VALUES;
+    const flags = word.slice(1);
+    const at = [...flags].findIndex((flag) => values.includes(flag));
+    if (at === flags.length - 1) i++;
+  }
+  if (operands.includes(UNKNOWN) || operands.length < 2) return undefined;
+  return { sources: operands.slice(0, -1), dest: operands.at(-1)! };
+}
+
+/**
+ * Why no rule may vouch for an rsync command: `-e`/`--rsh` with anything
+ * but ssh and options it may vouch for, or an option that writes or reads a
+ * file on this computer the line names (`--log-file`, batch files).
+ */
+function rsyncCannotVouch(words: readonly string[]): string | undefined {
+  const risky = "rsync is given an option that can run a command or write a file on this computer";
+  for (let i = 1; i < words.length; i++) {
+    const word = words[i];
+    if (word === "--") break;
+    if (word === UNKNOWN) return "rsync is given a word known only when it runs, which could be an option that runs a command on this computer";
+    let shell: string | undefined;
+    if (word === "--rsh" || word === "-e") shell = words[++i] ?? "";
+    else if (word.startsWith("--rsh=")) shell = word.slice("--rsh=".length);
+    else if (/^-[A-Za-z]*e$/.test(word) && word.length > 2) shell = words[++i] ?? "";
+    else if (/^-[A-Za-z]*e./.test(word) && !word.startsWith("--")) shell = word.slice(word.indexOf("e") + 1);
+    if (/^--(log-file|write-batch|only-write-batch|read-batch)(=|$)/.test(word)) return risky;
+    if (shell === undefined) {
+      if (/^--/.test(word) && !word.includes("=") && RSYNC_LONG_VALUES.has(word)) i++;
+      continue;
+    }
+    if (shell === UNKNOWN) return risky;
+    const [program, ...options] = shell.trim().split(/\s+/);
+    if (basename(program ?? "") !== "ssh" || options.some((option) => /['"`$\\;|&<>()]/.test(option)) || ruleCannotVouch(["ssh", ...options, "host"])) return risky;
+  }
+  return undefined;
+}
+
+/**
+ * Copies to or from one machine: kept per host. An upload (`… host:*`)
+ * covers any local files; a download (`… host:* *`) any place here. A copy
+ * between two machines, or where a word is known only when it runs, is
+ * allowed only as written; risk.ts makes the first dangerous.
+ */
+function copyCategory(words: readonly string[]): string[] | string {
+  const program = words[0];
+  const operands = copyOperands(words);
+  if (!operands) return computed(program);
+  const remotes = [...operands.sources, operands.dest].map(remoteOperand).filter((remote) => remote !== undefined);
+  if (remotes.length === 0 || new Set(remotes.map((remote) => remote.prefix)).size > 1) return asWritten(words);
+  const prefix = `${remotes[0].prefix}*`;
+  if (remoteOperand(operands.dest)) return operands.sources.every((source) => !remoteOperand(source)) ? [program, "**", prefix] : asWritten(words);
+  return [program, "**", prefix, "*"];
 }
 
 /** A pattern as people read it. */

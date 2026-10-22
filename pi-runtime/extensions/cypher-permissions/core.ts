@@ -36,7 +36,7 @@ import { decide, describe } from "./policy.ts";
 import type { Verdict } from "./policy.ts";
 import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs } from "./sandbox.ts";
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
-import { benignEnv, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
+import { benignEnv, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
 import { assessCommand, assessOpaque, downloadsAndRuns, redirectDanger, TIER_RANK } from "./risk.ts";
 import type { Assessment, GitFacts, KillTarget, RiskFacts, Tier } from "./risk.ts";
@@ -244,6 +244,11 @@ function submoduleGitDirs(gitDir: string): string[] {
   };
   walk(join(gitDir, "modules"), 0);
   return out;
+}
+
+/** A rule matches a command as written, or without ssh options that change nothing here (`quietSsh`). */
+function matchesQuietly(pattern: readonly string[], words: readonly string[], worst = false): boolean {
+  return patternMatches(pattern, words, worst) || patternMatches(pattern, quietSsh(words), worst);
 }
 
 /** The user messages on a branch. */
@@ -1174,7 +1179,7 @@ export class Permissions {
     return rules.find(
       (rule) =>
         rule.decision === "allow" &&
-        patternMatches(rule.match, item.words) &&
+        matchesQuietly(rule.match, item.words) &&
         item.env.every((name) => rule.env?.includes(name)) &&
         (assessment.tier !== "danger" || rule.acknowledgeDanger === true || (assessment.key !== undefined && rule.dangers?.includes(assessment.key))) &&
         this.programTrusted(item.words[0], item.cwd, rule) &&
@@ -1228,9 +1233,9 @@ export class Permissions {
     for (const [index, item] of commands.entries()) {
       if (this.redirectProblem(item)) outside = false;
       if (item.inert) continue;
-      const deny = rules.find((rule) => rule.decision === "deny" && patternMatches(rule.match, item.words));
+      const deny = rules.find((rule) => rule.decision === "deny" && matchesQuietly(rule.match, item.words));
       if (deny) return { kind: "deny", reason: `Permission denied: \`${describePattern(deny.match)}\` is set to never run.` };
-      if (ruleCannotVouch(item.words) || rules.some((rule) => rule.decision !== "allow" && patternMatches(rule.match, item.words, true))) {
+      if (ruleCannotVouch(item.words) || rules.some((rule) => rule.decision !== "allow" && matchesQuietly(rule.match, item.words, true))) {
         outside = false;
         continue;
       }
@@ -1321,7 +1326,7 @@ export class Permissions {
       for (const { item, assessment } of pending) {
         if (onceOnly) break;
         onceOnly = ruleCannotVouch(item.words);
-        const held = rules.find((rule) => rule.decision !== "allow" && patternMatches(rule.match, item.words, true));
+        const held = rules.find((rule) => rule.decision !== "allow" && matchesQuietly(rule.match, item.words, true));
         if (held) onceOnly ??= held.decision === "deny" ? `it could turn out to be \`${describePattern(held.match)}\`, which is set to never run` : `\`${describePattern(held.match)}\` is set to always ask`;
         if (onceOnly) break;
         if (line.key === "download-run") {
