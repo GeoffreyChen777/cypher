@@ -481,9 +481,11 @@ pub struct TitleModelSettings {
 
 /// Device-local web-search fallback for Claude Code sessions: while the
 /// conversation model is `claude-bridge/*`, Pi's `web_search` runs through
-/// another model, since Claude Code models cannot search. Backed by the
-/// bundled `pi-web-search-claude-bridge` package; `available` is false on
-/// runtimes that do not ship it.
+/// the chosen model, since Pi cannot reach the conversation's own Claude Code
+/// search. A pinned `claude-bridge/*` model searches with Claude Code's
+/// WebSearch in a separate query (`claude_code`). Backed by the bundled
+/// `pi-web-search-claude-bridge` package; `available` is false on runtimes
+/// that do not ship it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebSearchFallbackSettings {
@@ -502,6 +504,11 @@ pub struct WebSearchFallbackSettings {
     /// by the package as a runtime pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved: Option<String>,
+    /// This device's runtime can search through Claude Code, so a
+    /// `claude-bridge/*` model may be pinned. False from older engines and
+    /// runtimes.
+    #[serde(default)]
+    pub claude_code: bool,
 }
 
 /// Device-local instructions Pi appends to every chat's system prompt

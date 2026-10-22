@@ -18,6 +18,11 @@ use crate::{
     widgets::text_input::{TextInput, TextInputEvent},
 };
 
+/// A Claude Code model: it searches through Claude Code, not a search API.
+fn is_claude_code(id: &str) -> bool {
+    id.starts_with("claude-bridge/")
+}
+
 pub struct WebSearchFallbackControl {
     state: Entity<AppState>,
     target: Entity<DeviceTarget>,
@@ -144,13 +149,17 @@ impl WebSearchFallbackControl {
                 if !page.target.read(cx).matches(&ticket) {
                     return;
                 }
+                // A Claude Code model searches through Claude Code itself,
+                // which only a patched runtime can do; elsewhere it is never
+                // offered.
+                let claude_code = page
+                    .settings
+                    .ready()
+                    .is_some_and(|settings| settings.claude_code);
                 page.models = match models {
                     Ok(value) => match serde_json::from_value::<Vec<Model>>(value) {
                         Ok(mut models) => {
-                            // The fallback runs through pi-web-search, which
-                            // cannot call a claude-bridge API — so a Claude
-                            // Code model is never offered as the fallback.
-                            models.retain(|model| !model.id.starts_with("claude-bridge/"));
+                            models.retain(|model| claude_code || !is_claude_code(&model.id));
                             models.sort_by(|a, b| {
                                 a.label
                                     .to_lowercase()
@@ -266,7 +275,7 @@ impl WebSearchFallbackControl {
     fn model_row(
         &self,
         model: Option<&Model>,
-        resolved: Option<&str>,
+        settings: &WebSearchFallbackSettings,
         selected: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -274,6 +283,10 @@ impl WebSearchFallbackControl {
         let id = model.map(|model| model.id.clone());
         let enabled = !self.busy && self.target.read(cx).can_write(cx);
         let (title, subtitle) = match model {
+            Some(model) if is_claude_code(&model.id) => (
+                model.label.clone(),
+                "Claude Code's own web search".to_string(),
+            ),
             Some(model) => (
                 model.label.clone(),
                 model
@@ -282,11 +295,13 @@ impl WebSearchFallbackControl {
                     .map(|(provider, _)| provider.to_string())
                     .unwrap_or_default(),
             ),
+            // Automatic ranks native search APIs only: it never picks Claude Code.
             None => (
                 "Automatic".to_string(),
-                match resolved {
-                    Some(resolved) => format!("Best in this catalog · now {resolved}"),
-                    None => "Best search model in this device's catalog".to_string(),
+                match (settings.resolved.as_deref(), settings.claude_code) {
+                    (Some(resolved), _) => format!("Best in this catalog · now {resolved}"),
+                    (None, true) => "Best non-Claude search model on this device".to_string(),
+                    (None, false) => "Best search model in this device's catalog".to_string(),
                 },
             ),
         };
@@ -367,7 +382,7 @@ impl WebSearchFallbackControl {
             .child(div().p(px(8.0)).child(self.search.clone()))
             .child(div().px(px(4.0)).child(self.model_row(
                 None,
-                settings.resolved.as_deref(),
+                settings,
                 settings.automatic,
                 theme,
                 cx,
@@ -405,7 +420,7 @@ impl WebSearchFallbackControl {
                             .pb(px(4.0))
                             .children(filtered.into_iter().map(|model| {
                                 let selected = settings.model.as_deref() == Some(model.id.as_str());
-                                self.model_row(Some(model), None, selected, theme, cx)
+                                self.model_row(Some(model), settings, selected, theme, cx)
                             })),
                     );
                 }
@@ -534,9 +549,11 @@ impl Render for WebSearchFallbackControl {
                                     .text_size(px(12.0))
                                     .line_height(px(17.0))
                                     .text_color(theme.text_muted)
-                                    .child(
-                                        "Cypher can't drive Claude Code's own web search yet. While a Claude Code model is selected, web search runs through the model below instead.",
-                                    ),
+                                    .child(if settings.claude_code {
+                                        "While a Claude Code model is selected, web search runs through the model below. Pick a Claude model to search with Claude Code's own web search on your subscription (a small one like Haiku is fastest), or another provider's model."
+                                    } else {
+                                        "Cypher can't drive Claude Code's own web search on this device's Runtime yet. While a Claude Code model is selected, web search runs through the model below instead."
+                                    }),
                             ),
                     )
                     .child(

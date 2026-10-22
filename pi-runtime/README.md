@@ -101,14 +101,23 @@ those of a process that was killed first
 recorded; your own Claude Code sessions in the same directory are untouched,
 and files left by Runtimes before this change stay.
 
-Claude Code has its own web search, but Cypher cannot drive it yet:
-`pi-claude-bridge` does not expose that builtin tool, and `pi-web-search`
-cannot call a `claude-bridge` API. The bundled
-**pi-web-search-claude-bridge** package routes that tool through a fallback
-model only while a `claude-bridge/*` model is selected (other models keep
-their own search). Claude → **Manage** carries the toggle and the search
-model; they write `agent/web-search-claude-bridge.json` and enable/disable the
-package in `settings.json` on the selected device. Both are device-local.
+The conversation's Claude Code session cannot search: `pi-claude-bridge`
+runs it without Claude Code's builtin tools, and `pi-web-search` cannot call a
+`claude-bridge` API. The bundled **pi-web-search-claude-bridge** package
+routes that tool through a fallback model only while a `claude-bridge/*` model
+is selected (other models keep their own search). Claude → **Manage** carries
+the toggle and the search model; they write
+`agent/web-search-claude-bridge.json` and enable/disable the package in
+`settings.json` on the selected device. Both are device-local.
+
+The fallback may itself be a `claude-bridge/*` model: the bridge then runs a
+separate one-off Claude Code query whose only tool is WebSearch (nothing from
+`~/.claude` loaded, no session kept), on the Claude subscription, and
+`pi-web-search` reports its answer and cited links like any native search
+(`patches/pi-claude-bridge-web-search.mjs`,
+`patches/pi-web-search-claude-code.mjs`). A small model such as Haiku answers
+in about 20 seconds. Settings offers Claude models only when the device's
+Runtime carries these patches.
 
 The default is **Automatic** (`{"model":"auto"}`, also the shape of a missing
 file): the package ranks a search-capable model from that device's own
