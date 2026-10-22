@@ -35,7 +35,42 @@ enum TranscriptTextStyle {
         weight: UIFont.Weight = .regular, lineHeight: CGFloat = MD.lineHeight
     ) -> NSAttributedString {
         let result = NSMutableAttributedString(string: "")
-        for run in runs {
+        let proseAttributes: [NSAttributedString.Key: Any] = [
+            .font: Theme.sansUI(size, weight: weight),
+            .foregroundColor: UIColor(Theme.text),
+        ]
+        // A display formula ended the paragraph; the next text starts a new one.
+        var breakPending = false
+        for var run in runs {
+            if let kind = run.style.math {
+                if let attachment = MathRenderer.attachment(run.text, kind: kind, size: size) {
+                    let math = MathRenderer.string(attachment, tex: run.text, kind: kind, attributes: proseAttributes)
+                    if kind == .display {
+                        // Its own paragraph: the soft breaks around a `$$`
+                        // on its own line are not text.
+                        trimTrailingWhitespace(result)
+                        if result.length > 0 {
+                            result.append(NSAttributedString(string: "\n", attributes: proseAttributes))
+                        }
+                        breakPending = true
+                    } else if breakPending {
+                        result.append(NSAttributedString(string: "\n", attributes: proseAttributes))
+                        breakPending = false
+                    }
+                    result.append(math)
+                    continue
+                }
+                // TeX that does not typeset reads as code, so the source shows.
+                run = InlineRun(
+                    text: run.text.trimmingCharacters(in: .whitespacesAndNewlines), style: InlineStyle(code: true))
+            }
+            if breakPending {
+                let rest = String(run.text.drop(while: \.isWhitespace))
+                if rest.isEmpty { continue }
+                run.text = rest
+                result.append(NSAttributedString(string: "\n", attributes: proseAttributes))
+                breakPending = false
+            }
             var font =
                 run.style.code
                 ? Theme.monoUI(size - 1.5)
@@ -61,8 +96,69 @@ enum TranscriptTextStyle {
         let paragraph = NSMutableParagraphStyle()
         paragraph.minimumLineHeight = lineHeight
         paragraph.maximumLineHeight = lineHeight
-        result.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: result.length))
+        let full = NSRange(location: 0, length: result.length)
+        result.addAttribute(.paragraphStyle, value: paragraph, range: full)
+        applyMathParagraphs(result, in: full, base: paragraph)
         return result
+    }
+
+    private static func trimTrailingWhitespace(_ text: NSMutableAttributedString) {
+        let string = text.string as NSString
+        var end = string.length
+        while end > 0, let scalar = Unicode.Scalar(string.character(at: end - 1)),
+            CharacterSet.whitespacesAndNewlines.contains(scalar)
+        {
+            end -= 1
+        }
+        text.deleteCharacters(in: NSRange(location: end, length: string.length - end))
+    }
+
+    /// Re-style the paragraphs of `text[range]` (all given `base`) around its
+    /// formulas: lines may grow past `base`'s fixed height to hold a tall
+    /// formula, a display formula's paragraph is centered with the block gap
+    /// around it, and prose after one hangs at the text edge like the
+    /// paragraph's own wrapped lines. Text without formulas is untouched.
+    static func applyMathParagraphs(
+        _ text: NSMutableAttributedString, in range: NSRange, base: NSParagraphStyle
+    ) {
+        var hasMath = false
+        text.enumerateAttribute(.cypherMathSource, in: range) { value, _, stop in
+            if value != nil {
+                hasMath = true
+                stop.pointee = true
+            }
+        }
+        guard hasMath else { return }
+        let string = text.string as NSString
+        var at = range.location
+        var first = true
+        while at < NSMaxRange(range) {
+            let paragraph = NSIntersectionRange(
+                string.paragraphRange(for: NSRange(location: at, length: 0)), range)
+            guard paragraph.length > 0 else { break }
+            var display = false
+            text.enumerateAttribute(.cypherDisplayMath, in: paragraph) { value, _, stop in
+                if value != nil {
+                    display = true
+                    stop.pointee = true
+                }
+            }
+            let style = (base.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+            style.maximumLineHeight = 0
+            if !first {
+                style.firstLineHeadIndent = base.headIndent
+                style.paragraphSpacingBefore = 0
+            }
+            if display {
+                style.alignment = .center
+                style.tabStops = []
+                if !first { style.paragraphSpacingBefore = MD.blockGap }
+                if NSMaxRange(paragraph) < NSMaxRange(range) { style.paragraphSpacing = MD.blockGap }
+            }
+            text.addAttribute(.paragraphStyle, value: style, range: paragraph)
+            at = NSMaxRange(paragraph)
+            first = false
+        }
     }
 
     /// Thinking's quieter tone: body text takes the muted color; inline code
@@ -208,8 +304,12 @@ enum TranscriptTextStyle {
             style.tabStops = [NSTextTab(textAlignment: .left, location: indent + listIndent)]
         }
         if result.length > 0 {
-            // The break belongs to the paragraph before it.
-            let previous = result.attributes(at: result.length - 1, effectiveRange: nil)
+            // The break belongs to the paragraph before it (but is not part
+            // of a formula that ends it).
+            var previous = result.attributes(at: result.length - 1, effectiveRange: nil)
+            for key in [NSAttributedString.Key.attachment, .cypherMathSource, .cypherDisplayMath] {
+                previous[key] = nil
+            }
             result.append(NSAttributedString(string: "\n", attributes: previous))
         }
         let start = result.length
@@ -223,9 +323,9 @@ enum TranscriptTextStyle {
                     ]))
         }
         result.append(text)
-        result.addAttribute(
-            .paragraphStyle, value: style,
-            range: NSRange(location: start, length: result.length - start))
+        let range = NSRange(location: start, length: result.length - start)
+        result.addAttribute(.paragraphStyle, value: style, range: range)
+        applyMathParagraphs(result, in: range, base: style)
     }
 
     static func code(
@@ -295,6 +395,16 @@ final class TranscriptTextLayoutManager: NSLayoutManager {
 
 final class TranscriptUITextView: UITextView {
     var selectionEnded: (() -> Void)?
+
+    /// Formulas copy as their TeX source; everything else as UIKit copies.
+    override func copy(_ sender: Any?) {
+        if let attributedText, let text = MathRenderer.plainText(attributedText, range: selectedRange) {
+            UIPasteboard.general.string = text
+            return
+        }
+        super.copy(sender)
+    }
+
     override func resignFirstResponder() -> Bool {
         let result = super.resignFirstResponder()
         if result {
@@ -405,9 +515,15 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
         if textView.selectedRange.length == 0 { applyLatest(to: textView) }
     }
 
+    /// The selected text, formulas as their TeX source.
+    private func quote(in textView: UITextView, range: NSRange) -> String {
+        textView.attributedText.flatMap { MathRenderer.plainText($0, range: range) }
+            ?? CommentPrompt.selectedText(textView.text ?? "", range: range)
+    }
+
     func commentAction(in textView: UITextView, range: NSRange) -> UIAction? {
         guard let drafts, drafts.owner != nil else { return nil }
-        let quote = CommentPrompt.selectedText(textView.text ?? "", range: range)
+        let quote = quote(in: textView, range: range)
         guard !CommentPrompt.normalize(quote).isEmpty else { return nil }
         let generation = drafts.generation
         return UIAction(title: "Comment", image: UIImage(systemName: "text.bubble")) { [weak drafts, weak textView] _ in
@@ -433,7 +549,7 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
     /// A temporary side chat about the selected text.
     func sideChatAction(in textView: UITextView, range: NSRange) -> UIAction? {
         guard let entry, let sideChat = actions?.sideChat else { return nil }
-        let quote = CommentPrompt.selectedText(textView.text ?? "", range: range)
+        let quote = quote(in: textView, range: range)
         guard !CommentPrompt.normalize(quote).isEmpty else { return nil }
         return UIAction(title: "Side Chat", image: UIImage(systemName: "bubble.left.and.bubble.right")) {
             [weak textView] _ in

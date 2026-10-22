@@ -34,7 +34,7 @@ $$
 
 - Prices stay prose: it costs $5 today and $10 tomorrow.
 - Code keeps its dollars: `echo $HOME` and `\(not math\)`.
-- TeX that does not typeset shows as code: $\frac{a}$.
+- TeX that does not typeset shows as code: $\undefinedmacro{x}$.
 "##;
 
 /// Bytes per streamed delta: small enough that formulas arrive half-written,

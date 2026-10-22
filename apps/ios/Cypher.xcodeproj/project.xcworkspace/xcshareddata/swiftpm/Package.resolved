@@ -1,5 +1,5 @@
 {
-  "originHash" : "380352fac03a7214383e6d1d9e08892ba627e39d90edf146409a5ecc5842bfe8",
+  "originHash" : "29aef4252941c48c298ad0c29d5456212fc62c193341e7cbdbe06c9252bc6818",
   "pins" : [
     {
       "identity" : "loro-swift",
@@ -26,6 +26,15 @@
       "state" : {
         "revision" : "3c6f9523da3a1ec2fd829673e472d95b8097a3b8",
         "version" : "0.8.0"
+      }
+    },
+    {
+      "identity" : "swiftmath",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mgriebling/SwiftMath.git",
+      "state" : {
+        "revision" : "fa8244ed032f4a1ade4cb0571bf87d2f1a9fd2d7",
+        "version" : "1.7.3"
       }
     }
   ],

@@ -15,6 +15,8 @@ struct InlineStyle: Hashable {
     var code = false
     var strikethrough = false
     var link: String? = nil
+    /// The run is a LaTeX formula (its text is the TeX source), not prose.
+    var math: MathKind? = nil
 
     static let plain = InlineStyle()
 }
@@ -63,36 +65,40 @@ struct TopBlock: Hashable {
 enum MarkdownParser {
     /// Parse a complete markdown source into top-level blocks.
     static func parse(_ source: String) -> [TopBlock] {
-        let document = Document(parsing: source)
+        // Formulas become placeholders cmark leaves alone (MathSource.swift);
+        // the rewrite keeps every line, so start lines index `source`.
+        let math = MathSource.rewrite(source)
+        let document = Document(parsing: math?.source ?? source)
+        let formulas = math?.formulas ?? []
         return document.children.compactMap { child in
-            guard let block = convertBlock(child) else { return nil }
+            guard let block = convertBlock(child, formulas) else { return nil }
             let line = child.range?.lowerBound.line ?? 1
             return TopBlock(startLine: line, block: block)
         }
     }
 
-    private static func convertBlock(_ markup: Markup) -> MDBlock? {
+    private static func convertBlock(_ markup: Markup, _ formulas: [String]) -> MDBlock? {
         switch markup {
         case let paragraph as Paragraph:
-            return .paragraph(inlines(of: paragraph))
+            return .paragraph(inlines(of: paragraph, formulas))
         case let heading as Heading:
-            return .heading(level: heading.level, inlines(of: heading))
+            return .heading(level: heading.level, inlines(of: heading, formulas))
         case let code as CodeBlock:
             var body = code.code
             if body.hasSuffix("\n") { body.removeLast() }
             let lang = code.language.flatMap { $0.isEmpty ? nil : $0 }
             return .codeBlock(language: lang, code: body)
         case let quote as BlockQuote:
-            return .blockquote(quote.children.compactMap(convertBlock))
+            return .blockquote(quote.children.compactMap { convertBlock($0, formulas) })
         case let list as UnorderedList:
-            return .list(orderedStart: nil, items: listItems(of: list))
+            return .list(orderedStart: nil, items: listItems(of: list, formulas))
         case let list as OrderedList:
-            return .list(orderedStart: Int(list.startIndex), items: listItems(of: list))
+            return .list(orderedStart: Int(list.startIndex), items: listItems(of: list, formulas))
         case let table as Markdown.Table:
             // `.cells`/`.rows` are lazy sequences — materialize eagerly.
-            let header: [[InlineRun]] = table.head.cells.map { inlines(of: $0) }
+            let header: [[InlineRun]] = table.head.cells.map { inlines(of: $0, formulas) }
             let rows: [[[InlineRun]]] = table.body.rows.map { row in
-                row.cells.map { inlines(of: $0) } as [[InlineRun]]
+                row.cells.map { inlines(of: $0, formulas) } as [[InlineRun]]
             }
             let align: [MDAlign] = table.columnAlignments.map {
                 switch $0 {
@@ -111,32 +117,35 @@ enum MarkdownParser {
             return .codeBlock(language: "html", code: html.rawHTML.trimmingCharacters(in: .newlines))
         default:
             // Unknown/unsupported block: flatten to a paragraph of its text.
-            let text = markup.format()
+            let text = MathSource.plain(markup.format(), formulas: formulas)
             guard !text.isEmpty else { return nil }
             return .paragraph([InlineRun(text: text, style: .plain)])
         }
     }
 
-    private static func listItems(of list: Markup) -> [MDListItem] {
+    private static func listItems(of list: Markup, _ formulas: [String]) -> [MDListItem] {
         list.children.compactMap { child in
             guard let item = child as? ListItem else { return nil }
             let checked: Bool? = item.checkbox.map { $0 == .checked }
-            return MDListItem(checked: checked, children: item.children.compactMap(convertBlock))
+            return MDListItem(
+                checked: checked, children: item.children.compactMap { convertBlock($0, formulas) })
         }
     }
 
-    private static func inlines(of container: Markup) -> [InlineRun] {
+    private static func inlines(of container: Markup, _ formulas: [String]) -> [InlineRun] {
         var runs: [InlineRun] = []
         for child in container.children {
-            collectInline(child, style: .plain, into: &runs)
+            collectInline(child, style: .plain, formulas, into: &runs)
         }
-        return mergeRuns(runs)
+        return mergeRuns(MathSource.dropFillers(runs))
     }
 
-    private static func collectInline(_ markup: Markup, style: InlineStyle, into runs: inout [InlineRun]) {
+    private static func collectInline(
+        _ markup: Markup, style: InlineStyle, _ formulas: [String], into runs: inout [InlineRun]
+    ) {
         switch markup {
         case let text as Markdown.Text:
-            runs.append(InlineRun(text: text.string, style: style))
+            runs.append(contentsOf: MathSource.runs(text.string, style: style, formulas: formulas))
         case let code as InlineCode:
             var s = style
             s.code = true
@@ -144,22 +153,23 @@ enum MarkdownParser {
         case let strong as Strong:
             var s = style
             s.bold = true
-            strong.children.forEach { collectInline($0, style: s, into: &runs) }
+            strong.children.forEach { collectInline($0, style: s, formulas, into: &runs) }
         case let em as Emphasis:
             var s = style
             s.italic = true
-            em.children.forEach { collectInline($0, style: s, into: &runs) }
+            em.children.forEach { collectInline($0, style: s, formulas, into: &runs) }
         case let strike as Strikethrough:
             var s = style
             s.strikethrough = true
-            strike.children.forEach { collectInline($0, style: s, into: &runs) }
+            strike.children.forEach { collectInline($0, style: s, formulas, into: &runs) }
         case let link as Markdown.Link:
             var s = style
             s.link = link.destination
-            link.children.forEach { collectInline($0, style: s, into: &runs) }
+            link.children.forEach { collectInline($0, style: s, formulas, into: &runs) }
         case let image as Markdown.Image:
             // Images render as their alt text (desktop parity: no inline images).
-            let alt = image.children.compactMap { ($0 as? Markdown.Text)?.string }.joined()
+            let alt = MathSource.plain(
+                image.children.compactMap { ($0 as? Markdown.Text)?.string }.joined(), formulas: formulas)
             runs.append(InlineRun(text: alt.isEmpty ? (image.source ?? "") : alt, style: style))
         case is SoftBreak:
             runs.append(InlineRun(text: " ", style: style))
@@ -169,7 +179,7 @@ enum MarkdownParser {
             runs.append(InlineRun(text: html.rawHTML, style: style))
         default:
             for child in markup.children {
-                collectInline(child, style: style, into: &runs)
+                collectInline(child, style: style, formulas, into: &runs)
             }
         }
     }
@@ -179,7 +189,8 @@ enum MarkdownParser {
         var merged: [InlineRun] = []
         for run in runs {
             if run.text.isEmpty { continue }
-            if var last = merged.last, last.style == run.style {
+            // Two adjacent formulas stay two formulas.
+            if var last = merged.last, last.style == run.style, run.style.math == nil {
                 last.text += run.text
                 merged[merged.count - 1] = last
             } else {

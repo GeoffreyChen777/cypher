@@ -20,4 +20,13 @@ Math in chat markdown is typeset with the following components.
 | RaTeX (parser, layout, raster renderer) | 0.1.15 | MIT | https://github.com/erweixin/RaTeX |
 | KaTeX fonts (`KaTeX_*.ttf`, embedded via `ratex-katex-fonts`) | 0.1.15 | SIL Open Font License 1.1 | https://github.com/KaTeX/KaTeX |
 
+The iOS app typesets math with SwiftMath, pinned in
+`apps/ios/Cypher.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`.
+
+| Component | Version | License | Source |
+| --- | --- | --- | --- |
+| SwiftMath | 1.7.3 | MIT | https://github.com/mgriebling/SwiftMath |
+| Latin Modern Math and TeX Gyre Termes Math fonts (bundled by SwiftMath) | 1.7.3 | GUST Font License | https://github.com/mgriebling/SwiftMath |
+| XITS, Asana, Euler, Fira, Garamond, KpMath, Lete Sans, Libertinus and Noto Sans Math fonts (bundled by SwiftMath) | 1.7.3 | SIL Open Font License 1.1 | https://github.com/mgriebling/SwiftMath |
+
 The full Cypher distribution remains licensed under the terms in `LICENSE`.
