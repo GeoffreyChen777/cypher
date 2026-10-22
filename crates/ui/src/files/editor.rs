@@ -285,6 +285,20 @@ impl CodeEditor {
         &self.content
     }
 
+    /// The file was renamed or moved: re-pick its language by the new name
+    /// (an extension change re-highlights), keeping text, caret and history.
+    pub fn set_path(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.path = path.to_string();
+        let language = cypher_syntax::language_for_path(path)
+            .filter(|lang| cypher_syntax::supports_language(*lang));
+        if language != self.language {
+            self.language = language;
+            self.highlight = None;
+            self.schedule_highlight(Duration::ZERO, cx);
+            cx.notify();
+        }
+    }
+
     pub fn read_only(&self) -> bool {
         self.read_only
     }

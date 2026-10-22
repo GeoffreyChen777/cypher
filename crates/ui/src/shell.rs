@@ -255,7 +255,6 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     cx.clear_key_bindings();
     crate::widgets::text_input::init(cx);
     crate::transcript::init(cx);
-    crate::files::editor::init(cx);
     // Fixed app-level shortcuts (⌘Q quit, ⌘W close, ⌘M minimize, ⌘H hide) —
     // these back the native menu key equivalents and must survive keymap
     // re-application.
@@ -325,6 +324,11 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
                 .ok()
             }),
     );
+    // Last: gpui counts a context-free binding as the deepest match and
+    // breaks ties by recency, so the Files editor's own keys (⌘S saves) must
+    // bind after the global shortcuts (⌘S toggles the sidebar) to win while
+    // the editor has focus.
+    crate::files::editor::init(cx);
 }
 
 /// Copy the latest transcript/diff text selection; false when there is none.

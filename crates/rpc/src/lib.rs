@@ -206,6 +206,21 @@ pub mod methods {
     /// text}. Same checkout/path rules as the reads (no creation, no symlink
     /// traversal, bounded size).
     pub const WRITE_WORKSPACE_FILE: &str = "WriteWorkspaceFile";
+    /// One base64 slice of a regular file's bytes; {chatId, cwd, path,
+    /// offset}. Image previews and hex views.
+    pub const READ_WORKSPACE_FILE_CHUNK: &str = "ReadWorkspaceFileChunk";
+    /// The file manager's mutations, under the same checkout/path rules as
+    /// the reads. Create an empty file or a folder; {.., path, directory}.
+    pub const CREATE_WORKSPACE_ENTRY: &str = "CreateWorkspaceEntry";
+    /// Import: offset 0 creates the file (never replacing one), later
+    /// slices append exactly at its end; {.., path, offset, data}.
+    pub const WRITE_WORKSPACE_FILE_CHUNK: &str = "WriteWorkspaceFileChunk";
+    /// Rename/move without replacing anything; {.., path, to}.
+    pub const MOVE_WORKSPACE_ENTRY: &str = "MoveWorkspaceEntry";
+    /// Copy a file or folder tree to a new path; {.., path, to}.
+    pub const COPY_WORKSPACE_ENTRY: &str = "CopyWorkspaceEntry";
+    /// Move to the host's Trash, or remove for good; {.., path, permanent}.
+    pub const DELETE_WORKSPACE_ENTRY: &str = "DeleteWorkspaceEntry";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
     pub const DELETE_WORKTREE: &str = "DeleteWorktree";
     // Quick-chat scratch folders live on the chat's host device.
@@ -459,6 +474,12 @@ pub mod methods {
         MethodSpec::unary(LIST_WORKSPACE_FILES).forwardable(),
         MethodSpec::unary(READ_WORKSPACE_FILE).forwardable(),
         MethodSpec::unary(WRITE_WORKSPACE_FILE).forwardable(),
+        MethodSpec::unary(READ_WORKSPACE_FILE_CHUNK).forwardable(),
+        MethodSpec::unary(CREATE_WORKSPACE_ENTRY).forwardable(),
+        MethodSpec::unary(WRITE_WORKSPACE_FILE_CHUNK).forwardable(),
+        MethodSpec::unary(MOVE_WORKSPACE_ENTRY).forwardable(),
+        MethodSpec::unary(COPY_WORKSPACE_ENTRY).forwardable(),
+        MethodSpec::unary(DELETE_WORKSPACE_ENTRY).forwardable(),
         MethodSpec::unary(CREATE_WORKTREE).forwardable(),
         MethodSpec::unary(DELETE_WORKTREE).forwardable(),
         MethodSpec::unary(CREATE_SCRATCH_DIR).forwardable(),

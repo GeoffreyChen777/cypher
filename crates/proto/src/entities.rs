@@ -463,12 +463,18 @@ pub struct FileSearchMatch {
     pub is_dir: bool,
 }
 
-/// Read-only, chat-checkout-scoped file browser. Paths are relative to cwd.
+/// Chat-checkout-scoped file browser. Paths are relative to cwd.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceFileEntry {
     pub name: String,
     pub is_dir: bool,
+    /// Regular files: the size in bytes. Absent from older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// Last modification as Unix milliseconds. Absent from older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_ms: Option<i64>,
 }
 
 /// Device-local Pi model for all automatic session titles. None preserves the
@@ -550,6 +556,38 @@ pub struct WorkspaceFileContent {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceFileWritten {
     pub bytes: u64,
+}
+
+/// `ReadWorkspaceFileChunk` reply: one base64 slice of a regular file's
+/// bytes (image previews, hex views).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileChunk {
+    pub data: String,
+    pub offset: u64,
+    pub next_offset: u64,
+    /// The file's whole size when the slice was read.
+    pub bytes: u64,
+    pub done: bool,
+    /// Unix milliseconds — a reader compares it across slices to notice a
+    /// file rewritten mid-read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_ms: Option<i64>,
+}
+
+/// Reply of the workspace entry mutations (create, chunked write, move,
+/// copy, delete).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceEntryChanged {
+    /// The entry's relative path after the change.
+    pub path: String,
+    /// Chunked writes: the file's size after the slice.
+    #[serde(default)]
+    pub bytes: u64,
+    /// Deletes: moved to the host's Trash rather than removed.
+    #[serde(default)]
+    pub trashed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

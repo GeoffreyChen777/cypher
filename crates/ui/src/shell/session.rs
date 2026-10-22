@@ -138,6 +138,8 @@ pub(super) struct SessionSlot {
     /// Files surfaces by id — each tab its own tree + editor over the
     /// chat's checkout.
     pub(super) files: std::collections::HashMap<u64, Entity<FilesPanel>>,
+    /// Event hookups for [`Self::files`] ("Mention in Chat").
+    pub(super) files_subs: std::collections::HashMap<u64, Subscription>,
     pub(super) files_seq: u64,
     /// Temporary Side Chat tabs: one [`SideChatPanel`] per open
     /// side chat, keyed by a slot-minted sequence id. Owned here so the

@@ -8,6 +8,7 @@ how it works. Everything else is grouped here by who reads it.
 - [Linux setup](features/linux-setup.md) — installing, updating and repairing a headless Linux device.
 - [Chat appearance](features/chat-appearance.md) — chat fonts, colors, spacing and wide-screen mode.
 - [Appearance colors](features/appearance-colors.md) — app themes and Terminal, Git and Sidebar color overrides.
+- [Files](features/files.md) — the desktop file manager: tree, file operations, previews.
 - [Git diff layouts](features/git-diff.md) — unified and side-by-side diffs in the Git pane.
 - [Turn changes](features/turn-changes.md) — the files each round of a conversation changed, and their diffs.
 - [Context recovery](features/context-recovery.md) — restarting a failed turn with supplementary context a model writes.

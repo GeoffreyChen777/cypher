@@ -456,7 +456,7 @@ impl Shell {
 
     /// The picker's Files card / the `+` menu's Files row: a fresh file
     /// browser tab over the session's checkout.
-    fn add_files_surface(&mut self, sid: SlotId, cx: &mut Context<Self>) {
+    fn add_files_surface(&mut self, sid: SlotId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
@@ -464,7 +464,24 @@ impl Shell {
         let id = slot.files_seq;
         let state = slot.state.clone();
         let panel = cx.new(|cx| FilesPanel::new(state, cx));
+        let sub = cx.subscribe_in(
+            &panel,
+            window,
+            move |this: &mut Self, _, event, window, cx| match event {
+                crate::files::FilesEvent::Mention { path, is_dir } => {
+                    if let Some(composer) = this.tiles.slots.get(&sid).map(|s| s.composer.clone()) {
+                        composer.update(cx, |composer, cx| {
+                            composer.insert_file_mention(path, *is_dir, window, cx)
+                        });
+                    }
+                }
+            },
+        );
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
+            return;
+        };
         slot.files.insert(id, panel);
+        slot.files_subs.insert(id, sub);
         slot.dock.surfaces.push(DockSurface::Files(id));
         self.set_dock_active(sid, DockSurface::Files(id), cx);
     }
@@ -577,6 +594,7 @@ impl Shell {
                 // Dropping the entity drops its editors — unsaved edits go
                 // with them (the tab title carries the ● warning).
                 slot.files.remove(&id);
+                slot.files_subs.remove(&id);
             }
             DockSurface::SideChat(_) | DockSurface::Picker => {}
         }
@@ -660,7 +678,10 @@ impl Shell {
                 }
                 DockSurface::Files(id) if slot.files.contains_key(&id) => {
                     let panel = slot.files.get(&id).cloned().expect("checked");
-                    panel.update(cx, |panel, cx| panel.ensure_content(cx));
+                    panel.update(cx, |panel, cx| {
+                        panel.set_header_right(header_right, cx);
+                        panel.ensure_content(cx);
+                    });
                     // Same two-row shape as the diff pane: the surface's own
                     // controls row under the tab strip, then the body.
                     let controls = panel.update(cx, |panel, cx| panel.render_header_controls(cx));
@@ -877,8 +898,8 @@ impl Shell {
                             .when(files_available, |el| {
                                 el.child(
                                     row("surface-card-files", icons::FOLDER_WITH_FILES, "Files")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.add_files_surface(sid, cx);
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.add_files_surface(sid, window, cx);
                                         })),
                                 )
                             })
@@ -1371,9 +1392,9 @@ fn rail_plus_menu(
                     el.child(
                         popover::menu_row(&theme, false, "right-plus-files")
                             .id("right-plus-files-row")
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.ensure_dock_open(sid, cx);
-                                this.add_files_surface(sid, cx);
+                                this.add_files_surface(sid, window, cx);
                                 this.close_right_plus(cx);
                             }))
                             .child(

@@ -204,6 +204,7 @@ impl Shell {
                 diff_subs: std::collections::HashMap::new(),
                 diff_seq: 0,
                 files: std::collections::HashMap::new(),
+                files_subs: std::collections::HashMap::new(),
                 files_seq: 0,
                 side_chats: std::collections::HashMap::new(),
                 side_chat_subs: std::collections::HashMap::new(),

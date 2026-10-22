@@ -775,7 +775,13 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_WORKSPACE_FILES
             | methods::READ_WORKSPACE_FILE
-            | methods::WRITE_WORKSPACE_FILE => files::workspace_file(self, method, params).await,
+            | methods::WRITE_WORKSPACE_FILE
+            | methods::READ_WORKSPACE_FILE_CHUNK
+            | methods::CREATE_WORKSPACE_ENTRY
+            | methods::WRITE_WORKSPACE_FILE_CHUNK
+            | methods::MOVE_WORKSPACE_ENTRY
+            | methods::COPY_WORKSPACE_ENTRY
+            | methods::DELETE_WORKSPACE_ENTRY => files::workspace_file(self, method, params).await,
             methods::SEARCH_FILES => files::search_files(self, params).await,
             methods::SEARCH_GITHUB_ISSUES => github::search_github_issues(self, params).await,
             methods::GET_GITHUB_ISSUE => github::get_github_issue(self, params).await,
