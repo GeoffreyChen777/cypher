@@ -203,6 +203,12 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   reachable through their parent. Links require a synced parent/child relation
   on the same execution device; absent links are shown as unavailable rather
   than guessed. The persisted agent profile is left untouched.
+- **Math:** replies typeset LaTeX like the desktop: `$…$` and `\(…\)` in
+  the line, on the text baseline; `$$…$$` and `\[…\]` centered on a row of
+  their own, shrunk to fit a narrow screen. Prices ("$5 and $10") and code
+  keep their dollars, and TeX that does not typeset shows as inline code.
+  Formulas take the text color (appearance, thinking's muted tone, the
+  streaming fade) and copy or quote as their TeX source.
 - **Comment / quote for the next input:** select text **directly in the chat**
   using native long-press/drag handles, then choose **Comment** from the system
   selection menu (Copy remains available). User bubbles, assistant paragraphs,
@@ -269,7 +275,8 @@ Or open `Cypher.xcodeproj` in Xcode and run. Dependencies (SPM, resolved
 automatically): [loro-swift 1.13.x](https://github.com/loro-dev/loro-swift)
 (matches the engine's loro 1.13), [swift-markdown](https://github.com/swiftlang/swift-markdown)
 (cmark-gfm: tables/strikethrough/tasklists — the same feature set as the
-desktop's pulldown-cmark config).
+desktop's pulldown-cmark config) and [SwiftMath 1.7.x](https://github.com/mgriebling/SwiftMath)
+(typesets LaTeX in replies; its math fonts add about 7 MB).
 
 Simulator tests that exercise the real Keychain require local ad-hoc signing:
 use `CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=-` with `xcodebuild ... test`.
@@ -330,6 +337,7 @@ Run these commands from the repository root.
   `-demo -route chat:chat-veil -sheet subagents`.
   Child fixture: `-demo -route chat:demo-child-planner`.
   Script fixture: `-demo -route chat:chat-deploy`.
+  Math fixture (LaTeX in a reply): `-demo -route chat:chat-math`.
   Context recovery fixtures: `-demo -route space:space-recovery`; the live
   replay is `-demo -route chat:chat-recovery-live`.
   Comment editor/list fixtures:

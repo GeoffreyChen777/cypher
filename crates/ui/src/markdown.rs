@@ -16,6 +16,7 @@
 
 pub mod diff_fence;
 pub mod find;
+pub mod math;
 pub mod mend;
 pub mod parser;
 pub mod render;

@@ -13,7 +13,7 @@
 
 use std::ops::Range;
 
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 // ---------------------------------------------------------------------------
 // Tree model
@@ -28,6 +28,19 @@ pub struct InlineStyle {
     pub strikethrough: bool,
     /// Destination URL when inside a link.
     pub link: Option<String>,
+    /// The run is a LaTeX formula (its text is the TeX source), not prose.
+    pub math: Option<MathKind>,
+}
+
+/// How a formula was delimited: `$…$` / `\(…\)` set inline in the text
+/// style, `$$…$$` / `\[…\]` in the display style. The renderer gives display
+/// math in a paragraph a centered row of its own; inside headings and table
+/// cells it stays in the line (in display style). The tree keeps it as a run
+/// either way, so a paragraph stays one block for the incremental parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MathKind {
+    Inline,
+    Display,
 }
 
 /// One run of identically-styled inline text.
@@ -108,17 +121,23 @@ impl BlockTree {
 // ---------------------------------------------------------------------------
 
 pub fn options() -> Options {
-    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
+    Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_MATH
 }
 
 /// Parse a whole source into a [`BlockTree`].
 pub fn parse_full(source: &str) -> BlockTree {
+    let (rewritten, paren_math) = rewrite_tex_delimiters(source).unzip();
+    let source = rewritten.as_deref().unwrap_or(source);
     let events: Vec<(Event, Range<usize>)> = Parser::new_ext(source, options())
         .into_offset_iter()
         .collect();
     let mut cur = Cursor {
         events: &events,
         ix: 0,
+        paren_math: paren_math.as_deref().unwrap_or(&[]),
     };
     let mut blocks = Vec::new();
     while let Some((event, range)) = cur.peek() {
@@ -146,9 +165,96 @@ pub fn parse_full(source: &str) -> BlockTree {
     BlockTree { blocks }
 }
 
+/// Rewrite TeX's own `\(…\)` and `\[…\]` math delimiters — models write
+/// them as often as dollars — into the dollar forms pulldown's math extension
+/// reads. CommonMark sees `\(` as an escaped paren, so a first parse finds
+/// exactly the escapes that are real (code spans and fences keep theirs) and
+/// only pairs that open and close inside one block are touched.
+///
+/// The rewrite keeps every byte offset: `\(`→`${` and `\)`→`}$` (the braces
+/// only group the formula), `\[`/`\]`→`$$`. Block ranges therefore still
+/// index the caller's source, which the incremental parser relies on. Also
+/// returns where each `\(` stood (ascending), so the parser can drop the
+/// grouping braces again. `None` when there is nothing to rewrite — the
+/// common case costs one `contains`.
+fn rewrite_tex_delimiters(source: &str) -> Option<(String, Vec<usize>)> {
+    if !source.contains("\\(") && !source.contains("\\[") {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    let mut edits: Vec<(usize, &'static str)> = Vec::new();
+    // The pending opener: its backslash's offset and the paren it waits for.
+    let mut open: Option<(usize, u8)> = None;
+    for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
+        match event {
+            // pulldown drops an escape's backslash and starts a fresh text
+            // event at the escaped char, so a real `\(` is a text event that
+            // begins with `(` right after a `\`.
+            Event::Text(_) => {
+                let at = range.start;
+                if at == 0 || bytes[at - 1] != b'\\' {
+                    continue;
+                }
+                match (bytes[at], open) {
+                    (b'(', _) => open = Some((at - 1, b')')),
+                    (b'[', _) => open = Some((at - 1, b']')),
+                    (closer, Some((start, wanted))) if closer == wanted => {
+                        let (open_with, close_with) = if wanted == b')' {
+                            ("${", "}$")
+                        } else {
+                            ("$$", "$$")
+                        };
+                        edits.push((start, open_with));
+                        edits.push((at - 1, close_with));
+                        open = None;
+                    }
+                    _ => {}
+                }
+            }
+            // Emphasis and links nest inside a formula's span harmlessly —
+            // the rewritten source parses them as math — but a formula never
+            // crosses a block boundary.
+            Event::Start(
+                Tag::Emphasis
+                | Tag::Strong
+                | Tag::Strikethrough
+                | Tag::Link { .. }
+                | Tag::Image { .. },
+            )
+            | Event::End(
+                TagEnd::Emphasis
+                | TagEnd::Strong
+                | TagEnd::Strikethrough
+                | TagEnd::Link
+                | TagEnd::Image,
+            )
+            | Event::SoftBreak
+            | Event::HardBreak
+            | Event::Code(_)
+            | Event::InlineHtml(_) => {}
+            _ => open = None,
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    let mut out = source.as_bytes().to_vec();
+    let mut parens = Vec::new();
+    for (at, with) in edits {
+        if with == "${" {
+            parens.push(at);
+        }
+        out[at..at + 2].copy_from_slice(with.as_bytes());
+    }
+    // Two-byte ASCII swapped for two-byte ASCII: still valid UTF-8.
+    Some((String::from_utf8(out).ok()?, parens))
+}
+
 struct Cursor<'a, 'e> {
     events: &'a [(Event<'e>, Range<usize>)],
     ix: usize,
+    /// Offsets of formulas written `\(…\)` ([`rewrite_tex_delimiters`]).
+    paren_math: &'a [usize],
 }
 
 impl<'a, 'e> Cursor<'a, 'e> {
@@ -388,6 +494,7 @@ fn parse_inline_container(cur: &mut Cursor, style: &InlineStyle) -> Vec<InlineRu
 }
 
 fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &InlineStyle) {
+    let start = cur.peek().map_or(0, |(_, range)| range.start);
     let Some(event) = cur.next_event() else {
         return;
     };
@@ -403,6 +510,15 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
             s.code = true;
             push(runs, t.into_string(), s);
         }
+        Event::InlineMath(t) => {
+            let mut tex = t.into_string();
+            // `\(x\)` was parsed as `${x}$`: the braces are ours, not the TeX.
+            if cur.paren_math.binary_search(&start).is_ok() {
+                tex = tex[1..tex.len() - 1].to_string();
+            }
+            push(runs, tex, math_style(MathKind::Inline));
+        }
+        Event::DisplayMath(t) => push(runs, t.into_string(), math_style(MathKind::Display)),
         Event::SoftBreak => push(runs, " ".into(), style.clone()),
         Event::HardBreak => push(runs, "\n".into(), style.clone()),
         Event::Html(t) | Event::InlineHtml(t) => push(runs, t.into_string(), style.clone()),
@@ -430,6 +546,15 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
     }
 }
 
+/// A formula's run style. Math ignores the surrounding emphasis and link: it
+/// is set by the TeX engine, not the prose fonts.
+fn math_style(kind: MathKind) -> InlineStyle {
+    InlineStyle {
+        math: Some(kind),
+        ..InlineStyle::default()
+    }
+}
+
 /// Promote bare `http(s)://` URLs into link runs — GFM's autolink extension,
 /// which pulldown-cmark has no option for (agents paste naked PR/issue URLs
 /// constantly; user report: the link isn't clickable). Runs already inside a
@@ -438,7 +563,7 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
 fn autolink_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out = Vec::with_capacity(runs.len());
     for run in runs {
-        if run.style.link.is_some() || run.style.code {
+        if run.style.link.is_some() || run.style.code || run.style.math.is_some() {
             out.push(run);
         } else {
             push_text_autolinked(&mut out, &run.text, &run.style);
@@ -530,7 +655,10 @@ fn merge_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out: Vec<InlineRun> = Vec::with_capacity(runs.len());
     for run in runs {
         match out.last_mut() {
-            Some(last) if last.style == run.style => last.text.push_str(&run.text),
+            // Two adjacent formulas stay two formulas.
+            Some(last) if last.style == run.style && run.style.math.is_none() => {
+                last.text.push_str(&run.text)
+            }
             _ => out.push(run),
         }
     }

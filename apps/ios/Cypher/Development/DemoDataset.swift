@@ -115,6 +115,13 @@ final class DemoDataset {
                 config: codex, lastMessagePreview: "Done — failed children stay quiet.",
                 lastMessageAt: now - 900_000, createdAt: now - 86_400_000,
                 spaceId: cypher.id, lastSeenAt: now - 3_600_000),
+            // LaTeX in a reply (the mock harness's [mock:math] showcase).
+            Chat(
+                id: "chat-math", deviceId: "dev-mac", title: "Quadratic formula and friends",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "Here is the quadratic formula.",
+                lastMessageAt: now - 2_000_000, createdAt: now - 2_100_000,
+                spaceId: cypher.id, lastSeenAt: now - 2_000_000),
             Chat(
                 id: "chat-deploy", deviceId: "dev-vps", title: "Wrangler deploy hygiene",
                 archived: false, cwd: edge.path, branch: nil, checkoutId: nil,
@@ -685,6 +692,16 @@ final class DemoDataset {
                         ),
                     ], createdAt: now - 86_400_000, deviceId: "dev-vps", status: .complete, continuationOf: nil),
             ]
+        case "chat-math":
+            return [
+                MessageEntry(
+                    id: "m1", role: .user,
+                    parts: [.text(id: "t0", text: "Show me some formulas.")],
+                    createdAt: now - 2_100_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                MessageEntry(
+                    id: "m2", role: .assistant, parts: [.text(id: "t0", text: mathShowcase)],
+                    createdAt: now - 2_000_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+            ]
         case "chat-permissions-story":
             return permissionStory(now: now)
         case "chat-permissions-card":
@@ -694,6 +711,39 @@ final class DemoDataset {
             return recoveryTranscript(for: chatId, now: now) ?? []
         }
     }
+
+    /// The reply of the mock harness's [mock:math] showcase
+    /// (crates/harness/src/mock/math.rs): every delimiter, prices and code
+    /// that keep their dollars, and TeX that does not typeset.
+    private static let mathShowcase = #"""
+        Here is the quadratic formula. For $ax^2 + bx + c = 0$ with $a \neq 0$, the roots are
+
+        $$
+        x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
+        $$
+
+        and the discriminant \(\Delta = b^2 - 4ac\) decides how many are real: two when $\Delta > 0$, one when $\Delta = 0$.
+
+        **Euler's identity** links the five constants $e$, $i$, $\pi$, $1$ and $0$:
+        \[
+        e^{i\pi} + 1 = 0
+        \]
+
+        A few more shapes, inline: $\sum_{k=1}^{n} k = \frac{n(n+1)}{2}$, $\int_0^1 x^2\,dx = \tfrac{1}{3}$, $\lim_{x \to 0} \frac{\sin x}{x} = 1$, and a matrix:
+
+        $$
+        A = \begin{pmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{pmatrix}, \qquad \det A = 1
+        $$
+
+        | Quantity | Formula |
+        | --- | --- |
+        | Gaussian | $\frac{1}{\sigma\sqrt{2\pi}} e^{-\frac{(x-\mu)^2}{2\sigma^2}}$ |
+        | Big-O | $O(n \log n)$ |
+
+        - Prices stay prose: it costs $5 today and $10 tomorrow.
+        - Code keeps its dollars: `echo $HOME` and `\(not math\)`.
+        - TeX that does not typeset shows as code: $\undefinedmacro{x}$.
+        """#
 
     // MARK: Permission control (the mock harness's [mock:permissions] story)
 
