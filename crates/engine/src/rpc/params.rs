@@ -125,6 +125,21 @@ pub(super) struct WorkspaceFileParams {
     /// `WriteWorkspaceFile` only: the full replacement text.
     #[serde(default)]
     pub(super) text: Option<String>,
+    /// Move/copy destination (relative, like `path`).
+    #[serde(default)]
+    pub(super) to: Option<String>,
+    /// `CreateWorkspaceEntry`: a folder rather than an empty file.
+    #[serde(default)]
+    pub(super) directory: bool,
+    /// Chunked reads/writes: the byte offset of this slice.
+    #[serde(default)]
+    pub(super) offset: u64,
+    /// `WriteWorkspaceFileChunk`: the slice, base64.
+    #[serde(default)]
+    pub(super) data: Option<String>,
+    /// `DeleteWorkspaceEntry`: remove for good instead of the Trash.
+    #[serde(default)]
+    pub(super) permanent: bool,
 }
 
 #[derive(Debug, Deserialize)]

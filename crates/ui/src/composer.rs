@@ -756,6 +756,29 @@ impl Composer {
         self.failure = Some(message.into());
         cx.notify();
     }
+
+    /// The Files surface's "Mention in Chat": a file chip at the caret (a
+    /// space first when the caret sits against a word), then focus.
+    pub fn insert_file_mention(
+        &mut self,
+        path: &str,
+        is_dir: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let link = mentions::local_file_link(path, is_dir);
+        self.input.update(cx, |input, cx| {
+            let at = input.selected_range.clone();
+            let glued = input.text()[..at.start]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| !ch.is_whitespace());
+            let link = if glued { format!(" {link}") } else { link };
+            input.replace_with_chip(at, link, cx);
+        });
+        let handle = self.input.read(cx).focus_handle.clone();
+        window.focus(&handle, cx);
+    }
     /// The picker entity, for the shell's canvas target selectors.
     pub fn pickers(&self) -> &Entity<Pickers> {
         &self.pickers

@@ -387,6 +387,9 @@ pub struct TextInput {
     projector: Option<fn(&str) -> TextProjection>,
     /// Settings credentials only; never used for chat drafts.
     secret: bool,
+    /// `(font size, line height)` replacing the default field metrics — the
+    /// file tree's compact inline rename field.
+    metrics: Option<(f32, f32)>,
     /// Bumped once per `layout_text` pass — the flip logic uses it to apply at
     /// most one compact↔expanded flip per layout (a flip is only re-evaluated
     /// after the input has been measured in the new mode).
@@ -459,6 +462,7 @@ impl TextInput {
             ghost: None,
             projector: None,
             secret: false,
+            metrics: None,
             layout_epoch: 0,
             display_is_placeholder: true,
             blink_anchor: Instant::now(),
@@ -678,6 +682,25 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Override the field's text metrics (single-line fields only).
+    pub fn set_metrics(&mut self, font_size: f32, line_height: f32) {
+        self.metrics = Some((font_size, line_height));
+    }
+
+    /// Select `range` (byte offsets, clamped to char boundaries).
+    pub fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let clamp = |at: usize| {
+            let mut at = at.min(self.content.len());
+            while !self.content.is_char_boundary(at) {
+                at -= 1;
+            }
+            at
+        };
+        self.selected_range = clamp(range.start)..clamp(range.end);
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.invalidate_chip_tooltip();
         self.content = text.into();
@@ -857,7 +880,7 @@ impl Render for TextInput {
             let style = crate::appearance::chat_style::settings(cx);
             (style.font_size, style.input_line_height())
         } else {
-            (INPUT_TEXT_SIZE, INPUT_LINE_HEIGHT)
+            self.metrics.unwrap_or((INPUT_TEXT_SIZE, INPUT_LINE_HEIGHT))
         };
         let text_color = if self.content.is_empty() {
             theme.text_faint
