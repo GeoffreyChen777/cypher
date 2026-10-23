@@ -4,8 +4,8 @@
 //! keyboard control, inline rename/new entries, cut/copy/paste, drag moves,
 //! Finder imports, a go-to-file filter and git status marks; beside it the
 //! picked file: a syntax-colored [`editor::CodeEditor`] saving back through
-//! `WriteWorkspaceFile`, rendered Markdown/SVG previews, an image viewer, or
-//! an info card and hex dump for other binaries.
+//! `WriteWorkspaceFile`, rendered Markdown/SVG/HTML previews, an image
+//! viewer, or an info card and hex dump for other binaries.
 //!
 //! Everything is fetched from the chat's HOST device (`targetDeviceId` relay
 //! forwarding, exactly like the diff pane): the tree is that checkout's, not
@@ -20,7 +20,8 @@
 //! Markdown files open in a rendered PREVIEW (the transcript's own Markdown
 //! renderer, fenced code highlighted in the background); a header toggle
 //! flips to the source editor and back. The preview re-parses lazily — only
-//! when it is shown and the text changed since the last parse.
+//! when it is shown and the text changed since the last parse. HTML files
+//! open the same way, as a live page in a native web view (macOS).
 
 pub mod editor;
 pub mod links;
@@ -28,6 +29,7 @@ mod menu;
 mod ops;
 mod preview;
 mod tree;
+pub mod web_view;
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -176,7 +178,7 @@ struct OpenFile {
     error: Option<SharedString>,
     /// Changed on disk while not shown: reload when it is next opened.
     stale: bool,
-    /// Markdown/SVG: show the rendered preview instead of the source.
+    /// Markdown/SVG/HTML: show the rendered preview instead of the source.
     preview: bool,
     /// The last parsed preview; `preview_stale` marks it behind the text.
     preview_tree: Option<Arc<BlockTree>>,
@@ -251,6 +253,8 @@ pub struct FilesPanel {
     file_tasks: HashMap<String, Task<()>>,
     /// The Markdown preview's own selection scope (registry reset per frame).
     selection_scope: SelectionScope,
+    /// The HTML preview's page, made on first use.
+    web: Option<web_view::WebView>,
     // ---- file manager ----
     tree_focus: FocusHandle,
     confirm_focus: FocusHandle,
@@ -324,6 +328,7 @@ impl FilesPanel {
             dir_tasks: HashMap::new(),
             file_tasks: HashMap::new(),
             selection_scope: selection::next_preview_scope(),
+            web: None,
             tree_focus: cx.focus_handle(),
             confirm_focus: cx.focus_handle(),
             confirm_focus_pending: false,
@@ -1119,7 +1124,7 @@ impl FilesPanel {
         cx.notify();
     }
 
-    /// The header's Source/Preview toggle (Markdown and SVG). Switching to
+    /// The header's Source/Preview toggle (Markdown, SVG, HTML). Switching to
     /// the source focuses the editor so typing works at once.
     fn set_preview(&mut self, preview: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.selected.clone() else {
@@ -1164,12 +1169,17 @@ impl FilesPanel {
 
     /// Re-parse the preview when it is shown and the text moved on; kicks a
     /// background highlight of its fenced code (paint-only when it lands).
-    /// SVG previews re-render from the current text.
+    /// SVG previews re-render from the current text; HTML ones reload it.
     fn ensure_preview(&mut self, path: &str, cx: &mut Context<Self>) {
         let Some(file) = self.open_files.get_mut(path) else {
             return;
         };
         if !file.preview || !file.preview_stale || file.clean.is_none() {
+            return;
+        }
+        if file.kind == FileKind::Html {
+            file.preview_stale = false;
+            file.preview_gen += 1;
             return;
         }
         if file.kind == FileKind::Svg {
@@ -2344,6 +2354,13 @@ impl FilesPanel {
         }
         let local = self.is_local();
         let modified = self.entry_meta(&path).and_then(|e| e.modified_ms);
+        // An HTML preview of a file on this machine reads it from disk (or
+        // resolves unsaved text beside it), so its relative files load.
+        let html_file = local.then(|| (self.absolute_path(&path), self.absolute_path("")));
+        let header_right = self.header_right;
+        let menu_open = self.menu.is_open() || self.confirm.is_some();
+        let generation = self.generation;
+        let panel = cx.entity_id();
         let Some(file) = self.open_files.get(&path) else {
             return centered_note("Select a file to view it.".into(), &theme);
         };
@@ -2448,6 +2465,34 @@ impl FilesPanel {
                     .child(render::selection_frame_reset(self.selection_scope))
                     .child(div().w_full().max_w(px(760.0)).child(rendered))
                     .into_any_element()
+            }
+            (true, FileKind::Html, _, _) => {
+                let from_disk = html_file.is_some() && !file.dirty;
+                let key = {
+                    use std::hash::{Hash as _, Hasher as _};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    (generation, &path, file.preview_gen, from_disk).hash(&mut hasher);
+                    hasher.finish()
+                };
+                let base = html_file
+                    .as_ref()
+                    .map(|(absolute, _)| web_view::base_dir(absolute));
+                let source = match &html_file {
+                    Some((absolute, root)) if from_disk => web_view::Source::File {
+                        path: absolute,
+                        root,
+                    },
+                    _ => web_view::Source::Text {
+                        html: file.editor.read(cx).content(),
+                        base: base.as_deref(),
+                    },
+                };
+                let web = self.web.get_or_insert_with(web_view::WebView::new);
+                web.load(key, source);
+                preview::render_page(
+                    web.element(format!("files-web:{panel}").into(), menu_open),
+                    header_right,
+                )
             }
             _ => file.editor.clone().into_any_element(),
         };

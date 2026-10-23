@@ -121,6 +121,10 @@ getrandom = "0.4"
 # TIFF/BMP images as PNG before upload.
 image = { version = "0.25", default-features = false, features = ["png", "tiff", "bmp"] }
 objc = "0.2"
+# Calls the WebKit navigation delegate's decision handler (an ObjC block).
+block = "0.1"
+# The gpui window's NSView, for the HTML preview's native web view.
+raw-window-handle = "0.6"
 notify = "7"
 portable-pty = "0.8"
 alacritty_terminal = "0.26"

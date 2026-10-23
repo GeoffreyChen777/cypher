@@ -625,6 +625,10 @@ impl Shell {
             overlays.push(sync);
         }
 
+        // Every layer but the Comment pill floats over the whole window,
+        // where a native HTML preview would cover it.
+        let mut covering = !overlays.is_empty();
+
         // The shared Comment pill/editor, LAST so it paints above every
         // clipped surface (transcript, diff panes, terminal).
         self.comments.popup.update(cx, |popup, cx| {
@@ -635,12 +639,15 @@ impl Shell {
 
         if self.showing_setup() {
             overlays.push(self.render_setup_overlay(cx));
+            covering = true;
         }
 
         if let Some(overlay) = self.render_about_overlay(viewport, cx) {
             overlays.push(overlay);
+            covering = true;
         }
 
+        crate::files::web_view::set_suppressed(covering);
         overlays
     }
 

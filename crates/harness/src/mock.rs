@@ -13,6 +13,7 @@ use crate::{Harness, HarnessError, RunControls};
 
 mod changes;
 mod diffs;
+mod html;
 mod math;
 mod permissions;
 mod progress;
@@ -20,6 +21,7 @@ mod translation;
 
 pub use changes::{MARKER as CHANGES_MARKER, ROUNDS as CHANGES_ROUNDS};
 pub use diffs::MARKER as DIFFS_MARKER;
+pub use html::MARKER as HTML_MARKER;
 pub use math::MARKER as MATH_MARKER;
 pub use permissions::{
     CARD_MARKER as PERMISSION_CARD_MARKER,
@@ -318,8 +320,9 @@ impl Harness for MockHarness {
                 controls.interrupt,
             ));
         }
-        // Diff fence, math and translation showcases ([`DIFFS_MARKER`],
-        // [`MATH_MARKER`], [`TRANSLATION_MARKER`]): their reply replaces the
+        // Diff fence, math, HTML preview and translation showcases
+        // ([`DIFFS_MARKER`], [`MATH_MARKER`], [`HTML_MARKER`],
+        // [`TRANSLATION_MARKER`]): their reply replaces the
         // script's text and tools. `CYPHER_MOCK_TRANSLATION=1` (or `replace`)
         // answers every prompt with the translation showcase, so a message
         // typed into the demo translates too.
@@ -338,6 +341,8 @@ impl Harness for MockHarness {
             Some(diffs::reply())
         } else if request.prompt.contains(MATH_MARKER) {
             Some(math::reply())
+        } else if request.prompt.contains(HTML_MARKER) {
+            Some(html::reply())
         } else {
             translation_mode.map(translation::reply)
         };

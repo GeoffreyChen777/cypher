@@ -91,6 +91,43 @@ fn frame_stats(frames: &[gpui::FrameTiming], ms: u64) -> String {
     format!("frames {rate:.1}/s · draw mean {mean:.2} ms · p95 {p95:.2} ms")
 }
 
+/// Paste the shown native web views (which gpui's scene lacks) into a
+/// capture, cropped to their visible frames.
+#[cfg(target_os = "macos")]
+async fn compose_web_views(image: &mut image::RgbaImage, viewport: f32) {
+    let scale = image.width() as f64 / viewport.max(1.0) as f64;
+    for shot in crate::files::web_view::debug::shots().await {
+        let Some(page) = shot
+            .png
+            .and_then(|png| image::load_from_memory(&png).ok())
+            .map(|page| page.to_rgba8())
+        else {
+            continue;
+        };
+        let (px_, py, pw, ph) = shot.page;
+        let page = image::imageops::resize(
+            &page,
+            (pw * scale).round().max(1.0) as u32,
+            (ph * scale).round().max(1.0) as u32,
+            image::imageops::FilterType::Triangle,
+        );
+        let (vx, vy, vw, vh) = shot.visible;
+        let x0 = (vx * scale).round().max(0.0) as u32;
+        let y0 = (vy * scale).round().max(0.0) as u32;
+        let x1 = (((vx + vw) * scale).round() as u32).min(image.width());
+        let y1 = (((vy + vh) * scale).round() as u32).min(image.height());
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let sx = x as i64 - (px_ * scale).round() as i64;
+                let sy = y as i64 - (py * scale).round() as i64;
+                if sx >= 0 && sy >= 0 && (sx as u32) < page.width() && (sy as u32) < page.height() {
+                    image.put_pixel(x, y, *page.get_pixel(sx as u32, sy as u32));
+                }
+            }
+        }
+    }
+}
+
 fn num(parts: &[&str], ix: usize) -> anyhow::Result<f32> {
     parts
         .get(ix)
@@ -199,8 +236,21 @@ async fn run(
             // A fresh frame first: the capture reads the last rendered scene.
             cx.update_window(window, |_, window, _| window.refresh())?;
             pause(cx, 150).await;
-            let image = cx.update_window(window, |_, window, _| window.render_to_image())??;
+            let (mut image, viewport) = cx.update_window(window, |_, window, _| {
+                window
+                    .render_to_image()
+                    .map(|image| (image, f32::from(window.viewport_size().width)))
+            })??;
+            #[cfg(target_os = "macos")]
+            compose_web_views(&mut image, viewport).await;
+            #[cfg(not(target_os = "macos"))]
+            let _ = viewport;
             image.save(dir.join(format!("{name}.png")))?;
+        }
+        "webviews" => {
+            for line in crate::files::web_view::debug::describe() {
+                log(dir, &line, Ok(()));
+            }
         }
         "move" => input(
             window,

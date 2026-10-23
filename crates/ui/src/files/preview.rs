@@ -1,6 +1,7 @@
 //! What the Files surface shows for a file that is not plain text: images
 //! (fetched as bytes through `ReadWorkspaceFileChunk`), SVG renders, an info
-//! card for other binaries, and a hex dump of a binary's head.
+//! card for other binaries, and a hex dump of a binary's head. (HTML pages
+//! render in [`super::web_view`].)
 
 use std::sync::Arc;
 
@@ -28,6 +29,8 @@ pub(super) enum FileKind {
     /// Text that also renders as an image.
     Svg,
     Markdown,
+    /// Text that renders as a web page.
+    Html,
     /// Text, or a binary the info card describes.
     Other,
 }
@@ -43,6 +46,7 @@ impl FileKind {
             Some("tif" | "tiff") => Self::Image(ImageFormat::Tiff),
             Some("ico") => Self::Image(ImageFormat::Ico),
             Some("svg") => Self::Svg,
+            Some("html" | "htm" | "xhtml") => Self::Html,
             _ if super::is_markdown(path) => Self::Markdown,
             _ => Self::Other,
         }
@@ -50,7 +54,11 @@ impl FileKind {
 
     /// Has a rendered view beside its source.
     pub(super) fn previews(self) -> bool {
-        matches!(self, Self::Svg | Self::Markdown)
+        match self {
+            Self::Svg | Self::Markdown => true,
+            Self::Html => super::web_view::AVAILABLE,
+            Self::Image(_) | Self::Other => false,
+        }
     }
 }
 
@@ -373,6 +381,16 @@ pub(super) fn render_image(
         .into_any_element()
 }
 
+/// The HTML view: the page edge to edge, short of the dock's floating rail
+/// on the right (`right`) — a native page would cover it.
+pub(super) fn render_page(page: AnyElement, right: f32) -> AnyElement {
+    div()
+        .size_full()
+        .pr(px(right))
+        .child(page)
+        .into_any_element()
+}
+
 fn footer(text: String, theme: &Theme) -> AnyElement {
     div()
         .flex_none()
@@ -536,6 +554,8 @@ mod tests {
         );
         assert_eq!(FileKind::for_path("logo.svg"), FileKind::Svg);
         assert_eq!(FileKind::for_path("README.md"), FileKind::Markdown);
+        assert_eq!(FileKind::for_path("site/Index.HTML"), FileKind::Html);
+        assert_eq!(FileKind::for_path("page.htm"), FileKind::Html);
         assert_eq!(FileKind::for_path("main.rs"), FileKind::Other);
         assert_eq!(FileKind::for_path(".png"), FileKind::Other);
         assert_eq!(kind_label("doc.PDF"), "PDF document");
