@@ -514,6 +514,8 @@ mod anchored {
     /// Set an entry's permission bits through its own fd. The engine runs
     /// with a private umask (its data dir), so project entries it creates
     /// get their modes set explicitly rather than inheriting that.
+    // `mode_t` is u16 on macOS, where the conversion is needed, and u32 on Linux.
+    #[allow(clippy::useless_conversion)]
     pub(super) fn chmod(file: &File, mode: libc::mode_t) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(std::fs::Permissions::from_mode(u32::from(mode & 0o7777)))
