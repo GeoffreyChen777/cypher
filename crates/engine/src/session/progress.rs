@@ -5,7 +5,9 @@
 //! and the steps still to come — an estimate the model revises with every
 //! reading, so the upcoming steps refresh as the agent learns more. The run loop checks every few seconds
 //! ([`NarrationClock`]) and asks again every [`EVERY`] while the turn runs,
-//! never with one reading still being written.
+//! never with one reading still being written, and only once the turn has
+//! moved on from what the last reading saw: a turn waiting on one long step
+//! keeps its reading rather than asking again.
 //!
 //! The model is the run harness's small-tier model from the run's own
 //! provider (`provider/model` ids share the prefix), else the run's model
@@ -14,8 +16,9 @@
 //! the bar moves steadily. Every failure is a silent skip with tracing: a
 //! progress reading must never fail or delay a run.
 
-use std::sync::Arc;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -27,6 +30,7 @@ use cypher_proto::{
 };
 
 use crate::registry::HarnessRegistry;
+use crate::util::lock;
 
 /// How long a turn runs before its first reading.
 pub(crate) const FIRST_AFTER: Duration = Duration::from_secs(60);
@@ -57,6 +61,9 @@ pub(crate) struct NarrationClock {
     turn: Option<DateTime<Utc>>,
     last_asked: Option<tokio::time::Instant>,
     in_flight: Arc<AtomicBool>,
+    /// The activity (see [`Prompt::activity`]) the last reading that landed
+    /// was written from.
+    read: Arc<Mutex<Option<u64>>>,
 }
 
 impl NarrationClock {
@@ -71,6 +78,7 @@ impl NarrationClock {
         if self.turn != turn {
             self.turn = turn;
             self.last_asked = None;
+            *lock(&self.read) = None;
         }
         let Some(turn) = turn else {
             return false;
@@ -89,20 +97,50 @@ impl NarrationClock {
         true
     }
 
-    /// Mark a reading in flight until the returned guard drops.
-    pub fn start(&self) -> InFlight {
+    /// Whether the last reading that landed already saw `activity`, so
+    /// asking again would only repeat it.
+    pub fn already_read(&self, activity: u64) -> bool {
+        *lock(&self.read) == Some(activity)
+    }
+
+    /// Mark a reading of `activity` in flight until the returned guard drops.
+    pub fn start(&self, activity: u64) -> InFlight {
         self.in_flight.store(true, Ordering::SeqCst);
-        InFlight(self.in_flight.clone())
+        InFlight {
+            flag: self.in_flight.clone(),
+            read: self.read.clone(),
+            activity,
+        }
     }
 }
 
 /// Holds a run's reading in flight (see [`NarrationClock::start`]).
-pub(crate) struct InFlight(Arc<AtomicBool>);
+pub(crate) struct InFlight {
+    flag: Arc<AtomicBool>,
+    read: Arc<Mutex<Option<u64>>>,
+    activity: u64,
+}
+
+impl InFlight {
+    /// The reading landed: the turn needs no other until it moves on. A
+    /// reading that failed never calls this, so the next tick tries again.
+    pub fn landed(&self) {
+        *lock(&self.read) = Some(self.activity);
+    }
+}
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.flag.store(false, Ordering::SeqCst);
     }
+}
+
+/// A reading's request, with what it reads the turn from.
+pub(crate) struct Prompt {
+    pub text: String,
+    /// A hash of the turn's request, the agent's activity and its plan: not
+    /// the elapsed time or the previous reading, which change on their own.
+    pub activity: u64,
 }
 
 /// The request for a reading of the turn that ends `entries` (joined), or
@@ -111,13 +149,16 @@ pub(crate) fn prompt(
     entries: &[SessionMessageEntry],
     previous: Option<&RunProgress>,
     elapsed: Duration,
-) -> Option<String> {
+) -> Option<Prompt> {
     let user_ix = entries.iter().rposition(|e| e.role == MessageRole::User)?;
     let request = request_text(&entries[user_ix]);
     if request.is_empty() {
         return None;
     }
     let activity = activity_lines(&entries[user_ix + 1..]);
+    let mut hasher = DefaultHasher::new();
+    (&request, &activity).hash(&mut hasher);
+    let fingerprint = hasher.finish();
     let mut out = String::from(
         "You are watching an AI coding agent work on a user's request, and you \
          report its progress to the user. Reply with ONLY one JSON object, no \
@@ -170,7 +211,10 @@ pub(crate) fn prompt(
         out.push('\n');
     }
     out.push_str("</agent_activity>\n");
-    Some(out)
+    Some(Prompt {
+        text: out,
+        activity: fingerprint,
+    })
 }
 
 fn request_text(entry: &SessionMessageEntry) -> String {
@@ -477,13 +521,19 @@ mod tests {
         assert!(!clock.due(Some(start), at(85), tick(85)));
         assert!(clock.due(Some(start), at(90), tick(90)));
         // One reading at a time.
-        let guard = clock.start();
+        let guard = clock.start(7);
         assert!(!clock.due(Some(start), at(125), tick(125)));
         drop(guard);
         assert!(clock.due(Some(start), at(126), tick(126)));
+        // A failed reading leaves its activity unread; a landed one doesn't.
+        assert!(!clock.already_read(7));
+        clock.start(7).landed();
+        assert!(clock.already_read(7));
+        assert!(!clock.already_read(8));
         // A new turn starts over.
         let next = at(200);
         assert!(!clock.due(Some(next), at(230), tick(230)));
+        assert!(!clock.already_read(7));
         assert!(clock.due(Some(next), at(260), tick(260)));
         assert!(!clock.due(None, at(400), tick(400)));
     }
@@ -532,15 +582,24 @@ mod tests {
             stages: vec![],
             updated_at: Utc::now(),
         };
-        let text = prompt(&entries, Some(&previous), Duration::from_secs(95)).unwrap();
-        assert!(text.contains("<request>\nAdd a progress bar\n</request>"));
-        assert!(!text.contains("old request"));
-        assert!(text.contains("<elapsed>1m 35s</elapsed>"));
-        assert!(text.contains("percent=\"30\">\ncurrent: Reading code\nnext: Wire it up\n"));
-        assert!(text.contains("Agent: Looking at the trailer."));
-        assert!(text.contains("cargo test (running)"));
-        assert!(text.contains("- [x] Engine\n- [ ] UI"));
+        let read = prompt(&entries, Some(&previous), Duration::from_secs(95)).unwrap();
+        let body = &read.text;
+        assert!(body.contains("<request>\nAdd a progress bar\n</request>"));
+        assert!(!body.contains("old request"));
+        assert!(body.contains("<elapsed>1m 35s</elapsed>"));
+        assert!(body.contains("percent=\"30\">\ncurrent: Reading code\nnext: Wire it up\n"));
+        assert!(body.contains("Agent: Looking at the trailer."));
+        assert!(body.contains("cargo test (running)"));
+        assert!(body.contains("- [x] Engine\n- [ ] UI"));
         assert!(prompt(&[], None, Duration::ZERO).is_none());
+        // Time passing and a new previous reading leave the activity as it
+        // was; a step finishing changes it.
+        let later = prompt(&entries, None, Duration::from_secs(400)).unwrap();
+        assert_eq!(later.activity, read.activity);
+        let mut moved = entries.clone();
+        moved[3].parts.push(text("Tests pass."));
+        let moved = prompt(&moved, Some(&previous), Duration::from_secs(95)).unwrap();
+        assert_ne!(moved.activity, read.activity);
     }
 
     #[test]

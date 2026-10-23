@@ -522,25 +522,29 @@ impl<'r> RunLoop<'r> {
         else {
             return;
         };
+        // Nothing new since the last reading: it still stands.
+        if self.narration.already_read(prompt.activity) {
+            return;
+        }
         let run_model = lock(&inner.last_requests)
             .get(chat_id)
             .and_then(|r| r.model.clone());
-        let in_flight = self.narration.start();
+        let in_flight = self.narration.start(prompt.activity);
         let inner = Arc::clone(inner);
         let chat_id = chat_id.to_string();
         let harness_id = self.scope.harness_id;
         let cwd = self.scope.run_cwd.to_string();
         tokio::spawn(async move {
-            let _in_flight = in_flight;
             let progress = crate::session::progress::ask(
                 &inner.registry,
                 harness_id,
                 run_model.as_deref(),
                 &cwd,
-                prompt,
+                prompt.text,
             )
             .await;
             if let Some(progress) = progress {
+                in_flight.landed();
                 inner.set_progress(&chat_id, turn, progress);
             }
         });
