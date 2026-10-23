@@ -14,7 +14,7 @@
          which a CI runner does not have: the export failed with "No profiles
          for 'ai.mvp-lab.cypher.ios' were found" even though the archive had
          just been signed with the profile installed beside it. The name below
-         is the one ios.yml passes as PROVISIONING_PROFILE_SPECIFIER. -->
+         is the one ios.yml passes as CYPHER_PROVISIONING_PROFILE. -->
     <key>signingStyle</key>
     <string>manual</string>
     <key>signingCertificate</key>
