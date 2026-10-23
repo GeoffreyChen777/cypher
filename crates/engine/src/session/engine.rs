@@ -1288,6 +1288,7 @@ impl Inner {
                     context_usage: seed,
                     throughput: None,
                     recovery: None,
+                    progress: None,
                 });
             if entry.context_usage == Some(usage) {
                 return;
@@ -1323,6 +1324,35 @@ impl Inner {
             }
             entry.recovery = recovery;
             entry.updated_at = Utc::now();
+            entry.clone()
+        };
+        self.publish_session(chat_id, &session);
+    }
+
+    /// A long turn's narrated progress (see [`crate::session::progress`]).
+    /// Applied only while `turn` — the `started_at` the narration was asked
+    /// for — is still the chat's running turn: a reading that lands after
+    /// its turn settled or a new one began is dropped. Each reading is a
+    /// registry write (one per half minute at most) so other devices' bars
+    /// follow; `updated_at` stays put, it is not a liveness signal.
+    fn set_progress(
+        &self,
+        chat_id: &str,
+        turn: chrono::DateTime<Utc>,
+        progress: cypher_proto::RunProgress,
+    ) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.status != SessionStatus::Working || entry.started_at != Some(turn) {
+                return;
+            }
+            entry.progress = Some(crate::session::progress::with_stages(
+                entry.progress.as_ref(),
+                progress,
+            ));
             entry.clone()
         };
         self.publish_session(chat_id, &session);
@@ -1366,6 +1396,7 @@ impl Inner {
                     context_usage: seed,
                     throughput: None,
                     recovery: None,
+                    progress: None,
                 });
             entry.subagents = runs;
             entry.updated_at = now;
@@ -1469,6 +1500,7 @@ impl Inner {
                     context_usage: seed,
                     throughput: None,
                     recovery: None,
+                    progress: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -1486,11 +1518,13 @@ impl Inner {
                 SessionStatus::Working if fresh_start || !was_active => {
                     entry.started_at = Some(now);
                     entry.throughput = None;
+                    entry.progress = None;
                 }
                 SessionStatus::Working | SessionStatus::AwaitingInput => {}
                 SessionStatus::Idle | SessionStatus::Errored => {
                     entry.started_at = None;
                     entry.throughput = None;
+                    entry.progress = None;
                 }
             }
             let settled = was_active && matches!(run, SessionStatus::Idle | SessionStatus::Errored);

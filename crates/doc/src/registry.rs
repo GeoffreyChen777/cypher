@@ -962,7 +962,8 @@ impl RegistryDoc {
     /// the stored one in place rather than blanking other devices' rings.
     /// Throughput is the opposite: it belongs to one turn, so a row without
     /// it (settled, or a new turn before its first reading) clears it. So
-    /// does a context recovery: a row without one ends it.
+    /// does a context recovery: a row without one ends it, and a turn's
+    /// narrated progress.
     pub fn upsert_session(&mut self, session: &Session) -> Result<(), DocError> {
         let subagents = serde_json::to_value(&session.subagents)?;
         let mut set = fields([
@@ -990,6 +991,13 @@ impl RegistryDoc {
                 "recovery",
                 match &session.recovery {
                     Some(recovery) => serde_json::to_value(recovery)?,
+                    None => Value::Null,
+                },
+            ),
+            (
+                "progress",
+                match &session.progress {
+                    Some(progress) => serde_json::to_value(progress)?,
                     None => Value::Null,
                 },
             ),

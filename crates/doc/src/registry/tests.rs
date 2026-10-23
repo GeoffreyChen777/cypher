@@ -330,6 +330,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         context_usage: None,
         throughput: None,
         recovery: None,
+        progress: None,
     }
 }
 
@@ -502,6 +503,38 @@ fn session_throughput_syncs_and_clears_with_the_turn() {
     let row = &b.read_sessions().unwrap()[0];
     assert_eq!(row.status, SessionStatus::Idle);
     assert_eq!(row.throughput, None);
+}
+
+/// A long turn's narrated progress rides the host's Working row to its peers
+/// (every device's progress bar), and the settle write clears it.
+#[test]
+fn session_progress_syncs_and_clears_with_the_turn() {
+    let reading = cypher_proto::RunProgress {
+        percent: 40,
+        current: "Wiring the UI".into(),
+        next: vec!["Run tests".into()],
+        steps_left: Some(2),
+        stages: vec![cypher_proto::ProgressStage {
+            label: "Wiring the UI".into(),
+            percent: 30,
+        }],
+        updated_at: ts(3_400),
+    };
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let (mut server, mut seq) = (HashMap::new(), 0);
+    let mut working = session("chat-1", "dev-a", SessionStatus::Working);
+    working.progress = Some(reading.clone());
+    a.upsert_session(&working).unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].progress, Some(reading));
+
+    a.upsert_session(&session("chat-1", "dev-a", SessionStatus::Idle))
+        .unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].progress, None);
 }
 
 /// A context recovery under way rides the host's row to its peers (the

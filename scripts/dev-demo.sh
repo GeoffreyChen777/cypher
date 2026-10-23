@@ -39,13 +39,25 @@
 #                                 # translations, one replaces. Paced like
 #                                 # --slow; every message typed into the demo
 #                                 # plays the same run (CYPHER_MOCK_TRANSLATION)
+#   scripts/dev-demo.sh --progress
+#                                 # narrated progress for long turns: under
+#                                 # "Progress demo", "Paginate the tasks API"
+#                                 # works through a plan for about four
+#                                 # minutes. After its first minute a progress
+#                                 # bar fills the spinner's row, with a dot per
+#                                 # step still to come and how many are left;
+#                                 # it moves every half minute, and midway the
+#                                 # agent finds a new step, so the upcoming
+#                                 # steps refresh. Every message typed into the
+#                                 # demo plays the same run (CYPHER_MOCK_PROGRESS)
 #
-# The flags combine (--permissions, --diffs, --changes or --translation takes
-# the place of the default seed).
+# The flags combine (--permissions, --diffs, --changes, --translation or
+# --progress takes the place of the default seed).
 # Everything lives under /tmp/cypher-demo-* (--work: /tmp/cypher-demo-work-*,
 # --permissions: /tmp/cypher-demo-permissions-*, --diffs:
 # /tmp/cypher-demo-diffs-*, --changes: /tmp/cypher-demo-changes-*,
-# --translation: /tmp/cypher-demo-translation-*); re-runs
+# --translation: /tmp/cypher-demo-translation-*, --progress:
+# /tmp/cypher-demo-progress-*); re-runs
 # reuse it (delete
 # those directories to reseed). Quitting the app stops the engine.
 set -euo pipefail
@@ -57,6 +69,7 @@ PERMS=""
 DIFFS=""
 CHANGES=""
 TRANSLATION=""
+PROGRESS=""
 for arg in "$@"; do
   case "$arg" in
     --work) WORK=1 ;;
@@ -65,12 +78,13 @@ for arg in "$@"; do
     --diffs) DIFFS=1 ;;
     --changes) CHANGES=1 ;;
     --translation) TRANSLATION=1 ;;
-    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs] [--changes] [--translation]' >&2; exit 2 ;;
+    --progress) PROGRESS=1 ;;
+    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs] [--changes] [--translation] [--progress]' >&2; exit 2 ;;
   esac
 done
 # Translation is about what happens while the agent works, so it is paced.
 [[ -n "$TRANSLATION" ]] && DELAY="${DELAY:-250}"
-DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}${CHANGES:+-changes}${TRANSLATION:+-translation}
+DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}${CHANGES:+-changes}${TRANSLATION:+-translation}${PROGRESS:+-progress}
 DAEMON_DIR=$DEMO_DIR-daemon
 UI_DIR=$DEMO_DIR-ui
 
@@ -85,7 +99,7 @@ cargo build -p cypher-rpc --example rpc_probe -q
 echo "▸ starting the mock engine with private Unix IPC"
 env CYPHER_DATA_DIR="$DAEMON_DIR" CYPHER_HARNESS=mock \
   ${WORK:+CYPHER_MOCK_WORK=1} ${DELAY:+CYPHER_MOCK_DELAY_MS=$DELAY} \
-  ${TRANSLATION:+CYPHER_MOCK_TRANSLATION=1} RUST_LOG=warn \
+  ${TRANSLATION:+CYPHER_MOCK_TRANSLATION=1} ${PROGRESS:+CYPHER_MOCK_PROGRESS=1} RUST_LOG=warn \
   ./target/debug/cypher headless &
 DAEMON_PID=$!
 trap 'kill $DAEMON_PID 2>/dev/null || true' EXIT
@@ -228,6 +242,16 @@ JSON
   "translateIntermediateResponses": true
 }
 JSON
+  elif [[ -n "$PROGRESS" ]]; then
+    # The run is scripted (crates/harness/src/mock/progress.rs); the bar
+    # comes from the engine's progress narrator asking the mock for readings.
+    project="$DEMO_DIR-projects/tasks-api"
+    mkdir -p "$project"
+    space=$(new_id) chat=$(new_id)
+    create_space "$space" "$project" '"name":"Progress demo"'
+    create_chat "$chat" "$space" "Paginate the tasks API"
+    run_prompt "$chat" "$project" "Add cursor pagination to GET /tasks, and keep the client returning every task." \
+      "Add cursor pagination to GET /tasks, and keep the client returning every task. [mock:progress]"
   elif [[ -n "$DIFFS" ]]; then
     space=$(new_id) chat=$(new_id)
     create_space "$space" "$PWD" '"name":"Diff fence demo","gitDetected":true'

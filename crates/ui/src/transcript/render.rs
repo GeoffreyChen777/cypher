@@ -18,7 +18,7 @@ impl Transcript {
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat_id = self.chat_id.clone()?;
         let now = chrono::Utc::now();
-        let (sending, elapsed_secs, upload_percent, throughput) = {
+        let (sending, elapsed_secs, upload_percent, throughput, progress) = {
             let state = self.state.read(cx);
             if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                 return None;
@@ -71,11 +71,13 @@ impl Transcript {
                 .session_for(&chat_id)
                 .and_then(|s| s.throughput.as_ref())
                 .and_then(|t| throughput_label(t, now));
+            let progress = state.session_for(&chat_id).and_then(|s| s.progress.clone());
             (
                 sending,
                 elapsed,
                 state.upload_progress_percent(&chat_id),
                 throughput,
+                progress,
             )
         };
         self.schedule_trailer_tick(cx);
@@ -87,17 +89,75 @@ impl Transcript {
             flavour_word(flavour_seed(&chat_id), elapsed_secs).to_string()
         };
         let theme = Theme::of(cx).clone();
+        // A long turn's narrated progress: its bar takes what the row
+        // leaves after the spinner, the word and the timer.
+        let progress = progress.filter(|_| upload_percent.is_none() && !sending);
+        let bar = progress.map(|progress| {
+            let now = Instant::now();
+            self.progress_motion.observe(
+                &chat_id,
+                progress.stages.len().max(1),
+                progress.percent.min(100),
+                &super::progress::upcoming_positions(
+                    progress.percent,
+                    super::progress::steps_left(&progress),
+                ),
+                now,
+            );
+            let chat_bg = crate::appearance::chat_style::panel_background(
+                crate::appearance::chat_style::settings(cx),
+                &theme,
+                true,
+            );
+            let entity = cx.entity().downgrade();
+            let on_hover = move |key: SharedString| -> super::progress::HoverHandler {
+                let entity = entity.clone();
+                Box::new(move |hovered: &bool, _: &mut Window, cx: &mut App| {
+                    let hovered = *hovered;
+                    entity
+                        .update(cx, |this, cx| {
+                            let before = this.progress_hover.clone();
+                            if hovered {
+                                this.progress_hover = Some(key.clone());
+                            } else if this.progress_hover.as_ref() == Some(&key) {
+                                this.progress_hover = None;
+                            }
+                            if this.progress_hover != before {
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                })
+            };
+            super::progress::render(
+                &progress,
+                &self.progress_motion,
+                &theme,
+                chat_bg,
+                self.progress_hover.as_deref(),
+                &on_hover,
+                cx.entity_id(),
+                now,
+            )
+        });
         Some(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM))
-                .pt(px(10.0))
+                // Room above the bar for its current stage's tip.
+                .pt(px(if bar.is_some() {
+                    super::progress::TIP_ROOM
+                } else {
+                    10.0
+                }))
+                .when(bar.is_some(), |el| el.w_full())
                 .text_size(px(11.0))
                 .child(crate::kit::loaders::gradient_spinner(2.5, cx.entity_id()))
                 .child(
                     div()
+                        .flex_none()
                         .text_size(px(12.0))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(format!("{word}…"))),
@@ -110,10 +170,12 @@ impl Transcript {
                     };
                     el.child(
                         div()
+                            .flex_none()
                             .text_color(theme.text_faint)
                             .child(SharedString::from(tail)),
                     )
                 })
+                .children(bar.map(|bar| div().flex_1().min_w_0().pl(px(6.0)).flex().child(bar)))
                 .into_any_element(),
         )
     }

@@ -759,6 +759,7 @@ async fn boot_recovery_terminalizes_local_but_not_remote_rows() {
         context_usage: None,
         throughput: None,
         recovery: None,
+        progress: None,
     };
     let remote = Session {
         chat_id: "chat-remote".into(),
@@ -770,6 +771,7 @@ async fn boot_recovery_terminalizes_local_but_not_remote_rows() {
         context_usage: None,
         throughput: None,
         recovery: None,
+        progress: None,
     };
     rig.core.workspace.record_session(&local);
     rig.core.workspace.record_session(&remote);

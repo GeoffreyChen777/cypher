@@ -15,6 +15,7 @@ mod changes;
 mod diffs;
 mod math;
 mod permissions;
+mod progress;
 mod translation;
 
 pub use changes::{MARKER as CHANGES_MARKER, ROUNDS as CHANGES_ROUNDS};
@@ -25,6 +26,7 @@ pub use permissions::{
     MULTILINE_CARD_MARKER as MULTILINE_PERMISSION_CARD_MARKER, STORY_MARKER as PERMISSIONS_MARKER,
     TALL_CARD_MARKER as TALL_PERMISSION_CARD_MARKER,
 };
+pub use progress::MARKER as PROGRESS_MARKER;
 pub use translation::{
     MARKER as TRANSLATION_MARKER, Mode as TranslationMode, PROMPT as TRANSLATION_PROMPT,
     REPLACE_MARKER as TRANSLATION_REPLACE_MARKER, settled as translation_settled,
@@ -215,6 +217,26 @@ impl Harness for MockHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        // The engine's progress narrator asking for a reading of a long turn
+        // ([`PROGRESS_MARKER`] runs one): answered at once from the plan it
+        // quotes.
+        if progress::is_reading(&request.prompt) {
+            return Ok(futures::stream::iter(
+                [
+                    AgentEvent::TextDelta {
+                        text: progress::reading(&request.prompt),
+                    },
+                    AgentEvent::Done {
+                        status: DoneStatus::Completed,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    },
+                ]
+                .map(Ok),
+            )
+            .boxed());
+        }
         // Optional pacing knob for demos/manual testing: `CYPHER_MOCK_DELAY_MS`
         // spaces the scripted events out so live-run UI states (working
         // indicator, streaming fade, trailing tool-group auto-open) are
@@ -281,6 +303,19 @@ impl Harness for MockHarness {
                 std::path::PathBuf::from(&request.cwd),
                 round,
                 delay,
+            ));
+        }
+        // Narrated progress demo ([`PROGRESS_MARKER`]): a run of about four
+        // minutes through a plan that gains a step midway, between the
+        // script's opening and its Done. `CYPHER_MOCK_PROGRESS=1` plays it for
+        // every prompt, so a message typed into the demo runs long too.
+        if request.prompt.contains(PROGRESS_MARKER)
+            || cypher_env::var("MOCK_PROGRESS").is_some_and(|v| !v.is_empty() && v != "0")
+        {
+            return Ok(progress::run(
+                body[..lead].to_vec(),
+                tail.to_vec(),
+                controls.interrupt,
             ));
         }
         // Diff fence, math and translation showcases ([`DIFFS_MARKER`],

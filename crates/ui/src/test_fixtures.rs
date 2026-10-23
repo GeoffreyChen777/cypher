@@ -58,6 +58,7 @@ pub fn session() -> Session {
         context_usage: None,
         throughput: None,
         recovery: None,
+        progress: None,
     }
 }
 

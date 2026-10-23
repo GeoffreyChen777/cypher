@@ -298,6 +298,14 @@ pub const EASE_TAILWIND: CubicBezier = CubicBezier::new(0.4, 0.0, 0.2, 1.0);
 /// CSS `transition-colors` default: 150ms over [`EASE_TAILWIND`] — the temporal
 /// blend every interactive hover wash rides in the original.
 pub const HOVER_FADE: MotionSpec = MotionSpec::new(150, EASE_TAILWIND);
+/// The progress bar's glint and breathing-ring period (`kit::progress_bar`).
+pub const PROGRESS_FLOW: MotionSpec =
+    MotionSpec::new(crate::kit::progress_bar::FLOW_MS, EASE_IN_OUT);
+/// The progress bar's fill and newest-dot tween when a reading lands.
+pub const PROGRESS_TWEEN: MotionSpec = MotionSpec::new(900, EASE_OUT_EXPO);
+/// The progress bar's tip switch: the old tip leaves, the new one rises in.
+pub const PROGRESS_TIP_OUT: MotionSpec = MotionSpec::new(260, EASE);
+pub const PROGRESS_TIP_IN: MotionSpec = MotionSpec::new(420, EASE_OUT_EXPO).with_delay(120);
 /// Cypher loader pulse period: 2.4s.
 pub const CYPHER_PULSE: MotionSpec = MotionSpec::new(2400, EASE);
 /// Gradient matrix spinner wave period: 750ms.

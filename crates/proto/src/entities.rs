@@ -307,6 +307,46 @@ pub struct Session {
     /// devices see it too; `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<crate::RecoveryProgress>,
+    /// A long turn's narrated progress (the working trailer's progress bar):
+    /// written by a cheap model once the turn has run a minute, refreshed
+    /// every half minute. Belongs to one turn like `throughput` — a settled
+    /// or newly started turn drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<RunProgress>,
+}
+
+/// A cheap model's reading of how far a long turn has got. An estimate for
+/// the user's eyes only — nothing drives off it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunProgress {
+    /// 0–100.
+    pub percent: u8,
+    /// What the agent is doing now, one short line.
+    pub current: String,
+    /// The steps still to come after `current`, in order: the model's
+    /// estimate, revised with every reading (may be empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next: Vec<String>,
+    /// How many steps remain after `current`, when the model counts more
+    /// than it lists in `next`. `None` = `next` is the whole remainder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps_left: Option<u16>,
+    /// The stages the turn has been through, oldest first; the last one is
+    /// `current`. The host carries them over from reading to reading (the
+    /// progress bar's dots).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<ProgressStage>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One stage of a long turn: what the agent was doing, and how far the turn
+/// had got (0–100) when that stage began.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressStage {
+    pub label: String,
+    pub percent: u8,
 }
 
 /// One output-throughput reading: an ESTIMATE made from the streamed deltas
