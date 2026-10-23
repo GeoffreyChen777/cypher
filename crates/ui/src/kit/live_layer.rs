@@ -2,7 +2,7 @@
 //!
 //! A view embedded with gpui's `cached()` replays its last frame until it is
 //! notified, so a loader inside it would either freeze or, leasing the pulse
-//! clock for its host, re-render the whole host on every pulse (~30 a
+//! clock for its host, re-render the whole host on every pulse (20 a
 //! second) — for the transcript, rebuilding and laying out every visible row
 //! to step a few spinner cells.
 //!

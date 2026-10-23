@@ -329,6 +329,9 @@ impl SideChatPanel {
 
     pub fn render_panel(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
+        let live = self
+            .transcript
+            .update(cx, |transcript, _| transcript.live_layer());
 
         div()
             .size_full()
@@ -394,8 +397,21 @@ impl SideChatPanel {
                 )
             })
             // The existing Transcript (flex_1) and the existing Composer —
-            // the reused render path and all of its UX.
-            .child(div().flex_1().min_h_0().child(self.transcript.clone()))
+            // the reused render path and all of its UX. The transcript is
+            // cached like the main chat's, so animation ticks replay its rows
+            // instead of rebuilding them; its live layer paints the loaders
+            // and hover fades inside, ticking with this panel.
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        self.transcript
+                            .clone()
+                            .cached(gpui::StyleRefinement::default().size_full()),
+                    )
+                    .child(live.overlay(self.transcript.entity_id(), cx.entity_id())),
+            )
             .child(self.composer.clone())
             .into_any_element()
     }

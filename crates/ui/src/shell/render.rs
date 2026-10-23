@@ -1765,6 +1765,9 @@ impl Shell {
         // app rather than waiting out the background probe cadence.
         let window_active = window.is_window_active();
         if window_active && !self.attention.was_window_active {
+            // Reduce Motion is changed in System Settings, so coming back
+            // is when it may have moved.
+            crate::kit::motion::sync_system_reduce_motion(cx);
             self.state.update(cx, |s, cx| s.probe_sync(cx));
             // Platforms release independently, so the build you want
             // may have shipped while you were away. The engine rate

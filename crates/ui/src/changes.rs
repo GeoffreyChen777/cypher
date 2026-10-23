@@ -220,6 +220,9 @@ pub struct Changes {
     sel_scope: crate::markdown::selection::SelectionScope,
     /// The shared shell-level Comment pill/editor (weak — the shell owns it).
     comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
+    /// Loaders and hover fades inside the cached pane (see
+    /// [`Self::live_layer`]).
+    live: crate::kit::live_layer::LiveLayer,
     _observe: Subscription,
     _layout_observe: Subscription,
 }
@@ -488,7 +491,12 @@ impl Changes {
         comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
+        // The pane renders cached (see `render_pane`) and reads the app
+        // state, so any change to it re-renders the pane.
+        let observe = cx.observe(&state, |this: &mut Self, _, cx| {
+            this.sync(cx);
+            cx.notify();
+        });
         let layout_observe = cx.observe_global::<layout::LayoutState>(|this: &mut Self, cx| {
             this.apply_layout(layout::current(cx), cx);
         });
@@ -567,6 +575,7 @@ impl Changes {
             owner: format!("changes-{}", cx.entity_id()),
             sel_scope,
             comment_popup,
+            live: crate::kit::live_layer::LiveLayer::default(),
             _observe: observe,
             _layout_observe: layout_observe,
         }

@@ -1219,7 +1219,18 @@ fn is_missing_object(message: &str) -> bool {
 }
 
 impl Render for Changes {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let live = self.live.clone();
+        live.scope(|| self.render_pane(window, cx))
+    }
+}
+
+impl Changes {
+    /// The dock renders the pane cached, so animation ticks replay it: the
+    /// pane re-renders when its own state or the app state it reads changes
+    /// (it observes both), and its loaders and hover fades paint through
+    /// [`Self::live_layer`].
+    fn render_pane(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.scope == DiffScope::History {
             let history = self.history_pane(cx);
             history.update(cx, |history, cx| history.ensure_loaded(cx));
@@ -1408,5 +1419,11 @@ impl Render for Changes {
             })
             .child(content)
             .into_any_element()
+    }
+
+    /// The pane's live layer: the dock paints its overlay right after the
+    /// cached pane.
+    pub fn live_layer(&self) -> crate::kit::live_layer::LiveLayer {
+        self.live.clone()
     }
 }

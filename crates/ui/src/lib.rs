@@ -183,6 +183,7 @@ pub fn run_app(config: UiConfig) {
             data_dir.clone(),
             cx,
         );
+        kit::motion::sync_system_reduce_motion(cx);
         appearance::surface_style::init(data_dir.clone(), cx);
         changes::layout::init(data_dir.clone(), cx);
         appearance::chat_style::init(data_dir, cx);

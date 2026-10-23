@@ -712,6 +712,7 @@ impl Shell {
                     // surface tab strip (user request).
                     let controls =
                         changes.update(cx, |changes, cx| changes.render_header_controls(cx));
+                    let live = changes.read(cx).live_layer();
                     div()
                         .size_full()
                         .flex()
@@ -732,7 +733,7 @@ impl Shell {
                                 .flex_1()
                                 .min_h_0()
                                 .pb(px(PANEL_CORNER_RADIUS))
-                                .child(changes),
+                                .child(self.cached_surface(changes.clone(), live)),
                         )
                         .into_any_element()
                 }
@@ -745,6 +746,7 @@ impl Shell {
                     // Same two-row shape as the diff pane: the surface's own
                     // controls row under the tab strip, then the body.
                     let controls = panel.update(cx, |panel, cx| panel.render_header_controls(cx));
+                    let live = panel.read(cx).live_layer();
                     div()
                         .size_full()
                         .flex()
@@ -762,7 +764,7 @@ impl Shell {
                                 .flex_1()
                                 .min_h_0()
                                 .pb(px(PANEL_CORNER_RADIUS))
-                                .child(panel),
+                                .child(self.cached_surface(panel.clone(), live)),
                         )
                         .into_any_element()
                 }
@@ -865,6 +867,23 @@ impl Shell {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// A dock surface's body: the surface view cached, so the animation
+    /// clock's ticks replay it instead of rebuilding it, with its live
+    /// layer's overlay right after it painting the loaders and hover fades
+    /// inside.
+    fn cached_surface<V: Render>(
+        &self,
+        view: Entity<V>,
+        live: crate::kit::live_layer::LiveLayer,
+    ) -> AnyElement {
+        let host = view.entity_id();
+        div()
+            .size_full()
+            .child(view.cached(gpui::StyleRefinement::default().size_full()))
+            .child(live.overlay(host, self.pulse_ticker.entity_id()))
+            .into_any_element()
     }
 
     /// The right pane's empty state: the "Open a surface" heading over a

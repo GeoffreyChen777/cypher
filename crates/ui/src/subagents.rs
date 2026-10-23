@@ -825,7 +825,7 @@ fn counts_line(counts: &PanelCounts) -> SharedString {
 }
 
 /// Braille frames for the compact Running spinner. Animation is driven by the
-/// shared 30fps pulse clock rather than a permanently hot display-frame loop.
+/// shared pulse clock rather than a permanently hot display-frame loop.
 const RUNNING_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 fn running_spinner_glyph(delta: f32) -> &'static str {

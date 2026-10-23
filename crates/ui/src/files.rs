@@ -48,6 +48,7 @@ use cypher_rpc::{RpcError, methods};
 use cypher_syntax::{HighlightedDocument, LanguageId};
 
 use crate::kit::icons::{self, icon};
+use crate::kit::live_layer::LiveLayer;
 use crate::kit::popover::{Loadable, Popup};
 use crate::kit::theme::Theme;
 use crate::markdown::parser::{Block, BlockTree, parse_full};
@@ -284,6 +285,9 @@ pub struct FilesPanel {
     watch_target: Option<Option<String>>,
     watch_task: Option<Task<()>>,
     refresh_task: Option<Task<()>>,
+    /// Loaders and hover fades inside the cached panel (see
+    /// [`Self::live_layer`]).
+    live: LiveLayer,
     _observe: Subscription,
 }
 
@@ -354,6 +358,7 @@ impl FilesPanel {
             watch_target: None,
             watch_task: None,
             refresh_task: None,
+            live: LiveLayer::default(),
             _observe: observe,
         }
     }
@@ -2709,6 +2714,17 @@ async fn call_with_retry(
 
 impl Render for FilesPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let live = self.live.clone();
+        live.scope(|| self.render_panel(window, cx))
+    }
+}
+
+impl FilesPanel {
+    /// The dock renders the panel cached, so animation ticks replay it:
+    /// everything it shows comes from its own fields, and every change to
+    /// them notifies. Loaders and hover fades inside paint through
+    /// [`Self::live_layer`].
+    fn render_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         for image in std::mem::take(&mut self.evicted) {
             gpui::ImageSource::Image(image).evict(Some(window), cx);
         }
@@ -2772,6 +2788,13 @@ impl Render for FilesPanel {
             .children(seam)
             .children(menu)
             .children(confirm)
+            .into_any_element()
+    }
+
+    /// The panel's live layer: the dock paints its overlay right after the
+    /// cached panel.
+    pub fn live_layer(&self) -> LiveLayer {
+        self.live.clone()
     }
 }
 

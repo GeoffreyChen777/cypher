@@ -42,14 +42,31 @@ pub use gpui::AnimationExt;
 // Pulse clock — throttled drive for the repeating loaders
 // ---------------------------------------------------------------------------
 
-/// Repeat-tick interval for the pulse/spinner loaders (~30fps). A shared 30fps
-/// clock instead of per-element repeating animations (which redraw every
-/// display frame) is visually equivalent for these chunky cell waves at a
-/// quarter of the redraws, and a window with no spinner mounted schedules
-/// nothing at all. Loaders inside cached views tick through a
+/// Repeat-tick interval for the pulse/spinner loaders while one of the app's
+/// windows is in front (20fps). A shared clock instead of per-element
+/// repeating animations (which redraw every display frame) is visually
+/// equivalent for these chunky cell waves at a fraction of the redraws, and a
+/// window with no spinner mounted schedules nothing at all. Every tick redraws
+/// the window, so the rate is the loaders' whole cost: 20fps is the lowest at
+/// which the fastest of them (the running tool's arc, 18° a step) still turns
+/// smoothly. Loaders inside cached views tick through a
 /// [`LiveLayer`](crate::kit::live_layer::LiveLayer), which repaints them
 /// without rebuilding their view.
-const PULSE_TICK: Duration = Duration::from_millis(33);
+const PULSE_TICK: Duration = Duration::from_millis(50);
+
+/// The tick while no window of the app is in front (8fps): the user is in
+/// another app, and a still-visible spinner only needs to show it is alive.
+const PULSE_TICK_BACKGROUND: Duration = Duration::from_millis(125);
+
+/// The clock's interval: [`PULSE_TICK`] while one of the app's windows is in
+/// front, else [`PULSE_TICK_BACKGROUND`].
+fn pulse_tick(foreground: bool) -> Duration {
+    if foreground {
+        PULSE_TICK
+    } else {
+        PULSE_TICK_BACKGROUND
+    }
+}
 
 /// How long a view stays on the tick list after its last spinner paint. One
 /// lease outlives a few missed frames; an unmounted spinner stops renewing and
@@ -75,7 +92,7 @@ impl Default for PulseClock {
 }
 
 /// Current phase `[0,1)` of a repeating spec, plus a lease that keeps the
-/// calling view re-rendering at [`PULSE_TICK`] while its spinner stays
+/// calling view re-rendering at [`pulse_tick`] while its spinner stays
 /// mounted. All cells across all views share one epoch, so multi-instance
 /// loaders stay phase-locked. Reduced motion returns a static 0 and schedules
 /// nothing.
@@ -90,24 +107,31 @@ pub fn pulse_delta(spec: &MotionSpec, view: EntityId, cx: &mut App) -> f32 {
     if !clock.running {
         clock.running = true;
         cx.spawn(async move |cx| {
+            let mut tick = PULSE_TICK;
             loop {
-                cx.background_executor().timer(PULSE_TICK).await;
-                let parked = cx.update(|cx| {
+                cx.background_executor().timer(tick).await;
+                let next = cx.update(|cx| {
                     let clock = cx.default_global::<PulseClock>();
                     let now = Instant::now();
                     clock.leases.retain(|_, until| *until > now);
                     if clock.leases.is_empty() {
                         clock.running = false;
-                        return true;
+                        return None;
                     }
                     let views: Vec<EntityId> = clock.leases.keys().copied().collect();
                     for view in views {
                         cx.notify(view);
                     }
-                    false
+                    let foreground = cx.windows().into_iter().any(|window| {
+                        window
+                            .update(cx, |_, window, _| window.is_window_active())
+                            .unwrap_or(false)
+                    });
+                    Some(pulse_tick(foreground))
                 });
-                if parked {
-                    break;
+                match next {
+                    Some(next) => tick = next,
+                    None => break,
                 }
             }
         })
@@ -682,8 +706,46 @@ pub fn reduced_motion(cx: &App) -> bool {
     cx.reduce_motion()
 }
 
+/// Follow the system's Reduce Motion setting (macOS: System Settings →
+/// Accessibility → Display), which gpui never reads itself. The setting
+/// changes in another app, so call this at launch and whenever a window
+/// comes to the front; setting the same value again does nothing.
+pub fn sync_system_reduce_motion(cx: &mut App) {
+    if let Some(reduce) = system_reduce_motion() {
+        cx.set_reduce_motion(reduce);
+    }
+}
+
+#[cfg(target_os = "macos")]
+// `msg_send!` expands an obsolete `feature = "cargo-clippy"` gate that rustc
+// now flags; the warning is the objc crate's, not this call site's.
+#[allow(unexpected_cfgs)]
+fn system_reduce_motion() -> Option<bool> {
+    use objc::runtime::{BOOL, NO, Object};
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if workspace.is_null() {
+            return None;
+        }
+        let reduce: BOOL = msg_send![workspace, accessibilityDisplayShouldReduceMotion];
+        Some(reduce != NO)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_reduce_motion() -> Option<bool> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_pulse_slows_while_the_app_is_behind() {
+        assert_eq!(super::pulse_tick(true).as_millis(), 50);
+        assert_eq!(super::pulse_tick(false).as_millis(), 125);
+    }
+
     #[test]
     fn spring_starts_overshoots_a_little_and_settles() {
         assert_eq!(super::spring(0.0, 1.0, 0.0), (0.0, false));

@@ -104,7 +104,7 @@ const MEMO_SHAPES: usize = 8;
 
 thread_local! {
     /// Recent shapes' bands, most recent last. A shadow repaints on every
-    /// frame its host renders — ~30 a second while a loader runs — and
+    /// frame its host renders — 20 a second while a loader runs — and
     /// tessellating its dozen-odd rings each time was a tenth of the frame;
     /// the shape itself only changes on a resize or a composer grow.
     static MEMO: RefCell<Vec<(ShapeKey, BandPaths)>> = const { RefCell::new(Vec::new()) };
