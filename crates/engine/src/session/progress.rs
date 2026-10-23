@@ -6,8 +6,10 @@
 //! reading, so the upcoming steps refresh as the agent learns more. The run loop checks every few seconds
 //! ([`NarrationClock`]) and asks again every [`EVERY`] while the turn runs,
 //! never with one reading still being written, and only once the turn has
-//! moved on from what the last reading saw: a turn waiting on one long step
-//! keeps its reading rather than asking again.
+//! moved on from what the last reading saw: a turn waiting on one long, quiet
+//! step keeps its reading rather than asking again. A running tool's latest
+//! output counts as moving on, so one command that chains several steps
+//! still moves the bar.
 //!
 //! The model is the run harness's small-tier model from the run's own
 //! provider (`provider/model` ids share the prefix), else the run's model
@@ -46,6 +48,13 @@ const MAX_REQUEST_CHARS: usize = 2_000;
 const MAX_ACTIVITY_LINES: usize = 40;
 const MAX_TEXT_CHARS: usize = 300;
 const MAX_DETAIL_CHARS: usize = 160;
+/// A `[Run]` command, as run: the turn's latest tool step and any still
+/// running keep nearly all of it (one command may chain several steps),
+/// older finished ones a shorter head.
+const MAX_COMMAND_CHARS: usize = 600;
+const MAX_PAST_COMMAND_CHARS: usize = 200;
+/// The last lines a running tool printed.
+const MAX_OUTPUT_LINES: usize = 3;
 const MAX_CURRENT_CHARS: usize = 80;
 const MAX_NEXT_ITEMS: usize = 8;
 /// The most steps left a reading may claim.
@@ -138,8 +147,9 @@ impl Drop for InFlight {
 /// A reading's request, with what it reads the turn from.
 pub(crate) struct Prompt {
     pub text: String,
-    /// A hash of the turn's request, the agent's activity and its plan: not
-    /// the elapsed time or the previous reading, which change on their own.
+    /// A hash of the turn's request, the agent's activity (a running tool's
+    /// latest output included) and its plan: not the elapsed time or the
+    /// previous reading, which change on their own.
     pub activity: u64,
 }
 
@@ -184,6 +194,9 @@ pub(crate) fn prompt(
          `next`, or more when there are more than 8.\n\
          - Steps marked `done` in the previous reading are finished: never list \
          them in `next` again.\n\
+         - One `[Run]` command may chain several steps (`&&`, `;`, one per \
+         line): judge the work it does, not how many lines the activity has. A \
+         running command's `output:` lines show which of its steps it is on.\n\
          - Write `current` and `next` in the same language as the user's request.\n\n",
     );
     out.push_str(&format!("<request>\n{request}\n</request>\n\n"));
@@ -245,7 +258,11 @@ fn request_text(entry: &SessionMessageEntry) -> String {
 fn activity_lines(round: &[SessionMessageEntry]) -> Vec<String> {
     let mut lines = Vec::new();
     let mut plan = None;
-    for part in round.iter().flat_map(|e| &e.parts) {
+    let parts: Vec<&MessagePart> = round.iter().flat_map(|e| &e.parts).collect();
+    let latest_tool = parts.iter().rposition(
+        |p| matches!(p, MessagePart::Tool { call, .. } if !matches!(call, ToolCall::Todo { .. })),
+    );
+    for (ix, part) in parts.into_iter().enumerate() {
         match part {
             MessagePart::Text { text, .. } => {
                 let flat = flatten(text);
@@ -261,18 +278,34 @@ fn activity_lines(round: &[SessionMessageEntry]) -> Vec<String> {
                 call,
                 is_error,
                 resolved,
+                progress,
                 ..
             } => {
                 let (label, detail) = cypher_proto::view::tool_chip_content(call);
+                let detail = match call {
+                    ToolCall::Exec { command } => {
+                        let max = if !resolved || Some(ix) == latest_tool {
+                            MAX_COMMAND_CHARS
+                        } else {
+                            MAX_PAST_COMMAND_CHARS
+                        };
+                        command_text(command, max)
+                    }
+                    _ => clip(&flatten(&detail), MAX_DETAIL_CHARS),
+                };
                 let outcome = match (resolved, is_error) {
                     (false, _) => "running",
                     (true, true) => "failed",
                     (true, false) => "done",
                 };
-                lines.push(format!(
-                    "[{label}] {} ({outcome})",
-                    clip(&flatten(&detail), MAX_DETAIL_CHARS)
-                ));
+                let mut line = format!("[{label}] {detail} ({outcome})");
+                if !resolved {
+                    for output in output_tail(progress.as_deref()) {
+                        line.push_str("\n  output: ");
+                        line.push_str(&output);
+                    }
+                }
+                lines.push(line);
             }
             _ => {}
         }
@@ -294,6 +327,35 @@ fn activity_lines(round: &[SessionMessageEntry]) -> Vec<String> {
         }
     }
     out
+}
+
+/// A command as it was run, its lines kept (indented under its `[Run]`
+/// line) so a script reads step by step.
+fn command_text(command: &str, max: usize) -> String {
+    let lines: Vec<&str> = command
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    clip(&lines.join("\n"), max).replace('\n', "\n    ")
+}
+
+/// The last [`MAX_OUTPUT_LINES`] a running tool printed, from the tail its
+/// part keeps while it runs.
+fn output_tail(progress: Option<&str>) -> Vec<String> {
+    let lines: Vec<String> = progress
+        .unwrap_or_default()
+        .lines()
+        // A line redrawn with `\r` (a progress meter) reads as its last draw.
+        .filter_map(|line| line.rsplit('\r').find(|draw| !draw.trim().is_empty()))
+        .map(flatten)
+        .collect();
+    let skipped = lines.len().saturating_sub(MAX_OUTPUT_LINES);
+    lines
+        .into_iter()
+        .skip(skipped)
+        .map(|line| clip(&line, MAX_DETAIL_CHARS))
+        .collect()
 }
 
 fn flatten(text: &str) -> String {
@@ -615,6 +677,56 @@ mod tests {
         assert!(
             read.text
                 .contains("percent=\"30\">\ndone: Plan\ncurrent: Reading code\n")
+        );
+    }
+
+    #[test]
+    fn commands_read_whole_and_running_ones_show_their_output() {
+        let exec = |command: String| ToolCall::Exec { command };
+        let long_tail = format!("cargo test -p cypher-engine {}", "x".repeat(300));
+        let chained = format!("cd /work/tree && cargo build\ncargo fmt  \n\n{long_tail}");
+        let mut running = tool("2", exec(chained), false);
+        if let MessagePart::Tool { progress, .. } = &mut running {
+            *progress = Some("one\ntwo\nthree\nBuilding 10%\rBuilding 80%\r\nfour\n".into());
+        }
+        let entries = |parts| {
+            vec![
+                entry(MessageRole::User, vec![text("Ship it")]),
+                entry(MessageRole::Assistant, parts),
+            ]
+        };
+        let old = tool("1", exec(format!("ls && {}", "y".repeat(400))), true);
+        let read = prompt(
+            &entries(vec![old.clone(), running.clone()]),
+            None,
+            Duration::ZERO,
+        )
+        .unwrap();
+        let body = &read.text;
+        // The running command keeps its lines and well past the chip's 160
+        // characters; an older finished one keeps a shorter head.
+        assert!(body.contains(
+            "[Run] cd /work/tree && cargo build\n    cargo fmt\n    cargo test -p cypher-engine x"
+        ));
+        assert!(body.contains(&format!("[Run] ls && {}… (done)", "y".repeat(194))));
+        // Its last output lines ride under it, a redrawn meter as its last draw.
+        assert!(body.contains(
+            "(running)\n  output: three\n  output: Building 80%\n  output: four\n</agent_activity>"
+        ));
+        assert!(!body.contains("output: two"));
+        // New output is new activity: the next tick asks again.
+        let mut moved = running.clone();
+        if let MessagePart::Tool { progress, .. } = &mut moved {
+            *progress = Some("five".into());
+        }
+        let later = prompt(&entries(vec![old.clone(), moved]), None, Duration::ZERO).unwrap();
+        assert_ne!(later.activity, read.activity);
+        // The latest step keeps its command whole once finished too.
+        let done = tool("1", exec(format!("ls && {}", "y".repeat(700))), true);
+        let read = prompt(&entries(vec![done]), None, Duration::ZERO).unwrap();
+        assert!(
+            read.text
+                .contains(&format!("[Run] ls && {}… (done)", "y".repeat(594)))
         );
     }
 
