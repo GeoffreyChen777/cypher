@@ -32,6 +32,7 @@ FOREIGN_CITATIONS = {
     ("crates/harness/src/pi/fork.rs", "docs/rpc.md"),  # pi's own repository
     ("docs/design/pi-rpc.md", "docs/rpc.md"),  # pi's own repository
     ("apps/ios/CypherTests/Composer/MentionsTests.swift", "docs/中文.md"),  # test fixture
+    ("crates/ui/src/files/tree.rs", "docs/a.md"),  # test fixture
     ("apps/ios/Cypher/Development/DemoDataset.swift", "docs/chat2-sync.md"),  # demo content
 }
 
