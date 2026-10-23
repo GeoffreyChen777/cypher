@@ -12,6 +12,7 @@ pub mod live_layer;
 pub mod loaders;
 pub mod motion;
 pub mod popover;
+pub mod progress_bar;
 pub mod ripples;
 pub mod soft_shadow;
 pub mod sound;

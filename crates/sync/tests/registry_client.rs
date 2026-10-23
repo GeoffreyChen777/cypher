@@ -80,6 +80,7 @@ async fn two_clients_converge_and_stream_live_updates() {
             context_usage: None,
             throughput: None,
             recovery: None,
+            progress: None,
         })
         .unwrap();
     }
@@ -395,6 +396,7 @@ async fn churn_stays_bounded_no_history_growth() {
                 context_usage: None,
                 throughput: None,
                 recovery: None,
+                progress: None,
             })
             .unwrap();
         }

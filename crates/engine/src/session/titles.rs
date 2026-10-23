@@ -257,7 +257,7 @@ fn cheapest_model(models: &[Model]) -> Option<String> {
     small.or(models.last()).map(|m| m.id.clone())
 }
 
-fn is_callable_small_tier(model: &Model) -> bool {
+pub(crate) fn is_callable_small_tier(model: &Model) -> bool {
     let haystack = format!("{} {}", model.id, model.label).to_lowercase();
     // Catalog variants like `gpt-5.4-mini-openai-compact` match "mini" but
     // are not callable as a standalone model.

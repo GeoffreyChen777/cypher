@@ -68,6 +68,7 @@ mod render;
 mod scroll;
 use render::*;
 mod comments;
+mod progress;
 mod recovery;
 mod translation_cue;
 mod turn_changes;
@@ -210,6 +211,12 @@ pub struct Transcript {
     show_original: std::collections::HashSet<SharedString>,
     /// Shift held over a translated message, and the switch's entrance.
     shift_cue: translation_cue::ShiftCue,
+    /// What changed between the progress readings shown, so the working
+    /// trailer's bar animates the change.
+    progress_motion: progress::ProgressMotion,
+    /// The progress bar dot the pointer is on (its key), so only one tip
+    /// shows at a time.
+    progress_hover: Option<SharedString>,
     /// Streaming fade veils, one per live markdown row (dropped on completion).
     veils: HashMap<SharedString, Rc<RefCell<RowVeil>>>,
     /// Live rows present in the transcript's REPLAY after (re)attaching to a
@@ -499,6 +506,8 @@ impl Transcript {
             toggle_pins: HashMap::new(),
             show_original: std::collections::HashSet::new(),
             shift_cue: translation_cue::ShiftCue::new(cx),
+            progress_motion: Default::default(),
+            progress_hover: None,
             veils: HashMap::new(),
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,

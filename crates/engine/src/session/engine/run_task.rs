@@ -239,6 +239,9 @@ struct RunIo {
     /// stops these ticks so the gate still catches real crashes.
     /// `touch_session` throttles at 10s.
     live_heartbeat: tokio::time::Interval,
+    /// When to check whether a long turn's progress reading is due
+    /// ([`crate::session::progress`]).
+    progress_tick: tokio::time::Interval,
 }
 
 /// The state of one run's event loop: the select over its event sources
@@ -299,6 +302,8 @@ struct RunLoop<'r> {
     /// `resume_state.agent_prompt`.
     retry_request: Option<RunRequest>,
     resume_state: Option<RunResumeState>,
+    /// When the running turn's next progress reading is due.
+    narration: crate::session::progress::NarrationClock,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -346,6 +351,8 @@ pub(super) async fn drive_run(
     }
     let mut live_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
     live_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut progress_tick = tokio::time::interval(crate::session::progress::CHECK_EVERY);
+    progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let scope = RunScope {
         inner: &inner,
         chat_id: &chat_id,
@@ -361,6 +368,7 @@ pub(super) async fn drive_run(
         engine_rx,
         cancel_rx,
         live_heartbeat,
+        progress_tick,
     };
     let mut run = RunLoop::new(scope, &doc, &device_id, retry_request, resume_state);
 
@@ -434,6 +442,7 @@ impl<'r> RunLoop<'r> {
             last_translation: None,
             retry_request: Some(retry_request),
             resume_state: Some(resume_state),
+            narration: Default::default(),
         }
     }
 
@@ -460,6 +469,10 @@ impl<'r> RunLoop<'r> {
                 self.scope.inner.touch_session(self.scope.chat_id);
                 Step::Continue
             }
+            _ = io.progress_tick.tick() => {
+                self.on_progress_tick();
+                Step::Continue
+            }
             // Idle reaper: a parked persistent session nobody returned to in
             // 30 minutes releases its child. The turn was finalized at Done,
             // so this end is clean — no aborted stamp.
@@ -477,6 +490,60 @@ impl<'r> RunLoop<'r> {
                 Step::Continue
             }
         }
+    }
+
+    /// Ask for the running turn's progress reading when one is due: in the
+    /// background, applied only if the turn is still running when it lands.
+    fn on_progress_tick(&mut self) {
+        let (inner, chat_id) = (self.scope.inner, self.scope.chat_id);
+        if inner.is_ephemeral(chat_id) {
+            return;
+        }
+        let (turn, previous) = lock(&inner.statuses)
+            .get(chat_id)
+            .filter(|s| s.status == SessionStatus::Working)
+            .map_or((None, None), |s| (s.started_at, s.progress.clone()));
+        let now = chrono::Utc::now();
+        if !self.narration.due(turn, now, tokio::time::Instant::now()) {
+            return;
+        }
+        let Some(turn) = turn else {
+            return;
+        };
+        let entries = match self.doc.read_entries() {
+            Ok(entries) => cypher_doc::join_continuation_entries(entries),
+            Err(err) => {
+                tracing::debug!(chat = %chat_id, error = %err, "progress reading skipped");
+                return;
+            }
+        };
+        let elapsed = now.signed_duration_since(turn).to_std().unwrap_or_default();
+        let Some(prompt) = crate::session::progress::prompt(&entries, previous.as_ref(), elapsed)
+        else {
+            return;
+        };
+        let run_model = lock(&inner.last_requests)
+            .get(chat_id)
+            .and_then(|r| r.model.clone());
+        let in_flight = self.narration.start();
+        let inner = Arc::clone(inner);
+        let chat_id = chat_id.to_string();
+        let harness_id = self.scope.harness_id;
+        let cwd = self.scope.run_cwd.to_string();
+        tokio::spawn(async move {
+            let _in_flight = in_flight;
+            let progress = crate::session::progress::ask(
+                &inner.registry,
+                harness_id,
+                run_model.as_deref(),
+                &cwd,
+                prompt,
+            )
+            .await;
+            if let Some(progress) = progress {
+                inner.set_progress(&chat_id, turn, progress);
+            }
+        });
     }
 
     fn on_cancel(&mut self) {

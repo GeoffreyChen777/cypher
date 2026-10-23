@@ -216,6 +216,10 @@ pub(crate) struct RawSession {
     /// Parsed leniently like `context_usage`.
     #[serde(default)]
     recovery: Option<serde_json::Value>,
+    /// A long turn's narrated progress; absent otherwise and on old writers.
+    /// Parsed leniently like `context_usage`.
+    #[serde(default)]
+    progress: Option<serde_json::Value>,
 }
 
 impl From<RawSession> for Session {
@@ -235,6 +239,9 @@ impl From<RawSession> for Session {
                 .and_then(|value| serde_json::from_value(value).ok()),
             recovery: raw
                 .recovery
+                .and_then(|value| serde_json::from_value(value).ok()),
+            progress: raw
+                .progress
                 .and_then(|value| serde_json::from_value(value).ok()),
         }
     }
