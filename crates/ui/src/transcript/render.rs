@@ -97,9 +97,9 @@ impl Transcript {
             self.progress_motion.observe(
                 &chat_id,
                 progress.stages.len().max(1),
-                progress.percent.min(100),
+                super::progress::shown_percent(&progress),
                 &super::progress::upcoming_positions(
-                    progress.percent,
+                    super::progress::shown_percent(&progress),
                     super::progress::steps_left(&progress),
                 ),
                 now,

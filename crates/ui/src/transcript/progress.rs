@@ -125,20 +125,16 @@ pub(super) fn steps_left(progress: &RunProgress) -> usize {
     usize::from(progress.steps_left.unwrap_or(0)).max(progress.next.len())
 }
 
-/// Where each stage's dot sits, 0–1: where it began, shrunk in proportion
-/// when the reading has since gone back below it (an engine that kept
-/// stages ahead of the fill), so no stage sits ahead of the fill.
-pub(super) fn stage_positions(stages: &[u8], percent: u8) -> Vec<f32> {
-    let fill = f32::from(percent.min(100)) / 100.0;
-    let at: Vec<f32> = stages
+/// The percentage the bar shows: the reading's, but never behind where a
+/// stage began. Stages never move once recorded, so a reading that went
+/// back (from a host that doesn't hold it there itself) stops at them.
+pub(super) fn shown_percent(progress: &RunProgress) -> u8 {
+    progress
+        .stages
         .iter()
-        .map(|p| f32::from((*p).min(100)) / 100.0)
-        .collect();
-    let reach = at.iter().copied().fold(0.0, f32::max);
-    if reach <= fill {
-        return at;
-    }
-    at.iter().map(|a| a * fill / reach).collect()
+        .map(|s| s.percent)
+        .fold(progress.percent, u8::max)
+        .min(100)
 }
 
 /// Where each of `count` upcoming steps begins, 0–1: the stretch between the
@@ -188,8 +184,11 @@ pub(super) fn render(
     if labels.is_empty() {
         labels.push((progress.current.clone(), progress.percent));
     }
-    let percent = progress.percent.min(100);
-    let fractions = stage_positions(&labels.iter().map(|(_, p)| *p).collect::<Vec<_>>(), percent);
+    let percent = shown_percent(progress);
+    let fractions: Vec<f32> = labels
+        .iter()
+        .map(|(_, p)| f32::from((*p).min(100)) / 100.0)
+        .collect();
     let last = labels.len() - 1;
     let left = steps_left(progress);
     let upcoming = upcoming_positions(percent, left);
@@ -521,10 +520,23 @@ mod tests {
     }
 
     #[test]
-    fn stages_stay_behind_the_fill() {
-        assert_eq!(stage_positions(&[10, 30], 40), vec![0.1, 0.3]);
-        let shrunk = stage_positions(&[30, 60], 20);
-        assert!((shrunk[0] - 0.1).abs() < 1e-6 && (shrunk[1] - 0.2).abs() < 1e-6);
+    fn the_fill_never_falls_behind_a_stage() {
+        let stage = |percent| cypher_proto::ProgressStage {
+            label: "s".into(),
+            percent,
+        };
+        let mut progress = RunProgress {
+            percent: 40,
+            current: "s".into(),
+            next: vec![],
+            steps_left: None,
+            stages: vec![stage(10), stage(30)],
+            updated_at: chrono::Utc::now(),
+        };
+        assert_eq!(shown_percent(&progress), 40);
+        progress.stages = vec![stage(35), stage(62)];
+        progress.percent = 22;
+        assert_eq!(shown_percent(&progress), 62);
     }
 
     #[test]

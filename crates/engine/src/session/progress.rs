@@ -182,6 +182,8 @@ pub(crate) fn prompt(
          Empty when nothing is left.\n\
          - `steps_left` is how many steps remain after `current`: the length of \
          `next`, or more when there are more than 8.\n\
+         - Steps marked `done` in the previous reading are finished: never list \
+         them in `next` again.\n\
          - Write `current` and `next` in the same language as the user's request.\n\n",
     );
     out.push_str(&format!("<request>\n{request}\n</request>\n\n"));
@@ -192,9 +194,15 @@ pub(crate) fn prompt(
     ));
     if let Some(previous) = previous {
         out.push_str(&format!(
-            "<previous_reading percent=\"{}\">\ncurrent: {}\n",
-            previous.percent, previous.current
+            "<previous_reading percent=\"{}\">\n",
+            previous.percent
         ));
+        // Every stage but the last (which is `current`) is finished.
+        let passed = previous.stages.len().saturating_sub(1);
+        for stage in &previous.stages[..passed] {
+            out.push_str(&format!("done: {}\n", stage.label));
+        }
+        out.push_str(&format!("current: {}\n", previous.current));
         for step in &previous.next {
             out.push_str(&format!("next: {step}\n"));
         }
@@ -348,33 +356,22 @@ pub(crate) fn parse(raw: &str, now: DateTime<Utc>) -> Option<RunProgress> {
 }
 
 /// `reading` with the turn's stages carried over from `previous`: its
-/// `current` closes the list, as a new stage when the agent moved on. A
-/// stage sits where the turn was when it began, never before the one ahead
-/// of it. A reading that went back (the agent found more work) shrinks the
-/// stages behind it in proportion, so every stage stays behind the fill.
+/// `current` closes the list, as a new stage when the agent moved on. The
+/// stages already recorded never change: a reading only moves the fill, the
+/// current step and the steps ahead, and its percentage never falls behind
+/// where the current stage began, so every stage stays behind the fill.
 pub(crate) fn with_stages(previous: Option<&RunProgress>, mut reading: RunProgress) -> RunProgress {
     let mut stages = previous.map(|p| p.stages.clone()).unwrap_or_default();
-    let reach = stages
-        .iter()
-        .map(|s| s.percent)
-        .chain(previous.map(|p| p.percent))
-        .max()
-        .unwrap_or(0);
-    if reading.percent < reach {
-        let (to, from) = (u32::from(reading.percent), u32::from(reach));
-        for stage in &mut stages {
-            let at = u32::from(stage.percent.min(reach));
-            stage.percent = ((at * to * 2 + from) / (from * 2)) as u8;
-        }
+    if let Some(began) = stages.iter().map(|s| s.percent).max() {
+        reading.percent = reading.percent.max(began);
     }
     if stages
         .last()
         .is_none_or(|last| last.label != reading.current)
     {
-        let floor = stages.last().map_or(0, |last| last.percent);
         stages.push(ProgressStage {
             label: reading.current.clone(),
-            percent: reading.percent.max(floor),
+            percent: reading.percent,
         });
     }
     let excess = stages.len().saturating_sub(MAX_STAGES);
@@ -600,6 +597,25 @@ mod tests {
         moved[3].parts.push(text("Tests pass."));
         let moved = prompt(&moved, Some(&previous), Duration::from_secs(95)).unwrap();
         assert_ne!(moved.activity, read.activity);
+        // The passed stages are shown as done, the last one is `current`.
+        let staged = RunProgress {
+            stages: vec![
+                ProgressStage {
+                    label: "Plan".into(),
+                    percent: 5,
+                },
+                ProgressStage {
+                    label: "Reading code".into(),
+                    percent: 20,
+                },
+            ],
+            ..previous
+        };
+        let read = prompt(&entries, Some(&staged), Duration::from_secs(95)).unwrap();
+        assert!(
+            read.text
+                .contains("percent=\"30\">\ndone: Plan\ncurrent: Reading code\n")
+        );
     }
 
     #[test]
@@ -655,20 +671,25 @@ mod tests {
         // Same stage: it keeps where it began.
         let two = with_stages(Some(&one), read(30, "Store"));
         assert_eq!(two.stages, vec![stage("Store", 20)]);
-        // A reading that went back shrinks the stages behind it, so none
-        // sits ahead of the fill.
-        let three = with_stages(Some(&two), read(15, "API"));
-        assert_eq!(three.stages, vec![stage("Store", 10), stage("API", 15)]);
+        // The current stage moves on: the fill may move within it, but a
+        // reading that went back stops where it began.
+        let three = with_stages(Some(&two), read(40, "API"));
+        assert_eq!(three.stages, vec![stage("Store", 20), stage("API", 40)]);
         let four = with_stages(Some(&three), read(15, "API"));
-        assert_eq!(four.stages, three.stages);
-        // Stages already ahead of the reading (older data) come back too.
+        assert_eq!((four.percent, &four.stages), (40, &three.stages));
+        // A new stage after a reading that went back: the passed ones stay
+        // put and the new one begins where the last left off.
+        let five = with_stages(Some(&four), read(30, "Tests"));
+        assert_eq!(
+            five.stages,
+            vec![stage("Store", 20), stage("API", 40), stage("Tests", 40)]
+        );
+        assert_eq!(five.percent, 40);
+        // Stages already ahead of the reading (older data) never move.
         let mut ahead = read(22, "Wait");
         ahead.stages = vec![stage("A", 35), stage("B", 60), stage("Wait", 62)];
-        let healed = with_stages(Some(&ahead), read(23, "Wait"));
-        assert_eq!(
-            healed.stages,
-            vec![stage("A", 13), stage("B", 22), stage("Wait", 23)]
-        );
+        let kept = with_stages(Some(&ahead), read(23, "Wait"));
+        assert_eq!((kept.percent, &kept.stages), (62, &ahead.stages));
         let mut long = three;
         for n in 0..20 {
             long = with_stages(Some(&long), read(50, &format!("step {n}")));
