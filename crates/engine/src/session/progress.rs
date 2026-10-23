@@ -306,9 +306,23 @@ pub(crate) fn parse(raw: &str, now: DateTime<Utc>) -> Option<RunProgress> {
 /// `reading` with the turn's stages carried over from `previous`: its
 /// `current` closes the list, as a new stage when the agent moved on. A
 /// stage sits where the turn was when it began, never before the one ahead
-/// of it.
+/// of it. A reading that went back (the agent found more work) shrinks the
+/// stages behind it in proportion, so every stage stays behind the fill.
 pub(crate) fn with_stages(previous: Option<&RunProgress>, mut reading: RunProgress) -> RunProgress {
     let mut stages = previous.map(|p| p.stages.clone()).unwrap_or_default();
+    let reach = stages
+        .iter()
+        .map(|s| s.percent)
+        .chain(previous.map(|p| p.percent))
+        .max()
+        .unwrap_or(0);
+    if reading.percent < reach {
+        let (to, from) = (u32::from(reading.percent), u32::from(reach));
+        for stage in &mut stages {
+            let at = u32::from(stage.percent.min(reach));
+            stage.percent = ((at * to * 2 + from) / (from * 2)) as u8;
+        }
+    }
     if stages
         .last()
         .is_none_or(|last| last.label != reading.current)
@@ -582,9 +596,20 @@ mod tests {
         // Same stage: it keeps where it began.
         let two = with_stages(Some(&one), read(30, "Store"));
         assert_eq!(two.stages, vec![stage("Store", 20)]);
-        // A reading that went back never puts a stage behind the last one.
+        // A reading that went back shrinks the stages behind it, so none
+        // sits ahead of the fill.
         let three = with_stages(Some(&two), read(15, "API"));
-        assert_eq!(three.stages, vec![stage("Store", 20), stage("API", 20)]);
+        assert_eq!(three.stages, vec![stage("Store", 10), stage("API", 15)]);
+        let four = with_stages(Some(&three), read(15, "API"));
+        assert_eq!(four.stages, three.stages);
+        // Stages already ahead of the reading (older data) come back too.
+        let mut ahead = read(22, "Wait");
+        ahead.stages = vec![stage("A", 35), stage("B", 60), stage("Wait", 62)];
+        let healed = with_stages(Some(&ahead), read(23, "Wait"));
+        assert_eq!(
+            healed.stages,
+            vec![stage("A", 13), stage("B", 22), stage("Wait", 23)]
+        );
         let mut long = three;
         for n in 0..20 {
             long = with_stages(Some(&long), read(50, &format!("step {n}")));

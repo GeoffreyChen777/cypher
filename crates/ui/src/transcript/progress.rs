@@ -125,6 +125,22 @@ pub(super) fn steps_left(progress: &RunProgress) -> usize {
     usize::from(progress.steps_left.unwrap_or(0)).max(progress.next.len())
 }
 
+/// Where each stage's dot sits, 0–1: where it began, shrunk in proportion
+/// when the reading has since gone back below it (an engine that kept
+/// stages ahead of the fill), so no stage sits ahead of the fill.
+pub(super) fn stage_positions(stages: &[u8], percent: u8) -> Vec<f32> {
+    let fill = f32::from(percent.min(100)) / 100.0;
+    let at: Vec<f32> = stages
+        .iter()
+        .map(|p| f32::from((*p).min(100)) / 100.0)
+        .collect();
+    let reach = at.iter().copied().fold(0.0, f32::max);
+    if reach <= fill {
+        return at;
+    }
+    at.iter().map(|a| a * fill / reach).collect()
+}
+
 /// Where each of `count` upcoming steps begins, 0–1: the stretch between the
 /// fill's end and the finish shared evenly between the current step and
 /// those after it. Capped at [`MAX_UPCOMING`] dots.
@@ -172,12 +188,9 @@ pub(super) fn render(
     if labels.is_empty() {
         labels.push((progress.current.clone(), progress.percent));
     }
-    let fractions: Vec<f32> = labels
-        .iter()
-        .map(|(_, p)| f32::from((*p).min(100)) / 100.0)
-        .collect();
-    let last = labels.len() - 1;
     let percent = progress.percent.min(100);
+    let fractions = stage_positions(&labels.iter().map(|(_, p)| *p).collect::<Vec<_>>(), percent);
+    let last = labels.len() - 1;
     let left = steps_left(progress);
     let upcoming = upcoming_positions(percent, left);
     let (from, to) = (
@@ -505,6 +518,13 @@ mod tests {
         assert_eq!(left_note(0), "last step");
         assert_eq!(left_note(1), "1 step left");
         assert_eq!(left_note(4), "4 steps left");
+    }
+
+    #[test]
+    fn stages_stay_behind_the_fill() {
+        assert_eq!(stage_positions(&[10, 30], 40), vec![0.1, 0.3]);
+        let shrunk = stage_positions(&[30, 60], 20);
+        assert!((shrunk[0] - 0.1).abs() < 1e-6 && (shrunk[1] - 0.2).abs() < 1e-6);
     }
 
     #[test]

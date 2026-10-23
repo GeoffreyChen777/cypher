@@ -98,34 +98,22 @@ impl ProgressBar {
         let width = f32::from(bounds.size.width);
         let mid = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
         let left = f32::from(bounds.origin.x);
-        let dots = self.dots();
-        let last = dots.len().checked_sub(1);
+        let (passed, current) = shown_stages(self.dots(), width);
+        let upcoming = shown_upcoming(self.upcoming(), current, width);
         // Every dot with the room it keeps clear on the track. The current
         // ring keeps room for its largest breath, so the gap holds still.
-        let mut holes: Vec<(f32, f32)> = dots
+        let mut holes: Vec<(f32, f32)> = passed
             .iter()
-            .enumerate()
-            .map(|(ix, &at)| {
-                let radius = if Some(ix) == last {
-                    CURRENT_LARGE
-                } else {
-                    PASSED_DOT
-                } / 2.0;
-                (dot_x(at, width), radius + GAP)
-            })
+            .map(|&x| (x, PASSED_DOT / 2.0 + GAP))
             .collect();
-        let upcoming = self.upcoming();
-        holes.extend(
-            upcoming
-                .iter()
-                .map(|&at| (dot_x(at, width), UPCOMING_DOT / 2.0 + GAP)),
-        );
+        holes.extend(current.map(|x| (x, CURRENT_LARGE / 2.0 + GAP)));
+        holes.extend(upcoming.iter().map(|&x| (x, UPCOMING_DOT / 2.0 + GAP)));
         // The finish shows unless the last dot before it crowds it.
         let finish = dot_x(1.0, width);
         let before_finish = upcoming
             .last()
-            .map(|&at| (dot_x(at, width), UPCOMING_DOT))
-            .or_else(|| last.map(|ix| (dot_x(dots[ix], width), CURRENT_LARGE)));
+            .map(|&x| (x, UPCOMING_DOT))
+            .or_else(|| current.map(|x| (x, CURRENT_LARGE)));
         let finish_shown = before_finish.is_none_or(|(x, size)| finish - x > size);
         if finish_shown {
             holes.push((finish, FINISH_DOT / 2.0 + GAP));
@@ -210,20 +198,13 @@ impl ProgressBar {
         if finish_shown {
             disc(window, finish, FINISH_DOT, self.ink.opacity(TONE_FINISH));
         }
-        for &at in upcoming {
-            disc(
-                window,
-                dot_x(at, width),
-                UPCOMING_DOT,
-                self.ink.opacity(TONE_UPCOMING),
-            );
+        for &x in &upcoming {
+            disc(window, x, UPCOMING_DOT, self.ink.opacity(TONE_UPCOMING));
         }
-        for (ix, &at) in dots.iter().enumerate() {
-            let x = dot_x(at, width);
-            if Some(ix) != last {
-                disc(window, x, PASSED_DOT, self.ink.opacity(TONE_PASSED));
-                continue;
-            }
+        for &x in &passed {
+            disc(window, x, PASSED_DOT, self.ink.opacity(TONE_PASSED));
+        }
+        if let Some(x) = current {
             // Current: a hollow ring breathing in and out once per period,
             // grown in from nothing when its stage is new.
             let breath = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
@@ -237,6 +218,42 @@ impl ProgressBar {
             );
         }
     }
+}
+
+/// The passed stages' x and the current one's, on a bar `width` wide. A
+/// passed dot that would overlap the dot after it is left out: the tones are
+/// translucent, so stacked dots would paint darker than the rest.
+fn shown_stages(stages: &[f32], width: f32) -> (Vec<f32>, Option<f32>) {
+    let Some((&current, passed)) = stages.split_last() else {
+        return (Vec::new(), None);
+    };
+    let current = dot_x(current, width);
+    let mut shown: Vec<f32> = Vec::new();
+    let mut next = (current, (CURRENT_LARGE + PASSED_DOT) / 2.0);
+    for &at in passed.iter().rev() {
+        let x = dot_x(at, width);
+        if next.0 - x >= next.1 {
+            shown.push(x);
+            next = (x, PASSED_DOT);
+        }
+    }
+    shown.reverse();
+    (shown, Some(current))
+}
+
+/// The upcoming steps' x on a bar `width` wide, each left out when it would
+/// overlap the dot before it (the current ring, or the last one kept).
+fn shown_upcoming(upcoming: &[f32], current: Option<f32>, width: f32) -> Vec<f32> {
+    let mut shown: Vec<f32> = Vec::new();
+    let mut before = current.map(|x| (x, (CURRENT_LARGE + UPCOMING_DOT) / 2.0));
+    for &at in upcoming {
+        let x = dot_x(at, width);
+        if before.is_none_or(|(b, room)| x - b >= room) {
+            shown.push(x);
+            before = Some((x, UPCOMING_DOT));
+        }
+    }
+    shown
 }
 
 /// The x of a stage at `at` (0–1) on a bar `width` wide: inset from both
@@ -294,6 +311,18 @@ mod tests {
             vec![(13.0, 54.0)]
         );
         assert!(segments(0.0, 10.0, &[(5.0, 20.0)]).is_empty());
+    }
+
+    #[test]
+    fn overlapping_dots_are_left_out() {
+        // On a 214px bar a stage is 2px per percent.
+        let (passed, current) = shown_stages(&[0.10, 0.11, 0.30, 0.31], 214.0);
+        assert_eq!(current, Some(dot_x(0.31, 214.0)));
+        // 0.30 crowds the current ring, 0.10 crowds 0.11.
+        assert_eq!(passed, vec![dot_x(0.11, 214.0)]);
+        let ahead = shown_upcoming(&[0.32, 0.40, 0.41, 0.60], current, 214.0);
+        assert_eq!(ahead, vec![dot_x(0.40, 214.0), dot_x(0.60, 214.0)]);
+        assert_eq!(shown_stages(&[], 214.0), (Vec::new(), None));
     }
 
     #[test]
