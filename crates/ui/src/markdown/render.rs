@@ -83,7 +83,13 @@ pub struct RenderOptions {
     /// independently (paint order cannot conflict). Only read when
     /// [`Self::selection`] is `Some`.
     pub scope: super::selection::SelectionScope,
+    /// Offered every clicked link first; one it doesn't take (`false`), or
+    /// every link when `None`, opens through the system.
+    pub link: Option<LinkHandler>,
 }
+
+/// A link click's destination, offered to the surface: `true` when handled.
+pub type LinkHandler = Rc<dyn Fn(&str, &mut Window, &mut gpui::App) -> bool>;
 
 /// Selection lifecycle callbacks fired from the frame-scoped selection mouse
 /// listeners ([`register_selection_listeners`]) so the owning surface can
@@ -134,6 +140,7 @@ impl RenderOptions {
             copy: None,
             selection: None,
             scope: super::selection::SelectionScope::Transcript(0),
+            link: None,
         }
     }
 }
@@ -1144,9 +1151,12 @@ fn flat_text_element(
     } else {
         let (ranges, urls): (Vec<_>, Vec<_>) = flat.links.iter().cloned().unzip();
         let id: SharedString = format!("{}-t{ix}", opts.row_key).into();
+        let handler = opts.link.clone();
         InteractiveText::new(id, styled)
-            .on_click(ranges, move |clicked_ix, _window, cx| {
-                if let Some(url) = urls.get(clicked_ix) {
+            .on_click(ranges, move |clicked_ix, window, cx| {
+                if let Some(url) = urls.get(clicked_ix)
+                    && !handler.as_ref().is_some_and(|take| take(url, window, cx))
+                {
                     cx.open_url(url);
                 }
             })

@@ -280,6 +280,7 @@ impl Transcript {
             copy: Some(self.copy_ui_for(row_id, cx)),
             selection: Some(self.selection_ui_for(row_id, cx)),
             scope: self.scope,
+            link: self.link_handler.clone(),
         };
         let highlight = self.code_highlight_for(row_id, tree, Some(block_ix), cx);
         let Some(top) = tree.blocks.get(block_ix) else {

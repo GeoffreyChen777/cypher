@@ -23,6 +23,7 @@
 //! when it is shown and the text changed since the last parse.
 
 pub mod editor;
+pub mod links;
 mod menu;
 mod ops;
 mod preview;
@@ -269,6 +270,8 @@ pub struct FilesPanel {
     reveal_pending: Option<String>,
     /// Focus the shown file's editor once it has loaded.
     focus_editor_pending: bool,
+    /// Go to this line of this file once it has loaded (a chat link).
+    line_pending: Option<(String, usize)>,
     filter: Filter,
     /// Decoded images, oldest first (bounded by [`MAX_IMAGES`]).
     image_order: Vec<String>,
@@ -332,6 +335,7 @@ impl FilesPanel {
             op_tasks: Vec::new(),
             reveal_pending: None,
             focus_editor_pending: false,
+            line_pending: None,
             filter: Filter {
                 input,
                 query: String::new(),
@@ -435,6 +439,7 @@ impl FilesPanel {
         self.expanded.clear();
         self.rows.clear();
         self.selected = None;
+        self.line_pending = None;
         for (_, file) in self.open_files.drain() {
             if let Media::Image { image, .. } = file.media {
                 self.evicted.push(image);
@@ -639,6 +644,42 @@ impl FilesPanel {
         cx.notify();
     }
 
+    /// A chat link: reveal `path` (relative to the checkout, `""` the root)
+    /// in the tree and open it — a folder expands, a file shows at `line`
+    /// when given (in its source, not a preview).
+    pub fn open_link(
+        &mut self,
+        path: String,
+        line: Option<usize>,
+        dir: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_content(cx);
+        if path.is_empty() {
+            return;
+        }
+        self.clear_filter(cx);
+        self.reveal_in_tree(path.clone(), cx);
+        if dir || self.entry_meta(&path).is_some_and(|entry| entry.is_dir) {
+            self.set_expanded(&path, true, cx);
+            return;
+        }
+        self.open_file(path.clone(), false, None, cx);
+        let Some(line) = line else {
+            return;
+        };
+        let Some(file) = self.open_files.get_mut(&path) else {
+            return;
+        };
+        file.preview = false;
+        if file.clean.is_some() && !file.loading {
+            file.editor
+                .update(cx, |editor, cx| editor.go_to_line(line, cx));
+        } else {
+            self.line_pending = Some((path, line));
+        }
+    }
+
     /// Show `path` in the editor side, loading it on first open. Narrow
     /// panes flip to the editor; `focus` moves typing into it.
     fn open_file(
@@ -796,22 +837,29 @@ impl FilesPanel {
                         file.bytes = content.bytes;
                         file.error = None;
                         let text = content.text.unwrap_or_default();
-                        if file.clean.as_deref() == Some(text.as_str()) && !file.dirty {
-                            cx.notify();
-                            return;
+                        // Unchanged text keeps the editor as it is.
+                        if file.clean.as_deref() != Some(text.as_str()) || file.dirty {
+                            // A truncated read must never be saved back — it
+                            // would silently drop the file's tail.
+                            let read_only = content.binary || content.truncated;
+                            file.clean = Some(text.clone());
+                            file.dirty = false;
+                            file.preview_stale = true;
+                            file.editor
+                                .update(cx, |editor, cx| editor.set_content(text, read_only, cx));
                         }
-                        // A truncated read must never be saved back — it
-                        // would silently drop the file's tail.
-                        let read_only = content.binary || content.truncated;
-                        file.clean = Some(text.clone());
-                        file.dirty = false;
-                        file.preview_stale = true;
-                        file.editor
-                            .update(cx, |editor, cx| editor.set_content(text, read_only, cx));
                     }
                     Err(err) => {
                         file.error = Some(rpc_message(&err));
                     }
+                }
+                // A chat link's line lands once the text is in.
+                if let Some((_, line)) = this.line_pending.take_if(|(path, _)| *path == task_path)
+                    && let Some(file) = this.open_files.get(&task_path)
+                    && file.clean.is_some()
+                {
+                    file.editor
+                        .update(cx, |editor, cx| editor.go_to_line(line, cx));
                 }
                 cx.notify();
             })

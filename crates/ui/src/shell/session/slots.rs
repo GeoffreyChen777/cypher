@@ -62,6 +62,19 @@ impl Shell {
         let state = AppState::new_session_context(&self.state, chat_id.clone(), cx);
         let popup = self.comments.popup.clone().downgrade();
         let transcript = cx.new(|cx| Transcript::new(state.clone(), popup, cx));
+        // A reply's file links open in this tile's Files tab; other links
+        // go to the system.
+        let shell = cx.weak_entity();
+        transcript.update(cx, |transcript, _| {
+            transcript.set_link_handler(std::rc::Rc::new(move |url, window, cx| {
+                let Some(link) = crate::files::links::parse(url) else {
+                    return false;
+                };
+                shell
+                    .update(cx, |shell, cx| shell.open_file_link(sid, link, window, cx))
+                    .is_ok()
+            }));
+        });
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let subagents = cx.new(|cx| SubagentsPanel::new(state.clone(), cx));
         // "PaletteSearch" context: ↵ / ⇧↵ / esc stay unbound so they bubble

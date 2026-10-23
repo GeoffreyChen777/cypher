@@ -281,6 +281,9 @@ pub struct Transcript {
     /// temporary panel so a side chat beside the main transcript (or two side
     /// chats) never collide in the selection registry.
     scope: crate::markdown::selection::SelectionScope,
+    /// Takes the replies' link clicks before the system does (the shell's
+    /// file links); `None` opens every link through the system.
+    link_handler: Option<crate::markdown::render::LinkHandler>,
     /// Embedded (temporary Side Chat) layout: narrow-panel row gutters and a
     /// smaller first-row top inset instead of the main surface's titlebar
     /// chrome gap. Also disables the annotation surface (no Comment pill, no
@@ -433,6 +436,11 @@ impl Transcript {
         )
     }
 
+    /// Offer the replies' link clicks to `handler` before the system.
+    pub fn set_link_handler(&mut self, handler: crate::markdown::render::LinkHandler) {
+        self.link_handler = Some(handler);
+    }
+
     /// A temporary Side Chat transcript: the EXISTING
     /// renderer against a Side Chat fork state, with a fresh selection scope
     /// (never colliding with the main transcript or another panel), the rail
@@ -530,6 +538,7 @@ impl Transcript {
             prompt_nav: None,
             rail_enabled,
             scope,
+            link_handler: None,
             embedded,
             bottom_clearance: 0.0,
             viewport_size: None,

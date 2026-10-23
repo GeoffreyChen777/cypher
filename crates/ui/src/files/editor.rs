@@ -202,6 +202,9 @@ pub struct CodeEditor {
     /// Keeps the caret in view through edits and moves; a wheel scroll
     /// pauses it until the next caret move.
     follow_cursor: bool,
+    /// The next prepaint scrolls the caret's line to the upper third
+    /// ([`Self::go_to_line`]) rather than just into view.
+    center_caret: bool,
     // -- measured (written during prepaint) --
     text_bounds: Option<Bounds<Pixels>>,
     char_width: f32,
@@ -247,6 +250,7 @@ impl CodeEditor {
             scroll_top: 0.0,
             scroll_left: 0.0,
             follow_cursor: true,
+            center_caret: false,
             text_bounds: None,
             char_width: 0.0,
             visible: Vec::new(),
@@ -301,6 +305,25 @@ impl CodeEditor {
 
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Select 1-based `line` (clamped to the text) and scroll it to the
+    /// upper third of the view — a link to `file:line` landing.
+    pub fn go_to_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        let ix = line.saturating_sub(1).min(self.line_count() - 1);
+        let start = self.line_starts[ix];
+        let end = self
+            .line_starts
+            .get(ix + 1)
+            .map_or(self.content.len(), |next| next - 1);
+        self.selected_range = start..end;
+        // The caret at the line's start, so a long line doesn't scroll the
+        // view sideways to its end.
+        self.selection_reversed = true;
+        self.marked_range = None;
+        self.follow_cursor = true;
+        self.center_caret = true;
+        cx.notify();
     }
 
     /// `(line, column)` of the caret, 1-based, for a status readout.
@@ -761,7 +784,9 @@ impl CodeEditor {
 
         let cursor = self.cursor_offset();
         let cursor_line = self.line_of(cursor);
-        if self.follow_cursor {
+        if std::mem::take(&mut self.center_caret) {
+            self.scroll_top = cursor_line as f32 * LINE_HEIGHT - height / 3.0;
+        } else if self.follow_cursor {
             self.scroll_top = scroll_to_reveal(
                 self.scroll_top,
                 cursor_line as f32 * LINE_HEIGHT,

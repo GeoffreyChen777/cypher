@@ -547,6 +547,66 @@ impl Shell {
         }
     }
 
+    /// A reply's file link: the file opens in the session's Files tab (the
+    /// active one, else the first, else a new one), at its line. A path
+    /// outside the checkout can't show there; one on this device is
+    /// revealed in the system file manager instead.
+    pub(in crate::shell) fn open_file_link(
+        &mut self,
+        sid: SlotId,
+        link: crate::files::links::FileLink,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
+            return;
+        };
+        let context = crate::files::context_for(slot.state.read(cx));
+        let resolved = match &context {
+            Ok(context) => crate::files::links::resolve(&link.path, &context.cwd),
+            Err(_) => Err(link.path.clone()),
+        };
+        let path = match resolved {
+            Ok(path) => path,
+            Err(outside) => {
+                let here = context.as_ref().is_ok_and(|c| c.target.is_none());
+                let path = std::path::Path::new(&outside);
+                if (here || context.is_err()) && path.is_absolute() && path.exists() {
+                    cx.reveal_path(path);
+                }
+                return;
+            }
+        };
+        self.ensure_dock_open(sid, cx);
+        let Some(slot) = self.tiles.slots.get(&sid) else {
+            return;
+        };
+        let shown = match self.resolved_dock_active(slot, cx) {
+            DockSurface::Files(id) => Some(id),
+            _ => slot.dock.surfaces.iter().find_map(|surface| match surface {
+                DockSurface::Files(id) if slot.files.contains_key(id) => Some(*id),
+                _ => None,
+            }),
+        };
+        match shown {
+            Some(id) => self.set_dock_active(sid, DockSurface::Files(id), cx),
+            None => self.add_files_surface(sid, window, cx),
+        }
+        let panel = self
+            .tiles
+            .slots
+            .get(&sid)
+            .and_then(|slot| match slot.dock.active {
+                DockSurface::Files(id) => slot.files.get(&id).cloned(),
+                _ => None,
+            });
+        if let Some(panel) = panel {
+            panel.update(cx, |panel, cx| {
+                panel.open_link(path, link.line, link.dir, cx)
+            });
+        }
+    }
+
     fn register_diff_surface(
         &mut self,
         sid: SlotId,
