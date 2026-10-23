@@ -124,9 +124,9 @@ fn split_line_suffix(path: &str) -> Option<(String, usize)> {
 
 /// `12` or `12-20` → 12.
 fn line_number(text: &str) -> Option<usize> {
-    let first =
-        text.split_once('-')
-            .map_or(text, |(from, to)| if is_digits(to) { from } else { "" });
+    let first = text
+        .split_once('-')
+        .map_or(text, |(from, to)| if is_digits(to) { from } else { "" });
     if is_digits(first) {
         first.parse().ok()
     } else {
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(parse("a.rs:12-20"), link("a.rs", Some(12)));
         assert_eq!(parse("a.rs#L7"), link("a.rs", Some(7)));
         assert_eq!(parse("a.rs#L7-L9"), link("a.rs", Some(7)));
-        assert_eq!(parse("docs/x.md#usage"), link("docs/x.md", None));
+        assert_eq!(parse("guide/x.md#usage"), link("guide/x.md", None));
         assert_eq!(parse("file:///abs/my%20a.rs"), link("/abs/my a.rs", None));
         assert_eq!(parse("file://localhost/abs/a.rs"), link("/abs/a.rs", None));
         assert_eq!(parse("cypher-file:src/lib.rs"), link("src/lib.rs", None));
