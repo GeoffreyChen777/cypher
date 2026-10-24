@@ -1,6 +1,6 @@
 //! The working trailer's progress bar, painted: a hairline track whose
 //! filled part carries a travelling glint, a solid dot where each passed
-//! stage began, a hollow ring that breathes for the current stage, a faint
+//! stage began, a hollow ring that follows the fill for the current stage, a faint
 //! dot for each step still to come, and a faint pinpoint at the finish. Everything is neutral grey from the theme's
 //! text colour.
 //!
@@ -53,7 +53,8 @@ const TONE_CURRENT: f32 = 0.58;
 pub struct ProgressBar {
     /// Filled fraction, 0–1 (mid-tween while the fill moves).
     pub fill: f32,
-    /// Where each stage began, 0–1, oldest first; the last is current.
+    /// Stage positions, 0–1, oldest first. Passed stages stay where they
+    /// began; the last (current) dot follows `fill`, including mid-tween.
     pub dots: [f32; MAX_DOTS],
     pub dot_count: u8,
     /// Where each step still to come begins, 0–1, in order.
@@ -67,14 +68,18 @@ pub struct ProgressBar {
 
 impl ProgressBar {
     pub fn new(fill: f32, stages: &[f32], upcoming: &[f32], appear: f32, ink: Hsla) -> Self {
+        let fill = fill.clamp(0.0, 1.0);
         let mut dots = [0.0; MAX_DOTS];
         let kept = &stages[stages.len().saturating_sub(MAX_DOTS)..];
         dots[..kept.len()].copy_from_slice(kept);
+        if let Some(current) = dots[..kept.len()].last_mut() {
+            *current = fill;
+        }
         let mut ahead = [0.0; MAX_UPCOMING];
         let shown = &upcoming[..upcoming.len().min(MAX_UPCOMING)];
         ahead[..shown.len()].copy_from_slice(shown);
         Self {
-            fill: fill.clamp(0.0, 1.0),
+            fill,
             dots,
             dot_count: kept.len() as u8,
             upcoming: ahead,
@@ -333,7 +338,38 @@ mod tests {
         assert_eq!(bar.dot_count as usize, MAX_DOTS);
         assert_eq!(bar.upcoming().len(), MAX_UPCOMING);
         assert_eq!(bar.upcoming()[0], 0.95);
-        assert_eq!(bar.dots()[MAX_DOTS - 1], 19.0 / 20.0);
+        assert_eq!(&bar.dots()[..MAX_DOTS - 1], &stages[4..19]);
+        assert_eq!(bar.dots()[MAX_DOTS - 1], bar.fill);
         assert_eq!(bar.fill, 1.0);
+    }
+
+    #[test]
+    fn current_ring_tracks_the_fill_not_the_stage_start() {
+        // The current stage began at 72%, but its latest reading is 97%.
+        // Every tween frame moves only the ring; passed stages stay put.
+        let stages = [0.16, 0.26, 0.68, 0.72];
+        for fill in [0.72, 0.80, 0.90, 0.97] {
+            let bar = ProgressBar::new(fill, &stages, &[0.985], 1.0, gpui::black());
+            assert_eq!(&bar.dots()[..3], &stages[..3]);
+            assert_eq!(bar.dots()[3], bar.fill);
+            for width in [64.0, 214.0, 500.0] {
+                let (_, current) = shown_stages(bar.dots(), width);
+                assert_eq!(current, Some(dot_x(fill, width)));
+            }
+        }
+    }
+
+    #[test]
+    fn current_ring_handles_initial_fill_endpoints_and_no_stages() {
+        for fill in [-0.1, 0.0, 0.3, 1.0, 1.1] {
+            let bar = ProgressBar::new(fill, &[0.72], &[], 1.0, gpui::black());
+            assert_eq!(bar.dots(), &[bar.fill]);
+            assert_eq!(
+                shown_stages(bar.dots(), 214.0),
+                (vec![], Some(dot_x(bar.fill, 214.0)))
+            );
+        }
+        let empty = ProgressBar::new(0.5, &[], &[], 1.0, gpui::black());
+        assert!(empty.dots().is_empty());
     }
 }

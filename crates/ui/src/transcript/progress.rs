@@ -7,8 +7,9 @@
 //! which dot the pointer is on ([`HoverListener`]), and the current stage's
 //! resting tip steps aside while another dot has it. Tips sit on the chat's own background, lifted by a soft shadow.
 //!
-//! Motion: when a reading lands the fill glides to its new percentage and a
-//! new stage's dot grows in; refreshed upcoming steps glide to their new
+//! Motion: when a reading lands the fill, current ring and its tip glide
+//! together to the new percentage, and a new stage's dot grows in;
+//! refreshed upcoming steps and their hover targets glide to their new
 //! places; the old stage's tip lifts away as the new one
 //! rises into place ([`ProgressMotion`] notices both). The glint and the
 //! current ring's breathing run continuously in the bar itself.
@@ -162,6 +163,17 @@ pub(super) type HoverListener<'a> = &'a dyn Fn(SharedString) -> HoverHandler;
 /// A dot's hover handler.
 pub(super) type HoverHandler = Box<dyn Fn(&bool, &mut Window, &mut gpui::App)>;
 
+/// Centre a hover target (and its tip pointer) on the painted dot. The
+/// percentage is relative to the whole row, so the margin accounts for
+/// the track's inset at both ends.
+fn target_margin(at: f32) -> f32 {
+    INSET - at * 2.0 * INSET - HIT / 2.0
+}
+
+fn position_target<T: Styled>(target: T, at: f32) -> T {
+    target.left(relative(at)).ml(px(target_margin(at)))
+}
+
 /// The bar for `progress`, filling what its row leaves. `hovered` is the key
 /// of the dot the pointer is on, if any.
 #[allow(clippy::too_many_arguments)]
@@ -228,16 +240,17 @@ pub(super) fn render(
 
     let target = |key: String, at: f32| {
         let group = SharedString::from(key);
-        let target = div()
-            .id(group.clone())
-            .on_hover(on_hover(group.clone()))
-            .group(group.clone())
-            .absolute()
-            .top_0()
-            .left(relative(at))
-            .ml(px(INSET - at * 2.0 * INSET - HIT / 2.0))
-            .w(px(HIT))
-            .h(px(HEIGHT));
+        let target = position_target(
+            div()
+                .id(group.clone())
+                .on_hover(on_hover(group.clone()))
+                .group(group.clone())
+                .absolute()
+                .top_0()
+                .w(px(HIT))
+                .h(px(HEIGHT)),
+            at,
+        );
         (target, group)
     };
     // A soft ring marks a hovered dot.
@@ -255,13 +268,14 @@ pub(super) fn render(
 
     // The current stage first: every other dot's tip, shown on hover, then
     // paints over the current one's.
-    let at = fractions[last];
+    let at = to;
     let anchor_left = at <= 0.5;
     let label = labels[last].0.clone();
     let note = format!("{percent}% · {}", left_note(left));
     let (mut current, group) = target(format!("progress-stage-{last}"), at);
     // Its label and how many steps are left always, rising in when the
     // stage is new; on hover, a fuller tip listing every step to come.
+    let entering = grew || motion.from_percent == 0;
     let resting = tip(
         vec![tip_line(&label, Some(note.clone()), &look)],
         anchor_left,
@@ -271,7 +285,12 @@ pub(super) fn render(
     .with_animation(
         ("progress-tip-in", last),
         PROGRESS_TIP_IN.animation(),
-        |el, t| el.opacity(t).bottom(px(TIP_LIFT - 5.0 * (1.0 - t))),
+        move |el, t| {
+            // The position tween gets a new key on every reading, but a
+            // percentage-only update must not fade the same tip in again.
+            let t = if entering { t } else { 1.0 };
+            el.opacity(t).bottom(px(TIP_LIFT - 5.0 * (1.0 - t)))
+        },
     );
     // One tip at a time: the resting tip steps aside while the pointer is
     // on another dot (one that is still on the bar).
@@ -324,7 +343,13 @@ pub(super) fn render(
             .opacity(0.0)
             .group_hover(group, |s| s.opacity(1.0)),
     );
-    bar = bar.child(current);
+    // Use the fill's tween for the hit area and both tips as well as the
+    // painted ring: neither should jump ahead or stay at the stage start.
+    bar = bar.child(current.with_animation(
+        ("progress-current-position", motion.revision),
+        PROGRESS_TWEEN.animation(),
+        move |el, t| position_target(el, lerp(from, to, t)),
+    ));
 
     // Passed stages: their label on hover; the one just left lifts away.
     let leaving = motion.leaving(now);
@@ -351,6 +376,7 @@ pub(super) fn render(
 
     // Steps still to come: each one's name and place on hover.
     for (n, &at) in upcoming.iter().enumerate() {
+        let from = motion.from_upcoming.get(n).copied().unwrap_or(1.0);
         let label = progress
             .next
             .get(n)
@@ -358,19 +384,28 @@ pub(super) fn render(
             .unwrap_or_else(|| "A later step".to_owned());
         let (dot, group) = target(format!("progress-next-{n}"), at);
         bar = bar.child(
-            dot.child(hover_ring(&group)).child(
-                tip(
-                    vec![tip_line(
-                        &label,
-                        Some(format!("{} of {left}", n + 1)),
+            dot.child(hover_ring(&group))
+                .child(
+                    tip(
+                        vec![tip_line(
+                            &label,
+                            Some(format!("{} of {left}", n + 1)),
+                            &look,
+                        )],
+                        at <= 0.5,
                         &look,
-                    )],
-                    at <= 0.5,
-                    &look,
+                    )
+                    .opacity(0.0)
+                    .group_hover(group, |s| s.opacity(1.0)),
                 )
-                .opacity(0.0)
-                .group_hover(group, |s| s.opacity(1.0)),
-            ),
+                .with_animation(
+                    (
+                        SharedString::from(format!("progress-next-position-{n}")),
+                        motion.revision,
+                    ),
+                    PROGRESS_TWEEN.animation(),
+                    move |el, t| position_target(el, lerp(from, at, t)),
+                ),
         );
     }
     bar.into_any_element()
@@ -508,6 +543,22 @@ fn pointer(fill: Hsla, edge: Hsla) -> gpui::Canvas<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_targets_and_tip_pointers_stay_centred_on_their_dots() {
+        for width in [64.0, 214.0, 500.0] {
+            for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let fill = lerp(0.72, 0.97, t);
+                let upcoming = lerp(0.86, 0.985, t);
+                let bar = ProgressBar::new(fill, &[0.16, 0.72], &[upcoming], 1.0, gpui::black());
+                for (target_at, painted_at) in [(fill, bar.dots[1]), (upcoming, bar.upcoming[0])] {
+                    let centre = target_at * width + target_margin(target_at) + HIT / 2.0;
+                    let painted = crate::kit::progress_bar::dot_x(painted_at, width);
+                    assert!((centre - painted).abs() < 0.0001);
+                }
+            }
+        }
+    }
 
     #[test]
     fn upcoming_steps_share_what_is_left() {
