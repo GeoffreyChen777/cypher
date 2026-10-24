@@ -495,10 +495,41 @@ impl Transcript {
             base_pad,
             ..
         } = *frame;
-        if let (Some(anchor_bounds), Some(last_bounds)) = (
-            self.list.bounds_for_item(anchor_ix),
-            self.list.bounds_for_item(last_ix),
-        ) {
+        let anchor_bounds = self.list.bounds_for_item(anchor_ix);
+        if let Some(anchor_bounds) = anchor_bounds
+            && self.list.bounds_for_item(last_ix).is_none()
+        {
+            // The prompt is measured but the last row lies past the list's
+            // measured window: a reply that landed in one big jump (a remote
+            // session syncs in batches, not tokens) can overshoot viewport +
+            // overdraw before any frame sees it whole. The sizing below never
+            // runs then — the reservation and the hold's hard stop outlived
+            // the reply, and wheel-down stopped dead at the prompt with most
+            // of the reply unreachable (user report: "stuck in the middle").
+            // The measured rows above the last are a lower bound on the
+            // turn's content (the pads live on the last row only); once that
+            // alone fills the reservation, the reply has outgrown it. The pad
+            // sits past the measured window, so dropping it moves nothing on
+            // screen; release in place — handing an unseen, possibly very
+            // long reply to the bottom pin would yank the view off the prompt.
+            let measured_bottom = (anchor_ix..last_ix)
+                .filter_map(|ix| self.list.bounds_for_item(ix))
+                .map(|b| f32::from(b.bottom()))
+                .fold(f32::NEG_INFINITY, f32::max);
+            let turn_at_least = measured_bottom - f32::from(anchor_bounds.top());
+            if own_turn_reservation(usable, turn_at_least) <= 0.5 {
+                self.own_turn = None;
+                self.own_turn_last_tick = None;
+                self.remeasure_last_row();
+                self.show_jump_button =
+                    self.distance_from_bottom() > SCROLL_BUTTON_THRESHOLD_PX && !self.pinned;
+                cx.notify();
+                return true;
+            }
+        }
+        if let (Some(anchor_bounds), Some(last_bounds)) =
+            (anchor_bounds, self.list.bounds_for_item(last_ix))
+        {
             // Content height of the turn, excluding the pads on the last row.
             let turn_height = f32::from(last_bounds.bottom())
                 - f32::from(anchor_bounds.top())
