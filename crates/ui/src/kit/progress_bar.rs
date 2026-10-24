@@ -11,10 +11,13 @@
 //! either side, and the current ring stays hollow on whatever surface the
 //! chat sits on.
 //!
-//! The geometry is pure ([`dot_x`], [`segments`]) so it is unit-tested; the
-//! transcript positions its hover targets with the same [`INSET`] mapping.
+//! The geometry is pure ([`dot_x`], [`segments`], [`ring_path`]) so it is
+//! unit-tested; the transcript positions its hover targets with the same
+//! [`INSET`] mapping.
 
-use gpui::{Bounds, Hsla, Pixels, Window, point, px, size};
+use gpui::{
+    Bounds, FillOptions, Hsla, PathBuilder, PathStyle, Pixels, Point, Window, point, px, size,
+};
 
 /// Most stage dots a bar carries (the engine keeps 16 stages).
 pub const MAX_DOTS: usize = 16;
@@ -35,6 +38,9 @@ const PASSED_DOT: f32 = 6.0;
 const CURRENT_SMALL: f32 = 8.0;
 const CURRENT_LARGE: f32 = 11.0;
 const CURRENT_BORDER: f32 = 1.5;
+/// Sides of the polygons the current ring is cut from: round to the eye at
+/// its largest breath.
+const RING_SIDES: usize = 48;
 const FINISH_DOT: f32 = 4.0;
 const UPCOMING_DOT: f32 = 4.5;
 const GLINT: f32 = 72.0;
@@ -184,16 +190,6 @@ impl ProgressBar {
                 size(px(diameter), px(diameter)),
             )
         };
-        let ring = |window: &mut Window, x: f32, diameter: f32, border: f32, color: Hsla| {
-            window.paint_quad(gpui::quad(
-                circle(x, diameter),
-                px(diameter / 2.0),
-                gpui::transparent_black(),
-                px(border),
-                color,
-                gpui::BorderStyle::Solid,
-            ));
-        };
         let disc = |window: &mut Window, x: f32, diameter: f32, color: Hsla| {
             window.paint_quad(
                 gpui::fill(circle(x, diameter), color).corner_radii(px(diameter / 2.0)),
@@ -214,15 +210,43 @@ impl ProgressBar {
             // grown in from nothing when its stage is new.
             let breath = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
             let diameter = CURRENT_SMALL + (CURRENT_LARGE - CURRENT_SMALL) * breath;
-            ring(
-                window,
-                x,
-                diameter * self.appear,
-                CURRENT_BORDER,
-                self.ink.opacity(TONE_CURRENT * self.appear),
-            );
+            let centre = point(px(left + x), px(mid));
+            if let Some(ring) = ring_path(centre, diameter * self.appear, CURRENT_BORDER) {
+                window.paint_path(ring, self.ink.opacity(TONE_CURRENT * self.appear));
+            }
         }
     }
+}
+
+/// The current ring: a band `border` wide inside a circle `diameter` across
+/// about `centre`, or a disc when the circle is smaller than its border.
+///
+/// A path, not a bordered quad: gpui snaps a quad's edges to whole device
+/// pixels, so a quad ring breathing 3px grew in a few visible steps a
+/// breath, pausing at either end. A path keeps every sub-pixel size.
+fn ring_path(centre: Point<Pixels>, diameter: f32, border: f32) -> Option<gpui::Path<Pixels>> {
+    let outer = diameter / 2.0;
+    if outer <= 0.0 {
+        return None;
+    }
+    let circle = |radius: f32| -> Vec<Point<Pixels>> {
+        (0..RING_SIDES)
+            .map(|side| {
+                let angle = side as f32 / RING_SIDES as f32 * std::f32::consts::TAU;
+                point(
+                    centre.x + px(radius * angle.cos()),
+                    centre.y + px(radius * angle.sin()),
+                )
+            })
+            .collect()
+    };
+    let mut path = PathBuilder::fill().with_style(PathStyle::Fill(FillOptions::even_odd()));
+    path.add_polygon(&circle(outer), true);
+    let inner = outer - border;
+    if inner > 0.0 {
+        path.add_polygon(&circle(inner), true);
+    }
+    path.build().ok()
 }
 
 /// The passed stages' x and the current one's, on a bar `width` wide. A
@@ -328,6 +352,23 @@ mod tests {
         let ahead = shown_upcoming(&[0.32, 0.40, 0.41, 0.60], current, 214.0);
         assert_eq!(ahead, vec![dot_x(0.40, 214.0), dot_x(0.60, 214.0)]);
         assert_eq!(shown_stages(&[], 214.0), (Vec::new(), None));
+    }
+
+    #[test]
+    fn the_ring_breathes_through_sub_pixel_sizes() {
+        // A quad would snap these to whole device pixels.
+        let centre = point(px(40.3), px(11.0));
+        for diameter in [CURRENT_SMALL, 8.37, 9.81, CURRENT_LARGE] {
+            let ring = ring_path(centre, diameter, CURRENT_BORDER).unwrap();
+            let bounds = ring.bounds;
+            assert!((f32::from(bounds.size.width) - diameter).abs() < 1e-3);
+            assert!((f32::from(bounds.size.height) - diameter).abs() < 1e-3);
+            assert!((f32::from(bounds.center().x) - 40.3).abs() < 1e-3);
+            assert!((f32::from(bounds.center().y) - 11.0).abs() < 1e-3);
+        }
+        // Still growing in from nothing.
+        assert!(ring_path(centre, 0.0, CURRENT_BORDER).is_none());
+        assert!(ring_path(centre, 2.0, CURRENT_BORDER).is_some());
     }
 
     #[test]
