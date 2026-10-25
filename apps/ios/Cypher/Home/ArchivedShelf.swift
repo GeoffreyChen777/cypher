@@ -1,7 +1,8 @@
 // Archived shelf — the desktop sidebar's settled shelf for archived sessions
 // (shell/spaces.rs `render_archived_section`), sitting under the active list
-// as its own inset-grouped section: a header that folds (open by default,
-// session-transient), single-line rows, and Show-more paging (10, then +25).
+// as its own inset-grouped section: a header that folds (session-transient;
+// folded on Home, open in a project), single-line rows, and Show-more paging
+// (10, then +25). A search opens it onto the archived sessions that match.
 // The desktop's hover-swapped Unarchive pill becomes swipe-to-unarchive here,
 // mirroring the active rows' swipe-to-archive.
 
@@ -13,23 +14,31 @@ extension Chat {
 
 struct ArchivedSection: View {
     @Environment(AppModel.self) private var model
-    /// Scope, matching the list above it: nil = All.
-    var spaceId: String?
-    var orphanedOnly = false
+    /// Scope, matching the list above it.
+    let scope: SessionScope
+    var query = ""
 
     // spaces.rs INITIAL/PAGE. Both session-transient, like the desktop's.
-    @State private var open = true
+    @State private var open: Bool
     @State private var shown = ArchivedSection.initialCount
     private static let initialCount = 10
     private static let pageSize = 25
 
+    init(scope: SessionScope, query: String = "", startsOpen: Bool = true) {
+        self.scope = scope
+        self.query = query
+        _open = State(initialValue: startsOpen)
+    }
+
     var body: some View {
-        let archived = model.archivedChats(in: spaceId).filter { chat in
-            !orphanedOnly || !model.spaces.contains(where: { $0.id == chat.spaceId })
+        let liveSpaceIds = Set(model.spaces.map(\.id))
+        let archived = model.archivedChats().filter { chat in
+            scope.contains(chat, liveSpaceIds: liveSpaceIds) && model.matches(chat, query: query)
         }
+        let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
         if !archived.isEmpty {
             Section {
-                if open {
+                if open || searching {
                     // Distinct identity namespace (desktop's "archived-{id}"
                     // vs "c:{id}" FLIP keys): the SAME id in both ForEach made
                     // SwiftUI animate archiving as a cross-section MOVE — the
@@ -44,7 +53,11 @@ struct ArchivedSection: View {
                     }
                 }
             } header: {
-                header(count: archived.count)
+                if searching {
+                    ListSectionHeader(title: "Archived")
+                } else {
+                    header(count: archived.count)
+                }
             }
         }
     }

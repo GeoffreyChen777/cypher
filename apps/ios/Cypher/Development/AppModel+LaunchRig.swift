@@ -9,6 +9,7 @@ extension AppModel {
     func applyDemoLaunchArguments(_ args: [String]) {
         enterDemoMode()
         if args.contains("-demo-many") { demo?.addManyProjects() }
+        if args.contains("-demo-history") { demo?.addSessionHistory() }
         if let ix = args.firstIndex(of: "-route"), ix + 1 < args.count {
             let spec = args[ix + 1]
             if spec.hasPrefix("chat:") {

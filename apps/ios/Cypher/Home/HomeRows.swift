@@ -1,5 +1,5 @@
-// Home list rows and components: section headers, device tabs, project and
-// chat rows, activity badges, status marks, relative time.
+// Home list rows and components: section headers, the project chips, chat
+// rows, status marks, activity counts, relative time.
 
 import SwiftUI
 
@@ -38,24 +38,42 @@ extension ListSectionHeader where Accessory == EmptyView {
     }
 }
 
-/// "All" plus one rounded-rectangle tab per project-owning device, with its
-/// presence dot. Content-layer filters, so solid fills rather than glass
-/// (glass belongs to the navigation layer). Scrolls sideways past ~4 devices.
-struct DeviceTabs: View {
-    @Environment(AppModel.self) private var model
-    let deviceIds: [String]
-    @Binding var selection: String
+/// One chip of Home's scope row.
+struct ScopeChip: Identifiable {
+    var scope: SessionScope
+    var title: String
+    /// Its sessions' aggregate status; nil or idle shows none.
+    var indicator: ChatIndicator?
+    var id: SessionScope { scope }
+}
+
+/// "All" plus a chip per project (then Quick chats and No project when they
+/// hold sessions): Home's project filter. Content-layer filters, so solid
+/// fills rather than glass (glass belongs to the navigation layer). A
+/// project chip's long press opens the project or starts a session there.
+struct ScopeChips: View {
+    let chips: [ScopeChip]
+    @Binding var selection: SessionScope
+    var openProject: (String) -> Void
+    var newSession: (String) -> Void
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                tab(id: "", title: "All", online: nil)
-                ForEach(deviceIds, id: \.self) { id in
-                    tab(id: id, title: model.deviceName(id), online: model.deviceOnline(id))
+                ForEach(chips) { chip in
+                    if case .project(let id) = chip.scope {
+                        chipButton(chip)
+                            .contextMenu {
+                                Button("Open Project", systemImage: "folder") { openProject(id) }
+                                Button("New Session", systemImage: "square.and.pencil") { newSession(id) }
+                            }
+                    } else {
+                        chipButton(chip)
+                    }
                 }
             }
         }
-        // Tabs start on the cards' edge (the inset-grouped section margin)
+        // Chips start on the cards' edge (the inset-grouped section margin)
         // but scroll out to the screen edge.
         .contentMargins(.horizontal, Self.margin, for: .scrollContent)
     }
@@ -63,22 +81,18 @@ struct DeviceTabs: View {
     /// The inset-grouped section margin.
     static let margin: CGFloat = 16
 
-    private func tab(id: String, title: String, online: Bool?) -> some View {
-        // A filter naming a vanished device reads as All.
-        let current = deviceIds.contains(selection) ? selection : ""
-        let selected = id == current
+    private func chipButton(_ chip: ScopeChip) -> some View {
+        let selected = chip.scope == selection
         return Button {
             guard !selected else { return }
             UISelectionFeedbackGenerator().selectionChanged()
-            withAnimation(Motion.fadeQuick) { selection = id }
+            withAnimation(Motion.fadeQuick) { selection = chip.scope }
         } label: {
             HStack(spacing: 6) {
-                if let online {
-                    Circle()
-                        .fill(online ? Theme.statusCompleted : Theme.textFaint.opacity(0.5))
-                        .frame(width: 6, height: 6)
+                if let indicator = chip.indicator, indicator != .idle {
+                    SessionStatusMark(indicator: indicator, cellSize: 2.2)
                 }
-                Text(title)
+                Text(chip.title)
                     .font(Theme.sans(14, weight: .medium, relativeTo: .subheadline))
                     .foregroundStyle(selected ? Theme.bg : Theme.text)
                     .lineLimit(1)
@@ -92,99 +106,9 @@ struct DeviceTabs: View {
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(online.map { "\(title), \($0 ? "online" : "offline")" } ?? title)
+        .accessibilityLabel(chip.title)
+        .accessibilityIdentifier("scope-chip-\(chip.title)")
         .accessibilityAddTraits(selected ? .isSelected : [])
-    }
-}
-
-/// The name with the session count across from it; then the project's
-/// activity as colored badges, a state each in the session rows' own marks,
-/// or when it was last active once nothing is happening.
-struct ProjectRow: View {
-    @Environment(AppModel.self) private var model
-    let space: Space
-
-    var body: some View {
-        let chats = model.chats(in: space.id)
-        let counts = ChatIndicator.activityCounts(chats.map { model.indicator(for: $0) })
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(space.displayName)
-                    .font(Theme.sans(16, weight: .medium, relativeTo: .body))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                if !chats.isEmpty {
-                    Text(chats.count == 1 ? "1 session" : "\(chats.count) sessions")
-                        .font(Theme.sans(12.5, relativeTo: .footnote))
-                        .foregroundStyle(Theme.textFaint)
-                        .lineLimit(1)
-                        .fixedSize()
-                }
-            }
-            if counts.isEmpty {
-                Text(quietLine(chats))
-                    .font(Theme.sans(13, relativeTo: .subheadline))
-                    .foregroundStyle(Theme.textMuted)
-                    .lineLimit(1)
-            } else {
-                ActivityBadges(counts: counts)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
-    }
-
-    /// The second line of a project with nothing going on.
-    private func quietLine(_ chats: [Chat]) -> String {
-        guard let last = chats.map({ $0.lastMessageAt ?? $0.createdAt }).max() else { return "No sessions yet" }
-        let ago = relativeTime(last)
-        return ago == "now" ? "Last active just now" : "Last active \(ago) ago"
-    }
-}
-
-/// One badge per state with sessions in it, attention first: the session
-/// rows' mark and color, the count and the state in words. Where the words
-/// don't fit, the badges keep only their marks and counts.
-struct ActivityBadges: View {
-    let counts: [ChatIndicator.Count]
-
-    var body: some View {
-        ViewThatFits(in: .horizontal) {
-            badges(compact: false)
-            badges(compact: true)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(ChatIndicator.activitySummary(counts).joined(separator: ", "))
-    }
-
-    private func badges(compact: Bool) -> some View {
-        HStack(spacing: 6) {
-            ForEach(counts, id: \.indicator) { count in
-                ActivityBadge(count: count, compact: compact)
-            }
-        }
-        .fixedSize()
-    }
-}
-
-struct ActivityBadge: View {
-    let count: ChatIndicator.Count
-    var compact = false
-
-    var body: some View {
-        let color = SessionStatusMark.color(count.indicator)
-        HStack(spacing: 5) {
-            SessionStatusMark(indicator: count.indicator, cellSize: 2.2)
-            Text(compact ? "\(count.count)" : count.label)
-                .font(Theme.sans(12, weight: .medium, relativeTo: .footnote))
-                .foregroundStyle(color)
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 8)
-        .frame(height: 22)
-        .background(color.opacity(0.13), in: Capsule())
     }
 }
 
@@ -216,7 +140,7 @@ extension ChatIndicator {
         }
     }
 
-    /// "1 needs input · 1 running · 1 done" parts, in the badges' order.
+    /// "1 needs input · 1 running · 1 done" parts, attention first.
     static func activitySummary(_ indicators: [ChatIndicator]) -> [String] {
         activitySummary(activityCounts(indicators))
     }
@@ -303,8 +227,8 @@ struct ChatRow: View {
     /// space has been renamed, or when the session runs in a worktree off to
     /// the side.
     private var location: String {
-        // The folder is named after the chat id — the device says it all.
-        if chat.isScratch { return model.deviceName(chat.deviceId) }
+        // The folder is named after the chat id: say what it is instead.
+        if chat.isScratch { return "Quick chat @ \(model.deviceName(chat.deviceId))" }
         let space =
             model.space(for: chat)?.displayName
             ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
