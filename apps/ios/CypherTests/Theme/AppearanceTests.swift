@@ -49,9 +49,9 @@ final class AppearanceTests: XCTestCase {
 
     func testDynamicPalettePreservesDarkAndProvidesLightSurfaces() {
         XCTAssertEqual(rgba(Theme.bg, .light)[0], 1, accuracy: 0.001)
-        XCTAssertEqual(rgba(Theme.bg, .dark)[0], 6.0 / 255, accuracy: 0.001)
-        XCTAssertEqual(rgba(Theme.surface, .dark)[0], 13.0 / 255, accuracy: 0.001)
-        XCTAssertEqual(rgba(Theme.sheetPanel, .dark)[0], 20.0 / 255, accuracy: 0.001)
+        XCTAssertEqual(rgba(Theme.bg, .dark)[0], 18.0 / 255, accuracy: 0.001)
+        XCTAssertEqual(rgba(Theme.surface, .dark)[0], 25.0 / 255, accuracy: 0.001)
+        XCTAssertEqual(rgba(Theme.sheetPanel, .dark)[0], 32.0 / 255, accuracy: 0.001)
         XCTAssertEqual(rgba(Theme.sheetPanel, .light)[0], 1, accuracy: 0.001)
         XCTAssertEqual(rgba(whiteAlpha(0.06), .light)[0], 0, accuracy: 0.001)
         XCTAssertEqual(rgba(whiteAlpha(0.06), .dark)[0], 1, accuracy: 0.001)
