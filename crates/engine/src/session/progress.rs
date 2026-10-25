@@ -3,7 +3,9 @@
 //! A turn that has been Working for [`FIRST_AFTER`] gets a cheap model's
 //! reading of how far it has got: a percentage, what the agent is doing now
 //! and the steps still to come — an estimate the model revises with every
-//! reading, so the upcoming steps refresh as the agent learns more. The run loop checks every few seconds
+//! reading, so the upcoming steps refresh as the agent learns more. When
+//! they grow past anything the plan has counted, the stages already passed
+//! shrink to make room ([`with_stages`]). The run loop checks every few seconds
 //! ([`NarrationClock`]) and asks again every [`EVERY`] while the turn runs,
 //! never with one reading still being written, and only once the turn has
 //! moved on from what the last reading saw: a turn waiting on one long, quiet
@@ -413,24 +415,57 @@ pub(crate) fn parse(raw: &str, now: DateTime<Utc>) -> Option<RunProgress> {
         next,
         steps_left,
         stages: Vec::new(),
+        planned: None,
         updated_at: now,
     })
 }
 
+/// How many steps a reading counts after its current one: the listed
+/// steps, or the model's count when it names more.
+fn steps_ahead(progress: &RunProgress) -> usize {
+    usize::from(progress.steps_left.unwrap_or(0)).max(progress.next.len())
+}
+
 /// `reading` with the turn's stages carried over from `previous`: its
-/// `current` closes the list, as a new stage when the agent moved on. The
-/// stages already recorded never change: a reading only moves the fill, the
-/// current step and the steps ahead, and its percentage never falls behind
-/// where the current stage began, so every stage stays behind the fill.
+/// `current` closes the list, as a new stage when the agent moved on. A
+/// reading moves the fill, the current step and the steps ahead, and its
+/// percentage never falls behind where the current stage began, so every
+/// stage stays behind the fill.
+///
+/// The stages already recorded keep their places, with one exception: when
+/// a reading's plan (its stages and the steps ahead) is bigger than it has
+/// ever been, the stages and the fill shrink to make room, so the steps
+/// still to come (the current one and those ahead) get an average step's
+/// share each rather than piling up before the finish. They shrink by no
+/// more than the plan grew, and a reading that went back further itself
+/// keeps its own lower percentage. A plan that only regrows to an earlier
+/// size moves nothing.
 pub(crate) fn with_stages(previous: Option<&RunProgress>, mut reading: RunProgress) -> RunProgress {
     let mut stages = previous.map(|p| p.stages.clone()).unwrap_or_default();
-    if let Some(began) = stages.iter().map(|s| s.percent).max() {
-        reading.percent = reading.percent.max(began);
-    }
-    if stages
+    let moved = stages
         .last()
-        .is_none_or(|last| last.label != reading.current)
-    {
+        .is_none_or(|last| last.label != reading.current);
+    let planned = previous.map_or(0, |p| {
+        usize::from(p.planned.unwrap_or(0)).max(p.stages.len() + steps_ahead(p))
+    });
+    let plan = stages.len() + usize::from(moved) + steps_ahead(&reading);
+    if let Some(began) = stages.iter().map(|s| s.percent).max() {
+        let mut fill = f64::from(reading.percent.max(began));
+        if planned > 0 && plan > planned && fill > 0.0 {
+            let to_come = 1 + steps_ahead(&reading);
+            let room = 100.0 * to_come as f64 / plan as f64;
+            let mut scale = ((100.0 - room) / fill).clamp(planned as f64 / plan as f64, 1.0);
+            if reading.percent < began {
+                scale = scale.min(f64::from(reading.percent) / f64::from(began));
+            }
+            for stage in &mut stages {
+                stage.percent = (f64::from(stage.percent) * scale).round() as u8;
+            }
+            fill *= scale;
+        }
+        reading.percent = fill.round() as u8;
+    }
+    if moved {
         stages.push(ProgressStage {
             label: reading.current.clone(),
             percent: reading.percent,
@@ -439,6 +474,9 @@ pub(crate) fn with_stages(previous: Option<&RunProgress>, mut reading: RunProgre
     let excess = stages.len().saturating_sub(MAX_STAGES);
     stages.drain(..excess);
     reading.stages = stages;
+    // Counted against the stages kept, so it shrinks as the oldest drop.
+    let planned = planned.max(plan) - excess;
+    reading.planned = Some(u16::try_from(planned).unwrap_or(u16::MAX));
     reading
 }
 
@@ -639,6 +677,7 @@ mod tests {
             next: vec!["Wire it up".into()],
             steps_left: None,
             stages: vec![],
+            planned: None,
             updated_at: Utc::now(),
         };
         let read = prompt(&entries, Some(&previous), Duration::from_secs(95)).unwrap();
@@ -766,48 +805,120 @@ mod tests {
 
     #[test]
     fn stages_carry_over_and_grow_when_the_agent_moves_on() {
-        let read = |percent, current: &str| RunProgress {
+        // `ahead` steps after `current`: these readings keep a four-step plan.
+        let read = |percent, current: &str, ahead| RunProgress {
             percent,
             current: current.into(),
             next: vec![],
-            steps_left: None,
+            steps_left: Some(ahead),
             stages: vec![],
+            planned: None,
             updated_at: Utc::now(),
         };
         let stage = |label: &str, percent| ProgressStage {
             label: label.into(),
             percent,
         };
-        let one = with_stages(None, read(20, "Store"));
+        let one = with_stages(None, read(20, "Store", 3));
         assert_eq!(one.stages, vec![stage("Store", 20)]);
+        assert_eq!(one.planned, Some(4));
         // Same stage: it keeps where it began.
-        let two = with_stages(Some(&one), read(30, "Store"));
+        let two = with_stages(Some(&one), read(30, "Store", 3));
         assert_eq!(two.stages, vec![stage("Store", 20)]);
         // The current stage moves on: the fill may move within it, but a
         // reading that went back stops where it began.
-        let three = with_stages(Some(&two), read(40, "API"));
+        let three = with_stages(Some(&two), read(40, "API", 2));
         assert_eq!(three.stages, vec![stage("Store", 20), stage("API", 40)]);
-        let four = with_stages(Some(&three), read(15, "API"));
+        let four = with_stages(Some(&three), read(15, "API", 2));
         assert_eq!((four.percent, &four.stages), (40, &three.stages));
         // A new stage after a reading that went back: the passed ones stay
         // put and the new one begins where the last left off.
-        let five = with_stages(Some(&four), read(30, "Tests"));
+        let five = with_stages(Some(&four), read(30, "Tests", 1));
         assert_eq!(
             five.stages,
             vec![stage("Store", 20), stage("API", 40), stage("Tests", 40)]
         );
-        assert_eq!(five.percent, 40);
+        assert_eq!((five.percent, five.planned), (40, Some(4)));
         // Stages already ahead of the reading (older data) never move.
-        let mut ahead = read(22, "Wait");
+        let mut ahead = read(22, "Wait", 0);
         ahead.stages = vec![stage("A", 35), stage("B", 60), stage("Wait", 62)];
-        let kept = with_stages(Some(&ahead), read(23, "Wait"));
+        let kept = with_stages(Some(&ahead), read(23, "Wait", 0));
         assert_eq!((kept.percent, &kept.stages), (62, &ahead.stages));
+        // The oldest stages drop first, and the plan's count with them.
         let mut long = three;
         for n in 0..20 {
-            long = with_stages(Some(&long), read(50, &format!("step {n}")));
+            long = with_stages(Some(&long), read(50, &format!("step {n}"), 30 - n));
         }
         assert_eq!(long.stages.len(), MAX_STAGES);
         assert_eq!(long.stages.last().unwrap().label, "step 19");
+        assert_eq!(long.planned, Some(MAX_STAGES as u16 + 11));
+    }
+
+    #[test]
+    fn a_plan_that_grows_makes_room_for_its_new_steps() {
+        let read = |percent, current: &str, ahead| RunProgress {
+            percent,
+            current: current.into(),
+            next: vec![],
+            steps_left: Some(ahead),
+            stages: vec![],
+            planned: None,
+            updated_at: Utc::now(),
+        };
+        let stage = |label: &str, percent| ProgressStage {
+            label: label.into(),
+            percent,
+        };
+        let at = |percent, current: &str, ahead, stages| RunProgress {
+            stages,
+            ..read(percent, current, ahead)
+        };
+        // Five steps planned, the third under way at 60%, then five more turn
+        // up: rather than eight steps in the last 40%, everything done so far
+        // shrinks by the plan's growth (5 to 10), every stage kept.
+        let before = at(
+            60,
+            "C",
+            2,
+            vec![stage("A", 10), stage("B", 40), stage("C", 60)],
+        );
+        let grown = with_stages(Some(&before), read(62, "C", 7));
+        assert_eq!(
+            grown.stages,
+            vec![stage("A", 5), stage("B", 20), stage("C", 30)]
+        );
+        assert_eq!((grown.percent, grown.planned), (31, Some(10)));
+        // A plan that shrinks and regrows to an earlier size moves nothing.
+        let shrunk = with_stages(Some(&grown), read(35, "C", 5));
+        let regrown = with_stages(Some(&shrunk), read(36, "C", 7));
+        assert_eq!(
+            (regrown.percent, &regrown.stages, regrown.planned),
+            (36, &grown.stages, Some(10))
+        );
+        // Moving on into a step nobody planned grows the plan too; a reading
+        // that went back further itself keeps its own percentage.
+        let further = with_stages(Some(&regrown), read(18, "D", 9));
+        assert_eq!(
+            further.stages,
+            vec![
+                stage("A", 3),
+                stage("B", 12),
+                stage("C", 18),
+                stage("D", 18)
+            ]
+        );
+        assert_eq!((further.percent, further.planned), (18, Some(13)));
+        // Where the steps still to come have most of their room already, the
+        // stages shrink only as far as gives each an average step's share
+        // (here 1/9) — and not at all where they have it.
+        let early = at(12, "B", 6, vec![stage("A", 5), stage("B", 10)]);
+        let more = with_stages(Some(&early), read(12, "B", 7));
+        assert_eq!(more.stages, vec![stage("A", 5), stage("B", 9)]);
+        assert_eq!(more.percent, 11);
+        let low = at(8, "B", 6, vec![stage("A", 5), stage("B", 8)]);
+        let roomy = with_stages(Some(&low), read(8, "B", 7));
+        assert_eq!((roomy.percent, &roomy.stages), (8, &low.stages));
+        assert_eq!(roomy.planned, Some(9));
     }
 
     #[test]

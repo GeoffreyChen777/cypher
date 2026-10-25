@@ -96,7 +96,7 @@ impl Transcript {
             let now = Instant::now();
             self.progress_motion.observe(
                 &chat_id,
-                progress.stages.len().max(1),
+                &super::progress::stages(&progress),
                 super::progress::shown_percent(&progress),
                 &super::progress::upcoming_positions(
                     super::progress::shown_percent(&progress),

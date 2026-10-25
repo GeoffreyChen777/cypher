@@ -518,6 +518,7 @@ fn session_progress_syncs_and_clears_with_the_turn() {
             label: "Wiring the UI".into(),
             percent: 30,
         }],
+        planned: Some(3),
         updated_at: ts(3_400),
     };
     let mut a = RegistryDoc::new("dev-a");

@@ -337,6 +337,12 @@ pub struct RunProgress {
     /// progress bar's dots).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stages: Vec<ProgressStage>,
+    /// The most steps the turn's plan has counted — its stages and the
+    /// steps left after them — at the plan's largest. The host keeps it with
+    /// the stages: a reading whose plan grows past it shrinks the stages and
+    /// the fill to make room for the new steps. `None` = not counted yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned: Option<u16>,
     pub updated_at: DateTime<Utc>,
 }
 
