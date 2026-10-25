@@ -25,7 +25,7 @@ pub use chat_client::{
     CheckpointFetcher,
 };
 pub use registry::{RegistryClient, RegistryEvent, RegistryTransport, RegistryTuning};
-pub use store::{DocsStore, StoreError};
+pub use store::{DocWrite, DocsStore, StoreError, StoredDoc};
 pub use types::{RoomStatsSnapshot, StaticUrl, SyncError, UrlProvider};
 
 /// Lock a mutex, ignoring poisoning: the guarded state stays consistent

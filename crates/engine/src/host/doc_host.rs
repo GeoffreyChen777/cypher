@@ -44,6 +44,9 @@ mod cache;
 mod chat2_sync;
 mod commands;
 mod open;
+mod persist;
+
+pub(crate) use persist::DocPersister;
 
 use cache::{DOC_RESIDENT_FLOOR_BYTES, RESIDENT_BYTES_PER_SNAPSHOT_BYTE};
 
@@ -220,8 +223,12 @@ pub struct ChatDocHandle {
     mirror_dirty: AtomicBool,
     /// Epoch ms of the last open/watch touch — the LRU eviction key.
     last_access: AtomicI64,
-    /// Last known snapshot blob size — the eviction budget estimate's input.
+    /// Last known stored size (base + deltas) — the eviction budget
+    /// estimate's input.
     snapshot_bytes: AtomicUsize,
+    /// Incremental snapshot writer, shared with the chat2 sink so both
+    /// extend the same stored base.
+    persister: Arc<DocPersister>,
     /// A threshold checkpoint POST is in flight (the quiesce
     /// tick must not stack concurrent full-snapshot uploads).
     checkpointing: Arc<AtomicBool>,
@@ -613,13 +620,9 @@ impl DocHost {
         if !handle.ephemeral.load(Ordering::Acquire) {
             return Ok(()); // already promoted
         }
-        let snapshot = handle.doc.export_snapshot()?;
-        self.inner.store.save_snapshot_with_cursor(
-            chat_id,
-            &snapshot,
-            0,
-            crate::host::chat2_host::CHAT2_DOC_EPOCH,
-        )?;
+        handle
+            .persister
+            .save_full_with_cursor(handle.doc.doc(), 0)?;
         Ok(())
     }
 
@@ -797,15 +800,10 @@ impl DocHost {
         if handle.ephemeral.load(Ordering::Acquire) {
             return;
         }
-        match handle.doc.export_snapshot() {
-            Ok(bytes) => {
-                handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
-                if let Err(err) = self.inner.store.save_snapshot(&handle.chat_id, &bytes) {
-                    tracing::warn!(chat = %handle.chat_id, error = %err, "snapshot save failed");
-                }
-            }
+        match handle.persister.save(handle.doc.doc()) {
+            Ok(stored) => handle.snapshot_bytes.store(stored, Ordering::Relaxed),
             Err(err) => {
-                tracing::warn!(chat = %handle.chat_id, error = %err, "snapshot export failed");
+                tracing::warn!(chat = %handle.chat_id, error = %err, "snapshot save failed");
             }
         }
     }

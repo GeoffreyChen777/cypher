@@ -35,6 +35,7 @@ use crate::util::lock;
 use crate::util::now_ms;
 
 mod entities;
+mod persist;
 mod presence;
 mod sync;
 mod transport;
@@ -118,8 +119,12 @@ pub struct WorkspaceHostConfig {
     pub allow_device_rejoin: bool,
 }
 
+pub(crate) use persist::{RegistryPersister, load_registry};
+
 struct WorkspaceHostInner {
     store: Arc<DocsStore>,
+    /// What the store holds of the registry — saves write only the diff.
+    persisted: RegistryPersister,
     config: WorkspaceHostConfig,
     reg: Arc<Mutex<RegistryDoc>>,
     chats_tx: watch::Sender<Vec<Chat>>,
@@ -171,10 +176,12 @@ impl WorkspaceHost {
     /// Load (or init) the registry, upsert this device's row, start
     /// the change-driven task, and join the edge registry room when configured.
     pub fn open(store: Arc<DocsStore>, config: WorkspaceHostConfig) -> Result<Self, EngineError> {
-        let mut doc = match store.load_snapshot(REGISTRY_DOC_ID)? {
-            Some(bytes) => RegistryDoc::from_bytes(&bytes, &config.device_id)
-                .map_err(|e| EngineError::Other(format!("registry snapshot load failed: {e}")))?,
-            None => RegistryDoc::new(&config.device_id),
+        let (mut doc, persisted) = match load_registry(&store, &config.device_id)? {
+            Some(loaded) => loaded,
+            None => (
+                RegistryDoc::new(&config.device_id),
+                RegistryPersister::empty(),
+            ),
         };
 
         // Boot: announce our device row immediately when there's no edge (local
@@ -197,6 +204,7 @@ impl WorkspaceHost {
         let host = Self {
             inner: Arc::new(WorkspaceHostInner {
                 store,
+                persisted,
                 config,
                 reg: Arc::new(Mutex::new(doc)),
                 chats_tx,

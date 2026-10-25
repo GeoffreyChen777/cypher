@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::EngineError;
 
 const LOCAL_PROFILE_FILE: &str = "local-profile.json";
-const LOCAL_ORG_ID: &str = "local";
+pub(crate) const LOCAL_ORG_ID: &str = "local";
 const LEGACY_UPLOADS_DIR: &str = "uploads";
 const LEGACY_UPLOADS_OWNER_FILE: &str = "legacy-uploads-owner.json";
 
