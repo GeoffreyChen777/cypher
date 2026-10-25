@@ -1235,8 +1235,13 @@ async fn a_parent_between_turns_still_gets_the_question() {
     core.doc_host
         .queue_command(PARENT, pi_run("delegate it"))
         .expect("parent run");
+    // Working lands before the run task reaches the harness, so wait for
+    // the parent's feed too.
     common::wait_for(
-        || common::status(core, PARENT) == Some(SessionStatus::Working),
+        || {
+            common::status(core, PARENT) == Some(SessionStatus::Working)
+                && rig.release.lock().unwrap().is_some()
+        },
         "parent turn running",
     )
     .await;
