@@ -220,6 +220,104 @@ fn fenced_code_drag_selects_across_blank_lines_and_reports_exact_quote(
     selection::clear(scope);
 }
 
+#[gpui::test]
+fn shielded_overlay_keeps_presses_out_of_the_text_beneath(cx: &mut gpui::TestAppContext) {
+    use crate::markdown::selection;
+    use gpui::MouseButton;
+    let _guard = selection::tests::state_lock();
+    let below = selection::next_side_chat_scope();
+    let own = selection::next_question_scope();
+    const BELOW: &str = "alpha bravo charlie delta echo foxtrot golf hotel";
+    const OVERLAY_LEFT: f32 = 160.0;
+    struct Layers {
+        below: selection::SelectionScope,
+        own: selection::SelectionScope,
+    }
+    impl gpui::Render for Layers {
+        fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            // A transcript line, and a composer floating over its right half
+            // with selectable text of its own (the question card).
+            div()
+                .relative()
+                .size_full()
+                .child(selection_frame_reset(self.below))
+                .child(selectable_plain_text(
+                    self.below,
+                    "below".into(),
+                    BELOW.into(),
+                    &theme,
+                ))
+                .child(
+                    shield_selection(div())
+                        .absolute()
+                        .top_0()
+                        .left(px(OVERLAY_LEFT))
+                        .right_0()
+                        .h(px(120.0))
+                        .flex()
+                        .flex_col()
+                        .justify_end()
+                        .child(selection_frame_reset(self.own))
+                        .child(selectable_plain_text(
+                            self.own,
+                            "own".into(),
+                            "india juliett".into(),
+                            &theme,
+                        )),
+                )
+        }
+    }
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    let window = cx.open_window(gpui::size(px(600.0), px(200.0)), |_, _| Layers {
+        below,
+        own,
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let layout_of = |scope: selection::SelectionScope| {
+        REGISTRY.with(|registry| registry.borrow()[&scope][0].layout.clone())
+    };
+    let point_in = |layout: &gpui::TextLayout, index| {
+        layout.position_for_index(index).unwrap() + point(px(1.0), layout.line_height() / 2.0)
+    };
+    let double_click = |visual: &mut gpui::VisualTestContext, position| {
+        visual.simulate_event(gpui::MouseDownEvent {
+            position,
+            modifiers: Default::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        visual.simulate_mouse_up(position, MouseButton::Left, Default::default());
+    };
+    let below_layout = layout_of(below);
+    let alpha = point_in(&below_layout, 0);
+    let golf = point_in(&below_layout, BELOW.find("golf").unwrap());
+    let hotel = point_in(&below_layout, BELOW.find("hotel").unwrap());
+    assert!(alpha.x < px(OVERLAY_LEFT) && golf.x > px(OVERLAY_LEFT + 10.0));
+
+    // Uncovered text selects as before.
+    double_click(&mut visual, alpha);
+    assert_eq!(selection::selected_text().as_deref(), Some("alpha"));
+    // A double click or a drag on the overlay never reaches the text under
+    // it, though it still drops that text's selection like a press elsewhere.
+    double_click(&mut visual, golf);
+    assert_eq!(selection::selected_text(), None);
+    visual.simulate_mouse_down(golf, MouseButton::Left, Default::default());
+    visual.simulate_mouse_move(hotel, MouseButton::Left, Default::default());
+    visual.simulate_mouse_up(hotel, MouseButton::Left, Default::default());
+    assert_eq!(selection::selected_text(), None);
+    // The overlay's own text, painted after its shield, still selects.
+    let own_layout = layout_of(own);
+    double_click(&mut visual, point_in(&own_layout, "india ".len()));
+    assert_eq!(selection::selected_text().as_deref(), Some("juliett"));
+    selection::clear(own);
+}
+
 #[test]
 fn clipped_long_line_cannot_start_selection_in_the_other_diff_column() {
     let text = Bounds::new(point(px(-80.0), px(0.0)), gpui::size(px(900.0), px(21.0)));

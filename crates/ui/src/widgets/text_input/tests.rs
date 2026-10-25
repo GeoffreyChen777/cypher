@@ -133,6 +133,82 @@ fn secret_projection_masks_unicode_and_preserves_caret_boundaries() {
     assert_eq!(empty.display_to_raw(0), 0);
 }
 
+#[gpui::test]
+fn double_and_triple_presses_select_words_and_lines(cx: &mut gpui::TestAppContext) {
+    struct Host {
+        input: gpui::Entity<TextInput>,
+    }
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            gpui::div().w(px(400.0)).child(self.input.clone())
+        }
+    }
+    const TEXT: &str = "alpha bravo charlie\nsecond line here";
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    let window = cx.open_window(gpui::size(px(500.0), px(200.0)), |_, cx| Host {
+        input: cx.new(|cx| TextInput::new("", cx)),
+    });
+    let input = window.update(cx, |host, _, _| host.input.clone()).unwrap();
+    input.update(cx, |input, cx| input.set_text(TEXT, cx));
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let at = |visual: &mut gpui::VisualTestContext, word: &str| {
+        visual.update(|_, cx| {
+            let input = input.read(cx);
+            let local = input.point_for_index(TEXT.find(word).unwrap()).unwrap();
+            input.last_bounds.unwrap().origin + local + point(px(1.0), input.line_height / 2.0)
+        })
+    };
+    let press = |visual: &mut gpui::VisualTestContext, position, click_count| {
+        visual.simulate_event(MouseDownEvent {
+            position,
+            modifiers: Default::default(),
+            button: MouseButton::Left,
+            click_count,
+            first_mouse: false,
+        });
+    };
+    let selected = |visual: &mut gpui::VisualTestContext| {
+        visual.update(|_, cx| {
+            let input = input.read(cx);
+            (input.selected_range.clone(), input.selection_reversed)
+        })
+    };
+    let (alpha, bravo, second) = (
+        at(&mut visual, "alpha"),
+        at(&mut visual, "bravo"),
+        at(&mut visual, "second"),
+    );
+
+    press(&mut visual, bravo, 2);
+    visual.simulate_mouse_up(bravo, MouseButton::Left, Default::default());
+    assert_eq!(selected(&mut visual), (6..11, false), "the word");
+    press(&mut visual, bravo, 3);
+    visual.simulate_mouse_up(bravo, MouseButton::Left, Default::default());
+    assert_eq!(
+        selected(&mut visual),
+        (0..19, false),
+        "the line, not its newline"
+    );
+
+    // A drag from a double press extends by whole words, keeping the pressed
+    // word whichever way it goes.
+    press(&mut visual, bravo, 2);
+    visual.simulate_mouse_move(second, MouseButton::Left, Default::default());
+    assert_eq!(selected(&mut visual), (6..26, false));
+    visual.simulate_mouse_move(alpha, MouseButton::Left, Default::default());
+    assert_eq!(selected(&mut visual), (0..11, true));
+    visual.simulate_mouse_up(alpha, MouseButton::Left, Default::default());
+
+    // A single press still just places the caret.
+    press(&mut visual, second, 1);
+    visual.simulate_mouse_up(second, MouseButton::Left, Default::default());
+    assert_eq!(selected(&mut visual).0, 20..20);
+}
+
 #[test]
 fn caret_blink_phase() {
     // Solid through the first half-period (typing burst never blinks).

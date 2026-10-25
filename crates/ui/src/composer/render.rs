@@ -462,8 +462,10 @@ impl Composer {
         } else {
             None
         };
-        // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
-        let container = div()
+        // Centered composer column (zeron `mx-auto w-full max-w-3xl`). It
+        // floats over the transcript's bottom, so a press here must not also
+        // select the transcript text under it.
+        let container = crate::markdown::render::shield_selection(div())
             .w_full()
             .when(!wide, |el| {
                 el.max_w(px(crate::appearance::chat_style::COMPOSER_WIDTH))

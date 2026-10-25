@@ -1419,6 +1419,23 @@ thread_local! {
     static REGISTRY: RefCell<
         std::collections::HashMap<super::selection::SelectionScope, Vec<RegEntry>>
     > = RefCell::new(std::collections::HashMap::new());
+    /// Whether a surface floating over selectable text took the current
+    /// left press ([`shield_selection`]). Every press's capture phase resets
+    /// it, before any bubble-phase listener can set or read it.
+    static PRESS_SHIELDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark `element` as floating over selectable text (the composer and the
+/// find bar over the transcript). The selection listeners only test bounds,
+/// and a press inside the element must never start a selection in the text
+/// underneath: that text treats the press as one elsewhere and drops its
+/// settled selection. Only text painted before the element is affected; its
+/// own selectable text (the question card) handles the press first, since
+/// bubble order runs front to back.
+pub fn shield_selection<E: gpui::InteractiveElement>(element: E) -> E {
+    element.on_mouse_down(gpui::MouseButton::Left, |_, _, _| {
+        PRESS_SHIELDED.with(|shielded| shielded.set(true));
+    })
 }
 
 /// A zero-size canvas that clears `scope`'s selection registry — paint it
@@ -1557,10 +1574,14 @@ fn register_selection_listeners(
         let (key, text, layout) = (key.clone(), text.clone(), layout.clone());
         let selection = selection.clone();
         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
-            if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
+            if phase == DispatchPhase::Capture {
+                PRESS_SHIELDED.with(|shielded| shielded.set(false));
                 return;
             }
-            if visible_bounds.contains(&e.position) {
+            if e.button != MouseButton::Left {
+                return;
+            }
+            if visible_bounds.contains(&e.position) && !PRESS_SHIELDED.with(|s| s.get()) {
                 let ix = match layout.index_for_position(e.position) {
                     Ok(ix) | Err(ix) => ix,
                 };

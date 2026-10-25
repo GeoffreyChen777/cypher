@@ -240,8 +240,7 @@ impl Shell {
                 .justify_center()
                 .child(motion::dialog_in(
                     "jump-to-bottom",
-                    div()
-                        .id("jump-to-bottom-btn")
+                    crate::markdown::render::shield_selection(div().id("jump-to-bottom-btn"))
                         .h(px(30.0))
                         .rounded_full()
                         .border_1()

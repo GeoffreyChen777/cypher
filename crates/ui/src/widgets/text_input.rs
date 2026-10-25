@@ -173,6 +173,15 @@ enum EditKind {
     Delete,
 }
 
+/// What a press selects, and a drag from it extends by: characters from a
+/// single click, whole words from a double click, lines from a triple.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SelectUnit {
+    Char,
+    Word,
+    Line,
+}
+
 /// Bind the text input keymap. Call once at app boot.
 pub fn init(cx: &mut App) {
     // Settings fields share native text editing, not the chat's Tab/Escape
@@ -359,6 +368,10 @@ pub struct TextInput {
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
     is_selecting: bool,
+    /// The press's unit, and the word or line it landed on — a drag keeps
+    /// that span selected whichever way it extends.
+    drag_unit: SelectUnit,
+    drag_origin: Range<usize>,
     drag_position: Option<Point<Pixels>>,
     drag_generation: u64,
     drag_autoscroll_active: bool,
@@ -446,6 +459,8 @@ impl TextInput {
             selection_reversed: false,
             marked_range: None,
             is_selecting: false,
+            drag_unit: SelectUnit::Char,
+            drag_origin: 0..0,
             drag_position: None,
             drag_generation: 0,
             drag_autoscroll_active: false,
