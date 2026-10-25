@@ -86,6 +86,17 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   **Context recovery** project has a session per state (writing context,
   restarting, recovered, out of attempts) and a live one that replays the
   whole flow when opened and again for each message sent in it.
+- **Run progress:** a long turn's narrated progress (`progress` on the
+  session row, the desktop working trailer's bar) fills the rest of the
+  working strip: the desktop's painted bar — passed stages as dots, the
+  current one as a breathing ring at the fill's end, the steps to come as
+  faint dots, a glint along the fill — and the percentage. Readings glide
+  into place; Reduce Motion jumps and stills the glint. A phone has no
+  hover: tapping the strip opens the stage tips as one card, each row
+  leading with its state — a green check for stages done (with where each
+  began), a pulsing ring in the text colour for the one under way (with how many steps
+  are left), a dashed grey circle for steps not started. Read leniently like `recovery`. Demo: the **Streaming
+  veil** session replays a run of readings while it's open.
 - **Composer focus:** the editor owns a native UITextView/delegate rather than
   relying on SwiftUI TextField's backing-view accessibility ID or FocusState.
   Empty focus and the first typed character expand the model/thinking toolbar;
