@@ -9,8 +9,9 @@
 //!
 //! Motion: when a reading lands the fill, current ring and its tip glide
 //! together to the new percentage, and a new stage's dot grows in;
-//! refreshed upcoming steps and their hover targets glide to their new
-//! places; the old stage's tip lifts away as the new one
+//! refreshed upcoming steps, and passed stages a grown plan made room
+//! before, glide with their hover targets to their new places; the old
+//! stage's tip lifts away as the new one
 //! rises into place ([`ProgressMotion`] notices both). The glint and the
 //! current ring's breathing run continuously in the bar itself.
 
@@ -52,11 +53,14 @@ const MAX_UPCOMING: usize = crate::kit::progress_bar::MAX_UPCOMING;
 #[derive(Debug, Default)]
 pub(super) struct ProgressMotion {
     chat_id: Option<String>,
-    stages: usize,
+    /// Each stage's label and where it sits, 0–1, oldest first.
+    stages: Vec<(String, f32)>,
     percent: u8,
     upcoming: Vec<f32>,
     /// Where the fill glides from to `percent`.
     from_percent: u8,
+    /// Where each stage glides from to its place in `stages`.
+    from_stages: Vec<f32>,
     /// Where the upcoming dots glide from to `upcoming`.
     from_upcoming: Vec<f32>,
     /// The last change added a stage (its dot grows in).
@@ -72,7 +76,7 @@ impl ProgressMotion {
     pub fn observe(
         &mut self,
         chat_id: &str,
-        stages: usize,
+        stages: &[(String, f32)],
         percent: u8,
         upcoming: &[f32],
         now: Instant,
@@ -80,9 +84,10 @@ impl ProgressMotion {
         if self.chat_id.as_deref() != Some(chat_id) {
             *self = Self {
                 chat_id: Some(chat_id.to_owned()),
-                stages,
+                stages: stages.to_vec(),
                 percent,
                 upcoming: upcoming.to_vec(),
+                from_stages: stages.iter().map(|(_, at)| *at).collect(),
                 revision: self.revision + 1,
                 ..Self::default()
             };
@@ -91,13 +96,31 @@ impl ProgressMotion {
         if stages == self.stages && percent == self.percent && upcoming == self.upcoming {
             return;
         }
-        self.from_percent = self.percent;
-        self.from_upcoming = std::mem::replace(&mut self.upcoming, upcoming.to_vec());
-        self.grew = stages > self.stages;
+        // The stages on screen, matched to the new ones by label: the oldest
+        // may have dropped off the front.
+        let dropped = (0..=self.stages.len())
+            .find(|&k| {
+                self.stages[k..]
+                    .iter()
+                    .zip(stages)
+                    .all(|(seen, new)| seen.0 == new.0)
+            })
+            .unwrap_or(self.stages.len());
+        let seen = &self.stages[dropped..];
+        // A stage already on screen glides from where it was; a new one
+        // grows in at its place.
+        self.from_stages = stages
+            .iter()
+            .enumerate()
+            .map(|(ix, (_, at))| seen.get(ix).map_or(*at, |(_, from)| *from))
+            .collect();
+        self.grew = stages.len() > seen.len();
         if self.grew {
             self.switched_at = Some(now);
         }
-        self.stages = stages;
+        self.from_percent = self.percent;
+        self.from_upcoming = std::mem::replace(&mut self.upcoming, upcoming.to_vec());
+        self.stages = stages.to_vec();
         self.percent = percent;
         self.revision += 1;
     }
@@ -105,8 +128,13 @@ impl ProgressMotion {
     /// The stage whose tip is leaving, while it still is.
     pub fn leaving(&self, now: Instant) -> Option<usize> {
         let at = self.switched_at?;
-        (self.grew && self.stages >= 2 && now.duration_since(at) < LEAVE_FOR)
-            .then(|| self.stages - 2)
+        let count = self.stages.len();
+        (self.grew && count >= 2 && now.duration_since(at) < LEAVE_FOR).then(|| count - 2)
+    }
+
+    /// Where stage `ix` glides from to `to`.
+    fn stage_from(&self, ix: usize, to: f32) -> f32 {
+        self.from_stages.get(ix).copied().unwrap_or(to)
     }
 
     /// The upcoming dots `t` of the way through the tween: each glides from
@@ -118,6 +146,21 @@ impl ProgressMotion {
             .map(|(ix, &to)| lerp(self.from_upcoming.get(ix).copied().unwrap_or(1.0), to, t))
             .collect()
     }
+}
+
+/// The turn's stages, oldest first: each one's label and where it began,
+/// 0–1. A reading from a host that keeps no stages still shows its current
+/// one.
+pub(super) fn stages(progress: &RunProgress) -> Vec<(String, f32)> {
+    let at = |percent: u8| f32::from(percent.min(100)) / 100.0;
+    if progress.stages.is_empty() {
+        return vec![(progress.current.clone(), at(progress.percent))];
+    }
+    progress
+        .stages
+        .iter()
+        .map(|s| (s.label.clone(), at(s.percent)))
+        .collect()
 }
 
 /// How many steps remain after the current one: the listed steps, or the
@@ -187,20 +230,9 @@ pub(super) fn render(
     view: EntityId,
     now: Instant,
 ) -> AnyElement {
-    let mut labels: Vec<(String, u8)> = progress
-        .stages
-        .iter()
-        .map(|s| (s.label.clone(), s.percent))
-        .collect();
-    // A reading from a host that keeps no stages still shows its current one.
-    if labels.is_empty() {
-        labels.push((progress.current.clone(), progress.percent));
-    }
+    let labels = stages(progress);
     let percent = shown_percent(progress);
-    let fractions: Vec<f32> = labels
-        .iter()
-        .map(|(_, p)| f32::from((*p).min(100)) / 100.0)
-        .collect();
+    let fractions: Vec<f32> = labels.iter().map(|(_, at)| *at).collect();
     let last = labels.len() - 1;
     let left = steps_left(progress);
     let upcoming = upcoming_positions(percent, left);
@@ -212,6 +244,11 @@ pub(super) fn render(
     let ink = theme.text;
     let look = TipLook::new(theme, chat_bg);
     let painted = {
+        let stage_from: Vec<f32> = fractions
+            .iter()
+            .enumerate()
+            .map(|(ix, &at)| motion.stage_from(ix, at))
+            .collect();
         let fractions = fractions.clone();
         let glide: Vec<Vec<f32>> = [0.0, 1.0].map(|t| motion.upcoming_at(t)).into();
         div().absolute().inset_0().with_animation(
@@ -224,8 +261,13 @@ pub(super) fn render(
                     .zip(&glide[1])
                     .map(|(&a, &b)| lerp(a, b, t))
                     .collect();
+                let stages: Vec<f32> = stage_from
+                    .iter()
+                    .zip(&fractions)
+                    .map(|(&a, &b)| lerp(a, b, t))
+                    .collect();
                 el.child(loaders::progress_bar(
-                    ProgressBar::new(lerp(from, to, t), &fractions, &upcoming, appear, ink),
+                    ProgressBar::new(lerp(from, to, t), &stages, &upcoming, appear, ink),
                     view,
                 ))
             },
@@ -355,6 +397,7 @@ pub(super) fn render(
     let leaving = motion.leaving(now);
     for ix in 0..last {
         let at = fractions[ix];
+        let from = motion.stage_from(ix, at);
         let label = labels[ix].0.clone();
         let (mut dot, group) = target(format!("progress-stage-{ix}"), at);
         dot = dot.child(hover_ring(&group)).child(
@@ -371,7 +414,14 @@ pub(super) fn render(
                 ),
             );
         }
-        bar = bar.child(dot);
+        bar = bar.child(dot.with_animation(
+            (
+                SharedString::from(format!("progress-stage-position-{ix}")),
+                motion.revision,
+            ),
+            PROGRESS_TWEEN.animation(),
+            move |el, t| position_target(el, lerp(from, at, t)),
+        ));
     }
 
     // Steps still to come: each one's name and place on hover.
@@ -582,6 +632,7 @@ mod tests {
             next: vec![],
             steps_left: None,
             stages: vec![stage(10), stage(30)],
+            planned: None,
             updated_at: chrono::Utc::now(),
         };
         assert_eq!(shown_percent(&progress), 40);
@@ -592,32 +643,53 @@ mod tests {
 
     #[test]
     fn motion_follows_readings() {
+        let stages = |marks: &[(&str, f32)]| -> Vec<(String, f32)> {
+            marks.iter().map(|&(l, at)| (l.to_owned(), at)).collect()
+        };
         let t0 = Instant::now();
         let mut motion = ProgressMotion::default();
-        motion.observe("a", 1, 25, &[0.5, 0.75], t0);
+        motion.observe("a", &stages(&[("A", 0.2)]), 25, &[0.5, 0.75], t0);
         // First sight fills in from empty, nothing leaving.
         assert_eq!((motion.from_percent, motion.grew), (0, false));
         assert_eq!(motion.leaving(t0), None);
         // Same stage, further along: the fill glides, no tip switch.
-        motion.observe("a", 1, 30, &[0.5, 0.75], t0);
+        motion.observe("a", &stages(&[("A", 0.2)]), 30, &[0.5, 0.75], t0);
         assert_eq!((motion.from_percent, motion.grew), (25, false));
         // Refreshed steps glide from where they were, a new one from the end.
-        motion.observe("a", 1, 30, &[0.4, 0.6, 0.8], t0);
+        motion.observe("a", &stages(&[("A", 0.2)]), 30, &[0.4, 0.6, 0.8], t0);
         assert_eq!(motion.upcoming_at(0.0), vec![0.5, 0.75, 1.0]);
         assert_eq!(motion.upcoming_at(1.0), vec![0.4, 0.6, 0.8]);
         // A new stage: the old tip leaves for a moment.
         let t1 = t0 + Duration::from_secs(30);
-        motion.observe("a", 2, 42, &[0.7], t1);
+        let two = stages(&[("A", 0.2), ("B", 0.42)]);
+        motion.observe("a", &two, 42, &[0.7], t1);
         assert_eq!((motion.from_percent, motion.grew), (30, true));
         assert_eq!(motion.leaving(t1 + Duration::from_millis(100)), Some(0));
         assert_eq!(motion.leaving(t1 + LEAVE_FOR), None);
         // Re-observing the same reading changes nothing.
         let revision = motion.revision;
-        motion.observe("a", 2, 42, &[0.7], t1 + Duration::from_secs(1));
+        motion.observe("a", &two, 42, &[0.7], t1 + Duration::from_secs(1));
         assert_eq!(motion.revision, revision);
         assert_eq!(motion.from_percent, 30);
+        // A grown plan moves the passed stages back: they glide from where
+        // they were.
+        let room = stages(&[("A", 0.1), ("B", 0.21)]);
+        motion.observe("a", &room, 22, &[0.4, 0.6, 0.8], t1);
+        assert_eq!((motion.stage_from(0, 0.1), motion.grew), (0.2, false));
+        // The oldest stage dropping off moves no other: each glides from its
+        // own place.
+        let mut many: Vec<(String, f32)> = (0..16)
+            .map(|n| (format!("s{n}"), n as f32 / 20.0))
+            .collect();
+        motion.observe("a", &many, 80, &[], t1);
+        many.remove(0);
+        many.push(("s16".into(), 0.82));
+        motion.observe("a", &many, 82, &[], t1);
+        assert_eq!(motion.stage_from(0, 0.05), 0.05);
+        assert_eq!(motion.stage_from(15, 0.82), 0.82);
+        assert!(motion.grew);
         // Another chat starts over.
-        motion.observe("b", 3, 60, &[], t1);
+        motion.observe("b", &stages(&[("C", 0.6)]), 60, &[], t1);
         assert_eq!((motion.from_percent, motion.leaving(t1)), (0, None));
     }
 }
