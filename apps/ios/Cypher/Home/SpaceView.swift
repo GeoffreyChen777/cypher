@@ -12,13 +12,20 @@ struct SpaceView: View {
     @State private var actions = SessionActions()
     @StoredSessionListOptions private var listOptions
 
+    /// Home's view, minus its device filter: a project lives on one device.
+    private var options: SessionListOptions {
+        var options = listOptions
+        options.device = nil
+        return options
+    }
+
     private var space: Space? {
         model.spaces.first { $0.id == spaceId }
     }
 
     var body: some View {
         List {
-            let chats = model.listedChats(in: spaceId, options: listOptions)
+            let chats = model.listedChats(in: spaceId, options: options)
             let statusSlot = ChatRow.needsStatusSlot(chats, in: model)
             // No header: the project title already names this list, and the
             // first card then sits directly on the title's edge.
@@ -38,7 +45,7 @@ struct SpaceView: View {
                     .sessionRowActions(chat)
                 }
             }
-            ArchivedSection(spaceId: spaceId)
+            ArchivedSection(scope: .project(spaceId))
         }
         .sessionActionPrompts(actions)
         .listStyle(.insetGrouped)

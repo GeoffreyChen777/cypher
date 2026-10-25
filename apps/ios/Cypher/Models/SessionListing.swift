@@ -1,7 +1,9 @@
 // The session list's view options — a port of the desktop sidebar's view
 // menu (crates/ui/src/prefs.rs `SidebarSort`, prefs/sidebar_time.rs, and
-// state/queries.rs `sidebar_groups_with`): a sort with its direction, and a
-// "last active" window. The device filter is Home's device tabs.
+// state/queries.rs `sidebar_groups_with`): a sort with its direction, a
+// "last active" window and a device filter — plus what the phone's
+// session-first Home adds on top: a project scope, search, and the list's
+// time headings.
 
 import Foundation
 
@@ -40,6 +42,8 @@ struct SessionListOptions: Equatable {
     /// Only sessions active within this many minutes (live ones stay);
     /// nil keeps them all.
     var activeWithinMins: Int?
+    /// Only sessions (and projects) on this device; nil keeps every device.
+    var device: String?
 
     /// The desktop slider's stops (minutes); past the last one is "All".
     static let stops: [Int] = [
@@ -71,6 +75,7 @@ struct SessionListOptions: Equatable {
     /// Whether the time filter keeps a session: recent ones, and live ones
     /// (running or waiting on an answer) however quiet.
     func keeps(_ chat: Chat, cutoff: Int64?, indicator: ChatIndicator) -> Bool {
+        if let device, chat.deviceId != device { return false }
         guard let cutoff else { return true }
         return indicator == .working || indicator == .awaitingInput
             || (chat.lastMessageAt ?? chat.createdAt) >= cutoff
@@ -116,6 +121,7 @@ struct SessionListOptions: Equatable {
             return a.id < b.id
         }
         var ordered = busy + empty
+        if let device { ordered = ordered.filter { $0.deviceId == device } }
         if let cutoff = cutoff(now: now) {
             let kept = Set(
                 activeChats
@@ -150,4 +156,104 @@ private func stableSorted<T>(_ items: [T], by less: (T, T) -> Bool) -> [T] {
         if less(b.element, a.element) { return false }
         return a.offset < b.offset
     }.map(\.element)
+}
+
+// MARK: - Session-first Home
+
+/// Which sessions Home lists: the project chips.
+enum SessionScope: Hashable {
+    case all
+    case project(String)
+    /// Project-less sessions in a host's scratch folder.
+    case quickChats
+    /// Other sessions outside any live project.
+    case noProject
+
+    func contains(_ chat: Chat, liveSpaceIds: Set<String>) -> Bool {
+        switch self {
+        case .all: true
+        case .project(let id): chat.spaceId == id
+        case .quickChats: chat.isScratch
+        case .noProject: !chat.isScratch && !(chat.spaceId.map(liveSpaceIds.contains) ?? false)
+        }
+    }
+}
+
+enum SessionSearch {
+    /// Every word of `query` appears in the title, the last message, the
+    /// project or the device (case- and diacritic-insensitive). An empty
+    /// query matches everything.
+    static func matches(_ chat: Chat, query: String, project: String?, device: String) -> Bool {
+        let words = query.split(whereSeparator: \.isWhitespace)
+        guard !words.isEmpty else { return true }
+        let haystack = [chat.displayTitle, chat.lastMessagePreview ?? "", project ?? "", device]
+        return words.allSatisfy { word in
+            haystack.contains { $0.localizedStandardContains(word) }
+        }
+    }
+}
+
+/// A run of Home's list under one heading.
+struct SessionSection: Identifiable, Equatable {
+    /// The heading; empty for a list without headings (Name sort).
+    var title: String
+    var chats: [Chat]
+    var id: String { title }
+}
+
+extension SessionListOptions {
+    /// Headings for an arranged list, keeping its order. By activity:
+    /// "Now" (running or waiting on an answer) when newest come first, then
+    /// Today, Yesterday, Previous 7 Days, Previous 30 Days and Earlier. By
+    /// date, the same days over creation. By device, one run per device in
+    /// name order (activity within). By name, one run without a heading.
+    func sections(
+        _ chats: [Chat], now: Date, calendar: Calendar = .current,
+        indicator: (Chat) -> ChatIndicator, deviceName: (String) -> String
+    ) -> [SessionSection] {
+        guard !chats.isEmpty else { return [] }
+        switch sort {
+        case .name:
+            return [SessionSection(title: "", chats: chats)]
+        case .device:
+            let byDevice = stableSorted(chats) { a, b in
+                let (da, db) = (deviceName(a.deviceId).lowercased(), deviceName(b.deviceId).lowercased())
+                return reversed ? da > db : da < db
+            }
+            return grouped(byDevice) { deviceName($0.deviceId) }
+        case .activity, .date:
+            let today = calendar.startOfDay(for: now)
+            func day(_ chat: Chat) -> String {
+                let ms = sort == .activity ? chat.lastMessageAt ?? chat.createdAt : chat.createdAt
+                let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+                let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: today).day ?? 0
+                switch days {
+                case ...0: return "Today"
+                case 1: return "Yesterday"
+                case 2...7: return "Previous 7 Days"
+                case 8...30: return "Previous 30 Days"
+                default: return "Earlier"
+                }
+            }
+            guard sort == .activity, !reversed else { return grouped(chats, by: day) }
+            let live = chats.filter { [.working, .awaitingInput].contains(indicator($0)) }
+            let liveIds = Set(live.map(\.id))
+            let rest = grouped(chats.filter { !liveIds.contains($0.id) }, by: day)
+            return (live.isEmpty ? [] : [SessionSection(title: "Now", chats: live)]) + rest
+        }
+    }
+
+    /// Chats under their heading; headings in the order of their first chat.
+    private func grouped(_ chats: [Chat], by title: (Chat) -> String) -> [SessionSection] {
+        var sections: [SessionSection] = []
+        for chat in chats {
+            let heading = title(chat)
+            if let ix = sections.firstIndex(where: { $0.title == heading }) {
+                sections[ix].chats.append(chat)
+            } else {
+                sections.append(SessionSection(title: heading, chats: [chat]))
+            }
+        }
+        return sections
+    }
 }

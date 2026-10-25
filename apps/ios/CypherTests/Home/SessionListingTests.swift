@@ -122,6 +122,94 @@ final class SessionListingTests: XCTestCase {
         XCTAssertEqual(cypher.last?.id, "hist-refactor")
     }
 
+    func testHomeHeadsTheListByDayWithLiveSessionsFirst() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        // Noon UTC, so "hours ago" lands on predictable days.
+        let noon = Date(timeIntervalSince1970: TimeInterval(now / 1000 / 86_400 * 86_400 + 43_200))
+        let at = Int64(noon.timeIntervalSince1970 * 1000)
+        func row(_ id: String, _ hoursAgo: Int64, created: Int64? = nil) -> Chat {
+            var row = self.chat(id, active: nil, created: 0)
+            row.lastMessageAt = at - hoursAgo * hour
+            row.createdAt = at - (created ?? hoursAgo) * hour
+            return row
+        }
+        let chats = [
+            row("live", 30), row("today", 2), row("yesterday", 20, created: 1),
+            row("week", 72), row("month", 20 * 24), row("old", 90 * 24),
+        ]
+        let indicator: (Chat) -> ChatIndicator = { $0.id == "live" ? .working : .idle }
+        func headings(_ options: SessionListOptions) -> [String: [String]] {
+            let arranged = options.arrange(chats, now: at, indicator: indicator)
+            let sections = options.sections(
+                arranged, now: noon, calendar: calendar, indicator: indicator, deviceName: { $0 })
+            return Dictionary(uniqueKeysWithValues: sections.map { ($0.title, $0.chats.map(\.id)) })
+        }
+        let activity = SessionListOptions()
+        let arranged = activity.arrange(chats, now: at, indicator: indicator)
+        XCTAssertEqual(
+            activity.sections(arranged, now: noon, calendar: calendar, indicator: indicator, deviceName: { $0 })
+                .map(\.title),
+            ["Now", "Today", "Yesterday", "Previous 7 Days", "Previous 30 Days", "Earlier"])
+        XCTAssertEqual(
+            headings(activity),
+            [
+                "Now": ["live"], "Today": ["today"], "Yesterday": ["yesterday"],
+                "Previous 7 Days": ["week"], "Previous 30 Days": ["month"], "Earlier": ["old"],
+            ])
+        // Oldest first: no "Now"; the live session sits in its own day.
+        XCTAssertNil(headings(SessionListOptions(reversed: true))["Now"])
+        // By creation: "yesterday" was created an hour ago.
+        XCTAssertEqual(headings(SessionListOptions(sort: .date))["Today"], ["yesterday", "today"])
+        XCTAssertEqual(headings(SessionListOptions(sort: .name)).keys.sorted(), [""])
+    }
+
+    func testHomeRunsByDeviceInNameOrder() {
+        var mac = chat("mac", active: 1, created: 1)
+        mac.deviceId = "m"
+        var vps = chat("vps", active: 2, created: 2)
+        vps.deviceId = "v"
+        let names = ["m": "MacBook", "v": "hetzner"]
+        for reversed in [false, true] {
+            let options = SessionListOptions(sort: .device, reversed: reversed)
+            let titles = options.sections(
+                [mac, vps], now: Date(), indicator: { _ in .idle }, deviceName: { names[$0]! }
+            ).map(\.title)
+            XCTAssertEqual(titles, reversed ? ["MacBook", "hetzner"] : ["hetzner", "MacBook"])
+        }
+        let onMac = SessionListOptions(device: "m").arrange([mac, vps], now: now) { _ in .idle }
+        XCTAssertEqual(ids(onMac), ["mac"])
+    }
+
+    func testSearchMatchesEveryWordAnywhere() {
+        var row = chat("c", title: "Zotero export cleanup", active: 1, created: 1)
+        row.lastMessagePreview = "Fixed the BibTeX keys"
+        func finds(_ query: String) -> Bool {
+            SessionSearch.matches(row, query: query, project: "research-notes", device: "hetzner")
+        }
+        XCTAssertTrue(finds(""))
+        XCTAssertTrue(finds("zotero"))
+        XCTAssertTrue(finds("bibtex research"), "words may match different fields")
+        XCTAssertTrue(finds("HETZNER"))
+        XCTAssertFalse(finds("zotero mac"), "every word must match")
+    }
+
+    func testScopesSplitProjectsQuickChatsAndTheRest() {
+        let live: Set<String> = ["s1"]
+        let inProject = chat("p", space: "s1", active: 1, created: 1)
+        let orphan = chat("o", space: "gone", active: 1, created: 1)
+        var quick = chat("q", active: 1, created: 1)
+        quick.cwd = "/Users/dev/.cypher/cypher-scratch/q"
+        let loose = chat("l", active: 1, created: 1)
+        func members(_ scope: SessionScope) -> [String] {
+            ids([inProject, orphan, quick, loose].filter { scope.contains($0, liveSpaceIds: live) })
+        }
+        XCTAssertEqual(members(.all), ["p", "o", "q", "l"])
+        XCTAssertEqual(members(.project("s1")), ["p"])
+        XCTAssertEqual(members(.quickChats), ["q"])
+        XCTAssertEqual(members(.noProject), ["o", "l"])
+    }
+
     func testDirectionAndFormatting() {
         XCTAssertTrue(SessionListOptions().descending)
         XCTAssertFalse(SessionListOptions(sort: .name).descending)

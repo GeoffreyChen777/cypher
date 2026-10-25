@@ -36,6 +36,9 @@ extension AppModel {
     /// Active quick chats across devices.
     var quickChats: [Chat] { data?.quickChats ?? [] }
 
+    /// Every active session, recency order (Home's list).
+    var activeChats: [Chat] { data?.activeChats ?? [] }
+
     /// Registered devices, online first then by name (the quick-chat
     /// palette's order, minus "this device": the phone isn't one).
     var devices: [DeviceRow] {
@@ -153,6 +156,12 @@ extension AppModel {
     /// A project's sessions as its list shows them.
     func listedChats(in spaceId: String, options: SessionListOptions) -> [Chat] {
         listed(chats(in: spaceId), options: options)
+    }
+
+    /// Home's search over a session: title, last message, project, device.
+    func matches(_ chat: Chat, query: String) -> Bool {
+        SessionSearch.matches(
+            chat, query: query, project: space(for: chat)?.displayName, device: deviceName(chat.deviceId))
     }
 
     /// The project cards under the view menu's time filter and sort.

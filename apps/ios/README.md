@@ -17,9 +17,22 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   "LOADING" appears only if it's still waiting after the decode. Foregrounding
   never shows it; Reduce Motion gets a static mark and a plain fade. Rigs
   (`-demo`, XCTest) skip it; `-splash` forces it.
-- **Project-first:** Home lists projects with their owning device;
-  open a project to create or resume its sessions, or access its archive.
-  `Space`/`spaceId` remain the shared wire-schema names — no schema migration.
+- **Session-first Home:** every active session in one list, one tap from
+  launch, under Now (running or waiting on an answer), Today, Yesterday,
+  Previous 7 Days, Previous 30 Days and Earlier; each row names its project
+  and device. Project chips across the top narrow it (then Quick chats and
+  No project); a chip's long press, or **Project ›** under the chips, opens
+  the project's own page with its archive. Search sits under the title;
+  once a swipe up scrolls it away, a search button top left brings it back,
+  focused. It matches every word against title, last message, project and
+  device, looks past the time filter, and lists matching archived sessions
+  too. The sliders menu filters by device and last activity and sorts (New
+  activity, Name, Device, Date created), as the desktop sidebar's view menu
+  does; saved on this phone only. The archived shelf sits folded at the
+  bottom. New (✎) starts a session in the chosen project, else the latest
+  session's, or in another project, a quick chat, or a new project.
+  `Space`/`spaceId` remain the shared wire-schema names — no schema
+  migration.
 - **Pi-only:** new sessions use Pi. Existing non-Pi sessions remain readable
   but cannot be driven from the mobile composer. The engine's mock harness
   is test infrastructure, not a selectable agent.
@@ -143,10 +156,11 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   stays dimmed and explains itself on tap. Restart asks first, naming how many
   messages it deletes, then calls the host's `RewindSession`; a prompt's text
   returns to an empty composer. Side chats show date and copy only.
-- **Quick chat:** Home's speech-bubble button starts a project-less session on
-  a chosen online device (`CreateScratchDir` on the host, then a row without a
-  space). Quick chats get their own Home section; other project-less sessions
-  appear under Other Sessions.
+- **Quick chat:** Home's New menu → Quick Chat starts a project-less session
+  on a chosen online device (`CreateScratchDir` on the host, then a row
+  without a space). Quick chats list with every other session as "Quick chat
+  @ device", with a chip of their own; other project-less sessions get the No
+  project chip.
 - **Slash commands:** typing `/` opens the desktop's grouped menu over the
   host's Pi commands (`ListCommands`): headings (Conversation, Agent modes,
   Subagents…), one line per command with its glyph and a badge for what it
@@ -371,7 +385,7 @@ Cypher/
                   bench rigs, Dev-bundle profile and interop probe
   Auth/           WorkOS/dev auth client, PKCE helpers, sign-in screen
   Notifications/  push registration and settings, payload models, banners
-  Home/           project list, project sessions, archived shelf, row actions
+  Home/           session list, project sessions, archived shelf, row actions
   Session/        session screen, new-session flow, side chats, subagents,
                   comments, connection notices
   Workspace/      Files / Changes browser over the host's workspace RPCs
@@ -399,10 +413,11 @@ mirrors and their vectors are listed in [protocol/README.md](../../protocol/READ
 
 | Desktop | iOS |
 | --- | --- |
-| Sidebar: Projects + Sessions | Project-first Home, owning device, then sessions |
-| Horizontal session tabs per project | Project detail: vertical session list (creation order) |
+| Sidebar: Projects + Sessions | Session-first Home: one list under day headings, project chips, search |
+| Sidebar view menu (device, last active, sort, order) | Same options in Home's sliders menu |
+| Horizontal session tabs per project | Project detail: vertical session list (the view menu's order) |
 | Tab close = archive | Swipe-to-archive |
-| Archived shelf under the sidebar list (open by default, Show-more paging, hover-swap Unarchive) | Same shelf under Home/space lists; unarchive is swipe-to-unarchive |
+| Archived shelf under the sidebar list (open by default, Show-more paging, hover-swap Unarchive) | Same shelf under Home (folded) and project lists; unarchive is swipe-to-unarchive |
 | Status word in the row corner (muted dots; Done keeps its pop; spinner rides bottom-right) | Same, same colors |
 | Composer `white_alpha(0.03)` pill + hairline | Liquid Glass pill (`glassEffect`) + hairline |
 | Harness brand SVG marks (icons.rs) | Same path data via a native SVG path parser (`BrandMarks.swift`) |

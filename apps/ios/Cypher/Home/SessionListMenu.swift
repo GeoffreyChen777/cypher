@@ -1,7 +1,7 @@
 // The session list's view menu — the desktop sidebar header's view menu
-// (shell/sidebar.rs `render_sidebar_view_menu`) as a toolbar menu: Last
-// active, Sort by and Order. Saved on this phone only, like the desktop's
-// ui-settings.
+// (shell/sidebar.rs `render_sidebar_view_menu`) as a toolbar menu: Device
+// (on Home), Last active, Sort by and Order. Saved on this phone only, like
+// the desktop's ui-settings.
 
 import SwiftUI
 
@@ -12,26 +12,42 @@ struct StoredSessionListOptions: DynamicProperty {
     @AppStorage("sessionListReversed") private var reversed = false
     // 0 = All.
     @AppStorage("sessionListActiveWithinMins") private var activeWithin = 0
+    // "" = every device. The key Home's device tabs used.
+    @AppStorage("homeDeviceFilter") private var device = ""
 
     var wrappedValue: SessionListOptions {
         get {
             SessionListOptions(
                 sort: SessionSort(rawValue: sort) ?? .activity, reversed: reversed,
-                activeWithinMins: activeWithin > 0 ? activeWithin : nil)
+                activeWithinMins: activeWithin > 0 ? activeWithin : nil,
+                device: device.isEmpty ? nil : device)
         }
         nonmutating set {
             sort = newValue.sort.rawValue
             reversed = newValue.reversed
             activeWithin = newValue.activeWithinMins ?? 0
+            device = newValue.device ?? ""
         }
     }
 }
 
 struct SessionListMenu: View {
+    @Environment(AppModel.self) private var model
     @StoredSessionListOptions private var options
+    /// Home filters by device; a project already lives on one.
+    var showsDevice = false
 
     var body: some View {
         Menu {
+            if showsDevice && model.devices.count > 1 {
+                Picker("Device", selection: binding(\.device)) {
+                    Text("All Devices").tag(String?.none)
+                    ForEach(model.devices) { device in
+                        Text(device.name).tag(String?.some(device.id))
+                    }
+                }
+                .pickerStyle(.menu)
+            }
             Picker("Last active", selection: binding(\.activeWithinMins)) {
                 Text("All").tag(Int?.none)
                 ForEach(SessionListOptions.stops, id: \.self) { mins in
@@ -59,9 +75,15 @@ struct SessionListMenu: View {
         }
         // Tinted while a non-default view is active, so a narrowed or
         // reordered list is obvious.
-        .tint(options.isDefault ? nil : Theme.accent)
+        .tint(narrowed ? Theme.accent : nil)
         .accessibilityLabel("View options")
         .accessibilityIdentifier("session-list-menu")
+    }
+
+    private var narrowed: Bool {
+        var shown = options
+        if !showsDevice || !model.devices.contains(where: { $0.id == shown.device }) { shown.device = nil }
+        return !shown.isDefault
     }
 
     private func binding<T>(_ key: WritableKeyPath<SessionListOptions, T>) -> Binding<T> {

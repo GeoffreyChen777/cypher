@@ -1,7 +1,9 @@
-// Home — the mobile shell: the desktop sidebar's project list as a native
-// inset-grouped list, filtered by owning-device tabs across the top and
-// ordered / time-filtered by the view menu (SessionListMenu). A project
-// opens into its sessions (SpaceView); close=archive becomes swipe-to-archive.
+// Home — the mobile shell, session-first: every session in one inset-grouped
+// list under time headings (Now, Today, Yesterday, …), one tap from launch.
+// Project chips narrow it (a long press opens the project's own page,
+// SpaceView), search finds any session, archived ones included, and the view
+// menu (SessionListMenu) filters by device and time and picks the sort.
+// close=archive becomes swipe-to-archive.
 
 import SwiftUI
 
@@ -24,8 +26,16 @@ struct HomeView: View {
     @State private var navigation = NavigationProbe()
     // "" = All. Sticky across launches; falls back to All if the device's
     // projects are gone.
-    @AppStorage("homeDeviceFilter") private var deviceFilter: String = ""
     @StoredSessionListOptions private var listOptions
+    /// The project chips' choice. Session-transient: a narrowed list left
+    /// over from last time is how sessions go missing.
+    @State private var scope: SessionScope = .all
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
+    /// The search field has scrolled away: the toolbar offers search instead.
+    @State private var searchTucked = false
+    /// Bumped by the toolbar's search button: scroll back to the field.
+    @State private var searchRequests = 0
 
     /// Registry rows a pending notification may be waiting on: the chat and
     /// its project id, so a late-hydrating row re-triggers the attempt.
@@ -93,85 +103,148 @@ struct HomeView: View {
         }
     }
 
-    private var projectList: some View {
-        List {
-            let deviceIds = deviceGroups.map(\.id)
-            let groups = listedGroups
-            // A filter naming a vanished device reads as All.
-            let selectedId = deviceIds.contains(deviceFilter) ? deviceFilter : nil
-            let shown = selectedId.map { id in groups.filter { $0.id == id } } ?? groups
-            let quickChats = listedQuickChats(deviceId: selectedId)
-            let orphaned = selectedId == nil ? model.listed(orphanedChats, options: listOptions) : []
-            // In the list, under the large title: a top safeAreaBar
-            // shifted the scroll inset while the title collapsed (the
-            // title flickered and slid under the tabs) and ran the scroll
-            // indicator across the tabs. A header rather than a row: a
-            // cell masks its content to the section's corner radius,
-            // which clipped the first tab.
-            if !deviceIds.isEmpty {
-                Section {
-                } header: {
-                    DeviceTabs(deviceIds: deviceIds, selection: $deviceFilter)
-                        .listRowInsets(EdgeInsets())
-                        // Out past the section margin to the screen edge.
-                        .padding(.horizontal, -DeviceTabs.margin)
-                        .textCase(nil)
-                }
-            }
-            if listOptions.activeWithinMins != nil, shown.isEmpty, quickChats.isEmpty, orphaned.isEmpty,
-                !(deviceIds.isEmpty && orphanedChats.isEmpty && model.quickChats.isEmpty)
-            {
-                Section { FilteredEmptyState() }
-            }
-            // One tab: one card. All: a card per device, named by a plain
-            // header (the tabs already carry presence), so rows never
-            // repeat their device.
-            ForEach(shown) { group in
-                Section {
-                    ForEach(group.spaces) { space in
-                        // A button rather than a NavigationLink: the card
-                        // opens the project without a disclosure chevron.
-                        Button {
-                            path.append(.space(space.id))
-                        } label: {
-                            ProjectRow(space: space)
-                        }
-                        .groupedRowStyle()
+    private var sessionList: some View {
+        let options = effectiveOptions
+        let chats = listedChats(options)
+        let sections = options.sections(
+            chats, now: Date(), indicator: model.indicator(for:), deviceName: model.deviceName)
+        let statusSlot = ChatRow.needsStatusSlot(chats, in: model)
+        // Inside one project the rows name their checkout, not the project.
+        let showLocation: Bool = {
+            if case .project = currentScope { return false }
+            return true
+        }()
+        return ScrollViewReader { proxy in
+            List {
+                if !isEmpty {
+                    // A row in the list, not `.searchable`: the system
+                    // drawer on iOS 26 starts hidden (pull down to show), and
+                    // this one should sit under the title until a swipe up
+                    // scrolls it away.
+                    Section {
+                        searchField
+                            .id(Self.searchRowId)
+                            .listRowInsets(EdgeInsets())
+                            .listRowBackground(Color.clear)
                     }
-                } header: {
-                    if selectedId == nil && deviceIds.count > 1 {
-                        ListSectionHeader(title: model.deviceName(group.id))
-                    }
+                    .listSectionSpacing(.compact)
                 }
+                sessionRows(chats: chats, sections: sections, statusSlot: statusSlot, showLocation: showLocation)
             }
-            quickChatsSection(quickChats)
-            if selectedId == nil {
-                otherSessionsSection(orphaned)
-                ArchivedSection(spaceId: nil, orphanedOnly: true)
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y + geometry.contentInsets.top > Self.searchTuckOffset
+            } action: { _, tucked in
+                withAnimation(Motion.fadeQuick) { searchTucked = tucked }
+            }
+            .onChange(of: searchRequests) { _, _ in
+                withAnimation { proxy.scrollTo(Self.searchRowId, anchor: .top) }
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(350))
+                    searchFocused = true
+                }
             }
         }
+        .scrollDismissesKeyboard(.immediately)
         .sessionActionPrompts(actions)
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(Theme.surface.ignoresSafeArea())
         .overlay {
-            if model.spaces.isEmpty && orphanedChats.isEmpty && model.quickChats.isEmpty {
-                emptyState
-            }
+            if isEmpty { emptyState }
         }
         .background(NavigationProbeView(probe: navigation))
-        .navigationTitle("Projects")
+        .navigationTitle("Sessions")
         .navigationSubtitle(subtitle)
         .navigationBarTitleDisplayMode(.large)
     }
 
+    private static let searchRowId = "home-search-row"
+    /// About the field's height: past it, the field is under the bar.
+    private static let searchTuckOffset: CGFloat = 40
+
+    @ViewBuilder
+    private func sessionRows(
+        chats: [Chat], sections: [SessionSection], statusSlot: Bool, showLocation: Bool
+    ) -> some View {
+        // In the list, under the large title: a top safeAreaBar
+        // shifted the scroll inset while the title collapsed (the
+        // title flickered and slid under the chips) and ran the scroll
+        // indicator across them. A header rather than a row: a cell
+        // masks its content to the section's corner radius, which
+        // clipped the first chip.
+        if !isEmpty {
+            Section {
+            } header: {
+                scopeHeader
+                    .listRowInsets(EdgeInsets())
+                    // Out past the section margin to the screen edge.
+                    .padding(.horizontal, -ScopeChips.margin)
+                    .textCase(nil)
+            }
+        }
+        if chats.isEmpty && !isEmpty {
+            emptyRows
+        }
+        ForEach(sections) { section in
+            Section {
+                ForEach(section.chats) { chat in
+                    NavigationLink(value: Route.chat(chat.id)) {
+                        ChatRow(chat: chat, showLocation: showLocation, statusSlot: statusSlot)
+                    }
+                    .groupedRowStyle()
+                    .sessionRowActions(chat)
+                }
+            } header: {
+                if !section.title.isEmpty {
+                    ListSectionHeader(title: section.title)
+                }
+            }
+        }
+        ArchivedSection(scope: currentScope, query: query, startsOpen: false)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Theme.textMuted)
+            TextField("Search sessions", text: $query)
+                .font(Theme.sans(16, relativeTo: .body))
+                .foregroundStyle(Theme.text)
+                .focused($searchFocused)
+                .submitLabel(.search)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .accessibilityIdentifier("home-search")
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Theme.textFaint)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(minHeight: 40)
+        .background(Theme.groupedRow, in: Capsule())
+        .contentShape(Capsule())
+        .onTapGesture { searchFocused = true }
+    }
+
     private var routedList: some View {
-        projectList
+        sessionList
             .navigationDestination(for: Route.self, destination: destination)
             .toolbar { homeToolbar }
             .sheet(isPresented: $showNewSpace) {
+                // A new project is for a new session: start one there, and
+                // narrow the list to it for the way back.
                 NewSpaceSheet { spaceId in
-                    path.append(.space(spaceId))
+                    scope = .project(spaceId)
+                    path.append(.newSession(spaceId: spaceId))
                 }
             }
             .sheet(isPresented: $showNotifications) { NotificationSettingsView() }
@@ -192,23 +265,29 @@ struct HomeView: View {
     @ToolbarContentBuilder
     private var homeToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            SessionListMenu()
+            SessionListMenu(showsDevice: true)
+        }
+        // The search field scrolled away: search from here instead. Tinted
+        // while a search is narrowing the list.
+        if searchTucked {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    searchRequests += 1
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .tint(searching ? Theme.accent : nil)
+                .accessibilityLabel("Search")
+                .accessibilityIdentifier("search-button")
+            }
         }
         ToolbarItem(placement: .topBarTrailing) {
             accountMenu
         }
-        // Account and Add are unrelated: separate glass groups.
+        // Account and New are unrelated: separate glass groups.
         ToolbarSpacer(.fixed, placement: .topBarTrailing)
         ToolbarItem(placement: .topBarTrailing) {
-            quickChatMenu
-        }
-        ToolbarItem(placement: .topBarTrailing) {
-            Button {
-                showNewSpace = true
-            } label: {
-                Image(systemName: "plus")
-            }
-            .accessibilityLabel("New project")
+            composeMenu
         }
     }
 
@@ -221,7 +300,7 @@ struct HomeView: View {
 
     /// Sessions to preload: re-run when the visible set changes.
     private var preloadKey: String {
-        (model.overviewChats + model.projectlessChats + model.quickChats).map(\.id).joined()
+        model.activeChats.map(\.id).joined()
     }
 
     // MARK: Notification navigation
@@ -293,11 +372,34 @@ struct HomeView: View {
         .accessibilityLabel("Account")
     }
 
-    /// Quick chat: pick the device (desktop's palette — offline devices are
-    /// listed but can't be picked; the host has to make the folder).
-    private var quickChatMenu: some View {
-        Menu {
-            Section("Quick chat on") {
+    /// New: a session in the chosen project (else the latest session's),
+    /// another project, a quick chat on a device (offline devices are listed
+    /// but can't be picked; the host has to make the folder), or a project.
+    private var composeMenu: some View {
+        let target = composeTarget
+        return Menu {
+            if let target {
+                Button {
+                    path.append(.newSession(spaceId: target.id))
+                } label: {
+                    Label("New Session", systemImage: "square.and.pencil")
+                    Text("\(target.displayName) @ \(model.deviceName(target.deviceId))")
+                }
+            }
+            let others = model.listedSpaces(options: SessionListOptions()).filter { $0.id != target?.id }
+            if !others.isEmpty {
+                Menu("In Another Project", systemImage: "folder") {
+                    ForEach(others) { space in
+                        Button {
+                            path.append(.newSession(spaceId: space.id))
+                        } label: {
+                            Text(space.displayName)
+                            Text(model.deviceName(space.deviceId))
+                        }
+                    }
+                }
+            }
+            Menu("Quick Chat", systemImage: "bubble.left") {
                 ForEach(model.devices) { device in
                     Button {
                         path.append(.quickChat(deviceId: device.id))
@@ -308,23 +410,31 @@ struct HomeView: View {
                     .disabled(!model.deviceOnline(device.id))
                 }
             }
+            .disabled(model.devices.isEmpty)
+            Divider()
+            Button("New Project…", systemImage: "folder.badge.plus") { showNewSpace = true }
         } label: {
-            Image(systemName: "bubble.left")
+            Image(systemName: "square.and.pencil")
         }
-        .disabled(model.devices.isEmpty)
-        .accessibilityLabel("Quick chat")
-        .accessibilityIdentifier("quick-chat")
+        .accessibilityLabel("New")
+        .accessibilityIdentifier("compose")
+    }
+
+    /// Where New Session goes: the chosen project, else the latest session's.
+    private var composeTarget: Space? {
+        if case .project(let id) = currentScope { return model.spaces.first { $0.id == id } }
+        return model.activeChats.lazy.compactMap { model.space(for: $0) }.first
+            ?? model.listedSpaces(options: SessionListOptions()).first
     }
 
     /// Always one line, so the large title never jumps: connection state
-    /// first, then live activity, then the plain project count.
+    /// first, then live activity, then the plain session count.
     private var subtitle: String {
         guard model.connected else { return "Connecting…" }
-        let indicators = model.overviewChats.map { model.indicator(for: $0) }
-        let activity = ChatIndicator.activitySummary(indicators)
+        let activity = ChatIndicator.activitySummary(model.activeChats.map { model.indicator(for: $0) })
         if !activity.isEmpty { return activity.joined(separator: " · ") }
-        let count = model.spaces.count
-        return count == 1 ? "1 project" : "\(count) projects"
+        let count = model.activeChats.count
+        return count == 1 ? "1 session" : "\(count) sessions"
     }
 
     private var emptyState: some View {
@@ -340,81 +450,140 @@ struct HomeView: View {
         }
     }
 
-    // MARK: Sections
+    // MARK: List
 
-    private struct DeviceGroup: Identifiable {
-        let id: String
-        var spaces: [Space]
+    /// Nothing anywhere yet: no project and no session.
+    private var isEmpty: Bool {
+        model.spaces.isEmpty && model.activeChats.isEmpty
     }
 
-    /// Projects under their owning device, in registry order: the tabs,
-    /// which never move with the sort or the time filter.
-    private var deviceGroups: [DeviceGroup] {
-        Self.grouping(model.spaces)
+    private var searching: Bool {
+        !query.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
-    /// The listed projects (view menu sort and time filter) under their
-    /// owning device; a device's card comes where its first project falls.
-    private var listedGroups: [DeviceGroup] {
-        Self.grouping(model.listedSpaces(options: listOptions))
+    /// The view menu's options as the list applies them: a vanished
+    /// device's filter reads as every device, and a search looks past the
+    /// time filter (finding an old session is its point).
+    private var effectiveOptions: SessionListOptions {
+        var options = listOptions
+        if let device = options.device, !model.devices.contains(where: { $0.id == device }) {
+            options.device = nil
+        }
+        if searching { options.activeWithinMins = nil }
+        return options
     }
 
-    private static func grouping(_ spaces: [Space]) -> [DeviceGroup] {
-        var groups: [DeviceGroup] = []
-        for space in spaces {
-            if let ix = groups.firstIndex(where: { $0.id == space.deviceId }) {
-                groups[ix].spaces.append(space)
-            } else {
-                groups.append(DeviceGroup(id: space.deviceId, spaces: [space]))
+    /// The chips' choice; a vanished project's reads as All.
+    private var currentScope: SessionScope {
+        if case .project(let id) = scope, !model.spaces.contains(where: { $0.id == id }) { return .all }
+        return scope
+    }
+
+    /// The sessions in scope that match the search, under the view menu.
+    private func listedChats(_ options: SessionListOptions) -> [Chat] {
+        let liveSpaceIds = Set(model.spaces.map(\.id))
+        let scoped = model.activeChats.filter {
+            currentScope.contains($0, liveSpaceIds: liveSpaceIds) && model.matches($0, query: query)
+        }
+        return model.listed(scoped, options: options)
+    }
+
+    /// "All", the projects the view menu lists (in its order; the chosen
+    /// one stays even when filtered out), then Quick chats and No project
+    /// when they hold listed sessions. Each carries its sessions' status.
+    private var chips: [ScopeChip] {
+        let options = effectiveOptions
+        var spaces = model.listedSpaces(options: options)
+        if case .project(let id) = currentScope, !spaces.contains(where: { $0.id == id }),
+            let space = model.spaces.first(where: { $0.id == id })
+        {
+            spaces.append(space)
+        }
+        // Same-named projects on different devices say which is which.
+        let names = Dictionary(grouping: spaces, by: \.displayName)
+        var chips = [ScopeChip(scope: .all, title: "All")]
+        chips += spaces.map { space in
+            let title =
+                names[space.displayName, default: []].count > 1
+                ? "\(space.displayName) · \(model.deviceName(space.deviceId))" : space.displayName
+            return ScopeChip(scope: .project(space.id), title: title, indicator: model.spaceIndicator(space.id))
+        }
+        for (scope, title, chats) in [
+            (SessionScope.quickChats, "Quick chats", model.quickChats),
+            (SessionScope.noProject, "No project", model.projectlessChats),
+        ] where currentScope == scope || !model.listed(chats, options: options).isEmpty {
+            let indicator = ChatIndicator.projectSummary(chats.map { model.indicator(for: $0) })
+            chips.append(ScopeChip(scope: scope, title: title, indicator: indicator))
+        }
+        return chips
+    }
+
+    /// The chips, and under them the chosen project's place and the way to
+    /// its own page.
+    private var scopeHeader: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ScopeChips(
+                chips: chips, selection: $scope,
+                openProject: { path.append(.space($0)) },
+                newSession: { path.append(.newSession(spaceId: $0)) })
+            if case .project(let id) = currentScope, let space = model.spaces.first(where: { $0.id == id }) {
+                HStack(spacing: 8) {
+                    Text("\(model.deviceName(space.deviceId)) · \(SpaceView.abbreviatingHome(space.path))")
+                        .font(Theme.sans(13, relativeTo: .subheadline))
+                        .foregroundStyle(Theme.textMuted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    Button {
+                        path.append(.space(id))
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text("Project")
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .font(Theme.sans(13, weight: .medium, relativeTo: .subheadline))
+                        .foregroundStyle(Theme.accent)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("open-project")
+                }
+                .padding(.horizontal, ScopeChips.margin)
             }
         }
-        return groups
     }
 
-    /// Sessions with no live project — desktop "No project" chats, and
-    /// history whose project row is gone; never invent a project/device
-    /// association for them. (This filtered `overviewChats`, which only
-    /// holds live-project chats, so the section never showed anything.)
-    private var orphanedChats: [Chat] {
-        model.projectlessChats
-    }
-
-    /// Quick chats, every device in one card (state.rs merge_scratch_groups);
-    /// a device tab narrows it to that device.
-    private func listedQuickChats(deviceId: String?) -> [Chat] {
-        model.listed(model.quickChats.filter { deviceId == nil || $0.deviceId == deviceId }, options: listOptions)
-    }
-
-    @ViewBuilder private func quickChatsSection(_ chats: [Chat]) -> some View {
-        if !chats.isEmpty {
-            let statusSlot = ChatRow.needsStatusSlot(chats, in: model)
-            Section {
-                ForEach(chats) { chat in
-                    NavigationLink(value: Route.chat(chat.id)) {
-                        ChatRow(chat: chat, showLocation: true, statusSlot: statusSlot)
-                    }
-                    .groupedRowStyle()
-                    .sessionRowActions(chat)
-                }
-            } header: {
-                ListSectionHeader(title: "Quick chats")
+    /// Why the list is empty: no search match, the time filter, or a scope
+    /// without sessions.
+    @ViewBuilder private var emptyRows: some View {
+        let liveSpaceIds = Set(model.spaces.map(\.id))
+        let inScope = model.activeChats.filter { currentScope.contains($0, liveSpaceIds: liveSpaceIds) }
+        if searching {
+            // Archived matches still list below; say nothing over them.
+            let archivedMatch = model.archivedChats().contains {
+                currentScope.contains($0, liveSpaceIds: liveSpaceIds) && model.matches($0, query: query)
             }
-        }
-    }
-
-    @ViewBuilder private func otherSessionsSection(_ orphaned: [Chat]) -> some View {
-        if !orphaned.isEmpty {
-            let statusSlot = ChatRow.needsStatusSlot(orphaned, in: model)
-            Section {
-                ForEach(orphaned) { chat in
-                    NavigationLink(value: Route.chat(chat.id)) {
-                        ChatRow(chat: chat, showLocation: true, statusSlot: statusSlot)
-                    }
-                    .groupedRowStyle()
-                    .sessionRowActions(chat)
+            if !archivedMatch {
+                Section {
+                    ContentUnavailableView.search(text: query)
+                        .listRowBackground(Color.clear)
                 }
-            } header: {
-                ListSectionHeader(title: "Other Sessions")
+            }
+        } else if !inScope.isEmpty && effectiveOptions.activeWithinMins != nil {
+            Section { FilteredEmptyState() }
+        } else {
+            Section {
+                ContentUnavailableView {
+                    Label("No Sessions", systemImage: "bubble.left.and.bubble.right")
+                } description: {
+                    Text(inScope.isEmpty ? "Nothing here yet." : "No sessions on this device.")
+                } actions: {
+                    if case .project(let id) = currentScope {
+                        Button("New Session") { path.append(.newSession(spaceId: id)) }
+                            .buttonStyle(.glass)
+                    }
+                }
+                .listRowBackground(Color.clear)
             }
         }
     }
