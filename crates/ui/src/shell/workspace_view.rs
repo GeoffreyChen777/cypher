@@ -830,7 +830,7 @@ impl Shell {
                     (Some(group), self.geometry.rail_focus.1.wrapping_add(1));
             }
             let epoch = self.geometry.rail_focus.1;
-            let rail = self.render_session_rail(sid, top, cx);
+            let rail = self.render_session_rail(sid, top, window, cx);
             // Absolute, fixed width: the fade cannot change anyone's layout.
             // A top-right Windows tile starts the buttons under the caption
             // controls (`top` above). The tab row keeps its own right inset.
