@@ -6,7 +6,7 @@
   --ink: light-dark(#292929, #dedede);
   --muted: light-dark(#727272, #999);
   --line: light-dark(#e9e9e9, #272727);
-  --page: light-dark(#fff, #060606);
+  --page: light-dark(#fff, #121212);
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: var(--page); }
@@ -28,7 +28,7 @@ button:focus-visible { outline: 2px solid var(--muted); outline-offset: -3px; }
   font: 13px -apple-system, BlinkMacSystemFont, sans-serif; text-align: left;
   cursor: pointer; transition: background-color 120ms ease;
 }
-.file-header:active { background: light-dark(#f4f4f4, #191919); }
+.file-header:active { background: light-dark(#f4f4f4, #252525); }
 .file-symbol { width: 18px; height: 18px; flex: none; color: var(--muted); }
 .file-disclosure {
   width: 14px; height: 14px; flex: none; color: var(--muted);
