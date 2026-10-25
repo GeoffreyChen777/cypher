@@ -103,9 +103,11 @@ struct DeviceTabs: View {
 struct ProjectRow: View {
     @Environment(AppModel.self) private var model
     let space: Space
+    @StoredSessionListOptions private var listOptions
 
     var body: some View {
-        let chats = model.chats(in: space.id)
+        // What the project opens to: the time filter narrows the count too.
+        let chats = model.listedChats(in: space.id, options: listOptions)
         let counts = ChatIndicator.activityCounts(chats.map { model.indicator(for: $0) })
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {

@@ -1,7 +1,7 @@
 // Home — the mobile shell: the desktop sidebar's project list as a native
-// inset-grouped list, filtered by owning-device tabs across the top. A
-// project opens into its sessions (SpaceView); close=archive becomes
-// swipe-to-archive.
+// inset-grouped list, filtered by owning-device tabs across the top and
+// ordered / time-filtered by the view menu (SessionListMenu). A project
+// opens into its sessions (SpaceView); close=archive becomes swipe-to-archive.
 
 import SwiftUI
 
@@ -25,6 +25,7 @@ struct HomeView: View {
     // "" = All. Sticky across launches; falls back to All if the device's
     // projects are gone.
     @AppStorage("homeDeviceFilter") private var deviceFilter: String = ""
+    @StoredSessionListOptions private var listOptions
 
     /// Registry rows a pending notification may be waiting on: the chat and
     /// its project id, so a late-hydrating row re-triggers the attempt.
@@ -94,28 +95,38 @@ struct HomeView: View {
 
     private var projectList: some View {
         List {
-            let groups = deviceGroups
-            let selected = groups.first { $0.id == deviceFilter }
+            let deviceIds = deviceGroups.map(\.id)
+            let groups = listedGroups
+            // A filter naming a vanished device reads as All.
+            let selectedId = deviceIds.contains(deviceFilter) ? deviceFilter : nil
+            let shown = selectedId.map { id in groups.filter { $0.id == id } } ?? groups
+            let quickChats = listedQuickChats(deviceId: selectedId)
+            let orphaned = selectedId == nil ? model.listed(orphanedChats, options: listOptions) : []
             // In the list, under the large title: a top safeAreaBar
             // shifted the scroll inset while the title collapsed (the
             // title flickered and slid under the tabs) and ran the scroll
             // indicator across the tabs. A header rather than a row: a
             // cell masks its content to the section's corner radius,
             // which clipped the first tab.
-            if !groups.isEmpty {
+            if !deviceIds.isEmpty {
                 Section {
                 } header: {
-                    DeviceTabs(deviceIds: groups.map(\.id), selection: $deviceFilter)
+                    DeviceTabs(deviceIds: deviceIds, selection: $deviceFilter)
                         .listRowInsets(EdgeInsets())
                         // Out past the section margin to the screen edge.
                         .padding(.horizontal, -DeviceTabs.margin)
                         .textCase(nil)
                 }
             }
+            if listOptions.activeWithinMins != nil, shown.isEmpty, quickChats.isEmpty, orphaned.isEmpty,
+                !(deviceIds.isEmpty && orphanedChats.isEmpty && model.quickChats.isEmpty)
+            {
+                Section { FilteredEmptyState() }
+            }
             // One tab: one card. All: a card per device, named by a plain
             // header (the tabs already carry presence), so rows never
             // repeat their device.
-            ForEach(selected.map { [$0] } ?? groups) { group in
+            ForEach(shown) { group in
                 Section {
                     ForEach(group.spaces) { space in
                         // A button rather than a NavigationLink: the card
@@ -128,14 +139,14 @@ struct HomeView: View {
                         .groupedRowStyle()
                     }
                 } header: {
-                    if selected == nil && groups.count > 1 {
+                    if selectedId == nil && deviceIds.count > 1 {
                         ListSectionHeader(title: model.deviceName(group.id))
                     }
                 }
             }
-            quickChatsSection(deviceId: selected?.id)
-            if selected == nil {
-                otherSessionsSection
+            quickChatsSection(quickChats)
+            if selectedId == nil {
+                otherSessionsSection(orphaned)
                 ArchivedSection(spaceId: nil, orphanedOnly: true)
             }
         }
@@ -180,6 +191,9 @@ struct HomeView: View {
 
     @ToolbarContentBuilder
     private var homeToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            SessionListMenu()
+        }
         ToolbarItem(placement: .topBarTrailing) {
             accountMenu
         }
@@ -333,10 +347,21 @@ struct HomeView: View {
         var spaces: [Space]
     }
 
-    /// Projects under their owning device, in registry order.
+    /// Projects under their owning device, in registry order: the tabs,
+    /// which never move with the sort or the time filter.
     private var deviceGroups: [DeviceGroup] {
+        Self.grouping(model.spaces)
+    }
+
+    /// The listed projects (view menu sort and time filter) under their
+    /// owning device; a device's card comes where its first project falls.
+    private var listedGroups: [DeviceGroup] {
+        Self.grouping(model.listedSpaces(options: listOptions))
+    }
+
+    private static func grouping(_ spaces: [Space]) -> [DeviceGroup] {
         var groups: [DeviceGroup] = []
-        for space in model.spaces {
+        for space in spaces {
             if let ix = groups.firstIndex(where: { $0.id == space.deviceId }) {
                 groups[ix].spaces.append(space)
             } else {
@@ -356,8 +381,11 @@ struct HomeView: View {
 
     /// Quick chats, every device in one card (state.rs merge_scratch_groups);
     /// a device tab narrows it to that device.
-    @ViewBuilder private func quickChatsSection(deviceId: String?) -> some View {
-        let chats = model.quickChats.filter { deviceId == nil || $0.deviceId == deviceId }
+    private func listedQuickChats(deviceId: String?) -> [Chat] {
+        model.listed(model.quickChats.filter { deviceId == nil || $0.deviceId == deviceId }, options: listOptions)
+    }
+
+    @ViewBuilder private func quickChatsSection(_ chats: [Chat]) -> some View {
         if !chats.isEmpty {
             let statusSlot = ChatRow.needsStatusSlot(chats, in: model)
             Section {
@@ -374,8 +402,7 @@ struct HomeView: View {
         }
     }
 
-    @ViewBuilder private var otherSessionsSection: some View {
-        let orphaned = orphanedChats
+    @ViewBuilder private func otherSessionsSection(_ orphaned: [Chat]) -> some View {
         if !orphaned.isEmpty {
             let statusSlot = ChatRow.needsStatusSlot(orphaned, in: model)
             Section {

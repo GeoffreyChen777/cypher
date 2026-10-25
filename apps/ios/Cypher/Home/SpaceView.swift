@@ -1,6 +1,7 @@
 // Space detail — the phone's answer to the desktop's horizontal session tabs:
-// the space's sessions as an inset-grouped list (recency order), swipe-to-
-// archive (= tab close), and a bottom-bar compose button for a new session.
+// the space's sessions as an inset-grouped list (the view menu's sort and
+// time filter, recency by default), swipe-to-archive (= tab close), and a
+// bottom-bar compose button for a new session.
 
 import SwiftUI
 
@@ -9,6 +10,7 @@ struct SpaceView: View {
     let spaceId: String
     @Binding var path: [Route]
     @State private var actions = SessionActions()
+    @StoredSessionListOptions private var listOptions
 
     private var space: Space? {
         model.spaces.first { $0.id == spaceId }
@@ -16,13 +18,17 @@ struct SpaceView: View {
 
     var body: some View {
         List {
-            let chats = model.chats(in: spaceId)
+            let chats = model.listedChats(in: spaceId, options: listOptions)
             let statusSlot = ChatRow.needsStatusSlot(chats, in: model)
             // No header: the project title already names this list, and the
             // first card then sits directly on the title's edge.
             Section {
                 if chats.isEmpty {
-                    emptyState
+                    if model.chats(in: spaceId).isEmpty {
+                        emptyState
+                    } else {
+                        FilteredEmptyState()
+                    }
                 }
                 ForEach(chats) { chat in
                     NavigationLink(value: Route.chat(chat.id)) {
@@ -42,6 +48,9 @@ struct SpaceView: View {
         .navigationSubtitle(subtitle)
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                SessionListMenu()
+            }
             // Compose lives bottom-trailing, in thumb reach (Mail, Notes).
             ToolbarSpacer(.flexible, placement: .bottomBar)
             ToolbarItem(placement: .bottomBar) {

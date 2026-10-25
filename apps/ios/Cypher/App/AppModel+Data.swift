@@ -145,6 +145,23 @@ extension AppModel {
         data?.chats(in: spaceId) ?? []
     }
 
+    /// A list's sessions under the view menu's time filter and sort.
+    func listed(_ chats: [Chat], options: SessionListOptions) -> [Chat] {
+        options.arrange(chats, now: nowMs(), indicator: indicator(for:))
+    }
+
+    /// A project's sessions as its list shows them.
+    func listedChats(in spaceId: String, options: SessionListOptions) -> [Chat] {
+        listed(chats(in: spaceId), options: options)
+    }
+
+    /// The project cards under the view menu's time filter and sort.
+    func listedSpaces(options: SessionListOptions) -> [Space] {
+        options.arrange(
+            spaces: spaces, activeChats: overviewChats, now: nowMs(),
+            indicator: indicator(for:), deviceName: deviceName)
+    }
+
     func chat(id: String) -> Chat? {
         data?.chat(id: id)
     }

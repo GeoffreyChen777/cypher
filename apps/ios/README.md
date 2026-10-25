@@ -351,6 +351,9 @@ Run these commands from the repository root.
   Math fixture (LaTeX in a reply): `-demo -route chat:chat-math`.
   Context recovery fixtures: `-demo -route space:space-recovery`; the live
   replay is `-demo -route chat:chat-recovery-live`.
+  Session list view menu (sort, Last active): `-demo -demo-history` adds
+  sessions from minutes to weeks old across projects, quick chats and
+  project-less sessions.
   Comment editor/list fixtures:
   `-demo -route chat:chat-tabs -sheet comment` (or `-sheet comments`).
 
