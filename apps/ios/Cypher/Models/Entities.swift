@@ -104,6 +104,9 @@ struct SessionRow: Hashable {
     /// A context recovery under way (entities.rs `recovery`): the host is
     /// writing supplementary context for a failed turn, or restarting it.
     var recovery: RecoveryProgress? = nil
+    /// A long turn's narrated progress (entities.rs `progress`): the status
+    /// strip's progress bar. Belongs to one turn; a settled row drops it.
+    var progress: RunProgress? = nil
 }
 
 /// entities.rs `ContextUsage`: tokens in the context window, of its size.
@@ -451,6 +454,104 @@ struct RecoveryProgress: Hashable {
         formatter.formatOptions = [.withInternetDateTime]
         guard let date = formatter.date(from: text) else { return nil }
         return Int64(((date.timeIntervalSince1970 + fraction) * 1000).rounded(.down))
+    }
+}
+
+// MARK: - Run progress (proto entities.rs `RunProgress`)
+
+/// `ProgressStage`: what the agent was doing, and how far the turn had got
+/// (0–100) when that stage began.
+struct ProgressStage: Hashable {
+    var label: String
+    var percent: Int
+}
+
+/// `RunProgress`: a cheap model's reading of how far a long turn has got. An
+/// estimate for the user's eyes only — nothing drives off it.
+struct RunProgress: Hashable {
+    /// 0–100.
+    var percent: Int
+    /// What the agent is doing now, one short line.
+    var current: String
+    /// The steps still to come after `current`, in order (may be empty).
+    var next: [String] = []
+    /// How many steps remain when the model counts more than it lists.
+    var stepsLeft: Int? = nil
+    /// The stages the turn has been through, oldest first; the last one is
+    /// `current`.
+    var stages: [ProgressStage] = []
+
+    /// progress_bar.rs `MAX_UPCOMING`.
+    static let maxUpcoming = 12
+
+    /// progress.rs `steps_left`: the listed steps, or the model's count when
+    /// it names more.
+    var stepsLeftCount: Int { max(stepsLeft ?? 0, next.count) }
+
+    /// progress.rs `shown_percent`: the reading's, but never behind where a
+    /// stage began (stages never move once recorded).
+    var shownPercent: Int {
+        min(stages.map(\.percent).reduce(percent, max), 100)
+    }
+
+    /// The stages the bar marks: a host that keeps none still shows its
+    /// current one.
+    var shownStages: [ProgressStage] {
+        stages.isEmpty ? [ProgressStage(label: current, percent: percent)] : stages
+    }
+
+    /// progress.rs `upcoming_positions`: where each upcoming step begins,
+    /// 0–1 — the stretch past the fill shared evenly between the current
+    /// step and those after it.
+    static func upcomingPositions(percent: Int, count: Int) -> [Double] {
+        let from = Double(min(max(percent, 0), 100)) / 100
+        let shown = min(count, maxUpcoming)
+        let share = (1 - from) / Double(shown + 1)
+        return shown == 0 ? [] : (1...shown).map { from + share * Double($0) }
+    }
+
+    /// progress.rs `left_note`: "3 steps left", for the current step.
+    static func leftNote(_ left: Int) -> String {
+        switch left {
+        case 0: "last step"
+        case 1: "1 step left"
+        default: "\(left) steps left"
+        }
+    }
+
+    /// "42% · 3 steps left".
+    var note: String { "\(shownPercent)% \u{b7} \(Self.leftNote(stepsLeftCount))" }
+
+    init(
+        percent: Int, current: String, next: [String] = [], stepsLeft: Int? = nil,
+        stages: [ProgressStage] = []
+    ) {
+        self.percent = percent
+        self.current = current
+        self.next = next
+        self.stepsLeft = stepsLeft
+        self.stages = stages
+    }
+
+    /// rows.rs: lenient — a malformed value drops the reading, never the row.
+    init?(_ value: JSONValue?) {
+        guard let object = value?.objectValue,
+            let percent = object["percent"]?.int64Value, (0...255).contains(percent),
+            let current = object["current"]?.stringValue
+        else { return nil }
+        var stages: [ProgressStage] = []
+        for stage in object["stages"]?.arrayValue ?? [] {
+            guard let stage = stage.objectValue,
+                let label = stage["label"]?.stringValue,
+                let percent = stage["percent"]?.int64Value, (0...255).contains(percent)
+            else { return nil }
+            stages.append(ProgressStage(label: label, percent: Int(percent)))
+        }
+        let next = (object["next"]?.arrayValue ?? []).compactMap(\.stringValue)
+        let stepsLeft = object["stepsLeft"]?.int64Value.map { Int(min(max($0, 0), Int64(UInt16.max))) }
+        self.init(
+            percent: Int(percent), current: current, next: next, stepsLeft: stepsLeft,
+            stages: stages)
     }
 }
 

@@ -59,6 +59,8 @@ final class DemoDataset {
     private var streamTask: Task<Void, Never>?
     /// The context recovery replay (DemoDataset+ContextRecovery.swift).
     @ObservationIgnored var recoveryTask: Task<Void, Never>?
+    /// The run progress replay (DemoDataset+RunProgress.swift).
+    @ObservationIgnored var progressTask: Task<Void, Never>?
 
     static let dummyConfig = AppConfig(
         edgeURL: URL(string: "http://localhost:8787")!, mode: .dev,
@@ -146,7 +148,8 @@ final class DemoDataset {
             "chat-veil": SessionRow(
                 chatId: "chat-veil", deviceId: "dev-mac", status: .working,
                 startedAt: now - 95_000, updatedAt: now - 5_000,
-                contextUsage: ContextUsage(used: 124_000, size: 200_000)),
+                contextUsage: ContextUsage(used: 124_000, size: 200_000),
+                progress: Self.runProgressReadings.first),
             // Idle, near full: the composer's context ring in amber.
             "chat-tabs": SessionRow(
                 chatId: "chat-tabs", deviceId: "dev-mac", status: .idle,
@@ -413,6 +416,7 @@ final class DemoDataset {
         }
         stores[chatId] = store
         refreshRecoveryShowcase(chatId)
+        if chatId == Self.runProgressChatId { playRunProgressStory() }
         if chatId == Self.recoveryReplayChatId {
             // Plays once the session has opened and settled.
             recoveryTask = Task { [weak self, weak store] in

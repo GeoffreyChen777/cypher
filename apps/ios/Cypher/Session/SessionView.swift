@@ -26,6 +26,8 @@ struct SessionView: View {
     @State private var commentDrafts = CommentDrafts()
     @State private var catalog = RemotePiCatalog()
     @State private var connectionRetry = 0
+    /// The progress card, opened by tapping the working strip's bar.
+    @State private var showingProgress = false
     @State private var workspaceDestination: WorkspaceDestination?
     @State private var actions = SessionActions()
     /// The entry a fork / restart is in flight for (its strip button spins).
@@ -427,7 +429,8 @@ struct SessionView: View {
                 VStack(spacing: 0) {
                     HStack(spacing: 8) {
                         statusStrip(chat: chat, store: store, status: status)
-                            .allowsHitTesting(false)
+                            // Only the progress bar's strip takes a tap (its card).
+                            .allowsHitTesting(status == .working && sessionRow(chat: chat)?.progress != nil)
                             .lineLimit(1)
                         SubagentsAccessory(
                             parent: chat, store: store,
@@ -517,7 +520,9 @@ struct SessionView: View {
     /// shows the sunrise spinner + rotating flavour word + elapsed; a context
     /// recovery under way (render.rs `render_recovery_trailer`) shows the
     /// spinner + what it is doing; Errored shows "Run failed"; the strip
-    /// always reserves its height so the composer never shifts.
+    /// always reserves its height so the composer never shifts. A long turn's
+    /// narrated progress (render.rs's trailer bar) fills the rest of the row
+    /// with its bar and percentage; a tap opens its stages.
     private func statusStrip(chat: Chat, store: SessionStore, status: SessionStatus?) -> some View {
         let transportReady =
             model.demo != nil || (model.connected && model.deviceOnline(chat.deviceId) && store.connected)
@@ -537,6 +542,8 @@ struct SessionView: View {
                 ? nil : sessionRow(chat: chat)?.recovery.flatMap { $0.isLive(now: now) ? $0 : nil }
             // Every state but a quiet, connected session draws something here.
             let showing = connection != .ready || status == .working || status == .errored || recovery != nil
+            let progress =
+                connection == .ready && recovery == nil && status == .working ? sessionRow(chat: chat)?.progress : nil
             HStack(spacing: 6) {
                 if connection != .ready {
                     SessionConnectionIndicator(phase: connection, retryRevision: connectionRetry) {
@@ -564,10 +571,23 @@ struct SessionView: View {
                         Text("\(Motion.flavourWord(seed: Motion.flavourSeed(chat.id), elapsedSecs: elapsed))…")
                             .font(Theme.sans(12))
                             .foregroundStyle(Theme.textMuted)
+                            .layoutPriority(1)
                         Text(Motion.formatElapsed(elapsed))
                             .font(Theme.sans(11))
                             .foregroundStyle(Theme.textFaint)
                             .monospacedDigit()
+                            .fixedSize()
+                        if let progress {
+                            RunProgressBar(progress: progress)
+                                .frame(minWidth: 40, maxWidth: .infinity)
+                                .padding(.leading, 2)
+                            Text("\(progress.shownPercent)%")
+                                .font(Theme.sans(11))
+                                .foregroundStyle(Theme.textFaint)
+                                .monospacedDigit()
+                                .fixedSize()
+                                .accessibilityHidden(true)  // the bar's value reads it
+                        }
                     case .errored:
                         Text("Run failed")
                             .font(Theme.sans(11))
@@ -578,6 +598,18 @@ struct SessionView: View {
                 }
             }
             .modifier(StatusCapsule(active: showing))
+            .contentShape(Capsule())
+            .onTapGesture { if progress != nil { showingProgress = true } }
+            .accessibilityElement(children: progress != nil ? .combine : .contain)
+            .accessibilityAddTraits(progress != nil ? .isButton : [])
+            .accessibilityHint(progress != nil ? "Shows the turn's steps" : "")
+            .accessibilityIdentifier(progress != nil ? "run-progress" : "")
+            .popover(
+                isPresented: Binding(
+                    get: { showingProgress && progress != nil }, set: { showingProgress = $0 })
+            ) {
+                if let progress { RunProgressCard(progress: progress) }
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 16)  // the capsule on the composer's edge, its text on the composer's
         }
