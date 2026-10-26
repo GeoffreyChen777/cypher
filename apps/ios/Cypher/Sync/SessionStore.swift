@@ -12,9 +12,9 @@
 // message).
 //
 // The doc syncs whole, but `entries` is a window on its tail: a transcript
-// opens on its last page of messages and reads earlier pages as its reader
-// scrolls back (`loadEarlier`), so a long session costs one page to open and
-// to keep up to date, not its whole history.
+// opens on its last few messages and reads earlier pages as its reader
+// scrolls back (`loadEarlier`), so a long session costs a few messages to
+// open and to keep up to date, not its whole history.
 
 import Foundation
 import Loro
@@ -69,7 +69,7 @@ final class SessionStore {
     /// Where the published `entries` start.
     @ObservationIgnored private var shownStart = 0
     /// Transcripts on screen (`holdWindow`). With none the window follows the
-    /// tail, so a store kept warm in the background stays one page; with one
+    /// tail, so a store kept warm in the background stays a few messages; with one
     /// it only grows, so nothing drops off the top under a reader.
     @ObservationIgnored private var windowHolds = 0
     /// Questions this device answered whose part the host hasn't resolved
@@ -164,15 +164,20 @@ final class SessionStore {
 
     // MARK: Window
 
-    /// The messages a transcript opens with, and how many more each
-    /// `loadEarlier` adds.
+    /// The messages a transcript opens with: the last few, so the first
+    /// paint reads, parses and lays out little more than a screen. A window
+    /// shorter than the screen reads the next page at once (TranscriptView).
+    nonisolated static let openMessages = 5
+
+    /// How many more messages each `loadEarlier` adds.
     nonisolated static let pageMessages = 40
 
-    /// Where a window over `count` messages starts: the last page, or from
-    /// `held` while a reader holds it — never less than a page, and back to
-    /// the last page if the messages it started at are gone (a rewind).
+    /// Where a window over `count` messages starts: the last few, or from
+    /// `held` while a reader holds it — never fewer than it opens with, and
+    /// back to the last few if the messages it started at are gone (a
+    /// rewind).
     nonisolated static func windowStart(held: Int?, count: Int) -> Int {
-        let tail = max(0, count - pageMessages)
+        let tail = max(0, count - openMessages)
         guard let held, held < count else { return tail }
         return min(held, tail)
     }
@@ -250,7 +255,7 @@ final class SessionStore {
         }
         saver = DocSaver { [weak self] in
             guard let self else { return }
-            DocDisk.saveChat2(doc: self.doc, id: self.chatId, cursor: self.cursor)
+            DocDisk.saveChat2Later(doc: self.doc, id: self.chatId, cursor: self.cursor)
         }
         // Subscription BEFORE any connect: every local commit lands in the
         // client when it exists; commits made earlier are covered by the
@@ -382,6 +387,7 @@ final class SessionStore {
     /// Backgrounding hook: persist immediately.
     func flushToDisk() {
         saver?.flush()
+        DocDisk.finishWrites()
     }
 
     /// Foreground hook: revive the room after a suspension (see

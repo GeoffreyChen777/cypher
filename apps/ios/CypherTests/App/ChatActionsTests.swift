@@ -76,14 +76,15 @@ final class ChatActionsTests: XCTestCase {
         let model = AppModel()
         model.enterDemoMode()
         let source = try XCTUnwrap(model.chat(id: "chat-tabs"))
-        let entries = try XCTUnwrap(model.sessionStore(for: source)?.entries)
+        // The whole transcript: `entries` is only its window.
+        let entries = try XCTUnwrap(model.sessionStore(for: source)?.fedEntries)
         let prompt = try XCTUnwrap(entries.last { $0.role == .user })
         let promptIx = try XCTUnwrap(entries.firstIndex { $0.id == prompt.id })
 
         guard case .created(let beforeId) = await model.forkSession(source, anchor: prompt) else {
             return XCTFail("fork failed")
         }
-        XCTAssertEqual(model.sessionStore(for: try XCTUnwrap(model.chat(id: beforeId)))?.entries.count, promptIx)
+        XCTAssertEqual(model.sessionStore(for: try XCTUnwrap(model.chat(id: beforeId)))?.fedEntries.count, promptIx)
         XCTAssertNotNil(model.takePendingDraft(chatId: beforeId))
         XCTAssertNil(model.takePendingDraft(chatId: beforeId), "the draft is handed over once")
         XCTAssertTrue(model.chat(id: beforeId)?.title?.hasSuffix("— Fork") == true)
@@ -93,7 +94,7 @@ final class ChatActionsTests: XCTestCase {
         guard case .created(let afterId) = await model.forkSession(source, anchor: reply) else {
             return XCTFail("fork failed")
         }
-        XCTAssertEqual(model.sessionStore(for: try XCTUnwrap(model.chat(id: afterId)))?.entries.count, replyIx + 1)
+        XCTAssertEqual(model.sessionStore(for: try XCTUnwrap(model.chat(id: afterId)))?.fedEntries.count, replyIx + 1)
         XCTAssertNil(model.takePendingDraft(chatId: afterId))
     }
 }
