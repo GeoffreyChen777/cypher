@@ -25,7 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cypher_doc::{REGISTRY_DOC_ID, RegistryDoc};
+use cypher_doc::RegistryDoc;
 use cypher_sync::DocsStore;
 use serde::{Deserialize, Serialize};
 
@@ -246,10 +246,11 @@ impl LocalImporter {
             return Ok(None);
         }
         let store = DocsStore::open(&root)?;
-        let Some(bytes) = store.load_snapshot(REGISTRY_DOC_ID)? else {
+        let Some((registry, _)) =
+            crate::host::workspace_host::load_registry(&store, &self.inner.device_id)?
+        else {
             return Ok(None); // store exists but no registry replica — nothing rowed
         };
-        let registry = RegistryDoc::from_bytes(&bytes, &self.inner.device_id)?;
         Ok(Some((store, registry)))
     }
 

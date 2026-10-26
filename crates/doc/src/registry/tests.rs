@@ -949,6 +949,128 @@ fn persistence_round_trips_rows_pending_and_cursor() {
 }
 
 #[test]
+fn items_round_trip_rows_pending_and_cursor() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    doc.upsert_chat(&chat("chat-2", "dev-a")).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut doc]);
+    doc.rename_chat("chat-1", "unacked").unwrap();
+
+    let items = doc.to_items().unwrap();
+    assert_eq!(items.len(), 2 + 2, "meta + pending + one item per row");
+    let restored = RegistryDoc::from_items(items, "dev-a").unwrap().unwrap();
+    assert_eq!(restored.cursor(), doc.cursor());
+    assert_eq!(restored.pending_len(), 1);
+    assert_eq!(restored.read_all().unwrap(), doc.read_all().unwrap());
+    assert!(
+        RegistryDoc::from_items(Vec::new(), "dev-a")
+            .unwrap()
+            .is_none(),
+        "no meta item: nothing stored in item form"
+    );
+}
+
+#[test]
+fn one_row_change_touches_one_row_item() {
+    let mut doc = RegistryDoc::new("dev-a");
+    for id in ["chat-1", "chat-2", "chat-3"] {
+        doc.upsert_chat(&chat(id, "dev-a")).unwrap();
+    }
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut doc]);
+    let before: HashMap<_, _> = doc.to_items().unwrap().into_iter().collect();
+    doc.rename_chat("chat-2", "renamed").unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut doc]);
+    let changed: Vec<String> = doc
+        .to_items()
+        .unwrap()
+        .into_iter()
+        .filter(|(key, bytes)| before.get(key) != Some(bytes))
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(
+        changed.len(),
+        2,
+        "meta (cursor) + the renamed row: {changed:?}"
+    );
+    assert!(changed.contains(&"meta".to_string()));
+    assert!(changed.iter().any(|key| key.ends_with("/chat-2")));
+}
+
+#[test]
+fn unsent_heartbeats_coalesce_instead_of_piling_up() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut session = session("chat-1", "dev-a", SessionStatus::Working);
+    for beat in 0..100 {
+        session.updated_at = ts(1_000 + beat);
+        doc.upsert_session(&session).unwrap();
+    }
+    assert_eq!(
+        doc.pending_len(),
+        1,
+        "each full-row upsert overrides the last"
+    );
+    assert_eq!(
+        doc.read_sessions().unwrap()[0].updated_at,
+        ts(1_099),
+        "the newest write survives"
+    );
+
+    // A batch already on the wire stays until its ACK; the next beat queues.
+    let in_flight = doc.take_pushable();
+    assert_eq!(in_flight.len(), 1);
+    session.updated_at = ts(2_000);
+    doc.upsert_session(&session).unwrap();
+    assert_eq!(doc.pending_len(), 2);
+}
+
+#[test]
+fn coalescing_keeps_writes_a_newer_op_does_not_cover() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    // A partial update (title only) never shadows the creating upsert.
+    doc.rename_chat("chat-1", "one").unwrap();
+    assert_eq!(doc.pending_len(), 2);
+    // The same partial field set again shadows the earlier rename only.
+    doc.rename_chat("chat-1", "two").unwrap();
+    assert_eq!(doc.pending_len(), 2);
+    // A different row is never touched.
+    doc.upsert_chat(&chat("chat-2", "dev-a")).unwrap();
+    assert_eq!(doc.pending_len(), 3);
+
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut doc]);
+    let chats = doc.read_chats().unwrap();
+    assert_eq!(chats.len(), 2);
+    assert_eq!(
+        doc.chat("chat-1").unwrap().unwrap().title.as_deref(),
+        Some("two")
+    );
+}
+
+#[test]
+fn settling_locally_folds_pending_into_rows() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    doc.rename_chat("chat-1", "titled").unwrap();
+    doc.upsert_chat(&chat("chat-2", "dev-a")).unwrap();
+    doc.delete_chat("chat-2").unwrap();
+    let shown = doc.read_all().unwrap();
+    assert!(doc.settle_pending_locally());
+    assert_eq!(doc.pending_len(), 0);
+    assert_eq!(
+        doc.read_all().unwrap(),
+        shown,
+        "settling changes nothing visible"
+    );
+    assert!(!doc.settle_pending_locally(), "nothing left to fold");
+}
+
+#[test]
 fn state_frames_delta_replace_and_reseed() {
     let mut doc = RegistryDoc::new("dev-a");
     doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();

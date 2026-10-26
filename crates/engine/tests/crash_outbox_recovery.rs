@@ -221,8 +221,11 @@ async fn sigkill_recovers_journal_and_unacked_outbox() {
             vec![
                 "chat_outbox",
                 "processed_commands",
+                "registry_items",
                 "schema_migrations",
-                "snapshots"
+                "snapshot_deltas",
+                "snapshots",
+                "store_counters"
             ]
         );
         core.shutdown().await;

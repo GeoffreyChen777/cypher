@@ -52,6 +52,34 @@ pub struct PendingBatch {
     pub in_flight: bool,
 }
 
+/// Whether applying `old` then `newer` always equals applying `newer` alone,
+/// so an unsent `old` can be dropped. Holds when `newer` is the later write
+/// (same device, monotonic HLC) to the same row, sets every field `old` sets,
+/// and can't differ on row existence: an upsert overrides an upsert or
+/// update, an update only another update (an update never creates or revives,
+/// so it can't stand in for a creating upsert). Per-field clock overrides
+/// (re-seeds) keep their exact clocks and are never dropped.
+fn op_shadows(newer: &RowOp, old: &RowOp) -> bool {
+    if newer.kind != old.kind
+        || newer.id != old.id
+        || newer.clocks.is_some()
+        || old.clocks.is_some()
+        || newer.hlc <= old.hlc
+    {
+        return false;
+    }
+    let ops_compatible = matches!(
+        (old.op, newer.op),
+        (OpKind::Upsert | OpKind::Update, OpKind::Upsert) | (OpKind::Update, OpKind::Update)
+    );
+    match (&old.set, &newer.set) {
+        (Some(old_set), Some(new_set)) if ops_compatible => {
+            old_set.keys().all(|field| new_set.contains_key(field))
+        }
+        _ => false,
+    }
+}
+
 // ── the doc ─────────────────────────────────────────────────────────────────
 
 /// What [`RegistryDoc::apply_state`] decided about a `state` frame.
@@ -85,6 +113,24 @@ struct PersistedState {
     rows: Vec<RegistryRow>,
     pending: Vec<PendingBatch>,
 }
+
+/// [`PersistedState`] minus rows and pending — the `meta` item of
+/// [`RegistryDoc::to_items`].
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedMeta {
+    v: u32,
+    #[serde(default)]
+    resync_epoch: u32,
+    device_id: String,
+    server_seq: u64,
+    gc_floor: u64,
+    clock: HlcClock,
+}
+
+const ITEM_META: &str = "meta";
+const ITEM_PENDING: &str = "pending";
+const ITEM_ROW_PREFIX: &str = "row/";
 
 /// The local registry replica. Pure data — no I/O, no async; the transport
 /// (`cypher_sync::RegistryClient`) and the engine host drive it under a lock.
@@ -153,8 +199,76 @@ impl RegistryDoc {
         Ok(serde_json::to_vec(&state)?)
     }
 
+    /// The replica as independent `(key, bytes)` items — one per row plus
+    /// `meta` and `pending` — so a store can rewrite only the items that
+    /// changed. Rows are a few hundred bytes each; the whole replica is
+    /// routinely ~1MB, and it changes on every heartbeat.
+    pub fn to_items(&self) -> Result<Vec<(String, Vec<u8>)>, DocError> {
+        let meta = PersistedMeta {
+            v: 1,
+            resync_epoch: CURRENT_RESYNC_EPOCH,
+            device_id: self.device_id.clone(),
+            server_seq: self.server_seq,
+            gc_floor: self.gc_floor,
+            clock: self.clock.clone(),
+        };
+        let mut items =
+            Vec::with_capacity(self.authoritative.values().map(HashMap::len).sum::<usize>() + 2);
+        items.push((ITEM_META.to_string(), serde_json::to_vec(&meta)?));
+        items.push((ITEM_PENDING.to_string(), serde_json::to_vec(&self.pending)?));
+        for (kind, rows) in &self.authoritative {
+            for (id, row) in rows {
+                items.push((
+                    format!("{ITEM_ROW_PREFIX}{kind}/{id}"),
+                    serde_json::to_vec(row)?,
+                ));
+            }
+        }
+        Ok(items)
+    }
+
+    /// Inverse of [`Self::to_items`]; `None` when there is no `meta` item
+    /// (nothing stored in this form).
+    pub fn from_items(
+        items: impl IntoIterator<Item = (String, Vec<u8>)>,
+        device_id: &str,
+    ) -> Result<Option<Self>, DocError> {
+        let mut meta: Option<PersistedMeta> = None;
+        let mut pending = Vec::new();
+        let mut rows = Vec::new();
+        for (key, bytes) in items {
+            if key == ITEM_META {
+                meta = Some(serde_json::from_slice(&bytes)?);
+            } else if key == ITEM_PENDING {
+                pending = serde_json::from_slice(&bytes)?;
+            } else if key.starts_with(ITEM_ROW_PREFIX) {
+                rows.push(serde_json::from_slice(&bytes)?);
+            }
+        }
+        let Some(meta) = meta else {
+            return Ok(None);
+        };
+        Self::from_state(
+            PersistedState {
+                v: meta.v,
+                resync_epoch: meta.resync_epoch,
+                device_id: meta.device_id,
+                server_seq: meta.server_seq,
+                gc_floor: meta.gc_floor,
+                clock: meta.clock,
+                rows,
+                pending,
+            },
+            device_id,
+        )
+        .map(Some)
+    }
+
     pub fn from_bytes(bytes: &[u8], device_id: &str) -> Result<Self, DocError> {
-        let state: PersistedState = serde_json::from_slice(bytes)?;
+        Self::from_state(serde_json::from_slice(bytes)?, device_id)
+    }
+
+    fn from_state(state: PersistedState, device_id: &str) -> Result<Self, DocError> {
         if state.v != 1 {
             return Err(DocError::Schema(format!(
                 "unknown registry snapshot version {}",
@@ -337,6 +451,18 @@ impl RegistryDoc {
         // atomically (only cross-chunk atomicity is given up).
         const MAX_OPS_PER_BATCH: usize = 400;
         self.generation += 1;
+        // An unsent batch every op of which a new op fully overrides can
+        // never matter again: drop it. Without this, every write queued while
+        // nothing acks (offline, a stuck room) was kept forever — a session
+        // heartbeat every 30s grew `pending` (persisted, and replayed by every
+        // overlay read) by thousands of batches a day.
+        self.pending.retain(|batch| {
+            batch.in_flight
+                || !batch
+                    .ops
+                    .iter()
+                    .all(|old| ops.iter().any(|new| op_shadows(new, old)))
+        });
         while !ops.is_empty() {
             let tail = if ops.len() > MAX_OPS_PER_BATCH {
                 ops.split_off(MAX_OPS_PER_BATCH)
@@ -353,6 +479,25 @@ impl RegistryDoc {
             });
             ops = tail;
         }
+    }
+
+    /// Edge-less replicas: no server will ever ack, so fold every pending op
+    /// straight into the local rows (what the overlay already shows) instead
+    /// of keeping it queued. Returns whether anything was folded.
+    pub fn settle_pending_locally(&mut self) -> bool {
+        if self.pending.is_empty() {
+            return false;
+        }
+        for batch in std::mem::take(&mut self.pending) {
+            for op in &batch.ops {
+                let current = self.authoritative.get(&op.kind).and_then(|m| m.get(&op.id));
+                if let (Some(next), _) = apply_op(current, op) {
+                    self.put_authoritative(next);
+                }
+            }
+        }
+        self.generation += 1;
+        true
     }
 
     fn write(&mut self, kind: &str, id: &str, op: OpKind, set: BTreeMap<String, Value>) {
