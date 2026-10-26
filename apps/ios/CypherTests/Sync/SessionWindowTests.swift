@@ -6,6 +6,7 @@ import XCTest
 /// pages back as the reader scrolls (SessionStore's window).
 @MainActor
 final class SessionWindowTests: XCTestCase {
+    private let open = SessionStore.openMessages
     private let page = SessionStore.pageMessages
 
     private func config() -> AppConfig {
@@ -33,12 +34,12 @@ final class SessionWindowTests: XCTestCase {
         doc.commit()
     }
 
-    func testAWindowOpensOnTheLastPage() {
+    func testAWindowOpensOnTheLastFewMessages() {
         let doc = BenchRunner.buildDoc(turns: 120)  // 240 messages
         let read = SessionStore.readWindow(of: doc, held: nil)
-        XCTAssertEqual(read.start, 240 - page)
-        XCTAssertEqual(read.entries.count, page)
-        XCTAssertEqual(read.entries.first?.id, "u100")
+        XCTAssertEqual(read.start, 240 - open)
+        XCTAssertEqual(read.entries.count, open)
+        XCTAssertEqual(read.entries.first?.id, "a117")
         XCTAssertEqual(read.entries.last?.id, "a119")
     }
 
@@ -51,19 +52,19 @@ final class SessionWindowTests: XCTestCase {
         XCTAssertEqual(read.entries.map(\.id).suffix(2), ["a119", "u120"])
     }
 
-    func testAWindowNeverHoldsLessThanAPage() {
-        XCTAssertEqual(SessionStore.windowStart(held: nil, count: page / 2), 0)
+    func testAWindowNeverHoldsFewerThanItOpensWith() {
+        XCTAssertEqual(SessionStore.windowStart(held: nil, count: open - 1), 0)
         XCTAssertEqual(SessionStore.windowStart(held: 10, count: 100), 10)
-        // Messages rewound from under the window's end: back to a full page.
-        XCTAssertEqual(SessionStore.windowStart(held: 90, count: 100), 100 - page)
-        // From under its start: the last page again.
-        XCTAssertEqual(SessionStore.windowStart(held: 230, count: 100), 100 - page)
+        // Messages rewound from under the window's end: back to the last few.
+        XCTAssertEqual(SessionStore.windowStart(held: 98, count: 100), 100 - open)
+        // From under its start: the last few again.
+        XCTAssertEqual(SessionStore.windowStart(held: 230, count: 100), 100 - open)
     }
 
     func testAContinuationReachesBackToItsRoot() throws {
         let doc = LoroDoc()
         try push(entry("root", role: .assistant), to: doc)
-        for ix in 0..<page + 5 { try push(entry("u\(ix)"), to: doc) }
+        for ix in 0..<open + 5 { try push(entry("u\(ix)"), to: doc) }
         try push(entry("more", role: .assistant, continuationOf: "root"), to: doc)
         let read = SessionStore.readWindow(of: doc, held: nil)
         XCTAssertEqual(read.start, 0)
@@ -75,15 +76,15 @@ final class SessionWindowTests: XCTestCase {
     func testAFedStorePagesBackWhileHeldAndFollowsTheTailOnRelease() {
         let store = SessionStore(chatId: "fed", config: config(), offline: true)
         store.setEntries(BenchRunner.syntheticEntries(turns: 120))
-        XCTAssertEqual(store.entries.count, page)
+        XCTAssertEqual(store.entries.count, open)
         XCTAssertTrue(store.hasEarlier)
 
         store.loadEarlier()
-        XCTAssertEqual(store.entries.count, page, "Unheld, the window follows the tail")
+        XCTAssertEqual(store.entries.count, open, "Unheld, the window follows the tail")
 
         store.holdWindow()
         store.loadEarlier()  // fed: lands at once
-        XCTAssertEqual(store.entries.count, 2 * page)
+        XCTAssertEqual(store.entries.count, open + page)
         while store.hasEarlier { store.loadEarlier() }
         XCTAssertEqual(store.entries.count, 240)
         XCTAssertEqual(store.entries.first?.id, "u0")
@@ -92,46 +93,48 @@ final class SessionWindowTests: XCTestCase {
         XCTAssertEqual(store.entries.count, 241, "A held window grows at the tail")
 
         store.releaseWindow()
-        XCTAssertEqual(store.entries.count, page)
+        XCTAssertEqual(store.entries.count, open)
         XCTAssertEqual(store.entries.last?.id, "u120")
         XCTAssertTrue(store.hasEarlier)
     }
 
-    func testADocStoreHydratesOnePageParsedOffTheMainThread() async throws {
+    func testADocStoreHydratesItsLastFewMessagesParsedOffTheMainThread() async throws {
         let chatId = "window-\(UUID().uuidString.lowercased())"
         DocDisk.saveChat2(doc: BenchRunner.buildDoc(turns: 120), id: chatId, cursor: 0)
         let store = SessionStore(chatId: chatId, config: config())
         defer {
             store.stop()
+            DocDisk.finishWrites()
             try? FileManager.default.removeItem(at: DocDisk.chat2URL(for: chatId))
         }
         store.start()
         try await until { !store.entries.isEmpty }
-        XCTAssertEqual(store.entries.count, page)
-        XCTAssertEqual(store.entries.first?.id, "u100")
+        XCTAssertEqual(store.entries.count, open)
+        XCTAssertEqual(store.entries.first?.id, "a117")
         XCTAssertTrue(store.hasEarlier)
-        XCTAssertNotNil(store.transcriptCache.settledParses["a100#t0"], "The page's markdown is parsed before it lands")
-        // The scrubber's rounds above the page arrive after it.
-        try await until { store.earlierRounds.count == 100 }
+        XCTAssertNotNil(
+            store.transcriptCache.settledParses["a117#t0"], "The window's markdown is parsed before it lands")
+        // The scrubber's rounds above the window arrive after it.
+        try await until { store.earlierRounds.count == 118 }
         XCTAssertEqual(store.earlierRounds.first?.rowId, "u0")
-        XCTAssertEqual(store.earlierRounds.last?.messageIndex, 198)
+        XCTAssertEqual(store.earlierRounds.last?.messageIndex, 234)
 
         store.holdWindow()
         store.loadEarlier()
         store.loadEarlier()  // a page is on its way: no second one
-        try await until { store.entries.count == 2 * page }
+        try await until { store.entries.count == open + page }
         try await Task.sleep(for: .milliseconds(100))
-        XCTAssertEqual(store.entries.count, 2 * page)
-        XCTAssertEqual(store.entries.first?.id, "u80")
-        XCTAssertNotNil(store.transcriptCache.settledParses["a80#t0"])
-        XCTAssertEqual(store.earlierRounds.count, 80)
+        XCTAssertEqual(store.entries.count, open + page)
+        XCTAssertEqual(store.entries.first?.id, "a97")
+        XCTAssertNotNil(store.transcriptCache.settledParses["a97#t0"])
+        XCTAssertEqual(store.earlierRounds.count, 98)
 
         store.loadEarlier(through: 10)  // a scrubber jump to round 6
         try await until { store.entries.first?.id == "u5" }
         XCTAssertEqual(store.earlierRounds.map(\.rowId), ["u0", "u1", "u2", "u3", "u4"])
         store.releaseWindow()
-        try await until { store.entries.count == page }
-        try await until { store.earlierRounds.count == 100 }
+        try await until { store.entries.count == open }
+        try await until { store.earlierRounds.count == 118 }
     }
 
     private func until(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {

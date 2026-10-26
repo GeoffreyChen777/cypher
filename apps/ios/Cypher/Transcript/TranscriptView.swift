@@ -58,9 +58,9 @@ struct TranscriptView: View {
     /// and another identity's pad frame must never count as ours.
     @State private var padOwner = UUID()
     /// The first entry this view shows; nil until the first rows fix it. The
-    /// store's window holds one page on open (bounding what the lazy stack
-    /// can realize, and what opening reads and parses) and grows a page at a
-    /// time as the reader nears the top. A page that lands stays hidden above
+    /// store's window holds the last few messages on open (bounding what the
+    /// lazy stack can realize, and what opening reads and parses) and grows a
+    /// page at a time as the reader nears the top. A page that lands stays hidden above
     /// this entry until the scroll rests (`pageEarlier`): rows landing above
     /// a moving scroll would shove the reader's place, and SwiftUI drops a
     /// correcting scroll under a finger.
@@ -168,7 +168,7 @@ struct TranscriptView: View {
             // never fires for an initial value — this is the only hook for them.
             fixWindow()
             await settleToBottom()
-            pageEarlier()  // a first page shorter than the screen
+            pageEarlier()  // a first window shorter than the screen
         }
         .onChange(of: allRows.isEmpty) { _, isEmpty in
             // Projection is off-main, so a cached transcript usually lands after

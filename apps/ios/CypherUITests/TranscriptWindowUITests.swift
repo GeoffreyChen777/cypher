@@ -1,8 +1,8 @@
 import XCTest
 
 /// Long transcripts: `-big` is 120 synthetic turns (240 messages, ~840 rows).
-/// A session opens on its last page of messages (turns 100–119) and reads
-/// earlier pages as the reader scrolls back.
+/// A session opens on its last few messages (turn 117's reply through turn
+/// 119) and reads earlier pages as the reader scrolls back.
 @MainActor
 final class TranscriptWindowUITests: XCTestCase {
     private func launchBig(_ extra: [String] = []) -> (XCUIApplication, XCUIElement) {
@@ -44,7 +44,7 @@ final class TranscriptWindowUITests: XCTestCase {
         let (app, transcript) = launchBig()
         XCTAssertTrue(turn(app, "Turn 119:").waitForExistence(timeout: 10))
         XCTAssertTrue(transcript.waitForHittable(timeout: 10))
-        // Turns 60–79 are two pages above the one the session opened on.
+        // Turns 60–79 are pages above the messages the session opened on.
         let older = element(app, "MATCHES", "Turn [67][0-9]:.*")
         var swipes = 0
         while !older.exists, swipes < 80 {
@@ -55,8 +55,8 @@ final class TranscriptWindowUITests: XCTestCase {
     }
 
     func testAPageLandsAboveTheReaderWithoutMovingThem() {
-        // Pages take 20s to land, so this one lands with the reader at rest
-        // on the first page's top.
+        // Pages take 45s to land, so this one lands with the reader at rest
+        // on the top of the messages the session opened on.
         let (app, transcript) = launchBig(["-slow-pages"])
         XCTAssertTrue(turn(app, "Turn 119:").waitForExistence(timeout: 10))
         XCTAssertTrue(transcript.waitForHittable(timeout: 10))
@@ -67,12 +67,12 @@ final class TranscriptWindowUITests: XCTestCase {
             swipes += 1
         }
         XCTAssertTrue(loader.isHittable, "Scrolling back must reach the top of the loaded messages")
-        let landed = element(app, "CONTAINS", "Landed the pass-99")
+        let landed = element(app, "CONTAINS", "Landed the pass-116")
         XCTAssertFalse(landed.exists, "The page above is still on its way")
-        let first = turn(app, "Turn 100:")
+        let first = element(app, "CONTAINS", "Pass 117:")
         XCTAssertTrue(first.isHittable)
         let before = first.frame.minY
-        XCTAssertTrue(landed.waitForExistence(timeout: 30), "The page lands above the reader")
+        XCTAssertTrue(landed.waitForExistence(timeout: 60), "The page lands above the reader")
         sleep(1)
         XCTAssertTrue(first.isHittable, "The reader's place must stay in view")
         XCTAssertEqual(first.frame.minY, before, accuracy: 2, "Nothing on screen moves when the page lands")
