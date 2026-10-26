@@ -159,18 +159,37 @@ func settle() async {
     for _ in 0..<10 { try? await Task.sleep(nanoseconds: 1_000_000) }
 }
 
-/// Polls `condition` until it holds or two seconds pass.
+/// Polls `condition` until it holds or ten seconds pass. It returns the
+/// moment it holds; the budget only bounds a failure, and two seconds ran out
+/// on a loaded CI runner.
 @MainActor
 func eventually(
     _ message: String = "condition never held", file: StaticString = #filePath, line: UInt = #line,
     _ condition: () async -> Bool
 ) async {
-    let deadline = Date().addingTimeInterval(2)
+    let deadline = Date().addingTimeInterval(10)
     while Date() < deadline {
         if await condition() { return }
         try? await Task.sleep(nanoseconds: 1_000_000)
     }
     XCTFail(message, file: file, line: line)
+}
+
+/// `RoomSocketLifecycle.Timing.livenessTickNs`: the only timer that sleeps
+/// exactly this long.
+let livenessTickNs: UInt64 = 1_000_000_000
+
+/// Moves `clock` one liveness tick, once a tick is armed to wake on it. A
+/// client still handling the last tick when the clock moves sleeps through
+/// this one, so a test stepping toward a deadline could run out of steps
+/// before any tick saw it. Skips the step once `done` holds: a session torn
+/// down re-arms no tick.
+@MainActor
+func tick(_ clock: ManualRoomClock, unless done: () -> Bool = { false }) async {
+    await eventually("liveness tick never re-armed") { clock.hasSleeper(lasting: livenessTickNs) || done() }
+    guard !done() else { return }
+    clock.advance(nanoseconds: livenessTickNs)
+    await settle()
 }
 
 /// Records what a client's delegate is told, on the main actor.

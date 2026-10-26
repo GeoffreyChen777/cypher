@@ -108,6 +108,11 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
     var source: WorkspaceSourceDocument? = nil
     var onStatus: (DiffRendererStatus) -> Void
 
+    /// How long one input may take to render, launching WebKit's processes
+    /// included, before the view gives up on it. Tests raise it: a simulator
+    /// on a loaded CI runner has taken 23s to launch a WebContent process.
+    static var renderDeadline: Duration = .seconds(15)
+
     static var resourceURL: URL? {
         Bundle.main.url(forResource: "DiffRenderer", withExtension: "bundle")?
             .appendingPathComponent("index.html")
@@ -187,7 +192,7 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
             let id = activeID
             deadline?.cancel()
             deadline = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(15))
+                try? await Task.sleep(for: WorkspaceDiffWebView.renderDeadline)
                 guard !Task.isCancelled, let self, self.activeID == id else { return }
                 self.report(.failed)
             }
