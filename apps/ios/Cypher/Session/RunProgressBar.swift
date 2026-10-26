@@ -299,20 +299,33 @@ struct ProgressTween: Equatable {
 struct RunProgressBar: View {
     let progress: RunProgress
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var tween = ProgressTween()
+    @State private var tween: ProgressTween
+
+    /// The tween starts out holding the reading, so the very first frame has
+    /// a bar to paint: it doesn't wait on a change handler to hand it over.
+    init(progress: RunProgress) {
+        self.progress = progress
+        var tween = ProgressTween()
+        tween.observe(ProgressReading(progress), now: Date().timeIntervalSinceReferenceDate, animated: true)
+        _tween = State(initialValue: tween)
+    }
 
     var body: some View {
+        // Read here, not only in the Canvas closure, so a reading that lands
+        // redraws the bar.
+        let shown = tween
         TimelineView(.animation(paused: reduceMotion)) { timeline in
             let now = timeline.date.timeIntervalSinceReferenceDate
             let period = ProgressBarGeometry.flowPeriod
             let phase = reduceMotion ? 0 : now.truncatingRemainder(dividingBy: period) / period
+            // Reduce Motion paints where the glide ends (its clock is paused).
+            let frame = shown.frame(at: reduceMotion ? .infinity : now)
             Canvas { context, size in
-                guard let frame = tween.frame(at: now) ?? tweenless else { return }
-                frame.paint(in: &context, size: size, phase: phase, ink: Theme.text)
+                frame?.paint(in: &context, size: size, phase: phase, ink: Theme.text)
             }
         }
         .frame(height: ProgressBarGeometry.height)
-        .onChange(of: ProgressReading(progress), initial: true) { _, reading in
+        .onChange(of: ProgressReading(progress)) { _, reading in
             tween.observe(reading, now: Date().timeIntervalSinceReferenceDate, animated: !reduceMotion)
         }
         .accessibilityElement()
@@ -324,13 +337,6 @@ struct RunProgressBar: View {
     private var spoken: String {
         let label = progress.shownStages.last?.label ?? progress.current
         return "\(progress.shownPercent)%, \(label), \(RunProgress.leftNote(progress.stepsLeftCount))"
-    }
-
-    /// Before the first reading is noted (the first frame): the reading as is.
-    private var tweenless: ProgressBarFrame? {
-        guard reduceMotion else { return nil }
-        let reading = ProgressReading(progress)
-        return ProgressBarFrame(fill: reading.fill, stages: reading.stages, upcoming: reading.upcoming, appear: 1)
     }
 }
 
