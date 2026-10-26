@@ -16,6 +16,35 @@ final class WorkspaceDiffWebTests: XCTestCase {
 
         """
 
+    /// Every wait below outlasts a cold WebKit process launch, which has taken
+    /// 23s on a loaded CI runner. The view's own deadline must too, or it
+    /// gives up on a render the test is still waiting for.
+    private static let launchBudget: Duration = .seconds(60)
+    private var savedDeadline = WorkspaceDiffWebView.renderDeadline
+
+    override func setUp() async throws {
+        savedDeadline = WorkspaceDiffWebView.renderDeadline
+        WorkspaceDiffWebView.renderDeadline = Self.launchBudget
+    }
+
+    override func tearDown() async throws {
+        WorkspaceDiffWebView.renderDeadline = savedDeadline
+    }
+
+    /// Polls `script` until it returns true. The renderer reports `rendered`
+    /// once its rows are mounted; their highlighting, layout and scroll
+    /// position settle over the frames after that.
+    private func eventually(
+        _ web: WKWebView, _ script: String, timeout: Duration = .seconds(5)
+    ) async throws -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if (try await web.evaluateJavaScript(script)) as? Bool == true { return true }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        return false
+    }
+
     @MainActor
     private final class Fixture {
         let window: UIWindow
@@ -59,12 +88,16 @@ final class WorkspaceDiffWebTests: XCTestCase {
             return view.subviews.lazy.compactMap { self.web(in: $0) }.first
         }
         func wait() async throws -> WKWebView {
-            for _ in 0..<180 {
-                if status != .loading { break }
-                try await Task.sleep(for: .milliseconds(100))
-            }
+            try await settle()
             XCTAssertEqual(status, .rendered)
             return try XCTUnwrap(web())
+        }
+        /// Waits out `.loading` for as long as the view itself would.
+        func settle() async throws {
+            let deadline = ContinuousClock.now + WorkspaceDiffWebView.renderDeadline + .seconds(1)
+            while status == .loading, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(100))
+            }
         }
         func waitForHighlight(in web: WKWebView, file: Bool = false) async throws {
             for _ in 0..<50 {
@@ -184,10 +217,7 @@ final class WorkspaceDiffWebTests: XCTestCase {
     func testOversizedPatchFailsExplicitlyInsteadOfParsingATruncatedHunk() async throws {
         let fixture = try Fixture(patch: "diff --git a/x b/x\n+" + String(repeating: "x", count: 512 * 1024))
         defer { fixture.close() }
-        for _ in 0..<180 {
-            if fixture.status != .loading { break }
-            try await Task.sleep(for: .milliseconds(100))
-        }
+        try await fixture.settle()
         XCTAssertEqual(fixture.status, .tooLarge)
     }
 
@@ -392,16 +422,18 @@ final class WorkspaceDiffWebTests: XCTestCase {
             as! Double
         XCTAssertEqual(emptyHeight, 0, "Collapsed files must not retain blank padding")
         _ = try await web.evaluateJavaScript("document.querySelector('.file-header').click()")
-        try await Task.sleep(for: .milliseconds(200))
+        // The reopened file's rows mount over the next frames.
+        let expandable = try await eventually(
+            web, "!!document.querySelector('diffs-container')?.shadowRoot?.querySelector('[data-expand-button]')")
+        XCTAssertTrue(expandable, "The reopened file shows its folded context")
         _ = try await web.evaluateJavaScript(
             "document.querySelector('diffs-container').shadowRoot.querySelector('[data-expand-button]').click()")
-        try await Task.sleep(for: .milliseconds(200))
-        let loading = try await web.evaluateJavaScript("document.querySelector('.context-notice').dataset.state")
-        XCTAssertEqual(loading as? String, "loading")
+        let noticeState = "document.querySelector('.context-notice').dataset.state"
+        let loading = try await eventually(web, "\(noticeState) === 'loading'", timeout: .seconds(1))
+        XCTAssertTrue(loading, "The notice shows while the 1.5s load is under way")
         try await capture(web, "context-loading")
-        try await Task.sleep(for: .milliseconds(1_500))
-        let warning = try await web.evaluateJavaScript("document.querySelector('.context-notice').dataset.state")
-        XCTAssertEqual(warning as? String, "warning")
+        let warning = try await eventually(web, "\(noticeState) === 'warning'")
+        XCTAssertTrue(warning, "A stale load leaves a warning")
         try await capture(web, "context-stale")
         let centered = try await web.evaluateJavaScript(
             """
@@ -458,7 +490,12 @@ final class WorkspaceDiffWebTests: XCTestCase {
         defer { fixture.close() }
         let web = try await fixture.wait()
         try await fixture.waitForHighlight(in: web, file: true)
-        try await Task.sleep(for: .milliseconds(200))
+        // The worker caches its tokens before the rows repaint with them.
+        let painted = try await eventually(
+            web,
+            "document.querySelector('diffs-container').shadowRoot.querySelectorAll('[data-content] span[style]').length > 0"
+        )
+        XCTAssertTrue(painted, "The worker's highlighting must reach the rows")
         XCTAssertEqual(web.accessibilityIdentifier, "workspace-source-web")
         let info = try await web.evaluateJavaScript("window.cypherDiff.inspect()") as! [String: Any]
         XCTAssertEqual(info["mode"] as? String, "file")
@@ -507,17 +544,24 @@ final class WorkspaceDiffWebTests: XCTestCase {
         let fixture = try Fixture(patch: "", source: .init(text: text))
         defer { fixture.close() }
         let web = try await fixture.wait()
-        _ = try await web.evaluateJavaScript("window.scrollTo(0, 4000); true")
-        try await Task.sleep(for: .milliseconds(300))
         let visibleLine = """
             (() => { const rows = [...document.querySelector('diffs-container').shadowRoot.querySelectorAll('[data-content] [data-line]')];
-              return rows.find(r => r.getBoundingClientRect().top >= 0)?.dataset.lineIndex; })()
+              return Number(rows.find(r => r.getBoundingClientRect().top >= 0)?.dataset.lineIndex ?? -1); })()
             """
-        let before = Int(try await web.evaluateJavaScript(visibleLine) as? String ?? "0") ?? 0
+        // `rendered` can arrive before the virtualizer has sized the document,
+        // when a scroll to 4000 would clamp to the top.
+        let tall = try await eventually(web, "document.documentElement.scrollHeight > 4000 + innerHeight")
+        XCTAssertTrue(tall, "The virtualized file must take its full height")
+        _ = try await web.evaluateJavaScript("window.scrollTo(0, 4000); true")
+        let scrolled = try await eventually(web, "\(visibleLine) > 100")
+        XCTAssertTrue(scrolled, "Scrolling must mount the rows it reaches")
+        let before = try await web.evaluateJavaScript(visibleLine) as? Int ?? -1
         fixture.update(source: .init(text: text, wrap: true))
         _ = try await fixture.wait()
-        try await Task.sleep(for: .milliseconds(400))
-        let after = Int(try await web.evaluateJavaScript(visibleLine) as? String ?? "0") ?? 0
+        // Rows reflow over the frames after the wrap; the anchor holds through them.
+        let held = try await eventually(web, "Math.abs(\(visibleLine) - \(before)) <= 2")
+        let after = try await web.evaluateJavaScript(visibleLine) as? Int ?? -1
+        XCTAssertTrue(held, "Wrapping must keep line \(before) in view, not \(after)")
         XCTAssertGreaterThan(before, 100)
         XCTAssertEqual(Double(before), Double(after), accuracy: 2)
         let count =
@@ -542,7 +586,8 @@ final class WorkspaceDiffWebTests: XCTestCase {
         defer { hosted.close() }
         let host = hosted.host
         var web: WKWebView?
-        for _ in 0..<100 {
+        let deadline = ContinuousClock.now + WorkspaceDiffWebView.renderDeadline
+        while ContinuousClock.now < deadline {
             web = firstSubview(WKWebView.self, in: host.view)
             if let web, let state = try? await web.evaluateJavaScript("window.cypherDiff?.inspect().status"),
                 state as? String == "rendered"
