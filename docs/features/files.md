@@ -69,6 +69,10 @@ Narrow panes show one at a time.
   and Open.
 - **Clicking** a chip opens the file in the Files tab with the cited lines
   selected.
+- The Pi runtime asks every model for this form by default (paths relative to
+  the working directory, the whole path every time, lines as a `:42-58`
+  suffix; see [File references](../../pi-runtime/README.md#file-references)),
+  so the lookup below is the fallback for replies that don't follow it.
 - A reference is looked up at the checkout root first, then by the Go to file
   search for files whose path ends in it (agents often write paths relative to
   a package, or just the name). A bare name is first read as the one longer

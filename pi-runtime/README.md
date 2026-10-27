@@ -168,6 +168,23 @@ The package script runs `provider-service.test.mjs` against the staged Runtime
 and a local fixture endpoint, including the full credential lifecycle and
 redaction checks. No real provider credentials are needed.
 
+## File references
+
+Cypher's own `extensions/cypher-file-references.ts` gives every chat default
+instructions for naming files: a path as inline code, relative to the working
+directory, with an optional `:42` or `:42-58` line suffix and a trailing `/`
+for a folder, the whole path every time. The desktop transcript turns that
+shape into a chip that previews and opens the file (see
+[Files](../docs/features/files.md#from-the-chat)).
+
+The block is put in front of Pi's appended system prompt (the `<addendum>`
+section) before every turn, ahead of the user's `APPEND_SYSTEM.md` text, which
+it never writes. That section keeps its place when it first appears in an
+older session and survives a subagent's replacement prompt, and
+pi-claude-bridge forwards it to Claude Code; a custom prompt section could
+replay out of order, which the bridge refuses. The text is fixed, so prompt
+caching is unaffected.
+
 ## GPT Fast mode
 
 `/fast` comes from Cypher's own `extensions/cypher-fast-mode.ts`, which
