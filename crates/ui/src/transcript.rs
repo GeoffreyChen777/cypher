@@ -59,6 +59,7 @@ mod rows;
 pub use rows::*;
 mod chips;
 pub use chips::*;
+mod code_ref;
 mod highlight;
 use highlight::*;
 mod attachments;
@@ -309,6 +310,9 @@ pub struct Transcript {
     synced_revision: Option<(u64, Option<String>, Vec<String>, u32)>,
     /// Hovered rail tick (grows + shows the preview card).
     rail_hover: Option<usize>,
+    /// The replies' file-reference chips: the hovered one's preview card
+    /// and the resolved files behind it.
+    code_refs: code_ref::CodeRefPreview,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
     /// strip (zeron chat-view.tsx `group-hover`; the rows report hover
     /// themselves). Keyed by ROW so a row→row move within one entry can't
@@ -553,6 +557,7 @@ impl Transcript {
             viewport_size: None,
             synced_revision: None,
             rail_hover: None,
+            code_refs: Default::default(),
             hovered_entry: None,
             copied_code: None,
             copied_clear: None,

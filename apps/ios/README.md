@@ -238,6 +238,13 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   keep their dollars, and TeX that does not typeset shows as inline code.
   Formulas take the text color (appearance, thinking's muted tone, the
   streaming fade) and copy or quote as their TeX source.
+- **Diagrams:** a ```` ```mermaid ```` fence draws as a diagram once its
+  closing fence arrives (a fence still streaming shows as code), themed for
+  the appearance, fit to the column down to 60% of its size and scrolling
+  sideways past that. Its header switches between the diagram and its
+  source; source Mermaid cannot draw stays code, with the reason in the
+  header. Mermaid runs offline in one hidden WKWebView that hands back a
+  PNG (see [`MermaidRenderer/`](MermaidRenderer/README.md)).
 - **Comment / quote for the next input:** select text **directly in the chat**
   using native long-press/drag handles, then choose **Comment** from the system
   selection menu (Copy remains available). User bubbles, assistant paragraphs,
@@ -305,7 +312,10 @@ automatically): [loro-swift 1.13.x](https://github.com/loro-dev/loro-swift)
 (matches the engine's loro 1.13), [swift-markdown](https://github.com/swiftlang/swift-markdown)
 (cmark-gfm: tables/strikethrough/tasklists — the same feature set as the
 desktop's pulldown-cmark config) and [SwiftMath 1.7.x](https://github.com/mgriebling/SwiftMath)
-(typesets LaTeX in replies; its math fonts add about 7 MB).
+(typesets LaTeX in replies; its math fonts add about 7 MB). Two offline web
+renderers ship as checked-in resource bundles built from pinned npm
+packages: [`DiffRenderer/`](DiffRenderer/README.md) and
+[`MermaidRenderer/`](MermaidRenderer/README.md) (about 3.6 MB).
 
 Simulator tests that exercise the real Keychain require local ad-hoc signing:
 use `CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=-` with `xcodebuild ... test`.
@@ -367,6 +377,7 @@ Run these commands from the repository root.
   Child fixture: `-demo -route chat:demo-child-planner`.
   Script fixture: `-demo -route chat:chat-deploy`.
   Math fixture (LaTeX in a reply): `-demo -route chat:chat-math`.
+  Diagram fixture (Mermaid in a reply): `-demo -route chat:chat-mermaid`.
   Artifacts fixture (an HTML and an SVG artifact, a plain HTML fence):
   `-demo -route chat:chat-artifacts`.
   Context recovery fixtures: `-demo -route space:space-recovery`; the live
@@ -399,7 +410,8 @@ Cypher/
                   and @ menus, model picker, question panel, attachments
   Transcript/     rows_for_entry port, transcript view, scroll state, veil,
                   turn scrubber, tool chips
-  Markdown/       incremental parser, highlighter, block views
+  Markdown/       incremental parser, highlighter, block views, math,
+                  Mermaid diagrams
   Theme/          theme.rs port: palette, fonts, motion, icons, appearance
   Shared/         sheet chrome, loaders, boot splash
   Models/         wire and registry entity types

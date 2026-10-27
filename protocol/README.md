@@ -42,7 +42,7 @@ the tests on every side by hand.
 | Translation language aliases | `crates/engine/src/pi/translation.rs` | `pi-runtime/extensions/cypher-translation.ts` (`LANGUAGE_ALIASES`) | — |
 | Notifications model (badge payload, preferences) | — | `apps/edge/src/notifications/notifications-model.ts`; `notifications-model.test.ts` | `Notifications/NotificationModels.swift`; `NotificationTests.swift` |
 | Subagent aggregation | `crates/ui/src/subagents.rs` | — | `Models/Subagents.swift`; `SubagentsTests.swift` |
-| Artifact fences (a bare `artifact` info word, kind, `title=`, whether the fence closed) | `crates/ui/src/markdown/parser.rs` (`artifact_info`, `fence_closed`); `markdown/parser/tests.rs` | `pi-runtime/extensions/cypher-artifacts.ts` (the guide that names the fence); `cypher-artifacts.test.mjs` | `Markdown/ArtifactFence.swift`; `ArtifactTests.swift` |
+| Artifact fences (a bare `artifact` info word, kind, `title=`) | `crates/ui/src/markdown/parser.rs` (`artifact_info`); `markdown/parser/tests.rs` | `crates/harness/src/pi/chat-rendering.ts` (the guide that names the fence) | `Markdown/ArtifactFence.swift`; `ArtifactTests.swift` |
 
 The iPhone app also ports desktop UI logic (markdown parser, theme, transcript
 rows, slash menu, context ring, loaders); those files cite their desktop source

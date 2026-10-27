@@ -276,7 +276,7 @@ pub struct FilesPanel {
     /// Focus the shown file's editor once it has loaded.
     focus_editor_pending: bool,
     /// Go to this line of this file once it has loaded (a chat link).
-    line_pending: Option<(String, usize)>,
+    line_pending: Option<(String, (usize, usize))>,
     filter: Filter,
     /// Decoded images, oldest first (bounded by [`MAX_IMAGES`]).
     image_order: Vec<String>,
@@ -655,12 +655,12 @@ impl FilesPanel {
     }
 
     /// A chat link: reveal `path` (relative to the checkout, `""` the root)
-    /// in the tree and open it — a folder expands, a file shows at `line`
-    /// when given (in its source, not a preview).
+    /// in the tree and open it — a folder expands, a file shows `lines`
+    /// (first and last, selected) when given (in its source, not a preview).
     pub fn open_link(
         &mut self,
         path: String,
-        line: Option<usize>,
+        lines: Option<(usize, usize)>,
         dir: bool,
         cx: &mut Context<Self>,
     ) {
@@ -675,7 +675,7 @@ impl FilesPanel {
             return;
         }
         self.open_file(path.clone(), false, None, cx);
-        let Some(line) = line else {
+        let Some((first, last)) = lines else {
             return;
         };
         let Some(file) = self.open_files.get_mut(&path) else {
@@ -684,9 +684,9 @@ impl FilesPanel {
         file.preview = false;
         if file.clean.is_some() && !file.loading {
             file.editor
-                .update(cx, |editor, cx| editor.go_to_line(line, cx));
+                .update(cx, |editor, cx| editor.go_to_lines(first, last, cx));
         } else {
-            self.line_pending = Some((path, line));
+            self.line_pending = Some((path, (first, last)));
         }
     }
 
@@ -864,12 +864,13 @@ impl FilesPanel {
                     }
                 }
                 // A chat link's line lands once the text is in.
-                if let Some((_, line)) = this.line_pending.take_if(|(path, _)| *path == task_path)
+                if let Some((_, (first, last))) =
+                    this.line_pending.take_if(|(path, _)| *path == task_path)
                     && let Some(file) = this.open_files.get(&task_path)
                     && file.clean.is_some()
                 {
                     file.editor
-                        .update(cx, |editor, cx| editor.go_to_line(line, cx));
+                        .update(cx, |editor, cx| editor.go_to_lines(first, last, cx));
                 }
                 cx.notify();
             })
@@ -1203,7 +1204,7 @@ impl FilesPanel {
             .iter()
             .enumerate()
             .filter_map(|(ix, top)| match &top.block {
-                Block::CodeBlock { language, code } => {
+                Block::CodeBlock { language, code, .. } => {
                     crate::markdown::diff_fence::highlight_input(language.as_deref(), code)
                         .filter(|(lang, _)| cypher_syntax::supports_language(*lang))
                         .map(|(lang, source)| (ix, lang, source.into_owned()))
@@ -2445,7 +2446,20 @@ impl FilesPanel {
             (true, FileKind::Markdown, Some(tree), _) => {
                 let mut options = render::RenderOptions::settled(format!("files-md:{path}").into());
                 options.scope = self.selection_scope;
+                let entity = cx.weak_entity();
+                options.diagram_toggled = Some(Rc::new(move |_, cx| {
+                    entity.update(cx, |_, cx| cx.notify()).ok();
+                }));
                 let highlights = file.preview_highlights.clone();
+                for top in &tree.blocks {
+                    crate::markdown::mermaid::request_block(
+                        &top.block,
+                        &theme,
+                        window.scale_factor(),
+                        cx,
+                        |_, cx| cx.notify(),
+                    );
+                }
                 let rendered = render::render_tree(tree, &options, &theme, window, &|ix| {
                     highlights.get(&ix).cloned()
                 });
@@ -2721,7 +2735,7 @@ fn human_bytes(bytes: u64) -> String {
 }
 
 /// User-facing text for a failed workspace RPC.
-fn rpc_message(err: &RpcError) -> SharedString {
+pub(crate) fn rpc_message(err: &RpcError) -> SharedString {
     match err {
         RpcError::Transport(_) | RpcError::Closed => "Could not reach the session's device.".into(),
         // Old engines lack the newer workspace RPCs.
@@ -2733,7 +2747,7 @@ fn rpc_message(err: &RpcError) -> SharedString {
 /// One retry over a cold relay dial to the host device (the file mention
 /// picker's exact courtesy), and a short wait when the host's file workers
 /// are all busy.
-async fn call_with_retry(
+pub(crate) async fn call_with_retry(
     engine: &EngineHandle,
     method: &str,
     params: serde_json::Value,

@@ -203,7 +203,7 @@ pub struct CodeEditor {
     /// pauses it until the next caret move.
     follow_cursor: bool,
     /// The next prepaint scrolls the caret's line to the upper third
-    /// ([`Self::go_to_line`]) rather than just into view.
+    /// ([`Self::go_to_lines`]) rather than just into view.
     center_caret: bool,
     // -- measured (written during prepaint) --
     text_bounds: Option<Bounds<Pixels>>,
@@ -307,14 +307,16 @@ impl CodeEditor {
         self.read_only
     }
 
-    /// Select 1-based `line` (clamped to the text) and scroll it to the
-    /// upper third of the view — a link to `file:line` landing.
-    pub fn go_to_line(&mut self, line: usize, cx: &mut Context<Self>) {
-        let ix = line.saturating_sub(1).min(self.line_count() - 1);
+    /// Select 1-based lines `first..=last` (clamped to the text) and scroll
+    /// the first to the upper third of the view — a link to `file:12-20`
+    /// landing.
+    pub fn go_to_lines(&mut self, first: usize, last: usize, cx: &mut Context<Self>) {
+        let ix = first.saturating_sub(1).min(self.line_count() - 1);
+        let last_ix = last.saturating_sub(1).clamp(ix, self.line_count() - 1);
         let start = self.line_starts[ix];
         let end = self
             .line_starts
-            .get(ix + 1)
+            .get(last_ix + 1)
             .map_or(self.content.len(), |next| next - 1);
         self.selected_range = start..end;
         // The caret at the line's start, so a long line doesn't scroll the

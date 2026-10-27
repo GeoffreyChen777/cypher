@@ -51,8 +51,12 @@ struct MarkdownBlockView: View {
             )
             .frame(maxWidth: .infinity, alignment: .leading)
 
-        case .codeBlock(let language, let code):
-            CodeBlockView(language: language, code: code, cacheKey: cacheKey)
+        case .codeBlock(let language, let code, let closed):
+            if closed, isMermaidFence(language) {
+                MermaidBlockView(code: code)
+            } else {
+                CodeBlockView(language: language, code: code, cacheKey: cacheKey)
+            }
 
         case .artifact(let kind, let title, let code, let closed):
             ArtifactCard(kind: kind, title: title, code: code, closed: closed, streaming: streaming)
@@ -85,37 +89,64 @@ struct CodeBlockView: View {
     @State private var page: ArtifactPage?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        Group {
             if let language, !language.isEmpty {
-                HStack(spacing: 8) {
-                    Text(language)
-                        .font(Theme.sans(11))
-                        .foregroundStyle(Theme.textMuted)
-                    Spacer(minLength: 0)
-                    if let kind = ArtifactKind(language: language) {
-                        Button {
-                            page = ArtifactPage(
-                                kind: kind,
-                                title: ArtifactFence.displayTitle(kind: kind, title: nil, code: code),
-                                code: code)
-                        } label: {
-                            Text("Preview")
-                                .font(Theme.sans(11, weight: .medium))
-                                .foregroundStyle(Theme.textMuted)
+                FencePanel {
+                    HStack(spacing: 8) {
+                        Text(language)
+                        Spacer(minLength: 0)
+                        if let kind = ArtifactKind(language: language) {
+                            Button {
+                                page = ArtifactPage(
+                                    kind: kind,
+                                    title: ArtifactFence.displayTitle(kind: kind, title: nil, code: code),
+                                    code: code)
+                            } label: {
+                                Text("Preview").font(Theme.sans(11, weight: .medium))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("code-block-preview")
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("code-block-preview")
                     }
+                } content: {
+                    HighlightedCodeView(language: language, code: code)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 5)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(whiteAlpha(0.02))
-                .overlay(alignment: .bottom) {
-                    Rectangle().fill(Theme.border).frame(height: 1)
+            } else {
+                FencePanel(header: nil) {
+                    HighlightedCodeView(language: language, code: code)
                 }
             }
-            HighlightedCodeView(language: language, code: code)
+        }
+        .fullScreenCover(item: $page) { ArtifactViewer(page: $0) }
+    }
+}
+
+/// A fence's chrome: the rounded panel and, when given, the label strip above
+/// its body (desktop `fence_frame`).
+struct FencePanel<Header: View, Content: View>: View {
+    let header: Header?
+    @ViewBuilder let content: Content
+
+    init(@ViewBuilder header: () -> Header, @ViewBuilder content: () -> Content) {
+        self.header = header()
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let header {
+                header
+                    .font(Theme.sans(11))
+                    .foregroundStyle(Theme.textMuted)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(whiteAlpha(0.02))
+                    .overlay(alignment: .bottom) {
+                        Rectangle().fill(Theme.border).frame(height: 1)
+                    }
+            }
+            content
         }
         .background(whiteAlpha(0.035))
         .clipShape(RoundedRectangle(cornerRadius: Theme.panelRadius))
@@ -123,7 +154,13 @@ struct CodeBlockView: View {
             RoundedRectangle(cornerRadius: Theme.panelRadius)
                 .strokeBorder(whiteAlpha(0.06), lineWidth: 1)
         )
-        .fullScreenCover(item: $page) { ArtifactViewer(page: $0) }
+    }
+}
+
+extension FencePanel where Header == EmptyView {
+    init(header: Header?, @ViewBuilder content: () -> Content) {
+        self.header = header
+        self.content = content()
     }
 }
 

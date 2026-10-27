@@ -124,6 +124,13 @@ final class DemoDataset {
                 config: claude, lastMessagePreview: "Here is the quadratic formula.",
                 lastMessageAt: now - 2_000_000, createdAt: now - 2_100_000,
                 spaceId: cypher.id, lastSeenAt: now - 2_000_000),
+            // Mermaid diagrams in a reply (the mock harness's [mock:mermaid] showcase).
+            Chat(
+                id: "chat-mermaid", deviceId: "dev-mac", title: "How a prompt travels",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "Here is how a prompt travels through the app.",
+                lastMessageAt: now - 2_200_000, createdAt: now - 2_300_000,
+                spaceId: cypher.id, lastSeenAt: now - 2_200_000),
             // Artifacts in a reply (the mock harness's [mock:artifacts] showcase).
             Chat(
                 id: "chat-artifacts", deviceId: "dev-mac", title: "Explain binary search",
@@ -713,6 +720,16 @@ final class DemoDataset {
                     id: "m2", role: .assistant, parts: [.text(id: "t0", text: mathShowcase)],
                     createdAt: now - 2_000_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
             ]
+        case "chat-mermaid":
+            return [
+                MessageEntry(
+                    id: "m1", role: .user,
+                    parts: [.text(id: "t0", text: "Draw me how a prompt travels through the app.")],
+                    createdAt: now - 2_300_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                MessageEntry(
+                    id: "m2", role: .assistant, parts: [.text(id: "t0", text: mermaidShowcase)],
+                    createdAt: now - 2_200_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+            ]
         case "chat-artifacts":
             return [
                 MessageEntry(
@@ -881,6 +898,105 @@ final class DemoDataset {
         - Prices stay prose: it costs $5 today and $10 tomorrow.
         - Code keeps its dollars: `echo $HOME` and `\(not math\)`.
         - TeX that does not typeset shows as code: $\undefinedmacro{x}$.
+        """#
+
+    /// The reply of the mock harness's [mock:mermaid] showcase
+    /// (crates/harness/src/mock/mermaid.rs): the common diagram families, a
+    /// CJK one, one wider than the column, one in a list and one that does
+    /// not parse.
+    private static let mermaidShowcase = #"""
+        Here is how a prompt travels through the app:
+
+        ```mermaid
+        flowchart TD
+            A[User sends a prompt] --> B{Needs tools?}
+            B -->|yes| C[Run tool calls]
+            B -->|no| D[Stream the reply]
+            C --> E[(Session store)]
+            C --> D
+            D --> F([Done])
+        ```
+
+        The same exchange as a sequence:
+
+        ```mermaid
+        sequenceDiagram
+            participant UI
+            participant Engine
+            participant Model
+            UI->>Engine: send(prompt)
+            Engine->>Model: complete
+            Model-->>Engine: stream deltas
+            Note over Engine,Model: tool loop
+            Engine-->>UI: transcript update
+        ```
+
+        A session's lifecycle:
+
+        ```mermaid
+        stateDiagram-v2
+            [*] --> Idle
+            Idle --> Streaming: send
+            Streaming --> Tools: tool call
+            Tools --> Streaming: result
+            Streaming --> Idle: done
+            Streaming --> Error: failure
+            Error --> [*]
+        ```
+
+        Where the tokens went, and the pieces of the app:
+
+        ```mermaid
+        pie title Tokens per turn
+            "Prompt" : 42
+            "Tool output" : 30
+            "Reply" : 28
+        ```
+
+        ```mermaid
+        mindmap
+          root((Cypher))
+            UI
+              Transcript
+              Composer
+            Engine
+              Sessions
+              Tools
+        ```
+
+        ```mermaid
+        flowchart LR
+            用户[用户] --> 引擎[引擎处理请求] --> 模型[模型生成回复]
+        ```
+
+        A pipeline wider than the column scrolls sideways:
+
+        ```mermaid
+        flowchart LR
+            Fetch[Fetch sources] --> Parse[Parse markdown] --> Layout[Lay out blocks] --> Highlight[Highlight code] --> Typeset[Typeset math] --> Diagram[Draw diagrams] --> Paint[Paint the frame] --> Present[Present to screen]
+        ```
+
+        1. Diagrams work inside lists too:
+
+           ```mermaid
+           classDiagram
+               class Transcript {
+                   +rows: Vec~Row~
+                   +sync()
+               }
+               class Row {
+                   +id: String
+                   +version: u64
+               }
+               Transcript "1" --> "*" Row
+           ```
+
+        2. A diagram that does not parse stays code, with the reason:
+
+        ```mermaid
+        flowchart TD
+            A --> 
+        ```
         """#
 
     // MARK: Permission control (the mock harness's [mock:permissions] story)

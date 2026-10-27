@@ -18,6 +18,18 @@ shows the path). Editing the file by hand works too.
   Claude Code's own system prompt, which it cannot replace.
 - A subagent whose profile has a prompt of its own launches with that prompt
   appended instead, so it does not get this text. One without gets it.
+- Cypher's runtime puts its own instructions in the same appended part,
+  ahead of this text: how to name files (as inline code, relative to the
+  working directory, with an optional `:42-58` line suffix), the form the
+  transcript turns into file chips. They are not part of the file and are
+  added whether or not it exists; see
+  [File references](../../pi-runtime/README.md#file-references).
+- The app adds one more block there, from an extension it loads into every
+  Pi (`crates/harness/src/pi/chat-rendering.ts`): the chat renders Markdown,
+  math and Mermaid, so draw a ```` ```mermaid ```` diagram where one explains
+  better than prose, and it renders [artifacts](artifacts.md), pages written
+  in an ```` ```html artifact ```` fence. It ships with the app, not the
+  Runtime.
 - A project's `.pi/APPEND_SYSTEM.md` is normally not used: Pi loads project
   resources only for trusted projects, and under Cypher it has no way to ask,
   so a project it has no stored trust decision for stays untrusted.

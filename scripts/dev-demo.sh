@@ -23,6 +23,15 @@
 #   scripts/dev-demo.sh --diffs   # "Diff fences" under "Diff fence demo": an
 #                                 # answer with chat-style and git-patch
 #                                 # ```diff blocks
+#   scripts/dev-demo.sh --mermaid # "How a prompt travels" under "Mermaid
+#                                 # demo": an answer with ```mermaid diagrams
+#                                 # (flowchart, sequence, state, pie, mindmap,
+#                                 # class, a wide one, a broken one) that draw
+#                                 # as their fences close; each header switches
+#                                 # between the diagram and its source; and
+#                                 # "Diagram themes", the same two diagrams
+#                                 # under every Mermaid theme and a few editor
+#                                 # palettes
 #   scripts/dev-demo.sh --artifacts
 #                                 # chat artifacts: "Explain binary search"
 #                                 # under "Artifacts demo" answers with an
@@ -59,11 +68,12 @@
 #                                 # steps refresh. Every message typed into the
 #                                 # demo plays the same run (CYPHER_MOCK_PROGRESS)
 #
-# The flags combine (--permissions, --diffs, --artifacts, --changes,
+# The flags combine (--permissions, --diffs, --mermaid, --artifacts, --changes,
 # --translation or --progress takes the place of the default seed).
 # Everything lives under /tmp/cypher-demo-* (--work: /tmp/cypher-demo-work-*,
 # --permissions: /tmp/cypher-demo-permissions-*, --diffs:
-# /tmp/cypher-demo-diffs-*, --artifacts: /tmp/cypher-demo-artifacts-*, --changes: /tmp/cypher-demo-changes-*,
+# /tmp/cypher-demo-diffs-*, --mermaid: /tmp/cypher-demo-mermaid-*, --artifacts:
+# /tmp/cypher-demo-artifacts-*, --changes: /tmp/cypher-demo-changes-*,
 # --translation: /tmp/cypher-demo-translation-*, --progress:
 # /tmp/cypher-demo-progress-*); re-runs
 # reuse it (delete
@@ -75,6 +85,7 @@ WORK=""
 DELAY=""
 PERMS=""
 DIFFS=""
+MERMAID=""
 ARTIFACTS=""
 CHANGES=""
 TRANSLATION=""
@@ -85,16 +96,19 @@ for arg in "$@"; do
     --slow) DELAY=350 ;;
     --permissions) PERMS=1 ;;
     --diffs) DIFFS=1 ;;
+    --mermaid) MERMAID=1 ;;
     --artifacts) ARTIFACTS=1 ;;
     --changes) CHANGES=1 ;;
     --translation) TRANSLATION=1 ;;
     --progress) PROGRESS=1 ;;
-    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs] [--artifacts] [--changes] [--translation] [--progress]' >&2; exit 2 ;;
+    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs] [--mermaid] [--artifacts] [--changes] [--translation] [--progress]' >&2; exit 2 ;;
   esac
 done
 # Translation is about what happens while the agent works, so it is paced.
 [[ -n "$TRANSLATION" ]] && DELAY="${DELAY:-250}"
-DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}${ARTIFACTS:+-artifacts}${CHANGES:+-changes}${TRANSLATION:+-translation}${PROGRESS:+-progress}
+# About 12s for the Mermaid reply, so each fence streams as code and then draws.
+[[ -n "$MERMAID" ]] && DELAY="${DELAY:-120}"
+DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}${MERMAID:+-mermaid}${ARTIFACTS:+-artifacts}${CHANGES:+-changes}${TRANSLATION:+-translation}${PROGRESS:+-progress}
 DAEMON_DIR=$DEMO_DIR-daemon
 UI_DIR=$DEMO_DIR-ui
 
@@ -268,6 +282,16 @@ JSON
     create_chat "$chat" "$space" "Diff fences"
     run_prompt "$chat" "$PWD" "Show me the fingerprint changes as diffs." \
       "Show me the fingerprint changes as diffs. [mock:diffs]"
+  elif [[ -n "$MERMAID" ]]; then
+    space=$(new_id) chat=$(new_id) themes=$(new_id)
+    create_space "$space" "$PWD" '"name":"Mermaid demo","gitDetected":true'
+    create_chat "$themes" "$space" "Diagram themes"
+    run_prompt "$themes" "$PWD" "Show me the same diagrams in every theme." \
+      "Show me the same diagrams in every theme. [mock:mermaid-themes]"
+    sleep 1
+    create_chat "$chat" "$space" "How a prompt travels"
+    run_prompt "$chat" "$PWD" "Draw me how a prompt travels through the app." \
+      "Draw me how a prompt travels through the app. [mock:mermaid]"
   elif [[ -n "$ARTIFACTS" ]]; then
     project="$DEMO_DIR-projects/algorithms"
     mkdir -p "$project"

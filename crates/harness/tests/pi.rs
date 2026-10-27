@@ -298,6 +298,42 @@ fn subagents_with_file_tools_can_request_permission() {
     );
 }
 
+/// Every Pi, chat or discovery, loads the extension that tells the model
+/// what the chat renders.
+#[test]
+fn every_pi_loads_the_chat_rendering_extension() {
+    let harness = harness();
+    let request = request("scenario:happy");
+    for cmd in [
+        harness
+            .spawn_run_command(
+                Some(&request.cwd),
+                &RunHostContext::default(),
+                None,
+                &request,
+            )
+            .expect("run command builds"),
+        harness
+            .spawn_command(None, &RunHostContext::default(), None)
+            .expect("command builds"),
+    ] {
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let at = args
+            .iter()
+            .position(|arg| arg == "--extension")
+            .expect("--extension");
+        let path = std::path::Path::new(&args[at + 1]);
+        assert!(path.ends_with("cypher-chat-rendering.ts"), "{args:?}");
+        let source = std::fs::read_to_string(path).expect("extension written");
+        assert!(source.contains("before_agent_start"));
+        assert!(source.contains("mermaid fenced block"));
+    }
+}
+
 #[test]
 fn empty_catalog_placeholder_is_not_passed_to_pi() {
     let harness = harness();

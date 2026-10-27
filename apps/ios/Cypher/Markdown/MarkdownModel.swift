@@ -39,7 +39,10 @@ struct MDListItem: Hashable {
 indirect enum MDBlock: Hashable {
     case paragraph([InlineRun])
     case heading(level: Int, [InlineRun])
-    case codeBlock(language: String?, code: String)
+    /// `closed`: the fence has its closing line (indented blocks always do).
+    /// A fence still streaming has none yet, so renderers that turn the code
+    /// into something else (diagrams) wait for it.
+    case codeBlock(language: String?, code: String, closed: Bool = true)
     /// A fence tagged `artifact` (```html artifact title="…"```): a page the
     /// model wrote to be viewed. `closed` is false while its fence streams.
     case artifact(kind: ArtifactKind, title: String?, code: String, closed: Bool)
@@ -83,19 +86,11 @@ enum MarkdownParser {
         }
     }
 
-    /// What the walk needs besides the node: the formulas behind the math
-    /// placeholders and the parsed source's lines (an artifact's fences).
+    /// What every block conversion reads: the formulas the math rewrite took
+    /// out, and the parsed source's lines (block ranges index them).
     private struct Context {
-        let formulas: [String]
-        let lines: [Substring]
-
-        /// The source lines `range` spans (1-based, inclusive).
-        func lines(of range: SourceRange?) -> ArraySlice<Substring> {
-            guard let range else { return [] }
-            let from = max(range.lowerBound.line - 1, 0)
-            let to = min(range.upperBound.line, lines.count)
-            return from < to ? lines[from..<to] : []
-        }
+        var formulas: [String]
+        var lines: [Substring]
     }
 
     private static func convertBlock(_ markup: Markup, _ context: Context) -> MDBlock? {
@@ -111,12 +106,12 @@ enum MarkdownParser {
             // cmark hands over the whole info string; its first word is the
             // language, as on the desktop.
             let info = code.language ?? ""
+            let closed = code.range.map { fenceClosed($0, lines: context.lines) } ?? true
             if let (kind, title) = ArtifactFence.info(info) {
-                let closed = ArtifactFence.closed(context.lines(of: code.range))
                 return .artifact(kind: kind, title: title, code: body, closed: closed)
             }
             let lang = info.split(whereSeparator: \.isWhitespace).first.map(String.init)
-            return .codeBlock(language: lang, code: body)
+            return .codeBlock(language: lang, code: body, closed: closed)
         case let quote as BlockQuote:
             return .blockquote(quote.children.compactMap { convertBlock($0, context) })
         case let list as UnorderedList:
@@ -159,6 +154,33 @@ enum MarkdownParser {
             return MDListItem(
                 checked: checked, children: item.children.compactMap { convertBlock($0, context) })
         }
+    }
+
+    /// Whether a code block's source ends in a closing fence: a line of at
+    /// least the opener's run of the opener's character (desktop parser.rs
+    /// `fence_closed`). Indented blocks have no fence and count as closed.
+    /// Columns are 1-based UTF-8 offsets; container markers (`>`, the
+    /// indentation under a list item) are trimmed off the closing line.
+    static func fenceClosed(_ range: SourceRange, lines: [Substring]) -> Bool {
+        let first = range.lowerBound.line - 1
+        let last = range.upperBound.line - 1
+        guard first >= 0, first < lines.count else { return true }
+        let openerLine = lines[first].utf8.dropFirst(max(0, range.lowerBound.column - 1))
+        let opener = (String(openerLine) ?? "").drop(while: { $0 == " " || $0 == "\t" || $0 == ">" })
+        guard let fence = opener.first, fence == "`" || fence == "~" else { return true }
+        let run = opener.prefix(while: { $0 == fence }).count
+        // The block's last non-blank line after the opener.
+        var ix = min(last, lines.count - 1)
+        while ix > first,
+            lines[ix].allSatisfy({ $0 == " " || $0 == "\t" || $0 == ">" || $0 == "\r" })
+        {
+            ix -= 1
+        }
+        guard ix > first else { return false }
+        let closer = lines[ix]
+            .drop(while: { $0 == " " || $0 == "\t" || $0 == ">" })
+            .trimmingCharacters(in: .whitespaces)
+        return closer.count >= run && closer.allSatisfy { $0 == fence }
     }
 
     private static func inlines(of container: Markup, _ formulas: [String]) -> [InlineRun] {

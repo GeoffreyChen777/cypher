@@ -1,5 +1,5 @@
 // Artifact fences — a port of the fence rules in crates/ui/src/markdown/parser.rs
-// (`artifact_info`, `info_words`, `fence_closed`); a mirror listed in
+// (`artifact_info`, `info_words`); a mirror listed in
 // protocol/README.md.
 //
 // A fence whose info string carries a bare `artifact` word is a page the model
@@ -74,23 +74,6 @@ enum ArtifactFence {
                 words.append((String(key), String(value)))
             }
         }
-    }
-
-    /// Whether a fenced block's source lines (opening fence through the
-    /// block's end) end with its closing fence. Container markers (`>`,
-    /// indentation) before either fence are skipped.
-    static func closed(_ lines: ArraySlice<Substring>) -> Bool {
-        func strip(_ line: Substring) -> Substring {
-            let start = line.drop { $0 == " " || $0 == "\t" || $0 == ">" }
-            return start.prefix(start.count - start.reversed().prefix(while: \.isWhitespace).count)
-        }
-        guard lines.count >= 2, let open = lines.first.map(strip),
-            let fence = open.first, fence == "`" || fence == "~"
-        else { return false }
-        let length = open.prefix { $0 == fence }.count
-        // `count >= 2`: the last line is never the opening one.
-        guard let close = lines.last.map(strip) else { return false }
-        return close.count >= length && close.allSatisfy { $0 == fence }
     }
 
     /// The text of a page's `<title>` element, entities decoded.

@@ -65,6 +65,10 @@ pub enum Block {
     CodeBlock {
         language: Option<String>,
         code: String,
+        /// The fence has its closing line (indented blocks always do). A
+        /// fence still streaming has none yet, so renderers that turn the
+        /// code into something else (diagrams) wait for this.
+        closed: bool,
     },
     /// A fence tagged `artifact` (```` ```html artifact title="…" ````): a
     /// page the model wrote to be viewed, not read. The chat shows a card
@@ -182,27 +186,6 @@ fn info_words(info: &str) -> Vec<(String, Option<String>)> {
         }
         words.push((key, Some(value)));
     }
-}
-
-/// Whether a fenced block's source (opening fence through the block's end)
-/// ends with its closing fence. Container markers (`>`, indentation) before
-/// either fence are skipped.
-fn fence_closed(block: &str) -> bool {
-    fn strip(line: &str) -> &str {
-        line.trim_start_matches([' ', '\t', '>']).trim_end()
-    }
-    let mut lines = block.lines();
-    let Some(open) = lines.next().map(strip) else {
-        return false;
-    };
-    let Some(fence) = open.chars().next().filter(|c| matches!(c, '`' | '~')) else {
-        return false;
-    };
-    let len = open.chars().take_while(|c| *c == fence).count();
-    lines
-        .last()
-        .map(strip)
-        .is_some_and(|close| close.chars().count() >= len && close.chars().all(|c| c == fence))
 }
 
 /// GFM column alignment for a table (mdast `align`; `None` renders as Left).
@@ -375,7 +358,7 @@ fn rewrite_tex_delimiters(source: &str) -> Option<(String, Vec<usize>)> {
 }
 
 struct Cursor<'a, 'e> {
-    /// The parsed text: block ranges index it.
+    /// The parsed text, which event ranges index.
     source: &'a str,
     events: &'a [(Event<'e>, Range<usize>)],
     ix: usize,
@@ -403,6 +386,27 @@ impl<'a, 'e> Cursor<'a, 'e> {
         }
         event
     }
+}
+
+/// Whether a fenced block's source — its event range, opening fence through
+/// closing fence, with any container markers — ends in a closing fence: a
+/// line of at least the opener's run of the opener's character.
+fn fence_closed(block: &str) -> bool {
+    fn strip(line: &str) -> &str {
+        line.trim_start_matches([' ', '\t', '>']).trim_end()
+    }
+    let mut lines = block.trim_end_matches(['\n', '\r']).lines();
+    let Some(opener) = lines.next().map(strip) else {
+        return false;
+    };
+    let Some(fence) = opener.chars().next().filter(|c| matches!(c, '`' | '~')) else {
+        return false;
+    };
+    let run = opener.chars().take_while(|&c| c == fence).count();
+    lines
+        .last()
+        .map(strip)
+        .is_some_and(|closer| closer.chars().count() >= run && closer.chars().all(|c| c == fence))
 }
 
 fn is_block_tag(tag: &Tag) -> bool {
@@ -441,6 +445,10 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
             runs: parse_inline_container(cur, &InlineStyle::default()),
         }],
         Tag::CodeBlock(kind) => {
+            let closed = match &kind {
+                CodeBlockKind::Fenced(_) => cur.source.get(range).is_some_and(fence_closed),
+                CodeBlockKind::Indented => true,
+            };
             let artifact = match &kind {
                 CodeBlockKind::Fenced(info) => artifact_info(info),
                 CodeBlockKind::Indented => None,
@@ -469,7 +477,6 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
                 code.pop();
             }
             if let Some((kind, title)) = artifact {
-                let closed = cur.source.get(range).is_some_and(fence_closed);
                 return vec![Block::Artifact {
                     kind,
                     title,
@@ -477,7 +484,11 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
                     closed,
                 }];
             }
-            vec![Block::CodeBlock { language, code }]
+            vec![Block::CodeBlock {
+                language,
+                code,
+                closed,
+            }]
         }
         Tag::BlockQuote(_) => vec![Block::BlockQuote {
             children: parse_block_sequence(cur),

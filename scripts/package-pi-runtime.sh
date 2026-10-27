@@ -56,7 +56,7 @@ cp "$SPEC/extensions/cypher-translation.ts" "$STAGE/extensions/"
 cp "$SPEC/extensions/cypher-fast-mode.ts" "$STAGE/extensions/"
 cp "$SPEC/extensions/cypher-codemode.ts" "$STAGE/extensions/"
 cp "$SPEC/extensions/cypher-permissions.ts" "$STAGE/extensions/"
-cp "$SPEC/extensions/cypher-artifacts.ts" "$STAGE/extensions/"
+cp "$SPEC/extensions/cypher-file-references.ts" "$STAGE/extensions/"
 mkdir -p "$STAGE/extensions/cypher-permissions"
 cp "$SPEC"/extensions/cypher-permissions/*.ts "$STAGE/extensions/cypher-permissions/"
 cp "$SPEC/provider-service.mjs" "$STAGE/"
@@ -271,7 +271,10 @@ CYPHER_PI_RUNTIME_STAGE="$STAGE" \
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-fast-mode.test.mjs"
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-codemode.test.mjs"
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-permissions.test.mjs"
-"$STAGE/bin/node" --test "$SPEC/extensions/cypher-artifacts.test.mjs"
+"$STAGE/bin/node" --test "$SPEC/extensions/cypher-file-references.test.mjs"
+# The file-reference instructions in a prompt the staged Pi builds.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/extensions/cypher-file-references.staged.test.mjs"
 # A real Pi with the patched tools, a scripted model and the real Landstrip:
 # the sandbox, the grep and apply_patch hooks and the approval dialogs.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \

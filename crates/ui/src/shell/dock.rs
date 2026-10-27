@@ -783,7 +783,10 @@ impl Shell {
             });
         if let Some(panel) = panel {
             panel.update(cx, |panel, cx| {
-                panel.open_link(path, link.line, link.dir, cx)
+                let lines = link
+                    .line
+                    .map(|first| (first, link.end_line.unwrap_or(first)));
+                panel.open_link(path, lines, link.dir, cx)
             });
         }
     }

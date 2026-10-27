@@ -69,14 +69,12 @@ The demo fixture is `-demo -route chat:chat-artifacts`. Add `-sheet artifact`
 
 ## How the agent knows
 
-The Pi runtime's `extensions/cypher-artifacts.ts` adds an `<artifacts>`
-section to every turn's system prompt. It describes the fence, asks for
-self-contained pages, and says to revise a page under the same title. Pi
-renders the section after its built-in ones on every model; on Claude,
-pi-claude-bridge forwards it with Pi's other custom sections. The engine
-registers the extension once the device's runtime carries it, so a device on
-an older runtime renders artifacts but its agent isn't told about them. You
-can still ask for one ("show it as an `html artifact`").
+The app's chat-rendering block, which the engine loads into every Pi it
+starts (`crates/harness/src/pi/chat-rendering.ts`), tells the model about
+artifacts next to Mermaid diagrams: the fence, self-contained pages, and
+revising a page under the same title. It sits at the front of the appended
+system prompt, so every model gets it, and it ships with the app rather than
+the Pi runtime. See [System prompt](system-prompt.md).
 
 ## Trying it without a model
 
