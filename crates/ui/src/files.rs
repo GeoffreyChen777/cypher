@@ -1204,7 +1204,7 @@ impl FilesPanel {
             .iter()
             .enumerate()
             .filter_map(|(ix, top)| match &top.block {
-                Block::CodeBlock { language, code } => {
+                Block::CodeBlock { language, code, .. } => {
                     crate::markdown::diff_fence::highlight_input(language.as_deref(), code)
                         .filter(|(lang, _)| cypher_syntax::supports_language(*lang))
                         .map(|(lang, source)| (ix, lang, source.into_owned()))
@@ -2446,7 +2446,20 @@ impl FilesPanel {
             (true, FileKind::Markdown, Some(tree), _) => {
                 let mut options = render::RenderOptions::settled(format!("files-md:{path}").into());
                 options.scope = self.selection_scope;
+                let entity = cx.weak_entity();
+                options.diagram_toggled = Some(Rc::new(move |_, cx| {
+                    entity.update(cx, |_, cx| cx.notify()).ok();
+                }));
                 let highlights = file.preview_highlights.clone();
+                for top in &tree.blocks {
+                    crate::markdown::mermaid::request_block(
+                        &top.block,
+                        &theme,
+                        window.scale_factor(),
+                        cx,
+                        |_, cx| cx.notify(),
+                    );
+                }
                 let rendered = render::render_tree(tree, &options, &theme, window, &|ix| {
                     highlights.get(&ix).cloned()
                 });

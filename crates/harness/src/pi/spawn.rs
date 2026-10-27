@@ -67,8 +67,12 @@ pub(super) fn write_temp_prompt(agent: &str, prompt: &str) -> std::io::Result<Pa
     Ok(path)
 }
 
+/// The extension that tells the model what the chat renders
+/// (`chat-rendering.ts`), loaded into every Pi with `-e`.
+const CHAT_RENDERING_EXTENSION: &str = "cypher-chat-rendering.ts";
+
 /// Private files every Cypher-spawned Pi loads: the engine client module the
-/// bundled extensions import.
+/// bundled extensions import, and the chat-rendering extension.
 fn private_support_dir() -> std::io::Result<&'static std::path::Path> {
     static DIRECTORY: std::sync::OnceLock<Result<tempfile::TempDir, String>> =
         std::sync::OnceLock::new();
@@ -79,14 +83,19 @@ fn private_support_dir() -> std::io::Result<&'static std::path::Path> {
             .map_err(|e| e.to_string())?;
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(dir.path().join("engine-client.mjs"))
-            .map_err(|e| e.to_string())?;
-        file.write_all(include_str!("engine-client.mjs").as_bytes())
-            .map_err(|e| e.to_string())?;
+        for (name, contents) in [
+            ("engine-client.mjs", include_str!("engine-client.mjs")),
+            (CHAT_RENDERING_EXTENSION, include_str!("chat-rendering.ts")),
+        ] {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(dir.path().join(name))
+                .map_err(|e| e.to_string())?;
+            file.write_all(contents.as_bytes())
+                .map_err(|e| e.to_string())?;
+        }
         Ok(dir)
     });
     directory
@@ -198,6 +207,13 @@ impl PiHarness {
         sandbox: Option<SandboxLevel>,
     ) -> Result<Command, HarnessError> {
         let (exe, mut args) = self.resolve_program()?;
+        args.push("--extension".into());
+        args.push(
+            private_support_dir()?
+                .join(CHAT_RENDERING_EXTENSION)
+                .display()
+                .to_string(),
+        );
         // Child-subagent semantics (Cypher-hosted child chats): restrict tools
         // to the persisted agent allowlist plus the messaging tools (and
         // `request_permission` beside file tools), append

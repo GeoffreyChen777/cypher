@@ -38,6 +38,7 @@ ratex-parser.workspace = true
 ratex-layout.workspace = true
 ratex-types.workspace = true
 ratex-render.workspace = true
+merman.workspace = true
 alacritty_terminal.workspace = true
 base64.workspace = true
 image.workspace = true

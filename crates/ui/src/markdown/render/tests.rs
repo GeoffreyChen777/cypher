@@ -478,6 +478,7 @@ fn block_match_counts_walk_every_rendered_element() {
             &Block::CodeBlock {
                 language: None,
                 code: "let x = x;\nreturn x;".into(),
+                closed: true,
             },
             "x"
         ),

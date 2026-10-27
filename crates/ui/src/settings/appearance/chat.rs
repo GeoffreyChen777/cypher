@@ -183,7 +183,7 @@ fn preview_highlights(
         .iter()
         .enumerate()
         .filter_map(|(index, top)| {
-            let parser::Block::CodeBlock { language, code } = &top.block else {
+            let parser::Block::CodeBlock { language, code, .. } = &top.block else {
                 return None;
             };
             let (lang, source) =

@@ -87,6 +87,9 @@ pub struct RenderOptions {
     /// Offered every clicked link first; one it doesn't take (`false`), or
     /// every link when `None`, opens through the system.
     pub link: Option<LinkHandler>,
+    /// Called after a diagram fence switched between its diagram and its
+    /// source — the block changed height. `None` renders no switch.
+    pub diagram_toggled: Option<WindowHandler>,
     /// File references in inline code show as chips that report hover and
     /// clicks here ([`super::code_ref`]). `None` keeps them plain inline
     /// code — surfaces with nothing to preview them against.
@@ -170,6 +173,7 @@ impl RenderOptions {
             selection: None,
             scope: super::selection::SelectionScope::Transcript(0),
             link: None,
+            diagram_toggled: None,
             code_refs: None,
         }
     }
@@ -334,12 +338,19 @@ pub fn render_block(
             let line = line * theme.markdown.body_line_height / MD_LINE_HEIGHT;
             text_element(runs, size, line, true, ctx, window)
         }
-        Block::CodeBlock { language, code }
+        Block::CodeBlock {
+            language,
+            code,
+            closed: true,
+        } if super::mermaid::is_mermaid_fence(language.as_deref()) => {
+            super::mermaid::render(code, ctx, window)
+        }
+        Block::CodeBlock { language, code, .. }
             if super::diff_fence::is_diff_fence(language.as_deref()) =>
         {
             super::diff_fence::render(code, ctx, highlight)
         }
-        Block::CodeBlock { language, code } => {
+        Block::CodeBlock { language, code, .. } => {
             render_code_block(language.as_deref(), code, ctx, highlight)
         }
         Block::BlockQuote { children } => {
@@ -992,10 +1003,20 @@ pub fn count_block_matches(block: &Block, query: &str) -> usize {
             crate::markdown::find::count_matches(&runs_text(runs), query)
         }
         // A diff fence selects line by line, markers excluded.
-        Block::CodeBlock { language, code }
+        Block::CodeBlock { language, code, .. }
             if super::diff_fence::is_diff_fence(language.as_deref()) =>
         {
             super::diff_fence::count_matches(code, query)
+        }
+        // A drawn diagram shows no text to find.
+        Block::CodeBlock {
+            language,
+            code,
+            closed: true,
+        } if super::mermaid::is_mermaid_fence(language.as_deref())
+            && super::mermaid::is_drawn(code) =>
+        {
+            0
         }
         // A fence is ONE selectable text model (see `flatten_code`), so its
         // matches are counted over the raw source, newlines included.
@@ -2204,8 +2225,18 @@ pub fn code_excerpt(
         .child(flat_text_element(&flat, 0, opts, &code_theme))
 }
 
-fn render_code_block(
+pub(super) fn render_code_block(
     language: Option<&str>,
+    code: &str,
+    ctx: BlockCtx,
+    highlight: CodeHighlight,
+) -> AnyElement {
+    code_block_with_header(language.map(fence_label), code, ctx, highlight)
+}
+
+/// A code block under a header of the caller's own (or none).
+pub(super) fn code_block_with_header(
+    header: Option<AnyElement>,
     code: &str,
     ctx: BlockCtx,
     highlight: CodeHighlight,
@@ -2246,7 +2277,7 @@ fn render_code_block(
     // This also applies the streaming veil without changing text or layout.
     let text = flat_text_element(&cached.flat, ix, opts, &code_theme);
     let scroll_id: SharedString = format!("{}-code{ix}", opts.row_key).into();
-    fence_frame(ctx, language.map(fence_label))
+    fence_frame(ctx, header)
         .child(
             horizontal_scroller(scroll_id)
                 .px(px(CODE_PADDING_X))
@@ -2268,7 +2299,7 @@ fn render_code_block(
         .into_any_element()
 }
 
-fn fence_label(language: &str) -> AnyElement {
+pub(super) fn fence_label(language: &str) -> AnyElement {
     SharedString::from(language.to_string()).into_any_element()
 }
 

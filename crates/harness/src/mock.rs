@@ -15,6 +15,8 @@ mod changes;
 mod diffs;
 mod html;
 mod math;
+mod mermaid;
+mod mermaid_themes;
 mod permissions;
 mod progress;
 mod refs;
@@ -24,6 +26,8 @@ pub use changes::{MARKER as CHANGES_MARKER, ROUNDS as CHANGES_ROUNDS};
 pub use diffs::MARKER as DIFFS_MARKER;
 pub use html::MARKER as HTML_MARKER;
 pub use math::MARKER as MATH_MARKER;
+pub use mermaid::MARKER as MERMAID_MARKER;
+pub use mermaid_themes::{MARKER as MERMAID_THEMES_MARKER, text as mermaid_themes_text};
 pub use permissions::{
     CARD_MARKER as PERMISSION_CARD_MARKER,
     MULTILINE_CARD_MARKER as MULTILINE_PERMISSION_CARD_MARKER, STORY_MARKER as PERMISSIONS_MARKER,
@@ -328,8 +332,9 @@ impl Harness for MockHarness {
                 controls.interrupt,
             ));
         }
-        // Diff fence, math, HTML preview, file reference and translation
-        // showcases ([`DIFFS_MARKER`], [`MATH_MARKER`], [`HTML_MARKER`],
+        // Diff fence, math, Mermaid, HTML preview, file reference and
+        // translation showcases ([`DIFFS_MARKER`], [`MATH_MARKER`],
+        // [`MERMAID_MARKER`], [`MERMAID_THEMES_MARKER`], [`HTML_MARKER`],
         // [`REFS_MARKER`], [`TRANSLATION_MARKER`]): their reply replaces the
         // script's text and tools. `CYPHER_MOCK_TRANSLATION=1` (or `replace`)
         // answers every prompt with the translation showcase, so a message
@@ -349,6 +354,10 @@ impl Harness for MockHarness {
             Some(diffs::reply())
         } else if request.prompt.contains(MATH_MARKER) {
             Some(math::reply())
+        } else if request.prompt.contains(MERMAID_MARKER) {
+            Some(mermaid::reply())
+        } else if request.prompt.contains(MERMAID_THEMES_MARKER) {
+            Some(mermaid_themes::reply())
         } else if request.prompt.contains(HTML_MARKER) {
             Some(html::reply())
         } else if request.prompt.contains(REFS_MARKER) {

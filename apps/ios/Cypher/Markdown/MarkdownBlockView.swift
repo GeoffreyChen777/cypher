@@ -48,8 +48,12 @@ struct MarkdownBlockView: View {
             )
             .frame(maxWidth: .infinity, alignment: .leading)
 
-        case .codeBlock(let language, let code):
-            CodeBlockView(language: language, code: code, cacheKey: cacheKey)
+        case .codeBlock(let language, let code, let closed):
+            if closed, isMermaidFence(language) {
+                MermaidBlockView(code: code)
+            } else {
+                CodeBlockView(language: language, code: code, cacheKey: cacheKey)
+            }
 
         case .blockquote(let children):
             BlockquoteView(children: children, cacheKey: cacheKey)
@@ -76,9 +80,35 @@ struct CodeBlockView: View {
     var cacheKey: String = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let language, !language.isEmpty {
+        if let language, !language.isEmpty {
+            FencePanel {
                 Text(language)
+            } content: {
+                HighlightedCodeView(language: language, code: code)
+            }
+        } else {
+            FencePanel(header: nil) {
+                HighlightedCodeView(language: language, code: code)
+            }
+        }
+    }
+}
+
+/// A fence's chrome: the rounded panel and, when given, the label strip above
+/// its body (desktop `fence_frame`).
+struct FencePanel<Header: View, Content: View>: View {
+    let header: Header?
+    @ViewBuilder let content: Content
+
+    init(@ViewBuilder header: () -> Header, @ViewBuilder content: () -> Content) {
+        self.header = header()
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let header {
+                header
                     .font(Theme.sans(11))
                     .foregroundStyle(Theme.textMuted)
                     .padding(.horizontal, 12)
@@ -89,7 +119,7 @@ struct CodeBlockView: View {
                         Rectangle().fill(Theme.border).frame(height: 1)
                     }
             }
-            HighlightedCodeView(language: language, code: code)
+            content
         }
         .background(whiteAlpha(0.035))
         .clipShape(RoundedRectangle(cornerRadius: Theme.panelRadius))
@@ -97,6 +127,13 @@ struct CodeBlockView: View {
             RoundedRectangle(cornerRadius: Theme.panelRadius)
                 .strokeBorder(whiteAlpha(0.06), lineWidth: 1)
         )
+    }
+}
+
+extension FencePanel where Header == EmptyView {
+    init(header: Header?, @ViewBuilder content: () -> Content) {
+        self.header = header
+        self.content = content()
     }
 }
 

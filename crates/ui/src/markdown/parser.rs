@@ -65,6 +65,10 @@ pub enum Block {
     CodeBlock {
         language: Option<String>,
         code: String,
+        /// The fence has its closing line (indented blocks always do). A
+        /// fence still streaming has none yet, so renderers that turn the
+        /// code into something else (diagrams) wait for this.
+        closed: bool,
     },
     BlockQuote {
         children: Vec<Block>,
@@ -135,6 +139,7 @@ pub fn parse_full(source: &str) -> BlockTree {
         .into_offset_iter()
         .collect();
     let mut cur = Cursor {
+        source,
         events: &events,
         ix: 0,
         paren_math: paren_math.as_deref().unwrap_or(&[]),
@@ -251,6 +256,8 @@ fn rewrite_tex_delimiters(source: &str) -> Option<(String, Vec<usize>)> {
 }
 
 struct Cursor<'a, 'e> {
+    /// The parsed text, which event ranges index.
+    source: &'a str,
     events: &'a [(Event<'e>, Range<usize>)],
     ix: usize,
     /// Offsets of formulas written `\(…\)` ([`rewrite_tex_delimiters`]).
@@ -279,6 +286,27 @@ impl<'a, 'e> Cursor<'a, 'e> {
     }
 }
 
+/// Whether a fenced block's source — its event range, opening fence through
+/// closing fence, with any container markers — ends in a closing fence: a
+/// line of at least the opener's run of the opener's character.
+fn fence_closed(block: &str) -> bool {
+    fn strip(line: &str) -> &str {
+        line.trim_start_matches([' ', '\t', '>']).trim_end()
+    }
+    let mut lines = block.trim_end_matches(['\n', '\r']).lines();
+    let Some(opener) = lines.next().map(strip) else {
+        return false;
+    };
+    let Some(fence) = opener.chars().next().filter(|c| matches!(c, '`' | '~')) else {
+        return false;
+    };
+    let run = opener.chars().take_while(|&c| c == fence).count();
+    lines
+        .last()
+        .map(strip)
+        .is_some_and(|closer| closer.chars().count() >= run && closer.chars().all(|c| c == fence))
+}
+
 fn is_block_tag(tag: &Tag) -> bool {
     matches!(
         tag,
@@ -297,6 +325,10 @@ fn is_block_tag(tag: &Tag) -> bool {
 /// Consume a `Start(tag)` and everything through its matching `End`, producing
 /// block(s). Unknown containers are transparent (children splice in).
 fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
+    let range = cur
+        .peek()
+        .map(|(_, range)| range.clone())
+        .unwrap_or_default();
     let Some(Event::Start(tag)) = cur.next_event() else {
         return Vec::new();
     };
@@ -311,6 +343,10 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
             runs: parse_inline_container(cur, &InlineStyle::default()),
         }],
         Tag::CodeBlock(kind) => {
+            let closed = match kind {
+                CodeBlockKind::Fenced(_) => cur.source.get(range).is_some_and(fence_closed),
+                CodeBlockKind::Indented => true,
+            };
             let language = match kind {
                 CodeBlockKind::Fenced(info) => {
                     let lang = info.split_whitespace().next().unwrap_or("");
@@ -334,7 +370,11 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
             if code.ends_with('\n') {
                 code.pop();
             }
-            vec![Block::CodeBlock { language, code }]
+            vec![Block::CodeBlock {
+                language,
+                code,
+                closed,
+            }]
         }
         Tag::BlockQuote(_) => vec![Block::BlockQuote {
             children: parse_block_sequence(cur),
