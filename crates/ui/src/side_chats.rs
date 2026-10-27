@@ -317,6 +317,16 @@ impl SideChatPanel {
         .detach();
     }
 
+    /// Open the side chat's artifacts with `handler`.
+    pub fn set_artifact_handler(
+        &mut self,
+        handler: crate::markdown::artifact::ArtifactHandler,
+        cx: &mut Context<Self>,
+    ) {
+        self.transcript
+            .update(cx, |transcript, _| transcript.set_artifact_handler(handler));
+    }
+
     /// Rendered panel: a single rounded selection bar with lifecycle actions,
     /// plus the EXISTING Transcript and Composer. No bespoke bubbles, manual
     /// input, or answer prompt — the reused components own all of that.

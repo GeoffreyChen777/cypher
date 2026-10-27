@@ -27,7 +27,9 @@ shows the path). Editing the file by hand works too.
 - The app adds one more block there, from an extension it loads into every
   Pi (`crates/harness/src/pi/chat-rendering.ts`): the chat renders Markdown,
   math and Mermaid, so draw a ```` ```mermaid ```` diagram where one explains
-  better than prose. It ships with the app, not the Runtime.
+  better than prose, and it renders [artifacts](artifacts.md), pages written
+  in an ```` ```html artifact ```` fence. It ships with the app, not the
+  Runtime.
 - A project's `.pi/APPEND_SYSTEM.md` is normally not used: Pi loads project
   resources only for trusted projects, and under Cypher it has no way to ask,
   so a project it has no stored trust decision for stays untrusted.

@@ -32,6 +32,10 @@ Code block text controls plain code and neutral tokens (variables, parameters,
 operators, and punctuation). Keywords, strings, comments, numbers, and other
 colored syntax tokens retain their existing highlights. These overrides apply
 only to fenced code blocks, not inline code, terminal output, or Diff panels.
+Without a background override, a code block sits a step above the chat: a faint
+light wash in dark mode, a half-white lift in light mode, where its label is a
+caption over the code rather than a separate strip.
+[Artifact](artifacts.md) cards use the same plate.
 
 **Inline code text** and **Inline code background** independently style Markdown
 backtick spans, including those in lists, headings, and tables. They do not

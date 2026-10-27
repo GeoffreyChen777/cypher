@@ -283,6 +283,8 @@ impl Transcript {
             link: self.link_handler.clone(),
             diagram_toggled: Some(self.diagram_toggled_for(row_id, cx)),
             code_refs: Some(self.code_ref_ui(cx)),
+            artifact: self.artifact_handler.clone(),
+            live,
         };
         let highlight = self.code_highlight_for(row_id, tree, Some(block_ix), cx);
         let Some(top) = tree.blocks.get(block_ix) else {

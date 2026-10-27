@@ -33,6 +33,9 @@ struct MarkdownBlockView: View {
     let block: MDBlock
     /// Identity for async highlight caching (row id).
     var cacheKey: String = ""
+    /// The row is still streaming (an artifact's unclosed fence is still
+    /// being written).
+    var streaming = false
 
     var body: some View {
         switch block {
@@ -54,6 +57,9 @@ struct MarkdownBlockView: View {
             } else {
                 CodeBlockView(language: language, code: code, cacheKey: cacheKey)
             }
+
+        case .artifact(let kind, let title, let code, let closed):
+            ArtifactCard(kind: kind, title: title, code: code, closed: closed, streaming: streaming)
 
         case .blockquote(let children):
             BlockquoteView(children: children, cacheKey: cacheKey)
@@ -79,18 +85,39 @@ struct CodeBlockView: View {
     let code: String
     var cacheKey: String = ""
 
+    /// An HTML or SVG fence's page, opened from its Preview button.
+    @State private var page: ArtifactPage?
+
     var body: some View {
-        if let language, !language.isEmpty {
-            FencePanel {
-                Text(language)
-            } content: {
-                HighlightedCodeView(language: language, code: code)
-            }
-        } else {
-            FencePanel(header: nil) {
-                HighlightedCodeView(language: language, code: code)
+        Group {
+            if let language, !language.isEmpty {
+                FencePanel {
+                    HStack(spacing: 8) {
+                        Text(language)
+                        Spacer(minLength: 0)
+                        if let kind = ArtifactKind(language: language) {
+                            Button {
+                                page = ArtifactPage(
+                                    kind: kind,
+                                    title: ArtifactFence.displayTitle(kind: kind, title: nil, code: code),
+                                    code: code)
+                            } label: {
+                                Text("Preview").font(Theme.sans(11, weight: .medium))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("code-block-preview")
+                        }
+                    }
+                } content: {
+                    HighlightedCodeView(language: language, code: code)
+                }
+            } else {
+                FencePanel(header: nil) {
+                    HighlightedCodeView(language: language, code: code)
+                }
             }
         }
+        .fullScreenCover(item: $page) { ArtifactViewer(page: $0) }
     }
 }
 

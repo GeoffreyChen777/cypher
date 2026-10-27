@@ -43,6 +43,9 @@ indirect enum MDBlock: Hashable {
     /// A fence still streaming has none yet, so renderers that turn the code
     /// into something else (diagrams) wait for it.
     case codeBlock(language: String?, code: String, closed: Bool = true)
+    /// A fence tagged `artifact` (```html artifact title="…"```): a page the
+    /// model wrote to be viewed. `closed` is false while its fence streams.
+    case artifact(kind: ArtifactKind, title: String?, code: String, closed: Bool)
     case blockquote([MDBlock])
     case list(orderedStart: Int?, items: [MDListItem])
     case table(header: [[InlineRun]], rows: [[[InlineRun]]], align: [MDAlign])
@@ -100,8 +103,14 @@ enum MarkdownParser {
         case let code as CodeBlock:
             var body = code.code
             if body.hasSuffix("\n") { body.removeLast() }
-            let lang = code.language.flatMap { $0.isEmpty ? nil : $0 }
+            // cmark hands over the whole info string; its first word is the
+            // language, as on the desktop.
+            let info = code.language ?? ""
             let closed = code.range.map { fenceClosed($0, lines: context.lines) } ?? true
+            if let (kind, title) = ArtifactFence.info(info) {
+                return .artifact(kind: kind, title: title, code: body, closed: closed)
+            }
+            let lang = info.split(whereSeparator: \.isWhitespace).first.map(String.init)
             return .codeBlock(language: lang, code: body, closed: closed)
         case let quote as BlockQuote:
             return .blockquote(quote.children.compactMap { convertBlock($0, context) })

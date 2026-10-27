@@ -846,9 +846,9 @@ struct TranscriptView: View {
             case .prose(let blocks, let streaming):
                 ProseRowView(row: row, blocks: blocks, streaming: streaming, veils: veils)
 
-            case .markdown(let block, _):
+            case .markdown(let block, let streaming):
                 // A thought's code block or table: its own colors, quieted.
-                MarkdownBlockView(block: block, cacheKey: row.id)
+                MarkdownBlockView(block: block, cacheKey: row.id, streaming: streaming)
                     .opacity(row.muted ? 0.75 : 1)
 
             case .toolGroup(let tools, let autoOpen):

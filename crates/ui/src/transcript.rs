@@ -285,6 +285,9 @@ pub struct Transcript {
     /// Takes the replies' link clicks before the system does (the shell's
     /// file links); `None` opens every link through the system.
     link_handler: Option<crate::markdown::render::LinkHandler>,
+    /// Opens the replies' artifacts (the shell's side panel); `None` shows
+    /// their cards inert.
+    artifact_handler: Option<crate::markdown::artifact::ArtifactHandler>,
     /// Embedded (temporary Side Chat) layout: narrow-panel row gutters and a
     /// smaller first-row top inset instead of the main surface's titlebar
     /// chrome gap. Also disables the annotation surface (no Comment pill, no
@@ -445,6 +448,11 @@ impl Transcript {
         self.link_handler = Some(handler);
     }
 
+    /// Open the replies' artifacts (and HTML fences' Preview) with `handler`.
+    pub fn set_artifact_handler(&mut self, handler: crate::markdown::artifact::ArtifactHandler) {
+        self.artifact_handler = Some(handler);
+    }
+
     /// A temporary Side Chat transcript: the EXISTING
     /// renderer against a Side Chat fork state, with a fresh selection scope
     /// (never colliding with the main transcript or another panel), the rail
@@ -543,6 +551,7 @@ impl Transcript {
             rail_enabled,
             scope,
             link_handler: None,
+            artifact_handler: None,
             embedded,
             bottom_clearance: 0.0,
             viewport_size: None,

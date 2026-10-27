@@ -38,6 +38,8 @@ pub const MD_LINE_HEIGHT: f32 = 22.0;
 /// Code block padding.
 pub const CODE_PADDING_X: f32 = 12.0;
 pub const CODE_PADDING_Y: f32 = 10.0;
+/// Corner radius of fenced blocks and artifact cards.
+pub const FENCE_RADIUS: f32 = 12.0;
 
 // Table metrics — a port of mugen-markdown 0.6.2's `TableBlock` under zeron's
 // resolved md theme. The design is frameless ("flat hairline"): 1px horizontal
@@ -94,6 +96,12 @@ pub struct RenderOptions {
     /// clicks here ([`super::code_ref`]). `None` keeps them plain inline
     /// code — surfaces with nothing to preview them against.
     pub code_refs: Option<CodeRefUi>,
+    /// Opens artifact cards and HTML fences' Preview; `None` renders the
+    /// cards inert and the fences without the button.
+    pub artifact: Option<super::artifact::ArtifactHandler>,
+    /// The row is still streaming: an artifact whose fence hasn't closed
+    /// is still being written.
+    pub live: bool,
 }
 
 /// A link click's destination, offered to the surface: `true` when handled.
@@ -175,6 +183,8 @@ impl RenderOptions {
             link: None,
             diagram_toggled: None,
             code_refs: None,
+            artifact: None,
+            live: false,
         }
     }
 }
@@ -353,6 +363,12 @@ pub fn render_block(
         Block::CodeBlock { language, code, .. } => {
             render_code_block(language.as_deref(), code, ctx, highlight)
         }
+        Block::Artifact {
+            kind,
+            title,
+            code,
+            closed,
+        } => super::artifact::render_card(*kind, title.as_deref(), code, *closed, ctx),
         Block::BlockQuote { children } => {
             div()
                 // Accent-tinted quote: indigo rail + a whisper of the same hue
@@ -1021,6 +1037,8 @@ pub fn count_block_matches(block: &Block, query: &str) -> usize {
         // A fence is ONE selectable text model (see `flatten_code`), so its
         // matches are counted over the raw source, newlines included.
         Block::CodeBlock { code, .. } => crate::markdown::find::count_matches(code, query),
+        // The card shows no text of the page's.
+        Block::Artifact { .. } => 0,
         Block::BlockQuote { children } => children
             .iter()
             .map(|child| count_block_matches(child, query))
@@ -2231,15 +2249,17 @@ pub(super) fn render_code_block(
     ctx: BlockCtx,
     highlight: CodeHighlight,
 ) -> AnyElement {
-    code_block_with_header(language.map(fence_label), code, ctx, highlight)
+    code_block_with_header(language.map(fence_label), code, ctx, highlight, language)
 }
 
-/// A code block under a header of the caller's own (or none).
+/// A code block under a header of the caller's own (or none). `preview` is
+/// the fence's language when an HTML or SVG fence offers its Preview.
 pub(super) fn code_block_with_header(
     header: Option<AnyElement>,
     code: &str,
     ctx: BlockCtx,
     highlight: CodeHighlight,
+    preview: Option<&str>,
 ) -> AnyElement {
     let BlockCtx {
         top_ix,
@@ -2277,11 +2297,18 @@ pub(super) fn code_block_with_header(
     // This also applies the streaming veil without changing text or layout.
     let text = flat_text_element(&cached.flat, ix, opts, &code_theme);
     let scroll_id: SharedString = format!("{}-code{ix}", opts.row_key).into();
+    // Under a caption (light, no divider) the code follows the label closely.
+    let top = if header.is_some() && theme.appearance == crate::kit::theme::Appearance::Light {
+        2.0
+    } else {
+        CODE_PADDING_Y
+    };
     fence_frame(ctx, header)
         .child(
             horizontal_scroller(scroll_id)
                 .px(px(CODE_PADDING_X))
-                .py(px(CODE_PADDING_Y))
+                .pt(px(top))
+                .pb(px(CODE_PADDING_Y))
                 .mono(theme)
                 .text_size(px(theme.markdown.code_size))
                 .line_height(px(theme.markdown.code_line_height))
@@ -2294,8 +2321,18 @@ pub(super) fn code_block_with_header(
                 .items_start()
                 .child(text),
         )
-        // Overlay LAST so it paints above the header/body.
-        .children(copy_button(code, ctx))
+        // Overlay LAST so it paints above the header/body. An HTML fence's
+        // Preview sits beside Copy, the pair right-aligned so "Copied"
+        // grows leftward.
+        .children(match super::artifact::preview_chip(preview, code, ctx) {
+            Some(preview) => Some(
+                fence_actions()
+                    .child(preview)
+                    .children(copy_chip(code, ctx))
+                    .into_any_element(),
+            ),
+            None => copy_button(code, ctx),
+        })
         .into_any_element()
 }
 
@@ -2308,10 +2345,14 @@ pub(super) fn fence_label(language: &str) -> AnyElement {
 pub(super) fn fence_frame(ctx: BlockCtx, header: Option<AnyElement>) -> gpui::Div {
     let theme = ctx.theme;
     let chrome_color = theme.code_block_text.unwrap_or(theme.text_muted);
+    // Dark keeps its tuned strip (a tone step and a divider under the
+    // label); on the light plate the label is a caption over the code, so
+    // the block carries one edge, not four layers.
+    let strip = theme.appearance == crate::kit::theme::Appearance::Dark;
     div()
-        .rounded(px(10.0))
-        // Faint white wash over the near-black panel ≈ #101010 (zeron's code
-        // surface), with the hairline border.
+        .rounded(px(FENCE_RADIUS))
+        // A plate a step above the chat (see `code_block_background`), with
+        // the hairline border.
         .bg(code_block_background(theme))
         .border_1()
         .border_color(theme.border)
@@ -2322,10 +2363,13 @@ pub(super) fn fence_frame(ctx: BlockCtx, header: Option<AnyElement>) -> gpui::Di
                 div()
                     .px(px(CODE_PADDING_X))
                     .py(px(5.0))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    // A whisper of tone separation between header and body.
-                    .bg(theme.ink(0.02))
+                    .when(strip, |el| {
+                        el.border_b_1()
+                            .border_color(theme.border)
+                            // A whisper of tone separation between header
+                            // and body.
+                            .bg(theme.ink(0.02))
+                    })
                     .text_size(px(11.0))
                     .text_color(chrome_color)
                     .child(header),
@@ -2339,6 +2383,23 @@ pub(super) fn fence_frame(ctx: BlockCtx, header: Option<AnyElement>) -> gpui::Di
 /// layout. Sits centered in the header when there is one, floats over the
 /// first code line otherwise.
 pub(super) fn copy_button(code: &str, ctx: BlockCtx) -> Option<AnyElement> {
+    copy_chip(code, ctx).map(|chip| fence_actions().child(chip).into_any_element())
+}
+
+/// The overlay row a fence's action chips sit in, top-right.
+fn fence_actions() -> gpui::Div {
+    div()
+        .absolute()
+        .top(px(3.0))
+        .right(px(5.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(2.0))
+}
+
+/// The Copy chip itself, unpositioned.
+fn copy_chip(code: &str, ctx: BlockCtx) -> Option<gpui::Stateful<gpui::Div>> {
     let BlockCtx {
         ix, opts, theme, ..
     } = ctx;
@@ -2350,9 +2411,6 @@ pub(super) fn copy_button(code: &str, ctx: BlockCtx) -> Option<AnyElement> {
         let fade_key = format!("{}-copy{ix}", opts.row_key);
         div()
             .id(SharedString::from(fade_key.clone()))
-            .absolute()
-            .top(px(3.0))
-            .right(px(5.0))
             .h(px(20.0))
             .px(px(6.0))
             .rounded(px(5.0))
@@ -2382,7 +2440,6 @@ pub(super) fn copy_button(code: &str, ctx: BlockCtx) -> Option<AnyElement> {
                 .text_color(chrome_color),
             )
             .when(copied, |el| el.child(SharedString::from("Copied")))
-            .into_any_element()
     })
 }
 

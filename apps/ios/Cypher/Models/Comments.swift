@@ -181,7 +181,7 @@ extension MDBlock {
     var commentText: String {
         switch self {
         case .paragraph(let runs), .heading(_, let runs): return runs.map(\.text).joined()
-        case .codeBlock(_, let code, _): return code
+        case .codeBlock(_, let code, _), .artifact(_, _, let code, _): return code
         case .blockquote(let blocks): return blocks.map(\.commentText).joined(separator: "\n\n")
         case .list(let start, let items):
             return items.enumerated().map { index, item in

@@ -378,6 +378,8 @@ Run these commands from the repository root.
   Script fixture: `-demo -route chat:chat-deploy`.
   Math fixture (LaTeX in a reply): `-demo -route chat:chat-math`.
   Diagram fixture (Mermaid in a reply): `-demo -route chat:chat-mermaid`.
+  Artifacts fixture (an HTML and an SVG artifact, a plain HTML fence):
+  `-demo -route chat:chat-artifacts`.
   Context recovery fixtures: `-demo -route space:space-recovery`; the live
   replay is `-demo -route chat:chat-recovery-live`.
   Session list view menu (sort, Last active): `-demo -demo-history` adds

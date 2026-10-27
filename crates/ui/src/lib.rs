@@ -3,6 +3,7 @@
 //! [`run_app`] and its [`UiConfig`].
 
 mod appearance;
+mod artifacts;
 mod attachments;
 mod changes;
 mod comment_popup;

@@ -32,6 +32,8 @@ const CORPORA: &[&str] = &[
     "###### deep heading\n\n#### h4\n",
     "Euler: $e^{i\\pi} + 1 = 0$ holds.\n\n$$\n\\int_0^1 x\\,dx = \\tfrac12\n$$\n\nafter $a_1$ and $b_2$\n",
     "TeX delimiters \\(x_1\\) and\n\\[\n\\sum_k k\n\\]\nthen prose, prices $5 and $10\n",
+    "Here it is:\n\n```html artifact title=\"Bubble sort\"\n<!doctype html>\n<p>hi</p>\n```\n\nafter\n",
+    "- item\n\n  ````svg artifact\n  <svg/>\n  ````\n",
 ];
 
 #[test]
@@ -590,4 +592,93 @@ fn dollar_prices_stay_prose() {
             runs: vec![prose_run("costs $5 and $10 today")]
         }]
     );
+}
+
+fn artifact(source: &str) -> (ArtifactKind, Option<String>, String, bool) {
+    match blocks(source).into_iter().next() {
+        Some(Block::Artifact {
+            kind,
+            title,
+            code,
+            closed,
+        }) => (kind, title, code, closed),
+        other => panic!("not an artifact: {other:?}"),
+    }
+}
+
+#[test]
+fn artifact_fences_carry_kind_title_and_code() {
+    assert_eq!(
+        artifact("```html artifact title=\"Bubble sort\"\n<p>a</p>\n<p>b</p>\n```\n"),
+        (
+            ArtifactKind::Html,
+            Some("Bubble sort".to_string()),
+            "<p>a</p>\n<p>b</p>".to_string(),
+            true
+        )
+    );
+    // The marker can come first; titles may be single-quoted or bare.
+    assert_eq!(
+        artifact("```artifact svg title='Logo'\n<svg/>\n```").0,
+        ArtifactKind::Svg
+    );
+    assert_eq!(
+        artifact("```Artifact HTML title=Plain\nx\n```")
+            .1
+            .as_deref(),
+        Some("Plain")
+    );
+    // No language: HTML. No title: none.
+    assert_eq!(artifact("```artifact\nx\n```").0, ArtifactKind::Html);
+    assert_eq!(artifact("```html artifact title=\"  \"\nx\n```").1, None);
+}
+
+#[test]
+fn only_marked_renderable_fences_are_artifacts() {
+    for source in [
+        "```html\n<p>x</p>\n```",
+        "```python artifact\nprint(1)\n```",
+        "```html title=\"artifact\"\n<p>x</p>\n```",
+        "```html artifacts\n<p>x</p>\n```",
+    ] {
+        assert!(
+            matches!(blocks(source).as_slice(), [Block::CodeBlock { .. }]),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn artifacts_know_when_their_fence_closed() {
+    assert!(!artifact("```html artifact\n<p>x</p>").3);
+    assert!(!artifact("```html artifact\n<p>x</p>\n``").3);
+    assert!(artifact("```html artifact\n<p>x</p>\n```").3);
+    // A longer opening fence needs a closing one as long.
+    assert!(!artifact("````html artifact\n```\n").3);
+    assert!(artifact("~~~html artifact\nx\n~~~~\n").3);
+    // Inside a quote, the markers before the fences don't count.
+    match blocks("> ```html artifact\n> <p>x</p>\n> ```\n").as_slice() {
+        [Block::BlockQuote { children }] => assert!(matches!(
+            children.as_slice(),
+            [Block::Artifact { closed: true, .. }]
+        )),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_streamed_artifact_closes_when_its_fence_does() {
+    let source = "intro\n\n```html artifact title=\"Demo\"\n<p>x</p>\n```\n";
+    let mut parser = IncrementalParser::default();
+    let fence_end = source.rfind("```").unwrap();
+    parser.set_text(&source[..fence_end]);
+    assert!(matches!(
+        parser.tree().blocks.last().map(|top| &top.block),
+        Some(Block::Artifact { closed: false, .. })
+    ));
+    parser.set_text(source);
+    assert!(matches!(
+        parser.tree().blocks.last().map(|top| &top.block),
+        Some(Block::Artifact { closed: true, .. })
+    ));
 }

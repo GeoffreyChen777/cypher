@@ -210,6 +210,18 @@ impl Shell {
                 cx,
             )
         });
+        // Its artifacts open in the tile's side panel beside it.
+        let shell = cx.weak_entity();
+        panel.update(cx, |panel, cx| {
+            panel.set_artifact_handler(
+                std::rc::Rc::new(move |artifact, _, cx| {
+                    shell
+                        .update(cx, |shell, cx| shell.open_artifact(sid, artifact, cx))
+                        .ok();
+                }),
+                cx,
+            )
+        });
         let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };

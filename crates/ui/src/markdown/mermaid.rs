@@ -68,7 +68,7 @@ const MIN_FIT: f32 = 0.6;
 pub fn render(code: &str, ctx: BlockCtx, window: &Window) -> AnyElement {
     match lookup(code, Palette::of(ctx.theme), window.scale_factor()) {
         Diagram::Ready { .. } if ctx.opts.diagram_toggled.is_some() && shows_source(code) => {
-            code_block_with_header(Some(drawn_header(code, true, ctx)), code, ctx, None)
+            code_block_with_header(Some(drawn_header(code, true, ctx)), code, ctx, None, None)
         }
         Diagram::Ready {
             image,
@@ -76,7 +76,7 @@ pub fn render(code: &str, ctx: BlockCtx, window: &Window) -> AnyElement {
             height,
         } => render_diagram(image, width, height, code, ctx),
         Diagram::Failed(error) => {
-            code_block_with_header(Some(failed_header(error, ctx)), code, ctx, None)
+            code_block_with_header(Some(failed_header(error, ctx)), code, ctx, None, None)
         }
         Diagram::Pending => render_code_block(Some("mermaid"), code, ctx, None),
     }

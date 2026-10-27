@@ -11,6 +11,7 @@ use cypher_proto::{
 
 use crate::{Harness, HarnessError, RunControls};
 
+mod artifacts;
 mod changes;
 mod diffs;
 mod html;
@@ -22,6 +23,7 @@ mod progress;
 mod refs;
 mod translation;
 
+pub use artifacts::{MARKER as ARTIFACTS_MARKER, REVISE_MARKER as ARTIFACTS_REVISE_MARKER};
 pub use changes::{MARKER as CHANGES_MARKER, ROUNDS as CHANGES_ROUNDS};
 pub use diffs::MARKER as DIFFS_MARKER;
 pub use html::MARKER as HTML_MARKER;
@@ -332,10 +334,11 @@ impl Harness for MockHarness {
                 controls.interrupt,
             ));
         }
-        // Diff fence, math, Mermaid, HTML preview, file reference and
-        // translation showcases ([`DIFFS_MARKER`], [`MATH_MARKER`],
+        // Diff fence, math, Mermaid, HTML preview, file reference, artifact
+        // and translation showcases ([`DIFFS_MARKER`], [`MATH_MARKER`],
         // [`MERMAID_MARKER`], [`MERMAID_THEMES_MARKER`], [`HTML_MARKER`],
-        // [`REFS_MARKER`], [`TRANSLATION_MARKER`]): their reply replaces the
+        // [`REFS_MARKER`], [`ARTIFACTS_MARKER`], [`ARTIFACTS_REVISE_MARKER`],
+        // [`TRANSLATION_MARKER`]): their reply replaces the
         // script's text and tools. `CYPHER_MOCK_TRANSLATION=1` (or `replace`)
         // answers every prompt with the translation showcase, so a message
         // typed into the demo translates too.
@@ -362,6 +365,10 @@ impl Harness for MockHarness {
             Some(html::reply())
         } else if request.prompt.contains(REFS_MARKER) {
             Some(refs::reply())
+        } else if request.prompt.contains(ARTIFACTS_REVISE_MARKER) {
+            Some(artifacts::revision())
+        } else if request.prompt.contains(ARTIFACTS_MARKER) {
+            Some(artifacts::reply())
         } else {
             translation_mode.map(translation::reply)
         };

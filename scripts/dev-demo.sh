@@ -32,6 +32,14 @@
 #                                 # "Diagram themes", the same two diagrams
 #                                 # under every Mermaid theme and a few editor
 #                                 # palettes
+#   scripts/dev-demo.sh --artifacts
+#                                 # chat artifacts: "Explain binary search"
+#                                 # under "Artifacts demo" answers with an
+#                                 # interactive HTML artifact, an SVG artifact
+#                                 # and a plain ```html fence (Preview beside
+#                                 # Copy); its second round revises the HTML
+#                                 # page under the same title, so its open tab
+#                                 # reloads. --slow shows a card "Writing…"
 #   scripts/dev-demo.sh --changes # turn changes: "Due dates for tasks" under
 #                                 # "Turn changes demo", four rounds on a small
 #                                 # Git project — each round's answer lists the
@@ -60,11 +68,12 @@
 #                                 # steps refresh. Every message typed into the
 #                                 # demo plays the same run (CYPHER_MOCK_PROGRESS)
 #
-# The flags combine (--permissions, --diffs, --mermaid, --changes,
+# The flags combine (--permissions, --diffs, --mermaid, --artifacts, --changes,
 # --translation or --progress takes the place of the default seed).
 # Everything lives under /tmp/cypher-demo-* (--work: /tmp/cypher-demo-work-*,
 # --permissions: /tmp/cypher-demo-permissions-*, --diffs:
-# /tmp/cypher-demo-diffs-*, --mermaid: /tmp/cypher-demo-mermaid-*, --changes: /tmp/cypher-demo-changes-*,
+# /tmp/cypher-demo-diffs-*, --mermaid: /tmp/cypher-demo-mermaid-*, --artifacts:
+# /tmp/cypher-demo-artifacts-*, --changes: /tmp/cypher-demo-changes-*,
 # --translation: /tmp/cypher-demo-translation-*, --progress:
 # /tmp/cypher-demo-progress-*); re-runs
 # reuse it (delete
@@ -77,6 +86,7 @@ DELAY=""
 PERMS=""
 DIFFS=""
 MERMAID=""
+ARTIFACTS=""
 CHANGES=""
 TRANSLATION=""
 PROGRESS=""
@@ -87,17 +97,18 @@ for arg in "$@"; do
     --permissions) PERMS=1 ;;
     --diffs) DIFFS=1 ;;
     --mermaid) MERMAID=1 ;;
+    --artifacts) ARTIFACTS=1 ;;
     --changes) CHANGES=1 ;;
     --translation) TRANSLATION=1 ;;
     --progress) PROGRESS=1 ;;
-    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs] [--mermaid] [--changes] [--translation] [--progress]' >&2; exit 2 ;;
+    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs] [--mermaid] [--artifacts] [--changes] [--translation] [--progress]' >&2; exit 2 ;;
   esac
 done
 # Translation is about what happens while the agent works, so it is paced.
 [[ -n "$TRANSLATION" ]] && DELAY="${DELAY:-250}"
 # About 12s for the Mermaid reply, so each fence streams as code and then draws.
 [[ -n "$MERMAID" ]] && DELAY="${DELAY:-120}"
-DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}${MERMAID:+-mermaid}${CHANGES:+-changes}${TRANSLATION:+-translation}${PROGRESS:+-progress}
+DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}${MERMAID:+-mermaid}${ARTIFACTS:+-artifacts}${CHANGES:+-changes}${TRANSLATION:+-translation}${PROGRESS:+-progress}
 DAEMON_DIR=$DEMO_DIR-daemon
 UI_DIR=$DEMO_DIR-ui
 
@@ -281,6 +292,17 @@ JSON
     create_chat "$chat" "$space" "How a prompt travels"
     run_prompt "$chat" "$PWD" "Draw me how a prompt travels through the app." \
       "Draw me how a prompt travels through the app. [mock:mermaid]"
+  elif [[ -n "$ARTIFACTS" ]]; then
+    project="$DEMO_DIR-projects/algorithms"
+    mkdir -p "$project"
+    space=$(new_id) chat=$(new_id)
+    create_space "$space" "$project" '"name":"Artifacts demo"'
+    create_chat "$chat" "$space" "Explain binary search"
+    prompt="How does binary search work? Show me."
+    run_prompt "$chat" "$project" "$prompt" "$prompt [mock:artifacts]"
+    wait_round "$chat" 1
+    prompt="Nice. Can it count the comparisons as it goes?"
+    run_prompt "$chat" "$project" "$prompt" "$prompt [mock:artifacts:revise]"
   elif [[ -n "$WORK" ]]; then
     # The scripted commands read this repo's files, so the project is this checkout.
     space=$(new_id) chat=$(new_id)

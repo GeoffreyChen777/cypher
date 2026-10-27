@@ -246,7 +246,8 @@ fn aligned(shown: &BlockTree, agent: &BlockTree) -> bool {
             .iter()
             .zip(&agent.blocks)
             .all(|(s, a)| match (&s.block, &a.block) {
-                (Block::CodeBlock { code: sc, .. }, Block::CodeBlock { code: ac, .. }) => sc == ac,
+                (Block::CodeBlock { code: sc, .. }, Block::CodeBlock { code: ac, .. })
+                | (Block::Artifact { code: sc, .. }, Block::Artifact { code: ac, .. }) => sc == ac,
                 (Block::List { items: si, .. }, Block::List { items: ai, .. }) => {
                     si.len() == ai.len()
                 }
@@ -288,7 +289,7 @@ fn plain(blocks: &[Block]) -> String {
             Block::Paragraph { runs } | Block::Heading { runs, .. } => {
                 out.push(prose(runs));
             }
-            Block::CodeBlock { code, .. } => out.push(code.clone()),
+            Block::CodeBlock { code, .. } | Block::Artifact { code, .. } => out.push(code.clone()),
             Block::BlockQuote { children } => out.push(plain(children)),
             Block::List { items, .. } => {
                 for item in items {
