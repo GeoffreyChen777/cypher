@@ -76,13 +76,20 @@ impl Shell {
             }));
         });
         // Its artifacts open in this tile's side panel.
-        let shell = cx.weak_entity();
+        let (shell, revise) = (cx.weak_entity(), cx.weak_entity());
         transcript.update(cx, |transcript, _| {
-            transcript.set_artifact_handler(std::rc::Rc::new(move |artifact, _, cx| {
-                shell
-                    .update(cx, |shell, cx| shell.open_artifact(sid, artifact, cx))
-                    .ok();
-            }));
+            transcript.set_artifact_handler(
+                std::rc::Rc::new(move |artifact, _, cx| {
+                    shell
+                        .update(cx, |shell, cx| shell.open_artifact(sid, artifact, cx))
+                        .ok();
+                }),
+                std::rc::Rc::new(move |artifact, cx| {
+                    revise
+                        .update(cx, |shell, cx| shell.refresh_artifact(sid, artifact, cx))
+                        .ok();
+                }),
+            );
         });
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let subagents = cx.new(|cx| SubagentsPanel::new(state.clone(), cx));

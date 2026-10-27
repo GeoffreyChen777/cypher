@@ -317,14 +317,17 @@ impl SideChatPanel {
         .detach();
     }
 
-    /// Open the side chat's artifacts with `handler`.
+    /// Open the side chat's artifacts with `handler`, and hand `revised`
+    /// their revisions.
     pub fn set_artifact_handler(
         &mut self,
         handler: crate::markdown::artifact::ArtifactHandler,
+        revised: crate::markdown::artifact::ArtifactRevised,
         cx: &mut Context<Self>,
     ) {
-        self.transcript
-            .update(cx, |transcript, _| transcript.set_artifact_handler(handler));
+        self.transcript.update(cx, |transcript, _| {
+            transcript.set_artifact_handler(handler, revised)
+        });
     }
 
     /// Rendered panel: a single rounded selection bar with lifecycle actions,

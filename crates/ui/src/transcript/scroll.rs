@@ -911,6 +911,7 @@ impl Transcript {
         );
 
         self.update_veils(attached, entries.is_empty(), &new_rows);
+        self.index_artifacts(attached, entries.is_empty(), &new_rows, cx);
 
         let was_empty = self.rows.is_empty();
         let old_last = self.rows.len().checked_sub(1);
@@ -1075,6 +1076,35 @@ impl Transcript {
                 .iter()
                 .any(|r| &r.id == id && is_live_markdown(&r.kind))
         });
+    }
+
+    /// Note the named pages' newest revisions and pass on the ones that just
+    /// landed. Pages already in the chat's replay pass on nothing.
+    fn index_artifacts(
+        &mut self,
+        attached: bool,
+        entries_empty: bool,
+        new_rows: &[Row],
+        cx: &mut Context<Self>,
+    ) {
+        if attached {
+            self.artifacts_attach_pending = true;
+        }
+        let quiet = self.artifacts_attach_pending;
+        if !entries_empty {
+            self.artifacts_attach_pending = false;
+        }
+        let revised = self.artifacts.borrow_mut().update(new_rows, quiet);
+        if let Some(handler) = self.artifact_revised.clone()
+            && !revised.is_empty()
+        {
+            // Deferred: the shell may be mid-update around this sync.
+            cx.defer(move |cx| {
+                revised
+                    .into_iter()
+                    .for_each(|artifact| handler(artifact, cx))
+            });
+        }
     }
 
     /// Tell the list which rows a doc commit replaced.

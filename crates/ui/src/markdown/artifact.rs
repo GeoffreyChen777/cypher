@@ -33,6 +33,10 @@ pub struct ArtifactOpen {
 /// Opens a clicked artifact.
 pub type ArtifactHandler = Rc<dyn Fn(ArtifactOpen, &mut Window, &mut gpui::App)>;
 
+/// Takes a named page's new revision as it lands in the chat: the page's
+/// open tab, if any, reloads.
+pub type ArtifactRevised = Rc<dyn Fn(ArtifactOpen, &mut gpui::App)>;
+
 /// What to open for the fence at `ctx`.
 pub fn open_request(
     kind: ArtifactKind,

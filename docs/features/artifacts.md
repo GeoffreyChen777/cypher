@@ -33,8 +33,11 @@ session's side panel.
 Each page opens as its own surface in the right dock (the `</>` icon on the
 rail). Opening the card again brings the tab forward. A **named** artifact
 (one with `title=`) that the agent writes again under the same title is a
-revision: it reloads the open tab instead of adding one. Unnamed fences each
-get their own tab.
+revision of the same page: once its fence closes, the page's open tab reloads
+by itself (without coming forward), and every card with that title, the
+earlier ones included, opens the newest version. A new title is a page of its
+own; the agent keeps the title unless you ask for a new page or to keep the
+old one. Unnamed fences each get their own tab.
 
 - **Preview / Source**: the page in a web view, or its syntax-colored source.
 - **Copy** copies the source.
@@ -72,7 +75,8 @@ The demo fixture is `-demo -route chat:chat-artifacts`. Add `-sheet artifact`
 The app's chat-rendering block, which the engine loads into every Pi it
 starts (`crates/harness/src/pi/chat-rendering.ts`), tells the model about
 artifacts next to Mermaid diagrams: the fence, self-contained pages, and
-revising a page under the same title. It sits at the front of the appended
+revising a page under the same title (or making a separate one under a new
+title). It sits at the front of the appended
 system prompt, so every model gets it, and it ships with the app rather than
 the Pi runtime. See [System prompt](system-prompt.md).
 
