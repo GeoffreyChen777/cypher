@@ -1,28 +1,40 @@
 // Tells the model what Cypher's chat renders, so it reaches for a diagram when
 // one explains better than prose. The engine writes this file beside its
 // engine client and loads it into every Pi it starts (`-e`), so it ships with
-// the app rather than the Runtime and leaves the user's APPEND_SYSTEM.md alone.
+// the app rather than the Runtime.
 //
-// It adds its own prompt section rather than editing the prompt text: the
-// section is identical every turn, so it never invalidates a cached prefix.
+// Like the Runtime's cypher-file-references extension, the block goes at the
+// front of Pi's appended system prompt (the `<addendum>` section) on every
+// turn, ahead of the user's APPEND_SYSTEM.md text, which it never writes to.
+// A custom prompt section would replay out of order once it first appeared
+// in an older session, which pi-claude-bridge refuses; the addendum keeps its
+// place and reaches every model. The text never changes, so the prompt stays
+// cache-stable across turns.
 
-const SECTION = "cypher_rendering";
-
-export const GUIDANCE = `Your replies are shown in Cypher, which renders GitHub-flavored Markdown, LaTeX math ($…$ inline, $$…$$ display) and Mermaid diagrams.
+export const CHAT_RENDERING = `<cypher_rendering>
+Your replies are shown in Cypher, which renders GitHub-flavored Markdown, LaTeX math ($…$ inline, $$…$$ display) and Mermaid diagrams.
 - When a diagram explains something better than prose — a flow or decision, calls between components, a state machine, an architecture or data model, a timeline — draw it in a \`\`\`mermaid fenced block instead of ASCII art.
 - Keep each diagram small and focused; split a large one. Quote labels that contain punctuation: A["Parse (fast path)"].
-- Don't add a diagram where a sentence or a short list does the job.`;
+- Don't add a diagram where a sentence or a short list does the job.
+</cypher_rendering>`;
+
+/** The appended prompt with Cypher's block in front of the rest. */
+export function withChatRendering(append: string): string {
+  if (append.includes(CHAT_RENDERING)) return append;
+  const rest = append.trim();
+  return rest ? `${CHAT_RENDERING}\n\n${rest}` : CHAT_RENDERING;
+}
 
 type BeforeAgentStart = {
-  systemPromptOptions?: { sections?: Record<string, string> };
+  systemPromptOptions?: { appendSystemPrompt?: string };
 };
 
 export default function chatRendering(pi: {
   on(event: "before_agent_start", handler: (event: BeforeAgentStart) => void): void;
 }) {
   pi.on("before_agent_start", (event) => {
-    // Runtimes without prompt sections run on without the guidance.
-    const sections = event.systemPromptOptions?.sections;
-    if (sections) sections[SECTION] = GUIDANCE;
+    // Runtimes without mutable prompt options run on without the guidance.
+    const options = event.systemPromptOptions;
+    if (options) options.appendSystemPrompt = withChatRendering(options.appendSystemPrompt ?? "");
   });
 }
