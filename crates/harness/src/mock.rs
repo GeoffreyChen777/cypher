@@ -5,8 +5,8 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
-    UserInputQuestion,
+    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    SteeringMode, UserInputQuestion,
 };
 
 use crate::{Harness, HarnessError, RunControls};
@@ -299,8 +299,14 @@ impl Harness for MockHarness {
             ));
         }
         // Turn changes demo ([`CHANGES_MARKER`]): round N edits the run's
-        // checkout between the script's opening and its Done.
-        if let Some(round) = changes::round_of(&request.prompt) {
+        // checkout between the script's opening and its Done. A read-only run
+        // edits nothing, as a real agent's could not: the auto-titler sends
+        // the chat's first prompt — marker included — through the harness
+        // in the same checkout, and must not replay the round's edits into
+        // the next one.
+        if let Some(round) = changes::round_of(&request.prompt)
+            && request.sandbox != SandboxLevel::ReadOnly
+        {
             return Ok(changes::run(
                 body[..lead].to_vec(),
                 tail.to_vec(),
