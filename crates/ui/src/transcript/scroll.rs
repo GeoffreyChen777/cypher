@@ -211,6 +211,8 @@ impl Transcript {
                 {
                     this.dismiss_comment_ui_and_selection(cx);
                 }
+                // A file preview would float off its chip.
+                this.hide_code_ref(cx);
                 // Wheel/touch while a runway lives: input owns the viewport,
                 // and the BOTTOM PIN must stay out of it entirely. Escaping
                 // releases the hold (the reservation stays behind as plain

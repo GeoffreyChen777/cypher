@@ -402,6 +402,60 @@ fn runs_text_matches_the_flattened_text() {
 }
 
 #[test]
+fn file_references_flatten_to_chips_that_copy_as_written() {
+    let code = |text: &str| InlineRun {
+        text: text.into(),
+        style: InlineStyle {
+            code: true,
+            ..Default::default()
+        },
+    };
+    let prose = |text: &str| InlineRun {
+        text: text.into(),
+        style: InlineStyle::default(),
+    };
+    let theme = Theme::dark();
+    let runs = vec![
+        prose("saved ("),
+        code("utils/checkpointing/processors/file.py:69-73"),
+        prose("), matched by "),
+        code("identity()"),
+        prose(" in "),
+        code("file.py:128-131"),
+    ];
+    let flat = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, None, true);
+    // Find counts over the same text the chips render.
+    assert_eq!(runs_text(&runs), flat.text.as_ref());
+    let glue = crate::markdown::code_ref::ICON_GLUE;
+    let shown: Vec<&str> = flat
+        .refs
+        .iter()
+        .map(|chip| &flat.text[chip.range.clone()])
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            format!("{glue}file.py:69-73"),
+            format!("{glue}file.py:128-131"),
+        ]
+    );
+    // Identifiers stay inline code; chips are not code washes.
+    assert_eq!(flat.code_ranges.len(), 1);
+    assert_eq!(&flat.text[flat.code_ranges[0].clone()], "identity()");
+    // Each chip copies as the reference the agent wrote.
+    let sources = flat.copy_sources.as_deref().unwrap();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0].0, flat.refs[0].range);
+    assert_eq!(sources[0].1, "utils/checkpointing/processors/file.py:69-73");
+    assert_eq!(sources[1].1, "file.py:128-131");
+    // Without chips the same runs stay plain inline code.
+    let plain = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, None, false);
+    assert!(plain.refs.is_empty());
+    assert_eq!(plain.code_ranges.len(), 3);
+    assert!(plain.copy_sources.is_none());
+}
+
+#[test]
 fn block_match_counts_walk_every_rendered_element() {
     let runs = |text: &str| {
         vec![InlineRun {
@@ -962,7 +1016,7 @@ fn formulas_flatten_to_glue_with_a_math_env() {
             },
         },
     ];
-    let flat = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, Some(&env));
+    let flat = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, Some(&env), false);
     let [span] = flat.math.as_slice() else {
         panic!("one formula");
     };

@@ -4,8 +4,8 @@
   "version": "1.0.0",
   "description": "Pinned Pi and extension set for Cypher's isolated runtime",
   "scripts": {
-    "test": "node --test provider-service.test.mjs patches/pi-agent-squad-cypher-host/cypher-host.test.mjs extensions/cypher-translation.test.mjs extensions/cypher-fast-mode.test.mjs extensions/cypher-codemode.test.mjs extensions/cypher-permissions.test.mjs",
-    "test:staged": "node --test patches/pi-agent-squad-prompt-options.staged.test.mjs patches/pi-agent-squad-permission-tool.staged.test.mjs patches/pi-agent-squad-model-options.staged.test.mjs patches/response-model.staged.test.mjs patches/context-files.staged.test.mjs patches/session-cleanup.staged.test.mjs patches/web-search.staged.test.mjs mcp-login.staged.test.mjs extensions/cypher-permissions.staged.test.mjs"
+    "test": "node --test provider-service.test.mjs patches/pi-agent-squad-cypher-host/cypher-host.test.mjs extensions/cypher-translation.test.mjs extensions/cypher-fast-mode.test.mjs extensions/cypher-codemode.test.mjs extensions/cypher-permissions.test.mjs extensions/cypher-file-references.test.mjs",
+    "test:staged": "node --test patches/pi-agent-squad-prompt-options.staged.test.mjs patches/pi-agent-squad-permission-tool.staged.test.mjs patches/pi-agent-squad-model-options.staged.test.mjs patches/response-model.staged.test.mjs patches/context-files.staged.test.mjs patches/session-cleanup.staged.test.mjs patches/web-search.staged.test.mjs mcp-login.staged.test.mjs extensions/cypher-permissions.staged.test.mjs extensions/cypher-file-references.staged.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.1.0",
