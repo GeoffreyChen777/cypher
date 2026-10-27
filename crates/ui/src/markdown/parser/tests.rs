@@ -134,12 +134,75 @@ fn block_structure_basics() {
         other => panic!("unexpected {other:?}"),
     }
     match &tree.blocks[2].block {
-        Block::CodeBlock { language, code } => {
+        Block::CodeBlock {
+            language,
+            code,
+            closed,
+        } => {
             assert_eq!(language.as_deref(), Some("ts"));
             assert_eq!(code, "let x = 1;");
+            assert!(closed);
         }
         other => panic!("unexpected {other:?}"),
     }
+}
+
+fn closed_flags(source: &str) -> Vec<bool> {
+    parse_full(source)
+        .blocks
+        .iter()
+        .filter_map(|top| match &top.block {
+            Block::CodeBlock { closed, .. } => Some(*closed),
+            Block::List { items, .. } => items.iter().flatten().find_map(|block| match block {
+                Block::CodeBlock { closed, .. } => Some(*closed),
+                _ => None,
+            }),
+            Block::BlockQuote { children } => children.iter().find_map(|block| match block {
+                Block::CodeBlock { closed, .. } => Some(*closed),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn code_blocks_know_whether_their_fence_closed() {
+    assert_eq!(
+        closed_flags("```mermaid\ngraph TD\n  A --> B\n```\n"),
+        [true]
+    );
+    assert_eq!(closed_flags("```mermaid\ngraph TD\n  A --> B\n```"), [true]);
+    assert_eq!(closed_flags("```mermaid\ngraph TD\n  A --> B\n"), [false]);
+    assert_eq!(closed_flags("```mermaid\ngraph TD\n  A --> B\n``"), [false]);
+    assert_eq!(closed_flags("```mermaid"), [false]);
+    // A shorter run inside a longer fence is content, not a closer.
+    assert_eq!(closed_flags("````md\n```\nstill code\n```\n"), [false]);
+    assert_eq!(closed_flags("````md\n```\ncode\n````\n"), [true]);
+    assert_eq!(closed_flags("~~~\nx\n~~~\n"), [true]);
+    assert_eq!(closed_flags("    indented\n    code\n"), [true]);
+    // Container markers ride the block's lines.
+    assert_eq!(closed_flags("- ```mermaid\n  graph TD\n  ```\n"), [true]);
+    assert_eq!(closed_flags("> ```mermaid\n> graph TD\n> ```\n"), [true]);
+    assert_eq!(closed_flags("> ```mermaid\n> graph TD\n"), [false]);
+}
+
+#[test]
+fn a_streamed_fence_closes_with_its_last_line() {
+    let source = "intro\n\n```mermaid\ngraph TD\n  A --> B\n```\n";
+    let mut p = IncrementalParser::default();
+    let closer = source.rfind("```").unwrap();
+    p.set_text(&source[..closer]);
+    assert!(matches!(
+        p.tree().blocks.last().map(|top| &top.block),
+        Some(Block::CodeBlock { closed: false, .. })
+    ));
+    p.set_text(source);
+    assert!(matches!(
+        p.tree().blocks.last().map(|top| &top.block),
+        Some(Block::CodeBlock { closed: true, .. })
+    ));
+    assert_eq!(p.tree(), &parse_full(source));
 }
 
 #[test]

@@ -136,6 +136,11 @@ ratex-parser = "0.1.15"
 ratex-layout = "0.1.15"
 ratex-types = "0.1.15"
 ratex-render = { version = "0.1.15", features = ["embed-fonts"] }
+# Mermaid diagrams in chat markdown: a headless Rust Mermaid (parse → layout →
+# SVG), rasterized by gpui's resvg. Default features would add the EPL-2.0 ELK
+# layout and a second math stack; dagre and the Cytoscape layouts cover every
+# family without them.
+merman = { version = "0.9.2", default-features = false, features = ["all-diagrams", "svg", "layout-cytoscape"] }
 unicode-segmentation = "1"
 # `rustls-tls` alone is webpki-roots only: the bundled CA list never consults the
 # OS trust store, so a corporate TLS-inspecting proxy's CA — installed in the

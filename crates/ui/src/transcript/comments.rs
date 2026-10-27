@@ -189,7 +189,7 @@ impl Transcript {
             if only.is_some_and(|o| o != ix) {
                 continue;
             }
-            if let Block::CodeBlock { language, code } = &top.block
+            if let Block::CodeBlock { language, code, .. } = &top.block
                 && let Some((lang, source)) =
                     crate::markdown::diff_fence::highlight_input(language.as_deref(), code)
             {
@@ -281,11 +281,22 @@ impl Transcript {
             selection: Some(self.selection_ui_for(row_id, cx)),
             scope: self.scope,
             link: self.link_handler.clone(),
+            diagram_toggled: Some(self.diagram_toggled_for(row_id, cx)),
         };
         let highlight = self.code_highlight_for(row_id, tree, Some(block_ix), cx);
         let Some(top) = tree.blocks.get(block_ix) else {
             return gpui::Empty.into_any_element();
         };
+        // A landing diagram is taller than the source it replaces: remeasure
+        // its row, keeping the scroll anchor.
+        let diagram_row = row_id.clone();
+        markdown::mermaid::request_block(
+            &top.block,
+            theme,
+            window.scale_factor(),
+            cx,
+            move |this: &mut Self, cx| this.remeasure_row(&diagram_row, cx),
+        );
         let el = markdown::render::render_block(
             &top.block,
             markdown::render::BlockCtx::top(block_ix, &opts, theme),
@@ -308,6 +319,29 @@ impl Transcript {
             window.on_next_frame(move |_, cx| cx.notify(id));
         }
         el
+    }
+
+    /// Remeasure one row whose height changed in place (a diagram landed or
+    /// switched to its source), keeping the scroll anchor.
+    fn remeasure_row(&mut self, row_id: &SharedString, cx: &mut Context<Self>) {
+        if let Some(ix) = self.rows.iter().position(|row| &row.id == row_id) {
+            self.list.remeasure_items(ix..ix + 1);
+        }
+        cx.notify();
+    }
+
+    fn diagram_toggled_for(
+        &self,
+        row_id: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> markdown::render::WindowHandler {
+        let row_id = row_id.clone();
+        let entity = cx.weak_entity();
+        Rc::new(move |_window, cx| {
+            entity
+                .update(cx, |this, cx| this.remeasure_row(&row_id, cx))
+                .ok();
+        })
     }
 
     /// The toggle over folded rows (a translation's original, a thought, a

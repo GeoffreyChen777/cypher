@@ -39,7 +39,10 @@ struct MDListItem: Hashable {
 indirect enum MDBlock: Hashable {
     case paragraph([InlineRun])
     case heading(level: Int, [InlineRun])
-    case codeBlock(language: String?, code: String)
+    /// `closed`: the fence has its closing line (indented blocks always do).
+    /// A fence still streaming has none yet, so renderers that turn the code
+    /// into something else (diagrams) wait for it.
+    case codeBlock(language: String?, code: String, closed: Bool = true)
     case blockquote([MDBlock])
     case list(orderedStart: Int?, items: [MDListItem])
     case table(header: [[InlineRun]], rows: [[[InlineRun]]], align: [MDAlign])
@@ -68,16 +71,27 @@ enum MarkdownParser {
         // Formulas become placeholders cmark leaves alone (MathSource.swift);
         // the rewrite keeps every line, so start lines index `source`.
         let math = MathSource.rewrite(source)
-        let document = Document(parsing: math?.source ?? source)
-        let formulas = math?.formulas ?? []
+        let parsed = math?.source ?? source
+        let document = Document(parsing: parsed)
+        let context = Context(
+            formulas: math?.formulas ?? [],
+            lines: parsed.split(separator: "\n", omittingEmptySubsequences: false))
         return document.children.compactMap { child in
-            guard let block = convertBlock(child, formulas) else { return nil }
+            guard let block = convertBlock(child, context) else { return nil }
             let line = child.range?.lowerBound.line ?? 1
             return TopBlock(startLine: line, block: block)
         }
     }
 
-    private static func convertBlock(_ markup: Markup, _ formulas: [String]) -> MDBlock? {
+    /// What every block conversion reads: the formulas the math rewrite took
+    /// out, and the parsed source's lines (block ranges index them).
+    private struct Context {
+        var formulas: [String]
+        var lines: [Substring]
+    }
+
+    private static func convertBlock(_ markup: Markup, _ context: Context) -> MDBlock? {
+        let formulas = context.formulas
         switch markup {
         case let paragraph as Paragraph:
             return .paragraph(inlines(of: paragraph, formulas))
@@ -87,13 +101,14 @@ enum MarkdownParser {
             var body = code.code
             if body.hasSuffix("\n") { body.removeLast() }
             let lang = code.language.flatMap { $0.isEmpty ? nil : $0 }
-            return .codeBlock(language: lang, code: body)
+            let closed = code.range.map { fenceClosed($0, lines: context.lines) } ?? true
+            return .codeBlock(language: lang, code: body, closed: closed)
         case let quote as BlockQuote:
-            return .blockquote(quote.children.compactMap { convertBlock($0, formulas) })
+            return .blockquote(quote.children.compactMap { convertBlock($0, context) })
         case let list as UnorderedList:
-            return .list(orderedStart: nil, items: listItems(of: list, formulas))
+            return .list(orderedStart: nil, items: listItems(of: list, context))
         case let list as OrderedList:
-            return .list(orderedStart: Int(list.startIndex), items: listItems(of: list, formulas))
+            return .list(orderedStart: Int(list.startIndex), items: listItems(of: list, context))
         case let table as Markdown.Table:
             // `.cells`/`.rows` are lazy sequences — materialize eagerly.
             let header: [[InlineRun]] = table.head.cells.map { inlines(of: $0, formulas) }
@@ -123,13 +138,40 @@ enum MarkdownParser {
         }
     }
 
-    private static func listItems(of list: Markup, _ formulas: [String]) -> [MDListItem] {
+    private static func listItems(of list: Markup, _ context: Context) -> [MDListItem] {
         list.children.compactMap { child in
             guard let item = child as? ListItem else { return nil }
             let checked: Bool? = item.checkbox.map { $0 == .checked }
             return MDListItem(
-                checked: checked, children: item.children.compactMap { convertBlock($0, formulas) })
+                checked: checked, children: item.children.compactMap { convertBlock($0, context) })
         }
+    }
+
+    /// Whether a code block's source ends in a closing fence: a line of at
+    /// least the opener's run of the opener's character (desktop parser.rs
+    /// `fence_closed`). Indented blocks have no fence and count as closed.
+    /// Columns are 1-based UTF-8 offsets; container markers (`>`, the
+    /// indentation under a list item) are trimmed off the closing line.
+    static func fenceClosed(_ range: SourceRange, lines: [Substring]) -> Bool {
+        let first = range.lowerBound.line - 1
+        let last = range.upperBound.line - 1
+        guard first >= 0, first < lines.count else { return true }
+        let openerLine = lines[first].utf8.dropFirst(max(0, range.lowerBound.column - 1))
+        let opener = (String(openerLine) ?? "").drop(while: { $0 == " " || $0 == "\t" || $0 == ">" })
+        guard let fence = opener.first, fence == "`" || fence == "~" else { return true }
+        let run = opener.prefix(while: { $0 == fence }).count
+        // The block's last non-blank line after the opener.
+        var ix = min(last, lines.count - 1)
+        while ix > first,
+            lines[ix].allSatisfy({ $0 == " " || $0 == "\t" || $0 == ">" || $0 == "\r" })
+        {
+            ix -= 1
+        }
+        guard ix > first else { return false }
+        let closer = lines[ix]
+            .drop(while: { $0 == " " || $0 == "\t" || $0 == ">" })
+            .trimmingCharacters(in: .whitespaces)
+        return closer.count >= run && closer.allSatisfy { $0 == fence }
     }
 
     private static func inlines(of container: Markup, _ formulas: [String]) -> [InlineRun] {

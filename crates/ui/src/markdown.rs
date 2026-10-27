@@ -18,6 +18,7 @@ pub mod diff_fence;
 pub mod find;
 pub mod math;
 pub mod mend;
+pub mod mermaid;
 pub mod parser;
 pub mod render;
 pub mod selection;
