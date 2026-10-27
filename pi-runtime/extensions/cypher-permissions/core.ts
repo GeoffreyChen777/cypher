@@ -170,6 +170,9 @@ const ALWAYS_IN = "Always in ";
 /** Dangerous work: until the user's next message. */
 const TASK = "Allow for this task";
 
+/** How sure the reviewing model must be to approve a danger. */
+const DANGER_CONFIDENCE = 0.9;
+
 /** A reviewing model that failed to sign in (an expired session, a missing key). */
 const AUTH_FAILURE = /authenticat|unauthori[sz]ed|\b401\b|\b403\b|expired|log ?in|sign ?in|credential|api key|forbidden/i;
 
@@ -783,6 +786,7 @@ export class Permissions {
   private async review(
     request: Omit<JudgeRequest, "level" | "workspaceRoots" | "userMessages" | "recentToolCalls">,
     ctx: RequestContext,
+    minConfidence = this.config.judge.minConfidence,
   ): Promise<{ decision: "approve" | "ask-user"; reason: string; state: "approved" | "asked" | "unavailable" | "paused" }> {
     if (!ctx.complete) return { decision: "ask-user", reason: "No reviewing model is available here.", state: "unavailable" };
     const paused = this.judgePaused();
@@ -819,7 +823,7 @@ export class Permissions {
       return { decision: "ask-user", reason: `The reviewing model failed${why}`, state: "unavailable" };
     }
     this.noteReview("ok");
-    const verdict = parseVerdict(text, this.config.judge.minConfidence);
+    const verdict = parseVerdict(text, minConfidence);
     return { ...verdict, state: verdict.decision === "approve" ? "approved" : "asked" };
   }
 
@@ -1260,7 +1264,9 @@ export class Permissions {
    * depends on the line's risk tier (risk.ts):
    *
    * - dangerous: a human, every task: run once, or allow its patterns until
-   *   the user's next message;
+   *   the user's next message. A danger short of the most sensitive
+   *   (risk.ts `reviewable`) goes to the reviewing model first, which may run
+   *   it once when the user's own message asks for exactly it;
    * - local: the reviewing model, which remembers its approval for the chat;
    *   else a human: once, or always in this project by patterns for similar
    *   commands (the agent's, then each other command's category).
@@ -1374,12 +1380,20 @@ export class Permissions {
         return { ok: true, scope: "rule", by: "rule" } as const;
       }
       // Model first for what is not dangerous: it may run the command, and
-      // remembers its approval for this chat; otherwise the user decides, with its reason.
+      // remembers its approval for this chat. A danger short of the most
+      // sensitive (risk.ts `reviewable`): it may run it once, when the user's
+      // own message asks for exactly it. Otherwise the user decides, with its reason.
+      const reviewable =
+        dangerous &&
+        !onceOnly &&
+        line.parsed.kind !== "opaque" &&
+        // Every word of it known before it runs: the model sees the command, not what `$(…)` makes of it.
+        line.assessments!.every((assessment, index) => assessment.tier !== "danger" || (assessment.reviewable === true && !line.commands[index].words.includes(UNKNOWN)));
       let review: string | undefined;
-      if (mode === "assisted" && !dangerous) {
+      if (mode === "assisted" && (!dangerous || reviewable)) {
         const purpose = [proposal.label && `Purpose: ${proposal.label}`, proposal.reason && `Reason: ${proposal.reason}`].filter(Boolean).join("\n");
-        // An approval is remembered for the commands' own categories, never for patterns the agent proposed.
-        const memo = patterns.filter((pattern) => !pattern.proposed);
+        // An approval is remembered for the commands' own categories, never for patterns the agent proposed; a danger's, never.
+        const memo = dangerous ? [] : patterns.filter((pattern) => !pattern.proposed);
         const verdict = await this.review(
           {
             capability: "escalate",
@@ -1393,6 +1407,7 @@ export class Permissions {
             remembers: memo.map((pattern) => describePattern(pattern.match)),
           },
           ctx,
+          dangerous ? Math.max(this.config.judge.minConfidence, DANGER_CONFIDENCE) : undefined,
         );
         audit.judge = verdict.state;
         if (verdict.decision === "approve") {
@@ -1409,7 +1424,7 @@ export class Permissions {
         return { ok: false, reason } as const;
       }
       const lines: string[] = [];
-      if (dangerous && line.kind) lines.push(fact("Note", `Dangerous: it ${homeRelative(line.kind, this.home)}. This always asks.`));
+      if (dangerous && line.kind) lines.push(fact("Note", `Dangerous: it ${homeRelative(line.kind, this.home)}.${reviewable ? "" : " This always asks."}`));
       if (proposal.label) lines.push(fact("Purpose", proposal.label));
       lines.push(fact("Command", command));
       for (const pattern of patterns) lines.push(fact("Pattern", describePattern(pattern.match)));

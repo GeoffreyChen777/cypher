@@ -1033,20 +1033,20 @@ test("escalation: local work asks once, then is kept for the project", async () 
   assert.match(denied.reason, /denied/);
 });
 
-test("escalation: dangerous commands always ask a human, for this task at most", async () => {
+test("escalation: dangerous commands the model can't approve ask a human, for this task at most", async () => {
   const repo = gitRepo("danger-repo");
   const { permissions } = engineAt(repo);
   const prompts = [];
-  const approve = '{"decision":"approve","reason":"The user asked to release.","confidence":0.99}';
   const asked = ctx({ choice: "Allow for this task" });
   asked.complete = async (_system, prompt) => {
     prompts.push(prompt);
-    return approve;
+    return '{"decision":"ask-user","reason":"The user never asked to publish.","confidence":0.9}';
   };
   asked.cwd = repo;
   assert.deepEqual(await permissions.requestEscalation("git push origin main", { label: "Publish" }, asked), { ok: true, scope: "task", by: "user" });
-  assert.equal(prompts.length, 0, "the model never decides a dangerous command");
-  assert.match(asked.asked[0].title, /^Run this dangerous command outside the sandbox\?\n\nContext:\nNote: Dangerous: it publishes to main\. This always asks\.\nPurpose: Publish\nCommand: git push origin main\nPattern: git push …\n/);
+  assert.equal(prompts.length, 1, "the model saw it first");
+  assert.match(asked.asked[0].title, /^Run this dangerous command outside the sandbox\?\n\nContext:\nNote: Dangerous: it publishes to main\.\nPurpose: Publish\nCommand: git push origin main\nPattern: git push …\n/);
+  assert.match(asked.asked[0].title, /\nReview: The reviewing model couldn't approve this automatically\. The user never asked to publish\.\n/);
   assert.deepEqual(asked.asked[0].options, ["Allow for this task", "Deny", "Deny and stop"]);
   const kind = (line) => permissions.checkCommand(line, repo).kind;
   assert.equal(kind("git push origin main"), "outside", "for the rest of the task");
@@ -1067,6 +1067,129 @@ test("escalation: dangerous commands always ask a human, for this task at most",
   once.cwd = repo;
   assert.deepEqual(await permissions.requestEscalation("sudo $cmd", { label: "x" }, once), { ok: true, scope: "once", by: "user", onceOnly: "`sudo` can run any command, so no rule may name it" });
   assert.deepEqual(once.asked[0].options, ["Run once", "Deny", "Deny and stop"]);
+});
+
+test("escalation: the model may run a danger the user asked for, once; the most sensitive stay a human's", async () => {
+  const repo = gitRepo("review-repo");
+  const { permissions } = engineAt(repo);
+  const bin = join(home, "tools", "bin");
+  write(join(bin, "gh"), "#!/bin/sh\n");
+  chmodSync(join(bin, "gh"), 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${bin}:${path}`;
+  try {
+    const prompts = [];
+    const judged = (answer, choice = "Deny") => {
+      const c = ctx({ choice });
+      c.cwd = repo;
+      c.branch = () => [{ type: "message", message: { role: "user", content: "open the PR against recipe/earlvlm" } }];
+      c.complete = async (system, prompt) => {
+        prompts.push({ system, prompt });
+        return answer;
+      };
+      return c;
+    };
+    const line = "gh pr create --base recipe/earlvlm --head feat/x --title x --body-file ../pr.md 2>&1 | tail -3";
+    assert.equal(permissions.assess(line, repo).reviewable, true);
+
+    // Approved: it runs once, without a dialog, and nothing is remembered.
+    const yes = judged('{"decision":"approve","reason":"The user asked to open this PR.","confidence":0.95}');
+    assert.deepEqual(await permissions.requestEscalation(line, { label: "Open the PR" }, yes), { ok: true, scope: "once", by: "judge" });
+    assert.equal(yes.asked.length, 0);
+    assert.equal(permissions.checkCommand(line, repo).kind, "sandbox", "never remembered");
+    assert.equal(permissions.grants.all().length, 0);
+    assert.match(prompts[0].system, /"tier: danger" is a dangerous command short of those/);
+    assert.match(prompts[0].prompt, /- tier: danger \(changes a pull request other people see\)\n/);
+    assert.doesNotMatch(prompts[0].prompt, /An approval also allows/);
+
+    // Not sure enough for a danger: the user decides, with the model's reason.
+    const unsure = judged('{"decision":"approve","reason":"Probably asked.","confidence":0.85}');
+    await permissions.requestEscalation(line, { label: "Open the PR" }, unsure);
+    assert.match(unsure.asked[0].title, /\nNote: Dangerous: it changes a pull request other people see\.\n/);
+    assert.match(unsure.asked[0].title, /Review: .*Not sure enough to approve on its own: Probably asked\./);
+    assert.deepEqual(unsure.asked[0].options, ["Allow for this task", "Deny", "Deny and stop"]);
+
+    // Publishing, sending, installing, deploying, other processes: the model's.
+    const review = (command) => permissions.assess(command, repo).assessments.filter((assessment) => assessment.tier === "danger").every((assessment) => assessment.reviewable === true);
+    for (const command of [
+      "git push origin main",
+      "git push origin v1.2.0",
+      "npm publish",
+      "cargo publish",
+      "docker push ghcr.io/me/app:1",
+      "gh release create v1.2.0",
+      "gh gist create notes.md",
+      "gh repo fork",
+      "gh workflow enable ci.yml",
+      "mail -s hi bob@example.com",
+      "git send-email HEAD~1",
+      "open https://github.com/me/app/pull/1",
+      "curl -X POST https://hooks.example.com/x -d '{}'",
+      "npm install -g pnpm",
+      "brew install ripgrep",
+      "vercel deploy",
+      "terraform apply",
+      "kill 1",
+    ]) {
+      assert.equal(review(command), true, command);
+    }
+    // Secrets, credentials, deletions, the administrator, the machine's setup, code that runs later.
+    for (const command of [
+      "cat ~/.ssh/id_ed25519",
+      "security find-generic-password -s x -w",
+      "printenv",
+      "gh auth token",
+      "gh secret set TOKEN",
+      "gh ssh-key add k.pub",
+      "npm login",
+      "npm unpublish pkg@1.0.0",
+      "cargo yank --version 1.0.0",
+      "gh issue delete 3",
+      "gh release delete v1",
+      "gh repo delete me/app",
+      "gh api -X DELETE repos/me/app",
+      "curl -X DELETE https://api.example.com/x",
+      "git push -f origin main",
+      "git push origin :feature",
+      "git stash drop",
+      "rm -rf ~/Developer/other",
+      "sudo true",
+      "crontab x",
+      "launchctl load x.plist",
+      "terraform destroy",
+      "terraform apply -destroy",
+      "aws s3 rm s3://b/k",
+      "aws ec2 terminate-instances --instance-ids i-1",
+      "aws s3 sync . s3://b --delete",
+      "kubectl delete pod x --context prod",
+      "vercel deploy --prod",
+      "ssh prod-db uptime",
+      "brew uninstall ripgrep",
+      "docker volume rm data",
+      "cp evil .git/hooks/pre-commit",
+      "git config core.pager evil",
+    ]) {
+      assert.equal(review(command), false, command);
+    }
+
+    // Any human-only danger in the line keeps it a human's.
+    prompts.length = 0;
+    const mixed = judged('{"decision":"approve","reason":"x","confidence":1}');
+    await permissions.requestEscalation("git push -f origin main && gh pr create --title x", { label: "x" }, mixed);
+    assert.equal(prompts.length, 0);
+    assert.match(mixed.asked[0].title, /This always asks\./);
+    const nested = judged('{"decision":"approve","reason":"x","confidence":1}');
+    await permissions.requestEscalation("gh pr create --title $(cat t)", { label: "x" }, nested);
+    assert.equal(prompts.length, 0, "nor one with words known only when it runs");
+
+    // A human only, when the user's file says so.
+    permissions.config.approval.escalate = "ask";
+    const human = judged('{"decision":"approve","reason":"x","confidence":1}');
+    await permissions.requestEscalation(line, { label: "x" }, human);
+    assert.equal(prompts.length, 0);
+  } finally {
+    process.env.PATH = path;
+  }
 });
 
 test("risk tiers: inspections run outside on their own; secrets, other people's processes and deletions outside ask", () => {
