@@ -57,15 +57,21 @@ struct PiSessionModes: Decodable, Equatable {
     var orchestrate = false
     /// The chat's goal, unless none was set or it was cleared.
     var goal: Goal?
+    /// The live session explainer (`/explain`).
+    var explain = false
 
-    init(fast: Bool = false, codemode: Bool = true, orchestrate: Bool = false, goal: Goal? = nil) {
+    init(
+        fast: Bool = false, codemode: Bool = true, orchestrate: Bool = false, goal: Goal? = nil,
+        explain: Bool = false
+    ) {
         self.fast = fast
         self.codemode = codemode
         self.orchestrate = orchestrate
         self.goal = goal
+        self.explain = explain
     }
 
-    private enum CodingKeys: String, CodingKey { case fast, codemode, orchestrate, goal }
+    private enum CodingKeys: String, CodingKey { case fast, codemode, orchestrate, goal, explain }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -74,6 +80,8 @@ struct PiSessionModes: Decodable, Equatable {
         codemode = try c.decodeIfPresent(Bool.self, forKey: .codemode) ?? true
         orchestrate = try c.decodeIfPresent(Bool.self, forKey: .orchestrate) ?? false
         goal = try c.decodeIfPresent(Goal.self, forKey: .goal)
+        // Engines from before `/explain` send none: off.
+        explain = try c.decodeIfPresent(Bool.self, forKey: .explain) ?? false
     }
 }
 
@@ -172,6 +180,7 @@ enum SlashMenu {
     /// typed name finds the host's other commands too (`sections`).
     static let shownByDefault = [
         "permissions", "compact", "goal", "fast", "scripts", "orchestrate", "subagent-status",
+        "explain",
     ]
 
     /// slash_menu.rs `PERMISSIONS`: the composer's own command. Picking a
@@ -241,7 +250,7 @@ enum SlashMenu {
     static func placement(_ name: String) -> (group: SlashCommandGroup, advanced: Bool) {
         let name = name.lowercased()
         switch name {
-        case "compact", "export-html": return (.conversation, false)
+        case "compact", "export-html", "explain": return (.conversation, false)
         case "permissions", "goal", "fast", "scripts", "orchestrate": return (.agentModes, false)
         case "subagent-config": return (.subagents, true)
         case "subagents": return (.subagents, false)
@@ -265,6 +274,7 @@ enum SlashMenu {
         case "permissions": return .shieldCheck
         case "compact": return .foldVertical
         case "export-html": return .archiveUp
+        case "explain": return .document
         case "goal": return .flag
         case "fast": return .bolt
         case "scripts": return .code
@@ -290,6 +300,13 @@ enum SlashMenu {
                 SlashChoice(value: "on", description: "Let the main agent delegate to subagents"),
                 SlashChoice(value: "off", description: "Use subagents only when asked"),
                 SlashChoice(value: "status", description: "Show the current setting"),
+            ]
+        case "explain":
+            // The app's `/explain`; anything else typed after it is the focus.
+            return [
+                SlashChoice(value: "on", description: "Write the explainer now and keep it up to date"),
+                SlashChoice(value: "off", description: "Stop updating the explainer"),
+                SlashChoice(value: "status", description: "Show whether the explainer is on"),
             ]
         case "goal":
             // pi-goal's own completions and wording.
@@ -370,6 +387,7 @@ enum SlashMenu {
         case "fast": return facts.modes.map { onOff($0.fast) }
         case "scripts": return facts.modes.map { onOff($0.codemode) }
         case "orchestrate": return facts.modes.map { onOff($0.orchestrate) }
+        case "explain": return facts.modes.map { onOff($0.explain) }
         case "goal":
             guard let goal = facts.modes?.goal else { return nil }
             return SlashBadge(label: goalStatus(goal.status), tone: goal.status == "active" ? .on : .neutral)
@@ -391,8 +409,12 @@ enum SlashMenu {
         if command == permissions {
             return facts.permission.map { PermissionLevel.of(sandbox: $0).value == choice.value } ?? false
         }
-        guard command == "orchestrate", let modes = facts.modes else { return false }
-        return choice.value == (modes.orchestrate ? "on" : "off")
+        guard let modes = facts.modes else { return false }
+        switch command {
+        case "orchestrate": return choice.value == (modes.orchestrate ? "on" : "off")
+        case "explain": return choice.value == (modes.explain ? "on" : "off")
+        default: return false
+        }
     }
 
     /// slash_menu.rs `choice_summary`: the line above a command's choices,
@@ -405,6 +427,9 @@ enum SlashMenu {
         switch command {
         case "orchestrate":
             return "Adaptive orchestration is \(modes.orchestrate ? "on" : "off")"
+        case "explain":
+            return modes.explain
+                ? "The session explainer is on and follows the chat" : "The session explainer is off"
         case "goal":
             guard let goal = modes.goal else { return "No goal yet. Type one to start it." }
             return "\(goalStatus(goal.status)): \(goal.text)"

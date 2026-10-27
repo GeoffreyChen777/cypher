@@ -30,6 +30,9 @@ shows the path). Editing the file by hand works too.
   better than prose, and it renders [artifacts](artifacts.md), pages written
   in an ```` ```html artifact ```` fence. It ships with the app, not the
   Runtime.
+- While a chat's [session explainer](artifacts.md#the-session-explainer-explain)
+  is on, a second app extension (`crates/harness/src/pi/explain.ts`) adds a
+  block after the rest, asking the model to keep that page up to date.
 - A project's `.pi/APPEND_SYSTEM.md` is normally not used: Pi loads project
   resources only for trusted projects, and under Cypher it has no way to ask,
   so a project it has no stored trust decision for stays untrusted.

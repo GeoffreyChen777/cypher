@@ -53,6 +53,32 @@ background.
 The web view is macOS only. On Linux the surface shows the source, and Open
 in browser shows the page.
 
+## The session explainer (`/explain`)
+
+`/explain` asks the agent for a page titled "Session explainer" that explains
+the session's work: what was built or changed and the features it adds, how
+the parts fit together, the decisions made, and what is still open. Then it
+keeps the page up to date. While it is on, the agent ends every reply that
+changes the work by writing the page again under the same title, so the
+page's open tab reloads and every explainer card opens the newest version.
+Replies that change nothing (an answer to a question) leave it alone.
+
+- `/explain` or `/explain on` turns it on and writes the page now; on
+  already, it writes the page again.
+- `/explain <what to focus on>` does the same, focused on that; the focus
+  stays until another one replaces it.
+- `/explain off` stops the updates. The page stays in the chat.
+- `/explain status` says whether it is on.
+
+It is a Pi command from an extension the app loads into every Pi
+(`crates/harness/src/pi/explain.ts`), so it ships with the app. The state
+lives in the chat's Pi session (`cypher-explain.state` entries), and the `/`
+menu shows it as an On/Off badge under Conversation, on the desktop and the
+iPhone alike. While it is on, the instruction rides in the appended system
+prompt of every turn ([System prompt](system-prompt.md)). Each update is a
+whole page in the reply, so it costs output on every reply that changes the
+work.
+
 ## On the iPhone
 
 The iPhone app reads artifact fences the same way and shows the same card. A

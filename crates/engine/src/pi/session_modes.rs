@@ -1,7 +1,8 @@
 //! What the Pi plugins' per-chat switches are set to, for the composer's `/`
 //! menu: GPT Fast mode and codemode (the runtime's cypher-fast-mode.ts and
 //! cypher-codemode.ts), adaptive orchestration (pi-agent-squad
-//! `/orchestrate`) and the current goal (pi-goal).
+//! `/orchestrate`), the current goal (pi-goal) and the live session
+//! explainer (the app's `/explain`, crates/harness/src/pi/explain.ts).
 //!
 //! The plugins keep this state only as custom entries in the chat's Pi
 //! session file, the last entry of each type winning, and report it nowhere
@@ -25,6 +26,7 @@ const FAST_ENTRY: &str = "gpt-fast-pi.state";
 const CODEMODE_ENTRY: &str = "cypher-codemode.state";
 const ORCHESTRATE_ENTRY: &str = "orchestrator-mode";
 const GOAL_ENTRY: &str = "goal-state";
+const EXPLAIN_ENTRY: &str = "cypher-explain.state";
 
 /// Fast mode's default: `settings.json` `"pi-gpt-fast-mode": {"enabled": true}`.
 const FAST_DEFAULT_FIELD: &str = "pi-gpt-fast-mode";
@@ -48,6 +50,10 @@ pub struct PiSessionModes {
     /// The chat's goal, unless none was set or it was cleared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<PiGoal>,
+    /// The live session explainer: the chat's last `/explain` (on) or
+    /// `/explain off`; off by default.
+    #[serde(default)]
+    pub explain: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,6 +73,7 @@ impl Default for PiSessionModes {
             codemode: true,
             orchestrate: false,
             goal: None,
+            explain: false,
         }
     }
 }
@@ -84,6 +91,7 @@ struct Scan {
     codemode: Option<bool>,
     orchestrate: Option<bool>,
     goal: Option<Option<PiGoal>>,
+    explain: Option<bool>,
 }
 
 static SCANS: LazyLock<Mutex<HashMap<PathBuf, Scan>>> = LazyLock::new(Default::default);
@@ -98,6 +106,7 @@ pub fn read(session_file: Option<&Path>, agent_dir: &Path) -> PiSessionModes {
         codemode: scan.codemode.unwrap_or(true),
         orchestrate: scan.orchestrate.unwrap_or(false),
         goal: scan.goal.flatten(),
+        explain: scan.explain.unwrap_or(false),
     }
 }
 
@@ -163,6 +172,7 @@ fn apply(scan: &mut Scan, line: &[u8]) {
         Some(FAST_ENTRY) => scan.fast = enabled().or(scan.fast),
         Some(CODEMODE_ENTRY) => scan.codemode = enabled().or(scan.codemode),
         Some(ORCHESTRATE_ENTRY) => scan.orchestrate = enabled().or(scan.orchestrate),
+        Some(EXPLAIN_ENTRY) => scan.explain = enabled().or(scan.explain),
         Some(GOAL_ENTRY) => {
             if let Some(goal) = data.and_then(|data| data.get("goal")) {
                 scan.goal = Some(goal_of(goal));
@@ -231,13 +241,17 @@ mod tests {
         let mut file = std::fs::File::create(&path).unwrap();
         write!(
             file,
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             r#"{"type":"session","version":3,"id":"s"}"#.to_owned() + "\n",
             custom(
                 FAST_ENTRY,
                 serde_json::json!({ "version": 1, "enabled": true })
             ),
             custom(ORCHESTRATE_ENTRY, serde_json::json!({ "enabled": true })),
+            custom(
+                EXPLAIN_ENTRY,
+                serde_json::json!({ "version": 1, "enabled": true, "focus": "sync" })
+            ),
             // A message quoting an entry type is not an entry.
             r#"{"type":"message","message":{"content":"\"customType\":\"orchestrator-mode\""}}"#
                 .to_owned()
@@ -246,14 +260,18 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
         let modes = read(Some(&path), agent.path());
-        assert!(modes.fast && modes.orchestrate && modes.goal.is_none());
+        assert!(modes.fast && modes.orchestrate && modes.explain && modes.goal.is_none());
         assert!(modes.codemode, "codemode is on until a chat turns it off");
 
         // Appended later: the scan continues where it stopped.
         write!(
             file,
-            "{}{}{}",
+            "{}{}{}{}",
             custom(ORCHESTRATE_ENTRY, serde_json::json!({ "enabled": false })),
+            custom(
+                EXPLAIN_ENTRY,
+                serde_json::json!({ "version": 1, "enabled": false })
+            ),
             custom(
                 CODEMODE_ENTRY,
                 serde_json::json!({ "version": 1, "enabled": false })
@@ -266,7 +284,7 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
         let modes = read(Some(&path), agent.path());
-        assert!(modes.fast && !modes.orchestrate && !modes.codemode);
+        assert!(modes.fast && !modes.orchestrate && !modes.codemode && !modes.explain);
         assert_eq!(
             modes.goal,
             Some(PiGoal {
@@ -292,12 +310,13 @@ mod tests {
     }
 
     /// An engine from before codemode's switch sends no `codemode`; the UI
-    /// reads that as on, which is what those engines' Pi does with MCP.
+    /// reads that as on, which is what those engines' Pi does with MCP. One
+    /// from before `/explain` sends no `explain`: off, as it has no explainer.
     #[test]
     fn modes_without_codemode_read_as_on() {
         let modes: PiSessionModes =
             serde_json::from_str(r#"{"fast": true, "orchestrate": false}"#).unwrap();
-        assert!(modes.fast && modes.codemode);
+        assert!(modes.fast && modes.codemode && !modes.explain);
     }
 
     #[test]

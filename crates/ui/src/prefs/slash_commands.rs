@@ -30,6 +30,7 @@ pub const SHOWN_BY_DEFAULT: &[&str] = &[
     "scripts",
     "orchestrate",
     "subagent-status",
+    "explain",
 ];
 
 /// Turn on each [`SHOWN_BY_DEFAULT`] command not yet in `offered`, and record
@@ -143,7 +144,7 @@ pub fn placement(name: &str) -> Placement {
     let name = name.to_ascii_lowercase();
     let at = |group, advanced| Placement { group, advanced };
     match name.as_str() {
-        "compact" | "export-html" => at(Conversation, false),
+        "compact" | "export-html" | "explain" => at(Conversation, false),
         "goal" | "fast" | "scripts" | "orchestrate" => at(AgentModes, false),
         "subagent-config" => at(Subagents, true),
         "subagents" => at(Subagents, false),
@@ -171,6 +172,7 @@ pub fn icon(name: &str) -> &'static str {
     match name.as_str() {
         "compact" => icons::FOLD_VERTICAL,
         "export-html" => icons::ARCHIVE_UP_MINIMALISTIC,
+        "explain" => icons::DOCUMENT,
         "goal" => icons::FLAG,
         "fast" => icons::BOLT,
         "scripts" => icons::CODE,
@@ -261,7 +263,8 @@ mod tests {
                 "fast",
                 "scripts",
                 "orchestrate",
-                "subagent-status"
+                "subagent-status",
+                "explain"
             ])
         );
         assert_eq!(offered, names(SHOWN_BY_DEFAULT));
@@ -279,7 +282,14 @@ mod tests {
         offer_defaults(&mut shown, &mut offered);
         assert_eq!(
             shown,
-            names(&["compact", "goal", "fast", "orchestrate", "subagent-status"])
+            names(&[
+                "compact",
+                "goal",
+                "fast",
+                "orchestrate",
+                "subagent-status",
+                "explain"
+            ])
         );
     }
 
@@ -288,6 +298,7 @@ mod tests {
         let cases = [
             ("compact", icons::FOLD_VERTICAL),
             ("export-html", icons::ARCHIVE_UP_MINIMALISTIC),
+            ("explain", icons::DOCUMENT),
             ("goal", icons::FLAG),
             ("fast", icons::BOLT),
             ("scripts", icons::CODE),
@@ -318,6 +329,7 @@ mod tests {
         let cases = [
             ("compact", Conversation, false),
             ("export-html", Conversation, false),
+            ("explain", Conversation, false),
             ("goal", AgentModes, false),
             ("fast", AgentModes, false),
             ("scripts", AgentModes, false),

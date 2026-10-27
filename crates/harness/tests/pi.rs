@@ -298,10 +298,10 @@ fn subagents_with_file_tools_can_request_permission() {
     );
 }
 
-/// Every Pi, chat or discovery, loads the extension that tells the model
-/// what the chat renders.
+/// Every Pi, chat or discovery, loads the app's extensions: the one that
+/// tells the model what the chat renders, and `/explain`.
 #[test]
-fn every_pi_loads_the_chat_rendering_extension() {
+fn every_pi_loads_the_app_extensions() {
     let harness = harness();
     let request = request("scenario:happy");
     for cmd in [
@@ -322,15 +322,22 @@ fn every_pi_loads_the_chat_rendering_extension() {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        let at = args
+        let extensions: Vec<&std::path::Path> = args
             .iter()
-            .position(|arg| arg == "--extension")
-            .expect("--extension");
-        let path = std::path::Path::new(&args[at + 1]);
-        assert!(path.ends_with("cypher-chat-rendering.ts"), "{args:?}");
-        let source = std::fs::read_to_string(path).expect("extension written");
+            .enumerate()
+            .filter(|(_, arg)| *arg == "--extension")
+            .map(|(at, _)| std::path::Path::new(&args[at + 1]))
+            .collect();
+        let [rendering, explain] = extensions[..] else {
+            panic!("two --extension: {args:?}");
+        };
+        assert!(rendering.ends_with("cypher-chat-rendering.ts"), "{args:?}");
+        let source = std::fs::read_to_string(rendering).expect("extension written");
         assert!(source.contains("before_agent_start"));
         assert!(source.contains("mermaid fenced block"));
+        assert!(explain.ends_with("cypher-explain.ts"), "{args:?}");
+        let source = std::fs::read_to_string(explain).expect("extension written");
+        assert!(source.contains(r#"registerCommand("explain""#));
     }
 }
 
