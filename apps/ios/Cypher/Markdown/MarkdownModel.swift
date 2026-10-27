@@ -40,6 +40,9 @@ indirect enum MDBlock: Hashable {
     case paragraph([InlineRun])
     case heading(level: Int, [InlineRun])
     case codeBlock(language: String?, code: String)
+    /// A fence tagged `artifact` (```html artifact title="…"```): a page the
+    /// model wrote to be viewed. `closed` is false while its fence streams.
+    case artifact(kind: ArtifactKind, title: String?, code: String, closed: Bool)
     case blockquote([MDBlock])
     case list(orderedStart: Int?, items: [MDListItem])
     case table(header: [[InlineRun]], rows: [[[InlineRun]]], align: [MDAlign])
@@ -68,16 +71,35 @@ enum MarkdownParser {
         // Formulas become placeholders cmark leaves alone (MathSource.swift);
         // the rewrite keeps every line, so start lines index `source`.
         let math = MathSource.rewrite(source)
-        let document = Document(parsing: math?.source ?? source)
-        let formulas = math?.formulas ?? []
+        let parsed = math?.source ?? source
+        let document = Document(parsing: parsed)
+        let context = Context(
+            formulas: math?.formulas ?? [],
+            lines: parsed.split(separator: "\n", omittingEmptySubsequences: false))
         return document.children.compactMap { child in
-            guard let block = convertBlock(child, formulas) else { return nil }
+            guard let block = convertBlock(child, context) else { return nil }
             let line = child.range?.lowerBound.line ?? 1
             return TopBlock(startLine: line, block: block)
         }
     }
 
-    private static func convertBlock(_ markup: Markup, _ formulas: [String]) -> MDBlock? {
+    /// What the walk needs besides the node: the formulas behind the math
+    /// placeholders and the parsed source's lines (an artifact's fences).
+    private struct Context {
+        let formulas: [String]
+        let lines: [Substring]
+
+        /// The source lines `range` spans (1-based, inclusive).
+        func lines(of range: SourceRange?) -> ArraySlice<Substring> {
+            guard let range else { return [] }
+            let from = max(range.lowerBound.line - 1, 0)
+            let to = min(range.upperBound.line, lines.count)
+            return from < to ? lines[from..<to] : []
+        }
+    }
+
+    private static func convertBlock(_ markup: Markup, _ context: Context) -> MDBlock? {
+        let formulas = context.formulas
         switch markup {
         case let paragraph as Paragraph:
             return .paragraph(inlines(of: paragraph, formulas))
@@ -86,14 +108,21 @@ enum MarkdownParser {
         case let code as CodeBlock:
             var body = code.code
             if body.hasSuffix("\n") { body.removeLast() }
-            let lang = code.language.flatMap { $0.isEmpty ? nil : $0 }
+            // cmark hands over the whole info string; its first word is the
+            // language, as on the desktop.
+            let info = code.language ?? ""
+            if let (kind, title) = ArtifactFence.info(info) {
+                let closed = ArtifactFence.closed(context.lines(of: code.range))
+                return .artifact(kind: kind, title: title, code: body, closed: closed)
+            }
+            let lang = info.split(whereSeparator: \.isWhitespace).first.map(String.init)
             return .codeBlock(language: lang, code: body)
         case let quote as BlockQuote:
-            return .blockquote(quote.children.compactMap { convertBlock($0, formulas) })
+            return .blockquote(quote.children.compactMap { convertBlock($0, context) })
         case let list as UnorderedList:
-            return .list(orderedStart: nil, items: listItems(of: list, formulas))
+            return .list(orderedStart: nil, items: listItems(of: list, context))
         case let list as OrderedList:
-            return .list(orderedStart: Int(list.startIndex), items: listItems(of: list, formulas))
+            return .list(orderedStart: Int(list.startIndex), items: listItems(of: list, context))
         case let table as Markdown.Table:
             // `.cells`/`.rows` are lazy sequences — materialize eagerly.
             let header: [[InlineRun]] = table.head.cells.map { inlines(of: $0, formulas) }
@@ -123,12 +152,12 @@ enum MarkdownParser {
         }
     }
 
-    private static func listItems(of list: Markup, _ formulas: [String]) -> [MDListItem] {
+    private static func listItems(of list: Markup, _ context: Context) -> [MDListItem] {
         list.children.compactMap { child in
             guard let item = child as? ListItem else { return nil }
             let checked: Bool? = item.checkbox.map { $0 == .checked }
             return MDListItem(
-                checked: checked, children: item.children.compactMap { convertBlock($0, formulas) })
+                checked: checked, children: item.children.compactMap { convertBlock($0, context) })
         }
     }
 

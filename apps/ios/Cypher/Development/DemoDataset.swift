@@ -124,6 +124,13 @@ final class DemoDataset {
                 config: claude, lastMessagePreview: "Here is the quadratic formula.",
                 lastMessageAt: now - 2_000_000, createdAt: now - 2_100_000,
                 spaceId: cypher.id, lastSeenAt: now - 2_000_000),
+            // Artifacts in a reply (the mock harness's [mock:artifacts] showcase).
+            Chat(
+                id: "chat-artifacts", deviceId: "dev-mac", title: "Explain binary search",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "Step through it here.",
+                lastMessageAt: now - 1_900_000, createdAt: now - 1_950_000,
+                spaceId: cypher.id, lastSeenAt: now - 1_900_000),
             Chat(
                 id: "chat-deploy", deviceId: "dev-vps", title: "Wrangler deploy hygiene",
                 archived: false, cwd: edge.path, branch: nil, checkoutId: nil,
@@ -706,6 +713,16 @@ final class DemoDataset {
                     id: "m2", role: .assistant, parts: [.text(id: "t0", text: mathShowcase)],
                     createdAt: now - 2_000_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
             ]
+        case "chat-artifacts":
+            return [
+                MessageEntry(
+                    id: "m1", role: .user,
+                    parts: [.text(id: "t0", text: "How does binary search work? Show me.")],
+                    createdAt: now - 1_950_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                MessageEntry(
+                    id: "m2", role: .assistant, parts: [.text(id: "t0", text: artifactsShowcase)],
+                    createdAt: now - 1_900_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+            ]
         case "chat-permissions-story":
             return permissionStory(now: now)
         case "chat-permissions-card":
@@ -715,6 +732,123 @@ final class DemoDataset {
             return recoveryTranscript(for: chatId, now: now) ?? []
         }
     }
+
+    /// The reply of the mock harness's [mock:artifacts] showcase
+    /// (crates/harness/src/mock/artifacts.rs): an interactive HTML artifact,
+    /// an SVG artifact and a plain HTML fence.
+    private static let artifactsShowcase = #"""
+        Binary search halves the range it still has to look at on every step, so a sorted list of a million numbers takes at most 20 comparisons. Step through it here:
+
+        ```html artifact title="Binary search, step by step"
+        <!doctype html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <title>Binary search, step by step</title>
+        <style>
+          :root { color-scheme: light dark; font-family: -apple-system, system-ui, sans-serif; }
+          body { margin: 0; padding: 24px; background: Canvas; color: CanvasText; }
+          h1 { font-size: 18px; margin: 0 0 4px; }
+          p.lead { margin: 0 0 18px; opacity: .7; font-size: 13px; }
+          .cells { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 18px; }
+          .cell { width: 40px; height: 40px; border-radius: 8px; display: grid; place-items: center;
+                  font: 600 14px ui-monospace, monospace; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+                  transition: background .2s, opacity .2s, transform .2s; }
+          .cell.out { opacity: .25; }
+          .cell.mid { background: #6366f1; color: white; transform: translateY(-3px); }
+          .cell.found { background: #16a34a; color: white; }
+          .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; }
+          input { width: 70px; padding: 6px 8px; border-radius: 6px; border: 1px solid #8884; font-size: 14px; }
+          button { padding: 7px 14px; border-radius: 6px; border: 0; background: #6366f1; color: white; font-weight: 600; cursor: pointer; }
+          button.ghost { background: transparent; color: inherit; border: 1px solid #8886; }
+          #log { font: 13px ui-monospace, monospace; line-height: 1.7; white-space: pre-wrap; }
+        </style>
+        </head>
+        <body>
+        <h1>Binary search</h1>
+        <p class="lead">Pick a target, then step: each comparison discards half of what is left.</p>
+        <div class="controls">
+          <label>Target <input id="target" type="number" value="37"></label>
+          <button id="step">Step</button>
+          <button id="reset" class="ghost">Reset</button>
+        </div>
+        <div class="cells" id="cells"></div>
+        <div id="log"></div>
+        <script>
+          const values = [2, 5, 8, 12, 16, 23, 29, 37, 41, 48, 56, 63, 72, 81, 90, 99];
+          const cells = document.getElementById("cells");
+          const log = document.getElementById("log");
+          let lo, hi, done, steps;
+          function reset() {
+            lo = 0; hi = values.length - 1; done = false; steps = 0; log.textContent = "";
+            render(-1);
+          }
+          function render(mid, found) {
+            cells.innerHTML = "";
+            values.forEach((v, i) => {
+              const el = document.createElement("div");
+              el.className = "cell" + (i < lo || i > hi ? " out" : "") + (i === mid ? (found ? " found" : " mid") : "");
+              el.textContent = v;
+              cells.appendChild(el);
+            });
+          }
+          function step() {
+            if (done) return;
+            const target = Number(document.getElementById("target").value);
+            if (lo > hi) { log.textContent += `Range empty: ${target} is not in the list.\n`; done = true; return; }
+            const mid = (lo + hi) >> 1;
+            steps++;
+            if (values[mid] === target) {
+              log.textContent += `Step ${steps}: values[${mid}] = ${values[mid]} — found it.\n`;
+              done = true; render(mid, true); return;
+            }
+            const lower = values[mid] < target;
+            log.textContent += `Step ${steps}: values[${mid}] = ${values[mid]} ${lower ? "<" : ">"} ${target}, keep the ${lower ? "right" : "left"} half.\n`;
+            if (lower) lo = mid + 1; else hi = mid - 1;
+            render(mid);
+          }
+          document.getElementById("step").onclick = step;
+          document.getElementById("reset").onclick = reset;
+          document.getElementById("target").oninput = reset;
+          reset();
+        </script>
+        </body>
+        </html>
+        ```
+
+        The same idea as a picture — each level is one comparison, and the range shrinks by half:
+
+        ```svg artifact title="Halving the range"
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 220" font-family="system-ui, sans-serif" font-size="12">
+          <rect width="420" height="220" fill="#ffffff"/>
+          <g fill="#6366f1" fill-opacity="0.85">
+            <rect x="20" y="20" width="380" height="28" rx="6"/>
+            <rect x="210" y="70" width="190" height="28" rx="6"/>
+            <rect x="210" y="120" width="95" height="28" rx="6"/>
+            <rect x="257" y="170" width="48" height="28" rx="6" fill="#16a34a"/>
+          </g>
+          <g fill="#ffffff" font-weight="600">
+            <text x="30" y="39">16 candidates</text>
+            <text x="220" y="89">8 left</text>
+            <text x="220" y="139">4 left</text>
+            <text x="262" y="189">2</text>
+          </g>
+          <g fill="#555555">
+            <text x="20" y="89">step 1: 37 &gt; 29</text>
+            <text x="20" y="139">step 2: 37 &lt; 56</text>
+            <text x="20" y="189">step 3: 37 = 37 ✓</text>
+          </g>
+        </svg>
+        ```
+
+        And a plain HTML snippet, which keeps its code but can still be previewed from the button beside Copy:
+
+        ```html
+        <button style="padding:8px 16px;border-radius:8px;border:0;background:#6366f1;color:white;font:600 14px system-ui">
+          Search
+        </button>
+        ```
+        """#
 
     /// The reply of the mock harness's [mock:math] showcase
     /// (crates/harness/src/mock/math.rs): every delimiter, prices and code

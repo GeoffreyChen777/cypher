@@ -118,7 +118,8 @@ impl ArtifactKind {
 }
 
 /// An artifact fence's info string, `html artifact title="Sorting"`: its kind
-/// and title. `None` unless a bare `artifact` word marks it. Without a
+/// and title. These fence rules are mirrored by the iPhone app
+/// (`apps/ios/Cypher/Markdown/ArtifactFence.swift`; see `protocol/README.md`). `None` unless a bare `artifact` word marks it. Without a
 /// language the page is HTML; a language that doesn't render (`python
 /// artifact`) stays an ordinary code block.
 fn artifact_info(info: &str) -> Option<(ArtifactKind, Option<String>)> {

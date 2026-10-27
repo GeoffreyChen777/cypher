@@ -26,8 +26,7 @@ session's side panel.
 - Plain ```` ```html ```` and ```` ```svg ```` fences keep their code and get
   a **Preview** button beside Copy that opens them the same way.
 - Side chats open their artifacts in the same side panel.
-- The iPhone app and other Markdown readers show the fence as an ordinary
-  `html` code block.
+- Other Markdown readers show the fence as an ordinary `html` code block.
 
 ## The Artifact surface
 
@@ -50,6 +49,23 @@ background.
 
 The web view is macOS only. On Linux the surface shows the source, and Open
 in browser shows the page.
+
+## On the iPhone
+
+The iPhone app reads artifact fences the same way and shows the same card. A
+tap opens the page full screen: Close on the left, and on the right a menu to
+switch between Preview and Source and to copy the source. Its "Writing…" state
+works the same way as the desktop's. Plain ```` ```html ```` and
+```` ```svg ```` fences get a Preview button in their header.
+
+The page runs in a web view with a non-persistent store, so nothing it saves
+outlives the viewer. As on the desktop, it loads with no base URL, scripts and
+styles from the web load, and tapped web links open in Safari. The page stays
+loaded while you look at its source. There's no side panel and no reload in
+place: a revised artifact is a new card to tap.
+
+The demo fixture is `-demo -route chat:chat-artifacts`. Add `-sheet artifact`
+(or `-sheet artifact-source`) to open the first card that shows.
 
 ## How the agent knows
 
