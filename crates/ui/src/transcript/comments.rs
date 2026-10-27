@@ -281,6 +281,7 @@ impl Transcript {
             selection: Some(self.selection_ui_for(row_id, cx)),
             scope: self.scope,
             link: self.link_handler.clone(),
+            code_refs: Some(self.code_ref_ui(cx)),
         };
         let highlight = self.code_highlight_for(row_id, tree, Some(block_ix), cx);
         let Some(top) = tree.blocks.get(block_ix) else {

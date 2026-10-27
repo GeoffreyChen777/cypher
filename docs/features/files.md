@@ -49,6 +49,33 @@ Narrow panes show one at a time.
   Show Hex, Open with Default App and Reveal in Finder; Hex shows the first
   64 KiB.
 
+## From the chat
+
+- **File links** in a reply (Markdown links to `src/a.rs#L12`, `a.rs:12`,
+  `file:///…`) open the file in the session's Files tab, at the line.
+- **File references** in inline code (`` `core/context.py:146-160` ``,
+  `` `file.py:128` ``, `` `src/lib.rs` ``) show as chips: a file glyph, the
+  file name and muted lines. They sit in the prose without a background (and
+  without the inline-code color); the pointer brings up a light wash.
+  A span counts when it is one path-shaped token naming a file and either
+  cites lines or has a folder; bare names without lines, globs, placeholders
+  (`rank_<n>.pt`) and URLs stay code. Copying a chip copies the reference as
+  written.
+- **Hovering** a chip for a moment opens a preview of the cited lines with
+  three lines around them, syntax colored, from the file as it is in the
+  checkout now (not when the reply was written), on a frosted card that eases
+  out of the chip. The card stays while the pointer is on it, so its code
+  scrolls, selects and copies; it also has Copy (the resolved path and lines)
+  and Open.
+- **Clicking** a chip opens the file in the Files tab with the cited lines
+  selected.
+- A reference is looked up at the checkout root first, then by the Go to file
+  search for files whose path ends in it (agents often write paths relative to
+  a package, or just the name). A bare name is first read as the one longer
+  path of that name elsewhere in the same reply. When several files match, the
+  card lists them instead of picking one; a path that isn't found or lies
+  outside the checkout says so.
+
 ## RPCs
 
 Every file RPC takes `{chatId, cwd, path}` (plus `targetDeviceId` to reach
