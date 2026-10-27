@@ -17,6 +17,7 @@ mod html;
 mod math;
 mod permissions;
 mod progress;
+mod refs;
 mod translation;
 
 pub use changes::{MARKER as CHANGES_MARKER, ROUNDS as CHANGES_ROUNDS};
@@ -29,6 +30,7 @@ pub use permissions::{
     TALL_CARD_MARKER as TALL_PERMISSION_CARD_MARKER,
 };
 pub use progress::MARKER as PROGRESS_MARKER;
+pub use refs::MARKER as REFS_MARKER;
 pub use translation::{
     MARKER as TRANSLATION_MARKER, Mode as TranslationMode, PROMPT as TRANSLATION_PROMPT,
     REPLACE_MARKER as TRANSLATION_REPLACE_MARKER, settled as translation_settled,
@@ -320,9 +322,9 @@ impl Harness for MockHarness {
                 controls.interrupt,
             ));
         }
-        // Diff fence, math, HTML preview and translation showcases
-        // ([`DIFFS_MARKER`], [`MATH_MARKER`], [`HTML_MARKER`],
-        // [`TRANSLATION_MARKER`]): their reply replaces the
+        // Diff fence, math, HTML preview, file reference and translation
+        // showcases ([`DIFFS_MARKER`], [`MATH_MARKER`], [`HTML_MARKER`],
+        // [`REFS_MARKER`], [`TRANSLATION_MARKER`]): their reply replaces the
         // script's text and tools. `CYPHER_MOCK_TRANSLATION=1` (or `replace`)
         // answers every prompt with the translation showcase, so a message
         // typed into the demo translates too.
@@ -343,6 +345,8 @@ impl Harness for MockHarness {
             Some(math::reply())
         } else if request.prompt.contains(HTML_MARKER) {
             Some(html::reply())
+        } else if request.prompt.contains(REFS_MARKER) {
+            Some(refs::reply())
         } else {
             translation_mode.map(translation::reply)
         };

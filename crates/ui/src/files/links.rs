@@ -12,6 +12,9 @@ pub struct FileLink {
     pub path: String,
     /// 1-based line, from a `:12` suffix or a `#L12` fragment.
     pub line: Option<usize>,
+    /// The last line of a cited range (`:12-20`, `#L12-L20`); `None` for
+    /// a single line.
+    pub end_line: Option<usize>,
     /// Written with a trailing slash: a folder.
     pub dir: bool,
 }
@@ -38,16 +41,21 @@ pub fn parse(url: &str) -> Option<FileLink> {
     };
     let rest = rest.split_once('?').map_or(rest, |(path, _)| path);
     let mut path = percent_decode(rest).unwrap_or_else(|| rest.to_owned());
-    let mut line = fragment.and_then(fragment_line);
-    if line.is_none()
+    let mut lines = fragment.and_then(fragment_lines);
+    if lines.is_none()
         && let Some((head, at)) = split_line_suffix(&path)
     {
         path = head;
-        line = Some(at);
+        lines = Some(at);
     }
     let dir = path.ends_with('/');
     let path = path.trim_end_matches('/').to_owned();
-    (!path.is_empty()).then_some(FileLink { path, line, dir })
+    (!path.is_empty()).then_some(FileLink {
+        path,
+        line: lines.map(|(first, _)| first),
+        end_line: lines.and_then(|(first, last)| (last > first).then_some(last)),
+        dir,
+    })
 }
 
 /// `path` inside the checkout at `cwd`, relative to it (`""` is the root),
@@ -95,43 +103,57 @@ fn has_scheme(url: &str) -> bool {
         && scheme
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-        && line_number(rest.split(':').next().unwrap_or_default()).is_none()
+        && line_range(rest.split(':').next().unwrap_or_default()).is_none()
 }
 
-/// The line of a `L12`, `L12-L20` or `L12C3` fragment.
-fn fragment_line(fragment: &str) -> Option<usize> {
-    let digits = fragment
-        .strip_prefix('L')
-        .or_else(|| fragment.strip_prefix('l'))?;
-    let end = digits
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(digits.len());
-    digits[..end].parse().ok().filter(|&n| n > 0)
-}
-
-/// `a.rs:12`, `a.rs:12:5` or `a.rs:12-20` → (`a.rs`, 12).
-fn split_line_suffix(path: &str) -> Option<(String, usize)> {
-    let (head, last) = path.rsplit_once(':')?;
-    let last_line = line_number(last)?;
-    let (head, line) = match head.rsplit_once(':') {
-        Some((before, prev)) if !before.is_empty() && is_digits(prev) => {
-            (before, prev.parse().ok()?)
-        }
-        _ => (head, last_line),
+/// The lines of a `L12`, `L12-L20`, `L12-20` or `L12C3` fragment.
+fn fragment_lines(fragment: &str) -> Option<(usize, usize)> {
+    let leading_number = |text: &str| -> Option<usize> {
+        let digits = text.strip_prefix('L').or_else(|| text.strip_prefix('l'))?;
+        let end = digits
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(digits.len());
+        digits[..end].parse().ok().filter(|&n| n > 0)
     };
-    (!head.is_empty() && line > 0).then(|| (head.to_owned(), line))
+    let first = leading_number(fragment)?;
+    let last = fragment
+        .split_once('-')
+        .and_then(|(_, to)| leading_number(to).or_else(|| to.parse().ok()))
+        .filter(|&last| last >= first)
+        .unwrap_or(first);
+    Some((first, last))
 }
 
-/// `12` or `12-20` → 12.
-fn line_number(text: &str) -> Option<usize> {
-    let first = text
-        .split_once('-')
-        .map_or(text, |(from, to)| if is_digits(to) { from } else { "" });
-    if is_digits(first) {
-        first.parse().ok()
-    } else {
-        None
+/// `a.rs:12`, `a.rs:12:5` or `a.rs:12-20` → (`a.rs`, (12, 12 or 20)).
+fn split_line_suffix(path: &str) -> Option<(String, (usize, usize))> {
+    let (head, last) = path.rsplit_once(':')?;
+    let last_lines = line_range(last)?;
+    let (head, lines) = match head.rsplit_once(':') {
+        Some((before, prev)) if !before.is_empty() && is_digits(prev) => {
+            let line = prev.parse().ok()?;
+            (before, (line, line))
+        }
+        _ => (head, last_lines),
+    };
+    (!head.is_empty() && lines.0 > 0).then(|| (head.to_owned(), lines))
+}
+
+/// `12` → (12, 12); `12-20` → (12, 20). A reversed range keeps its start.
+fn line_range(text: &str) -> Option<(usize, usize)> {
+    let (first, last) = match text.split_once('-') {
+        Some((from, to)) if is_digits(to) => (from, Some(to)),
+        Some(_) => return None,
+        None => (text, None),
+    };
+    if !is_digits(first) {
+        return None;
     }
+    let first: usize = first.parse().ok()?;
+    let last = last
+        .and_then(|last| last.parse().ok())
+        .filter(|&last| last >= first)
+        .unwrap_or(first);
+    Some((first, last))
 }
 
 fn is_digits(text: &str) -> bool {
@@ -163,7 +185,15 @@ mod tests {
         Some(FileLink {
             path: path.trim_end_matches('/').into(),
             line,
+            end_line: None,
             dir: path.ends_with('/'),
+        })
+    }
+
+    fn range(path: &str, first: usize, last: usize) -> Option<FileLink> {
+        Some(FileLink {
+            end_line: Some(last),
+            ..link(path, Some(first))?
         })
     }
 
@@ -172,9 +202,12 @@ mod tests {
         assert_eq!(parse("src/a.rs"), link("src/a.rs", None));
         assert_eq!(parse("./src/a.rs:12"), link("./src/a.rs", Some(12)));
         assert_eq!(parse("/abs/a.rs:12:5"), link("/abs/a.rs", Some(12)));
-        assert_eq!(parse("a.rs:12-20"), link("a.rs", Some(12)));
+        assert_eq!(parse("a.rs:12-20"), range("a.rs", 12, 20));
+        assert_eq!(parse("a.rs:20-12"), link("a.rs", Some(20)));
         assert_eq!(parse("a.rs#L7"), link("a.rs", Some(7)));
-        assert_eq!(parse("a.rs#L7-L9"), link("a.rs", Some(7)));
+        assert_eq!(parse("a.rs#L7-L9"), range("a.rs", 7, 9));
+        assert_eq!(parse("a.rs#L7-9"), range("a.rs", 7, 9));
+        assert_eq!(parse("a.rs#L7C3"), link("a.rs", Some(7)));
         assert_eq!(parse("guide/x.md#usage"), link("guide/x.md", None));
         assert_eq!(parse("file:///abs/my%20a.rs"), link("/abs/my a.rs", None));
         assert_eq!(parse("file://localhost/abs/a.rs"), link("/abs/a.rs", None));
