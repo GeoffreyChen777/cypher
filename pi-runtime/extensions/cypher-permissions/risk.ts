@@ -43,6 +43,33 @@ export interface Assessment {
    * with the same key (every tag of a release, not a force-push).
    */
   key?: string;
+  /** A danger the reviewing model may approve once, when the user's own message asks for it (`reviewable`). */
+  reviewable?: true;
+}
+
+/**
+ * Dangers a human alone decides, whatever the user said in chat: secrets and
+ * credentials, deleting or discarding, the administrator, the machine's own
+ * setup, anything that can run code later, and what the line leaves unknown.
+ */
+const HUMAN_ONLY_KIND =
+  /secret|credential|keys|environment|administrator|how this machine runs|scheduled jobs|disk|raw data|delet|drops|discards|removes|rewrites|force-push|run a program|runs? code later|access to this machine|Cypher's own data|protected target|known only when it runs|cannot tell|downloads? code/i;
+/** Subcommands that delete, or that reach credentials, keys, secrets or ownership. */
+const HUMAN_ONLY_VERB =
+  /^(delete|destroy|remove|rm|rmi|rb|purge|prune|terminate|uninstall|unpublish|yank|reset|down|deregister|revoke|drop)([-:].*)?$|^.+:(delete|destroy|remove|purge)$|^(login|logout|adduser|signin|signout|token|tokens|owner|access|team|auth|secret|secrets|variable|variables|env|ssh-key|gpg-key|deploy-key|match|cert|sigh|pem|configure|credential|credentials|key|keys)$/i;
+/** Options that delete. */
+const HUMAN_ONLY_OPTION = /^(--delete|--prune|--purge|--destroy|-destroy|-XDELETE|--request=DELETE|--method=DELETE)$/i;
+
+/**
+ * Every other danger (publishing, deploying, sending, installing, a pull
+ * request) the reviewing model may approve once, when the user's own message
+ * asks for exactly it.
+ */
+function reviewable(assessment: Assessment, view: CommandView): Assessment {
+  if (HUMAN_ONLY_KIND.test(assessment.kind ?? "")) return assessment;
+  if (view.positionals.some((word) => HUMAN_ONLY_VERB.test(word))) return assessment;
+  if (view.args.some((word, i) => HUMAN_ONLY_OPTION.test(word) || (/^(-X|--request|--method)$/.test(word) && /^DELETE$/i.test(view.args[i + 1] ?? "")))) return assessment;
+  return { ...assessment, reviewable: true };
 }
 
 /** The danger a kind names, without the specifics that differ from command to command (which tag). */
@@ -615,7 +642,7 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
     return { tier: "local", kind: assessment.kind ?? `runs ${basename(next[0] ?? "a program")} through ${view.program}` };
   }
   const kill = killAssessment(view, facts);
-  if (kill?.tier === "danger") return kill;
+  if (kill?.tier === "danger") return reviewable(kill, view);
   const danger =
     pathDanger(command, view, facts) ??
     destroyDanger(command, view, facts) ??
@@ -625,7 +652,7 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
       ? (gitOptionDanger(view) ?? gitConfigDanger(view) ?? gitPushDanger(command, view, facts) ?? gitDiscardDanger(command, view, facts) ?? gitHistoryDanger(view))
       : undefined) ??
     DANGER.map((entry) => dangerMatches(entry, view, facts)).find((kind) => kind !== undefined);
-  if (danger) return { tier: "danger", kind: danger, key: dangerKey(danger) };
+  if (danger) return reviewable({ tier: "danger", kind: danger, key: dangerKey(danger) }, view);
   if (kill) return kill;
   const entry = INSPECT.find((candidate) => inspectMatches(candidate, view));
   if (entry) return { tier: "inspect", ...(entry.outside ? { outside: true } : {}) };
