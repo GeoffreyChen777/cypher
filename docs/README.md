@@ -9,6 +9,7 @@ how it works. Everything else is grouped here by who reads it.
 - [Chat appearance](features/chat-appearance.md) — chat fonts, colors, spacing and wide-screen mode.
 - [Appearance colors](features/appearance-colors.md) — app themes and Terminal, Git and Sidebar color overrides.
 - [Files](features/files.md) — the desktop file manager: tree, file operations, previews.
+- [Artifacts](features/artifacts.md) — pages the agent writes in the chat, opened in the side panel.
 - [Git diff layouts](features/git-diff.md) — unified and side-by-side diffs in the Git pane.
 - [Turn changes](features/turn-changes.md) — the files each round of a conversation changed, and their diffs.
 - [Context recovery](features/context-recovery.md) — restarting a failed turn with supplementary context a model writes.

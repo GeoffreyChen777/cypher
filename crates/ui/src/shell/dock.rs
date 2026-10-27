@@ -8,8 +8,9 @@ use super::*;
 
 /// One dock surface tab: a git-diff page (each tab its own [`Changes`]
 /// viewer — multiple diff panels, user request), a file browser/editor over
-/// the chat's checkout ([`FilesPanel`]), or a temporary Side Chat (round
-/// 21). `Picker` is the empty state ("Open a surface").
+/// the chat's checkout ([`FilesPanel`]), a temporary Side Chat, or a page
+/// from the chat ([`crate::artifacts::ArtifactPanel`]). `Picker` is the
+/// empty state ("Open a surface").
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum DockSurface {
     #[default]
@@ -17,6 +18,7 @@ pub enum DockSurface {
     Diff(u64),
     Files(u64),
     SideChat(u64),
+    Artifact(u64),
 }
 
 /// A tile's right dock state. Everything defaults CLOSED (user request —
@@ -489,6 +491,10 @@ impl Shell {
                     .side_chats
                     .get(id)
                     .map(|panel| (*surface, panel.read(cx).tab_title())),
+                DockSurface::Artifact(id) => slot
+                    .artifacts
+                    .get(id)
+                    .map(|panel| (*surface, panel.read(cx).tab_title())),
                 DockSurface::Picker => None,
             })
             .collect()
@@ -586,9 +592,47 @@ impl Shell {
                     panel.update(cx, |panel, cx| panel.ensure_content(cx));
                 }
             }
-            DockSurface::SideChat(_) | DockSurface::Picker => {}
+            DockSurface::SideChat(_) | DockSurface::Artifact(_) | DockSurface::Picker => {}
         }
         cx.notify();
+    }
+
+    /// An artifact card's click: the page opens in its own tab — or the tab
+    /// already showing it (a named page's revision included) comes forward
+    /// with it.
+    pub(in crate::shell) fn open_artifact(
+        &mut self,
+        sid: SlotId,
+        artifact: crate::markdown::artifact::ArtifactOpen,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
+            return;
+        };
+        let open = slot
+            .artifacts
+            .iter()
+            .find(|(_, panel)| panel.read(cx).shows(&artifact))
+            .map(|(id, panel)| (*id, panel.clone()));
+        self.ensure_dock_open(sid, cx);
+        let id = match open {
+            Some((id, panel)) => {
+                panel.update(cx, |panel, cx| panel.show(artifact, cx));
+                id
+            }
+            None => {
+                let panel = cx.new(|cx| crate::artifacts::ArtifactPanel::new(artifact, cx));
+                let Some(slot) = self.tiles.slots.get_mut(&sid) else {
+                    return;
+                };
+                slot.artifact_seq += 1;
+                let id = slot.artifact_seq;
+                slot.artifacts.insert(id, panel);
+                slot.dock.surfaces.push(DockSurface::Artifact(id));
+                id
+            }
+        };
+        self.set_dock_active(sid, DockSurface::Artifact(id), cx);
     }
 
     /// The picker's Files card / the `+` menu's Files row: a fresh file
@@ -793,6 +837,9 @@ impl Shell {
                 slot.files.remove(&id);
                 slot.files_subs.remove(&id);
             }
+            DockSurface::Artifact(id) => {
+                slot.artifacts.remove(&id);
+            }
             DockSurface::SideChat(_) | DockSurface::Picker => {}
         }
         if slot.dock.active == surface {
@@ -912,6 +959,11 @@ impl Shell {
                     } else {
                         self.render_surface_picker(sid, cx)
                     }
+                }
+                DockSurface::Artifact(id) if slot.artifacts.contains_key(&id) => {
+                    let panel = slot.artifacts.get(&id).cloned().expect("checked");
+                    panel.update(cx, |panel, cx| panel.set_header_right(header_right, cx));
+                    panel.into_any_element()
                 }
                 _ => self.render_surface_picker(sid, cx),
             }
@@ -1585,6 +1637,7 @@ fn rail_tab_button(
     let icon_path = match surface {
         DockSurface::Diff(_) => icons::GIT_BRANCH,
         DockSurface::Files(_) => icons::FOLDER_WITH_FILES,
+        DockSurface::Artifact(_) => icons::CODE,
         _ => icons::CHAT_ROUND_LINE,
     };
     let group: SharedString = format!("dock-rail-tab-{sid}-{ix}").into();

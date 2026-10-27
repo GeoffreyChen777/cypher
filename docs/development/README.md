@@ -121,13 +121,18 @@ Tests per platform:
   headless engine with the mock harness; `scripts/dev-app.sh [local|dev]` runs a
   UI attached to it over Unix IPC. Data lives in `~/.cypher-development/`;
   `CYPHER_DEV_INSTANCE=<name>` keeps a second checkout's instance separate.
+  Typing `[mock:artifacts]` into a chat there answers with chat
+  [artifacts](../features/artifacts.md), and `[mock:artifacts:revise]` with a
+  revision of the page.
 - `scripts/dev-demo.sh` starts an offline engine seeded with demo chats. `--work` seeds a
   run of thoughts between commands; `--permissions` seeds permission control: a settled
   deploy (commands outside the sandbox, blocked, denied, approvals filed under their
   calls), chats waiting on a permission card and on an ordinary question, and command
   rules in Settings → Permissions (the mock harness's `[mock:permissions]` and
   `[mock:permission-card]` markers); `--diffs` seeds an answer with chat-style and
-  git-patch ```` ```diff ```` fences (the `[mock:diffs]` marker); `--changes` seeds four
+  git-patch ```` ```diff ```` fences (the `[mock:diffs]` marker); `--artifacts` seeds a
+  chat whose answer holds artifacts and whose second round revises one (the
+  `[mock:artifacts]` and `[mock:artifacts:revise]` markers); `--changes` seeds four
   rounds on a small Git project (`scripts/demo/tasks-app`), each answer listing the files
   its round changed (the `[mock:changes:N]` markers); `--translation` seeds a Chinese
   request worked in English, each step between tool calls translating in the background

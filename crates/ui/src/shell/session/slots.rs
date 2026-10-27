@@ -75,6 +75,15 @@ impl Shell {
                     .is_ok()
             }));
         });
+        // Its artifacts open in this tile's side panel.
+        let shell = cx.weak_entity();
+        transcript.update(cx, |transcript, _| {
+            transcript.set_artifact_handler(std::rc::Rc::new(move |artifact, _, cx| {
+                shell
+                    .update(cx, |shell, cx| shell.open_artifact(sid, artifact, cx))
+                    .ok();
+            }));
+        });
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let subagents = cx.new(|cx| SubagentsPanel::new(state.clone(), cx));
         // "PaletteSearch" context: ↵ / ⇧↵ / esc stay unbound so they bubble
@@ -222,6 +231,8 @@ impl Shell {
                 side_chats: std::collections::HashMap::new(),
                 side_chat_subs: std::collections::HashMap::new(),
                 side_chat_seq: 0,
+                artifacts: std::collections::HashMap::new(),
+                artifact_seq: 0,
                 _subscriptions: subscriptions,
             },
         );

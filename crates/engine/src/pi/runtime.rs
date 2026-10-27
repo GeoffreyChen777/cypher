@@ -753,6 +753,7 @@ const CYPHER_EXTENSIONS: &[&str] = &[
     "cypher-fast-mode.ts",
     "cypher-codemode.ts",
     "cypher-permissions.ts",
+    "cypher-artifacts.ts",
 ];
 
 fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String> {

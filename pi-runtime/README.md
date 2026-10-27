@@ -193,6 +193,14 @@ keeps that list until the chat itself runs `/scripts`. Each toggle is a
 `cypher-codemode.state` session entry, which the engine reads for the `/`
 menu.
 
+## Artifacts
+
+Cypher's own `extensions/cypher-artifacts.ts` adds an `<artifacts>` section to
+every turn's system prompt. The section tells the model it can show the user a
+page by writing it in a fence tagged `artifact` (```` ```html artifact
+title="…" ````). The desktop chat renders that fence as a card that opens the
+page in the side panel; see [Artifacts](../docs/features/artifacts.md).
+
 ## Adding MCP servers
 
 MCP is Pi's built-in support; the bundle no longer ships pi-mcp-adapter

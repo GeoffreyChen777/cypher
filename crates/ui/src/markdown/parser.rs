@@ -66,6 +66,16 @@ pub enum Block {
         language: Option<String>,
         code: String,
     },
+    /// A fence tagged `artifact` (```` ```html artifact title="…" ````): a
+    /// page the model wrote to be viewed, not read. The chat shows a card
+    /// that opens it in the side panel ([`super::artifact`]).
+    Artifact {
+        kind: ArtifactKind,
+        title: Option<String>,
+        code: String,
+        /// The closing fence has arrived (`false` while it streams).
+        closed: bool,
+    },
     BlockQuote {
         children: Vec<Block>,
     },
@@ -80,6 +90,118 @@ pub enum Block {
         align: Vec<TableAlign>,
     },
     Rule,
+}
+
+/// What an artifact renders as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArtifactKind {
+    Html,
+    Svg,
+}
+
+impl ArtifactKind {
+    /// The kind a fence language names; `None` for one that doesn't render.
+    pub fn for_language(language: &str) -> Option<Self> {
+        match language.to_ascii_lowercase().as_str() {
+            "html" | "htm" | "xhtml" => Some(Self::Html),
+            "svg" => Some(Self::Svg),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Html => "HTML",
+            Self::Svg => "SVG",
+        }
+    }
+}
+
+/// An artifact fence's info string, `html artifact title="Sorting"`: its kind
+/// and title. `None` unless a bare `artifact` word marks it. Without a
+/// language the page is HTML; a language that doesn't render (`python
+/// artifact`) stays an ordinary code block.
+fn artifact_info(info: &str) -> Option<(ArtifactKind, Option<String>)> {
+    let words = info_words(info);
+    if !words
+        .iter()
+        .any(|(key, value)| value.is_none() && key.eq_ignore_ascii_case("artifact"))
+    {
+        return None;
+    }
+    let kind = match words
+        .iter()
+        .find(|(key, value)| value.is_none() && !key.eq_ignore_ascii_case("artifact"))
+    {
+        Some((language, _)) => ArtifactKind::for_language(language)?,
+        None => ArtifactKind::Html,
+    };
+    let title = words
+        .into_iter()
+        .find(|(key, value)| value.is_some() && key.eq_ignore_ascii_case("title"))
+        .and_then(|(_, value)| value)
+        .map(|title| title.trim().to_string())
+        .filter(|title| !title.is_empty());
+    Some((kind, title))
+}
+
+/// An info string's words: bare ones (`html`) and `key=value` pairs whose
+/// value may be quoted (`title="Two words"`, `title='x'`).
+fn info_words(info: &str) -> Vec<(String, Option<String>)> {
+    let mut words = Vec::new();
+    let mut chars = info.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        if chars.peek().is_none() {
+            return words;
+        }
+        let mut key = String::new();
+        while let Some(c) = chars.next_if(|c| !c.is_whitespace() && *c != '=') {
+            key.push(c);
+        }
+        if chars.next_if_eq(&'=').is_none() {
+            words.push((key, None));
+            continue;
+        }
+        let mut value = String::new();
+        match chars.next_if(|c| *c == '"' || *c == '\'') {
+            Some(quote) => {
+                for c in chars.by_ref() {
+                    if c == quote {
+                        break;
+                    }
+                    value.push(c);
+                }
+            }
+            None => {
+                while let Some(c) = chars.next_if(|c| !c.is_whitespace()) {
+                    value.push(c);
+                }
+            }
+        }
+        words.push((key, Some(value)));
+    }
+}
+
+/// Whether a fenced block's source (opening fence through the block's end)
+/// ends with its closing fence. Container markers (`>`, indentation) before
+/// either fence are skipped.
+fn fence_closed(block: &str) -> bool {
+    fn strip(line: &str) -> &str {
+        line.trim_start_matches([' ', '\t', '>']).trim_end()
+    }
+    let mut lines = block.lines();
+    let Some(open) = lines.next().map(strip) else {
+        return false;
+    };
+    let Some(fence) = open.chars().next().filter(|c| matches!(c, '`' | '~')) else {
+        return false;
+    };
+    let len = open.chars().take_while(|c| *c == fence).count();
+    lines
+        .last()
+        .map(strip)
+        .is_some_and(|close| close.chars().count() >= len && close.chars().all(|c| c == fence))
 }
 
 /// GFM column alignment for a table (mdast `align`; `None` renders as Left).
@@ -135,6 +257,7 @@ pub fn parse_full(source: &str) -> BlockTree {
         .into_offset_iter()
         .collect();
     let mut cur = Cursor {
+        source,
         events: &events,
         ix: 0,
         paren_math: paren_math.as_deref().unwrap_or(&[]),
@@ -251,6 +374,8 @@ fn rewrite_tex_delimiters(source: &str) -> Option<(String, Vec<usize>)> {
 }
 
 struct Cursor<'a, 'e> {
+    /// The parsed text: block ranges index it.
+    source: &'a str,
     events: &'a [(Event<'e>, Range<usize>)],
     ix: usize,
     /// Offsets of formulas written `\(…\)` ([`rewrite_tex_delimiters`]).
@@ -297,6 +422,10 @@ fn is_block_tag(tag: &Tag) -> bool {
 /// Consume a `Start(tag)` and everything through its matching `End`, producing
 /// block(s). Unknown containers are transparent (children splice in).
 fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
+    let range = cur
+        .peek()
+        .map(|(_, range)| range.clone())
+        .unwrap_or_default();
     let Some(Event::Start(tag)) = cur.next_event() else {
         return Vec::new();
     };
@@ -311,6 +440,10 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
             runs: parse_inline_container(cur, &InlineStyle::default()),
         }],
         Tag::CodeBlock(kind) => {
+            let artifact = match &kind {
+                CodeBlockKind::Fenced(info) => artifact_info(info),
+                CodeBlockKind::Indented => None,
+            };
             let language = match kind {
                 CodeBlockKind::Fenced(info) => {
                     let lang = info.split_whitespace().next().unwrap_or("");
@@ -333,6 +466,15 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
             // Fenced blocks carry a trailing newline; render per-line without it.
             if code.ends_with('\n') {
                 code.pop();
+            }
+            if let Some((kind, title)) = artifact {
+                let closed = cur.source.get(range).is_some_and(fence_closed);
+                return vec![Block::Artifact {
+                    kind,
+                    title,
+                    code,
+                    closed,
+                }];
             }
             vec![Block::CodeBlock { language, code }]
         }
@@ -827,7 +969,7 @@ impl IncrementalParser {
         // rules and tables have no inline tail to mend.
         if matches!(
             last.block,
-            Block::CodeBlock { .. } | Block::Rule | Block::Table { .. }
+            Block::CodeBlock { .. } | Block::Artifact { .. } | Block::Rule | Block::Table { .. }
         ) {
             return;
         }

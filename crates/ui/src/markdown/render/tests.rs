@@ -482,7 +482,11 @@ fn inline_color_changes_refresh_cached_runs() {
 #[test]
 fn code_block_base_color_preserves_colored_syntax_and_other_renderers() {
     for mut theme in [Theme::dark(), Theme::light()] {
-        assert_eq!(code_block_background(&theme), theme.ink(0.035));
+        let plate = match theme.appearance {
+            crate::kit::theme::Appearance::Dark => theme.ink(0.035),
+            crate::kit::theme::Appearance::Light => gpui::hsla(0.0, 0.0, 1.0, 0.5),
+        };
+        assert_eq!(code_block_background(&theme), plate);
         let foreground = gpui::rgb(0x6655aa).into();
         theme.code_block_text = Some(foreground);
         theme.code_block_background = Some(gpui::rgb(0xf0f0f0).into());

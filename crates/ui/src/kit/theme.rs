@@ -1187,12 +1187,27 @@ pub fn inline_code_text(theme: &Theme) -> Hsla {
 pub fn inline_code_wash(theme: &Theme) -> Hsla {
     theme.inline_code_background.unwrap_or(theme.code_wash)
 }
-/// Fenced code block fill: the chat override, else a faint ink wash.
+/// Fenced code block fill: the chat override, else a plate that sits a step
+/// above the chat. On dark that is a faint white wash; on light the same ink
+/// turns to black and sinks the block into the grey chat, while pure white
+/// glares beside the prose, so it is a white wash halfway to white: lifted,
+/// not lit, over whatever background the chat has.
 pub fn code_block_background(theme: &Theme) -> Hsla {
     theme
         .code_block_background
-        .unwrap_or_else(|| theme.ink(0.035))
+        .unwrap_or_else(|| match theme.appearance {
+            Appearance::Dark => theme.ink(0.035),
+            Appearance::Light => LIGHT_CODE_PLATE,
+        })
 }
+
+/// The light code plate: half-white over the chat background.
+const LIGHT_CODE_PLATE: Hsla = Hsla {
+    h: 0.0,
+    s: 0.0,
+    l: 1.0,
+    a: 0.5,
+};
 
 #[cfg(test)]
 mod tests;

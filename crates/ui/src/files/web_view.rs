@@ -12,17 +12,18 @@
 //! dialogs suppress every web preview while they show ([`set_suppressed`]),
 //! and the Files surface hides its own while its menu is open.
 //!
-//! macOS only: elsewhere HTML opens as source ([`AVAILABLE`]).
+//! macOS only: elsewhere HTML opens as source ([`AVAILABLE`]). Chat
+//! artifacts ([`crate::artifacts`]) show in the same view.
 
 use std::rc::Rc;
 
 use gpui::{AnyElement, Bounds, ElementId, Pixels, SharedString, prelude::*};
 
 /// Whether this platform can show an HTML preview.
-pub(super) const AVAILABLE: bool = cfg!(target_os = "macos");
+pub const AVAILABLE: bool = cfg!(target_os = "macos");
 
 /// What a preview shows.
-pub(super) enum Source<'a> {
+pub enum Source<'a> {
     /// A file on this machine, as saved: loaded from disk so its relative
     /// stylesheets, scripts and images (anywhere under `root`) load too.
     File { path: &'a str, root: &'a str },
@@ -37,19 +38,19 @@ pub(super) enum Source<'a> {
 
 /// One Files surface's web view (created hidden; shown by painting
 /// [`WebView::element`]).
-pub(super) struct WebView {
+pub struct WebView {
     inner: Rc<native::Inner>,
 }
 
 impl WebView {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             inner: native::Inner::new(),
         }
     }
 
     /// Show `source`, unless `key` names what is already loaded.
-    pub(super) fn load(&self, key: u64, source: Source<'_>) {
+    pub fn load(&self, key: u64, source: Source<'_>) {
         if self.inner.key.replace(Some(key)) != Some(key) {
             match source {
                 Source::File { path, root } => self.inner.load_file(path, root),
@@ -58,9 +59,15 @@ impl WebView {
         }
     }
 
+    /// Round the page's corners by `radius` points (it paints above gpui,
+    /// so a rounded frame drawn around it can't clip it).
+    pub fn set_corner_radius(&self, radius: f64) {
+        self.inner.set_corner_radius(radius);
+    }
+
     /// The element the web view tracks; `suppressed` keeps it hidden (a menu
     /// over it).
-    pub(super) fn element(&self, id: SharedString, suppressed: bool) -> AnyElement {
+    pub fn element(&self, id: SharedString, suppressed: bool) -> AnyElement {
         let inner = self.inner.clone();
         gpui::canvas(
             |_, _, _| {},
@@ -286,6 +293,15 @@ mod native {
             });
             LIVE.with_borrow_mut(|live| live.push(Rc::downgrade(&inner)));
             inner
+        }
+
+        pub(super) fn set_corner_radius(&self, radius: f64) {
+            unsafe {
+                let layer: *mut Object = msg_send![self.container, layer];
+                if !layer.is_null() {
+                    let _: () = msg_send![layer, setCornerRadius: radius];
+                }
+            }
         }
 
         pub(super) fn load(&self, html: &str, base: Option<&str>) {
@@ -663,6 +679,8 @@ mod native {
                 mounts: Cell::new(0),
             })
         }
+
+        pub(super) fn set_corner_radius(&self, _radius: f64) {}
 
         pub(super) fn load(&self, _html: &str, _base: Option<&str>) {}
 
