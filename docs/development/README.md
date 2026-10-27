@@ -133,7 +133,9 @@ Tests per platform:
   request worked in English, each step between tool calls translating in the background
   while the next tools run, then the answer — one chat appending translations, one
   replacing them (the `[mock:translation]` and `[mock:translation:replace]` markers;
-  paced, and every typed message plays the same run).
+  paced, and every typed message plays the same run). A prompt containing
+  `[mock:refs]` gets an answer citing this repository's files as inline code, to try
+  the file-reference chips in a chat opened on a Cypher checkout.
 - `scripts/dev-ios.sh` runs the iOS Dev bundle against a local Edge.
 - `dev` mode syncs through a local Edge: [Local Edge development](local-edge.md).
 - `scripts/e2e-smoke.sh` runs two headless engines against a local Edge.
