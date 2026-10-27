@@ -33,8 +33,11 @@ session's side panel.
 Each page opens as its own surface in the right dock (the `</>` icon on the
 rail). Opening the card again brings the tab forward. A **named** artifact
 (one with `title=`) that the agent writes again under the same title is a
-revision: it reloads the open tab instead of adding one. Unnamed fences each
-get their own tab.
+revision of the same page: once its fence closes, the page's open tab reloads
+by itself (without coming forward), and every card with that title, the
+earlier ones included, opens the newest version. A new title is a page of its
+own; the agent keeps the title unless you ask for a new page or to keep the
+old one. Unnamed fences each get their own tab.
 
 - **Preview / Source**: the page in a web view, or its syntax-colored source.
 - **Copy** copies the source.
@@ -49,6 +52,32 @@ background.
 
 The web view is macOS only. On Linux the surface shows the source, and Open
 in browser shows the page.
+
+## The session explainer (`/explain`)
+
+`/explain` asks the agent for a page titled "Session explainer" that explains
+the session's work: what was built or changed and the features it adds, how
+the parts fit together, the decisions made, and what is still open. Then it
+keeps the page up to date. While it is on, the agent ends every reply that
+changes the work by writing the page again under the same title, so the
+page's open tab reloads and every explainer card opens the newest version.
+Replies that change nothing (an answer to a question) leave it alone.
+
+- `/explain` or `/explain on` turns it on and writes the page now; on
+  already, it writes the page again.
+- `/explain <what to focus on>` does the same, focused on that; the focus
+  stays until another one replaces it.
+- `/explain off` stops the updates. The page stays in the chat.
+- `/explain status` says whether it is on.
+
+It is a Pi command from an extension the app loads into every Pi
+(`crates/harness/src/pi/explain.ts`), so it ships with the app. The state
+lives in the chat's Pi session (`cypher-explain.state` entries), and the `/`
+menu shows it as an On/Off badge under Conversation, on the desktop and the
+iPhone alike. While it is on, the instruction rides in the appended system
+prompt of every turn ([System prompt](system-prompt.md)). Each update is a
+whole page in the reply, so it costs output on every reply that changes the
+work.
 
 ## On the iPhone
 
@@ -72,7 +101,8 @@ The demo fixture is `-demo -route chat:chat-artifacts`. Add `-sheet artifact`
 The app's chat-rendering block, which the engine loads into every Pi it
 starts (`crates/harness/src/pi/chat-rendering.ts`), tells the model about
 artifacts next to Mermaid diagrams: the fence, self-contained pages, and
-revising a page under the same title. It sits at the front of the appended
+revising a page under the same title (or making a separate one under a new
+title). It sits at the front of the appended
 system prompt, so every model gets it, and it ships with the app rather than
 the Pi runtime. See [System prompt](system-prompt.md).
 

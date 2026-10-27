@@ -6,7 +6,8 @@
 //! (Attach files), then the commands turned on in Settings → Commands under
 //! the same group headers as that page, each with a badge for what it
 //! controls ("On" for Fast mode, a paused goal, how full the context is). A
-//! command that takes named choices — `/orchestrate on|off|status`, `/goal
+//! command that takes named choices — `/orchestrate on|off|status`, `/explain
+//! on|off|status`, `/goal
 //! pause|resume|…`, `/provider add` — shows a chevron, and choosing it (or
 //! typing its name and a space) opens the list of its choices, the one in
 //! effect checked.
@@ -53,6 +54,14 @@ const ORCHESTRATE: [Choice; 3] = [
     choice("on", "Let the main agent delegate to subagents"),
     choice("off", "Use subagents only when asked"),
     choice("status", "Show the current setting"),
+];
+
+// The app's `/explain` (crates/harness/src/pi/explain.ts); anything else
+// typed after it is what the explainer focuses on.
+const EXPLAIN: [Choice; 3] = [
+    choice("on", "Write the explainer now and keep it up to date"),
+    choice("off", "Stop updating the explainer"),
+    choice("status", "Show whether the explainer is on"),
 ];
 
 // pi-goal's own completions and wording.
@@ -102,6 +111,7 @@ pub fn permission_for(value: &str) -> Option<SandboxLevel> {
 pub fn choices(command: &str) -> &'static [Choice] {
     match command {
         "orchestrate" => &ORCHESTRATE,
+        "explain" => &EXPLAIN,
         "goal" => &GOAL,
         "provider" => &PROVIDER,
         PERMISSIONS => &PERMISSION_CHOICES,
@@ -392,6 +402,7 @@ pub fn command_badge(command: &str, facts: &Facts) -> Option<Badge> {
         "fast" => facts.modes.map(|modes| on_off(modes.fast)),
         "scripts" => facts.modes.map(|modes| on_off(modes.codemode)),
         "orchestrate" => facts.modes.map(|modes| on_off(modes.orchestrate)),
+        "explain" => facts.modes.map(|modes| on_off(modes.explain)),
         "goal" => facts.modes?.goal.as_ref().map(|goal| {
             let tone = if goal.status == "active" {
                 Tone::On
@@ -440,6 +451,7 @@ pub fn choice_in_effect(command: &str, choice: &Choice, facts: &Facts) -> bool {
         ("orchestrate", Some(modes)) => {
             choice.value == if modes.orchestrate { "on" } else { "off" }
         }
+        ("explain", Some(modes)) => choice.value == if modes.explain { "on" } else { "off" },
         _ => false,
     }
 }
@@ -457,6 +469,14 @@ pub fn choice_summary(command: &str, facts: &Facts) -> Option<String> {
             "Adaptive orchestration is {}",
             if modes.orchestrate { "on" } else { "off" }
         )),
+        "explain" => Some(
+            if modes.explain {
+                "The session explainer is on and follows the chat"
+            } else {
+                "The session explainer is off"
+            }
+            .into(),
+        ),
         "goal" => Some(match &modes.goal {
             Some(goal) => format!("{}: {}", goal_status(&goal.status), goal.text),
             None => "No goal yet. Type one to start it.".into(),
@@ -615,6 +635,7 @@ mod tests {
             fast: true,
             codemode: false,
             orchestrate: false,
+            explain: true,
             goal: Some(PiGoal {
                 status: "paused".into(),
                 text: "Ship the menu".into(),
@@ -656,6 +677,16 @@ mod tests {
         assert_eq!(command_badge("fast", &unknown), None);
         assert_eq!(command_badge("compact", &unknown), None);
 
+        assert_eq!(
+            command_badge("explain", &facts),
+            Some(badge("On", Tone::On))
+        );
+        assert!(choice_in_effect("explain", &EXPLAIN[0], &facts));
+        assert!(!choice_in_effect("explain", &EXPLAIN[1], &facts));
+        assert_eq!(
+            choice_summary("explain", &facts).as_deref(),
+            Some("The session explainer is on and follows the chat")
+        );
         assert!(choice_in_effect("orchestrate", &ORCHESTRATE[1], &facts));
         assert!(!choice_in_effect("orchestrate", &ORCHESTRATE[0], &facts));
         assert_eq!(

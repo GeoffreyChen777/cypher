@@ -62,6 +62,7 @@ pub use chips::*;
 mod code_ref;
 mod highlight;
 use highlight::*;
+mod artifacts;
 mod attachments;
 mod find;
 pub mod rail;
@@ -288,6 +289,13 @@ pub struct Transcript {
     /// Opens the replies' artifacts (the shell's side panel); `None` shows
     /// their cards inert.
     artifact_handler: Option<crate::markdown::artifact::ArtifactHandler>,
+    /// Takes the named pages' new revisions as they land.
+    artifact_revised: Option<crate::markdown::artifact::ArtifactRevised>,
+    /// The named pages' newest revisions, which their cards open.
+    artifacts: Rc<RefCell<artifacts::ArtifactIndex>>,
+    /// Armed at attach like [`Self::veil_attach_pending`]: the replay's
+    /// pages index without reloading anything.
+    artifacts_attach_pending: bool,
     /// Embedded (temporary Side Chat) layout: narrow-panel row gutters and a
     /// smaller first-row top inset instead of the main surface's titlebar
     /// chrome gap. Also disables the annotation surface (no Comment pill, no
@@ -448,9 +456,20 @@ impl Transcript {
         self.link_handler = Some(handler);
     }
 
-    /// Open the replies' artifacts (and HTML fences' Preview) with `handler`.
-    pub fn set_artifact_handler(&mut self, handler: crate::markdown::artifact::ArtifactHandler) {
-        self.artifact_handler = Some(handler);
+    /// Open the replies' artifacts (and HTML fences' Preview) with `handler`
+    /// — a named page at its newest revision — and hand `revised` each
+    /// revision as it lands.
+    pub fn set_artifact_handler(
+        &mut self,
+        handler: crate::markdown::artifact::ArtifactHandler,
+        revised: crate::markdown::artifact::ArtifactRevised,
+    ) {
+        let index = self.artifacts.clone();
+        self.artifact_handler = Some(Rc::new(move |artifact, window, cx| {
+            let artifact = index.borrow().latest(artifact);
+            handler(artifact, window, cx)
+        }));
+        self.artifact_revised = Some(revised);
     }
 
     /// A temporary Side Chat transcript: the EXISTING
@@ -552,6 +571,9 @@ impl Transcript {
             scope,
             link_handler: None,
             artifact_handler: None,
+            artifact_revised: None,
+            artifacts: Rc::default(),
+            artifacts_attach_pending: true,
             embedded,
             bottom_clearance: 0.0,
             viewport_size: None,

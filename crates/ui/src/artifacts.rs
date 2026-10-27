@@ -349,9 +349,11 @@ impl Render for ArtifactPanel {
         };
         // The page sits on a card of its own: a hairline frame around the
         // native view (inset by the border, its own corners rounded to
-        // match), on white like a browser page until the page paints. The
-        // source shows on the same card: the code wash over the opaque card
-        // tone.
+        // match). The web view paints the page's own background (white
+        // unless the page sets one), so the card keeps the theme's tone: a
+        // white card showed through the 1px inset as a bright ring in dark
+        // mode. The source shows on the same card: the code wash over the
+        // opaque card tone.
         let card = div()
             .flex_1()
             .min_h_0()
@@ -362,11 +364,7 @@ impl Render for ArtifactPanel {
             .rounded(px(CARD_RADIUS))
             .border_1()
             .border_color(theme.border)
-            .bg(if preview {
-                gpui::white()
-            } else {
-                theme.surface_card
-            })
+            .bg(theme.surface_card)
             .overflow_hidden()
             .child(
                 div()

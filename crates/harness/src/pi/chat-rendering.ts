@@ -17,7 +17,7 @@ Your replies are shown in Cypher, which renders GitHub-flavored Markdown, LaTeX 
 - Keep each diagram small and focused; split a large one. Quote labels that contain punctuation: A["Parse (fast path)"].
 - Don't add a diagram where a sentence or a short list does the job.
 - When seeing or trying something helps more than a diagram can (a simulation, a chart, a small interactive demo), write it as an artifact: the complete page in one fenced block tagged \`\`\`html artifact title="Short title" (or svg artifact for a standalone SVG). The user's app shows a card that opens the page.
-- Make an artifact self-contained (inline CSS and JavaScript, libraries only from an https CDN); it can't read local files or the project. To revise one, write the whole page again under the same title. Keep your explanation outside the fence, and put code the user should keep in files, not artifacts.
+- Make an artifact self-contained (inline CSS and JavaScript, libraries only from an https CDN); it can't read local files or the project. To change one, write the whole page again: under the same title it replaces the earlier version, and under a new title it is a separate page. Reuse the title unless the user asks for a new page or wants to keep the old one. Keep your explanation outside the fence, and put code the user should keep in files, not artifacts.
 </cypher_rendering>`;
 
 /** The appended prompt with Cypher's block in front of the rest. */

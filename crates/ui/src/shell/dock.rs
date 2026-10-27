@@ -635,6 +635,25 @@ impl Shell {
         self.set_dock_active(sid, DockSurface::Artifact(id), cx);
     }
 
+    /// A named page's revision landed in the chat: its open tab reloads in
+    /// place, without coming forward.
+    pub(in crate::shell) fn refresh_artifact(
+        &mut self,
+        sid: SlotId,
+        artifact: crate::markdown::artifact::ArtifactOpen,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(panel) = self.tiles.slots.get(&sid).and_then(|slot| {
+            slot.artifacts
+                .values()
+                .find(|panel| panel.read(cx).shows(&artifact))
+                .cloned()
+        }) else {
+            return;
+        };
+        panel.update(cx, |panel, cx| panel.show(artifact, cx));
+    }
+
     /// The picker's Files card / the `+` menu's Files row: a fresh file
     /// browser tab over the session's checkout.
     fn add_files_surface(&mut self, sid: SlotId, window: &mut Window, cx: &mut Context<Self>) {
