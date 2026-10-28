@@ -653,6 +653,72 @@ fn field_mutators_round_trip() {
     assert_eq!(dev.last_seen_at, Some(ts(6_000)));
 }
 
+fn home(device_id: &str, space_id: &str, cwd: &str, session: &str) -> ChatHome {
+    ChatHome {
+        device_id: device_id.into(),
+        space_id: space_id.into(),
+        cwd: cwd.into(),
+        harness_session_id: session.into(),
+        harness_session_cwd: cwd.into(),
+    }
+}
+
+#[test]
+fn rehome_chat_moves_location_fields_only() {
+    let mut ws = RegistryDoc::new("dev-a");
+    let mut row = chat("chat-1", "dev-a");
+    row.space_id = Some("space-a".into());
+    row.checkout_id = Some("checkout-a".into());
+    row.harness_session_id = Some("/a/agent-sessions/s.jsonl".into());
+    row.harness_session_cwd = Some("/tmp/repo".into());
+    row.pinned = true;
+    ws.upsert_chat(&row).unwrap();
+    ws.rename_chat("chat-1", "Kept").unwrap();
+
+    let to = home("dev-b", "space-b", "/srv/repo", "/b/agent-sessions/s.jsonl");
+    assert!(ws.rehome_chat("chat-1", &to).unwrap());
+    assert!(!ws.rehome_chat("nope", &to).unwrap());
+
+    let moved = ws.chat("chat-1").unwrap().unwrap();
+    assert_eq!(moved.device_id, "dev-b");
+    assert_eq!(moved.space_id.as_deref(), Some("space-b"));
+    assert_eq!(moved.cwd.as_deref(), Some("/srv/repo"));
+    assert_eq!(moved.branch, None);
+    assert_eq!(moved.checkout_id, None);
+    assert_eq!(
+        moved.harness_session_id.as_deref(),
+        Some("/b/agent-sessions/s.jsonl")
+    );
+    assert_eq!(moved.harness_session_cwd.as_deref(), Some("/srv/repo"));
+    assert_eq!(moved.title.as_deref(), Some("Kept"));
+    assert!(moved.pinned);
+    assert_eq!(moved.config, row.config);
+}
+
+/// Both ends of a migration write the same home; whichever clock wins, the
+/// replicas agree.
+#[test]
+fn rehome_written_by_both_hosts_converges() {
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    a.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+
+    let to = home("dev-b", "space-b", "/srv/repo", "/b/s.jsonl");
+    b.rehome_chat("chat-1", &to).unwrap();
+    a.rehome_chat("chat-1", &to).unwrap();
+    a.rename_chat("chat-1", "Renamed meanwhile").unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+
+    let on_a = a.chat("chat-1").unwrap().unwrap();
+    assert_eq!(on_a, b.chat("chat-1").unwrap().unwrap());
+    assert_eq!(on_a.device_id, "dev-b");
+    assert_eq!(on_a.cwd.as_deref(), Some("/srv/repo"));
+    assert_eq!(on_a.title.as_deref(), Some("Renamed meanwhile"));
+}
+
 #[test]
 fn delete_chat_tombstones_row_and_session() {
     let mut ws = RegistryDoc::new("dev-a");

@@ -296,6 +296,20 @@ pub mod methods {
     /// transcript at a settled anchor and re-point the SAME chat at a
     /// freshly materialized, truncated Pi session. Pi-only, like the fork.
     pub const REWIND_SESSION: &str = "RewindSession";
+    /// Move root chats (with their child chats) to another project, on this
+    /// or another device (stream of `ChatMigrationEvent`s). Answered by the
+    /// chats' current host, which drives the destination with the calls
+    /// below.
+    pub const MIGRATE_CHATS: &str = "MigrateChats";
+    /// Session migration, engine to engine: open a staging folder for the
+    /// destination project.
+    pub const BEGIN_CHAT_MIGRATION: &str = "BeginChatMigration";
+    /// One base64 slice of a staged migration file.
+    pub const WRITE_CHAT_MIGRATION_CHUNK: &str = "WriteChatMigrationChunk";
+    /// Install the staged files and become the chats' host.
+    pub const COMMIT_CHAT_MIGRATION: &str = "CommitChatMigration";
+    /// Drop a migration's staging folder.
+    pub const ABORT_CHAT_MIGRATION: &str = "AbortChatMigration";
 
     /// How one method is answered and routed. The engine derives its routing
     /// predicates from [`SPECS`], so adding a method means adding its constant
@@ -520,6 +534,13 @@ pub mod methods {
         // session there too.
         MethodSpec::unary(FORK_SESSION).forwardable(),
         MethodSpec::unary(REWIND_SESSION).forwardable(),
+        // A migration runs on the chats' current host; the staging calls
+        // land on the destination project's device.
+        MethodSpec::stream(MIGRATE_CHATS).forwardable(),
+        MethodSpec::unary(BEGIN_CHAT_MIGRATION).forwardable(),
+        MethodSpec::unary(WRITE_CHAT_MIGRATION_CHUNK).forwardable(),
+        MethodSpec::unary(COMMIT_CHAT_MIGRATION).forwardable(),
+        MethodSpec::unary(ABORT_CHAT_MIGRATION).forwardable(),
     ];
 
     /// The spec for `name`, or `None` for an unknown method.

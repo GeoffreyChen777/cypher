@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use cypher_proto::{Chat, ChatConfig, Device, Session, Space};
+use cypher_proto::{Chat, ChatConfig, ChatHome, Device, Session, Space};
 
 use crate::schema::DocError;
 
@@ -967,6 +967,33 @@ impl RegistryDoc {
             chat_id,
             OpKind::Update,
             fields([("branch", json!(branch))]),
+        );
+        Ok(true)
+    }
+
+    /// Session migration: move the chat to another project, and possibly
+    /// another host device, in ONE write. Every field naming where the chat
+    /// runs changes together, so no reader sees the new host with the old
+    /// folder or session. Title, config, pins and activity are untouched
+    /// (per-field LWW). `branch` and `checkoutId` clear: the new host's diff
+    /// reconciler stamps the destination checkout.
+    pub fn rehome_chat(&mut self, chat_id: &str, home: &ChatHome) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([
+                ("deviceId", json!(home.device_id)),
+                ("spaceId", json!(home.space_id)),
+                ("cwd", json!(home.cwd)),
+                ("branch", Value::Null),
+                ("checkoutId", Value::Null),
+                ("harnessSessionId", json!(home.harness_session_id)),
+                ("harnessSessionCwd", json!(home.harness_session_cwd)),
+            ]),
         );
         Ok(true)
     }

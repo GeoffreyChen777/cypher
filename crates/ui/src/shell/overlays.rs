@@ -651,7 +651,7 @@ impl Shell {
         overlays
     }
 
-    /// A chat row's context menu: pin, rename, archive, delete.
+    /// A chat row's context menu: pin, rename, move, archive, delete.
     fn render_chat_menu_overlay(
         &self,
         theme: &Theme,
@@ -663,69 +663,88 @@ impl Shell {
         let archive_id = chat_id.clone();
         let delete_id = chat_id.clone();
         let pin_id = chat_id.clone();
-        let pinned = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .any(|c| c.id == chat_id && c.pinned);
-        let menu =
-            popover::popover_card(theme)
-                .w(px(170.0))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.close_chat_menu(cx);
-                }))
-                .flex()
-                .flex_col()
-                .child(
-                    popover::menu_row(theme, false, format!("chat-menu-pin-{chat_id}"))
-                        .id("chat-menu-pin")
+        let move_id = chat_id.clone();
+        let (pinned, in_project) = {
+            let chat = self.state.read(cx).chats.iter().find(|c| c.id == chat_id);
+            (
+                chat.is_some_and(|c| c.pinned),
+                chat.is_some_and(|c| c.space_id.is_some() && !c.is_child()),
+            )
+        };
+        let menu = popover::popover_card(theme)
+            .w(px(190.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.close_chat_menu(cx);
+            }))
+            .flex()
+            .flex_col()
+            .child(
+                popover::menu_row(theme, false, format!("chat-menu-pin-{chat_id}"))
+                    .id("chat-menu-pin")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_chat_pinned(pin_id.clone(), !pinned, cx)
+                    }))
+                    .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
+                    .child(SharedString::from(if pinned { "Unpin" } else { "Pin" })),
+            )
+            .child(
+                popover::menu_row(theme, false, format!("chat-menu-rename-{chat_id}"))
+                    .id("chat-menu-rename")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_rename_chat(rename_id.clone(), cx)
+                    }))
+                    .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
+                    .child(SharedString::from("Rename…")),
+            )
+            // Quick chats have no project to leave.
+            .when(in_project, |menu| {
+                menu.child(
+                    popover::menu_row(theme, false, format!("chat-menu-move-{chat_id}"))
+                        .id("chat-menu-move")
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_chat_pinned(pin_id.clone(), !pinned, cx)
-                        }))
-                        .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
-                        .child(SharedString::from(if pinned { "Unpin" } else { "Pin" })),
-                )
-                .child(
-                    popover::menu_row(theme, false, format!("chat-menu-rename-{chat_id}"))
-                        .id("chat-menu-rename")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_rename_chat(rename_id.clone(), cx)
-                        }))
-                        .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
-                        .child(SharedString::from("Rename…")),
-                )
-                .child(
-                    popover::menu_row(theme, false, format!("chat-menu-archive-{chat_id}"))
-                        .id("chat-menu-archive")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.archive_chat(archive_id.clone(), cx)
+                            this.open_move_sessions(spaces::MoveSource::Chat(move_id.clone()), cx)
                         }))
                         .child(
-                            icon(icons::ARCHIVE_MINIMALISTIC)
+                            icon(icons::FOLDER)
                                 .size(px(16.0))
                                 .text_color(theme.text_muted),
                         )
-                        .child(SharedString::from("Archive")),
+                        .child(SharedString::from("Move to Project…")),
                 )
-                .child(popover::menu_separator())
-                .child(
-                    popover::menu_row(theme, false, format!("chat-menu-delete-{chat_id}"))
-                        .id("chat-menu-delete")
-                        .text_color(theme.danger)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.close_chat_menu(cx);
-                            this.dialogs.delete_chat = Some(delete_id.clone());
-                            cx.notify();
-                        }))
-                        .child(
-                            icon(icons::TRASH_BIN_MINIMALISTIC)
-                                .size(px(16.0))
-                                .text_color(theme.danger),
-                        )
-                        .child(SharedString::from("Delete…")),
-                )
-                .into_any_element();
+            })
+            .child(
+                popover::menu_row(theme, false, format!("chat-menu-archive-{chat_id}"))
+                    .id("chat-menu-archive")
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.archive_chat(archive_id.clone(), cx)
+                        }),
+                    )
+                    .child(
+                        icon(icons::ARCHIVE_MINIMALISTIC)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(SharedString::from("Archive")),
+            )
+            .child(popover::menu_separator())
+            .child(
+                popover::menu_row(theme, false, format!("chat-menu-delete-{chat_id}"))
+                    .id("chat-menu-delete")
+                    .text_color(theme.danger)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.close_chat_menu(cx);
+                        this.dialogs.delete_chat = Some(delete_id.clone());
+                        cx.notify();
+                    }))
+                    .child(
+                        icon(icons::TRASH_BIN_MINIMALISTIC)
+                            .size(px(16.0))
+                            .text_color(theme.danger),
+                    )
+                    .child(SharedString::from("Delete…")),
+            )
+            .into_any_element();
         Some(popover::menu_at(
             "chat-context-menu",
             position,

@@ -12,6 +12,7 @@ how it works. Everything else is grouped here by who reads it.
 - [Artifacts](features/artifacts.md) — pages the agent writes in the chat, opened in the side panel.
 - [Git diff layouts](features/git-diff.md) — unified and side-by-side diffs in the Git pane.
 - [Turn changes](features/turn-changes.md) — the files each round of a conversation changed, and their diffs.
+- [Moving sessions](features/session-migration.md) — moving a session, or a project's sessions, to another project on any device.
 - [Context recovery](features/context-recovery.md) — restarting a failed turn with supplementary context a model writes.
 - [System prompt](features/system-prompt.md) — your instructions, added to every Pi chat on a device.
 - [MCP settings](features/mcp-settings.md) — adding MCP servers to a device's Pi runtime.

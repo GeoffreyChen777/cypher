@@ -49,6 +49,7 @@ mod files;
 mod github;
 mod harnesses;
 mod mcp;
+mod migrations;
 mod mutate;
 mod params;
 mod pi;
@@ -93,6 +94,7 @@ pub struct EngineRpc {
     local_import: Option<crate::host::local_import::LocalImporter>,
     title_settings: Option<crate::session::title_settings::TitleSettingsStore>,
     context_recovery: Option<crate::session::context_recovery::ContextRecoveryService>,
+    migrations: Option<crate::session::migrations::ChatMigrations>,
     github: Option<crate::git::github::Github>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
@@ -151,6 +153,7 @@ impl EngineRpc {
             local_import: None,
             title_settings: None,
             context_recovery: None,
+            migrations: None,
             github: None,
             engine_info,
             start_subagent_lock: Mutex::new(()),
@@ -174,6 +177,21 @@ impl EngineRpc {
     ) -> Self {
         self.context_recovery = Some(recovery);
         self
+    }
+
+    /// Session migration, both ends (see `session::migrations`).
+    pub fn with_migrations(
+        mut self,
+        migrations: crate::session::migrations::ChatMigrations,
+    ) -> Self {
+        self.migrations = Some(migrations);
+        self
+    }
+
+    fn migrations(&self) -> Result<&crate::session::migrations::ChatMigrations, RpcError> {
+        self.migrations.as_ref().ok_or_else(|| {
+            RpcError::Failed("Session migration isn't available on this engine".into())
+        })
     }
 
     /// This device's GitHub sign-in and API access.
@@ -849,6 +867,11 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&reply)
             }
             methods::WATCH_AGENT_EVENTS => chats::watch_agent_events(self, params),
+            methods::MIGRATE_CHATS => migrations::migrate_chats(self, params),
+            methods::BEGIN_CHAT_MIGRATION
+            | methods::WRITE_CHAT_MIGRATION_CHUNK
+            | methods::COMMIT_CHAT_MIGRATION
+            | methods::ABORT_CHAT_MIGRATION => migrations::receive(self, method, params).await,
             other => Err(RpcError::UnknownMethod(other.to_string())),
         }
     }

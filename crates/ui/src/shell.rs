@@ -1137,6 +1137,9 @@ struct ShellDialogs {
     rename_space: Option<RenameSpaceDialog>,
     /// Space id awaiting delete confirmation (hard delete + session cascade).
     delete_space: Option<String>,
+    /// The move-sessions palette (a session, or a project's sessions, to
+    /// another project).
+    move_sessions: Option<spaces::MoveSessionsFlow>,
     /// The add-space palette (⌘K-style; device tabs + folder search), `Some`
     /// while open.
     add_space: Option<AddSpaceFlow>,
