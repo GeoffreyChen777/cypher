@@ -3,29 +3,92 @@
 
 import SwiftUI
 
-enum WorkspaceDestination: String, Identifiable {
+/// What the Files / Changes sheet opens on.
+enum WorkspaceDestination: Identifiable, Hashable {
     case files, changes
-    var id: String { rawValue }
-    var title: String { self == .files ? "Files" : "Changes" }
+    /// A recorded round's diff, scrolled to `focus` (the whole round when nil).
+    case round(TurnChanges, focus: String?)
+    /// A file a reply cites or links: found in the checkout, then shown at
+    /// its lines.
+    case reference(WorkspaceReference)
+
+    /// The two the session menu (and a demo launch's `-sheet`) names.
+    init?(rawValue: String) {
+        switch rawValue {
+        case "files": self = .files
+        case "changes": self = .changes
+        default: return nil
+        }
+    }
+
+    var id: String {
+        switch self {
+        case .files: "files"
+        case .changes: "changes"
+        case .round(let changes, let focus): "round:\(changes.base):\(changes.head):\(focus ?? "")"
+        case .reference(let reference): "reference:\(reference.path):\(reference.lines.map { "\($0)" } ?? "")"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .files: "Files"
+        case .changes: "Changes"
+        case .round: "Turn changes"
+        case .reference(let reference): (reference.expandedPath as NSString).lastPathComponent
+        }
+    }
+}
+
+/// A file a reply cites (a reference chip) or links to.
+struct WorkspaceReference: Hashable {
+    /// As written: relative to the checkout (or to some folder in it), or
+    /// absolute.
+    var path: String
+    var lines: ClosedRange<Int>? = nil
+    /// Written as a folder (a trailing slash).
+    var dir = false
+    /// The other paths the same reply cites: a bare name is read as the one
+    /// longer path among them that ends in it.
+    var context: [String] = []
+
+    var expandedPath: String {
+        FileReference(path: path, lines: lines).expanded(with: context) ?? path
+    }
+}
+
+extension EnvironmentValues {
+    /// Opens the session's Files / Changes sheet; nil where there is none
+    /// (side chats).
+    @Entry var openWorkspace: ((WorkspaceDestination) -> Void)? = nil
 }
 
 struct WorkspaceBrowserView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var session: WorkspaceBrowserSession
     let destination: WorkspaceDestination
+    /// The session's pending comments: a selection in a diff or a file can
+    /// be commented on like the transcript's. nil where it can't (not Pi).
+    let drafts: CommentDrafts?
 
-    init(model: AppModel, chat: Chat, destination: WorkspaceDestination) {
+    init(model: AppModel, chat: Chat, destination: WorkspaceDestination, drafts: CommentDrafts? = nil) {
         _session = State(initialValue: WorkspaceBrowserSession(model: model, chat: chat))
         self.destination = destination
+        self.drafts = drafts
     }
 
     var body: some View {
         NavigationStack {
             Group {
-                if destination == .files {
+                switch destination {
+                case .files:
                     WorkspaceDirectoryView(session: session, path: "")
-                } else {
-                    WorkspaceChangesView(session: session)
+                case .changes:
+                    WorkspaceChangesView(session: session, scope: .working)
+                case .round(let changes, let focus):
+                    WorkspaceChangesView(session: session, scope: .round(changes), focus: focus)
+                case .reference(let reference):
+                    WorkspaceReferenceView(session: session, reference: reference)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -46,12 +109,29 @@ struct WorkspaceBrowserView: View {
                 }
             }
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let drafts { PendingCommentsBar(drafts: drafts).background(Theme.bg) }
+        }
+        // Links in a rendered Markdown file are relative to it, not to the
+        // chat: they don't reopen this sheet.
+        .environment(\.openWorkspace, nil)
+        .environment(\.commentDrafts, drafts)
+        // The comment editor shows over this sheet while it is up.
+        .sheet(
+            isPresented: Binding(
+                get: { drafts.map { $0.presented && $0.presenter == .workspace } ?? false },
+                set: { drafts?.presented = $0 })
+        ) {
+            if let drafts { CommentsPanel(drafts: drafts) }
+        }
+        .onAppear { drafts?.presenter = .workspace }
+        .onDisappear { drafts?.presenter = .session }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }
 }
 
-private struct WorkspaceDirectoryView: View {
+struct WorkspaceDirectoryView: View {
     let session: WorkspaceBrowserSession
     let path: String
     @State private var listing: WorkspaceDirectory?
@@ -129,6 +209,9 @@ private struct WorkspaceDirectoryView: View {
 
 private struct WorkspaceChangesView: View {
     let session: WorkspaceBrowserSession
+    var scope: WorkspaceChangesScope = .working
+    /// The file to open the document at.
+    var focus: String? = nil
     @State private var snapshot: WorkspaceChanges?
     @State private var entries: [WorkspaceDiffEntry]?
     @State private var error: String?
@@ -146,9 +229,10 @@ private struct WorkspaceChangesView: View {
                         entries: entries,
                         loadSources: snapshot.truncated
                             ? nil
-                            : { path in
-                                try await session.diffSources(snapshot: snapshot, path: path)
-                            })
+                            : { [scope] path in
+                                try await session.diffSources(snapshot: snapshot, path: path, scope: scope)
+                            },
+                        focus: focus)
                 }
             } else {
                 WorkspaceLoadState(error: error, title: "Changes unavailable") { revision += 1 }
@@ -170,7 +254,7 @@ private struct WorkspaceChangesView: View {
             entries = nil
             error = nil
             do {
-                let result = try await session.changes()
+                let result = try await session.changes(scope)
                 let prepared = await Task.detached {
                     let patches = result.patches()
                     var seen = Set<String>()
@@ -186,28 +270,137 @@ private struct WorkspaceChangesView: View {
                 entries = prepared
             } catch {
                 guard !Task.isCancelled, generation == ticket else { return }
+                self.error = WorkspaceBrowserSession.errorMessage(error, scope: scope)
+            }
+        }
+    }
+}
+
+/// A reference or link from the chat: found in the checkout, then opened —
+/// the file at its cited lines, a folder's listing, or a choice between the
+/// files the reference could mean.
+struct WorkspaceReferenceView: View {
+    let session: WorkspaceBrowserSession
+    let reference: WorkspaceReference
+    @State private var resolution: WorkspaceResolution?
+    @State private var error: String?
+    @State private var revision = 0
+
+    var body: some View {
+        Group {
+            switch resolution {
+            case .file(let path):
+                WorkspaceFileView(session: session, path: path, lines: reference.lines, showsFolder: true)
+            case .directory(let path):
+                WorkspaceDirectoryView(session: session, path: path)
+                    .navigationTitle(path.isEmpty ? "Files" : (path as NSString).lastPathComponent)
+            case .ambiguous(let paths):
+                List {
+                    Section {
+                        ForEach(paths, id: \.self) { path in
+                            NavigationLink {
+                                WorkspaceFileView(
+                                    session: session, path: path, lines: reference.lines, showsFolder: true)
+                            } label: {
+                                WorkspacePathLabel(path: path)
+                            }
+                            .accessibilityIdentifier("workspace-candidate-\(path)")
+                        }
+                    } header: {
+                        Text("Several files end in \(reference.expandedPath)")
+                    }
+                }
+                .listStyle(.insetGrouped)
+                .scrollContentBackground(.hidden)
+                .navigationTitle(reference.path)
+            case .missing(let path):
+                ContentUnavailableView(
+                    "Not in this checkout", systemImage: "questionmark.folder",
+                    description: Text("No file at \(path), and none whose path ends in it."))
+            case .outside(let path):
+                ContentUnavailableView(
+                    "Outside this checkout", systemImage: "folder.badge.minus",
+                    description: Text("\(path) isn't in this session's working directory, so Files can't open it."))
+            case nil:
+                WorkspaceLoadState(error: error, title: "File unavailable") { revision += 1 }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.bg)
+        .task(id: revision) {
+            error = nil
+            do {
+                let result = try await session.resolve(reference)
+                guard !Task.isCancelled else { return }
+                resolution = result
+            } catch {
+                guard !Task.isCancelled else { return }
                 self.error = WorkspaceBrowserSession.errorMessage(error)
             }
         }
     }
 }
 
-private struct WorkspaceFileView: View {
+/// A path as a list row: the file name, its folder under it.
+private struct WorkspacePathLabel: View {
+    let path: String
+
+    var body: some View {
+        let name = (path as NSString).lastPathComponent
+        let dir = (path as NSString).deletingLastPathComponent
+        VStack(alignment: .leading, spacing: 2) {
+            Text(name).font(Theme.sans(14)).foregroundStyle(Theme.text)
+            if !dir.isEmpty {
+                Text(dir).font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
+                    .lineLimit(1).truncationMode(.head)
+            }
+        }
+    }
+}
+
+struct WorkspaceFileView: View {
     let session: WorkspaceBrowserSession
     let path: String
+    /// Cited lines to select and bring into view.
+    var lines: ClosedRange<Int>? = nil
+    /// Opened from the chat rather than the folder list: a button lists the
+    /// file's folder.
+    var showsFolder = false
     @State private var content: WorkspaceFileContent?
     @State private var error: String?
     @State private var revision = 0
     @State private var generation = UUID()
+    /// Markdown, HTML and SVG open rendered unless lines are cited.
+    @State private var source: Bool
+
+    init(session: WorkspaceBrowserSession, path: String, lines: ClosedRange<Int>? = nil, showsFolder: Bool = false) {
+        self.session = session
+        self.path = path
+        self.lines = lines
+        self.showsFolder = showsFolder
+        _source = State(initialValue: lines != nil)
+    }
+
+    private var kind: WorkspaceFileKind { WorkspaceFileKind(path: path) }
+
     var body: some View {
         Group {
-            if let content {
+            if kind == .image {
+                // Images skip the text read: their bytes come in slices.
+                WorkspaceImageView(session: session, path: path, revision: revision)
+            } else if let content {
                 if let text = content.text, !content.binary {
-                    WorkspaceSourceView(path: path, text: text, partial: content.truncated)
+                    if kind.previewable, !source {
+                        WorkspaceRenderedView(kind: kind, text: text, partial: content.truncated)
+                    } else {
+                        WorkspaceSourceView(path: path, text: text, partial: content.truncated, lines: lines)
+                    }
                 } else {
                     ContentUnavailableView(
                         "No text preview", systemImage: "doc",
-                        description: Text("This is a binary or non-UTF-8 file (\(content.bytes) bytes)."))
+                        description: Text(
+                            "This is a binary or non-UTF-8 file (\(ByteCountFormatter.string(fromByteCount: Int64(content.bytes), countStyle: .file)))."
+                        ))
                 }
             } else {
                 WorkspaceLoadState(error: error, title: "File unavailable") { revision += 1 }
@@ -218,12 +411,36 @@ private struct WorkspaceFileView: View {
         .navigationTitle((path as NSString).lastPathComponent)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if kind.previewable, content?.text != nil {
+                ToolbarItem(placement: .primaryAction) {
+                    Picker("View", selection: $source) {
+                        Label("Preview", systemImage: "eye").tag(false)
+                        Label("Source", systemImage: "chevron.left.forwardslash.chevron.right").tag(true)
+                    }
+                    .pickerStyle(.menu)
+                    .accessibilityIdentifier("workspace-preview-toggle")
+                }
+            }
+            if showsFolder {
+                ToolbarItem(placement: .primaryAction) {
+                    NavigationLink {
+                        let folder = (path as NSString).deletingLastPathComponent
+                        WorkspaceDirectoryView(session: session, path: folder)
+                            .navigationTitle(folder.isEmpty ? "Files" : (folder as NSString).lastPathComponent)
+                    } label: {
+                        Image(systemName: "folder")
+                    }
+                    .accessibilityLabel("Show in folder")
+                    .accessibilityIdentifier("workspace-show-folder")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button("Refresh", systemImage: "arrow.clockwise") { revision += 1 }
-                    .disabled(content == nil && error == nil)
+                    .disabled(kind != .image && content == nil && error == nil)
             }
         }
         .task(id: "\(path)/\(revision)") {
+            guard kind != .image else { return }
             let ticket = UUID()
             generation = ticket
             content = nil
@@ -240,7 +457,7 @@ private struct WorkspaceFileView: View {
     }
 }
 
-private struct WorkspaceLoadState: View {
+struct WorkspaceLoadState: View {
     let error: String?
     let title: String
     let retry: () -> Void
@@ -315,6 +532,10 @@ struct WorkspaceDocumentView: View {
 struct WorkspaceCodeView: UIViewRepresentable {
     let text: String
     var readerStyle = false
+    /// Lines to wash and scroll to (a cited reference's), 1-based.
+    var highlight: ClosedRange<Int>? = nil
+    /// The edit menu's Comment: takes the selected text.
+    var comment: ((String) -> Void)? = nil
     @Environment(\.colorScheme) private var colorScheme
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIView(context: Context) -> UITextView {
@@ -326,10 +547,12 @@ struct WorkspaceCodeView: UIViewRepresentable {
         view.dataDetectorTypes = []
         view.textContainerInset = UIEdgeInsets(top: 12, left: 8, bottom: 24, right: 8)
         view.accessibilityIdentifier = "workspace-code"
+        view.delegate = context.coordinator
         return view
     }
     func updateUIView(_ view: UITextView, context: Context) {
         let coordinator = context.coordinator
+        coordinator.comment = comment
         guard coordinator.text != text || coordinator.scheme != colorScheme || coordinator.readerStyle != readerStyle
         else { return }
         coordinator.text = text
@@ -351,13 +574,59 @@ struct WorkspaceCodeView: UIViewRepresentable {
                 .font: readerStyle ? UIFont.monospacedSystemFont(ofSize: 12, weight: .regular) : Theme.monoUI(12),
                 .foregroundColor: UIColor(Theme.text), .paragraphStyle: paragraph,
             ])
+        let lineRange = highlight.flatMap { Self.characterRange(of: $0, in: text) }
+        if let lineRange {
+            value.addAttribute(.backgroundColor, value: UIColor(Theme.accent.opacity(0.14)), range: lineRange)
+        }
         let selection = view.selectedRange
         view.attributedText = value
         if NSMaxRange(selection) <= value.length { view.selectedRange = selection }
+        if let lineRange, !coordinator.revealed {
+            coordinator.revealed = true
+            DispatchQueue.main.async { [weak view] in
+                view?.layoutIfNeeded()
+                view?.scrollRangeToVisible(lineRange)
+            }
+        }
     }
-    final class Coordinator {
+
+    /// The UTF-16 range lines `lines` (1-based) take in `text`.
+    static func characterRange(of lines: ClosedRange<Int>, in text: String) -> NSRange? {
+        let string = text as NSString
+        var start: Int?
+        var line = 1
+        var at = 0
+        while at <= string.length {
+            let range = string.lineRange(for: NSRange(location: min(at, string.length), length: 0))
+            if line == lines.lowerBound { start = range.location }
+            if line == lines.upperBound || NSMaxRange(range) >= string.length {
+                guard let start else { return nil }
+                return NSRange(location: start, length: NSMaxRange(range) - start)
+            }
+            line += 1
+            at = NSMaxRange(range)
+        }
+        return nil
+    }
+    final class Coordinator: NSObject, UITextViewDelegate {
         var text: String?
         var scheme: ColorScheme?
         var readerStyle = false
+        var revealed = false
+        var comment: ((String) -> Void)?
+
+        func textView(
+            _ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]
+        ) -> UIMenu? {
+            guard let comment else { return nil }
+            let quote = CommentPrompt.selectedText(textView.text ?? "", range: range)
+            guard !CommentPrompt.normalize(quote).isEmpty else { return nil }
+            let action = UIAction(title: "Comment", image: UIImage(systemName: "text.bubble")) {
+                [weak textView] _ in
+                textView?.selectedRange = NSRange(location: 0, length: 0)
+                comment(quote)
+            }
+            return UIMenu(children: [action] + suggestedActions)
+        }
     }
 }

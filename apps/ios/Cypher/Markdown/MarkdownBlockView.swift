@@ -54,6 +54,8 @@ struct MarkdownBlockView: View {
         case .codeBlock(let language, let code, let closed):
             if closed, isMermaidFence(language) {
                 MermaidBlockView(code: code)
+            } else if DiffFence.isDiff(language) {
+                DiffFenceView(code: code)
             } else {
                 CodeBlockView(language: language, code: code, cacheKey: cacheKey)
             }

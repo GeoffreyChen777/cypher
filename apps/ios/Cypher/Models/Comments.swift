@@ -91,6 +91,11 @@ final class CommentDrafts {
     private(set) var owner: String?
     var presented = false
     var editor: CommentSource?
+    /// Where the editor shows: over the session, or over the Files / Changes
+    /// sheet while that is up (a view can't present a sheet from under one).
+    var presenter = Presenter.session
+
+    enum Presenter { case session, workspace }
 
     func bind(to chatId: String) {
         guard owner != chatId else { return }

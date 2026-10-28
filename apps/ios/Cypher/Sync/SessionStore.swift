@@ -697,6 +697,11 @@ final class SessionStore {
             recovery: m["recovery"].flatMap { record in
                 guard let data = try? JSONSerialization.data(withJSONObject: record.jsonObject) else { return nil }
                 return try? JSONDecoder().decode(ContextRecovery.self, from: data)
+            },
+            // Read the same way: a record this app can't read costs the card.
+            turnChanges: m["turnChanges"].flatMap { record in
+                guard let data = try? JSONSerialization.data(withJSONObject: record.jsonObject) else { return nil }
+                return try? JSONDecoder().decode(TurnChanges.self, from: data)
             })
     }
 

@@ -49,6 +49,10 @@ struct SideChatSheet: View {
         .environment(\.commentDrafts, nil)
         .environment(\.transcriptSelectionActions, nil)
         .environment(\.transcriptMessageActions, nil)
+        // Its replies' file links and chips have no Files sheet to open.
+        .environment(\.openWorkspace, nil)
+        .environment(\.fileReferenceContext, nil)
+        .environment(\.fileReferenceSnippet, nil)
         .task { await store.start() }
     }
 

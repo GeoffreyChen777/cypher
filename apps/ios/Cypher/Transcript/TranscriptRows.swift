@@ -41,6 +41,10 @@ enum RowKind {
     /// `Thought`). In a work run it is a chip labelled with `preview`, the
     /// thought's first line.
     case thought(rows: Int, live: Bool, preview: String)
+    /// The files a settled round changed, closing the round's last answer:
+    /// a card listing them, each opening the round's diff at that file
+    /// (transcript.rs `TurnChanges`).
+    case turnChanges(TurnChanges)
 }
 
 /// What an append-mode translation puts between the agent's answer and its
@@ -566,6 +570,18 @@ enum TranscriptRowBuilder {
         flushTools(lastIx: lastPartIx)
         // Still the tail of a streaming reply: open, like a live tool group.
         closeRun(autoOpen: streaming)
+
+        // The round's changed files close its last answer; the strip rides
+        // under them.
+        if !streaming, let changes = entry.turnChanges {
+            rows.append(
+                TranscriptRow(
+                    id: "\(entry.id)#changes",
+                    version: fnv1a("\(changes.base)\(changes.head)\(changes.fileCount)\(changes.files.count)"),
+                    turnStart: first, kind: .turnChanges(changes),
+                    entryId: entry.id, timestamp: nil, partKey: nil))
+            first = false
+        }
 
         // The message strip under the entry's LAST row, whatever it is, once
         // the turn has settled ("no timestamp mid-stream"). The version bits

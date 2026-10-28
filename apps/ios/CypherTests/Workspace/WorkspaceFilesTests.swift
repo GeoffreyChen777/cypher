@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 @testable import Cypher
 
@@ -112,6 +113,73 @@ final class WorkspaceFilesTests: XCTestCase {
         } catch {
             XCTAssertTrue(error is WorkspaceBrowserError)
         }
+    }
+
+    func testReferencesResolveAtTheRootThenBySuffix() async throws {
+        let model = AppModel()
+        model.enterDemoMode()
+        let chat = try XCTUnwrap(model.chat(id: "chat-references"))
+        let cwd = try XCTUnwrap(chat.cwd)
+        let browser = WorkspaceBrowserSession(model: model, chat: chat)
+        func resolve(_ path: String, dir: Bool = false, context: [String] = []) async throws -> WorkspaceResolution {
+            try await browser.resolve(WorkspaceReference(path: path, lines: 3...4, dir: dir, context: context))
+        }
+        var result = try await resolve("Sources/Example.swift")
+        XCTAssertEqual(result, .file("Sources/Example.swift"))
+        result = try await resolve("\(cwd)/README.md")
+        XCTAssertEqual(result, .file("README.md"))
+        // Not at the root: found by the paths ending in it.
+        result = try await resolve("Example.swift")
+        XCTAssertEqual(result, .file("Sources/Example.swift"))
+        result = try await resolve("guide.md")
+        XCTAssertEqual(result, .file("notes/guide.md"))
+        // A bare name the reply also cites in full means that path.
+        result = try await resolve("Example.swift", context: ["Sources/Example.swift"])
+        XCTAssertEqual(result, .file("Sources/Example.swift"))
+        result = try await resolve("notes", dir: true)
+        XCTAssertEqual(result, .directory("notes"))
+        result = try await resolve("notes")
+        XCTAssertEqual(result, .directory("notes"))
+        result = try await resolve("Nope.swift")
+        XCTAssertEqual(result, .missing("Nope.swift"))
+        // An absolute path inside the checkout means exactly that file.
+        result = try await resolve("\(cwd)/Example.swift")
+        XCTAssertEqual(result, .missing("Example.swift"))
+        result = try await resolve("/etc/hosts")
+        XCTAssertEqual(result, .outside("/etc/hosts"))
+        result = try await resolve("../elsewhere/a.rs")
+        if case .outside = result {} else { XCTFail("\(result)") }
+        let snippet = try await browser.snippet(WorkspaceReference(path: "Example.swift", lines: 20...20))
+        XCTAssertEqual(snippet.path, "Sources/Example.swift")
+        XCTAssertTrue(snippet.lines.contains("let message = \"Hello from Cypher\""))
+    }
+
+    func testImagesLoadAsBytesAndKindsFollowTheExtension() async throws {
+        let model = AppModel()
+        model.enterDemoMode()
+        let browser = WorkspaceBrowserSession(model: model, chat: try XCTUnwrap(model.chat(id: "chat-references")))
+        let content = try await browser.file("notes/icon.png")
+        XCTAssertTrue(content.binary)
+        let data = try await browser.fileBytes("notes/icon.png")
+        XCTAssertEqual(UIImage(data: data)?.size.width, 96)
+        XCTAssertEqual(WorkspaceFileKind(path: "a/B.PNG"), .image)
+        XCTAssertEqual(WorkspaceFileKind(path: "README.md"), .markdown)
+        XCTAssertEqual(WorkspaceFileKind(path: "x.htm"), .html)
+        XCTAssertEqual(WorkspaceFileKind(path: "d.svg"), .svg)
+        XCTAssertEqual(WorkspaceFileKind(path: "Makefile"), .text)
+        XCTAssertTrue(WorkspaceFileKind.markdown.previewable)
+        XCTAssertFalse(WorkspaceFileKind.image.previewable)
+    }
+
+    func testDestinationsKeepTheirMenuNamesAndTitles() {
+        XCTAssertEqual(WorkspaceDestination(rawValue: "files"), .files)
+        XCTAssertEqual(WorkspaceDestination(rawValue: "changes"), .changes)
+        XCTAssertNil(WorkspaceDestination(rawValue: "round"))
+        let reference = WorkspaceReference(path: "file.py", lines: 2...3, context: ["src/file.py"])
+        XCTAssertEqual(WorkspaceDestination.reference(reference).title, "file.py")
+        XCTAssertNotEqual(
+            WorkspaceDestination.reference(reference).id,
+            WorkspaceDestination.reference(WorkspaceReference(path: "file.py")).id)
     }
 
     func testOldEngineShowsUpgradeAndOtherErrorsKeepTheirMeaning() {

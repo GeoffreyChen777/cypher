@@ -41,7 +41,32 @@ enum TranscriptTextStyle {
         ]
         // A display formula ended the paragraph; the next text starts a new one.
         var breakPending = false
-        for var run in runs {
+        // File references show as chips, labelled together so two files of
+        // one name keep a folder apart.
+        let references = runs.map { run in
+            run.style.code && run.style.link == nil && run.style.math == nil ? FileReference.detect(run.text) : nil
+        }
+        let labels = FileReference.labels(references.compactMap { $0 })
+        var chips = 0
+        for (index, var run) in runs.enumerated() {
+            if let reference = references[index] {
+                if breakPending {
+                    result.append(NSAttributedString(string: "\n", attributes: proseAttributes))
+                    breakPending = false
+                }
+                // A thin space apart from the prose on either side, as
+                // inline code sits on the desktop.
+                if index > 0, !runs[index - 1].style.code {
+                    result.append(FileReferenceChip.margin(proseAttributes))
+                }
+                result.append(
+                    FileReferenceChip.string(raw: run.text, reference: reference, label: labels[chips], size: size))
+                if index + 1 < runs.count, !runs[index + 1].style.code {
+                    result.append(FileReferenceChip.margin(proseAttributes))
+                }
+                chips += 1
+                continue
+            }
             if let kind = run.style.math {
                 if let attachment = MathRenderer.attachment(run.text, kind: kind, size: size) {
                     let math = MathRenderer.string(attachment, tex: run.text, kind: kind, attributes: proseAttributes)
@@ -87,7 +112,7 @@ enum TranscriptTextStyle {
             ]
             if run.style.code { attributes[.cypherInlineCode] = UIColor(Theme.inlineCodeWash) }
             if run.style.strikethrough { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
-            if let link = run.style.link, let url = URL(string: link) {
+            if let link = run.style.link, let url = TranscriptFileLinks.url(forLink: link) {
                 attributes[.link] = url
                 attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
             }
@@ -372,6 +397,8 @@ final class TranscriptTextLayoutManager: NSLayoutManager {
     override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
         if let storage = textStorage, let container = textContainers.first {
             let characters = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
+            FileReferenceChip.paintGlyphs(
+                self, storage: storage, container: container, characters: characters, origin: origin)
             storage.enumerateAttribute(.cypherInlineCode, in: characters) { value, range, _ in
                 guard let color = value as? UIColor else { return }
                 let glyphs = self.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
@@ -422,6 +449,9 @@ struct SelectableTranscriptText: UIViewRepresentable {
     @Environment(\.commentDrafts) private var drafts
     @Environment(\.transcriptEntry) private var entry
     @Environment(\.transcriptSelectionActions) private var actions
+    @Environment(\.openWorkspace) private var openWorkspace
+    @Environment(\.fileReferenceContext) private var referenceContext
+    @Environment(\.fileReferenceSnippet) private var referenceSnippet
 
     func makeUIView(context: Context) -> TranscriptUITextView {
         let storage = NSTextStorage()
@@ -437,10 +467,9 @@ struct SelectableTranscriptText: UIViewRepresentable {
         view.backgroundColor = .clear
         view.textContainerInset = .zero
         view.dataDetectorTypes = []
-        view.linkTextAttributes = [
-            .foregroundColor: UIColor(Theme.text),
-            .underlineStyle: NSUnderlineStyle.single.rawValue,
-        ]
+        // Links carry their own look (underlined text; a chip's glyph, name
+        // and muted lines), so the view adds none.
+        view.linkTextAttributes = [:]
         view.tintColor = UIColor(Theme.accent)
         // Repaint custom inline-code backgrounds as well as glyphs on a live
         // appearance change. Do not replace text or clear an active selection.
@@ -457,6 +486,8 @@ struct SelectableTranscriptText: UIViewRepresentable {
         }
         context.coordinator.entry = entry
         context.coordinator.actions = actions
+        context.coordinator.files = .init(
+            open: openWorkspace, context: referenceContext, snippet: referenceSnippet)
         context.coordinator.update(view, attributed: attributed, drafts: drafts)
         return view
     }
@@ -464,6 +495,8 @@ struct SelectableTranscriptText: UIViewRepresentable {
     func updateUIView(_ view: TranscriptUITextView, context: Context) {
         context.coordinator.entry = entry
         context.coordinator.actions = actions
+        context.coordinator.files = .init(
+            open: openWorkspace, context: referenceContext, snippet: referenceSnippet)
         context.coordinator.update(view, attributed: attributed, drafts: drafts)
     }
 
@@ -490,6 +523,14 @@ struct SelectableTranscriptText: UIViewRepresentable {
 final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
     var entry: TranscriptEntryContext?
     var actions: TranscriptSelectionActions?
+    var files = TranscriptFiles()
+
+    /// What file chips and file links reach: the session's Files sheet.
+    struct TranscriptFiles {
+        var open: ((WorkspaceDestination) -> Void)?
+        var context: ((String) -> [String])?
+        var snippet: ((WorkspaceReference) async throws -> FileReferenceSnippet)?
+    }
     private var latest: NSAttributedString?
     private weak var drafts: CommentDrafts?
     private var applying = false
@@ -557,6 +598,56 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
             textView?.resignFirstResponder()
             sideChat(entry, quote)
         }
+    }
+
+    /// The file a chip or a file link opens; nil for any other link.
+    private func reference(_ textItem: UITextItem) -> WorkspaceReference? {
+        guard case .link(let url) = textItem.content else { return nil }
+        let context = entry.flatMap { entry in files.context?(entry.entryId) } ?? []
+        return TranscriptFileLinks.reference(url, context: context)
+    }
+
+    /// A tap on a chip or a file link opens the file in Files; other links
+    /// open as before. With no Files to open (a side chat) a chip does
+    /// nothing, and a file link — no URL the system can open — neither.
+    func textView(
+        _ textView: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction
+    ) -> UIAction? {
+        guard let reference = reference(textItem) else { return defaultAction }
+        guard let open = files.open else { return nil }
+        return UIAction { _ in open(.reference(reference)) }
+    }
+
+    /// A long press on a chip or a file link: its cited lines as they are
+    /// in the checkout now, with Open in Files and Copy.
+    func textView(
+        _ textView: UITextView, menuConfigurationFor textItem: UITextItem, defaultMenu: UIMenu
+    ) -> UITextItem.MenuConfiguration? {
+        guard let reference = reference(textItem), case .link(let url) = textItem.content else {
+            return UITextItem.MenuConfiguration(menu: defaultMenu)
+        }
+        var actions: [UIMenuElement] = []
+        if let open = files.open {
+            actions.append(
+                UIAction(title: "Open in Files", image: UIImage(systemName: "folder")) { _ in
+                    open(.reference(reference))
+                })
+        }
+        let written = TranscriptFileLinks.written(url) ?? reference.path
+        actions.append(
+            UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
+                UIPasteboard.general.string = written
+            })
+        let menu = UIMenu(children: actions)
+        guard let snippet = files.snippet else { return UITextItem.MenuConfiguration(menu: menu) }
+        let card: UIView = UIHostingController(
+            rootView: FileReferencePreviewCard(reference: reference, load: snippet)
+        ).view
+        card.frame = CGRect(
+            x: 0, y: 0, width: FileReferencePreviewCard.width,
+            height: FileReferencePreviewCard.height(for: reference))
+        card.backgroundColor = UIColor(Theme.sheetPanel)
+        return UITextItem.MenuConfiguration(preview: .view(card), menu: menu)
     }
 
     func textView(

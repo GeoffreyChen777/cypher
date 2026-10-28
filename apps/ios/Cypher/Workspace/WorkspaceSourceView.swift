@@ -8,17 +8,21 @@ struct WorkspaceSourceView: View {
     let path: String
     let partial: Bool
     let preview: WorkspaceTextPreview
+    /// Cited lines: selected and in view when the file opens.
+    var lines: ClosedRange<Int>?
     private let oversized: Bool
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.commentDrafts) private var drafts
     @State private var wrap = false
     @State private var plain = false
     @State private var status: DiffRendererStatus = .loading
     @State private var hasRendered = false
     @State private var revision = 0
 
-    init(path: String, text: String, partial: Bool) {
+    init(path: String, text: String, partial: Bool, lines: ClosedRange<Int>? = nil) {
         self.path = path
         self.partial = partial
+        self.lines = lines
         preview = WorkspaceTextPreview(text)
         let lines =
             preview.text.split(separator: "\n", omittingEmptySubsequences: false).count
@@ -44,12 +48,15 @@ struct WorkspaceSourceView: View {
                         : plain
                             ? "Plain text preview"
                             : "Highlighting unavailable · Plain text preview", icon: "doc.plaintext")
-                WorkspaceCodeView(text: preview.text, readerStyle: true)
+                WorkspaceCodeView(
+                    text: preview.text, readerStyle: true, highlight: lines,
+                    comment: drafts.map { drafts in { drafts.begin(quote: $0) } })
             } else {
                 ZStack {
                     WorkspaceDiffWebView(
                         path: path, patch: "", split: false, dark: colorScheme == .dark,
-                        source: .init(text: preview.text, wrap: wrap)
+                        source: .init(text: preview.text, wrap: wrap, lines: lines),
+                        comment: drafts.map { drafts in { drafts.begin(quote: $0) } }
                     ) { value in
                         status = value
                         if value == .rendered { hasRendered = true }

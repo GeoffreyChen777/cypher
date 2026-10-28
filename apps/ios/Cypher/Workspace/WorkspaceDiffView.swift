@@ -10,7 +10,10 @@ struct WorkspaceDiffView: View {
     let partial: Bool
     var entries: [WorkspaceDiffEntry]? = nil
     var loadSources: ((String) async throws -> WorkspaceDiffSources)? = nil
+    /// The file the document opens at (a round's file tapped in the chat).
+    var focus: String? = nil
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.commentDrafts) private var drafts
     @State private var split = false
     @State private var status: DiffRendererStatus = .loading
     @State private var revision = 0
@@ -30,7 +33,9 @@ struct WorkspaceDiffView: View {
                     WorkspaceDiffWebView(
                         path: path, patch: patch, split: split,
                         dark: colorScheme == .dark,
-                        entries: entries, loadSources: loadSources
+                        entries: entries, loadSources: loadSources,
+                        focusFile: focus.flatMap { focus in entries?.prefix(250).firstIndex { $0.path == focus } },
+                        comment: drafts.map { drafts in { drafts.begin(quote: $0) } }
                     ) { status = $0 }
                     .id(revision)
                 }
@@ -94,6 +99,8 @@ enum DiffRendererStatus: Equatable {
 struct WorkspaceSourceDocument: Equatable {
     let text: String
     var wrap: Bool = false
+    /// Lines to select and bring into view (a cited reference's).
+    var lines: ClosedRange<Int>? = nil
 }
 
 /// The only document this WebView may navigate to is our bundled shell.
@@ -106,6 +113,10 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
     var entries: [WorkspaceDiffEntry]? = nil
     var loadSources: ((String) async throws -> WorkspaceDiffSources)? = nil
     var source: WorkspaceSourceDocument? = nil
+    /// Index into `entries` of the file to scroll to once rendered.
+    var focusFile: Int? = nil
+    /// The edit menu's Comment: takes the selected code.
+    var comment: ((String) -> Void)? = nil
     var onStatus: (DiffRendererStatus) -> Void
 
     /// How long one input may take to render, launching WebKit's processes
@@ -124,7 +135,7 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
         configuration.websiteDataStore = .nonPersistent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.userContentController.add(context.coordinator, name: "diffRenderer")
-        let view = WKWebView(frame: .zero, configuration: configuration)
+        let view = WorkspaceWebView(frame: .zero, configuration: configuration)
         view.isOpaque = false
         view.backgroundColor = .clear
         view.scrollView.backgroundColor = .clear
@@ -133,6 +144,9 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
         view.accessibilityIdentifier = source == nil ? "workspace-diff-web" : "workspace-source-web"
         view.navigationDelegate = context.coordinator
         context.coordinator.webView = view
+        view.commentOnSelection = { [weak coordinator = context.coordinator] in
+            coordinator?.commentOnSelection()
+        }
         if let url = Self.resourceURL {
             view.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
         } else {
@@ -142,8 +156,12 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
     }
     func updateUIView(_ view: WKWebView, context: Context) {
         context.coordinator.onStatus = onStatus
+        context.coordinator.comment = comment
+        (view as? WorkspaceWebView)?.commentsEnabled = comment != nil
         context.coordinator.loadSources = source == nil ? loadSources : nil
-        context.coordinator.update(path: path, patch: patch, split: split, dark: dark, entries: entries, source: source)
+        context.coordinator.update(
+            path: path, patch: patch, split: split, dark: dark, entries: entries, source: source,
+            focusFile: focusFile)
     }
     static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
         coordinator.stop()
@@ -160,6 +178,7 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
         weak var webView: WKWebView?
         var onStatus: (DiffRendererStatus) -> Void
         var loadSources: ((String) async throws -> WorkspaceDiffSources)?
+        var comment: ((String) -> Void)?
         private var ready = false
         private var stopped = false
         private var pending: Input?
@@ -175,16 +194,18 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
             var dark: Bool
             var entries: [WorkspaceDiffEntry]?
             var source: WorkspaceSourceDocument?
+            var focusFile: Int?
         }
         init(onStatus: @escaping (DiffRendererStatus) -> Void) { self.onStatus = onStatus }
 
         func update(
             path: String, patch: String, split: Bool, dark: Bool,
-            entries: [WorkspaceDiffEntry]? = nil, source: WorkspaceSourceDocument? = nil
+            entries: [WorkspaceDiffEntry]? = nil, source: WorkspaceSourceDocument? = nil,
+            focusFile: Int? = nil
         ) {
             let input = Input(
                 path: path, patch: entries == nil && source == nil ? patch : "",
-                split: split, dark: dark, entries: entries, source: source)
+                split: split, dark: dark, entries: entries, source: source, focusFile: focusFile)
             guard pending != input, !stopped else { return }
             cancelSourceTasks()
             pending = input
@@ -217,11 +238,15 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
             if let entries = pending.entries {
                 payload["files"] = entries.prefix(250).map(\.arguments)
                 payload["omittedFiles"] = max(0, entries.count - 250)
+                if let focusFile = pending.focusFile { payload["focusFile"] = focusFile }
             }
             if let source = pending.source {
                 payload["sourceText"] = source.text
                 payload["wrap"] = source.wrap
                 payload["canLoadContext"] = false
+                if let lines = source.lines {
+                    payload["focusLines"] = ["start": lines.lowerBound, "end": lines.upperBound]
+                }
             }
             let arguments: [String: Any] = ["input": payload]
             webView.callAsyncJavaScript(
@@ -232,6 +257,19 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
                 if case .failure = result { self.report(.failed) }
             }
         }
+        /// Comment on what is selected in the page.
+        func commentOnSelection() {
+            guard let comment, ready, !stopped, let webView else { return }
+            webView.callAsyncJavaScript(
+                "return window.cypherDiff.takeSelection()", arguments: [:], in: nil, in: .page
+            ) { [weak self] result in
+                guard let self, !self.stopped, case .success(let value) = result, let text = value as? String,
+                    !CommentPrompt.normalize(text).isEmpty
+                else { return }
+                comment(text)
+            }
+        }
+
         func report(_ status: DiffRendererStatus) {
             guard !stopped else { return }
             if status != .loading { deadline?.cancel() }
@@ -347,5 +385,23 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
             ready = false
             report(.failed)
         }
+    }
+}
+
+/// The renderer's web view: its edit menu leads with Comment when the
+/// session takes comments.
+final class WorkspaceWebView: WKWebView {
+    var commentOnSelection: (() -> Void)?
+    /// Set from the view's `comment`; nil hides the item.
+    var commentsEnabled = false
+
+    override func buildMenu(with builder: any UIMenuBuilder) {
+        super.buildMenu(with: builder)
+        guard commentsEnabled, let commentOnSelection, builder.system == .context else { return }
+        let comment = UIAction(title: "Comment", image: UIImage(systemName: "text.bubble")) { _ in
+            commentOnSelection()
+        }
+        comment.accessibilityIdentifier = "workspace-comment"
+        builder.insertSibling(UIMenu(options: .displayInline, children: [comment]), beforeMenu: .standardEdit)
     }
 }
