@@ -23,12 +23,14 @@ mod add_space;
 mod card_plate;
 mod group_cards;
 mod groups;
+mod move_sessions;
 mod overlays;
 mod quick_chat;
 mod style_menu;
 
 pub(super) use card_plate::CardPlate;
 use groups::*;
+pub(super) use move_sessions::{MoveSessionsFlow, MoveSource, space_has_sessions};
 
 /// The add-space palette (a command-K surface, summoned by ⌘K): search bar
 /// across the top, folder browser on the left, a Devices rail on the right,

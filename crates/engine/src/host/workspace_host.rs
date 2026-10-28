@@ -24,8 +24,8 @@ use tokio::sync::watch;
 
 use cypher_doc::{DeletedDevice, DeletedSpace, REGISTRY_DOC_ID, RegistryDoc};
 use cypher_proto::{
-    Chat, ChatConfig, ChildAgentProfile, ChildChat, Device, HarnessId, SandboxLevel, Session,
-    Space, SubagentRunMode,
+    Chat, ChatConfig, ChatHome, ChildAgentProfile, ChildChat, Device, HarnessId, SandboxLevel,
+    Session, Space, SubagentRunMode,
 };
 use cypher_sync::{DocsStore, RegistryClient, RegistryTransport, RegistryTuning};
 

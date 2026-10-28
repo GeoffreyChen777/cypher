@@ -506,6 +506,36 @@ impl SessionsEngine {
         }
     }
 
+    /// The harness session the chat's next run in `cwd` would resume — what
+    /// a session migration carries along. `None` when the next run would
+    /// start fresh anyway.
+    pub fn resumable_session(&self, chat_id: &str, cwd: &str) -> Option<String> {
+        self.inner.resume_for(chat_id, cwd)
+    }
+
+    /// Session migration, destination side: the chat resumes `session_id`
+    /// (empty = the "do not resume" tombstone) in `cwd` from now on. Memory
+    /// only — the migration writes the row itself, in the same write that
+    /// makes this device the host.
+    pub fn adopt_harness_session(&self, chat_id: &str, session_id: &str, cwd: &str) {
+        lock(&self.inner.harness_sessions).insert(
+            chat_id.to_string(),
+            HarnessSessionRef {
+                session_id: session_id.to_string(),
+                cwd: cwd.to_string(),
+            },
+        );
+        lock(&self.inner.last_requests).remove(chat_id);
+    }
+
+    /// Session migration, source side: the chat moved away. Drop what this
+    /// process remembered about running it, so a later move back starts
+    /// from the row rather than a session file that is gone.
+    pub fn forget_moved_chat(&self, chat_id: &str) {
+        lock(&self.inner.harness_sessions).remove(chat_id);
+        lock(&self.inner.last_requests).remove(chat_id);
+    }
+
     fn note_turn_start(&self, chat_id: &str, cwd: &str) {
         if self.inner.is_ephemeral(chat_id) {
             return; // temporary Side Chat: no checkout snapshot for the diff pane
@@ -1087,6 +1117,11 @@ impl SessionsEngine {
         lock(&self.inner.runs)
             .get(chat_id)
             .is_some_and(|h| h.run_id == run_id)
+    }
+
+    /// Does any run, live or parked, still hold the chat's harness session?
+    pub fn has_run(&self, chat_id: &str) -> bool {
+        lock(&self.inner.runs).contains_key(chat_id)
     }
 
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {

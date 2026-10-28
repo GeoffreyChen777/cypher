@@ -43,6 +43,7 @@ mod blobs;
 mod cache;
 mod chat2_sync;
 mod commands;
+mod migration;
 mod open;
 mod persist;
 
@@ -194,6 +195,13 @@ struct DocHostInner {
     /// outcome write. A pending command in the ledger but not in this set
     /// after a restart is a dead attempt from the mark/execute crash window.
     executing: Mutex<HashSet<String>>,
+    /// Chats a session migration is moving off this device: their drains
+    /// stand still until the move commits (the destination hosts them from
+    /// then on) or fails (they drain here again).
+    held: Mutex<HashSet<String>>,
+    /// Chats that moved here: folders a Run queued before the move may still
+    /// name, and the folder the chat runs in now.
+    moved_cwds: Mutex<HashMap<String, migration::MovedCwd>>,
     /// Shared client for sidecar blob fetches (30s timeout, uploads.rs
     /// discipline — diff_sync's untimed client hung on dead links).
     http: reqwest::Client,
@@ -487,6 +495,8 @@ impl DocHost {
                 tasks: TaskTracker::new(),
                 handles: Mutex::new(HashMap::new()),
                 executing: Mutex::new(HashSet::new()),
+                held: Mutex::new(HashSet::new()),
+                moved_cwds: Mutex::new(HashMap::new()),
                 http: reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
                     .build()

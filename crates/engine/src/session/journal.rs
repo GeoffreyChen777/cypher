@@ -192,13 +192,36 @@ impl RunJournal {
         Ok(stale)
     }
 
-    /// Remove a chat's journal file entirely (tests / future compaction).
+    /// Remove a chat's journal file entirely (a chat that moved to another
+    /// device; tests). The resume budget goes with it.
     pub fn discard(&self, chat_id: &str) -> Result<(), JournalError> {
         self.lock().remove(chat_id);
         let path = self.path_for(chat_id);
         if path.exists() {
             std::fs::remove_file(path)?;
         }
+        self.clear_resume_attempts(chat_id);
+        Ok(())
+    }
+
+    /// The chat's journal file (it may not exist yet).
+    pub fn journal_path(&self, chat_id: &str) -> PathBuf {
+        self.path_for(chat_id)
+    }
+
+    /// Session migration: `staged` becomes the chat's journal, replacing any
+    /// older one here. The open append handle is dropped first, so the next
+    /// append rescans the adopted file's tail for its seq.
+    pub fn adopt(&self, chat_id: &str, staged: &Path) -> Result<(), JournalError> {
+        let mut files = self.lock();
+        files.remove(chat_id);
+        let path = self.path_for(chat_id);
+        if std::fs::rename(staged, &path).is_err() {
+            std::fs::copy(staged, &path)?;
+            let _ = std::fs::remove_file(staged);
+        }
+        drop(files);
+        self.clear_resume_attempts(chat_id);
         Ok(())
     }
 }

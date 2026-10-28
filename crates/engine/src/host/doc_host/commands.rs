@@ -93,6 +93,13 @@ impl DocHost {
             }
             None => None,
         };
+        // A Run queued before the chat moved here names the old host's
+        // folder; it runs where the chat lives now.
+        if fresh_worktree.is_none()
+            && let Some(cwd) = self.moved_cwd(chat_id, &request.cwd)
+        {
+            request.cwd = cwd;
+        }
         // Queue-first attachments: the Run was queued with PENDING
         // upload ids (never the bytes, never pending refs in the
         // transcript). The drain only executes after every id is
@@ -682,6 +689,11 @@ impl DocHost {
             return;
         }
         if !self.is_host(&handle.chat_id) {
+            return;
+        }
+        // A migration is moving the chat away: whatever queues meanwhile
+        // runs on whichever device hosts it once the move settles.
+        if self.commands_held(&handle.chat_id) {
             return;
         }
         // Entries this pass decided to leave alone (processed dedupe hits).

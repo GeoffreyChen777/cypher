@@ -67,15 +67,26 @@
 #                                 # agent finds a new step, so the upcoming
 #                                 # steps refresh. Every message typed into the
 #                                 # demo plays the same run (CYPHER_MOCK_PROGRESS)
+#   scripts/dev-demo.sh --migration
+#                                 # moving sessions between projects: "Payments
+#                                 # API" holds four sessions (one archived, one
+#                                 # still working until you Stop it), "Payments
+#                                 # v2" is empty, and an offline "Build server"
+#                                 # has a project the palette lists but can't
+#                                 # pick. Right-click a session → Move to
+#                                 # Project…, or a project card → Move Sessions
+#                                 # to Project… (scripts/demo/seed-migration.sh;
+#                                 # a development build, for the offline device)
 #
 # The flags combine (--permissions, --diffs, --mermaid, --artifacts, --changes,
-# --translation or --progress takes the place of the default seed).
+# --translation, --progress or --migration takes the place of the default
+# seed).
 # Everything lives under /tmp/cypher-demo-* (--work: /tmp/cypher-demo-work-*,
 # --permissions: /tmp/cypher-demo-permissions-*, --diffs:
 # /tmp/cypher-demo-diffs-*, --mermaid: /tmp/cypher-demo-mermaid-*, --artifacts:
 # /tmp/cypher-demo-artifacts-*, --changes: /tmp/cypher-demo-changes-*,
 # --translation: /tmp/cypher-demo-translation-*, --progress:
-# /tmp/cypher-demo-progress-*); re-runs
+# /tmp/cypher-demo-progress-*, --migration: /tmp/cypher-demo-migration-*); re-runs
 # reuse it (delete
 # those directories to reseed). Quitting the app stops the engine.
 set -euo pipefail
@@ -90,6 +101,7 @@ ARTIFACTS=""
 CHANGES=""
 TRANSLATION=""
 PROGRESS=""
+MIGRATION=""
 for arg in "$@"; do
   case "$arg" in
     --work) WORK=1 ;;
@@ -101,14 +113,15 @@ for arg in "$@"; do
     --changes) CHANGES=1 ;;
     --translation) TRANSLATION=1 ;;
     --progress) PROGRESS=1 ;;
-    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs] [--mermaid] [--artifacts] [--changes] [--translation] [--progress]' >&2; exit 2 ;;
+    --migration) MIGRATION=1 ;;
+    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs] [--mermaid] [--artifacts] [--changes] [--translation] [--progress] [--migration]' >&2; exit 2 ;;
   esac
 done
 # Translation is about what happens while the agent works, so it is paced.
 [[ -n "$TRANSLATION" ]] && DELAY="${DELAY:-250}"
 # About 12s for the Mermaid reply, so each fence streams as code and then draws.
 [[ -n "$MERMAID" ]] && DELAY="${DELAY:-120}"
-DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}${MERMAID:+-mermaid}${ARTIFACTS:+-artifacts}${CHANGES:+-changes}${TRANSLATION:+-translation}${PROGRESS:+-progress}
+DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}${MERMAID:+-mermaid}${ARTIFACTS:+-artifacts}${CHANGES:+-changes}${TRANSLATION:+-translation}${PROGRESS:+-progress}${MIGRATION:+-migration}
 DAEMON_DIR=$DEMO_DIR-daemon
 UI_DIR=$DEMO_DIR-ui
 
@@ -117,7 +130,8 @@ for var in $(compgen -e | grep '^CYPHER_' || true); do unset "$var"; done
 export CYPHER_PROFILE=local CYPHER_AUTO_UPDATE=0
 
 echo "▸ building (first run takes a few minutes)…"
-cargo build -p cypher -q
+# The migration demo seeds an offline peer device (a development-only RPC).
+cargo build -p cypher -q ${MIGRATION:+--features development}
 cargo build -p cypher-rpc --example rpc_probe -q
 
 echo "▸ starting the mock engine with private Unix IPC"
@@ -266,6 +280,8 @@ JSON
   "translateIntermediateResponses": true
 }
 JSON
+  elif [[ -n "$MIGRATION" ]]; then
+    bash scripts/demo/seed-migration.sh "$DAEMON_DIR" "$DEMO_DIR-projects"
   elif [[ -n "$PROGRESS" ]]; then
     # The run is scripted (crates/harness/src/mock/progress.rs); the bar
     # comes from the engine's progress narrator asking the mock for readings.

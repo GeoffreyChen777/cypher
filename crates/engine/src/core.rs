@@ -45,6 +45,9 @@ pub struct EngineCore {
     /// Session Fork (v1): clone a settled transcript prefix into a NEW
     /// durable root Pi chat on the source chat's host device.
     pub session_forks: SessionForks,
+    /// Session migration: moves chats to another project, on this device or
+    /// another one.
+    pub migrations: session::migrations::ChatMigrations,
     /// Context recovery: restarts a failed round with supplementary context.
     /// Owned HERE — the sessions engine's round-end listener only holds a
     /// weak handle to it.
@@ -138,7 +141,7 @@ impl EngineCore {
         let store = Arc::new(DocsStore::open(profile.store_root())?);
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
-        let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
+        let sessions = SessionsEngine::new(device_id.clone(), journal.clone(), registry.clone());
         let doc_host = DocHost::new(
             store.clone(),
             DocHostConfig {
@@ -214,6 +217,14 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
+        let migrations = session::migrations::ChatMigrations::new(
+            sessions.clone(),
+            doc_host.clone(),
+            workspace.clone(),
+            journal,
+            uploads.clone(),
+            profile.store_root(),
+        );
         let title_settings = session::title_settings::TitleSettingsStore::new(data_dir);
         let context_recovery = session::context_recovery::ContextRecoveryService::new(
             sessions.clone(),
@@ -282,6 +293,7 @@ impl EngineCore {
             provider_logins: Arc::new(Default::default()),
             side_chats,
             session_forks,
+            migrations,
             context_recovery,
             device_id,
             local_import,
@@ -418,6 +430,7 @@ impl EngineCore {
         .with_provider_logins(self.provider_logins.clone())
         .with_title_settings(self.title_settings.clone())
         .with_context_recovery(self.context_recovery.clone())
+        .with_migrations(self.migrations.clone())
         .with_github(self.github.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);

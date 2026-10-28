@@ -788,7 +788,7 @@ fn classify_backend_error(
 /// and symlinks), then the remaining components are appended lexically.
 /// `None` when the result would escape `root` (a symlinked ancestor, `..`
 /// traversal, or an unresolvable prefix) — the deletion is then refused.
-fn canonicalize_under_root(path: &Path, root: &Path) -> Option<PathBuf> {
+pub(crate) fn canonicalize_under_root(path: &Path, root: &Path) -> Option<PathBuf> {
     let root = std::fs::canonicalize(root).ok()?;
     let mut existing = path.to_path_buf();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
