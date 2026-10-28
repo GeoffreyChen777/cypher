@@ -8,6 +8,23 @@ registerCustomTheme("cypher-dark", () => Promise.resolve(theme(true)));
 const themes = { light: "cypher-light", dark: "cypher-dark" };
 
 const root = document.getElementById("diff");
+
+// Pierre 1.4.1 centres a whole file's window on 50-line slices, and when
+// that window would start above the file it drops a slice from its end: the
+// rows past line 50 went missing while the viewport's middle was still above
+// it (scrolling a short file down, or opening one at a cited line). Such a
+// window now reaches as far down as it covers.
+const computeRenderRange = VirtualizedFile.prototype.computeRenderRangeFromWindow;
+VirtualizedFile.prototype.computeRenderRangeFromWindow = function (file, fileTop, windowSpecs) {
+  const range = computeRenderRange.call(this, file, fileTop, windowSpecs);
+  if (range.startingLine !== 0 || range.totalLines === 0 || !this.hasUniformLineHeights()) return range;
+  const { lineHeight } = this.metrics;
+  const lineCount = this.fileRenderer.getLineCount(file);
+  const reach = Math.min(lineCount, Math.ceil((windowSpecs.bottom - fileTop) / lineHeight));
+  if (reach <= range.totalLines) return range;
+  return { ...range, totalLines: reach, bufferAfter: Math.max(0, (lineCount - reach) * lineHeight) };
+};
+
 let virtualizer, pool, workerURL, highlightDeadline;
 let cards = [], retainedSourceBytes = 0;
 let sourceRecord;
@@ -226,6 +243,32 @@ async function updateSource(input) {
   notify("rendered", input.id);
 }
 
+// A file opened from a chat reference shows its cited lines selected and in
+// view; a round's diff opened from one of its files starts at that file.
+async function reveal(input, ticket) {
+  const lines = input.focusLines;
+  const file = input.focusFile;
+  if (!lines && !Number.isInteger(file)) return;
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  if (ticket !== generation) return;
+  if (lines && sourceRecord?.view) {
+    const start = Math.max(1, Math.trunc(Number(lines.start) || 1));
+    const end = Math.max(start, Math.trunc(Number(lines.end) || start));
+    sourceRecord.view.setSelectedLines({ start, end }, { notify: false });
+    const position = sourceRecord.view.getLinePosition(start);
+    // A few lines of context above the first cited one.
+    if (position) window.scrollTo(0, Math.max(0, (sourceRecord.view.top ?? 0) + position.top - 72));
+    state = { ...state, focusLines: { start, end } };
+  } else if (Number.isInteger(file)) {
+    const section = root.querySelectorAll("section.file")[file];
+    if (section) window.scrollTo(0, Math.max(0, section.getBoundingClientRect().top + window.scrollY - 8));
+    state = { ...state, focusFile: file };
+  }
+  // WebKit sends no scroll event for a script's own scroll before the first
+  // paint, so the virtualizer would keep the rows it picked at the top.
+  window.dispatchEvent(new Event("scroll"));
+}
+
 function failWorker(ticket) {
   if (ticket !== generation) return;
   const id = state.id;
@@ -407,6 +450,8 @@ async function render(input) {
       }, 8_000);
     });
     window.scrollTo(0, 0);
+    await reveal(input, ticket);
+    if (ticket !== generation) return;
     notify("rendered", input.id);
   } catch (error) {
     if (ticket !== generation) return;
@@ -418,8 +463,17 @@ async function render(input) {
 }
 
 // The context bridge uses a native-owned file index and a pinned snapshot.
+// A Comment from the native edit menu: the selected code (line numbers and
+// gutters can't be selected), then the selection goes, as the desktop's does.
+function takeSelection() {
+  const selection = document.getSelection();
+  const text = selection?.toString() ?? "";
+  selection?.removeAllRanges();
+  return text;
+}
+
 window.cypherDiff = Object.freeze({
-  render, dispose, contextResult,
+  render, dispose, contextResult, takeSelection,
   inspect: () => ({ ...state, cachedDiffs: pool?.getStats().diffCacheSize ?? 0,
     cachedFiles: pool?.getStats().fileCacheSize ?? 0, generation, retainedSourceBytes }),
 });

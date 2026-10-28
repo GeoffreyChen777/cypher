@@ -207,7 +207,8 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   it, "Open as Chat" keeps it. A side chat whose device link drops for good,
   or that sits unwatched ~5 minutes on the host, ends.
 - **Files / Changes:** separate options in the chat's top-right menu open read-only remote directory
-  navigation, UTF-8 file previews and working-tree Git diffs with per-file
+  navigation, UTF-8 file previews (Markdown rendered, HTML and SVG as pages,
+  images fitted or at 100%) and working-tree Git diffs with per-file
   patches. Changes uses a continuous, collapsible list in a locally bundled
   Pierre Diffs viewer with line numbers, syntax/word highlighting and
   unified/side-by-side layouts. Unchanged code starts folded and loads from the
@@ -238,6 +239,24 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   keep their dollars, and TeX that does not typeset shows as inline code.
   Formulas take the text color (appearance, thinking's muted tone, the
   streaming fade) and copy or quote as their TeX source.
+- **File references and links:** inline code citing a file
+  (`` `src/a.rs:12-20` ``) shows as a chip — glyph, name, muted lines — and
+  copies as written; a chip or a file link (`a.rs#L12`, `file://…`) opens
+  the file in the Files sheet with its lines selected, found at the checkout
+  root or by the file search (several matches are listed). A long press
+  previews the cited lines. See
+  [workspace browser](../../docs/features/ios-workspace-browser.md#from-the-chat).
+- **Turn changes:** a settled round's `turnChanges` shows as the desktop's
+  card under its last answer ("3 files changed +17 −3", Review, up to five
+  files); a file opens the round's diff at that file (the `trees` mode).
+- **Diff fences:** ```` ```diff ````, `patch` and `udiff` fences draw as diff
+  rows — accent bars, washes, markers, hunk strips, line numbers under
+  numbered hunks and a path header with counts — parsed as leniently as the
+  desktop does; code takes syntax colors when a file header names its
+  language. The copy button copies the raw fence.
+- **Forwarded questions:** a subagent's question or permission request the
+  host forwarded into the chat (`askedBy`) is titled "Question from actor" /
+  "Permission request from actor".
 - **Diagrams:** a ```` ```mermaid ```` fence draws as a diagram once its
   closing fence arrives (a fence still streaming shows as code), themed for
   the appearance, fit to the column down to 60% of its size and scrolling
@@ -252,7 +271,9 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   in-place selection. A reply's consecutive paragraphs, headings and lists
   (lists holding only prose) are one selectable text, so a drag selection
   crosses them; code blocks, tables, quotes and rules are texts of their own,
-  and a selection stops at them and never crosses messages. While a reply
+  and a selection stops at them and never crosses messages. Selections in
+  the Files / Changes sheet's code (and rendered Markdown files) offer
+  Comment too; the editor opens over that sheet. While a reply
   streams, its arriving block stays separate until the reply settles, so only
   that block re-lays out per frame. The editor shows the frozen selected
   quote and asks only for the comment — no second selection step.
@@ -378,6 +399,11 @@ Run these commands from the repository root.
   Script fixture: `-demo -route chat:chat-deploy`.
   Math fixture (LaTeX in a reply): `-demo -route chat:chat-math`.
   Diagram fixture (Mermaid in a reply): `-demo -route chat:chat-mermaid`.
+  File references, a file link, a diff fence and a round's changed files:
+  `-demo -route chat:chat-references`; add `-sheet round` (or
+  `round:README.md`) for the round's diff, `-sheet reference:Example.swift:44-45`
+  for a chip's file, `reference:notes/guide.md` / `page.html` / `diagram.svg`
+  / `icon.png` for the previews.
   Artifacts fixture (an HTML and an SVG artifact, a plain HTML fence):
   `-demo -route chat:chat-artifacts`.
   Context recovery fixtures: `-demo -route space:space-recovery`; the live

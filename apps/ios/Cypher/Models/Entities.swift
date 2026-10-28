@@ -222,6 +222,9 @@ struct UserInputQuestion: Hashable, Codable {
     /// (proto agent.rs `PermissionPrompt`): shown as an approval, and filed
     /// under the tool call it gates once answered.
     var permission: PermissionPrompt?
+    /// The subagent that asked, when the host forwarded a child chat's
+    /// question or permission prompt into this one (proto `asked_by`).
+    var askedBy: String?
 }
 
 /// proto agent.rs `PermissionPrompt`: what a permission prompt is about.
@@ -320,6 +323,57 @@ struct MessageEntry: Identifiable, Hashable {
     /// schema.rs `recovery`: a prompt the host sent again after a failed
     /// turn, with the context the agent received ahead of it.
     var recovery: ContextRecovery? = nil
+    /// schema.rs `turnChanges`: the files the round this entry closed
+    /// changed in its checkout, stamped by the host once the round settled.
+    var turnChanges: TurnChanges? = nil
+}
+
+// MARK: - Turn changes (proto entities.rs `TurnChanges`)
+
+/// The files one round of a conversation changed — from the prompt that set
+/// the agent working to the moment it settled. `base` and `head` are the
+/// host's `git write-tree` snapshots of the checkout at the round's start and
+/// end, so the round's diff stays readable after later rounds (until `git gc`
+/// prunes the unreferenced trees).
+struct TurnChanges: Decodable, Hashable {
+    /// Canonical checkout root on the host device.
+    var cwd: String
+    var base: String
+    var head: String
+    /// At most 100 files, in git's path order.
+    var files: [WorkspaceChange]
+    /// Every changed file, including any `files` leaves out.
+    var fileCount: Int
+    var additions: Int
+    var deletions: Int
+
+    /// Files the card lists; the rest are counted on its last row.
+    static let cardFiles = 5
+
+    /// "3 files changed" — the count covers files the entry left out.
+    var label: String {
+        let count = max(fileCount, files.count)
+        return count == 1 ? "1 file changed" : "\(count) files changed"
+    }
+
+    /// How many changed files the card does not list.
+    var hiddenFiles: Int {
+        max(0, max(fileCount, files.count) - min(files.count, Self.cardFiles))
+    }
+
+    /// The quiet word a file's status earns beside its name — nil for a
+    /// plain modification — and whether it reads as an addition, a deletion
+    /// or neither (turn_changes.rs `status_tag`).
+    static func statusTag(_ status: String) -> (word: String, added: Bool?)? {
+        switch status {
+        case "added": ("new", true)
+        case "deleted": ("deleted", false)
+        case "renamed": ("renamed", nil)
+        case "copied": ("copied", nil)
+        case "unmerged": ("conflict", nil)
+        default: nil
+        }
+    }
 }
 
 // MARK: - Context recovery (proto context_recovery.rs)

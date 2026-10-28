@@ -9,6 +9,12 @@ filesystem or the project's main checkout if the chat uses a worktree.
 
 - **Files:** directory navigation, filtering within the loaded directory,
   read-only UTF-8 text preview and explicit copying of loaded text.
+  Markdown opens rendered like a reply, HTML and SVG as pages (no base URL,
+  a non-persistent store, web links to Safari, as on the desktop for another
+  device's files), each with a Preview / Source switch. Images (PNG, JPEG,
+  GIF, WebP, BMP, TIFF, ICO, HEIC) load as bytes through
+  `ReadWorkspaceFileChunk`, up to 24 MiB, and show fitted or at 100% with
+  their format, pixel size and file size.
 - **Changes:** the existing working-tree diff capture (HEAD vs current files,
   including staged, unstaged and untracked changes), changed-file summaries,
   a continuous list of collapsible Pierre Diffs file cards with line numbers,
@@ -22,6 +28,40 @@ filesystem or the project's main checkout if the chat uses a worktree.
   or provider/LLM calls are performed.
 - Tool chips still show their existing summaries; they are not historical
   file revisions or full tool-output viewers in this version.
+
+## From the chat
+
+- **File references** in a reply's inline code (`` `core/context.py:146-160` ``,
+  `` `src/lib.rs` ``) show as chips — a file glyph, the file name and muted
+  lines — detected by the desktop's rules
+  ([Files → From the chat](files.md#from-the-chat)). Copying a selection
+  holds the reference as written.
+- **File links** (Markdown links to `src/a.rs#L12`, `a.rs:12-20`,
+  `file://…`, `cypher-file:`) and chips open the Files sheet on the file with the cited
+  lines selected and scrolled into view; a folder link opens its listing.
+  The path is read at the checkout root, then found by `SearchFiles` among
+  paths ending in it; a bare name first means the one longer path of that
+  name the reply cites. Several matches are listed to choose from; a path
+  outside the checkout or not found says so. A folder button shows the
+  file's folder.
+- **Long press** a chip or a file link for a preview of the cited lines with
+  three around them, from the checkout as it is now, plus Open in Files and
+  Copy.
+- A round's **changed files** card ([Turn changes](turn-changes.md)) opens
+  the round's diff (`GetCheckoutDiff` / `GetCheckoutFileDiffText` in the
+  `trees` mode) at the tapped file; Review opens the whole round.
+- Side chats have no Files sheet: their chips and file links don't open.
+
+## Comments
+
+On a Pi session, selecting code in the Changes diff or a Files source (or
+text in a rendered Markdown file) offers **Comment** first in the selection
+menu, as in the transcript. The quote is the selected code alone — line
+numbers and gutters can't be selected — and the editor opens over the
+sheet; the comment joins the session's pending comments (shown at the
+bottom of the sheet) and rides its next message in the same
+`agentPrompt` envelope as transcript comments. Nothing is sent from the
+sheet. The desktop comments on diff selections; its Files tab doesn't.
 
 ## File RPCs
 
@@ -88,7 +128,9 @@ terminal command is needed.
 
 The implementation is verified using isolated filesystem/RPC tests, a loopback
 relay connecting two test engines with different files, and an offline iOS
-Demo (`-demo -route chat:chat-tabs -sheet files`). Production engine processes, ongoing chats and installed
+Demo (`-demo -route chat:chat-tabs -sheet files`; references, previews and
+a round's diff: `-demo -route chat:chat-references` with `-sheet round`,
+`-sheet round:README.md` or `-sheet reference:Example.swift:44-45`). Production engine processes, ongoing chats and installed
 applications must not be restarted just to exercise the new handlers. A
 real-device/remote smoke test is still required after an authorized engine and
 iOS update. Use two different hosts/worktrees to verify target isolation.

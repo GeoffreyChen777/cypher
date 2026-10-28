@@ -33,7 +33,7 @@ struct QuestionPanel: View {
             let presentation = QuestionPresentation(wire)
             let question = presentation.displayQuestion(wire)
             VStack(spacing: 0) {
-                header(presentation)
+                header(presentation, askedBy: wire.askedBy)
                 Rectangle().fill(Theme.border).frame(height: 1)
                 ScrollView {
                     content(question, presentation: presentation)
@@ -61,12 +61,13 @@ struct QuestionPanel: View {
         }
     }
 
-    private func header(_ presentation: QuestionPresentation) -> some View {
+    private func header(_ presentation: QuestionPresentation, askedBy: String?) -> some View {
         HStack(spacing: 10) {
             Image(systemName: "bubble.left.and.text.bubble.right")
                 .font(.system(size: 13, weight: .medium))
                 .accessibilityHidden(true)
-            Text(presentation.header)
+            // A subagent's question forwarded here names who is waiting on it.
+            Text(askedBy.map { "Question from \($0)" } ?? presentation.header)
                 .font(Theme.sans(13, weight: .medium))
                 .lineLimit(1)
             Spacer(minLength: 8)

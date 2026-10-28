@@ -893,6 +893,14 @@ struct TranscriptView: View {
                     togglePins[row.id] = !open
                 }
 
+            case .turnChanges(let changes):
+                // Open by default, like the desktop's card.
+                TurnChangesCard(changes: changes, open: folds[row.id] ?? true) {
+                    withAnimation(reduceMotion ? nil : Motion.resize) {
+                        folds[row.id] = !(folds[row.id] ?? true)
+                    }
+                }
+
             case .thought(_, let live, let preview):
                 let open = TranscriptRowBuilder.isOpen(row, pins: togglePins)
                 if row.nested {

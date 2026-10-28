@@ -54,7 +54,8 @@ final class WorkspaceDiffWebTests: XCTestCase {
         init(
             patch: String, entries: [WorkspaceDiffEntry]? = nil,
             loadSources: ((String) async throws -> WorkspaceDiffSources)? = nil,
-            source: WorkspaceSourceDocument? = nil
+            source: WorkspaceSourceDocument? = nil, focusFile: Int? = nil,
+            comment: ((String) -> Void)? = nil
         ) throws {
             let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
             previous = scene.windows.first(where: \.isKeyWindow)
@@ -62,7 +63,8 @@ final class WorkspaceDiffWebTests: XCTestCase {
             host = UIHostingController(
                 rootView: WorkspaceDiffWebView(
                     path: "Example.swift", patch: patch, split: false, dark: false,
-                    entries: entries, loadSources: loadSources, source: source, onStatus: { _ in }))
+                    entries: entries, loadSources: loadSources, source: source, focusFile: focusFile,
+                    comment: comment, onStatus: { _ in }))
             host.rootView.onStatus = { [weak self] in self?.status = $0 }
             window.rootViewController = host
             window.makeKeyAndVisible()
@@ -79,7 +81,8 @@ final class WorkspaceDiffWebTests: XCTestCase {
             host.rootView = WorkspaceDiffWebView(
                 path: old.path, patch: patch ?? old.patch,
                 split: split ?? old.split, dark: dark ?? old.dark,
-                entries: old.entries, loadSources: old.loadSources, source: source ?? old.source, onStatus: old.onStatus
+                entries: old.entries, loadSources: old.loadSources, source: source ?? old.source,
+                comment: old.comment, onStatus: old.onStatus
             )
         }
         func web(in view: UIView? = nil) -> WKWebView? {
@@ -238,6 +241,86 @@ final class WorkspaceDiffWebTests: XCTestCase {
                 "document.querySelector('diffs-container').shadowRoot.querySelector('pre').textContent") as? String
         XCTAssertTrue(text?.contains("let value = 17") == true)
         XCTAssertFalse(text?.contains("let value = 10") == true)
+    }
+
+    func testCitedLinesOpenSelectedAndInView() async throws {
+        let text = (1...300).map { "let value\($0) = \($0)" }.joined(separator: "\n") + "\n"
+        let fixture = try Fixture(patch: "", source: .init(text: text, lines: 200...202))
+        defer { fixture.close() }
+        let web = try await fixture.wait()
+        let focus =
+            try await web.evaluateJavaScript("JSON.stringify(window.cypherDiff.inspect().focusLines)") as? String
+        XCTAssertEqual(focus, #"{"start":200,"end":202}"#)
+        let scrolled = try await web.evaluateJavaScript("window.scrollY") as? Double
+        XCTAssertGreaterThan(scrolled ?? 0, 1_000, "the cited lines are scrolled into view")
+        var selected = 0
+        for _ in 0..<30 {
+            selected =
+                (try await web.evaluateJavaScript(
+                    "document.querySelector('diffs-container').shadowRoot.querySelectorAll('[data-selected-line]').length"
+                ) as? Int) ?? 0
+            if selected > 0 { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertGreaterThan(selected, 0)
+    }
+
+    /// Pierre's whole-file window, centred on 50-line slices, dropped every
+    /// row past line 50 while the viewport's middle was still above it; the
+    /// cited lines of a short file scroll it there.
+    func testCitedLinesNearTheEndOfAShortFileKeepEveryRow() async throws {
+        let text = (1...60).map { "let value\($0) = \($0)" }.joined(separator: "\n") + "\n"
+        let fixture = try Fixture(patch: "", source: .init(text: text, lines: 44...45))
+        defer { fixture.close() }
+        let web = try await fixture.wait()
+        let lastRow = """
+            Math.max(...[...document.querySelector('diffs-container').shadowRoot
+              .querySelectorAll('[data-line]')].map(row => +row.getAttribute('data-line')))
+            """
+        var last = 0
+        for _ in 0..<30 {
+            last = (try await web.evaluateJavaScript(lastRow) as? Int) ?? 0
+            if last >= 60 { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertGreaterThanOrEqual(last, 60)
+        let scrolled = try await web.evaluateJavaScript("window.scrollY") as? Double
+        XCTAssertGreaterThan(scrolled ?? 0, 0)
+    }
+
+    func testCommentTakesTheSelectedCodeWithoutLineNumbers() async throws {
+        let text = (1...30).map { "let value\($0) = \($0)" }.joined(separator: "\n") + "\n"
+        var quotes: [String] = []
+        let fixture = try Fixture(patch: "", source: .init(text: text), comment: { quotes.append($0) })
+        defer { fixture.close() }
+        let web = try await fixture.wait()
+        _ = try await web.evaluateJavaScript(
+            """
+            (() => { const lines = [...document.querySelector('diffs-container').shadowRoot
+                .querySelectorAll('[data-content] [data-line]')];
+              document.getSelection().setBaseAndExtent(lines[2], 0, lines[4], lines[4].childNodes.length);
+              return true; })()
+            """)
+        let view = try XCTUnwrap(web as? WorkspaceWebView)
+        XCTAssertTrue(view.commentsEnabled)
+        view.commentOnSelection?()
+        for _ in 0..<20 where quotes.isEmpty { try await Task.sleep(for: .milliseconds(100)) }
+        XCTAssertEqual(quotes, ["let value3 = 3\nlet value4 = 4\nlet value5 = 5"])
+        let cleared = try await web.evaluateJavaScript("document.getSelection().toString()") as? String
+        XCTAssertEqual(cleared, "", "the selection goes once commented on")
+        // Nothing selected: no comment.
+        view.commentOnSelection?()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(quotes.count, 1)
+    }
+
+    func testARoundsFileOpensItsCard() async throws {
+        let (_, snapshot, entries) = try await demo()
+        let fixture = try Fixture(patch: snapshot.patch, entries: entries, focusFile: 1)
+        defer { fixture.close() }
+        let web = try await fixture.wait()
+        let focus = try await web.evaluateJavaScript("window.cypherDiff.inspect().focusFile") as? Int
+        XCTAssertEqual(focus, 1)
     }
 
     private func demo() async throws -> (WorkspaceBrowserSession, WorkspaceChanges, [WorkspaceDiffEntry]) {

@@ -215,7 +215,7 @@ struct PermissionPanel: View {
         HStack(spacing: 10) {
             LineIconView(.shieldCheck, size: 15, color: request.serious ? Theme.warning : Theme.textMuted)
                 .accessibilityHidden(true)
-            Text("Permission request")
+            Text(question.askedBy.map { "Permission request from \($0)" } ?? "Permission request")
                 .font(Theme.sans(13, weight: .medium))
                 .foregroundStyle(Theme.textMuted)
             Spacer(minLength: 8)

@@ -131,6 +131,14 @@ final class DemoDataset {
                 config: claude, lastMessagePreview: "Here is how a prompt travels through the app.",
                 lastMessageAt: now - 2_200_000, createdAt: now - 2_300_000,
                 spaceId: cypher.id, lastSeenAt: now - 2_200_000),
+            // File references, file links, a diff fence and the round's
+            // changed files in a reply.
+            Chat(
+                id: "chat-references", deviceId: "dev-mac", title: "Greet from Cypher",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "Changed the greeting in Example.swift.",
+                lastMessageAt: now - 1_700_000, createdAt: now - 1_800_000,
+                spaceId: cypher.id, lastSeenAt: now - 1_700_000),
             // Artifacts in a reply (the mock harness's [mock:artifacts] showcase).
             Chat(
                 id: "chat-artifacts", deviceId: "dev-mac", title: "Explain binary search",
@@ -740,6 +748,36 @@ final class DemoDataset {
                     id: "m2", role: .assistant, parts: [.text(id: "t0", text: artifactsShowcase)],
                     createdAt: now - 1_900_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
             ]
+        case "chat-references":
+            return [
+                MessageEntry(
+                    id: "m1", role: .user,
+                    parts: [.text(id: "t0", text: "Make the demo greet from Cypher.")],
+                    createdAt: now - 1_800_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                MessageEntry(
+                    id: "m2", role: .assistant,
+                    parts: [
+                        .tool(
+                            id: "c1", call: RenderToolCall(tag: "readFile", fields: ["path": "Sources/Example.swift"]),
+                            isError: false, resolved: true),
+                        .tool(
+                            id: "c2", call: RenderToolCall(tag: "editFile", fields: ["path": "Sources/Example.swift"]),
+                            isError: false, resolved: true),
+                        .text(id: "t0", text: referencesShowcase),
+                    ],
+                    createdAt: now - 1_700_000, deviceId: "dev-mac", status: .complete, continuationOf: nil,
+                    turnChanges: TurnChanges(
+                        cwd: "/Users/dev/Projects/cypher",
+                        base: String(repeating: "a1", count: 20), head: String(repeating: "b2", count: 20),
+                        files: [
+                            .init(
+                                path: "Sources/Example.swift", status: "modified", additions: 2, deletions: 2,
+                                binary: false),
+                            .init(path: "README.md", status: "modified", additions: 1, deletions: 1, binary: false),
+                            .init(path: "notes/guide.md", status: "added", additions: 14, deletions: 0, binary: false),
+                        ],
+                        fileCount: 3, additions: 17, deletions: 3)),
+            ]
         case "chat-permissions-story":
             return permissionStory(now: now)
         case "chat-permissions-card":
@@ -749,6 +787,29 @@ final class DemoDataset {
             return recoveryTranscript(for: chatId, now: now) ?? []
         }
     }
+
+    /// A reply that cites the demo checkout's files the way the Runtime asks
+    /// every model to, links one, and shows its change as a diff fence.
+    private static let referencesShowcase = #"""
+        The greeting lives in `Sources/Example.swift:20` — I changed it there and switched the flag at `Example.swift:45`. The [README](README.md#L3) says what the demo is for, and `notes/guide.md` covers the previews.
+
+        ```diff
+        --- a/Sources/Example.swift
+        +++ b/Sources/Example.swift
+        @@ -18,5 +18,5 @@
+         let value18 = 18
+         let value19 = 19
+        -let message = "Hello"
+        +let message = "Hello from Cypher"
+         let value21 = 21
+        @@ -43,3 +43,3 @@
+         let value43 = 43
+        -let enabled = false
+        +let enabled = true
+        ```
+
+        The diagram in `notes/diagram.svg` hasn't changed.
+        """#
 
     /// The reply of the mock harness's [mock:artifacts] showcase
     /// (crates/harness/src/mock/artifacts.rs): an interactive HTML artifact,

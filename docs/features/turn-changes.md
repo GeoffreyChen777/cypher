@@ -14,6 +14,12 @@ changed, under the round's last answer:
   round (unified or side by side, like every Git diff tab). Clicking another
   file of the same round reuses the tab.
 
+On the iPhone the card sits in the same place, under the round's last
+answer: the header folds the list, Review and the "more files" row open the
+round's whole diff, and a file opens it scrolled to that file — in the
+session's Changes sheet, read from the round's tree pair like the desktop
+tab. A pruned snapshot says so there too.
+
 A round that changed nothing shows no card. A steer sent while the agent is
 working belongs to the round it lands in; a message sent after the agent
 stopped starts a new round.

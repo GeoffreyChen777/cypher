@@ -192,6 +192,22 @@ struct SessionView: View {
                     model.launchSheet = nil
                     workspaceDestination = destination
                 }
+                // `-sheet round[:path]` opens the session's last recorded
+                // round, `-sheet reference:path:12` a file as a chip would.
+                if model.demo != nil, let sheet = model.launchSheet, let chat {
+                    if sheet == "round" || sheet.hasPrefix("round:"),
+                        let changes = model.sessionStore(for: chat)?.entries.last(where: { $0.turnChanges != nil })?
+                            .turnChanges
+                    {
+                        model.launchSheet = nil
+                        workspaceDestination = .round(
+                            changes, focus: sheet.hasPrefix("round:") ? String(sheet.dropFirst(6)) : nil)
+                    } else if sheet.hasPrefix("reference:"), let ref = FileReference.detect(String(sheet.dropFirst(10)))
+                    {
+                        model.launchSheet = nil
+                        workspaceDestination = .reference(WorkspaceReference(path: ref.path, lines: ref.lines))
+                    }
+                }
                 if model.demo != nil, model.launchSheet == "comment" || model.launchSheet == "comments" {
                     let showList = model.launchSheet == "comments"
                     model.launchSheet = nil
@@ -207,6 +223,10 @@ struct SessionView: View {
             .sessionActionPrompts(actions) { _ in leave() }
             .environment(\.transcriptSelectionActions, chat.map(selectionActions))
             .environment(\.transcriptMessageActions, chat.map(messageActions))
+            // File chips, file links and a round's changed files open here.
+            .environment(\.openWorkspace, chat.map { _ in { workspaceDestination = $0 } })
+            .environment(\.fileReferenceContext, chat.map(referenceContext))
+            .environment(\.fileReferenceSnippet, chat.map(referenceSnippet))
             .confirmationDialog(
                 "Restart from here?",
                 isPresented: Binding(
@@ -239,12 +259,36 @@ struct SessionView: View {
                 .onDisappear { store.close() }
             }
             .environment(\.commentDrafts, chat?.config?.harness == "pi" ? commentDrafts : nil)
-            .sheet(isPresented: $commentDrafts.presented) {
+            .sheet(
+                isPresented: Binding(
+                    get: { commentDrafts.presented && commentDrafts.presenter == .session },
+                    set: { commentDrafts.presented = $0 })
+            ) {
                 CommentsPanel(drafts: commentDrafts)
             }
             .sheet(item: $workspaceDestination) { destination in
-                if let chat { WorkspaceBrowserView(model: model, chat: chat, destination: destination) }
+                if let chat {
+                    WorkspaceBrowserView(
+                        model: model, chat: chat, destination: destination,
+                        // Selections in a diff or a file comment like the
+                        // transcript's, on a Pi session.
+                        drafts: chat.config?.harness == "pi" ? commentDrafts : nil)
+                }
             }
+    }
+
+    /// The paths a reply cites, for reading a bare name in it.
+    private func referenceContext(_ chat: Chat) -> (String) -> [String] {
+        { [model] entryId in
+            TranscriptFileLinks.citedPaths(in: model.sessionStore(for: chat)?.entries.first { $0.id == entryId })
+        }
+    }
+
+    /// A reference's cited lines, read from this chat's checkout.
+    private func referenceSnippet(_ chat: Chat) -> (WorkspaceReference) async throws -> FileReferenceSnippet {
+        { [model] reference in
+            try await WorkspaceBrowserSession(model: model, chat: chat).snippet(reference)
+        }
     }
 
     /// Fork and Side Chat on a selection — only what this session can do

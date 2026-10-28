@@ -132,31 +132,40 @@ enum MathRenderer {
         return string
     }
 
-    /// `text[range]` as plain text, formulas as their TeX source — what a
-    /// copy or a quote of a selection holds.
+    /// `text[range]` as plain text, formulas as their TeX source and file
+    /// reference chips as the inline code they were written as — what a copy
+    /// or a quote of a selection holds. nil when the range holds neither.
     nonisolated static func plainText(_ text: NSAttributedString, range: NSRange) -> String? {
         let full = NSRange(location: 0, length: text.length)
         let range = NSIntersectionRange(range, full)
         guard range.length > 0 else { return nil }
-        var hasMath = false
-        text.enumerateAttribute(.cypherMathSource, in: range) { value, _, stop in
-            if value != nil {
-                hasMath = true
-                stop.pointee = true
+        var special = false
+        for key in [NSAttributedString.Key.cypherMathSource, .cypherFileRef] where !special {
+            text.enumerateAttribute(key, in: range) { value, _, stop in
+                if value != nil {
+                    special = true
+                    stop.pointee = true
+                }
             }
         }
-        guard hasMath else { return nil }
+        guard special else { return nil }
         var out = ""
-        text.enumerateAttribute(.cypherMathSource, in: range) { value, part, _ in
-            let piece = (text.string as NSString).substring(with: part)
-            guard let source = value as? String else {
-                out += piece
+        text.enumerateAttribute(.cypherFileRef, in: range) { reference, chip, _ in
+            if let written = reference as? String {
+                out += written
                 return
             }
-            // Adjacent copies of one formula share a run: one source per
-            // attachment character.
-            for character in piece {
-                out += character == "\u{FFFC}" ? source : String(character)
+            text.enumerateAttribute(.cypherMathSource, in: chip) { value, part, _ in
+                let piece = (text.string as NSString).substring(with: part)
+                guard let source = value as? String else {
+                    out += piece
+                    return
+                }
+                // Adjacent copies of one formula share a run: one source per
+                // attachment character.
+                for character in piece {
+                    out += character == "\u{FFFC}" ? source : String(character)
+                }
             }
         }
         return out
