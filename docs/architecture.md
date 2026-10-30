@@ -197,7 +197,7 @@ Each crate depends only on crates in lower layers, dev-dependencies included;
 
 | Layer | Crates |
 | --- | --- |
-| foundation | `cypher-env`, `cypher-proto`, `cypher-syntax` |
+| foundation | `cypher-env`, `cypher-proto`, `cypher-syntax`, `cypher-secrets`, `cypher-trust` |
 | model and transport | `cypher-doc`, `cypher-update`, `cypher-net` |
 | clients | `cypher-sync`, `cypher-harness` |
 | relay | `cypher-rpc` |
