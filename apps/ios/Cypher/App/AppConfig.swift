@@ -30,6 +30,7 @@ final class AppConfig: @unchecked Sendable {
     }
 
     private let lock = NSLock()
+    private var trustStore: DeviceTrustStore?
     private var tokens: AuthTokens?
     private var devBearer: String?
     private var invalidated = false
@@ -54,6 +55,21 @@ final class AppConfig: @unchecked Sendable {
         self.tokens = tokens
         self.devBearer = devBearer
         self.previewRequested = developmentPreview
+    }
+
+    /// Device trust (DeviceTrustStore): set once by AppModel.connect; nil
+    /// in demo mode and tests, where relay clients speak plaintext.
+    var trust: DeviceTrustStore? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return trustStore
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            trustStore = newValue
+        }
     }
 
     /// Current bearer, refreshing the WorkOS access token when needed.
