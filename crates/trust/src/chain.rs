@@ -2,7 +2,9 @@
 //!
 //! Entry `0` is a device adding itself. Every later entry names the hash of
 //! the one before it and is signed by a device that is a member at that point
-//! in the log. No key may appear in two `add`s, so a removed device's keys stay
+//! in the log. Policy entries (`requirePaired` / `allowUnpaired`) carry their
+//! signer's own record and set the group's "Only paired devices" policy: one
+//! weak member would otherwise be a way around every other member's switch. No key may appear in two `add`s, so a removed device's keys stay
 //! out for good; the same device id may return with fresh keys (re-pairing a
 //! machine after removing it by mistake). Replaying the log from the start
 //! yields the members; [`TrustChain::verify`] refuses any log that breaks a rule.
@@ -24,6 +26,10 @@ pub const MAX_ENTRIES: usize = 1024;
 pub enum EntryKind {
     Add,
     Remove,
+    /// Group policy: from here on, members refuse unpaired devices.
+    RequirePaired,
+    /// Group policy: from here on, unpaired devices may connect again.
+    AllowUnpaired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +59,8 @@ impl TrustEntry {
         out.push(match self.kind {
             EntryKind::Add => 1,
             EntryKind::Remove => 2,
+            EntryKind::RequirePaired => 3,
+            EntryKind::AllowUnpaired => 4,
         });
         self.device.put(&mut out);
         out.extend_from_slice(&self.at.to_be_bytes());
@@ -110,6 +118,7 @@ pub struct TrustChain {
     members: BTreeMap<String, DevicePublic>,
     removed: BTreeSet<String>,
     keys_seen: BTreeSet<[u8; 32]>,
+    require_paired: bool,
 }
 
 impl TrustChain {
@@ -179,6 +188,12 @@ impl TrustChain {
                 self.members.remove(&entry.device.id);
                 self.removed.insert(entry.device.id.clone());
             }
+            EntryKind::RequirePaired | EntryKind::AllowUnpaired => {
+                if entry.device != *signer {
+                    return bad("a policy entry must carry its signer's record");
+                }
+                self.require_paired = entry.kind == EntryKind::RequirePaired;
+            }
         }
         self.entries.push(entry);
         Ok(())
@@ -212,6 +227,33 @@ impl TrustChain {
 
     pub fn is_removed(&self, device_id: &str) -> bool {
         self.removed.contains(device_id)
+    }
+
+    /// The group's "Only paired devices" policy.
+    pub fn require_paired(&self) -> bool {
+        self.require_paired
+    }
+
+    /// The entry setting the group's policy, signed by member `signer`.
+    pub fn propose_policy(
+        &self,
+        signer: &DeviceKeys,
+        require_paired: bool,
+        at: u64,
+    ) -> Result<TrustEntry, TrustError> {
+        let device = self
+            .members
+            .get(&signer.device_id)
+            .cloned()
+            .ok_or_else(|| {
+                TrustError::InvalidEntry("signed by a device outside the group".into())
+            })?;
+        let kind = if require_paired {
+            EntryKind::RequirePaired
+        } else {
+            EntryKind::AllowUnpaired
+        };
+        self.propose(signer, kind, device, at)
     }
 
     /// The entry adding `device`, signed by member `signer`. Not yet applied.
@@ -361,6 +403,28 @@ mod tests {
 
         let entries = chain.entries()[1..].to_vec();
         assert!(TrustChain::verify(entries).is_err(), "missing genesis");
+    }
+
+    #[test]
+    fn members_set_the_group_policy() {
+        let (a, b, mut chain) = group();
+        assert!(!chain.require_paired());
+        chain
+            .append(chain.propose_policy(&b, true, 3).unwrap())
+            .unwrap();
+        assert!(chain.require_paired());
+        chain
+            .append(chain.propose_policy(&a, false, 4).unwrap())
+            .unwrap();
+        assert!(!chain.require_paired());
+        let replayed = TrustChain::verify(chain.entries().to_vec()).unwrap();
+        assert!(!replayed.require_paired());
+        // An outsider cannot, and a policy entry must name its own signer.
+        assert!(chain.propose_policy(&keys("x"), true, 5).is_err());
+        let mut entry = chain.propose_policy(&a, true, 5).unwrap();
+        entry.device = b.public("B");
+        entry.sig = a.sign(&entry.signing_bytes());
+        assert!(chain.clone().append(entry).is_err());
     }
 
     #[test]

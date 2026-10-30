@@ -11,6 +11,7 @@
 mod auth;
 mod core;
 mod device_identity;
+pub mod device_trust;
 mod error;
 pub mod git;
 mod headless;

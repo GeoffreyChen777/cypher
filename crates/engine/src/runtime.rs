@@ -313,6 +313,8 @@ impl Engine {
                 .is_some_and(|token| !token.trim().is_empty()),
         };
         let device_id = load_or_create_device_id(profile.device_root())?;
+        let device_root = profile.device_root().to_path_buf();
+        let user_id = profile.user_id().to_string();
         #[allow(unused_mut)]
         let mut edge = edge_enabled.then(|| {
             EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone()))
@@ -459,11 +461,33 @@ impl Engine {
             });
         }
 
+        // Device trust rides the edge: without it there is no group to join.
+        if let Some(edge) = edge.as_ref() {
+            let token: Arc<dyn cypher_rpc::TokenSource> = Arc::new(auth.clone());
+            match crate::device_trust::DeviceTrust::open(
+                &device_root,
+                &user_id,
+                &core.device_id,
+                &crate::device_identity::local_device_name(&core.device_id),
+                Arc::new(crate::device_trust::HttpEdge::new(&edge.url, token.clone())),
+            ) {
+                Ok(trust) => {
+                    trust.spawn_sync(Some(token));
+                    core.set_trust(trust);
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "trust: device keys unavailable; pairing is off")
+                }
+            }
+        }
+
         let host_relay = edge.as_ref().map(|edge| {
-            let links = cypher_rpc::LinkCache::new(cypher_rpc::LinkCacheConfig::new(
-                edge.url.clone(),
-                Arc::new(auth.clone()),
-            ));
+            let mut links_config =
+                cypher_rpc::LinkCacheConfig::new(edge.url.clone(), Arc::new(auth.clone()));
+            if let Some(trust) = core.trust() {
+                links_config = links_config.with_trust(Arc::new(trust));
+            }
+            let links = cypher_rpc::LinkCache::new(links_config);
             let links_for_presence = links.clone();
             core.workspace
                 .set_peer_alive_hook(Arc::new(move |device_id: &str| {

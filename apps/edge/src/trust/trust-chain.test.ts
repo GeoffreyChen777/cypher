@@ -20,6 +20,7 @@ describe("device trust chain vectors", () => {
     if (typeof state === "string") return;
     expect([...state.members.keys()].sort()).toEqual(vectors.chain.members);
     expect([...state.removed]).toEqual(vectors.chain.removed);
+    expect(state.requirePaired).toBe(vectors.chain.requirePaired);
     expect(state.head).toBe(vectors.chain.entries.at(-1)!.hash);
   });
 

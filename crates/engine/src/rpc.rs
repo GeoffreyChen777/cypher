@@ -54,14 +54,17 @@ mod migrations;
 mod mutate;
 mod params;
 mod pi;
+mod relay;
 mod repos;
 mod settings;
 mod terminals;
+mod trust;
 mod updates;
 mod uploads;
 
 pub use agent::AgentRpc;
 use params::*;
+pub use relay::RelayRpc;
 
 fn failed(e: impl std::fmt::Display) -> RpcError {
     RpcError::Failed(e.to_string())
@@ -98,6 +101,7 @@ pub struct EngineRpc {
     context_recovery: Option<crate::session::context_recovery::ContextRecoveryService>,
     migrations: Option<crate::session::migrations::ChatMigrations>,
     github: Option<crate::git::github::Github>,
+    trust: Option<crate::device_trust::DeviceTrust>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
     /// so concurrent starts of the same `(parentChatId, runId)` cannot race the
@@ -157,6 +161,7 @@ impl EngineRpc {
             context_recovery: None,
             migrations: None,
             github: None,
+            trust: None,
             engine_info,
             start_subagent_lock: Mutex::new(()),
         }
@@ -211,6 +216,12 @@ impl EngineRpc {
     /// Attach the auth service (AuthStatus + AuthRpc mutations).
     pub fn with_auth(mut self, auth: Auth) -> Self {
         self.auth = Some(auth);
+        self
+    }
+
+    /// Attach device trust (Settings → Devices pairing).
+    pub fn with_trust(mut self, trust: crate::device_trust::DeviceTrust) -> Self {
+        self.trust = Some(trust);
         self
     }
 
@@ -869,6 +880,13 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&reply)
             }
             methods::WATCH_AGENT_EVENTS => chats::watch_agent_events(self, params),
+            methods::WATCH_DEVICE_TRUST => trust::watch(self),
+            methods::START_DEVICE_PAIRING
+            | methods::APPROVE_DEVICE_PAIRING
+            | methods::CANCEL_DEVICE_PAIRING
+            | methods::JOIN_DEVICE_GROUP
+            | methods::REMOVE_TRUSTED_DEVICE
+            | methods::SET_REQUIRE_PAIRED_DEVICES => trust::call(self, method, params).await,
             methods::MIGRATE_CHATS => migrations::migrate_chats(self, params),
             methods::BEGIN_CHAT_MIGRATION
             | methods::WRITE_CHAT_MIGRATION_CHUNK

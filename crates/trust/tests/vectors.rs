@@ -86,6 +86,11 @@ fn build() -> Value {
         .propose_remove(&c.keys, "device-a", 1_700_000_003_000)
         .unwrap();
     chain.append(remove_a).unwrap();
+    // B turns on "Only paired devices" for the group.
+    let policy = chain
+        .propose_policy(&b.keys, true, 1_700_000_004_000)
+        .unwrap();
+    chain.append(policy).unwrap();
     let entries = chain.entries().to_vec();
 
     let mut edited = entries.clone();
@@ -122,6 +127,14 @@ fn build() -> Value {
         let mut entry = base.propose_add(&a.keys, x.keys.public(x.name), 6).unwrap();
         entry.device = twin;
         resign(&a.keys, entry)
+    };
+    let foreign_policy = {
+        let mut entry = TrustChain::verify(entries[..4].to_vec())
+            .unwrap()
+            .propose_policy(&b.keys, true, 7)
+            .unwrap();
+        entry.device = c.keys.public(c.name);
+        resign(&b.keys, entry)
     };
     let signed_by_removed = resign(
         &a.keys,
@@ -199,6 +212,7 @@ fn build() -> Value {
             "entries": entries.iter().map(entry_json).collect::<Vec<_>>(),
             "members": chain.members().map(|m| m.id.clone()).collect::<Vec<_>>(),
             "removed": ["device-a"],
+            "requirePaired": chain.require_paired(),
         },
         "invalidChains": [
             invalid("an edited entry", edited),
@@ -209,6 +223,7 @@ fn build() -> Value {
             invalid("re-adding a removed device's keys", [&entries[..], &[readd]].concat()),
             invalid("adding a key already in use", [&entries[..2], &[duplicate_key]].concat()),
             invalid("signed by a removed device", [&entries[..], &[signed_by_removed]].concat()),
+            invalid("a policy entry carrying another device's record", [&entries[..4], &[foreign_policy]].concat()),
             invalid("no first entry", entries[1..].to_vec()),
         ],
         "pairing": {
@@ -261,6 +276,10 @@ fn the_committed_chain_verifies_and_the_invalid_ones_do_not() {
     let chain = TrustChain::verify(entries).unwrap();
     let members: Vec<_> = chain.members().map(|m| m.id.clone()).collect();
     assert_eq!(json!(members), file["chain"]["members"]);
+    assert_eq!(
+        json!(chain.require_paired()),
+        file["chain"]["requirePaired"]
+    );
     for case in file["invalidChains"].as_array().unwrap() {
         let entries: Vec<TrustEntry> = serde_json::from_value(case["entries"].clone()).unwrap();
         let Err(cypher_trust::TrustError::InvalidEntry(reason)) = TrustChain::verify(entries)

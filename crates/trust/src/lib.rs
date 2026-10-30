@@ -30,7 +30,7 @@ mod keys;
 pub mod noise;
 mod pairing;
 
-pub use chain::{EntryKind, TrustChain, TrustEntry};
+pub use chain::{Comparison, EntryKind, TrustChain, TrustEntry};
 pub use keys::{DeviceKeys, DevicePublic};
 pub use pairing::{JoinRequest, PairingCode, Welcome};
 

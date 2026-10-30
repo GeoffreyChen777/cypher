@@ -15,10 +15,14 @@ export interface DevicePublic {
   dhPub: string;
 }
 
+export type EntryKind = "add" | "remove" | "requirePaired" | "allowUnpaired";
+
+const KIND_BYTE: Record<EntryKind, number> = { add: 1, remove: 2, requirePaired: 3, allowUnpaired: 4 };
+
 export interface TrustEntry {
   seq: number;
   prev: string;
-  kind: "add" | "remove";
+  kind: EntryKind;
   device: DevicePublic;
   at: number;
   signer: string;
@@ -31,6 +35,8 @@ export interface ChainState {
   members: Map<string, DevicePublic>;
   removed: Set<string>;
   keysSeen: Set<string>;
+  /** The group's "Only paired devices" policy. */
+  requirePaired: boolean;
 }
 
 export const MAX_ENTRIES = 1024;
@@ -48,7 +54,8 @@ export const emptyState = (): ChainState => ({
   head: ZERO_HASH,
   members: new Map(),
   removed: new Set(),
-  keysSeen: new Set()
+  keysSeen: new Set(),
+  requirePaired: false
 });
 
 const fromHex = (hex: string): Uint8Array => {
@@ -77,7 +84,7 @@ export const parseEntry = (value: unknown): TrustEntry | undefined => {
   if (
     !isU64(e.seq) ||
     typeof e.prev !== "string" || !HEX32.test(e.prev) ||
-    (e.kind !== "add" && e.kind !== "remove") ||
+    typeof e.kind !== "string" || !Object.hasOwn(KIND_BYTE, e.kind) ||
     typeof d !== "object" || d === null ||
     !validField(d.id) || !validField(d.name) ||
     typeof d.signPub !== "string" || !HEX32.test(d.signPub) ||
@@ -91,7 +98,7 @@ export const parseEntry = (value: unknown): TrustEntry | undefined => {
   return {
     seq: e.seq,
     prev: e.prev,
-    kind: e.kind,
+    kind: e.kind as EntryKind,
     device: { id: d.id, name: d.name, signPub: d.signPub, dhPub: d.dhPub },
     at: e.at,
     signer: e.signer,
@@ -133,7 +140,7 @@ export const signingBytes = (entry: TrustEntry): Uint8Array =>
     .bytes(encoder.encode("cypher-trust-entry-v1\0"))
     .u64(entry.seq)
     .bytes(fromHex(entry.prev))
-    .bytes(Uint8Array.of(entry.kind === "add" ? 1 : 2))
+    .bytes(Uint8Array.of(KIND_BYTE[entry.kind]))
     .str(entry.device.id)
     .str(entry.device.name)
     .bytes(fromHex(entry.device.signPub))
@@ -195,12 +202,15 @@ export const applyEntry = async (
     state.keysSeen.add(entry.device.signPub);
     state.keysSeen.add(entry.device.dhPub);
     state.members.set(entry.device.id, entry.device);
-  } else {
+  } else if (entry.kind === "remove") {
     if (!sameDevice(state.members.get(entry.device.id), entry.device)) {
       return "removes a device that is not a member";
     }
     state.members.delete(entry.device.id);
     state.removed.add(entry.device.id);
+  } else {
+    if (!sameDevice(signer, entry.device)) return "a policy entry must carry its signer's record";
+    state.requirePaired = entry.kind === "requirePaired";
   }
   state.length += 1;
   state.head = await entryHash(entry);

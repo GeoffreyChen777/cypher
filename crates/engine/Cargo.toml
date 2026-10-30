@@ -15,6 +15,7 @@ development = []
 [dependencies]
 cypher-env.workspace = true
 cypher-secrets.workspace = true
+cypher-trust.workspace = true
 cypher-proto.workspace = true
 cypher-doc.workspace = true
 cypher-net.workspace = true
