@@ -6,6 +6,8 @@ export interface Env {
   /** chat2 session rooms (`chat2/{chatId}`) — dumb authenticated log relays
    * (docs/design/chat2-sync.md). */
   CHAT_ROOMS: DurableObjectNamespace;
+  /** Per-user device trust chains and pairing mailboxes (`t1/{userId}`). */
+  TRUST_ROOMS?: DurableObjectNamespace;
   BLOBS: R2Bucket;
   /** Release artifacts (headless tarballs, dmgs, latest.txt) served at
    * /releases/* for the curl-install flow. */

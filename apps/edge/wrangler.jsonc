@@ -31,7 +31,8 @@
       { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
       { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
       { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
-      { "name": "PUSH_DEVICES", "class_name": "PushDevice" }
+      { "name": "PUSH_DEVICES", "class_name": "PushDevice" },
+      { "name": "TRUST_ROOMS", "class_name": "TrustRoom" }
     ]
   },
   "services": [
@@ -69,6 +70,11 @@
       // SessionRoom, DeviceRoom, RegistryRoom, ChatRoom and PushDevice survive.
       "tag": "v6-remove-sync-v3",
       "deleted_classes": ["Sync3Room", "WorkspaceHub"]
+    },
+    {
+      // Device trust chains + pairing mailboxes (crates/trust).
+      "tag": "v7-trust",
+      "new_sqlite_classes": ["TrustRoom"]
     }
   ],
   "r2_buckets": [
