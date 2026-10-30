@@ -303,3 +303,64 @@ async fn all_failures_surface_the_last_error() {
         .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
 }
+
+fn lifted(url: &str) -> (String, Option<String>) {
+    let mut request = url.into_client_request().unwrap();
+    lift_bearer(&mut request).unwrap();
+    let auth = request
+        .headers()
+        .get("authorization")
+        .map(|value| value.to_str().unwrap().to_owned());
+    (request.uri().to_string(), auth)
+}
+
+#[test]
+fn the_bearer_moves_from_the_url_into_authorization() {
+    assert_eq!(
+        lifted("wss://edge.example/device/d1/ws?role=host&connId=c&token=eyJ.a-b_c.d"),
+        (
+            "wss://edge.example/device/d1/ws?role=host&connId=c".into(),
+            Some("Bearer eyJ.a-b_c.d".into())
+        )
+    );
+    assert_eq!(
+        lifted("ws://localhost:27640/registry/org/ws?token=alice%40org"),
+        (
+            "ws://localhost:27640/registry/org/ws".into(),
+            Some("Bearer alice@org".into())
+        )
+    );
+}
+
+#[test]
+fn a_url_without_a_bearer_is_untouched() {
+    assert_eq!(
+        lifted("wss://edge.example/chat2/c/ws?device=d&tokens=1"),
+        (
+            "wss://edge.example/chat2/c/ws?device=d&tokens=1".into(),
+            None
+        )
+    );
+}
+
+#[test]
+fn an_explicit_authorization_header_wins_and_the_parameter_still_goes() {
+    let mut request = "wss://edge.example/x?token=url"
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", "Bearer header".parse().unwrap());
+    lift_bearer(&mut request).unwrap();
+    assert_eq!(request.uri().to_string(), "wss://edge.example/x");
+    assert_eq!(request.headers()["authorization"], "Bearer header");
+}
+
+#[test]
+fn the_bearer_header_is_marked_sensitive() {
+    let mut request = "wss://edge.example/x?token=t"
+        .into_client_request()
+        .unwrap();
+    lift_bearer(&mut request).unwrap();
+    assert!(request.headers()["authorization"].is_sensitive());
+}

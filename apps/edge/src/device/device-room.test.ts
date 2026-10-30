@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pickLiveHost } from "./device-room";
+import { SIDECAR_MAX_BYTES, pickLiveHost, readLimited } from "./device-room";
 
 // The bug this guards: a host whose uplink died silently leaves a socket the
 // runtime still lists (no close event ever fires, and the supersede `close()`
@@ -94,5 +94,26 @@ describe("device-room host selection", () => {
         "leaving"
       )
     ).toBe("successor");
+  });
+});
+
+describe("device-room sidecar body limit", () => {
+  const body = (size: number, declared?: number) =>
+    new Request("https://x/sidecar/repos", {
+      method: "POST",
+      body: "x".repeat(size),
+      headers: declared === undefined ? {} : { "content-length": String(declared) }
+    });
+
+  it("returns a body at the limit", async () => {
+    expect((await readLimited(body(1024), 1024))?.byteLength).toBe(1024);
+  });
+
+  it("refuses a body over the limit even without a content-length", async () => {
+    expect(await readLimited(body(1025), 1024)).toBeUndefined();
+  });
+
+  it("refuses an oversized declared length before reading", async () => {
+    expect(await readLimited(body(10, SIDECAR_MAX_BYTES + 1), SIDECAR_MAX_BYTES)).toBeUndefined();
   });
 });

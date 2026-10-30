@@ -76,7 +76,7 @@ actor DeviceRelayClient {
             URLQueryItem(name: "connId", value: UUID().uuidString.lowercased()),
             URLQueryItem(name: "token", value: token),
         ]
-        let task = URLSession.shared.webSocketTask(with: components.url!)
+        let task = URLSession.shared.webSocketTask(with: URLRequest(url: components.url!).liftingBearer())
         // Checkout patches are capped at 3 MiB before JSON escaping. Keep a
         // finite transport ceiling, but don't reject normal diffs at 1 MiB.
         task.maximumMessageSize = 8 * 1024 * 1024

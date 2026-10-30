@@ -20,9 +20,32 @@ protocol WebSocketTransport: Sendable {
 
 struct URLSessionWebSocketTransport: WebSocketTransport {
     func open(_ request: URLRequest) -> any WebSocketConnection {
-        let task = URLSession.shared.webSocketTask(with: request)
+        let task = URLSession.shared.webSocketTask(with: request.liftingBearer())
         task.resume()
         return task
+    }
+}
+
+extension URLRequest {
+    /// Room URLs name the bearer as a `token` query item. Move it into
+    /// `Authorization` so it never appears in a URL on the wire or in the
+    /// edge's request logs; the Rust dialer does the same
+    /// (crates/net/src/dial.rs `lift_bearer`). An existing header wins, and the
+    /// query item is dropped either way.
+    func liftingBearer() -> URLRequest {
+        guard let url,
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let items = components.queryItems,
+              let token = items.first(where: { $0.name == "token" })?.value
+        else { return self }
+        let kept = items.filter { $0.name != "token" }
+        components.queryItems = kept.isEmpty ? nil : kept
+        var request = self
+        request.url = components.url ?? url
+        if request.value(forHTTPHeaderField: "Authorization") == nil, !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
     }
 }
 

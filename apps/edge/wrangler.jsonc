@@ -97,8 +97,12 @@
   },
   "observability": {
     "enabled": true,
+    // Invocation logs record every request's URL and headers, and older
+    // clients still put their bearer in WebSocket URLs (`?token=`). Keep only
+    // the Worker's own console output.
+    "logs": { "invocation_logs": false },
     // APNs device addresses are embedded in outbound URLs; do not persist
-    // outbound request tracing. Incoming routes contain no token/lease.
+    // outbound request tracing.
     "traces": { "enabled": false }
   }
 }
