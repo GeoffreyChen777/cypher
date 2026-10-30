@@ -1,5 +1,15 @@
 //! Private Unix IPC. No TCP fallback. Call bind only while owning the engine
 //! data-directory lock; that lock serializes stale-socket recovery.
+//!
+//! An engine instance serves two sockets in its private directory:
+//! - `engine.sock`, the full surface for viewports and the CLI. Every
+//!   connection presents the instance key ([`KEY_HEADER`]), which `bind`
+//!   writes fresh to a [`cypher_secrets::Secret`] — the login Keychain on a
+//!   signed macOS build, a 0600 file beside the socket otherwise.
+//! - `agent.sock`, keyless, for the agent processes the engine spawns. The
+//!   engine serves a restricted service there, so an agent following injected
+//!   instructions cannot reach terminals, settings or other devices through
+//!   IPC.
 use crate::{RpcClient, RpcError, RpcService};
 use std::{
     io,
@@ -12,6 +22,24 @@ use tokio::net::{UnixListener, UnixStream};
 fn euid() -> libc::uid_t {
     // SAFETY: geteuid(2) takes no arguments, touches no memory and cannot fail.
     unsafe { libc::geteuid() }
+}
+
+const ENGINE_SOCKET: &str = "engine.sock";
+const AGENT_SOCKET: &str = "agent.sock";
+
+/// Handshake header carrying the engine socket's key.
+pub const KEY_HEADER: &str = "x-cypher-ipc-key";
+
+/// The key store of an `engine.sock`; `None` for the keyless agent socket.
+fn key_secret(socket: &Path) -> Option<cypher_secrets::Secret> {
+    (socket.file_name()? == ENGINE_SOCKET)
+        .then(|| cypher_secrets::Secret::new(socket.with_file_name("engine.key")))
+}
+
+fn new_key() -> io::Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|err| io::Error::other(err.to_string()))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn denied(message: &str) -> io::Error {
@@ -57,7 +85,10 @@ fn validate_path(path: &Path, create: bool) -> io::Result<()> {
     if root != expected
         || key.len() != 32
         || !key.bytes().all(|b| b.is_ascii_hexdigit())
-        || path.file_name().and_then(|n| n.to_str()) != Some("engine.sock")
+        || !matches!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some(ENGINE_SOCKET | AGENT_SOCKET)
+        )
     {
         return Err(denied("invalid private IPC location"));
     }
@@ -124,6 +155,18 @@ pub async fn connect_local(path: &Path) -> Result<RpcClient, RpcError> {
     request
         .headers_mut()
         .insert("sec-websocket-protocol", "cypher.rpc.v1".parse().unwrap());
+    // No key at all means an engine from before keyed sockets, which accepts
+    // keyless clients; a keyed engine refuses the handshake by itself.
+    if let Some(secret) = key_secret(path)
+        && let Some(key) = secret
+            .read()
+            .map_err(|e| RpcError::Transport(format!("Engine IPC key unreadable: {e}")))?
+    {
+        let mut value = tokio_tungstenite::tungstenite::http::HeaderValue::from_bytes(&key)
+            .map_err(|_| RpcError::Transport("Engine IPC key is malformed".into()))?;
+        value.set_sensitive(true);
+        request.headers_mut().insert(KEY_HEADER, value);
+    }
     let (ws, response) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio_tungstenite::client_async(request, stream),
@@ -148,6 +191,8 @@ pub struct LocalListener {
     listener: UnixListener,
     path: PathBuf,
     identity: (u64, u64),
+    /// Required of every client; `None` on the agent socket.
+    key: Option<Arc<str>>,
 }
 
 impl LocalListener {
@@ -175,6 +220,15 @@ impl LocalListener {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
+        // The key exists before anything can connect.
+        let key = match key_secret(path) {
+            Some(secret) => {
+                let key = new_key()?;
+                secret.write(key.as_bytes())?;
+                Some(Arc::from(key))
+            }
+            None => None,
+        };
         let listener = UnixListener::bind(path)?;
         // The enclosing 0700 directory protects the bind-to-chmod interval.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
@@ -183,6 +237,7 @@ impl LocalListener {
             listener,
             path: path.into(),
             identity: (meta.dev(), meta.ino()),
+            key,
         })
     }
 
@@ -193,7 +248,11 @@ impl LocalListener {
             _ = connections.join_next(), if !connections.is_empty() => {},
             accepted = self.accept(), if connections.len() < 128 => match accepted {
                 Ok(stream) => {
-                    connections.spawn(crate::server::serve_ws_socket(stream, service.clone()));
+                    connections.spawn(crate::server::serve_ws_socket(
+                        stream,
+                        service.clone(),
+                        self.key.clone(),
+                    ));
                 }
                 Err(error) => {
                     tracing::warn!(%error, "Unix IPC accept failed");
@@ -211,6 +270,12 @@ impl Drop for LocalListener {
             && (meta.dev(), meta.ino()) == self.identity
         {
             let _ = std::fs::remove_file(&self.path);
+            // Still ours, so no successor has written its own key yet.
+            if self.key.is_some()
+                && let Some(secret) = key_secret(&self.path)
+            {
+                let _ = secret.delete();
+            }
         }
     }
 }
@@ -330,6 +395,77 @@ mod tests {
         let _ = server.await;
     }
 
+    async fn handshake(path: &Path, key: Option<&str>) -> bool {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = "ws://localhost/ipc".into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("sec-websocket-protocol", "cypher.rpc.v1".parse().unwrap());
+        if let Some(key) = key {
+            request
+                .headers_mut()
+                .insert(KEY_HEADER, key.parse().unwrap());
+        }
+        let stream = UnixStream::connect(path).await.unwrap();
+        tokio_tungstenite::client_async(request, stream)
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn the_engine_socket_requires_its_key_and_the_agent_socket_does_not() {
+        let (dir, path) = path();
+        let server = tokio::spawn(
+            LocalListener::bind(&path)
+                .await
+                .unwrap()
+                .serve(Arc::new(Service)),
+        );
+        let key_file = path.with_file_name("engine.key");
+        assert_eq!(std::fs::metadata(&key_file).unwrap().mode() & 0o777, 0o600);
+        let key = std::fs::read_to_string(&key_file).unwrap();
+        assert_eq!(key.len(), 64);
+        assert!(!handshake(&path, None).await);
+        assert!(!handshake(&path, Some(&"0".repeat(64))).await);
+        assert!(!handshake(&path, Some(&key[..63])).await);
+        assert!(handshake(&path, Some(&key)).await);
+        assert!(connect_local(&path).await.is_ok());
+        // A client that finds no key dials keyless; the engine still refuses it.
+        std::fs::remove_file(&key_file).unwrap();
+        assert!(connect_local(&path).await.is_err());
+
+        let agent = cypher_env::agent_socket(dir.path()).unwrap();
+        assert_eq!(agent.parent(), path.parent());
+        let agent_server = tokio::spawn(
+            LocalListener::bind(&agent)
+                .await
+                .unwrap()
+                .serve(Arc::new(Service)),
+        );
+        assert!(handshake(&agent, None).await);
+        let client = connect_local(&agent).await.unwrap();
+        assert_eq!(
+            client.call("Echo", serde_json::json!(1)).await.unwrap(),
+            serde_json::json!(1)
+        );
+        server.abort();
+        agent_server.abort();
+        let _ = (server.await, agent_server.await);
+    }
+
+    #[tokio::test]
+    async fn every_bind_mints_a_new_key() {
+        let (_dir, path) = path();
+        let key_file = path.with_file_name("engine.key");
+        let listener = LocalListener::bind(&path).await.unwrap();
+        let first = std::fs::read(&key_file).unwrap();
+        drop(listener);
+        assert!(!key_file.exists(), "the key leaves with its socket");
+        let listener = LocalListener::bind(&path).await.unwrap();
+        assert_ne!(std::fs::read(&key_file).unwrap(), first);
+        drop(listener);
+    }
+
     #[tokio::test]
     async fn stale_socket_is_recovered_but_unknown_files_and_symlinks_are_not() {
         let (_dir, path) = path();
@@ -377,7 +513,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires PI_PACKAGE_DIR pointing at the isolated Runtime and Node on PATH"]
     async fn node_bridge_uses_the_actual_rust_unix_rpc() {
-        let (_dir, path) = path();
+        let (dir, _) = path();
+        let path = cypher_env::agent_socket(dir.path()).unwrap();
         let listener = LocalListener::bind(&path).await.unwrap();
         let server = tokio::spawn(listener.serve(Arc::new(Service)));
         let module = Path::new(env!("CARGO_MANIFEST_DIR"))

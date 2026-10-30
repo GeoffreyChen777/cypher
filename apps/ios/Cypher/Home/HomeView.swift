@@ -13,6 +13,7 @@ struct HomeView: View {
     @State private var showNewSpace = false
     @State private var showNotifications = false
     @State private var showPermissions = false
+    @State private var showPairing = false
     @State private var actions = SessionActions()
     /// The in-flight notification navigation (see `scheduleNotificationNavigation`).
     @State private var notificationTask: Task<Void, Never>?
@@ -249,6 +250,7 @@ struct HomeView: View {
             }
             .sheet(isPresented: $showNotifications) { NotificationSettingsView() }
             .sheet(isPresented: $showPermissions) { PermissionSettingsView() }
+            .sheet(isPresented: $showPairing) { PairedDevicesView() }
     }
 
     @ViewBuilder
@@ -365,6 +367,8 @@ struct HomeView: View {
             Button("Notifications") { showNotifications = true }
             Button("Permissions") { showPermissions = true }
                 .disabled(model.devices.isEmpty)
+            Button("Paired devices") { showPairing = true }
+                .disabled(model.config?.trust == nil)
             Button("Sign out", role: .destructive) { model.signOut() }
         } label: {
             Image(systemName: "person.crop.circle")

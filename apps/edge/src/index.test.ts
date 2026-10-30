@@ -81,6 +81,7 @@ const routingEnv = () => {
     CHAT_ROOMS: namespace("CHAT_ROOMS"),
     REGISTRY_ROOMS: namespace("REGISTRY_ROOMS"),
     DEVICE_ROOMS: namespace("DEVICE_ROOMS"),
+    TRUST_ROOMS: namespace("TRUST_ROOMS"),
     BLOBS: {
       get: async (key: string) => { blobReads.push(`get ${key}`); return key === "blob/alice/c1/m1#c1" ? r2Object(key) : null; },
       head: async (key: string) => { blobReads.push(`head ${key}`); return key === "blob/alice/c1/m1#c1" ? r2Object(key) : null; }
@@ -218,6 +219,16 @@ const ROUTES: Route[] = [
   ["PUT", "/blob/c1/m1%23c1", "alice", false, 404],
   ["GET", "/blob/bad!/part", "alice", false, 404],
   ["GET", "/blob/c1/m1%23c1", undefined, false, 401],
+
+  // The trust room is always the caller's own.
+  ["GET", "/trust/chain", undefined, false, 401],
+  ["GET", "/trust/chain?user=bob", "alice", false, 200,
+    { ns: "TRUST_ROOMS", room: "t1/alice", path: "/chain", search: "" }],
+  ["POST", "/trust/chain", "bob", false, 200,
+    { ns: "TRUST_ROOMS", room: "t1/bob", path: "/chain", search: "" }],
+  ["PUT", "/trust/pairing/0123456789abcdef0123456789abcdef/join", "alice", false, 200,
+    { ns: "TRUST_ROOMS", room: "t1/alice", path: "/pairing/0123456789abcdef0123456789abcdef/join", search: "" }],
+  ["GET", "/trust", "alice", false, 404],
 
   ["PUT", "/attachments/a1", "alice", false, 200],
   ["GET", "/attachments/a1", "alice", false, 404],

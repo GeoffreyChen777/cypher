@@ -12,7 +12,8 @@ export default defineConfig({
       miniflare: {
         compatibilityDate: "2026-07-01",
         durableObjects: {
-          TEST_LOG: { className: "TestLogRoom", useSQLite: true }
+          TEST_LOG: { className: "TestLogRoom", useSQLite: true },
+          TRUST: { className: "TrustRoom", useSQLite: true }
         }
       }
     })

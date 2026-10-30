@@ -26,8 +26,8 @@ mod server;
 
 pub use client::RpcClient;
 pub use device_room::{
-    DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
-    NudgeHandler, StaticToken, TokenSource, decode_device_frame, device_room_ws_url,
+    DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig, NoTrust,
+    NudgeHandler, PeerTrust, StaticToken, TokenSource, decode_device_frame, device_room_ws_url,
     encode_device_frame,
 };
 pub use local::{LocalListener, connect_local, probe_local};
@@ -310,6 +310,20 @@ pub mod methods {
     pub const COMMIT_CHAT_MIGRATION: &str = "CommitChatMigration";
     /// Drop a migration's staging folder.
     pub const ABORT_CHAT_MIGRATION: &str = "AbortChatMigration";
+    /// This device's place in the user's trust group (stream of
+    /// `TrustStatus`): pairing state, members, "Only paired devices".
+    pub const WATCH_DEVICE_TRUST: &str = "WatchDeviceTrust";
+    /// Show a code for a new device to enter (this device must be paired).
+    pub const START_DEVICE_PAIRING: &str = "StartDevicePairing";
+    /// Add the device that entered the shown code.
+    pub const APPROVE_DEVICE_PAIRING: &str = "ApproveDevicePairing";
+    pub const CANCEL_DEVICE_PAIRING: &str = "CancelDevicePairing";
+    /// Ask to join the group with a code shown on a paired device: `{code}`.
+    pub const JOIN_DEVICE_GROUP: &str = "JoinDeviceGroup";
+    /// Remove a device from the group: `{deviceId}`.
+    pub const REMOVE_TRUSTED_DEVICE: &str = "RemoveTrustedDevice";
+    /// "Only paired devices": `{enabled}`.
+    pub const SET_REQUIRE_PAIRED_DEVICES: &str = "SetRequirePairedDevices";
 
     /// How one method is answered and routed. The engine derives its routing
     /// predicates from [`SPECS`], so adding a method means adding its constant
@@ -328,6 +342,9 @@ pub mod methods {
         /// Carries credentials or server configuration, so it may only be
         /// relayed over an HTTPS/WSS (or loopback development) link.
         pub credentials: bool,
+        /// Answered only for this device's own viewports and CLI: the relay
+        /// refuses it, so no other device can change it remotely.
+        pub local: bool,
     }
 
     impl MethodSpec {
@@ -338,6 +355,7 @@ pub mod methods {
                 forwardable: false,
                 auth: false,
                 credentials: false,
+                local: false,
             }
         }
 
@@ -362,6 +380,13 @@ pub mod methods {
         const fn credentials(self) -> Self {
             Self {
                 credentials: true,
+                ..self
+            }
+        }
+
+        const fn local(self) -> Self {
+            Self {
+                local: true,
                 ..self
             }
         }
@@ -541,6 +566,15 @@ pub mod methods {
         MethodSpec::unary(WRITE_CHAT_MIGRATION_CHUNK).forwardable(),
         MethodSpec::unary(COMMIT_CHAT_MIGRATION).forwardable(),
         MethodSpec::unary(ABORT_CHAT_MIGRATION).forwardable(),
+        // Device trust signs with this device's keys and gates the relay
+        // itself: never changed by another device.
+        MethodSpec::stream(WATCH_DEVICE_TRUST).local(),
+        MethodSpec::unary(START_DEVICE_PAIRING).local(),
+        MethodSpec::unary(APPROVE_DEVICE_PAIRING).local(),
+        MethodSpec::unary(CANCEL_DEVICE_PAIRING).local(),
+        MethodSpec::unary(JOIN_DEVICE_GROUP).local(),
+        MethodSpec::unary(REMOVE_TRUSTED_DEVICE).local(),
+        MethodSpec::unary(SET_REQUIRE_PAIRED_DEVICES).local(),
     ];
 
     /// The spec for `name`, or `None` for an unknown method.
@@ -601,6 +635,11 @@ pub mod methods {
                 assert!(
                     !(spec.auth && spec.forwardable),
                     "{}: auth methods answer for the local engine only",
+                    spec.name
+                );
+                assert!(
+                    !(spec.local && spec.forwardable),
+                    "{}: local methods are never relayed",
                     spec.name
                 );
             }

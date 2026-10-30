@@ -51,8 +51,9 @@ pub async fn connect_ws(url: &str) -> Result<WsStream, WsError> {
 }
 
 pub async fn connect_request(
-    request: tokio_tungstenite::tungstenite::http::Request<()>,
+    mut request: tokio_tungstenite::tungstenite::http::Request<()>,
 ) -> Result<WsStream, WsError> {
+    lift_bearer(&mut request)?;
     let uri = request.uri();
     let host = uri
         .host()
@@ -96,6 +97,56 @@ pub async fn connect_request(
         tokio_tungstenite::client_async_tls_with_config(request, stream, None, None).await?;
     crate::wake::notify_online();
     Ok(ws)
+}
+
+/// Cypher's room URLs name the bearer as a `token=` query parameter. Move it
+/// into `Authorization` before the request leaves the process, so the bearer
+/// never appears in a URL on the wire, in a proxy's logs or in the edge's
+/// request logs. A request that already carries `Authorization` keeps it, and
+/// the parameter is dropped either way.
+fn lift_bearer(
+    request: &mut tokio_tungstenite::tungstenite::http::Request<()>,
+) -> Result<(), WsError> {
+    use tokio_tungstenite::tungstenite::http::{
+        HeaderValue, Uri, header::AUTHORIZATION, uri::PathAndQuery,
+    };
+    let Some(query) = request.uri().query() else {
+        return Ok(());
+    };
+    let mut token = None;
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| match pair.strip_prefix("token=") {
+            Some(value) => {
+                token = Some(percent_decode(value));
+                false
+            }
+            None => true,
+        })
+        .collect();
+    let Some(token) = token else {
+        return Ok(());
+    };
+    let path = request.uri().path();
+    let path_and_query = if kept.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}?{}", kept.join("&"))
+    };
+    let mut parts = request.uri().clone().into_parts();
+    parts.path_and_query = Some(
+        PathAndQuery::try_from(path_and_query)
+            .map_err(tokio_tungstenite::tungstenite::http::Error::from)?,
+    );
+    *request.uri_mut() =
+        Uri::from_parts(parts).map_err(tokio_tungstenite::tungstenite::http::Error::from)?;
+    if !request.headers().contains_key(AUTHORIZATION) && !token.is_empty() {
+        let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(tokio_tungstenite::tungstenite::http::Error::from)?;
+        value.set_sensitive(true);
+        request.headers_mut().insert(AUTHORIZATION, value);
+    }
+    Ok(())
 }
 
 /// First proxy use and first proxy failure are worth a log line each; every

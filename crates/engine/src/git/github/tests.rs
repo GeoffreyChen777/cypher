@@ -172,7 +172,7 @@ fn git_checkout(remote: &str) -> tempfile::TempDir {
 }
 
 fn write_account(dir: &Path, account: &StoredAccount) {
-    write_private_atomic(
+    cypher_secrets::write_private(
         &dir.join(ACCOUNT_FILE),
         &serde_json::to_vec(account).unwrap(),
     )

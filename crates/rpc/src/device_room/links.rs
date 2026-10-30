@@ -10,8 +10,14 @@ use futures::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+use cypher_trust::noise::{Initiator, Session};
+
 use super::frames::{
     DeviceFrameHeader, decode_device_frame, encode_device_frame, relay_error_code,
+};
+use super::trust::{
+    HELLO, NOISE_KIND, NoTrust, PeerTrust, REFUSED, REPLY, SECURE_KIND, noise_payload,
+    refusal_message,
 };
 use super::{
     PING_INTERVAL, RELAY_KIND, RPC_KIND, SILENCE_LEASE, TokenSource, device_room_ws_url,
@@ -34,83 +40,52 @@ pub struct DeviceLink {
     client: Arc<RpcClient>,
     closed_rx: watch::Receiver<Option<String>>,
     pump: tokio::task::JoinHandle<()>,
+    /// Runs inside a Noise session.
+    secure: bool,
 }
 
+/// How long a client waits for the host's handshake answer.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+type WsSink = futures::stream::SplitSink<cypher_net::dial::WsStream, WsMessage>;
+type WsSource = futures::stream::SplitStream<cypher_net::dial::WsStream>;
+
 impl DeviceLink {
+    /// A plaintext link (no device trust).
     pub async fn connect(url: &str) -> Result<Self, RpcError> {
+        Self::connect_to(url, "", &NoTrust).await
+    }
+
+    /// A link to `host_device_id`. When the host is in this device's trust
+    /// group the RPC stream runs inside a Noise session; otherwise it is
+    /// plaintext, which "Only paired devices" refuses.
+    pub async fn connect_to(
+        url: &str,
+        host_device_id: &str,
+        trust: &dyn PeerTrust,
+    ) -> Result<Self, RpcError> {
+        let secure = trust.local_keys().zip(trust.peer_key(host_device_id));
+        if secure.is_none() && trust.require_paired() {
+            return Err(RpcError::Transport(format!(
+                "Device {host_device_id} isn't paired with this device, and this device only uses paired devices. Pair it in Settings → Devices."
+            )));
+        }
         let ws = cypher_net::dial::connect_ws(url)
             .await
             .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
         let (mut sink, mut stream) = ws.split();
-        let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
+        let session = match secure {
+            Some((keys, host_key)) => {
+                Some(handshake(&mut sink, &mut stream, &keys, host_device_id, &host_key).await?)
+            }
+            None => None,
+        };
+        let secure = session.is_some();
+        let (out_tx, out_rx) = mpsc::channel::<String>(256);
         let (in_tx, in_rx) = mpsc::channel::<String>(256);
         let (closed_tx, closed_rx) = watch::channel::<Option<String>>(None);
-
         let pump = tokio::spawn(async move {
-            let mut ping = tokio::time::interval(PING_INTERVAL);
-            ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            ping.tick().await; // consume the immediate first tick
-            let mut last_rx = tokio::time::Instant::now();
-            let reason = loop {
-                tokio::select! {
-                    frame = out_rx.recv() => match frame {
-                        Some(text) => {
-                            let header = DeviceFrameHeader::new(RPC_KIND, RPC_KIND);
-                            let encoded = match encode_device_frame(&header, text.as_bytes()) {
-                                Ok(bytes) => bytes,
-                                Err(err) => {
-                                    tracing::error!(error = %err, "device-room: frame encode failed");
-                                    continue;
-                                }
-                            };
-                            if sink.send(WsMessage::Binary(encoded)).await.is_err() {
-                                break "connection lost".to_string();
-                            }
-                        }
-                        None => {
-                            let _ = sink.send(WsMessage::Close(None)).await;
-                            break "closed".to_string();
-                        }
-                    },
-                    message = stream.next() => match message {
-                        Some(Ok(WsMessage::Binary(bytes))) => {
-                            last_rx = tokio::time::Instant::now();
-                            match decode_device_frame(&bytes) {
-                                Ok((header, payload)) if header.k == RELAY_KIND => {
-                                    // host_offline / host_closed: surface as link-down.
-                                    let code = relay_error_code(&payload)
-                                        .unwrap_or_else(|| "relay error".into());
-                                    tracing::info!(%code, "device-room: link down");
-                                    break code;
-                                }
-                                Ok((header, payload)) if header.k == RPC_KIND => {
-                                    let text = String::from_utf8_lossy(&payload).into_owned();
-                                    if in_tx.send(text).await.is_err() {
-                                        break "client dropped".to_string();
-                                    }
-                                }
-                                Ok(_) => {}
-                                Err(err) => {
-                                    tracing::warn!(error = %err, "device-room: malformed frame");
-                                }
-                            }
-                        }
-                        Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => {
-                            break "connection lost".to_string();
-                        }
-                        // Text "pong" / control frames: proof of life for the lease.
-                        Some(Ok(_)) => last_rx = tokio::time::Instant::now(),
-                    },
-                    _ = ping.tick() => {
-                        if sink.send(WsMessage::Text("ping".into())).await.is_err() {
-                            break "connection lost".to_string();
-                        }
-                    }
-                    _ = tokio::time::sleep_until(last_rx + SILENCE_LEASE) => {
-                        break "silent past lease".to_string();
-                    }
-                }
-            };
+            let reason = pump(sink, stream, out_rx, in_tx, session).await;
             // Dropping in_tx ends the RpcClient reader → pending calls fail Closed.
             let _ = closed_tx.send(Some(reason));
         });
@@ -119,6 +94,7 @@ impl DeviceLink {
             client: Arc::new(RpcClient::new(out_tx, in_rx)),
             closed_rx,
             pump,
+            secure,
         })
     }
 
@@ -128,6 +104,11 @@ impl DeviceLink {
 
     pub fn is_closed(&self) -> bool {
         self.closed_rx.borrow().is_some()
+    }
+
+    /// Whether the link runs inside a Noise session.
+    pub fn is_secure(&self) -> bool {
+        self.secure
     }
 
     /// Watch that resolves to `Some(reason)` when the link drops.
@@ -142,6 +123,173 @@ impl Drop for DeviceLink {
     }
 }
 
+/// Run the client's half of the Noise handshake on a fresh socket.
+async fn handshake(
+    sink: &mut WsSink,
+    stream: &mut WsSource,
+    keys: &cypher_trust::DeviceKeys,
+    host_device_id: &str,
+    host_key: &[u8; 32],
+) -> Result<Session, RpcError> {
+    let failed = |e: cypher_trust::TrustError| {
+        RpcError::Transport(format!("secure connection to {host_device_id} failed: {e}"))
+    };
+    let (initiator, first) = Initiator::start(keys, host_device_id, host_key).map_err(failed)?;
+    let header = DeviceFrameHeader::new(NOISE_KIND, NOISE_KIND);
+    let frame = encode_device_frame(&header, &noise_payload(HELLO, &first))?;
+    sink.send(WsMessage::Binary(frame))
+        .await
+        .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
+    let reply = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+        while let Some(message) = stream.next().await {
+            let Ok(WsMessage::Binary(bytes)) = message else {
+                if message.is_err() {
+                    break;
+                }
+                continue;
+            };
+            match decode_device_frame(&bytes) {
+                Ok((header, payload)) if header.k == RELAY_KIND => {
+                    let code = relay_error_code(&payload).unwrap_or_else(|| "relay error".into());
+                    return Err(RpcError::Transport(code));
+                }
+                Ok((header, payload)) if header.k == NOISE_KIND => return Ok(payload),
+                _ => {}
+            }
+        }
+        Err(RpcError::Transport("device room closed during the handshake".into()))
+    })
+    .await
+    .map_err(|_| {
+        RpcError::Transport(format!(
+            "Device {host_device_id} did not answer the secure handshake. It may need a Cypher update."
+        ))
+    })??;
+    match reply.split_first() {
+        Some((&REPLY, message)) => initiator.finish(message).map_err(failed),
+        Some((&REFUSED, reason)) => Err(RpcError::Transport(refusal_message(
+            host_device_id,
+            &String::from_utf8_lossy(reason),
+        ))),
+        _ => Err(RpcError::Transport(format!(
+            "secure connection to {host_device_id} failed: malformed handshake reply"
+        ))),
+    }
+}
+
+/// Move RPC frames between the socket and the client until the link drops;
+/// returns why. With a session, frames are sealed both ways and a plaintext
+/// frame from the relay is never accepted.
+async fn pump(
+    mut sink: WsSink,
+    mut stream: WsSource,
+    mut out_rx: mpsc::Receiver<String>,
+    in_tx: mpsc::Sender<String>,
+    mut session: Option<Session>,
+) -> String {
+    let mut ping = tokio::time::interval(PING_INTERVAL);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ping.tick().await; // consume the immediate first tick
+    let mut last_rx = tokio::time::Instant::now();
+    loop {
+        tokio::select! {
+            frame = out_rx.recv() => match frame {
+                Some(text) => {
+                    let frames = match session.as_mut() {
+                        Some(session) => match session.seal(text.as_bytes()) {
+                            Ok(fragments) => fragments
+                                .into_iter()
+                                .map(|fragment| (SECURE_KIND, fragment))
+                                .collect(),
+                            Err(err) => {
+                                tracing::error!(error = %err, "device-room: seal failed");
+                                return "secure channel failed".into();
+                            }
+                        },
+                        None => vec![(RPC_KIND, text.into_bytes())],
+                    };
+                    for (kind, payload) in frames {
+                        let header = DeviceFrameHeader::new(RPC_KIND, kind);
+                        let encoded = match encode_device_frame(&header, &payload) {
+                            Ok(bytes) => bytes,
+                            Err(err) => {
+                                tracing::error!(error = %err, "device-room: frame encode failed");
+                                continue;
+                            }
+                        };
+                        if sink.send(WsMessage::Binary(encoded)).await.is_err() {
+                            return "connection lost".into();
+                        }
+                    }
+                }
+                None => {
+                    let _ = sink.send(WsMessage::Close(None)).await;
+                    return "closed".into();
+                }
+            },
+            message = stream.next() => match message {
+                Some(Ok(WsMessage::Binary(bytes))) => {
+                    last_rx = tokio::time::Instant::now();
+                    let text = match decode_device_frame(&bytes) {
+                        Ok((header, payload)) if header.k == RELAY_KIND => {
+                            // host_offline / host_closed: surface as link-down.
+                            let code = relay_error_code(&payload)
+                                .unwrap_or_else(|| "relay error".into());
+                            tracing::info!(%code, "device-room: link down");
+                            return code;
+                        }
+                        Ok((header, payload)) if header.k == SECURE_KIND => match session.as_mut() {
+                            Some(session) => match session.open(&payload) {
+                                Ok(Some(message)) => String::from_utf8_lossy(&message).into_owned(),
+                                Ok(None) => continue,
+                                Err(err) => {
+                                    tracing::warn!(error = %err, "device-room: secure frame refused");
+                                    return "secure channel failed".into();
+                                }
+                            },
+                            None => continue,
+                        },
+                        Ok((header, payload)) if header.k == RPC_KIND => match session {
+                            None => String::from_utf8_lossy(&payload).into_owned(),
+                            Some(_) => {
+                                tracing::warn!("device-room: dropping a plaintext frame on a secure link");
+                                continue;
+                            }
+                        },
+                        Ok((header, payload)) if header.k == NOISE_KIND => {
+                            if payload.first() == Some(&REFUSED) {
+                                return String::from_utf8_lossy(&payload[1..]).into_owned();
+                            }
+                            continue;
+                        }
+                        Ok(_) => continue,
+                        Err(err) => {
+                            tracing::warn!(error = %err, "device-room: malformed frame");
+                            continue;
+                        }
+                    };
+                    if in_tx.send(text).await.is_err() {
+                        return "client dropped".into();
+                    }
+                }
+                Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => {
+                    return "connection lost".into();
+                }
+                // Text "pong" / control frames: proof of life for the lease.
+                Some(Ok(_)) => last_rx = tokio::time::Instant::now(),
+            },
+            _ = ping.tick() => {
+                if sink.send(WsMessage::Text("ping".into())).await.is_err() {
+                    return "connection lost".into();
+                }
+            }
+            _ = tokio::time::sleep_until(last_rx + SILENCE_LEASE) => {
+                return "silent past lease".into();
+            }
+        }
+    }
+}
+
 pub struct LinkCacheConfig {
     pub edge_url: String,
     pub token: Arc<dyn TokenSource>,
@@ -152,6 +300,9 @@ pub struct LinkCacheConfig {
     /// Readiness probe budget: the relay accepts client joins even when the host is
     /// offline, so a `ListHarnesses` round-trip proves the path before caching.
     pub probe_timeout: Duration,
+    /// Device trust: which hosts get a Noise session, and whether unpaired
+    /// hosts are refused.
+    pub trust: Arc<dyn PeerTrust>,
 }
 
 impl LinkCacheConfig {
@@ -168,7 +319,13 @@ impl LinkCacheConfig {
             cooldown_base: Duration::from_secs(5),
             cooldown_max: Duration::from_secs(60),
             probe_timeout: Duration::from_secs(10),
+            trust: Arc::new(NoTrust),
         }
+    }
+
+    pub fn with_trust(mut self, trust: Arc<dyn PeerTrust>) -> Self {
+        self.trust = trust;
+        self
     }
 }
 
@@ -342,8 +499,15 @@ impl LinkCache {
 
     fn cached(&self, device_id: &str) -> Option<Arc<DeviceLink>> {
         let mut links = lock(&self.links);
+        // A plaintext link dialed before the host joined this device's trust
+        // group is replaced by a sealed one as soon as its key is known.
+        let upgradable = |link: &DeviceLink| {
+            !link.is_secure()
+                && self.config.trust.local_keys().is_some()
+                && self.config.trust.peer_key(device_id).is_some()
+        };
         match links.get(device_id) {
-            Some(link) if !link.is_closed() => Some(link.clone()),
+            Some(link) if !link.is_closed() && !upgradable(link) => Some(link.clone()),
             Some(_) => {
                 links.remove(device_id);
                 None
@@ -404,7 +568,8 @@ impl LinkCache {
             &token,
         );
         tracing::info!(device = %device_id, "peer: dialing via device room");
-        let link = Arc::new(DeviceLink::connect(&url).await?);
+        let link =
+            Arc::new(DeviceLink::connect_to(&url, device_id, self.config.trust.as_ref()).await?);
         // Readiness probe: prove the host answers before caching (an offline host bounces
         // host_offline, which closes the link and fails this call fast).
         let client = link.client();

@@ -61,6 +61,8 @@ pub struct EngineCore {
     auth: Mutex<Option<Auth>>,
     /// Peer link cache for `targetDeviceId` routing (attached when edge+auth are ready).
     links: Mutex<Option<Arc<cypher_rpc::LinkCache>>>,
+    /// Device trust (attached with the edge): keys, the group's chain, pairing.
+    trust: Mutex<Option<crate::device_trust::DeviceTrust>>,
     /// Release checker (attached by [`Engine::assemble_runtime`]) — the
     /// UpdateStatus stream + ApplyUpdate.
     updater: Mutex<Option<cypher_update::Updater>>,
@@ -300,6 +302,7 @@ impl EngineCore {
             workspace_scope: profile.scope(),
             auth: Mutex::new(None),
             links: Mutex::new(None),
+            trust: Mutex::new(None),
             updater: Mutex::new(None),
             pi_runtime: Mutex::new(None),
             updater_wake: Mutex::new(None),
@@ -349,6 +352,14 @@ impl EngineCore {
         lock(&self.links).clone()
     }
 
+    pub fn set_trust(&self, trust: crate::device_trust::DeviceTrust) {
+        *lock(&self.trust) = Some(trust);
+    }
+
+    pub fn trust(&self) -> Option<crate::device_trust::DeviceTrust> {
+        lock(&self.trust).clone()
+    }
+
     /// Attach the release checker (before building the RPC service).
     pub fn set_updater_wake(&self, handle: tokio::task::JoinHandle<()>) {
         *lock(&self.updater_wake) = Some(handle);
@@ -395,8 +406,11 @@ impl EngineCore {
     /// re-reads auth on every (re)dial, so token refreshes take effect at reconnect.
     pub fn start_host_relay(&self, edge_url: &str) -> cypher_rpc::HostRelay {
         let auth = self.auth();
-        let config =
+        let mut config =
             cypher_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth));
+        if let Some(trust) = self.trust() {
+            config = config.with_trust(Arc::new(trust));
+        }
         let doc_host = self.doc_host.clone();
         let on_nudge: cypher_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
             // Opening the doc joins its room + syncs; drain fires on the change
@@ -408,7 +422,17 @@ impl EngineCore {
                 }
             }
         });
-        cypher_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        // Device-trust methods answer only for this device's own viewports.
+        let service = Arc::new(crate::rpc::RelayRpc::new(
+            self.rpc_service(),
+            self.device_id.clone(),
+        ));
+        cypher_rpc::HostRelay::spawn(config, service, on_nudge)
+    }
+
+    /// The restricted service behind the agent socket (`rpc::AgentRpc`).
+    pub fn agent_rpc_service(&self) -> Arc<crate::rpc::AgentRpc> {
+        Arc::new(crate::rpc::AgentRpc::new(self.rpc_service()))
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
@@ -434,6 +458,9 @@ impl EngineCore {
         .with_github(self.github.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
+        }
+        if let Some(trust) = self.trust() {
+            rpc = rpc.with_trust(trust);
         }
         if let Some(updater) = self.updater() {
             rpc = rpc.with_updater(updater);
@@ -470,6 +497,9 @@ impl EngineCore {
         // every ephemeral doc (host-memory only — dispose leaves no durable
         // remnants; a promoted chat is untouched) BEFORE the general session
         // teardown settles/flushes the remaining normal chats.
+        if let Some(trust) = self.trust() {
+            trust.shutdown();
+        }
         self.side_chats.shutdown().await;
         self.sessions.shutdown().await;
         self.terminals.shutdown();

@@ -4,6 +4,8 @@ import { DurableObject } from "cloudflare:workers";
  * `runInDurableObject` (the cloudflare-os TEST_OVERSEER pattern). */
 export class TestLogRoom extends DurableObject {}
 
+export { TrustRoom } from "../../src/trust/trust-room";
+
 export default {
   fetch(): Response {
     return new Response("test fixture", { status: 404 });

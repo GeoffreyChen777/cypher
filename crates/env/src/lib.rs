@@ -20,6 +20,12 @@ pub fn ipc_socket(data_dir: &std::path::Path) -> std::io::Result<PathBuf> {
     )))
 }
 
+/// The keyless socket beside [`ipc_socket`] that the engine serves to the
+/// agent processes it spawns (see `cypher_rpc`'s `local` module).
+pub fn agent_socket(data_dir: &std::path::Path) -> std::io::Result<PathBuf> {
+    Ok(ipc_socket(data_dir)?.with_file_name("agent.sock"))
+}
+
 /// Canonicalize the existing prefix without creating a directory during a
 /// read-only status query. Symlink aliases of an existing data root agree.
 pub fn canonical_data_dir(path: &std::path::Path) -> std::io::Result<PathBuf> {

@@ -4,6 +4,7 @@ declare global {
   namespace Cloudflare {
     interface Env {
       TEST_LOG: DurableObjectNamespace;
+      TRUST: DurableObjectNamespace;
     }
   }
 }

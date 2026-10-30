@@ -32,7 +32,8 @@ NODE="${NODE:-node}"
 
 # Crates that build without gpui; the Linux CI job checks exactly this set.
 HEADLESS=(-p cypher -p cypher-env -p cypher-proto -p cypher-doc -p cypher-sync
-  -p cypher-net -p cypher-harness -p cypher-engine -p cypher-rpc -p cypher-update -p cypher-syntax)
+  -p cypher-net -p cypher-harness -p cypher-engine -p cypher-rpc -p cypher-update -p cypher-syntax
+  -p cypher-secrets -p cypher-trust)
 
 run() {
   if [[ -n "${GITHUB_ACTIONS:-}" ]]; then echo "::group::$*"; else echo "+ $*"; fi
@@ -118,6 +119,9 @@ stage_macos() {
     -o "$out/preview-vectors"
   run "$out/preview-vectors" protocol/vectors/stream-preview-v1.json \
     protocol/vectors/preview-reducer-v1.json
+  run xcrun swiftc -module-cache-path "$out/module-cache" apps/ios/Cypher/Sync/DeviceTrust.swift \
+    scripts/tests/device-trust-vectors.swift -o "$out/trust-vectors"
+  run "$out/trust-vectors" protocol/vectors/device-trust-v1.json
   rm -rf "$out"
 }
 

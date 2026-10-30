@@ -58,6 +58,10 @@ const RELAY_KIND = " relay";
  * command sent to a chat the host hasn't warm-opened is never stranded. */
 const NUDGE_KIND = "nudge";
 const NUDGE_MAX_PENDING = 256;
+
+/** Largest sidecar slot body. Slots are small pickers' snapshots; the cap
+ * keeps one caller from filling the DO's storage. */
+export const SIDECAR_MAX_BYTES = 256 * 1024;
 const CHAT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export class DeviceRoom implements DurableObject {
@@ -161,7 +165,15 @@ export class DeviceRoom implements DurableObject {
         return value === undefined ? json({ error: "not_found" }, 404) : json(value);
       }
       if (request.method === "POST") {
-        putJsonBlob(this.blobs, `sidecar:${name}`, await request.json());
+        const body = await readLimited(request, SIDECAR_MAX_BYTES);
+        if (body === undefined) return json({ error: "too_large" }, 413);
+        let value: unknown;
+        try {
+          value = JSON.parse(new TextDecoder().decode(body));
+        } catch {
+          return json({ error: "bad_json" }, 400);
+        }
+        putJsonBlob(this.blobs, `sidecar:${name}`, value);
         return json({ ok: true });
       }
     }
@@ -309,6 +321,34 @@ export const pickLiveHost = <T>(
     if (!best || host.lastSeenAt > best.lastSeenAt) best = host;
   }
   return best && now - best.lastSeenAt <= HOST_LIVENESS_MS ? best.ws : undefined;
+};
+
+/** The request body, or `undefined` once it exceeds `max` bytes. Streams so
+ * an oversized body is never buffered whole. */
+export const readLimited = async (request: Request, max: number): Promise<Uint8Array | undefined> => {
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (declared > max) return undefined;
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => undefined);
+      return undefined;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
 };
 
 const encodeRelayError = (code: string): Uint8Array =>

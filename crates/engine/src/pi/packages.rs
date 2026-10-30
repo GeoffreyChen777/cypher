@@ -114,6 +114,19 @@ const RECOMMENDED: &[(&str, &str)] = &[
     ("npm:pi-provider-newapi", "Additional provider integration."),
 ];
 
+/// Whether `source` is exactly one of the [`RECOMMENDED`] sources. Installing
+/// or newly enabling a package accepts only these: an extension runs with full
+/// user access, and the RPCs that add one are reachable from every signed-in
+/// device of the account. Anything else is added by editing `settings.json`
+/// on the device itself.
+fn curated(source: &str) -> bool {
+    RECOMMENDED
+        .iter()
+        .any(|(recommended, _)| *recommended == source)
+}
+
+const NOT_CURATED: &str = "Only Cypher's curated Pi packages can be added here. Edit the Pi settings.json on this device to add others.";
+
 fn settings_path(paths: &crate::pi::runtime::PiRuntimePaths) -> PathBuf {
     paths.agent_dir.join("settings.json")
 }
@@ -366,8 +379,8 @@ pub async fn install_package(
     paths: &crate::pi::runtime::PiRuntimePaths,
     source: &str,
 ) -> Result<(), String> {
-    if !source.starts_with("npm:") {
-        return Err("Only npm Pi packages can be installed from this page.".into());
+    if !curated(source) {
+        return Err(NOT_CURATED.into());
     }
     if let Some(source) = bundled_source(paths, source) {
         return set_package_enabled(
@@ -419,6 +432,9 @@ pub fn set_package_enabled(
     });
     if params.enabled {
         if index.is_none() {
+            if !curated(&params.source) {
+                return Err(NOT_CURATED.into());
+            }
             let setting =
                 bundled_setting(paths, &params.source).unwrap_or(Value::String(params.source));
             list.push(setting);
@@ -473,6 +489,49 @@ mod tests {
             Some(package.to_str().unwrap())
         );
         assert!(package_enabled("npm:pi-web-search", &configured));
+    }
+
+    #[test]
+    fn only_curated_packages_can_be_added() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::pi::runtime::PiRuntimePaths::for_data_dir(temp.path());
+        std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        std::fs::write(
+            settings_path(&paths),
+            r#"{"packages":["/home/me/own-extension"]}"#,
+        )
+        .unwrap();
+
+        for source in ["/tmp/evil", "npm:evil", "npm:pi-web-search@0.0.1", "git:x"] {
+            let err = set_package_enabled(
+                &paths,
+                SetPackageEnabled {
+                    source: source.into(),
+                    enabled: true,
+                },
+            )
+            .unwrap_err();
+            assert_eq!(err, NOT_CURATED, "{source}");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let err = runtime
+                .block_on(install_package(&paths, source))
+                .unwrap_err();
+            assert_eq!(err, NOT_CURATED, "{source}");
+        }
+        assert_eq!(configured_packages(&paths).len(), 1);
+
+        // A package the user configured on the device can still be switched off.
+        set_package_enabled(
+            &paths,
+            SetPackageEnabled {
+                source: "/home/me/own-extension".into(),
+                enabled: false,
+            },
+        )
+        .unwrap();
+        assert!(configured_packages(&paths).is_empty());
     }
 
     #[test]

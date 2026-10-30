@@ -71,8 +71,63 @@
             return entries[(asked + 1)...].contains { $0.role == .assistant && !$0.parts.isEmpty }
         }
 
-        private static func wait(_ condition: () -> Bool) async -> Bool {
-            let deadline = Date().addingTimeInterval(45)
+        private static func wait(_ condition: () -> Bool, seconds: TimeInterval = 45) async -> Bool {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                if condition() { return true }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            return false
+        }
+    }
+
+    /// Opt-in device-trust probe (`-dev-trust-interop`): join the account's
+    /// trust group with the code in `CYPHER_DEV_PAIRING_CODE`, wait for the
+    /// desktop to approve, then call the desktop `CYPHER_DEV_TRUST_HOST` over
+    /// the relay — sealed, now that both are paired. Writes the outcome to
+    /// Documents/development-trust-interop.json.
+    @MainActor
+    enum DevelopmentTrustInterop {
+        static func run(model: AppModel) async {
+            let resultURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("development-trust-interop.json")
+            func result(_ status: String, _ detail: String) {
+                let body: [String: Any] = [
+                    "status": status, "detail": detail,
+                    "deviceId": model.deviceId,
+                    "fingerprint": model.config?.trust?.fingerprint ?? "",
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: body, options: .sortedKeys) {
+                    try? data.write(to: resultURL, options: .atomic)
+                }
+            }
+            let environment = ProcessInfo.processInfo.environment
+            guard let code = environment["CYPHER_DEV_PAIRING_CODE"], let host = environment["CYPHER_DEV_TRUST_HOST"],
+                let trust = model.config?.trust, let workspace = model.workspace
+            else {
+                result("failed", "missing pairing code, host or session")
+                return
+            }
+            result("running", "joining")
+            await trust.sync()
+            trust.join(code: code)
+            guard await wait({ trust.phase == .paired || (!trust.joining && trust.error != nil) }, seconds: 120),
+                trust.phase == .paired
+            else {
+                result("failed", "not paired: \(trust.error ?? "timed out")")
+                return
+            }
+            result("paired", "calling the desktop")
+            do {
+                let models = try await workspace.listModels(deviceId: host, harness: "mock")
+                result("passed", "\(models.count) models from \(host) over a sealed session")
+            } catch {
+                result("failed", "relay call failed: \(error.localizedDescription)")
+            }
+        }
+
+        private static func wait(_ condition: () -> Bool, seconds: TimeInterval) async -> Bool {
+            let deadline = Date().addingTimeInterval(seconds)
             while Date() < deadline {
                 if condition() { return true }
                 try? await Task.sleep(nanoseconds: 250_000_000)

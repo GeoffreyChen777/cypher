@@ -1,0 +1,851 @@
+{
+  "chain": {
+    "entries": [
+      {
+        "at": 1700000000000,
+        "device": {
+          "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+          "id": "device-a",
+          "name": "Studio Mac",
+          "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+        },
+        "hash": "f6405e2a81e598b1b1d848a377e64b32d13923745f3db576dca169bad4100e09",
+        "kind": "add",
+        "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "seq": 0,
+        "sig": "b4632b64269d39a6e900e79db926673e0f5c9d032e0b4680cea4373813842581ad8db274684e98eba7da1c3558376b1450563e3509798cdb84a14e37e1586f04",
+        "signer": "device-a",
+        "signingBytes": "6379706865722d74727573742d656e7472792d7631000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000086465766963652d610000000a53747564696f204d6163af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf7737147ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e0000018bcfe56800000000086465766963652d61"
+      },
+      {
+        "at": 1700000001000,
+        "device": {
+          "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+          "id": "device-b",
+          "name": "Build Box",
+          "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+        },
+        "hash": "32157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b98",
+        "kind": "add",
+        "prev": "f6405e2a81e598b1b1d848a377e64b32d13923745f3db576dca169bad4100e09",
+        "seq": 1,
+        "sig": "a8107ad78f1dc5ca56d0def4f34882cfa773d350ad0cd8b90e76fa9cff61a728f02de1f041855ed58fead3f972316ef8ca6bad80701ebbad6d8a81c77e6e3a01",
+        "signer": "device-a",
+        "signingBytes": "6379706865722d74727573742d656e7472792d7631000000000000000001f6405e2a81e598b1b1d848a377e64b32d13923745f3db576dca169bad4100e0901000000086465766963652d62000000094275696c6420426f78d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd015d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b0000018bcfe56be8000000086465766963652d61"
+      },
+      {
+        "at": 1700000002000,
+        "device": {
+          "dhPub": "ff32c150195988671fcfd84fac64903190b70cad38eb2a730106a2069d5fde7b",
+          "id": "device-c",
+          "name": "iPhone",
+          "signPub": "10276a3ddaf5d16de3c50ca009b95641d934d304d02a9f11fe87e1f2b1916c45"
+        },
+        "hash": "ac2f2a6fc293f91ead28bb6948ad663c261823c8b752174fbb8483d7a152d382",
+        "kind": "add",
+        "prev": "32157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b98",
+        "seq": 2,
+        "sig": "c7b65779c98e421f083684fff53edb48a7d291ffe506c977bec0b28fc2391264f83c77fe0bdae0dc1cf709934a7b16d55a313b82c2152aa61317b60a669efc04",
+        "signer": "device-b",
+        "signingBytes": "6379706865722d74727573742d656e7472792d763100000000000000000232157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b9801000000086465766963652d63000000066950686f6e6510276a3ddaf5d16de3c50ca009b95641d934d304d02a9f11fe87e1f2b1916c45ff32c150195988671fcfd84fac64903190b70cad38eb2a730106a2069d5fde7b0000018bcfe56fd0000000086465766963652d62"
+      },
+      {
+        "at": 1700000003000,
+        "device": {
+          "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+          "id": "device-a",
+          "name": "Studio Mac",
+          "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+        },
+        "hash": "b314b6984cde81117601ae5a33dbe18b385c4d78fadb0128679327568d99da78",
+        "kind": "remove",
+        "prev": "ac2f2a6fc293f91ead28bb6948ad663c261823c8b752174fbb8483d7a152d382",
+        "seq": 3,
+        "sig": "8ed86fb079b93ef10292c710290c33c464b089753cc3b28509e42c58521739b8b5e62f0a83681f59f0c242ab7e202ceb81dbb1aed75ead806446e143304c120e",
+        "signer": "device-c",
+        "signingBytes": "6379706865722d74727573742d656e7472792d7631000000000000000003ac2f2a6fc293f91ead28bb6948ad663c261823c8b752174fbb8483d7a152d38202000000086465766963652d610000000a53747564696f204d6163af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf7737147ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e0000018bcfe573b8000000086465766963652d63"
+      },
+      {
+        "at": 1700000004000,
+        "device": {
+          "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+          "id": "device-b",
+          "name": "Build Box",
+          "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+        },
+        "hash": "81ba8576b91fac740675f9a7cfb0aaed1a2c212bd403c533122798d1eaba20e9",
+        "kind": "requirePaired",
+        "prev": "b314b6984cde81117601ae5a33dbe18b385c4d78fadb0128679327568d99da78",
+        "seq": 4,
+        "sig": "ccec635dd360398cd65d2206663ff916aff61f8b436acf3f5bec3ca42e027d316a6b6593bd2f9504e9f462903d47bb7ccc031428ec7d7c51afaa992c6feb680d",
+        "signer": "device-b",
+        "signingBytes": "6379706865722d74727573742d656e7472792d7631000000000000000004b314b6984cde81117601ae5a33dbe18b385c4d78fadb0128679327568d99da7803000000086465766963652d62000000094275696c6420426f78d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd015d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b0000018bcfe577a0000000086465766963652d62"
+      }
+    ],
+    "members": [
+      "device-b",
+      "device-c"
+    ],
+    "removed": [
+      "device-a"
+    ],
+    "requirePaired": true
+  },
+  "comment": "Generated by crates/trust/tests/vectors.rs. Byte strings are lowercase hex; plaintext[i] = i % 251.",
+  "devices": [
+    {
+      "dhSecret": "3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a",
+      "fingerprint": "1800ab57707b67b7",
+      "public": {
+        "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+        "id": "device-a",
+        "name": "Studio Mac",
+        "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+      },
+      "signSecret": "1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e"
+    },
+    {
+      "dhSecret": "5a5b5c5d5e5f606162636465666768696a6b6c6d6e6f70717273747576777879",
+      "fingerprint": "0699263c882387c2",
+      "public": {
+        "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+        "id": "device-b",
+        "name": "Build Box",
+        "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+      },
+      "signSecret": "3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d"
+    },
+    {
+      "dhSecret": "797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798",
+      "fingerprint": "a805d8843602bb65",
+      "public": {
+        "dhPub": "ff32c150195988671fcfd84fac64903190b70cad38eb2a730106a2069d5fde7b",
+        "id": "device-c",
+        "name": "iPhone",
+        "signPub": "10276a3ddaf5d16de3c50ca009b95641d934d304d02a9f11fe87e1f2b1916c45"
+      },
+      "signSecret": "5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c"
+    },
+    {
+      "dhSecret": "98999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7",
+      "fingerprint": "274038efd59d776d",
+      "public": {
+        "dhPub": "a10eafb0a4fb54b97ec8c0bf34dc8f4c2182453eac5c62e08ece8878f68aa20d",
+        "id": "device-x",
+        "name": "Stranger",
+        "signPub": "6707fed112e78eedbf1caa5be92693ed5e929348ea916b5ecf2196a0c9935201"
+      },
+      "signSecret": "7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b"
+    }
+  ],
+  "invalidChains": [
+    {
+      "entries": [
+        {
+          "at": 1700000000000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "add",
+          "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+          "seq": 0,
+          "sig": "b4632b64269d39a6e900e79db926673e0f5c9d032e0b4680cea4373813842581ad8db274684e98eba7da1c3558376b1450563e3509798cdb84a14e37e1586f04",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000001000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Renamed",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "add",
+          "prev": "f6405e2a81e598b1b1d848a377e64b32d13923745f3db576dca169bad4100e09",
+          "seq": 1,
+          "sig": "a8107ad78f1dc5ca56d0def4f34882cfa773d350ad0cd8b90e76fa9cff61a728f02de1f041855ed58fead3f972316ef8ca6bad80701ebbad6d8a81c77e6e3a01",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000002000,
+          "device": {
+            "dhPub": "ff32c150195988671fcfd84fac64903190b70cad38eb2a730106a2069d5fde7b",
+            "id": "device-c",
+            "name": "iPhone",
+            "signPub": "10276a3ddaf5d16de3c50ca009b95641d934d304d02a9f11fe87e1f2b1916c45"
+          },
+          "kind": "add",
+          "prev": "32157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b98",
+          "seq": 2,
+          "sig": "c7b65779c98e421f083684fff53edb48a7d291ffe506c977bec0b28fc2391264f83c77fe0bdae0dc1cf709934a7b16d55a313b82c2152aa61317b60a669efc04",
+          "signer": "device-b"
+        },
+        {
+          "at": 1700000003000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "remove",
+          "prev": "ac2f2a6fc293f91ead28bb6948ad663c261823c8b752174fbb8483d7a152d382",
+          "seq": 3,
+          "sig": "8ed86fb079b93ef10292c710290c33c464b089753cc3b28509e42c58521739b8b5e62f0a83681f59f0c242ab7e202ceb81dbb1aed75ead806446e143304c120e",
+          "signer": "device-c"
+        },
+        {
+          "at": 1700000004000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "requirePaired",
+          "prev": "b314b6984cde81117601ae5a33dbe18b385c4d78fadb0128679327568d99da78",
+          "seq": 4,
+          "sig": "ccec635dd360398cd65d2206663ff916aff61f8b436acf3f5bec3ca42e027d316a6b6593bd2f9504e9f462903d47bb7ccc031428ec7d7c51afaa992c6feb680d",
+          "signer": "device-b"
+        }
+      ],
+      "name": "an edited entry",
+      "reason": "bad signature"
+    },
+    {
+      "entries": [
+        {
+          "at": 1700000000000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "add",
+          "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+          "seq": 0,
+          "sig": "b4632b64269d39a6e900e79db926673e0f5c9d032e0b4680cea4373813842581ad8db274684e98eba7da1c3558376b1450563e3509798cdb84a14e37e1586f04",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000001000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "add",
+          "prev": "f6405e2a81e598b1b1d848a377e64b32d13923745f3db576dca169bad4100e09",
+          "seq": 1,
+          "sig": "a8107ad78f1dc5ca56d0def4f34882cfa773d350ad0cd8b90e76fa9cff61a728f02de1f041855ed58fead3f972316ef8ca6bad80701ebbad6d8a81c77e6e3a01",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000002000,
+          "device": {
+            "dhPub": "ff32c150195988671fcfd84fac64903190b70cad38eb2a730106a2069d5fde7b",
+            "id": "device-c",
+            "name": "iPhone",
+            "signPub": "10276a3ddaf5d16de3c50ca009b95641d934d304d02a9f11fe87e1f2b1916c45"
+          },
+          "kind": "add",
+          "prev": "0707070707070707070707070707070707070707070707070707070707070707",
+          "seq": 2,
+          "sig": "c7b65779c98e421f083684fff53edb48a7d291ffe506c977bec0b28fc2391264f83c77fe0bdae0dc1cf709934a7b16d55a313b82c2152aa61317b60a669efc04",
+          "signer": "device-b"
+        },
+        {
+          "at": 1700000003000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "remove",
+          "prev": "ac2f2a6fc293f91ead28bb6948ad663c261823c8b752174fbb8483d7a152d382",
+          "seq": 3,
+          "sig": "8ed86fb079b93ef10292c710290c33c464b089753cc3b28509e42c58521739b8b5e62f0a83681f59f0c242ab7e202ceb81dbb1aed75ead806446e143304c120e",
+          "signer": "device-c"
+        },
+        {
+          "at": 1700000004000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "requirePaired",
+          "prev": "b314b6984cde81117601ae5a33dbe18b385c4d78fadb0128679327568d99da78",
+          "seq": 4,
+          "sig": "ccec635dd360398cd65d2206663ff916aff61f8b436acf3f5bec3ca42e027d316a6b6593bd2f9504e9f462903d47bb7ccc031428ec7d7c51afaa992c6feb680d",
+          "signer": "device-b"
+        }
+      ],
+      "name": "a broken hash link",
+      "reason": "does not follow the previous entry"
+    },
+    {
+      "entries": [
+        {
+          "at": 1700000000000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "add",
+          "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+          "seq": 0,
+          "sig": "b4632b64269d39a6e900e79db926673e0f5c9d032e0b4680cea4373813842581ad8db274684e98eba7da1c3558376b1450563e3509798cdb84a14e37e1586f04",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000001000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "add",
+          "prev": "f6405e2a81e598b1b1d848a377e64b32d13923745f3db576dca169bad4100e09",
+          "seq": 5,
+          "sig": "a8107ad78f1dc5ca56d0def4f34882cfa773d350ad0cd8b90e76fa9cff61a728f02de1f041855ed58fead3f972316ef8ca6bad80701ebbad6d8a81c77e6e3a01",
+          "signer": "device-a"
+        }
+      ],
+      "name": "a skipped sequence number",
+      "reason": "out of sequence"
+    },
+    {
+      "entries": [
+        {
+          "at": 1700000000000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "add",
+          "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+          "seq": 0,
+          "sig": "b4632b64269d39a6e900e79db926673e0f5c9d032e0b4680cea4373813842581ad8db274684e98eba7da1c3558376b1450563e3509798cdb84a14e37e1586f04",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000001000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "add",
+          "prev": "f6405e2a81e598b1b1d848a377e64b32d13923745f3db576dca169bad4100e09",
+          "seq": 1,
+          "sig": "a8107ad78f1dc5ca56d0def4f34882cfa773d350ad0cd8b90e76fa9cff61a728f02de1f041855ed58fead3f972316ef8ca6bad80701ebbad6d8a81c77e6e3a01",
+          "signer": "device-a"
+        },
+        {
+          "at": 5,
+          "device": {
+            "dhPub": "a10eafb0a4fb54b97ec8c0bf34dc8f4c2182453eac5c62e08ece8878f68aa20d",
+            "id": "device-x",
+            "name": "Stranger",
+            "signPub": "6707fed112e78eedbf1caa5be92693ed5e929348ea916b5ecf2196a0c9935201"
+          },
+          "kind": "add",
+          "prev": "32157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b98",
+          "seq": 2,
+          "sig": "e801fd21f9ac13b9877a0cf337e64a661cdb6cb045ecd10781f4e1eb1226a3991a13f6e6816515717d8c215c0ee0aa02c9f9b825d7b5eae84b5ffa91f266040d",
+          "signer": "device-x"
+        }
+      ],
+      "name": "signed by a device outside the group",
+      "reason": "signed by a device outside the group"
+    },
+    {
+      "entries": [
+        {
+          "at": 1700000000000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "add",
+          "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+          "seq": 0,
+          "sig": "b4632b64269d39a6e900e79db926673e0f5c9d032e0b4680cea4373813842581ad8db274684e98eba7da1c3558376b1450563e3509798cdb84a14e37e1586f04",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000001000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "add",
+          "prev": "f6405e2a81e598b1b1d848a377e64b32d13923745f3db576dca169bad4100e09",
+          "seq": 1,
+          "sig": "a8107ad78f1dc5ca56d0def4f34882cfa773d350ad0cd8b90e76fa9cff61a728f02de1f041855ed58fead3f972316ef8ca6bad80701ebbad6d8a81c77e6e3a01",
+          "signer": "device-a"
+        },
+        {
+          "at": 5,
+          "device": {
+            "dhPub": "a10eafb0a4fb54b97ec8c0bf34dc8f4c2182453eac5c62e08ece8878f68aa20d",
+            "id": "device-x",
+            "name": "Stranger",
+            "signPub": "6707fed112e78eedbf1caa5be92693ed5e929348ea916b5ecf2196a0c9935201"
+          },
+          "kind": "add",
+          "prev": "32157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b98",
+          "seq": 2,
+          "sig": "e801fd21f9ac13b9877a0cf337e64a661cdb6cb045ecd10781f4e1eb1226a3991a13f6e6816515717d8c215c0ee0aa02c9f9b825d7b5eae84b5ffa91f266040d",
+          "signer": "device-x"
+        }
+      ],
+      "name": "a device adding itself after the first entry",
+      "reason": "signed by a device outside the group"
+    },
+    {
+      "entries": [
+        {
+          "at": 1700000000000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "add",
+          "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+          "seq": 0,
+          "sig": "b4632b64269d39a6e900e79db926673e0f5c9d032e0b4680cea4373813842581ad8db274684e98eba7da1c3558376b1450563e3509798cdb84a14e37e1586f04",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000001000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "add",
+          "prev": "f6405e2a81e598b1b1d848a377e64b32d13923745f3db576dca169bad4100e09",
+          "seq": 1,
+          "sig": "a8107ad78f1dc5ca56d0def4f34882cfa773d350ad0cd8b90e76fa9cff61a728f02de1f041855ed58fead3f972316ef8ca6bad80701ebbad6d8a81c77e6e3a01",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000002000,
+          "device": {
+            "dhPub": "ff32c150195988671fcfd84fac64903190b70cad38eb2a730106a2069d5fde7b",
+            "id": "device-c",
+            "name": "iPhone",
+            "signPub": "10276a3ddaf5d16de3c50ca009b95641d934d304d02a9f11fe87e1f2b1916c45"
+          },
+          "kind": "add",
+          "prev": "32157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b98",
+          "seq": 2,
+          "sig": "c7b65779c98e421f083684fff53edb48a7d291ffe506c977bec0b28fc2391264f83c77fe0bdae0dc1cf709934a7b16d55a313b82c2152aa61317b60a669efc04",
+          "signer": "device-b"
+        },
+        {
+          "at": 1700000003000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "remove",
+          "prev": "ac2f2a6fc293f91ead28bb6948ad663c261823c8b752174fbb8483d7a152d382",
+          "seq": 3,
+          "sig": "8ed86fb079b93ef10292c710290c33c464b089753cc3b28509e42c58521739b8b5e62f0a83681f59f0c242ab7e202ceb81dbb1aed75ead806446e143304c120e",
+          "signer": "device-c"
+        },
+        {
+          "at": 1700000004000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "requirePaired",
+          "prev": "b314b6984cde81117601ae5a33dbe18b385c4d78fadb0128679327568d99da78",
+          "seq": 4,
+          "sig": "ccec635dd360398cd65d2206663ff916aff61f8b436acf3f5bec3ca42e027d316a6b6593bd2f9504e9f462903d47bb7ccc031428ec7d7c51afaa992c6feb680d",
+          "signer": "device-b"
+        },
+        {
+          "at": 6,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "add",
+          "prev": "81ba8576b91fac740675f9a7cfb0aaed1a2c212bd403c533122798d1eaba20e9",
+          "seq": 5,
+          "sig": "d72efc1ecd755fdc72742f5b914b36fc2b65fe0ab290ac6d450f0dd5ad1d59f4ad504ddc2e4c87fce133e5ce2af1699ddcbfe9e858e1d671482f838fdf759706",
+          "signer": "device-b"
+        }
+      ],
+      "name": "re-adding a removed device's keys",
+      "reason": "key already used"
+    },
+    {
+      "entries": [
+        {
+          "at": 1700000000000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "add",
+          "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+          "seq": 0,
+          "sig": "b4632b64269d39a6e900e79db926673e0f5c9d032e0b4680cea4373813842581ad8db274684e98eba7da1c3558376b1450563e3509798cdb84a14e37e1586f04",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000001000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "add",
+          "prev": "f6405e2a81e598b1b1d848a377e64b32d13923745f3db576dca169bad4100e09",
+          "seq": 1,
+          "sig": "a8107ad78f1dc5ca56d0def4f34882cfa773d350ad0cd8b90e76fa9cff61a728f02de1f041855ed58fead3f972316ef8ca6bad80701ebbad6d8a81c77e6e3a01",
+          "signer": "device-a"
+        },
+        {
+          "at": 6,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-x",
+            "name": "Stranger",
+            "signPub": "6707fed112e78eedbf1caa5be92693ed5e929348ea916b5ecf2196a0c9935201"
+          },
+          "kind": "add",
+          "prev": "32157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b98",
+          "seq": 2,
+          "sig": "98ca427e6c9d014e1b5e31166c93fdacdeb1447f27a3ff5eb07039f0422a6fc41769c4b9a16729840cd5cb13cae5b936d0c3573f35aae519ea31dd5de4e75d05",
+          "signer": "device-a"
+        }
+      ],
+      "name": "adding a key already in use",
+      "reason": "key already used"
+    },
+    {
+      "entries": [
+        {
+          "at": 1700000000000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "add",
+          "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+          "seq": 0,
+          "sig": "b4632b64269d39a6e900e79db926673e0f5c9d032e0b4680cea4373813842581ad8db274684e98eba7da1c3558376b1450563e3509798cdb84a14e37e1586f04",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000001000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "add",
+          "prev": "f6405e2a81e598b1b1d848a377e64b32d13923745f3db576dca169bad4100e09",
+          "seq": 1,
+          "sig": "a8107ad78f1dc5ca56d0def4f34882cfa773d350ad0cd8b90e76fa9cff61a728f02de1f041855ed58fead3f972316ef8ca6bad80701ebbad6d8a81c77e6e3a01",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000002000,
+          "device": {
+            "dhPub": "ff32c150195988671fcfd84fac64903190b70cad38eb2a730106a2069d5fde7b",
+            "id": "device-c",
+            "name": "iPhone",
+            "signPub": "10276a3ddaf5d16de3c50ca009b95641d934d304d02a9f11fe87e1f2b1916c45"
+          },
+          "kind": "add",
+          "prev": "32157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b98",
+          "seq": 2,
+          "sig": "c7b65779c98e421f083684fff53edb48a7d291ffe506c977bec0b28fc2391264f83c77fe0bdae0dc1cf709934a7b16d55a313b82c2152aa61317b60a669efc04",
+          "signer": "device-b"
+        },
+        {
+          "at": 1700000003000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "remove",
+          "prev": "ac2f2a6fc293f91ead28bb6948ad663c261823c8b752174fbb8483d7a152d382",
+          "seq": 3,
+          "sig": "8ed86fb079b93ef10292c710290c33c464b089753cc3b28509e42c58521739b8b5e62f0a83681f59f0c242ab7e202ceb81dbb1aed75ead806446e143304c120e",
+          "signer": "device-c"
+        },
+        {
+          "at": 1700000004000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "requirePaired",
+          "prev": "b314b6984cde81117601ae5a33dbe18b385c4d78fadb0128679327568d99da78",
+          "seq": 4,
+          "sig": "ccec635dd360398cd65d2206663ff916aff61f8b436acf3f5bec3ca42e027d316a6b6593bd2f9504e9f462903d47bb7ccc031428ec7d7c51afaa992c6feb680d",
+          "signer": "device-b"
+        },
+        {
+          "at": 7,
+          "device": {
+            "dhPub": "a10eafb0a4fb54b97ec8c0bf34dc8f4c2182453eac5c62e08ece8878f68aa20d",
+            "id": "device-x",
+            "name": "Stranger",
+            "signPub": "6707fed112e78eedbf1caa5be92693ed5e929348ea916b5ecf2196a0c9935201"
+          },
+          "kind": "add",
+          "prev": "81ba8576b91fac740675f9a7cfb0aaed1a2c212bd403c533122798d1eaba20e9",
+          "seq": 5,
+          "sig": "b41dc2b2678a8b349fcd3823b46c59d52bf233be58acb06c7f2af4f4a2209d12523db19c125a42ddae30fe8c207e2760b488d247b25e61361b2952beba55b10e",
+          "signer": "device-a"
+        }
+      ],
+      "name": "signed by a removed device",
+      "reason": "signed by a device outside the group"
+    },
+    {
+      "entries": [
+        {
+          "at": 1700000000000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "add",
+          "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+          "seq": 0,
+          "sig": "b4632b64269d39a6e900e79db926673e0f5c9d032e0b4680cea4373813842581ad8db274684e98eba7da1c3558376b1450563e3509798cdb84a14e37e1586f04",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000001000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "add",
+          "prev": "f6405e2a81e598b1b1d848a377e64b32d13923745f3db576dca169bad4100e09",
+          "seq": 1,
+          "sig": "a8107ad78f1dc5ca56d0def4f34882cfa773d350ad0cd8b90e76fa9cff61a728f02de1f041855ed58fead3f972316ef8ca6bad80701ebbad6d8a81c77e6e3a01",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000002000,
+          "device": {
+            "dhPub": "ff32c150195988671fcfd84fac64903190b70cad38eb2a730106a2069d5fde7b",
+            "id": "device-c",
+            "name": "iPhone",
+            "signPub": "10276a3ddaf5d16de3c50ca009b95641d934d304d02a9f11fe87e1f2b1916c45"
+          },
+          "kind": "add",
+          "prev": "32157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b98",
+          "seq": 2,
+          "sig": "c7b65779c98e421f083684fff53edb48a7d291ffe506c977bec0b28fc2391264f83c77fe0bdae0dc1cf709934a7b16d55a313b82c2152aa61317b60a669efc04",
+          "signer": "device-b"
+        },
+        {
+          "at": 1700000003000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "remove",
+          "prev": "ac2f2a6fc293f91ead28bb6948ad663c261823c8b752174fbb8483d7a152d382",
+          "seq": 3,
+          "sig": "8ed86fb079b93ef10292c710290c33c464b089753cc3b28509e42c58521739b8b5e62f0a83681f59f0c242ab7e202ceb81dbb1aed75ead806446e143304c120e",
+          "signer": "device-c"
+        },
+        {
+          "at": 7,
+          "device": {
+            "dhPub": "ff32c150195988671fcfd84fac64903190b70cad38eb2a730106a2069d5fde7b",
+            "id": "device-c",
+            "name": "iPhone",
+            "signPub": "10276a3ddaf5d16de3c50ca009b95641d934d304d02a9f11fe87e1f2b1916c45"
+          },
+          "kind": "requirePaired",
+          "prev": "b314b6984cde81117601ae5a33dbe18b385c4d78fadb0128679327568d99da78",
+          "seq": 4,
+          "sig": "4b4c399cd70ba053e32b4fc1b2691aba1ee57d2d15d2ffa1c54862e252c3ff91c6341aea24a816c71d5e280c97d860cff372602e73c31cab31dad0415506e103",
+          "signer": "device-b"
+        }
+      ],
+      "name": "a policy entry carrying another device's record",
+      "reason": "a policy entry must carry its signer's record"
+    },
+    {
+      "entries": [
+        {
+          "at": 1700000001000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "add",
+          "prev": "f6405e2a81e598b1b1d848a377e64b32d13923745f3db576dca169bad4100e09",
+          "seq": 1,
+          "sig": "a8107ad78f1dc5ca56d0def4f34882cfa773d350ad0cd8b90e76fa9cff61a728f02de1f041855ed58fead3f972316ef8ca6bad80701ebbad6d8a81c77e6e3a01",
+          "signer": "device-a"
+        },
+        {
+          "at": 1700000002000,
+          "device": {
+            "dhPub": "ff32c150195988671fcfd84fac64903190b70cad38eb2a730106a2069d5fde7b",
+            "id": "device-c",
+            "name": "iPhone",
+            "signPub": "10276a3ddaf5d16de3c50ca009b95641d934d304d02a9f11fe87e1f2b1916c45"
+          },
+          "kind": "add",
+          "prev": "32157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b98",
+          "seq": 2,
+          "sig": "c7b65779c98e421f083684fff53edb48a7d291ffe506c977bec0b28fc2391264f83c77fe0bdae0dc1cf709934a7b16d55a313b82c2152aa61317b60a669efc04",
+          "signer": "device-b"
+        },
+        {
+          "at": 1700000003000,
+          "device": {
+            "dhPub": "7ffc01e576bd86235e9e8784ddde8913d16d460e17bbb03eef16964e99cfeb5e",
+            "id": "device-a",
+            "name": "Studio Mac",
+            "signPub": "af3d20264f9c26ef085b5ce537f417d424037a0963a6386ff6d050e5bf773714"
+          },
+          "kind": "remove",
+          "prev": "ac2f2a6fc293f91ead28bb6948ad663c261823c8b752174fbb8483d7a152d382",
+          "seq": 3,
+          "sig": "8ed86fb079b93ef10292c710290c33c464b089753cc3b28509e42c58521739b8b5e62f0a83681f59f0c242ab7e202ceb81dbb1aed75ead806446e143304c120e",
+          "signer": "device-c"
+        },
+        {
+          "at": 1700000004000,
+          "device": {
+            "dhPub": "15d7b75064fdd1ca3b6887d75b37d6afc1fd2573ed9ddfef38d67dc3cdcaf91b",
+            "id": "device-b",
+            "name": "Build Box",
+            "signPub": "d1347773501b2378b98e8b0cf3792234c2b36544119b6b7c49a840c48572acd0"
+          },
+          "kind": "requirePaired",
+          "prev": "b314b6984cde81117601ae5a33dbe18b385c4d78fadb0128679327568d99da78",
+          "seq": 4,
+          "sig": "ccec635dd360398cd65d2206663ff916aff61f8b436acf3f5bec3ca42e027d316a6b6593bd2f9504e9f462903d47bb7ccc031428ec7d7c51afaa992c6feb680d",
+          "signer": "device-b"
+        }
+      ],
+      "name": "no first entry",
+      "reason": "out of sequence"
+    }
+  ],
+  "noise": {
+    "client": "device-a",
+    "clientEphemeral": "5758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f70717273747576",
+    "first": "27da2e9fcad7ef13ed32ba952051a628e88a638397c848a637035b441c3ea3244d9590805de4be413a6504f9da36ac9d1d9a8eca239ceb6621d52a4add8541a3cf2ad7d9298add623ec32060c363bba86f097c132df07d4322e365f75bd293ff47b6f5ea32134261",
+    "host": "device-b",
+    "hostEphemeral": "767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495",
+    "messages": [
+      {
+        "fragments": [
+          "0010bc7edfe0e46d54a914f9adc1f23137"
+        ],
+        "from": "client",
+        "plaintextLen": 0
+      },
+      {
+        "fragments": [
+          "008f7699342430eb72609bd0b8c4301a915e8f58d2b2dd240256559a75e5e4ecf4ddb72affaa9ef9c15945042321707de7344af3a07f"
+        ],
+        "from": "client",
+        "plaintextLen": 37
+      },
+      {
+        "fragments": [
+          "00cb60afe11163b8755249a2a379ca7f5a1090879d5eec4a873bcc26"
+        ],
+        "from": "host",
+        "plaintextLen": 11
+      },
+      {
+        "fragmentSha256": [
+          "f805c3294f2f13fa78a3804cb878c3354f61243a783140ef025e6037d0cd12da",
+          "7c04a56f4fbf0f0de1035651cb7624fc64c7ee56ef96e3a8825eff5c84437bfa"
+        ],
+        "from": "client",
+        "plaintextLen": 70000
+      }
+    ],
+    "pattern": "Noise_IK_25519_ChaChaPoly_SHA256",
+    "prologue": "6379706865722d6465766963652d726f6f6d2d7631006465766963652d62",
+    "reply": "06aff291e4d5d8e811b2e833c7ffdfb9a2e6184af1b53a13d9d8d48717654a29e38618badacfb718a5ba48ae82cecee8"
+  },
+  "pairing": {
+    "display": "0110-23AB-CDEF-GHJK-MNPQ",
+    "input": "oil0-23ab-cdef-ghjk-mnpq",
+    "join": {
+      "device": {
+        "dhPub": "ff32c150195988671fcfd84fac64903190b70cad38eb2a730106a2069d5fde7b",
+        "id": "device-c",
+        "name": "iPhone",
+        "signPub": "10276a3ddaf5d16de3c50ca009b95641d934d304d02a9f11fe87e1f2b1916c45"
+      },
+      "mac": "0c2df9e6b55260d35d57fa01f54a45661fe13b9558dd5b43229093cbeb1fd8cb"
+    },
+    "mailbox": "eb7c37052554743fd3502f22124ed684",
+    "welcome": {
+      "entry": "ac2f2a6fc293f91ead28bb6948ad663c261823c8b752174fbb8483d7a152d382",
+      "mac": "c4d718ebe3a3ea45b24f88ab2cf376cddc6d5bcc4134541780ec8f89e48e3657",
+      "seq": 2
+    }
+  }
+}

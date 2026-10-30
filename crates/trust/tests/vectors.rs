@@ -1,0 +1,308 @@
+//! Builds `protocol/vectors/device-trust-v1.json`, which the edge (TypeScript)
+//! and iOS (Swift) implementations run, and fails when the committed file
+//! differs. Everything is deterministic: Ed25519 signatures are, and the Noise
+//! handshake uses fixed ephemeral keys. Regenerate with
+//! `UPDATE_VECTORS=1 cargo test -p cypher-trust --test vectors`.
+
+use cypher_trust::noise::{Accepting, Initiator, PATTERN, prologue};
+use cypher_trust::{DeviceKeys, PairingCode, TrustChain, TrustEntry};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn seed(n: u8) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = n.wrapping_mul(31).wrapping_add(i as u8);
+    }
+    out
+}
+
+struct Device {
+    keys: DeviceKeys,
+    name: &'static str,
+    sign: [u8; 32],
+    dh: [u8; 32],
+}
+
+fn device(id: &str, name: &'static str, n: u8) -> Device {
+    let (sign, dh) = (seed(n), seed(n + 100));
+    Device {
+        keys: DeviceKeys::from_secrets(id.into(), sign, dh),
+        name,
+        sign,
+        dh,
+    }
+}
+
+fn entry_json(entry: &TrustEntry) -> Value {
+    let mut value = serde_json::to_value(entry).unwrap();
+    value["signingBytes"] = hex(&entry.signing_bytes()).into();
+    value["hash"] = hex(&entry.hash()).into();
+    value
+}
+
+fn invalid(name: &str, entries: Vec<TrustEntry>) -> Value {
+    let reason = match TrustChain::verify(entries.clone()) {
+        Err(cypher_trust::TrustError::InvalidEntry(reason)) => reason,
+        other => panic!("{name}: {other:?}"),
+    };
+    json!({ "name": name, "reason": reason, "entries": entries })
+}
+
+/// `entry` signed by `keys` (proposals refuse invalid entries, so the
+/// invalid cases are signed by hand).
+fn resign(keys: &DeviceKeys, mut entry: TrustEntry) -> TrustEntry {
+    entry.signer = keys.device_id.clone();
+    entry.sig = keys.sign_for_tests(&entry.signing_bytes());
+    entry
+}
+
+/// `plaintext[i] = i % 251`.
+fn plaintext(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+fn build() -> Value {
+    let a = device("device-a", "Studio Mac", 1);
+    let b = device("device-b", "Build Box", 2);
+    let c = device("device-c", "iPhone", 3);
+    let x = device("device-x", "Stranger", 4);
+
+    // A founds the group, adds B; B adds C; C removes A.
+    let mut chain = TrustChain::genesis(&a.keys, a.name, 1_700_000_000_000).unwrap();
+    let add_b = chain
+        .propose_add(&a.keys, b.keys.public(b.name), 1_700_000_001_000)
+        .unwrap();
+    chain.append(add_b).unwrap();
+    let add_c = chain
+        .propose_add(&b.keys, c.keys.public(c.name), 1_700_000_002_000)
+        .unwrap();
+    chain.append(add_c).unwrap();
+    let remove_a = chain
+        .propose_remove(&c.keys, "device-a", 1_700_000_003_000)
+        .unwrap();
+    chain.append(remove_a).unwrap();
+    // B turns on "Only paired devices" for the group.
+    let policy = chain
+        .propose_policy(&b.keys, true, 1_700_000_004_000)
+        .unwrap();
+    chain.append(policy).unwrap();
+    let entries = chain.entries().to_vec();
+
+    let mut edited = entries.clone();
+    edited[1].device.name = "Renamed".into();
+    let mut relinked = entries.clone();
+    relinked[2].prev = [7; 32];
+    let mut resequenced = entries[..2].to_vec();
+    resequenced[1].seq = 5;
+    // Entries an outsider signs, rebuilt so only the signer is wrong.
+    let base = TrustChain::verify(entries[..2].to_vec()).unwrap();
+    let by_outsider = resign(
+        &x.keys,
+        base.propose_add(&a.keys, x.keys.public(x.name), 5).unwrap(),
+    );
+    let self_add = {
+        let mut probe = TrustChain::genesis(&x.keys, x.name, 5).unwrap().entries()[0].clone();
+        probe.seq = 2;
+        probe.prev = base.head().unwrap();
+        resign(&x.keys, probe)
+    };
+    let after_removal = TrustChain::verify(entries.clone()).unwrap();
+    // A's old keys, signed by a member: refused because the keys were used.
+    let readd = {
+        let mut entry = after_removal
+            .propose_add(&b.keys, x.keys.public(x.name), 6)
+            .unwrap();
+        entry.device = a.keys.public(a.name);
+        entry.sig = [0; 64];
+        resign(&b.keys, entry)
+    };
+    let duplicate_key = {
+        let mut twin = x.keys.public(x.name);
+        twin.dh_pub = b.keys.public(b.name).dh_pub;
+        let mut entry = base.propose_add(&a.keys, x.keys.public(x.name), 6).unwrap();
+        entry.device = twin;
+        resign(&a.keys, entry)
+    };
+    let foreign_policy = {
+        let mut entry = TrustChain::verify(entries[..4].to_vec())
+            .unwrap()
+            .propose_policy(&b.keys, true, 7)
+            .unwrap();
+        entry.device = c.keys.public(c.name);
+        resign(&b.keys, entry)
+    };
+    let signed_by_removed = resign(
+        &a.keys,
+        after_removal
+            .propose_add(&b.keys, x.keys.public(x.name), 7)
+            .unwrap(),
+    );
+
+    // Pairing: C joins the group through A.
+    let code = PairingCode::parse("oil0-23ab-cdef-ghjk-mnpq").unwrap();
+    let joining = c.keys.public(c.name);
+    let join = code.join(&joining);
+    let welcome = code.welcome(2, entries[2].hash(), &joining);
+
+    // Noise: A (client) to B (host).
+    let host_id = "device-b";
+    let client_e = seed(201);
+    let host_e = seed(202);
+    let (initiator, first) =
+        Initiator::start_with(&a.keys, host_id, &b.keys.dh_public(), Some(&client_e)).unwrap();
+    let accepting = Accepting::read_with(&b.keys, host_id, &first, Some(&host_e)).unwrap();
+    let (reply, mut host) = accepting.accept().unwrap();
+    let mut client = initiator.finish(&reply).unwrap();
+    let mut messages = Vec::new();
+    for (from, len) in [
+        ("client", 0usize),
+        ("client", 37),
+        ("host", 11),
+        ("client", 70_000),
+    ] {
+        let body = plaintext(len);
+        let fragments = if from == "client" {
+            client.seal(&body).unwrap()
+        } else {
+            host.seal(&body).unwrap()
+        };
+        let receiver = if from == "client" {
+            &mut host
+        } else {
+            &mut client
+        };
+        let mut opened = None;
+        for fragment in &fragments {
+            opened = receiver.open(fragment).unwrap();
+        }
+        assert_eq!(opened.as_deref(), Some(&body[..]));
+        let mut message = json!({ "from": from, "plaintextLen": len });
+        if len > 1000 {
+            message["fragmentSha256"] = fragments
+                .iter()
+                .map(|f| hex(&Sha256::digest(f)))
+                .collect::<Vec<_>>()
+                .into();
+        } else {
+            message["fragments"] = fragments.iter().map(|f| hex(f)).collect::<Vec<_>>().into();
+        }
+        messages.push(message);
+    }
+
+    let devices: Vec<Value> = [&a, &b, &c, &x]
+        .iter()
+        .map(|d| {
+            json!({
+                "signSecret": hex(&d.sign),
+                "dhSecret": hex(&d.dh),
+                "public": d.keys.public(d.name),
+                "fingerprint": d.keys.public(d.name).fingerprint(),
+            })
+        })
+        .collect();
+    json!({
+        "comment": "Generated by crates/trust/tests/vectors.rs. Byte strings are lowercase hex; plaintext[i] = i % 251.",
+        "devices": devices,
+        "chain": {
+            "entries": entries.iter().map(entry_json).collect::<Vec<_>>(),
+            "members": chain.members().map(|m| m.id.clone()).collect::<Vec<_>>(),
+            "removed": ["device-a"],
+            "requirePaired": chain.require_paired(),
+        },
+        "invalidChains": [
+            invalid("an edited entry", edited),
+            invalid("a broken hash link", relinked),
+            invalid("a skipped sequence number", resequenced),
+            invalid("signed by a device outside the group", [&entries[..2], &[by_outsider]].concat()),
+            invalid("a device adding itself after the first entry", [&entries[..2], &[self_add]].concat()),
+            invalid("re-adding a removed device's keys", [&entries[..], &[readd]].concat()),
+            invalid("adding a key already in use", [&entries[..2], &[duplicate_key]].concat()),
+            invalid("signed by a removed device", [&entries[..], &[signed_by_removed]].concat()),
+            invalid("a policy entry carrying another device's record", [&entries[..4], &[foreign_policy]].concat()),
+            invalid("no first entry", entries[1..].to_vec()),
+        ],
+        "pairing": {
+            "input": "oil0-23ab-cdef-ghjk-mnpq",
+            "display": code.display(),
+            "mailbox": code.mailbox(),
+            "join": join,
+            "welcome": welcome,
+        },
+        "noise": {
+            "pattern": PATTERN,
+            "client": "device-a",
+            "host": host_id,
+            "prologue": hex(&prologue(host_id)),
+            "clientEphemeral": hex(&client_e),
+            "hostEphemeral": hex(&host_e),
+            "first": hex(&first),
+            "reply": hex(&reply),
+            "messages": messages,
+        },
+    })
+}
+
+/// Keys sorted at every level, so the file is byte-identical whether or not
+/// the build unifies serde_json's `preserve_order` feature (the workspace
+/// build does; this package alone does not).
+fn canonical(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let sorted: std::collections::BTreeMap<String, Value> = map
+                .into_iter()
+                .map(|(key, value)| (key, canonical(value)))
+                .collect();
+            Value::Object(sorted.into_iter().collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical).collect()),
+        other => other,
+    }
+}
+
+#[test]
+fn shared_vectors_match_the_committed_file() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../protocol/vectors/device-trust-v1.json"
+    );
+    let built = serde_json::to_string_pretty(&canonical(build())).unwrap() + "\n";
+    if std::env::var_os("UPDATE_VECTORS").is_some() {
+        std::fs::write(path, &built).unwrap();
+    }
+    let committed = std::fs::read_to_string(path).expect("run with UPDATE_VECTORS=1 to create it");
+    assert!(
+        committed == built,
+        "{path} is stale; regenerate with UPDATE_VECTORS=1"
+    );
+}
+
+#[test]
+fn the_committed_chain_verifies_and_the_invalid_ones_do_not() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../protocol/vectors/device-trust-v1.json"
+    );
+    let file: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let entries: Vec<TrustEntry> =
+        serde_json::from_value(file["chain"]["entries"].clone()).unwrap();
+    let chain = TrustChain::verify(entries).unwrap();
+    let members: Vec<_> = chain.members().map(|m| m.id.clone()).collect();
+    assert_eq!(json!(members), file["chain"]["members"]);
+    assert_eq!(
+        json!(chain.require_paired()),
+        file["chain"]["requirePaired"]
+    );
+    for case in file["invalidChains"].as_array().unwrap() {
+        let entries: Vec<TrustEntry> = serde_json::from_value(case["entries"].clone()).unwrap();
+        let Err(cypher_trust::TrustError::InvalidEntry(reason)) = TrustChain::verify(entries)
+        else {
+            panic!("{} verified", case["name"]);
+        };
+        assert_eq!(json!(reason), case["reason"], "{}", case["name"]);
+    }
+}

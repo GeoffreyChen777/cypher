@@ -92,6 +92,7 @@ extension AppModel {
     }
 
     func signOut() {
+        config?.trust?.stop()
         config?.invalidate()
         notifications.disconnect()
         workspace?.stop()
@@ -120,12 +121,18 @@ extension AppModel {
         url: URL, mode: AppConfig.Mode, userId: String, orgId: String,
         tokens: AuthTokens?, devBearer: String?
     ) {
+        self.config?.trust?.stop()
         self.config?.invalidate()
         let config = AppConfig(
             edgeURL: url, mode: mode, userId: userId, orgId: orgId,
             deviceId: deviceId, deviceName: deviceName,
             tokens: tokens, devBearer: devBearer)
         self.config = config
+        let trust = DeviceTrustStore(
+            deviceId: deviceId, deviceName: deviceName, userId: userId,
+            edge: HTTPTrustEdge(edgeURL: url, token: { [weak config] in await config?.currentToken() }))
+        config.trust = trust
+        trust.start()
         if !DevelopmentProfile.enabled { notifications.bind(config) }
         let store = WorkspaceStore(
             config: config,

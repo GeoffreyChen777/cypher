@@ -33,8 +33,38 @@ connection, desktop/setup/sync verify the persisted device ID before treating
 the peer as their Engine. Node's adapter verifies private directory/socket
 ownership and permissions; the Rust server checks its peer UID.
 
+## Engine socket and agent socket
+
+The instance directory holds two sockets:
+
+```text
+/tmp/cypher-ipc-<uid>/<instance-key>/engine.sock   viewports and the CLI; keyed
+/tmp/cypher-ipc-<uid>/<instance-key>/agent.sock    Pi children; keyless, restricted
+```
+
+Every `engine.sock` handshake carries `x-cypher-ipc-key`. The Engine mints a
+fresh 256-bit key each time it binds and stores it with `cypher-secrets`: in the
+login Keychain when the running binary has an Apple-anchored signature (release
+builds), else in `engine.key` (0600) beside the socket. Clients read it from the
+same place. A same-user process without Cypher's signature therefore needs a
+Keychain prompt on signed macOS builds; on Linux and in development builds the
+key file is readable by the user's processes, and the agent socket's
+restrictions below are what keeps an agent off the full surface.
+
+Agents never get `engine.sock`. `agent.sock` serves `rpc::AgentRpc`:
+`StartSubagent` (whose parent must be hosted on this device), `QueueCommand` and
+`WatchAgentEvents` for subagent chats hosted on this device, and
+`DetectPiLanguage`. Any other method, and any call carrying `targetDeviceId`,
+is refused, so an agent following injected instructions cannot open terminals,
+change settings, or reach other devices through IPC.
+
+Device-to-device trust over the relay is separate: see
+[Device trust](device-trust.md).
+
 This isolates different ordinary OS users, **not hostile processes sharing a
-UID or an administrator/root**. Separate Cypher logins under one OS account are
+UID or an administrator/root**. An unsandboxed agent still runs as the user and
+can, for example, replace the Cypher binary on a user-writable install; the
+permission sandbox is the boundary for that. Separate Cypher logins under one OS account are
 not an OS security boundary.
 This is IPC isolation, not a migration of existing chat/config file permissions;
 keep each user's data directory under a suitably private filesystem directory.
@@ -87,7 +117,7 @@ Each Linux UID has its own systemd user manager.
 
 The harness injects:
 
-- `CYPHER_ENGINE_SOCKET`: this Engine's socket.
+- `CYPHER_ENGINE_SOCKET`: this Engine's agent socket (`agent.sock`).
 - `CYPHER_ENGINE_CLIENT_MODULE`: Engine-owned JavaScript client module.
 - `CYPHER_CHAT_ID`: present only when the caller supplies a chat context.
 
@@ -101,7 +131,7 @@ const { connectEngine } = await import(
 );
 const client = await connectEngine();
 try {
-  const info = await client.call("EngineInfo");
+  const language = await client.call("DetectPiLanguage", { text });
   // for await (const event of client.subscribe(method, params, { signal })) …
 } finally {
   client.close();
