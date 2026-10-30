@@ -1901,6 +1901,7 @@ dependencies = [
  "cypher-env",
  "cypher-net",
  "cypher-secrets",
+ "cypher-trust",
  "futures",
  "getrandom 0.4.3",
  "libc",

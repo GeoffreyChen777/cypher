@@ -27,10 +27,14 @@ mod links;
 mod relay;
 #[cfg(test)]
 mod tests;
+mod trust;
 
 pub use frames::{DeviceFrameHeader, decode_device_frame, encode_device_frame};
 pub use links::{DeviceLink, LinkCache, LinkCacheConfig};
 pub use relay::{HostRelay, HostRelayConfig};
+pub use trust::{
+    CHANNEL_FAILED, HANDSHAKE_FAILED, NOISE_KIND, NoTrust, PeerTrust, SECURE_KIND, UNTRUSTED_DEVICE,
+};
 
 /// Relay-emitted control frames. MUST byte-match the DO's `RELAY_KIND` (yes, it has a
 /// leading space — clients compare with equality; a mismatch makes host_offline invisible).

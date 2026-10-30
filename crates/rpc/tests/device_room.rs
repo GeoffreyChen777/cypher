@@ -22,7 +22,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 };
 
 use cypher_rpc::device_room::{
-    CLIENT_CLOSED, CLIENT_GONE, HOST_CLOSED, HOST_OFFLINE, NUDGE_KIND, RELAY_KIND,
+    CLIENT_CLOSED, CLIENT_GONE, HOST_CLOSED, HOST_OFFLINE, NUDGE_KIND, RELAY_KIND, SECURE_KIND,
 };
 use cypher_rpc::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
@@ -43,6 +43,10 @@ enum Out {
 struct RelayState {
     host: Option<mpsc::UnboundedSender<Out>>,
     clients: HashMap<String, mpsc::UnboundedSender<Out>>,
+    /// Every payload the relay forwarded, as a malicious edge would see it.
+    seen: Vec<Vec<u8>>,
+    /// Flip one byte of every sealed frame on its way to a client.
+    tamper_sealed: bool,
 }
 
 struct FakeRelay {
@@ -173,7 +177,12 @@ async fn handle_socket(stream: tokio::net::TcpStream, state: Arc<Mutex<RelayStat
         let Ok((header, payload)) = decode_device_frame(&bytes) else {
             break;
         };
-        let st = state.lock().expect("lock");
+        let mut st = state.lock().expect("lock");
+        st.seen.push(payload.clone());
+        let mut payload = payload;
+        if is_host && st.tamper_sealed && header.k == SECURE_KIND && payload.len() > 4 {
+            payload[4] ^= 1;
+        }
         if !is_host {
             match &st.host {
                 Some(host) => {
@@ -714,4 +723,235 @@ async fn live_edge_relay_round_trip() {
         .expect("echo");
     assert_eq!(echoed["host"], "live-host");
     assert_eq!(echoed["params"]["live"], true);
+}
+
+// ---------------------------------------------------------------------------
+// Device trust: Noise sessions and "Only paired devices"
+// ---------------------------------------------------------------------------
+
+struct TestTrust {
+    keys: Option<Arc<cypher_trust::DeviceKeys>>,
+    /// Hosts this device knows: id → Noise key.
+    peers: HashMap<String, [u8; 32]>,
+    /// Clients this host accepts: (id, Noise key).
+    members: Vec<(String, [u8; 32])>,
+    require: bool,
+}
+
+#[async_trait]
+impl cypher_rpc::PeerTrust for TestTrust {
+    fn local_keys(&self) -> Option<Arc<cypher_trust::DeviceKeys>> {
+        self.keys.clone()
+    }
+    fn peer_key(&self, device_id: &str) -> Option<[u8; 32]> {
+        self.peers.get(device_id).copied()
+    }
+    async fn is_member(&self, client_id: &str, client_key: &[u8; 32]) -> bool {
+        self.members
+            .iter()
+            .any(|(id, key)| id == client_id && key == client_key)
+    }
+    fn require_paired(&self) -> bool {
+        self.require
+    }
+}
+
+struct Pair {
+    host_keys: Arc<cypher_trust::DeviceKeys>,
+    client_keys: Arc<cypher_trust::DeviceKeys>,
+}
+
+impl Pair {
+    fn new() -> Self {
+        Self {
+            host_keys: Arc::new(cypher_trust::DeviceKeys::generate("dev-a")),
+            client_keys: Arc::new(cypher_trust::DeviceKeys::generate("dev-b")),
+        }
+    }
+
+    /// The host's view: knows (or not) the client, requires pairing (or not).
+    fn host(&self, knows_client: bool, require: bool) -> Arc<TestTrust> {
+        Arc::new(TestTrust {
+            keys: Some(self.host_keys.clone()),
+            peers: HashMap::new(),
+            members: if knows_client {
+                vec![("dev-b".into(), self.client_keys.dh_public())]
+            } else {
+                Vec::new()
+            },
+            require,
+        })
+    }
+
+    /// The client's view: knows (or not) the host's key.
+    fn client(&self, knows_host: bool, require: bool) -> Arc<TestTrust> {
+        Arc::new(TestTrust {
+            keys: Some(self.client_keys.clone()),
+            peers: if knows_host {
+                HashMap::from([("dev-a".into(), self.host_keys.dh_public())])
+            } else {
+                HashMap::new()
+            },
+            members: Vec::new(),
+            require,
+        })
+    }
+}
+
+async fn trusted_host(relay: &FakeRelay, trust: Arc<TestTrust>) -> HostRelay {
+    let host = HostRelay::spawn(
+        relay_config(&relay.edge_url(), 100).with_trust(trust),
+        TestService::new("host-a"),
+        noop_nudge(),
+    );
+    relay.wait_host_connected().await;
+    host
+}
+
+fn trusted_cache(relay: &FakeRelay, trust: Arc<TestTrust>) -> Arc<LinkCache> {
+    let mut config =
+        LinkCacheConfig::new(relay.edge_url(), Arc::new(StaticToken("test-user".into())))
+            .with_trust(trust);
+    config.cooldown_base = Duration::from_millis(50);
+    config.cooldown_max = Duration::from_millis(100);
+    config.probe_timeout = Duration::from_millis(1_500);
+    LinkCache::new(config)
+}
+
+#[tokio::test]
+async fn paired_devices_talk_through_a_sealed_session_the_relay_cannot_read() {
+    let relay = FakeRelay::start().await;
+    let pair = Pair::new();
+    let _host = trusted_host(&relay, pair.host(true, true)).await;
+    let links = trusted_cache(&relay, pair.client(true, true));
+    let client = links.client("dev-a").await.expect("paired client connects");
+
+    // Larger than one Noise message, so it crosses as several fragments.
+    let secret = format!("secret-marker-{}", "x".repeat(200_000));
+    let echoed = client
+        .call("Echo", serde_json::json!({ "secret": secret }))
+        .await
+        .expect("echo over the sealed session");
+    assert_eq!(echoed["params"]["secret"], secret);
+    let streamed: Vec<_> = {
+        let mut rx = client
+            .subscribe("Count", serde_json::json!({ "n": 3 }))
+            .await
+            .unwrap();
+        let mut items = Vec::new();
+        while let Some(item) = rx.recv().await {
+            items.push(item);
+        }
+        items
+    };
+    assert_eq!(streamed, [0, 1, 2].map(|i| serde_json::json!(i)));
+
+    let seen = relay.state.lock().unwrap().seen.clone();
+    let needle = b"secret-marker";
+    assert!(
+        !seen
+            .iter()
+            .any(|payload| payload.windows(needle.len()).any(|w| w == needle)),
+        "the relay saw plaintext"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|payload| payload.windows(4).any(|w| w == b"Echo")),
+        "the relay saw a method name"
+    );
+}
+
+#[tokio::test]
+async fn a_host_that_requires_pairing_refuses_plaintext_and_unknown_devices() {
+    let relay = FakeRelay::start().await;
+    let pair = Pair::new();
+    let _host = trusted_host(&relay, pair.host(false, true)).await;
+
+    // An old or unpaired client speaking plaintext gets an error, fast.
+    let started = std::time::Instant::now();
+    let err = trusted_cache(&relay, pair.client(false, false))
+        .client("dev-a")
+        .await
+        .err()
+        .expect("plaintext is refused");
+    assert!(
+        err.to_string().contains("only accepts paired devices"),
+        "{err}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    // A client with keys the host doesn't know is refused at the handshake.
+    let err = trusted_cache(&relay, pair.client(true, false))
+        .client("dev-a")
+        .await
+        .err()
+        .expect("an unknown device is refused");
+    assert!(err.to_string().contains("isn't paired"), "{err}");
+}
+
+#[tokio::test]
+async fn a_client_that_requires_pairing_never_talks_to_an_unknown_host() {
+    let relay = FakeRelay::start().await;
+    let pair = Pair::new();
+    let _host = trusted_host(&relay, pair.host(true, false)).await;
+    let err = trusted_cache(&relay, pair.client(false, true))
+        .client("dev-a")
+        .await
+        .err()
+        .expect("an unknown host is refused before dialing");
+    assert!(err.to_string().contains("isn't paired"), "{err}");
+    assert!(relay.state.lock().unwrap().seen.is_empty());
+}
+
+#[tokio::test]
+async fn an_impostor_host_fails_the_handshake() {
+    let relay = FakeRelay::start().await;
+    let pair = Pair::new();
+    // The relay (or whoever holds the token) runs its own host for dev-a.
+    let impostor = Pair::new();
+    let _host = trusted_host(&relay, impostor.host(false, false)).await;
+    let err = trusted_cache(&relay, pair.client(true, false))
+        .client("dev-a")
+        .await
+        .err()
+        .expect("the impostor cannot complete the handshake");
+    assert!(
+        err.to_string().contains("refused") || err.to_string().contains("failed"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn a_tampered_sealed_frame_kills_the_link() {
+    let relay = FakeRelay::start().await;
+    let pair = Pair::new();
+    let _host = trusted_host(&relay, pair.host(true, true)).await;
+    let links = trusted_cache(&relay, pair.client(true, true));
+    let client = links.client("dev-a").await.expect("connects");
+    relay.state.lock().unwrap().tamper_sealed = true;
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.call("Echo", serde_json::json!({ "x": 1 })),
+    )
+    .await
+    .expect("fails fast instead of hanging");
+    assert!(result.is_err(), "a tampered reply must not be accepted");
+}
+
+#[tokio::test]
+async fn without_requirements_unpaired_devices_keep_working_in_plaintext() {
+    let relay = FakeRelay::start().await;
+    let pair = Pair::new();
+    let _host = trusted_host(&relay, pair.host(false, false)).await;
+    let links = trusted_cache(&relay, pair.client(false, false));
+    let client = links
+        .client("dev-a")
+        .await
+        .expect("legacy plaintext still works when nothing is required");
+    let echoed = client
+        .call("Echo", serde_json::json!({ "x": 1 }))
+        .await
+        .unwrap();
+    assert_eq!(echoed["params"]["x"], 1);
 }

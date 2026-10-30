@@ -26,8 +26,8 @@ mod server;
 
 pub use client::RpcClient;
 pub use device_room::{
-    DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
-    NudgeHandler, StaticToken, TokenSource, decode_device_frame, device_room_ws_url,
+    DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig, NoTrust,
+    NudgeHandler, PeerTrust, StaticToken, TokenSource, decode_device_frame, device_room_ws_url,
     encode_device_frame,
 };
 pub use local::{LocalListener, connect_local, probe_local};
