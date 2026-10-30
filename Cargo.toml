@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/env",
     "crates/secrets",
+    "crates/trust",
     "crates/proto",
     "crates/doc",
     "crates/net",
@@ -45,6 +46,7 @@ result_large_err = "allow"
 [workspace.dependencies]
 cypher-env = { path = "crates/env" }
 cypher-secrets = { path = "crates/secrets" }
+cypher-trust = { path = "crates/trust" }
 cypher-proto = { path = "crates/proto" }
 cypher-doc = { path = "crates/doc" }
 cypher-net = { path = "crates/net" }
