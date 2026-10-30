@@ -36,6 +36,14 @@ pub struct EngineConfig {
     pub workos_client_id: Option<String>,
 }
 
+impl EngineConfig {
+    /// The keyless socket beside `ipc_socket` that Pi children get as
+    /// `CYPHER_ENGINE_SOCKET` (`rpc::AgentRpc` answers there).
+    pub fn agent_socket(&self) -> PathBuf {
+        self.ipc_socket.with_file_name("agent.sock")
+    }
+}
+
 impl std::fmt::Debug for EngineConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EngineConfig")
@@ -87,6 +95,8 @@ pub struct Engine;
 pub struct EngineRuntime {
     core: EngineCore,
     host_relay: Mutex<Option<cypher_rpc::HostRelay>>,
+    /// Serves the agent socket; aborting it unlinks the socket.
+    agent_ipc: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl EngineRuntime {
@@ -108,6 +118,9 @@ impl EngineRuntime {
 
     pub async fn shutdown(&self) {
         self.disconnect_edge();
+        if let Some(agent_ipc) = lock(&self.agent_ipc).take() {
+            agent_ipc.abort();
+        }
         self.core.shutdown().await;
     }
 }
@@ -115,6 +128,9 @@ impl EngineRuntime {
 impl Drop for EngineRuntime {
     fn drop(&mut self) {
         lock(&self.host_relay).take();
+        if let Some(agent_ipc) = lock(&self.agent_ipc).take() {
+            agent_ipc.abort();
+        }
     }
 }
 
@@ -341,11 +357,10 @@ impl Engine {
         // `current` symlink makes the lazy harness become installed.
         let pi_runtime_data_dir = profile.device_root().to_path_buf();
         let pi_runtime_paths = pi::runtime::PiRuntimePaths::for_data_dir(profile.device_root());
-        // The engine-bridge URL every pi child gets as `CYPHER_ENGINE_SOCKET`:
-        // this runtime's own IPC WebSocket (`serve_ipc` binds the same port in
-        // headless and headed modes). Test-only `EngineCore::assemble` keeps
-        // `None` — it never serves IPC.
-        let engine_socket = Some(config.ipc_socket.to_string_lossy().into_owned());
+        // The engine bridge every pi child gets as `CYPHER_ENGINE_SOCKET`:
+        // this runtime's agent socket, bound below once the core exists.
+        // Test-only `EngineCore::assemble` keeps `None` — it never serves IPC.
+        let engine_socket = Some(config.agent_socket().to_string_lossy().into_owned());
         let synced_scope = profile.scope() == WorkspaceScope::Synced;
         let core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
@@ -458,9 +473,20 @@ impl Engine {
             core.start_host_relay(&edge.url)
         });
 
+        // Pi children only exist from here on. Losing the agent socket costs
+        // subagents and language detection, not the engine.
+        let agent_ipc = match serve_ipc(&config.agent_socket(), core.agent_rpc_service()).await {
+            Ok(task) => Some(task),
+            Err(err) => {
+                tracing::warn!(error = %err, "agent IPC socket unavailable; subagents are off");
+                None
+            }
+        };
+
         Ok(EngineRuntime {
             core,
             host_relay: std::sync::Mutex::new(host_relay),
+            agent_ipc: std::sync::Mutex::new(agent_ipc),
         })
     }
 }

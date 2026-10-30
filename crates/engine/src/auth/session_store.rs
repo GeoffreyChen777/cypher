@@ -57,22 +57,19 @@ impl AccessEntry {
 }
 
 impl Auth {
-    pub(super) fn session_file(&self) -> PathBuf {
-        self.inner.config.data_dir.join("session.json")
+    pub(super) fn session_secret(&self) -> cypher_secrets::Secret {
+        session_secret(&self.inner.config.data_dir)
     }
 
-    /// Persist (0600) or remove the stored session. Never panics: a disk error degrades
+    /// Persist or remove the stored session. Never panics: a storage error degrades
     /// to a logged warning, not a crash mid-refresh.
     pub(super) fn persist<S: std::borrow::Borrow<StoredSession>>(&self, session: Option<S>) {
-        let path = self.session_file();
+        let secret = self.session_secret();
         let outcome = match session {
             Some(session) => serde_json::to_vec(session.borrow())
                 .map_err(std::io::Error::other)
-                .and_then(|bytes| write_private(&path, &bytes)),
-            None => match std::fs::remove_file(&path) {
-                Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
-                _ => Ok(()),
-            },
+                .and_then(|bytes| secret.write(&bytes)),
+            None => secret.delete(),
         };
         if let Err(err) = outcome {
             tracing::warn!(error = %err, "auth: failed to persist session");
@@ -104,24 +101,20 @@ pub(crate) fn consume_sync_rejoin(data_dir: &Path) -> bool {
     }
 }
 
-/// Write a file readable only by the owner (0600). On non-unix targets a plain write.
-pub(super) fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        // An existing file keeps its old mode through OpenOptions — enforce 0600 anyway.
-        file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-        file.write_all(bytes)
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, bytes)
-    }
+/// The stored session holds the WorkOS refresh token: a
+/// [`cypher_secrets::Secret`] whose home file is `{data_dir}/session.json`.
+pub(crate) fn session_secret(data_dir: &Path) -> cypher_secrets::Secret {
+    cypher_secrets::Secret::new(data_dir.join("session.json"))
+}
+
+/// Read the stored session; unreadable or malformed reads as none.
+pub(super) fn load_session(data_dir: &Path) -> Option<StoredSession> {
+    let bytes = match session_secret(data_dir).read() {
+        Ok(bytes) => bytes?,
+        Err(err) => {
+            tracing::warn!(error = %err, "auth: stored session unreadable");
+            return None;
+        }
+    };
+    serde_json::from_slice(&bytes).ok()
 }

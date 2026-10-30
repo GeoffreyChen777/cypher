@@ -134,12 +134,12 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
 /// seam builds the exact command a run would spawn, so no child is needed.
 #[test]
 fn engine_bridge_url_is_injected_into_children() {
-    let url = std::ffi::OsStr::new("/tmp/cypher-ipc-fixture/engine.sock");
+    let url = std::ffi::OsStr::new("/tmp/cypher-ipc-fixture/agent.sock");
     let key = std::ffi::OsStr::new("CYPHER_ENGINE_SOCKET");
 
     let bridged = PiHarness::new(std::env::temp_dir().join("cypher-pi-bridge-sessions"))
         .with_executable(fixture_path())
-        .with_engine_bridge(Some("/tmp/cypher-ipc-fixture/engine.sock".into()));
+        .with_engine_bridge(Some("/tmp/cypher-ipc-fixture/agent.sock".into()));
     let cmd = bridged
         .spawn_command(None, &RunHostContext::default(), None)
         .expect("command builds");

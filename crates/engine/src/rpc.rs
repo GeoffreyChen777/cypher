@@ -42,6 +42,7 @@ use crate::session::side_chats::SideChats;
 use crate::terminals::Terminals;
 use crate::uploads::Uploads;
 
+mod agent;
 mod chats;
 mod diffs;
 mod docs;
@@ -59,6 +60,7 @@ mod terminals;
 mod updates;
 mod uploads;
 
+pub use agent::AgentRpc;
 use params::*;
 
 fn failed(e: impl std::fmt::Display) -> RpcError {

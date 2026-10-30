@@ -6,8 +6,9 @@ import { dirname, join } from "node:path";
 
 function validateSocket(path) {
   if (typeof path !== "string" || !path.startsWith(`/tmp/cypher-ipc-${process.getuid()}/`)
-      || Buffer.byteLength(path) > 100 || !/\/[a-f0-9]{32}\/engine\.sock$/.test(path)) {
-    throw new Error("Invalid private Engine socket");
+      || Buffer.byteLength(path) > 100 || !/\/[a-f0-9]{32}\/agent\.sock$/.test(path)) {
+    // Agents get the engine's keyless agent socket, never the keyed engine.sock.
+    throw new Error("Invalid private Engine agent socket");
   }
   for (const [entry, socket] of [[dirname(dirname(path)), false], [dirname(path), false], [path, true]]) {
     const stat = lstatSync(entry);

@@ -128,6 +128,8 @@ export const DEFAULT_SENSITIVE: readonly string[] = [
   // Cypher's and Pi's own credentials and other chats' transcripts.
   "~/.cypher*/session.json",
   "~/.cypher*/*/session.json",
+  "~/.cypher*/github-account.json",
+  "~/.cypher*/*/github-account.json",
   "~/.cypher*/profiles/**",
   "~/.cypher*/*/profiles/**",
   "~/.cypher*/orgs/**",

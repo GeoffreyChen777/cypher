@@ -1712,6 +1712,7 @@ dependencies = [
  "cypher-net",
  "cypher-proto",
  "cypher-rpc",
+ "cypher-secrets",
  "cypher-sync",
  "cypher-update",
  "futures",
@@ -1794,7 +1795,9 @@ dependencies = [
  "cypher-doc",
  "cypher-env",
  "cypher-net",
+ "cypher-secrets",
  "futures",
+ "getrandom 0.4.3",
  "libc",
  "serde",
  "serde_json",
@@ -1805,6 +1808,14 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "cypher-secrets"
+version = "0.3.66"
+dependencies = [
+ "security-framework",
+ "tempfile",
 ]
 
 [[package]]

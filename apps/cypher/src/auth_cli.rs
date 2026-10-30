@@ -147,8 +147,8 @@ pub async fn logout(config: EngineConfig) -> anyhow::Result<()> {
                 .unwrap_or_else(|| "<unknown>".into());
             auth.sign_out();
             println!(
-                "Signed out {email} — removed {}.",
-                config.data_dir.join("session.json").display()
+                "Signed out {email} — removed the session from {}.",
+                cypher_engine::Auth::session_location(&config.data_dir)
             );
         }
     }

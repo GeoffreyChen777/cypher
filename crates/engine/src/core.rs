@@ -411,6 +411,11 @@ impl EngineCore {
         cypher_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
     }
 
+    /// The restricted service behind the agent socket (`rpc::AgentRpc`).
+    pub fn agent_rpc_service(&self) -> Arc<crate::rpc::AgentRpc> {
+        Arc::new(crate::rpc::AgentRpc::new(self.rpc_service()))
+    }
+
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
         let mut rpc = EngineRpc::new(
             self.sessions.clone(),

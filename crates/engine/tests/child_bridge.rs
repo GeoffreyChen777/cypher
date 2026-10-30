@@ -1336,3 +1336,101 @@ async fn the_parent_turn_ending_keeps_the_question_open() {
     .await;
     core.shutdown().await;
 }
+
+fn local_parent(rig: &common::Rig) {
+    rig.core
+        .workspace
+        .create_chat(
+            PARENT,
+            None,
+            Some(rig.core.device_id.as_str()),
+            None,
+            Some("/tmp/repo".into()),
+        )
+        .expect("parent chat");
+}
+
+async fn agent_call(
+    rig: &common::Rig,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<RpcReply, RpcError> {
+    rig.core.agent_rpc_service().handle(method, params).await
+}
+
+/// The agent socket reaches subagents on this device and nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_socket_serves_only_local_subagent_calls() {
+    let rig = assemble();
+    local_parent(&rig);
+
+    let reply = agent_call(&rig, methods::START_SUBAGENT, start_params("run-a", PARENT))
+        .await
+        .expect("agents start subagents");
+    let RpcReply::Value(value) = reply else {
+        panic!("StartSubagent must be unary");
+    };
+    let child = value["childChatId"].as_str().unwrap().to_owned();
+
+    let interrupt = serde_json::json!({ "chatId": child, "command": { "kind": "interrupt" } });
+    agent_call(&rig, methods::QUEUE_COMMAND, interrupt)
+        .await
+        .expect("agents steer their own children");
+    assert!(
+        agent_call(
+            &rig,
+            methods::WATCH_AGENT_EVENTS,
+            serde_json::json!({ "chatId": child })
+        )
+        .await
+        .is_ok()
+    );
+
+    // The parent is an ordinary chat, not a subagent: no prompts into it.
+    let into_parent = serde_json::json!({ "chatId": PARENT, "command": { "kind": "interrupt" } });
+    let err = agent_call(&rig, methods::QUEUE_COMMAND, into_parent)
+        .await
+        .err()
+        .expect("an ordinary chat is refused");
+    assert!(
+        err.to_string().contains("subagent chats on this device"),
+        "{err}"
+    );
+    assert!(
+        agent_call(
+            &rig,
+            methods::WATCH_AGENT_EVENTS,
+            serde_json::json!({ "chatId": PARENT })
+        )
+        .await
+        .is_err()
+    );
+
+    // Never another device, whatever the method.
+    let mut remote = start_params("run-b", PARENT);
+    remote["targetDeviceId"] = "remote-device".into();
+    let err = agent_call(&rig, methods::START_SUBAGENT, remote)
+        .await
+        .err()
+        .expect("a device-addressed call is refused");
+    assert!(err.to_string().contains("other devices"), "{err}");
+
+    for method in [
+        methods::OPEN_TERMINAL,
+        methods::WRITE_WORKSPACE_FILE,
+        methods::SET_PI_PERMISSION_SETTINGS,
+        methods::INSTALL_PI_PACKAGE,
+        methods::APPLY_UPDATE,
+        methods::MUTATE,
+        methods::RETRY_COMMAND,
+        methods::STOP_ENGINE,
+    ] {
+        assert!(
+            matches!(
+                agent_call(&rig, method, serde_json::json!({})).await,
+                Err(RpcError::UnknownMethod(_))
+            ),
+            "{method} must not be served to agents"
+        );
+    }
+}
