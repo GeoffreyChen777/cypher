@@ -17,7 +17,7 @@ members runs inside an end-to-end Noise session.
 | Sync with the edge, pairing flows, `PeerTrust` | `crates/engine/src/device_trust.rs` |
 | Relay-served service guard | `crates/engine/src/rpc/relay.rs` |
 | Edge storage and validation | `apps/edge/src/trust/` (`TrustRoom`, `t1/{userId}`) |
-| iOS port (not yet wired in) | `apps/ios/Cypher/Sync/DeviceTrust.swift` |
+| iOS (joining, chain sync, client sessions) | `apps/ios/Cypher/Sync/{DeviceTrust,DeviceTrustStore,DeviceRelayClient}.swift`, Account › Paired devices |
 | Shared vectors | `protocol/vectors/device-trust-v1.json` |
 | UI | Settings → Devices → Pairing (`crates/ui/src/settings/device_pairing.rs`) |
 
@@ -112,28 +112,34 @@ The relay serves `RelayRpc`, not the bare engine service:
 ## What it does not cover
 
 - The policy is off by default, and plaintext stays available while it is off.
-  The iPhone app speaks only plaintext until its integration ships (below), so
-  turning the policy on cuts the phone off.
+  An iPhone app from before device trust speaks only plaintext, so turning the
+  policy on cuts such a phone off until it is updated and paired.
 - The edge can still delay or drop traffic, withhold a newer chain from a
   device (it cannot forge or roll one back), and see who talks to whom.
 - A paired device that is compromised is a member until someone removes it.
 - Same-user processes on a device: see [Unix IPC](unix-ipc.md).
 
-## iOS integration (remaining work)
+## iOS
 
-`DeviceTrust.swift` holds the chain rules, the pairing code and MACs, and the
-Noise initiator; `scripts/tests/device-trust-vectors.swift` proves them
-against the Rust vectors (the macOS stage of `scripts/check.sh`). Still to do
-in the app, with Xcode:
+The phone only joins: it never founds the group, shows codes or approves
+devices. `DeviceTrustStore` keeps its keys in the Keychain (this device only),
+syncs the chain every minute (fast-forward only) and runs the joining side of
+pairing from Account › Paired devices. `DeviceRelayClient` asks it for the
+host's key: with one it runs the Noise handshake and seals every frame through
+a single ordered outbox (Noise counts messages, so fragments must leave in
+sealing order); without one it refuses under the group's policy. A plaintext
+link opened before pairing is replaced on the next call.
 
-1. Generate and keep device keys in the Keychain (`Curve25519.Signing` and
-   `Curve25519.KeyAgreement` private keys).
-2. Sync the chain (`GET /trust/chain`), verify it, keep it, fast-forward only.
-3. Pairing UI: enter a code (or scan a QR code of it), post the join request,
-   poll for the welcome, verify, adopt.
-4. `DeviceRelayClient`: when the host is in the chain, send the `noise` hello,
-   finish on the reply, then seal outgoing `rpc` payloads as `rpcx` fragments
-   and open incoming ones; drop any plaintext frame on a secure link.
-5. Show the device's key fingerprint while waiting for approval.
+Checks:
 
-Until then the phone works only while the group's policy is off.
+- `DeviceTrustTests` (CypherTests): the shared vectors, joining, a swapped
+  device list, rollback, removal and re-pairing against an in-memory edge.
+- `scripts/tests/device-trust-vectors.swift`: the vectors without a simulator
+  (macOS stage of `scripts/check.sh`).
+- End to end, Development builds only: launch the Dev app with
+  `-dev-trust-interop` and `CYPHER_DEV_PAIRING_CODE` (a code from a desktop's
+  `StartDevicePairing`) and `CYPHER_DEV_TRUST_HOST` (that desktop's device id)
+  in its environment (`SIMCTL_CHILD_` prefix with `simctl launch`), against a
+  local `wrangler dev`. Approve on the desktop; the app joins, then calls the
+  desktop over a sealed session and writes
+  `Documents/development-trust-interop.json`.

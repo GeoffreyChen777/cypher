@@ -89,7 +89,14 @@ actor DeviceRelayClient {
     // MARK: Lifecycle
 
     private func connect() async throws {
-        if connected, socket != nil { return }
+        if connected, socket != nil {
+            // A plaintext link opened before the host was paired is replaced
+            // by a sealed one as soon as the host's key is known.
+            guard session == nil, let trust = config.trust else { return }
+            let deviceId = self.deviceId
+            guard await MainActor.run(body: { trust.hostKey(for: deviceId) != nil }) else { return }
+            teardown(error: .notConnected)
+        }
         if let connecting { return try await connecting.value }
         let attempt = Task { try await self.open() }
         connecting = attempt

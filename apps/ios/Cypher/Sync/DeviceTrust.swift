@@ -4,8 +4,8 @@
 // paired devices. The Rust, TypeScript and Swift implementations all run
 // protocol/vectors/device-trust-v1.json (protocol/README.md).
 //
-// The phone is only ever a client, so it needs no responder. Not yet wired
-// into DeviceRelayClient: see docs/design/device-trust.md for the steps.
+// The phone is only ever a client, so it needs no responder.
+// DeviceTrustStore and DeviceRelayClient use it.
 
 import CryptoKit
 import Foundation

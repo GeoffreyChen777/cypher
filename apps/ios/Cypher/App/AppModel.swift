@@ -95,6 +95,9 @@ final class AppModel {
                 }
                 if connectDevelopment(secret: Keychain.load(key: "developmentToken")) {
                     if args.contains("-dev-interop") { Task { await DevelopmentInterop.run(model: self) } }
+                    if args.contains("-dev-trust-interop") {
+                        Task { await DevelopmentTrustInterop.run(model: self) }
+                    }
                 }
                 return
             }
