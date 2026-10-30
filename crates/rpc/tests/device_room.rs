@@ -751,6 +751,11 @@ impl cypher_rpc::PeerTrust for TestTrust {
             .iter()
             .any(|(id, key)| id == client_id && key == client_key)
     }
+    fn is_known_member(&self, client_id: &str, client_key: &[u8; 32]) -> bool {
+        self.members
+            .iter()
+            .any(|(id, key)| id == client_id && key == client_key)
+    }
     fn require_paired(&self) -> bool {
         self.require
     }
@@ -954,4 +959,127 @@ async fn without_requirements_unpaired_devices_keep_working_in_plaintext() {
         .await
         .unwrap();
     assert_eq!(echoed["params"]["x"], 1);
+}
+
+/// A trust that learns the host's key part-way, like pairing does.
+struct LearningTrust {
+    keys: Arc<cypher_trust::DeviceKeys>,
+    host_key: std::sync::Mutex<Option<[u8; 32]>>,
+}
+
+#[async_trait]
+impl cypher_rpc::PeerTrust for LearningTrust {
+    fn local_keys(&self) -> Option<Arc<cypher_trust::DeviceKeys>> {
+        Some(self.keys.clone())
+    }
+    fn peer_key(&self, _: &str) -> Option<[u8; 32]> {
+        *self.host_key.lock().unwrap()
+    }
+    async fn is_member(&self, _: &str, _: &[u8; 32]) -> bool {
+        false
+    }
+    fn is_known_member(&self, _: &str, _: &[u8; 32]) -> bool {
+        false
+    }
+    fn require_paired(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn a_plaintext_link_is_replaced_once_the_host_is_paired() {
+    let relay = FakeRelay::start().await;
+    let pair = Pair::new();
+    let _host = trusted_host(&relay, pair.host(true, false)).await;
+    let trust = Arc::new(LearningTrust {
+        keys: pair.client_keys.clone(),
+        host_key: std::sync::Mutex::new(None),
+    });
+    let mut config =
+        LinkCacheConfig::new(relay.edge_url(), Arc::new(StaticToken("test-user".into())))
+            .with_trust(trust.clone());
+    config.probe_timeout = Duration::from_millis(1_500);
+    let links = LinkCache::new(config);
+    links.client("dev-a").await.unwrap();
+    relay.state.lock().unwrap().seen.clear();
+
+    *trust.host_key.lock().unwrap() = Some(pair.host_keys.dh_public());
+    let client = links.client("dev-a").await.unwrap();
+    client
+        .call("Echo", serde_json::json!({ "marker": "now-sealed" }))
+        .await
+        .unwrap();
+    let seen = relay.state.lock().unwrap().seen.clone();
+    assert!(
+        !seen
+            .iter()
+            .any(|p| p.windows(10).any(|w| w == b"now-sealed")),
+        "the upgraded link must not send plaintext"
+    );
+}
+
+/// A host trust whose membership can change mid-session.
+struct ShrinkingTrust {
+    keys: Arc<cypher_trust::DeviceKeys>,
+    member: std::sync::Mutex<Option<(String, [u8; 32])>>,
+}
+
+#[async_trait]
+impl cypher_rpc::PeerTrust for ShrinkingTrust {
+    fn local_keys(&self) -> Option<Arc<cypher_trust::DeviceKeys>> {
+        Some(self.keys.clone())
+    }
+    fn peer_key(&self, _: &str) -> Option<[u8; 32]> {
+        None
+    }
+    async fn is_member(&self, id: &str, key: &[u8; 32]) -> bool {
+        self.is_known_member(id, key)
+    }
+    fn is_known_member(&self, id: &str, key: &[u8; 32]) -> bool {
+        self.member
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(m, k)| m == id && k == key)
+    }
+    fn require_paired(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn an_open_session_ends_when_its_device_is_removed() {
+    let relay = FakeRelay::start().await;
+    let pair = Pair::new();
+    let host_trust = Arc::new(ShrinkingTrust {
+        keys: pair.host_keys.clone(),
+        member: std::sync::Mutex::new(Some(("dev-b".into(), pair.client_keys.dh_public()))),
+    });
+    let _host = HostRelay::spawn(
+        relay_config(&relay.edge_url(), 100).with_trust(host_trust.clone()),
+        TestService::new("host-a"),
+        noop_nudge(),
+    );
+    relay.wait_host_connected().await;
+    let links = trusted_cache(&relay, pair.client(true, true));
+    let client = links.client("dev-a").await.expect("member connects");
+    client.call("Echo", serde_json::json!({})).await.unwrap();
+
+    *host_trust.member.lock().unwrap() = None;
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.call("Echo", serde_json::json!({})),
+    )
+    .await
+    .expect("fails fast");
+    assert!(
+        result.is_err(),
+        "a removed device's session must not be served"
+    );
+    let err = links
+        .client("dev-a")
+        .await
+        .err()
+        .expect("and it cannot reconnect");
+    assert!(err.to_string().contains("isn't paired"), "{err}");
 }

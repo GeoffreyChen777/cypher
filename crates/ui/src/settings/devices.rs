@@ -149,6 +149,8 @@ pub struct DevicesPage {
     update_tasks: Vec<Task<()>>,
     /// The first render with a device list runs one check across the fleet.
     auto_checked: bool,
+    /// Pairing: this device's place in the account's trust group.
+    pairing: Entity<crate::settings::device_pairing::PairingSection>,
     _observe: Subscription,
 }
 
@@ -158,8 +160,11 @@ impl DevicesPage {
             this.reconcile_restarts(&state, cx);
             cx.notify()
         });
+        let pairing =
+            cx.new(|cx| crate::settings::device_pairing::PairingSection::new(state.clone(), cx));
         Self {
             state,
+            pairing,
             rename: None,
             delete_confirm: None,
             copied: None,
@@ -634,7 +639,14 @@ impl Render for DevicesPage {
                                 })),
                         )
                     })
-                    .child(card),
+                    .child(card)
+                    .when(
+                        matches!(
+                            workspace_scope,
+                            Some(WorkspaceScope::Synced | WorkspaceScope::Development)
+                        ),
+                        |el| el.child(self.pairing.clone()),
+                    ),
             )
             .when_some(dialog, |el, dialog| el.child(dialog))
             .when_some(delete_dialog, |el, dialog| el.child(dialog))

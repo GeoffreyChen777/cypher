@@ -34,8 +34,9 @@ const INVITE_TTL: Duration = Duration::from_secs(10 * 60);
 /// How long a joining device waits for the member to approve it.
 const JOIN_TTL: Duration = Duration::from_secs(15 * 60);
 const POLL: Duration = Duration::from_secs(2);
-/// Background re-sync cadence.
-const RESYNC: Duration = Duration::from_secs(10 * 60);
+/// Background re-sync cadence: how long a policy or removal made on another
+/// device can take to reach this one when nothing else prompts a sync.
+const RESYNC: Duration = Duration::from_secs(60);
 /// A client the host doesn't recognise triggers at most one refresh per this.
 const MISS_REFRESH: Duration = Duration::from_secs(15);
 
@@ -838,23 +839,28 @@ impl PeerTrust for DeviceTrust {
     }
 
     async fn is_member(&self, client_id: &str, client_key: &[u8; 32]) -> bool {
-        let check = |trust: &DeviceTrust| {
-            let state = lock(&trust.inner.state);
-            trust.is_paired_in(&state.chain)
-                && state
-                    .chain
-                    .member(client_id)
-                    .is_some_and(|member| &member.dh_pub == client_key)
-        };
-        if check(self) {
+        if self.is_known_member(client_id, client_key) {
             return true;
         }
         self.refresh_after_miss().await;
-        check(self)
+        self.is_known_member(client_id, client_key)
+    }
+
+    fn is_known_member(&self, client_id: &str, client_key: &[u8; 32]) -> bool {
+        let state = lock(&self.inner.state);
+        self.is_paired_in(&state.chain)
+            && state
+                .chain
+                .member(client_id)
+                .is_some_and(|member| &member.dh_pub == client_key)
     }
 
     fn require_paired(&self) -> bool {
         lock(&self.inner.state).chain.require_paired()
+    }
+
+    async fn refresh(&self) {
+        self.refresh_after_miss().await;
     }
 }
 

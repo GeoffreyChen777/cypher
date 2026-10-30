@@ -43,6 +43,14 @@ pub trait PeerTrust: Send + Sync + 'static {
     /// "Only paired devices": refuse plaintext and unknown devices, as host
     /// and as client.
     fn require_paired(&self) -> bool;
+    /// [`Self::is_member`] against the group as this device holds it now,
+    /// without refreshing: checked on every frame of an open session, so a
+    /// removal cuts it off as soon as this device learns of it.
+    fn is_known_member(&self, client_id: &str, client_key: &[u8; 32]) -> bool;
+    /// Re-read the group before deciding on a new client, so a
+    /// policy switched on elsewhere a moment ago already holds. Implementations
+    /// rate-limit it.
+    async fn refresh(&self) {}
 }
 
 /// No device keys: plaintext only, never refuses.
@@ -59,6 +67,10 @@ impl PeerTrust for NoTrust {
     }
 
     async fn is_member(&self, _: &str, _: &[u8; 32]) -> bool {
+        false
+    }
+
+    fn is_known_member(&self, _: &str, _: &[u8; 32]) -> bool {
         false
     }
 

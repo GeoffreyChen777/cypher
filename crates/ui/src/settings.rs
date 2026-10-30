@@ -6,6 +6,7 @@ pub mod appearance;
 pub mod archived;
 pub mod commands;
 pub mod context_recovery;
+pub mod device_pairing;
 pub mod device_target;
 pub mod devices;
 pub mod github;

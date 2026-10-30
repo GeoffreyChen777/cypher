@@ -40,6 +40,8 @@ pub struct DeviceLink {
     client: Arc<RpcClient>,
     closed_rx: watch::Receiver<Option<String>>,
     pump: tokio::task::JoinHandle<()>,
+    /// Runs inside a Noise session.
+    secure: bool,
 }
 
 /// How long a client waits for the host's handshake answer.
@@ -78,6 +80,7 @@ impl DeviceLink {
             }
             None => None,
         };
+        let secure = session.is_some();
         let (out_tx, out_rx) = mpsc::channel::<String>(256);
         let (in_tx, in_rx) = mpsc::channel::<String>(256);
         let (closed_tx, closed_rx) = watch::channel::<Option<String>>(None);
@@ -91,6 +94,7 @@ impl DeviceLink {
             client: Arc::new(RpcClient::new(out_tx, in_rx)),
             closed_rx,
             pump,
+            secure,
         })
     }
 
@@ -100,6 +104,11 @@ impl DeviceLink {
 
     pub fn is_closed(&self) -> bool {
         self.closed_rx.borrow().is_some()
+    }
+
+    /// Whether the link runs inside a Noise session.
+    pub fn is_secure(&self) -> bool {
+        self.secure
     }
 
     /// Watch that resolves to `Some(reason)` when the link drops.
@@ -490,8 +499,15 @@ impl LinkCache {
 
     fn cached(&self, device_id: &str) -> Option<Arc<DeviceLink>> {
         let mut links = lock(&self.links);
+        // A plaintext link dialed before the host joined this device's trust
+        // group is replaced by a sealed one as soon as its key is known.
+        let upgradable = |link: &DeviceLink| {
+            !link.is_secure()
+                && self.config.trust.local_keys().is_some()
+                && self.config.trust.peer_key(device_id).is_some()
+        };
         match links.get(device_id) {
-            Some(link) if !link.is_closed() => Some(link.clone()),
+            Some(link) if !link.is_closed() && !upgradable(link) => Some(link.clone()),
             Some(_) => {
                 links.remove(device_id);
                 None

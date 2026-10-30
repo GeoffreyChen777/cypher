@@ -190,6 +190,8 @@ fn jitter() -> Duration {
 struct VirtualConn {
     in_tx: mpsc::Sender<String>,
     session: Option<Arc<std::sync::Mutex<Session>>>,
+    /// The device id and Noise key a sealed session's client proved.
+    client: Option<(String, [u8; 32])>,
 }
 
 fn make_virtual_conn(
@@ -227,7 +229,11 @@ fn make_virtual_conn(
             }
         }
     });
-    VirtualConn { in_tx, session }
+    VirtualConn {
+        in_tx,
+        session,
+        client: None,
+    }
 }
 
 /// One relay session: connect as host, serve RPC per client conn, until the socket drops.
@@ -369,6 +375,17 @@ impl Host {
             SECURE_KIND => {
                 let Some(conn) = conns.get(&from) else { return };
                 let Some(session) = &conn.session else { return };
+                if self.trust.require_paired()
+                    && !conn
+                        .client
+                        .as_ref()
+                        .is_some_and(|(id, key)| self.trust.is_known_member(id, key))
+                {
+                    tracing::warn!(conn = %from, "device-room: closing a session whose device left the trust group");
+                    conns.remove(&from);
+                    self.refuse(&from, UNTRUSTED_DEVICE).await;
+                    return;
+                }
                 let opened = lock(session).open(&payload);
                 match opened {
                     Ok(Some(message)) => {
@@ -390,7 +407,11 @@ impl Host {
                     tracing::warn!(conn = %from, "device-room: dropping a plaintext frame on a secure conn");
                     return;
                 }
+                if !conns.contains_key(&from) {
+                    self.trust.refresh().await;
+                }
                 if self.trust.require_paired() {
+                    conns.remove(&from);
                     self.refuse_plaintext(&from, &payload).await;
                     return;
                 }
@@ -424,6 +445,7 @@ impl Host {
                 return;
             }
         };
+        self.trust.refresh().await;
         let member = self
             .trust
             .is_member(&accepting.client_id, &accepting.client_key)
@@ -439,18 +461,18 @@ impl Host {
                 "device-room: secure session from a device outside the trust group");
         }
         let client = accepting.client_id.clone();
+        let client_key = accepting.client_key;
         match accepting.accept() {
             Ok((reply, session)) => {
                 let session = Arc::new(std::sync::Mutex::new(session));
-                conns.insert(
+                let mut conn = make_virtual_conn(
+                    self.service.clone(),
                     from.to_string(),
-                    make_virtual_conn(
-                        self.service.clone(),
-                        from.to_string(),
-                        self.out_tx.clone(),
-                        Some(session),
-                    ),
+                    self.out_tx.clone(),
+                    Some(session),
                 );
+                conn.client = Some((client.clone(), client_key));
+                conns.insert(from.to_string(), conn);
                 self.send(from, NOISE_KIND, &noise_payload(REPLY, &reply))
                     .await;
                 tracing::info!(conn = %from, %client, member, "device-room: secure session open");

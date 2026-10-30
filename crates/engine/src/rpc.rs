@@ -642,6 +642,18 @@ impl RpcService for AuthRpc {
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         preflight(method, &params)?;
+        // A device-local method never runs anywhere else; naming another
+        // device must not quietly apply it here instead.
+        if methods::spec(method).is_some_and(|spec| spec.local)
+            && params
+                .get("targetDeviceId")
+                .and_then(|v| v.as_str())
+                .is_some_and(|target| target != self.doc_host.device_id())
+        {
+            return Err(RpcError::BadParams(format!(
+                "{method} only applies to this device."
+            )));
+        }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
