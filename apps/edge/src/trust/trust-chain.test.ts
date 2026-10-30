@@ -25,7 +25,7 @@ describe("device trust chain vectors", () => {
 
   for (const invalid of vectors.invalidChains) {
     it(`refuses ${invalid.name}`, async () => {
-      expect(typeof (await replay(invalid.entries))).toBe("string");
+      expect(await replay(invalid.entries)).toBe(invalid.reason);
     });
   }
 

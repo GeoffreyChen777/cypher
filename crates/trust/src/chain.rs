@@ -2,8 +2,9 @@
 //!
 //! Entry `0` is a device adding itself. Every later entry names the hash of
 //! the one before it and is signed by a device that is a member at that point
-//! in the log. A removed device stays removed (re-joining takes new keys), and
-//! no key may appear in two entries' `add`s. Replaying the log from the start
+//! in the log. No key may appear in two `add`s, so a removed device's keys stay
+//! out for good; the same device id may return with fresh keys (re-pairing a
+//! machine after removing it by mistake). Replaying the log from the start
 //! yields the members; [`TrustChain::verify`] refuses any log that breaks a rule.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -158,10 +159,8 @@ impl TrustChain {
         }
         match entry.kind {
             EntryKind::Add => {
-                if self.members.contains_key(&entry.device.id)
-                    || self.removed.contains(&entry.device.id)
-                {
-                    return bad("device already added or removed");
+                if self.members.contains_key(&entry.device.id) {
+                    return bad("device already a member");
                 }
                 if self.keys_seen.contains(&entry.device.sign_pub)
                     || self.keys_seen.contains(&entry.device.dh_pub)
@@ -322,9 +321,14 @@ mod tests {
         assert!(chain.is_removed("a"));
         // A removed device signs nothing more.
         assert!(chain.propose_add(&a, keys("d").public("D"), 5).is_err());
-        // Its id cannot return.
+        // Its keys cannot return; the same id with fresh keys can.
+        assert!(chain.propose_add(&b, a.public("A"), 5).is_err());
         let again = keys("a");
-        assert!(chain.propose_add(&b, again.public("A"), 5).is_err());
+        chain
+            .append(chain.propose_add(&b, again.public("A"), 5).unwrap())
+            .unwrap();
+        assert!(chain.member("a").is_some());
+        assert!(chain.is_removed("a"));
         // The whole log verifies from scratch.
         let replayed = TrustChain::verify(chain.entries().to_vec()).unwrap();
         assert_eq!(replayed.head(), chain.head());

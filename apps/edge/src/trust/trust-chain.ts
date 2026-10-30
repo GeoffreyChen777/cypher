@@ -187,9 +187,8 @@ export const applyEntry = async (
   }
   if (signatures && !(await verifySignature(signer.signPub, entry))) return "bad signature";
   if (entry.kind === "add") {
-    if (state.members.has(entry.device.id) || state.removed.has(entry.device.id)) {
-      return "device already added or removed";
-    }
+    // A removed device's keys stay out (keysSeen); its id may return with new keys.
+    if (state.members.has(entry.device.id)) return "device already a member";
     if (state.keysSeen.has(entry.device.signPub) || state.keysSeen.has(entry.device.dhPub)) {
       return "key already used";
     }

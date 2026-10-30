@@ -46,8 +46,19 @@ fn entry_json(entry: &TrustEntry) -> Value {
 }
 
 fn invalid(name: &str, entries: Vec<TrustEntry>) -> Value {
-    assert!(TrustChain::verify(entries.clone()).is_err(), "{name}");
-    json!({ "name": name, "entries": entries })
+    let reason = match TrustChain::verify(entries.clone()) {
+        Err(cypher_trust::TrustError::InvalidEntry(reason)) => reason,
+        other => panic!("{name}: {other:?}"),
+    };
+    json!({ "name": name, "reason": reason, "entries": entries })
+}
+
+/// `entry` signed by `keys` (proposals refuse invalid entries, so the
+/// invalid cases are signed by hand).
+fn resign(keys: &DeviceKeys, mut entry: TrustEntry) -> TrustEntry {
+    entry.signer = keys.device_id.clone();
+    entry.sig = keys.sign_for_tests(&entry.signing_bytes());
+    entry
 }
 
 /// `plaintext[i] = i % 251`.
@@ -85,33 +96,39 @@ fn build() -> Value {
     resequenced[1].seq = 5;
     // Entries an outsider signs, rebuilt so only the signer is wrong.
     let base = TrustChain::verify(entries[..2].to_vec()).unwrap();
-    let mut by_outsider = base.propose_add(&a.keys, x.keys.public(x.name), 5).unwrap();
-    by_outsider.signer = "device-x".into();
+    let by_outsider = resign(
+        &x.keys,
+        base.propose_add(&a.keys, x.keys.public(x.name), 5).unwrap(),
+    );
     let self_add = {
         let mut probe = TrustChain::genesis(&x.keys, x.name, 5).unwrap().entries()[0].clone();
         probe.seq = 2;
         probe.prev = base.head().unwrap();
-        probe
+        resign(&x.keys, probe)
     };
     let after_removal = TrustChain::verify(entries.clone()).unwrap();
+    // A's old keys, signed by a member: refused because the keys were used.
     let readd = {
         let mut entry = after_removal
             .propose_add(&b.keys, x.keys.public(x.name), 6)
             .unwrap();
         entry.device = a.keys.public(a.name);
-        entry
+        entry.sig = [0; 64];
+        resign(&b.keys, entry)
     };
     let duplicate_key = {
         let mut twin = x.keys.public(x.name);
         twin.dh_pub = b.keys.public(b.name).dh_pub;
         let mut entry = base.propose_add(&a.keys, x.keys.public(x.name), 6).unwrap();
         entry.device = twin;
-        entry
+        resign(&a.keys, entry)
     };
-    let mut signed_by_removed = after_removal
-        .propose_add(&b.keys, x.keys.public(x.name), 7)
-        .unwrap();
-    signed_by_removed.signer = "device-a".into();
+    let signed_by_removed = resign(
+        &a.keys,
+        after_removal
+            .propose_add(&b.keys, x.keys.public(x.name), 7)
+            .unwrap(),
+    );
 
     // Pairing: C joins the group through A.
     let code = PairingCode::parse("oil0-23ab-cdef-ghjk-mnpq").unwrap();
@@ -189,7 +206,7 @@ fn build() -> Value {
             invalid("a skipped sequence number", resequenced),
             invalid("signed by a device outside the group", [&entries[..2], &[by_outsider]].concat()),
             invalid("a device adding itself after the first entry", [&entries[..2], &[self_add]].concat()),
-            invalid("re-adding a removed device", [&entries[..], &[readd]].concat()),
+            invalid("re-adding a removed device's keys", [&entries[..], &[readd]].concat()),
             invalid("adding a key already in use", [&entries[..2], &[duplicate_key]].concat()),
             invalid("signed by a removed device", [&entries[..], &[signed_by_removed]].concat()),
             invalid("no first entry", entries[1..].to_vec()),
@@ -246,6 +263,10 @@ fn the_committed_chain_verifies_and_the_invalid_ones_do_not() {
     assert_eq!(json!(members), file["chain"]["members"]);
     for case in file["invalidChains"].as_array().unwrap() {
         let entries: Vec<TrustEntry> = serde_json::from_value(case["entries"].clone()).unwrap();
-        assert!(TrustChain::verify(entries).is_err(), "{}", case["name"]);
+        let Err(cypher_trust::TrustError::InvalidEntry(reason)) = TrustChain::verify(entries)
+        else {
+            panic!("{} verified", case["name"]);
+        };
+        assert_eq!(json!(reason), case["reason"], "{}", case["name"]);
     }
 }

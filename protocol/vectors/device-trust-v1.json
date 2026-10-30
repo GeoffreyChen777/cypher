@@ -181,7 +181,8 @@
           "signer": "device-c"
         }
       ],
-      "name": "an edited entry"
+      "name": "an edited entry",
+      "reason": "bad signature"
     },
     {
       "entries": [
@@ -242,7 +243,8 @@
           "signer": "device-c"
         }
       ],
-      "name": "a broken hash link"
+      "name": "a broken hash link",
+      "reason": "does not follow the previous entry"
     },
     {
       "entries": [
@@ -275,7 +277,8 @@
           "signer": "device-a"
         }
       ],
-      "name": "a skipped sequence number"
+      "name": "a skipped sequence number",
+      "reason": "out of sequence"
     },
     {
       "entries": [
@@ -318,11 +321,12 @@
           "kind": "add",
           "prev": "32157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b98",
           "seq": 2,
-          "sig": "924110e5d1649d1bea9d59cbc55281c548dfa9ab810d0937ab91a0d9d35472e8a07c758a71258c04be3e7e1993c8e837395912df7a7ec15b6908299641f61d05",
+          "sig": "e801fd21f9ac13b9877a0cf337e64a661cdb6cb045ecd10781f4e1eb1226a3991a13f6e6816515717d8c215c0ee0aa02c9f9b825d7b5eae84b5ffa91f266040d",
           "signer": "device-x"
         }
       ],
-      "name": "signed by a device outside the group"
+      "name": "signed by a device outside the group",
+      "reason": "signed by a device outside the group"
     },
     {
       "entries": [
@@ -365,11 +369,12 @@
           "kind": "add",
           "prev": "32157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b98",
           "seq": 2,
-          "sig": "bccdac921fd0c5b3c4b8bde3d33f60be1e67fd7bc3fd42a91b1069f1070d635503c3289db7966fc3e938cded4995c311db18532e3d3f4b8646507c3b042b560d",
+          "sig": "e801fd21f9ac13b9877a0cf337e64a661cdb6cb045ecd10781f4e1eb1226a3991a13f6e6816515717d8c215c0ee0aa02c9f9b825d7b5eae84b5ffa91f266040d",
           "signer": "device-x"
         }
       ],
-      "name": "a device adding itself after the first entry"
+      "name": "a device adding itself after the first entry",
+      "reason": "signed by a device outside the group"
     },
     {
       "entries": [
@@ -440,11 +445,12 @@
           "kind": "add",
           "prev": "b314b6984cde81117601ae5a33dbe18b385c4d78fadb0128679327568d99da78",
           "seq": 4,
-          "sig": "9dd738cfa5495257700b759b16a9dc3d637f072dbb5cd29cc17a646531b18279a84928002530d1c0af21c6923c8ef39362a2c48243e10b90325c192704a8db03",
+          "sig": "0df41170ab59fa1b5ba441752131a95f9e628574cbdd4d8e330022d24f3b6257df70881bd7c40d6c10c3a27d619dd776e3a34f8d4f152d6cfe7ed60bf599830b",
           "signer": "device-b"
         }
       ],
-      "name": "re-adding a removed device"
+      "name": "re-adding a removed device's keys",
+      "reason": "key already used"
     },
     {
       "entries": [
@@ -487,11 +493,12 @@
           "kind": "add",
           "prev": "32157ed4d5e64d2b1d84293ff4223df6c03deae07f4dfe5e56a095ca682f0b98",
           "seq": 2,
-          "sig": "b2ef3c0e9e917b7e2e3b1f59fa02faeecd05b5af556f9dbf4c4bc22696a812dc9e54b4fe07603b6e07c7ab61b295e7e172c99e85b7d53c82392601321e534a03",
+          "sig": "98ca427e6c9d014e1b5e31166c93fdacdeb1447f27a3ff5eb07039f0422a6fc41769c4b9a16729840cd5cb13cae5b936d0c3573f35aae519ea31dd5de4e75d05",
           "signer": "device-a"
         }
       ],
-      "name": "adding a key already in use"
+      "name": "adding a key already in use",
+      "reason": "key already used"
     },
     {
       "entries": [
@@ -562,11 +569,12 @@
           "kind": "add",
           "prev": "b314b6984cde81117601ae5a33dbe18b385c4d78fadb0128679327568d99da78",
           "seq": 4,
-          "sig": "af0ec10ea71918d69ab28cdc013f94a1d845642dff9ab0abbd8d964c7fe70ac02378c8030135d53d412d6d87641f3a9ddaa21cd4967d357c2133f215966c930b",
+          "sig": "262362079571817aaf683470f8fbc134805daea0cfac91b1c5bcd788528ef03a3d8fb0dcda6e3b3a588c546d416f3247a85ff12443327f1a5603bf55d7a8180f",
           "signer": "device-a"
         }
       ],
-      "name": "signed by a removed device"
+      "name": "signed by a removed device",
+      "reason": "signed by a device outside the group"
     },
     {
       "entries": [
@@ -613,7 +621,8 @@
           "signer": "device-c"
         }
       ],
-      "name": "no first entry"
+      "name": "no first entry",
+      "reason": "out of sequence"
     }
   ],
   "noise": {

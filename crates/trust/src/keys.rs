@@ -118,6 +118,13 @@ impl DeviceKeys {
         self.sign.sign(message).to_bytes()
     }
 
+    /// Sign arbitrary bytes — only the vector generator needs this, to build
+    /// invalid entries with valid signatures.
+    #[doc(hidden)]
+    pub fn sign_for_tests(&self, message: &[u8]) -> [u8; 64] {
+        self.sign(message)
+    }
+
     pub fn to_bytes(&self) -> Zeroizing<Vec<u8>> {
         let stored = StoredKeys {
             version: 1,
