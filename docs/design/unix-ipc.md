@@ -58,6 +58,9 @@ Agents never get `engine.sock`. `agent.sock` serves `rpc::AgentRpc`:
 is refused, so an agent following injected instructions cannot open terminals,
 change settings, or reach other devices through IPC.
 
+Device-to-device trust over the relay is separate: see
+[Device trust](device-trust.md).
+
 This isolates different ordinary OS users, **not hostile processes sharing a
 UID or an administrator/root**. An unsandboxed agent still runs as the user and
 can, for example, replace the Cypher binary on a user-writable install; the

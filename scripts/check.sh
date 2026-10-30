@@ -118,6 +118,9 @@ stage_macos() {
     -o "$out/preview-vectors"
   run "$out/preview-vectors" protocol/vectors/stream-preview-v1.json \
     protocol/vectors/preview-reducer-v1.json
+  run xcrun swiftc -module-cache-path "$out/module-cache" apps/ios/Cypher/Sync/DeviceTrust.swift \
+    scripts/tests/device-trust-vectors.swift -o "$out/trust-vectors"
+  run "$out/trust-vectors" protocol/vectors/device-trust-v1.json
   rm -rf "$out"
 }
 

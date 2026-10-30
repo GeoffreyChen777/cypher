@@ -47,6 +47,7 @@ Single binary `cypher`:
   permissions, peer-UID checks and the `cypher.rpc.v1` subprotocol.
 - `cypher headless` — engine only. A clean installation immediately serves its local profile over Unix IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
+See [Device trust](design/device-trust.md) for how devices authenticate each other over the relay.
 See [Unix IPC](design/unix-ipc.md) for endpoint ownership, service names, Pi bridge,
 and separate UI/Engine data directories. TCP IPC and its environment setting
 have been removed; remote Edge transports are unchanged.

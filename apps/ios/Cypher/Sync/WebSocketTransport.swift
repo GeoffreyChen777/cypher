@@ -34,9 +34,9 @@ extension URLRequest {
     /// query item is dropped either way.
     func liftingBearer() -> URLRequest {
         guard let url,
-              var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let items = components.queryItems,
-              let token = items.first(where: { $0.name == "token" })?.value
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+            let items = components.queryItems,
+            let token = items.first(where: { $0.name == "token" })?.value
         else { return self }
         let kept = items.filter { $0.name != "token" }
         components.queryItems = kept.isEmpty ? nil : kept
