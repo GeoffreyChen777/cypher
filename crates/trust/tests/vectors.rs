@@ -247,13 +247,30 @@ fn build() -> Value {
     })
 }
 
+/// Keys sorted at every level, so the file is byte-identical whether or not
+/// the build unifies serde_json's `preserve_order` feature (the workspace
+/// build does; this package alone does not).
+fn canonical(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let sorted: std::collections::BTreeMap<String, Value> = map
+                .into_iter()
+                .map(|(key, value)| (key, canonical(value)))
+                .collect();
+            Value::Object(sorted.into_iter().collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical).collect()),
+        other => other,
+    }
+}
+
 #[test]
 fn shared_vectors_match_the_committed_file() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../protocol/vectors/device-trust-v1.json"
     );
-    let built = serde_json::to_string_pretty(&build()).unwrap() + "\n";
+    let built = serde_json::to_string_pretty(&canonical(build())).unwrap() + "\n";
     if std::env::var_os("UPDATE_VECTORS").is_some() {
         std::fs::write(path, &built).unwrap();
     }
