@@ -270,6 +270,12 @@ impl Drop for LocalListener {
             && (meta.dev(), meta.ino()) == self.identity
         {
             let _ = std::fs::remove_file(&self.path);
+            // Still ours, so no successor has written its own key yet.
+            if self.key.is_some()
+                && let Some(secret) = key_secret(&self.path)
+            {
+                let _ = secret.delete();
+            }
         }
     }
 }
@@ -451,10 +457,13 @@ mod tests {
     async fn every_bind_mints_a_new_key() {
         let (_dir, path) = path();
         let key_file = path.with_file_name("engine.key");
-        drop(LocalListener::bind(&path).await.unwrap());
+        let listener = LocalListener::bind(&path).await.unwrap();
         let first = std::fs::read(&key_file).unwrap();
-        drop(LocalListener::bind(&path).await.unwrap());
+        drop(listener);
+        assert!(!key_file.exists(), "the key leaves with its socket");
+        let listener = LocalListener::bind(&path).await.unwrap();
         assert_ne!(std::fs::read(&key_file).unwrap(), first);
+        drop(listener);
     }
 
     #[tokio::test]
