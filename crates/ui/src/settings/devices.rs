@@ -1,9 +1,11 @@
 //! Settings → Devices: the device registry — name,
-//! platform, last-seen, presence dot, a "This device" badge, click-to-copy id,
-//! a Rename dialog (Mutate renameDevice), and in synced workspaces a Remove
-//! action that unpairs another machine (Mutate deleteDevice): that machine
-//! signs out of sync and continues in local-only mode. This device cannot be
-//! removed from here.
+//! platform, last-seen, presence dot, a "This device" badge, a Paired / Not
+//! paired badge from the trust group, click-to-copy id, a Rename dialog
+//! (Mutate renameDevice), and in synced workspaces a Remove action for another
+//! machine (Mutate deleteDevice): that machine signs out of sync and continues
+//! in local-only mode, and when it is paired this device also unpairs it
+//! (RemoveTrustedDevice), so its keys stop being trusted too. This device
+//! cannot be removed from here.
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -61,11 +63,47 @@ pub fn can_remove_device(scope: Option<WorkspaceScope>, is_local: bool) -> bool 
         )
 }
 
-/// Confirm-dialog body. Pure so the wording is unit-tested.
-pub fn delete_device_copy(name: &str) -> String {
-    format!(
-        "Removing \u{201c}{name}\u{201d} signs that machine out of this account. It will continue in local-only mode. Signing in again there will re-pair it."
-    )
+/// Confirm-dialog body; `paired` = the machine is also in this device's
+/// trust group, so Remove unpairs it too. Pure so the wording is unit-tested.
+pub fn delete_device_copy(name: &str, paired: bool) -> String {
+    if paired {
+        format!(
+            "Removing \u{201c}{name}\u{201d} signs that machine out of this account and unpairs it, so your other devices stop trusting its keys. It will continue in local-only mode. To use it again, sign in there and re-pair it with a new code."
+        )
+    } else {
+        format!(
+            "Removing \u{201c}{name}\u{201d} signs that machine out of this account. It will continue in local-only mode. Signing in again there will re-pair it."
+        )
+    }
+}
+
+/// The pairing badge for a device row: `Some(("Paired", true))` for a member
+/// of the trust group, `Some(("Not paired", false))` for anyone else, and
+/// `None` while this device can't tell (pairing unavailable, or this device
+/// isn't paired itself, so it holds no trusted list). Pure.
+pub fn pairing_badge(
+    status: Option<&cypher_engine::device_trust::TrustStatus>,
+    device_id: &str,
+) -> Option<(&'static str, bool)> {
+    let status = status?;
+    if status.state != cypher_engine::device_trust::TrustState::Paired {
+        return None;
+    }
+    Some(if status.members.iter().any(|m| m.id == device_id) {
+        ("Paired", true)
+    } else {
+        ("Not paired", false)
+    })
+}
+
+/// Whether removing `device_id` should also unpair it: it is another member
+/// of the group this device belongs to. Pure.
+pub fn unpair_on_remove(
+    status: Option<&cypher_engine::device_trust::TrustStatus>,
+    device_id: &str,
+) -> bool {
+    pairing_badge(status, device_id) == Some(("Paired", true))
+        && status.is_some_and(|s| s.device_id != device_id)
 }
 
 /// Where one device stands in the fleet-update flow (Devices → Update).
@@ -151,6 +189,7 @@ pub struct DevicesPage {
     auto_checked: bool,
     /// Pairing: this device's place in the account's trust group.
     pairing: Entity<crate::settings::device_pairing::PairingSection>,
+    _observe_pairing: Subscription,
     _observe: Subscription,
 }
 
@@ -162,9 +201,12 @@ impl DevicesPage {
         });
         let pairing =
             cx.new(|cx| crate::settings::device_pairing::PairingSection::new(state.clone(), cx));
+        // Row badges follow the pairing status.
+        let observe_pairing = cx.observe(&pairing, |_, _, cx| cx.notify());
         Self {
             state,
             pairing,
+            _observe_pairing: observe_pairing,
             rename: None,
             delete_confirm: None,
             copied: None,
@@ -238,15 +280,37 @@ impl DevicesPage {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        let unpair = unpair_on_remove(self.pairing.read(cx).status(), &device_id);
         let params = serde_json::json!({
             "op": "deleteDevice",
             "deviceId": device_id,
         });
         self.task = Some(cx.spawn(async move |this, cx| {
-            let result = engine.client().call(methods::MUTATE, params).await;
+            let removed = engine.client().call(methods::MUTATE, params).await;
+            // Unpair through this device's own engine: the trust RPCs are
+            // local-only, so the signature is always this device's decision.
+            let unpaired = match (&removed, unpair) {
+                (Ok(_), true) => Some(
+                    engine
+                        .client()
+                        .call(
+                            methods::REMOVE_TRUSTED_DEVICE,
+                            serde_json::json!({ "deviceId": device_id }),
+                        )
+                        .await,
+                ),
+                _ => None,
+            };
             this.update(cx, |page, cx| {
-                if let Err(err) = result {
-                    page.error = Some(format!("Remove failed: {err}").into());
+                match (removed, unpaired) {
+                    (Err(err), _) => page.error = Some(format!("Remove failed: {err}").into()),
+                    (Ok(_), Some(Err(err))) => page.error = Some(
+                        format!(
+                            "Removed, but it is still paired: {err}. Unpair it under Pairing below."
+                        )
+                        .into(),
+                    ),
+                    _ => {}
                 }
                 cx.notify();
             })
@@ -496,7 +560,8 @@ impl DevicesPage {
                 .map(|device| device.name.clone())
                 .unwrap_or_else(|| "this machine".into())
         };
-        let copy = delete_device_copy(&name);
+        let paired = unpair_on_remove(self.pairing.read(cx).status(), &device_id);
+        let copy = delete_device_copy(&name, paired);
         let card = popover::dialog_card(&theme)
             .child(popover::dialog_title(&theme, "Remove device?"))
             .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, copy)))
@@ -578,12 +643,14 @@ impl Render for DevicesPage {
             .values()
             .any(|phase| matches!(phase, DeviceUpdate::Checking));
 
+        let trust = self.pairing.read(cx).status().cloned();
         let ctx = DeviceRowContext {
             now,
             local_id,
             copied,
             workspace_scope,
             updates: &updates,
+            trust: trust.as_ref(),
         };
         let rows: Vec<AnyElement> = devices
             .into_iter()
@@ -670,7 +737,9 @@ impl DevicesPage {
             copied,
             workspace_scope,
             updates,
+            trust,
         } = ctx;
+        let pairing = pairing_badge(*trust, &device.id);
         let (now, workspace_scope) = (*now, *workspace_scope);
         let online = device_online(device.last_seen_at, now);
         let is_local = local_id.as_deref() == Some(device.id.as_str());
@@ -712,6 +781,13 @@ impl DevicesPage {
                     .child(widgets::meta_line(theme, meta)),
             )
             .when_some(status_pill, |el, pill| el.child(pill))
+            .when_some(pairing, |el, (label, paired)| {
+                el.child(if paired {
+                    widgets::badge_active(theme, label)
+                } else {
+                    widgets::badge(theme, label)
+                })
+            })
             .when(is_local, |el| {
                 el.child(
                     div()
@@ -875,6 +951,7 @@ struct DeviceRowContext<'a> {
     copied: Option<String>,
     workspace_scope: Option<WorkspaceScope>,
     updates: &'a HashMap<String, DeviceUpdate>,
+    trust: Option<&'a cypher_engine::device_trust::TrustStatus>,
 }
 
 /// The device's identity tile. Presence lives ON the tile: a corner dot
@@ -981,6 +1058,7 @@ fn fleet_update_controls(
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+    use cypher_engine::device_trust::{TrustMember, TrustState, TrustStatus};
 
     #[test]
     fn last_seen_formatting() {
@@ -1060,10 +1138,68 @@ mod tests {
 
     #[test]
     fn delete_copy_explains_local_only() {
-        let copy = delete_device_copy("vps");
-        assert!(copy.contains("vps"));
-        assert!(copy.contains("local-only"));
-        assert!(copy.contains("re-pair"));
-        assert!(!copy.contains("deletes"));
+        for paired in [false, true] {
+            let copy = delete_device_copy("vps", paired);
+            assert!(copy.contains("vps"));
+            assert!(copy.contains("local-only"));
+            assert!(copy.contains("re-pair"));
+            assert!(!copy.contains("deletes"));
+        }
+        assert!(delete_device_copy("vps", true).contains("unpairs"));
+        assert!(!delete_device_copy("vps", false).contains("unpairs"));
+    }
+
+    fn trust(state: TrustState, members: &[&str]) -> TrustStatus {
+        TrustStatus {
+            device_id: "me".into(),
+            fingerprint: "00".into(),
+            state,
+            members: members
+                .iter()
+                .map(|id| TrustMember {
+                    id: (*id).into(),
+                    name: (*id).into(),
+                    fingerprint: "00".into(),
+                    is_self: *id == "me",
+                })
+                .collect(),
+            require_paired: false,
+            pairing: None,
+            conflict: false,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn rows_show_pairing_only_when_this_device_can_tell() {
+        let paired = trust(TrustState::Paired, &["me", "mac"]);
+        assert_eq!(pairing_badge(Some(&paired), "mac"), Some(("Paired", true)));
+        assert_eq!(pairing_badge(Some(&paired), "me"), Some(("Paired", true)));
+        assert_eq!(
+            pairing_badge(Some(&paired), "vps"),
+            Some(("Not paired", false))
+        );
+        // Without a trusted list of its own, this device can't vouch either way.
+        for state in [
+            TrustState::Unpaired,
+            TrustState::Removed,
+            TrustState::Unknown,
+        ] {
+            assert_eq!(pairing_badge(Some(&trust(state, &[])), "mac"), None);
+        }
+        assert_eq!(pairing_badge(None, "mac"), None);
+    }
+
+    #[test]
+    fn removing_a_paired_machine_unpairs_it_but_never_this_device() {
+        let paired = trust(TrustState::Paired, &["me", "mac"]);
+        assert!(unpair_on_remove(Some(&paired), "mac"));
+        assert!(!unpair_on_remove(Some(&paired), "me"));
+        assert!(!unpair_on_remove(Some(&paired), "vps"));
+        assert!(!unpair_on_remove(
+            Some(&trust(TrustState::Unpaired, &[])),
+            "mac"
+        ));
+        assert!(!unpair_on_remove(None, "mac"));
     }
 }

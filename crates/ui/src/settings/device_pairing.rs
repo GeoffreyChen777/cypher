@@ -48,6 +48,11 @@ pub struct PairingSection {
 }
 
 impl PairingSection {
+    /// The latest status from the engine, once one has arrived.
+    pub fn status(&self) -> Option<&TrustStatus> {
+        self.status.as_ref()
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let code_input = cx.new(|cx| TextInput::new("XXXX-XXXX-XXXX-XXXX-XXXX", cx));
         let events = cx.subscribe(&code_input, |this: &mut Self, _, event, cx| {
