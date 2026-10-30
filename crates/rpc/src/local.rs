@@ -155,13 +155,13 @@ pub async fn connect_local(path: &Path) -> Result<RpcClient, RpcError> {
     request
         .headers_mut()
         .insert("sec-websocket-protocol", "cypher.rpc.v1".parse().unwrap());
-    if let Some(secret) = key_secret(path) {
-        let key = secret
+    // No key at all means an engine from before keyed sockets, which accepts
+    // keyless clients; a keyed engine refuses the handshake by itself.
+    if let Some(secret) = key_secret(path)
+        && let Some(key) = secret
             .read()
             .map_err(|e| RpcError::Transport(format!("Engine IPC key unreadable: {e}")))?
-            .ok_or_else(|| {
-                RpcError::Transport("Engine IPC key is missing; restart the engine".into())
-            })?;
+    {
         let mut value = tokio_tungstenite::tungstenite::http::HeaderValue::from_bytes(&key)
             .map_err(|_| RpcError::Transport("Engine IPC key is malformed".into()))?;
         value.set_sensitive(true);
@@ -424,6 +424,9 @@ mod tests {
         assert!(!handshake(&path, Some(&key[..63])).await);
         assert!(handshake(&path, Some(&key)).await);
         assert!(connect_local(&path).await.is_ok());
+        // A client that finds no key dials keyless; the engine still refuses it.
+        std::fs::remove_file(&key_file).unwrap();
+        assert!(connect_local(&path).await.is_err());
 
         let agent = cypher_env::agent_socket(dir.path()).unwrap();
         assert_eq!(agent.parent(), path.parent());
