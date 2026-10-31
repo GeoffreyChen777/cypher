@@ -88,7 +88,7 @@ struct ArchivedSection: View {
 
     /// Single line: dimmed harness mark, muted title, time-ago.
     private func row(_ chat: Chat) -> some View {
-        NavigationLink(value: Route.chat(chat.id)) {
+        RouteRow(route: .chat(chat.id)) {
             HStack(spacing: 10) {
                 if let harness = chat.config?.harness, harness != "pi" {
                     HarnessBadge(harness: harness, size: 14, dimmed: true)
@@ -105,7 +105,6 @@ struct ArchivedSection: View {
             }
             .padding(.vertical, 2)
         }
-        .groupedRowStyle()
         .archivedSessionRowActions(chat)
     }
 

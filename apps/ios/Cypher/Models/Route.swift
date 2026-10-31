@@ -22,8 +22,10 @@ enum SessionNavigation {
     /// Notification taps may arrive while that chat is already presented, or
     /// while the stack is empty. Rebuilding `[space, parent, chat]` from
     /// scratch re-inserts an on-screen destination at a new index and
-    /// NavigationStack crashes. Only pop-to-existing or append the chat.
-    static func openingNotification(_ chatId: String, in path: [Route]) -> [Route] {
-        opening(chatId, in: path)
+    /// NavigationStack crashes. Only pop-to-existing or append the chat —
+    /// or, in the iPad split layout, select it as a sidebar tap would.
+    static func openingNotification(_ chatId: String, in path: [Route], split: Bool = false) -> [Route] {
+        if split, !path.contains(.chat(chatId)) { return [.chat(chatId)] }
+        return opening(chatId, in: path)
     }
 }

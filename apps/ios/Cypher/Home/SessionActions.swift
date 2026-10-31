@@ -76,6 +76,7 @@ private struct SessionRowActions: ViewModifier {
                 }
             }
             .contextMenu {
+                OpenInNewWindowItem(chatId: chat.id)
                 if let actions {
                     Button("Rename…", systemImage: "pencil") { actions.rename(chat) }
                 }

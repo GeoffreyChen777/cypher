@@ -89,6 +89,35 @@ final class ComposerLayoutManager: NSLayoutManager {
 ///
 /// `text` is the RAW draft: mention links stay strict Markdown there, and
 /// the editor shows each as an `@name` chip that edits as one unit.
+/// The composer's text view. ⌘↩ and ⌘. are its own key commands, with
+/// priority over text input: a focused text view keeps Return for itself,
+/// ahead of SwiftUI shortcuts and the menu bar. Only the composer being
+/// typed in has them, so a session's and its side chat's never both do.
+final class ComposerUITextView: UITextView {
+    var onCommandReturn: (() -> Void)?
+    var onCommandPeriod: (() -> Void)?
+
+    override var keyCommands: [UIKeyCommand]? {
+        var commands = super.keyCommands ?? []
+        if onCommandReturn != nil {
+            commands.append(Self.command("Send", input: "\r", action: #selector(commandReturn)))
+        }
+        if onCommandPeriod != nil {
+            commands.append(Self.command("Stop", input: ".", action: #selector(commandPeriod)))
+        }
+        return commands
+    }
+
+    private static func command(_ title: String, input: String, action: Selector) -> UIKeyCommand {
+        let command = UIKeyCommand(title: title, action: action, input: input, modifierFlags: .command)
+        command.wantsPriorityOverSystemBehavior = true
+        return command
+    }
+
+    @objc func commandReturn() { onCommandReturn?() }
+    @objc func commandPeriod() { onCommandPeriod?() }
+}
+
 struct ComposerTextInput: UIViewRepresentable {
     @Binding var text: String
     let focus: ComposerFocus
@@ -100,12 +129,15 @@ struct ComposerTextInput: UIViewRepresentable {
     var caretToEnd = 0
     /// `@` completion; nil leaves chips display-only.
     var mentions: MentionEditor? = nil
+    /// A hardware keyboard's ⌘↩ (send) and ⌘. (stop); nil ignores them.
+    var onCommandReturn: (() -> Void)? = nil
+    var onCommandPeriod: (() -> Void)? = nil
 
     static let fontSize: CGFloat = 16
 
     func makeCoordinator() -> Coordinator { Coordinator(text: $text, focus: focus) }
 
-    func makeUIView(context: Context) -> UITextView {
+    func makeUIView(context: Context) -> ComposerUITextView {
         // TextKit 1, for the chips' rounded wash.
         let storage = NSTextStorage()
         let layout = ComposerLayoutManager()
@@ -113,7 +145,7 @@ struct ComposerTextInput: UIViewRepresentable {
         let container = NSTextContainer(size: CGSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
         container.widthTracksTextView = true
         layout.addTextContainer(container)
-        let view = UITextView(frame: .zero, textContainer: container)
+        let view = ComposerUITextView(frame: .zero, textContainer: container)
         view.backgroundColor = .clear
         view.font = Theme.sansUI(Self.fontSize)
         view.textContainerInset = .zero
@@ -128,8 +160,10 @@ struct ComposerTextInput: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ view: UITextView, context: Context) {
+    func updateUIView(_ view: ComposerUITextView, context: Context) {
         let coordinator = context.coordinator
+        view.onCommandReturn = onCommandReturn
+        view.onCommandPeriod = onCommandPeriod
         coordinator.text = $text
         coordinator.mentions = mentions
         mentions?.splice = { [weak coordinator, weak view] token, link in
@@ -159,14 +193,14 @@ struct ComposerTextInput: UIViewRepresentable {
         coordinator.reconcileFocus(view, enabled: enabled)
     }
 
-    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: ComposerUITextView, context: Context) -> CGSize? {
         guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
         let line = uiView.font?.lineHeight ?? 20
         let measured = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
         return CGSize(width: width, height: min(ceil(line * 7), max(ceil(line), ceil(measured.height))))
     }
 
-    static func dismantleUIView(_ view: UITextView, coordinator: Coordinator) {
+    static func dismantleUIView(_ view: ComposerUITextView, coordinator: Coordinator) {
         coordinator.detach()
         coordinator.mentions?.publish(nil)
         view.delegate = nil

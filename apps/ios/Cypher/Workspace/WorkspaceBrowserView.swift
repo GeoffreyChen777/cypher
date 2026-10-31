@@ -70,11 +70,17 @@ struct WorkspaceBrowserView: View {
     /// The session's pending comments: a selection in a diff or a file can
     /// be commented on like the transcript's. nil where it can't (not Pi).
     let drafts: CommentDrafts?
+    /// Close for the iPad inspector, which isn't dismissed like a sheet.
+    let onClose: (() -> Void)?
 
-    init(model: AppModel, chat: Chat, destination: WorkspaceDestination, drafts: CommentDrafts? = nil) {
+    init(
+        model: AppModel, chat: Chat, destination: WorkspaceDestination, drafts: CommentDrafts? = nil,
+        onClose: (() -> Void)? = nil
+    ) {
         _session = State(initialValue: WorkspaceBrowserSession(model: model, chat: chat))
         self.destination = destination
         self.drafts = drafts
+        self.onClose = onClose
     }
 
     var body: some View {
@@ -98,12 +104,13 @@ struct WorkspaceBrowserView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
-                        dismiss()
+                        if let onClose { onClose() } else { dismiss() }
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 18, weight: .regular))
                             .frame(width: 22, height: 22)
                     }
+                    .keyboardShortcut(.cancelAction)
                     .accessibilityLabel("Close")
                     .accessibilityIdentifier("workspace-close")
                 }

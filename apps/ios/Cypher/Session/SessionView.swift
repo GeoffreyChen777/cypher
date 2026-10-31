@@ -40,6 +40,21 @@ struct SessionView: View {
     @State private var noticeClear: Task<Void, Never>?
     @State private var sideChat: SideChatStore?
     @State private var promotedSideChat: String?
+    /// Regular width (iPad) docks Files, Changes and the side chat in an
+    /// inspector beside the transcript; compact keeps them in sheets.
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The iPad split view's columns, for making the inspector room.
+    @Environment(\.splitColumns) private var splitColumns
+    /// Where the split layout shows this session's inspector.
+    @Environment(\.detailInspector) private var detailInspector
+    @State private var inspectorShown = false
+    @State private var inspectorPane: SessionInspectorPane = .workspace
+    /// The inspector hid the sidebar to make room; closing it brings it back.
+    @State private var inspectorHidSidebar = false
+
+    /// Narrower than this beside the inspector, the chat takes the
+    /// sidebar's room instead.
+    static let minimumChatWidth: CGFloat = 480
 
     private var chat: Chat? { model.chat(id: chatId) }
     @Environment(\.scenePhase) private var scenePhase
@@ -75,8 +90,21 @@ struct SessionView: View {
                 commentDrafts.reset()
                 commentDrafts.bind(to: chatId)
             }
+            .onChange(of: workspaceDestination) { _, destination in
+                if docked, destination != nil { showInspector(.workspace) }
+            }
+            .onChange(of: inspectorKey, initial: true) { _, _ in publishInspector() }
+            .onAppear {
+                model.sessionOnScreen(chatId)
+                publishInspector()
+            }
             .onDisappear {
                 if path.last != .chat(chatId) { commentDrafts.reset() }
+                // The side chat belongs to this session's screen: it ends
+                // when the session leaves the path, not under a cover.
+                if !path.contains(.chat(chatId)) { endSideChat() }
+                detailInspector?.withdraw(owner: chatId)
+                model.sessionOffScreen(chatId)
                 model.markSeen(chatId: chatId)
                 model.releaseSessionStore(chatId: chatId)
             }
@@ -133,6 +161,7 @@ struct SessionView: View {
                         .truncationMode(.middle)
                 }
             }
+            .clearsHiddenSidebarButton(splitColumns)
             // Keep the title bounded without creating a leading
             // bar-button container or changing native Back behavior.
             .frame(
@@ -141,10 +170,23 @@ struct SessionView: View {
         }
         // Bare text on the bar, not a glass capsule.
         .sharedBackgroundVisibility(.hidden)
+        if docked {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    toggleInspector()
+                } label: {
+                    Image(systemName: "sidebar.trailing")
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .accessibilityLabel(inspectorShown ? "Hide Inspector" : "Show Inspector")
+                .accessibilityIdentifier("inspector-toggle")
+            }
+        }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 Button("Files", systemImage: "folder") { workspaceDestination = .files }
                 Button("Changes", systemImage: "plus.forwardslash.minus") { workspaceDestination = .changes }
+                OpenInNewWindowItem(chatId: chat.id)
                 if !chat.isChild {
                     Divider()
                     Button("Rename…", systemImage: "pencil") { actions.rename(chat) }
@@ -242,7 +284,9 @@ struct SessionView: View {
                 Text(rewindWarning(for: entry))
             }
             .sheet(
-                item: $sideChat,
+                item: Binding(
+                    get: { docked ? nil : sideChat },
+                    set: { if !docked, $0 == nil { endSideChat() } }),
                 onDismiss: {
                     // Navigate once the sheet is gone: a path change during its
                     // dismissal can be dropped.
@@ -255,8 +299,6 @@ struct SessionView: View {
                 SideChatSheet(store: store) { chatId in
                     promotedSideChat = chatId
                 }
-                // Closing discards it on the host; a no-op once it's a chat.
-                .onDisappear { store.close() }
             }
             .environment(\.commentDrafts, chat?.config?.harness == "pi" ? commentDrafts : nil)
             .sheet(
@@ -266,7 +308,11 @@ struct SessionView: View {
             ) {
                 CommentsPanel(drafts: commentDrafts)
             }
-            .sheet(item: $workspaceDestination) { destination in
+            .sheet(
+                item: Binding(
+                    get: { docked ? nil : workspaceDestination },
+                    set: { if !docked { workspaceDestination = $0 } })
+            ) { destination in
                 if let chat {
                     WorkspaceBrowserView(
                         model: model, chat: chat, destination: destination,
@@ -275,6 +321,92 @@ struct SessionView: View {
                         drafts: chat.config?.harness == "pi" ? commentDrafts : nil)
                 }
             }
+    }
+
+    // MARK: Inspector (iPad)
+
+    private var docked: Bool { sizeClass == .regular }
+
+    /// What the published panel depends on: republished when it changes.
+    private var inspectorKey: String {
+        [
+            "\(docked)", "\(inspectorShown)", "\(inspectorPane)",
+            sideChat.map { "\(ObjectIdentifier($0))" } ?? "", workspaceDestination?.id ?? "",
+            chat?.deviceId ?? "", chat?.cwd ?? "", chat?.config?.harness ?? "",
+        ].joined(separator: "|")
+    }
+
+    /// Hand the panel to the split layout's inspector, or take it down.
+    private func publishInspector() {
+        guard let detailInspector else { return }
+        guard docked, inspectorShown, let chat else {
+            detailInspector.withdraw(owner: chatId)
+            return
+        }
+        let panel = SessionInspector(
+            chat: chat, destination: $workspaceDestination, pane: $inspectorPane,
+            sideChat: sideChat,
+            drafts: chat.config?.harness == "pi" ? commentDrafts : nil,
+            close: hideInspector, closeSideChat: endSideChat
+        ) { chatId in
+            endSideChat()
+            path = SessionNavigation.opening(chatId, in: path)
+        }
+        detailInspector.present(owner: chatId, content: AnyView(panel), onHide: hideInspector)
+    }
+
+    private func showInspector(_ pane: SessionInspectorPane) {
+        inspectorPane = pane
+        guard !inspectorShown else { return }
+        // Measured before it opens: the chat's whole width (unknown, 0,
+        // before the first layout — leave the sidebar then).
+        if let splitColumns, splitColumns.wrappedValue != .detailOnly, viewWidth > 0,
+            viewWidth - SessionInspector.idealWidth < Self.minimumChatWidth
+        {
+            splitColumns.wrappedValue = .detailOnly
+            inspectorHidSidebar = true
+        }
+        inspectorShown = true
+    }
+
+    private func hideInspector() {
+        inspectorShown = false
+        workspaceDestination = nil
+        if inspectorHidSidebar {
+            inspectorHidSidebar = false
+            splitColumns?.wrappedValue = .all
+        }
+    }
+
+    private func toggleInspector() {
+        if inspectorShown {
+            hideInspector()
+        } else if sideChat != nil, inspectorPane == .sideChat {
+            showInspector(.sideChat)
+        } else {
+            if workspaceDestination == nil { workspaceDestination = .changes }
+            showInspector(.workspace)
+        }
+    }
+
+    /// Start a side chat on a selection, replacing (and ending) any other.
+    private func startSideChat(_ store: SideChatStore?) {
+        endSideChat()
+        sideChat = store
+        if docked, store != nil { showInspector(.sideChat) }
+    }
+
+    /// End the side chat: closing discards it on the host (a no-op once
+    /// it's a chat). The inspector falls back to Files / Changes, or hides
+    /// when the side chat was all it showed.
+    private func endSideChat() {
+        guard let store = sideChat else { return }
+        sideChat = nil
+        store.close()
+        if inspectorPane == .sideChat {
+            inspectorPane = .workspace
+            if inspectorShown, workspaceDestination == nil { hideInspector() }
+        }
     }
 
     /// The paths a reply cites, for reading a bare name in it.
@@ -302,7 +434,7 @@ struct SessionView: View {
         return TranscriptSelectionActions(
             fork: canFork ? { entry in fork(chat, at: entry) } : nil,
             sideChat: { entry, quote in
-                sideChat = model.sideChat(parent: chat, quote: quote, anchorEntryId: entry.entryId)
+                startSideChat(model.sideChat(parent: chat, quote: quote, anchorEntryId: entry.entryId))
             })
     }
 
@@ -530,6 +662,10 @@ struct SessionView: View {
                     }
                     .padding(.bottom, 8)
                 }
+                // The transcript's reading column, so a wide window (iPad)
+                // keeps the composer under the messages.
+                .frame(maxWidth: TranscriptView.maxContentWidth)
+                .frame(maxWidth: .infinity)
                 // Report the inset's global top edge — the visual line the
                 // transcript's bottom pad should meet while pinned. Global
                 // frames stay honest when the keyboard's inset math doesn't

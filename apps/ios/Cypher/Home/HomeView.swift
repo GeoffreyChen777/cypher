@@ -4,12 +4,23 @@
 // SpaceView), search finds any session, archived ones included, and the view
 // menu (SessionListMenu) filters by device and time and picks the sort.
 // close=archive becomes swipe-to-archive.
+//
+// In a regular-width window (iPad) the same list is the sidebar of a split
+// view: `path.first` is its selection and the detail column's root, and the
+// rest of `path` is the detail column's stack. One path for both layouts, so
+// the screens it routes to work unchanged and a window resized across the
+// size classes keeps its place.
 
 import SwiftUI
 
 struct HomeView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var path: [Route] = []
+    @State private var columns: NavigationSplitViewVisibility = .all
+    /// The open session's Files, Changes and side chat (SessionInspector),
+    /// beside the split view.
+    @State private var inspector = DetailInspector()
     @State private var showNewSpace = false
     @State private var showNotifications = false
     @State private var showPermissions = false
@@ -48,60 +59,164 @@ struct HomeView: View {
     // type-checks on its own: as one expression it timed out on CI's older
     // Xcode ("unable to type-check this expression in reasonable time").
     var body: some View {
-        NavigationStack(path: $path) {
-            routedList
-                .onChange(of: path) { _, route in
-                    lastPathChangeAt = Date().timeIntervalSinceReferenceDate
-                    if case .chat(let id) = route.last {
-                        model.notifications.viewing(id)
-                    } else {
-                        model.notifications.viewing(nil)
-                    }
+        Group {
+            if split {
+                splitLayout
+            } else {
+                NavigationStack(path: $path) {
+                    home
+                        .navigationDestination(for: Route.self) { RouteDestination(route: $0, path: $path) }
+                        .background(NavigationProbeView(probe: navigation))
                 }
-                // Notification taps navigate from `onChange`, NOT a `.task` on
-                // this root: `.task` is cancelled while a pushed session covers
-                // Home, so a tap taken inside a session was swallowed — and the
-                // stale request then fired on the way back, replacing the path
-                // in the middle of the pop transition (the reported crash).
-                // `onChange` stays live while covered, so the tap opens the
-                // session immediately, whichever screen the app was on.
-                .onChange(of: model.notifications.pendingNavigation?.id, initial: true) { _, _ in
-                    scheduleNotificationNavigation()
-                }
-                .onChange(of: chatsKey) { _, _ in
-                    scheduleNotificationNavigation()
-                }
-                .alert("Notification", isPresented: showsNavigationError) {
-                    Button("OK") { model.notifications.navigationError = nil }
-                } message: {
-                    Text(model.notifications.navigationError ?? "")
-                }
-                .task(id: preloadKey) {
-                    model.preloadSessions()
-                }
-                .onAppear {
-                    if case .chat(let id) = path.last {
-                        model.notifications.viewing(id)
-                    } else {
-                        model.notifications.viewing(nil)
-                    }
-                    if let route = model.launchRoute {
-                        model.launchRoute = nil
-                        // Push the whole stack atomically — appending from a child's
-                        // onAppear mid-transition gets dropped by NavigationStack.
-                        if case .space(let id) = route, model.launchSheet == "newsession" {
-                            model.launchSheet = nil
-                            path = [route, .newSession(spaceId: id)]
-                        } else {
-                            path = [route]
-                        }
-                    }
-                    if model.launchSheet == "newspace" {
-                        model.launchSheet = nil
-                        showNewSpace = true
-                    }
-                }
+            }
         }
+        // The probe holds the other layout's stack until it re-captures.
+        .onChange(of: split) { _, _ in navigation.controller = nil }
+        .focusedSceneValue(\.homeCommands, commands)
+    }
+
+    // MARK: Keyboard commands
+
+    private var commands: HomeCommands {
+        HomeCommands(
+            newSession: composeTarget.map { target in { open(.newSession(spaceId: target.id)) } },
+            newProject: { showNewSpace = true },
+            search: search,
+            step: stepSession)
+    }
+
+    /// ⌘F: back to the list's search field, focused.
+    private func search() {
+        if split {
+            if columns == .detailOnly { columns = .all }
+        } else if !path.isEmpty {
+            path = []
+        }
+        searchRequests += 1
+    }
+
+    /// The previous / next session in the list's order, from the open one
+    /// (or from the list's end when none is).
+    private func stepSession(_ delta: Int) {
+        let options = effectiveOptions
+        let chats = options.sections(
+            listedChats(options), now: Date(), indicator: model.indicator(for:), deviceName: model.deviceName
+        ).flatMap(\.chats)
+        guard !chats.isEmpty else { return }
+        let current: String? = {
+            if case .chat(let id) = split ? path.first : path.last { return id }
+            return nil
+        }()
+        let target: Int
+        if let index = current.flatMap({ id in chats.firstIndex { $0.id == id } }) {
+            target = min(max(index + delta, 0), chats.count - 1)
+        } else {
+            target = delta > 0 ? 0 : chats.count - 1
+        }
+        let route = Route.chat(chats[target].id)
+        if path != [route] { path = [route] }
+    }
+
+    /// A regular-width window: sidebar and detail side by side.
+    private var split: Bool { sizeClass == .regular }
+
+    private var splitLayout: some View {
+        NavigationSplitView(columnVisibility: $columns) {
+            home
+                .environment(\.sidebarRouting, SidebarRouting(selected: path.first, open: open))
+                .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 420)
+        } detail: {
+            DetailColumn(path: $path, columns: $columns, probe: navigation, inspectorHost: inspector) {
+                detailPlaceholder
+            }
+        }
+        .navigationSplitViewStyle(.balanced)
+        // Outside the split view: inside a column, the panel's own stack
+        // would push onto the column's (see DetailColumn).
+        .presentsDetailInspector(inspector)
+    }
+
+    /// The detail column with nothing selected.
+    private var detailPlaceholder: some View {
+        ContentUnavailableView {
+            Label("No Session Selected", systemImage: "bubble.left.and.bubble.right")
+        } description: {
+            Text("Pick a session from the list, or start a new one.")
+        } actions: {
+            if let target = composeTarget {
+                Button("New Session") { open(.newSession(spaceId: target.id)) }
+                    .buttonStyle(.glass)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.bg.ignoresSafeArea())
+    }
+
+    /// Open a route from Home: pushed on the phone, the detail column's new
+    /// root in the split layout (as the desktop sidebar replaces the tab).
+    private func open(_ route: Route) {
+        if split {
+            path = [route]
+        } else {
+            path.append(route)
+        }
+    }
+
+    /// The list with its routing, sheets and lifecycle: the whole screen on
+    /// the phone, the sidebar in the split layout.
+    private var home: some View {
+        routedList
+            .onChange(of: path) { _, route in
+                lastPathChangeAt = Date().timeIntervalSinceReferenceDate
+                if case .chat(let id) = route.last {
+                    model.notifications.viewing(id)
+                } else {
+                    model.notifications.viewing(nil)
+                }
+            }
+            // Notification taps navigate from `onChange`, NOT a `.task` on
+            // this root: `.task` is cancelled while a pushed session covers
+            // Home, so a tap taken inside a session was swallowed — and the
+            // stale request then fired on the way back, replacing the path
+            // in the middle of the pop transition (the reported crash).
+            // `onChange` stays live while covered, so the tap opens the
+            // session immediately, whichever screen the app was on.
+            .onChange(of: model.notifications.pendingNavigation?.id, initial: true) { _, _ in
+                scheduleNotificationNavigation()
+            }
+            .onChange(of: chatsKey) { _, _ in
+                scheduleNotificationNavigation()
+            }
+            .alert("Notification", isPresented: showsNavigationError) {
+                Button("OK") { model.notifications.navigationError = nil }
+            } message: {
+                Text(model.notifications.navigationError ?? "")
+            }
+            .task(id: preloadKey) {
+                model.preloadSessions()
+            }
+            .onAppear {
+                if case .chat(let id) = path.last {
+                    model.notifications.viewing(id)
+                } else {
+                    model.notifications.viewing(nil)
+                }
+                if let route = model.launchRoute {
+                    model.launchRoute = nil
+                    // Push the whole stack atomically — appending from a child's
+                    // onAppear mid-transition gets dropped by NavigationStack.
+                    if case .space(let id) = route, model.launchSheet == "newsession" {
+                        model.launchSheet = nil
+                        path = [route, .newSession(spaceId: id)]
+                    } else {
+                        path = [route]
+                    }
+                }
+                if model.launchSheet == "newspace" {
+                    model.launchSheet = nil
+                    showNewSpace = true
+                }
+            }
     }
 
     private var sessionList: some View {
@@ -153,7 +268,6 @@ struct HomeView: View {
         .overlay {
             if isEmpty { emptyState }
         }
-        .background(NavigationProbeView(probe: navigation))
         .navigationTitle("Sessions")
         .navigationSubtitle(subtitle)
         .navigationBarTitleDisplayMode(.large)
@@ -189,10 +303,9 @@ struct HomeView: View {
         ForEach(sections) { section in
             Section {
                 ForEach(section.chats) { chat in
-                    NavigationLink(value: Route.chat(chat.id)) {
+                    RouteRow(route: .chat(chat.id)) {
                         ChatRow(chat: chat, showLocation: showLocation, statusSlot: statusSlot)
                     }
-                    .groupedRowStyle()
                     .sessionRowActions(chat)
                 }
             } header: {
@@ -238,30 +351,18 @@ struct HomeView: View {
 
     private var routedList: some View {
         sessionList
-            .navigationDestination(for: Route.self, destination: destination)
             .toolbar { homeToolbar }
             .sheet(isPresented: $showNewSpace) {
                 // A new project is for a new session: start one there, and
                 // narrow the list to it for the way back.
                 NewSpaceSheet { spaceId in
                     scope = .project(spaceId)
-                    path.append(.newSession(spaceId: spaceId))
+                    open(.newSession(spaceId: spaceId))
                 }
             }
             .sheet(isPresented: $showNotifications) { NotificationSettingsView() }
             .sheet(isPresented: $showPermissions) { PermissionSettingsView() }
             .sheet(isPresented: $showPairing) { PairedDevicesView() }
-    }
-
-    @ViewBuilder
-    private func destination(_ route: Route) -> some View {
-        switch route {
-        case .space(let id): SpaceView(spaceId: id, path: $path)
-        case .chat(let id): SessionView(chatId: id, path: $path).id(id)
-        case .newSession(let spaceId): NewSessionView(spaceId: spaceId, path: $path)
-        case .quickChat(let deviceId):
-            NewSessionView(spaceId: "", path: $path, quickDeviceId: deviceId)
-        }
     }
 
     @ToolbarContentBuilder
@@ -286,6 +387,8 @@ struct HomeView: View {
         ToolbarItem(placement: .topBarTrailing) {
             accountMenu
         }
+        // The picture is the button, not a picture in a glass circle.
+        .sharedBackgroundVisibility(model.profile == nil ? .automatic : .hidden)
         // Account and New are unrelated: separate glass groups.
         ToolbarSpacer(.fixed, placement: .topBarTrailing)
         ToolbarItem(placement: .topBarTrailing) {
@@ -340,7 +443,7 @@ struct HomeView: View {
                 return
             }
             if let chat = model.chat(id: pending.chatId), chat.spaceId == pending.projectId {
-                let route = SessionNavigation.openingNotification(chat.id, in: path)
+                let route = SessionNavigation.openingNotification(chat.id, in: path, split: split)
                 model.notifications.pendingNavigation = nil
                 if route != path { path = route }
                 model.notifications.viewing(chat.id)
@@ -360,6 +463,13 @@ struct HomeView: View {
 
     private var accountMenu: some View {
         Menu {
+            if let profile = model.profile, model.demo == nil {
+                // Who's signed in, as the desktop's account menu heads it.
+                Section {
+                    Text(profile.name ?? profile.email ?? "Signed in")
+                    if profile.name != nil, let email = profile.email { Text(email) }
+                }
+            }
             if model.demo != nil {
                 Text("Demo mode")
             }
@@ -371,7 +481,11 @@ struct HomeView: View {
                 .disabled(model.config?.trust == nil)
             Button("Sign out", role: .destructive) { model.signOut() }
         } label: {
-            Image(systemName: "person.crop.circle")
+            if let profile = model.profile {
+                AccountAvatar(profile: profile)
+            } else {
+                Image(systemName: "person.crop.circle")
+            }
         }
         .accessibilityLabel("Account")
     }
@@ -384,7 +498,7 @@ struct HomeView: View {
         return Menu {
             if let target {
                 Button {
-                    path.append(.newSession(spaceId: target.id))
+                    open(.newSession(spaceId: target.id))
                 } label: {
                     Label("New Session", systemImage: "square.and.pencil")
                     Text("\(target.displayName) @ \(model.deviceName(target.deviceId))")
@@ -395,7 +509,7 @@ struct HomeView: View {
                 Menu("In Another Project", systemImage: "folder") {
                     ForEach(others) { space in
                         Button {
-                            path.append(.newSession(spaceId: space.id))
+                            open(.newSession(spaceId: space.id))
                         } label: {
                             Text(space.displayName)
                             Text(model.deviceName(space.deviceId))
@@ -406,7 +520,7 @@ struct HomeView: View {
             Menu("Quick Chat", systemImage: "bubble.left") {
                 ForEach(model.devices) { device in
                     Button {
-                        path.append(.quickChat(deviceId: device.id))
+                        open(.quickChat(deviceId: device.id))
                     } label: {
                         Text(device.name)
                         if !model.deviceOnline(device.id) { Text("Offline") }
@@ -528,8 +642,8 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 10) {
             ScopeChips(
                 chips: chips, selection: $scope,
-                openProject: { path.append(.space($0)) },
-                newSession: { path.append(.newSession(spaceId: $0)) })
+                openProject: { open(.space($0)) },
+                newSession: { open(.newSession(spaceId: $0)) })
             if case .project(let id) = currentScope, let space = model.spaces.first(where: { $0.id == id }) {
                 HStack(spacing: 8) {
                     Text("\(model.deviceName(space.deviceId)) · \(SpaceView.abbreviatingHome(space.path))")
@@ -539,7 +653,7 @@ struct HomeView: View {
                         .truncationMode(.middle)
                     Spacer(minLength: 8)
                     Button {
-                        path.append(.space(id))
+                        open(.space(id))
                     } label: {
                         HStack(spacing: 3) {
                             Text("Project")
@@ -583,7 +697,7 @@ struct HomeView: View {
                     Text(inScope.isEmpty ? "Nothing here yet." : "No sessions on this device.")
                 } actions: {
                     if case .project(let id) = currentScope {
-                        Button("New Session") { path.append(.newSession(spaceId: id)) }
+                        Button("New Session") { open(.newSession(spaceId: id)) }
                             .buttonStyle(.glass)
                     }
                 }

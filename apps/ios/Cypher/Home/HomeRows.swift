@@ -106,6 +106,7 @@ struct ScopeChips: View {
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
+        .hoverEffect(.highlight)
         .accessibilityLabel(chip.title)
         .accessibilityIdentifier("scope-chip-\(chip.title)")
         .accessibilityAddTraits(selected ? .isSelected : [])
