@@ -101,6 +101,13 @@ those of a process that was killed first
 recorded; your own Claude Code sessions in the same directory are untouched,
 and files left by Runtimes before this change stay.
 
+Claude Code stores a session's system prompt in its file on the first query
+and keeps it on every resume, whatever prompt it is given. So when Pi's prompt
+changes mid-chat (`/explain` or `/orchestrate on` in a running chat), the
+bridge rebuilds the session from Pi's history instead of resuming it, and
+Claude reads the new prompt; that turn runs without the prompt cache
+(`patches/pi-claude-bridge-prompt-refresh.mjs`).
+
 The conversation's Claude Code session cannot search: `pi-claude-bridge`
 runs it without Claude Code's builtin tools, and `pi-web-search` cannot call a
 `claude-bridge` API. The bundled **pi-web-search-claude-bridge** package
