@@ -60,8 +60,8 @@ struct MarkdownBlockView: View {
                 CodeBlockView(language: language, code: code, cacheKey: cacheKey)
             }
 
-        case .artifact(let kind, let title, let code, let closed):
-            ArtifactCard(kind: kind, title: title, code: code, closed: closed, streaming: streaming)
+        case .artifact(let kind, let title, let code, let closed, let patch):
+            ArtifactCard(kind: kind, title: title, code: code, closed: closed, patch: patch, streaming: streaming)
 
         case .blockquote(let children):
             BlockquoteView(children: children, cacheKey: cacheKey)

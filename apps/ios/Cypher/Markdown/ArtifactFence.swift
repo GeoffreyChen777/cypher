@@ -5,7 +5,8 @@
 // A fence whose info string carries a bare `artifact` word is a page the model
 // wrote to be viewed: ```html artifact title="Sorting"```. Without a language
 // it is HTML; a language that doesn't render (`python artifact`) stays an
-// ordinary code block.
+// ordinary code block. A bare `artifact-patch` marks a patch to the page its
+// `title=` names (ArtifactPatch.swift), which it needs.
 
 import Foundation
 
@@ -30,22 +31,27 @@ enum ArtifactKind: Hashable {
 }
 
 enum ArtifactFence {
-    /// An info string's kind and title; nil unless a bare `artifact` word
-    /// marks it.
-    static func info(_ info: String) -> (ArtifactKind, String?)? {
+    /// An info string's kind, title and whether it is a patch; nil unless a
+    /// bare `artifact` (or `artifact-patch`) word marks it.
+    static func info(_ info: String) -> (ArtifactKind, String?, Bool)? {
         let words = self.words(info)
         let bare = words.filter { $0.value == nil }.map(\.key)
-        guard bare.contains(where: { $0.lowercased() == "artifact" }) else { return nil }
+        let marker = { (word: String) in ["artifact", "artifact-patch"].contains(word.lowercased()) }
+        guard bare.contains(where: marker) else { return nil }
+        let patch = bare.contains { $0.lowercased() == "artifact-patch" }
         let kind: ArtifactKind
-        if let language = bare.first(where: { $0.lowercased() != "artifact" }) {
+        if let language = bare.first(where: { !marker($0) }) {
             guard let named = ArtifactKind(language: language) else { return nil }
             kind = named
         } else {
             kind = .html
         }
         let title = words.first { $0.value != nil && $0.key.lowercased() == "title" }?
-            .value?.trimmingCharacters(in: .whitespaces)
-        return (kind, title.flatMap { $0.isEmpty ? nil : $0 })
+            .value.map { $0.trimmingCharacters(in: .whitespaces) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+        // A patch to no page in particular is only code.
+        if patch && title == nil { return nil }
+        return (kind, title, patch)
     }
 
     /// An info string's words: bare ones (`html`) and `key=value` pairs whose

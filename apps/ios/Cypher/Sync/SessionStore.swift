@@ -58,6 +58,11 @@ final class SessionStore {
     /// The prompts above a long session's window are being read, after the
     /// window itself was shown.
     @ObservationIgnored private var outlineReading = false
+    /// The chat's named artifacts over the whole doc (ArtifactOutline.swift),
+    /// and the shelf its cards and open pages read.
+    @ObservationIgnored private var artifactOutline = ArtifactOutline()
+    @ObservationIgnored private var artifactsReading = false
+    @ObservationIgnored let artifactShelf = ArtifactShelf()
     /// The whole transcript a store fed through `setEntries` holds, of which
     /// `entries` is the window. Empty for a doc-backed store.
     @ObservationIgnored private(set) var fedEntries: [MessageEntry] = []
@@ -152,6 +157,7 @@ final class SessionStore {
         let window = start > 0 ? Array(fedEntries[start...]) : fedEntries
         durableEntries = window
         entries = window
+        artifactShelf.update(ArtifactOutline.of(fedEntries).pages)
         // Echoes whose real entry has landed are done.
         if !pendingSends.isEmpty {
             let ids = Set(window.map(\.id))
@@ -459,6 +465,7 @@ final class SessionStore {
         let held = heldStart
         let memo = transcriptCache.settledParses
         let outline = outlineReading ? nil : self.outline
+        let artifacts = artifactsReading ? nil : self.artifactOutline
         Task { @MainActor [weak self] in
             let read = await Task.detached(priority: .userInitiated) {
                 let read = Self.readWindow(of: doc, held: held)
@@ -467,7 +474,9 @@ final class SessionStore {
                 let rounds = outline.flatMap {
                     Self.extendOutline($0, of: doc, to: read.start, steers: read.steers, limit: Self.pageMessages)
                 }
-                return (read, rounds, TranscriptBuilderCache.parseSettled(read.entries, memo: memo))
+                // The same for the artifacts (`readArtifacts`).
+                let pages = artifacts.flatMap { ArtifactOutline.extend($0, of: doc, limit: Self.pageMessages) }
+                return (read, rounds, TranscriptBuilderCache.parseSettled(read.entries, memo: memo), pages)
             }.value
             guard let self else { return }
             self.projecting = false
@@ -478,6 +487,12 @@ final class SessionStore {
                 if self.earlierRounds != rounds.rounds { self.earlierRounds = rounds.rounds }
             } else if !self.outlineReading {
                 self.readOutline(to: read.0.start, steers: read.0.steers)
+            }
+            if let pages = read.3 {
+                self.artifactOutline = pages
+                self.artifactShelf.update(pages.pages)
+            } else if !self.artifactsReading {
+                self.readArtifacts()
             }
             // A page requested meanwhile stays requested (the re-run below
             // reads it); without a reader the window is wherever the tail is.
@@ -530,6 +545,26 @@ final class SessionStore {
             guard let self else { return }
             self.outlineReading = false
             if let read { self.outline = read }
+            self.project()
+        }
+    }
+
+    /// Reads a long history's artifacts off the main thread after the window
+    /// is shown, like `readOutline`; later projections extend it from there.
+    private func readArtifacts() {
+        artifactsReading = true
+        let doc = self.doc
+        let outline = self.artifactOutline
+        Task { @MainActor [weak self] in
+            let read = await Task.detached(priority: .utility) {
+                ArtifactOutline.extend(outline, of: doc)
+            }.value
+            guard let self else { return }
+            self.artifactsReading = false
+            if let read {
+                self.artifactOutline = read
+                self.artifactShelf.update(read.pages)
+            }
             self.project()
         }
     }

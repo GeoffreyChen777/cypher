@@ -2,7 +2,8 @@
 //! an SVG artifact and a plain ```` ```html ```` fence, then a revision of the
 //! HTML artifact under the same title, so the chat's artifact cards, the HTML
 //! fence's Preview button and the side panel's viewer (reloading on a
-//! revision) can be seen without a real model.
+//! revision) can be seen without a real model. The same revision also comes
+//! as a patch (`artifact-patch`), edits to the page rather than all of it.
 
 use cypher_proto::AgentEvent;
 
@@ -10,6 +11,8 @@ use cypher_proto::AgentEvent;
 pub const MARKER: &str = "[mock:artifacts]";
 /// Prompt marker: reply with the showcase's HTML artifact revised.
 pub const REVISE_MARKER: &str = "[mock:artifacts:revise]";
+/// Prompt marker: reply with the same revision as a patch.
+pub const PATCH_MARKER: &str = "[mock:artifacts:patch]";
 
 /// The revision's edits to the showcase page: a comparison counter.
 const REVISIONS: &[(&str, &str)] = &[
@@ -177,6 +180,37 @@ pub(super) fn revision() -> Vec<AgentEvent> {
     )
 }
 
+/// The patch reply: the revision's edits to the showcase page, in one
+/// `artifact-patch` fence that streams a few hunks at a time.
+pub(super) fn patch() -> Vec<AgentEvent> {
+    let fence = patch_fence();
+    let pieces = fence
+        .split_inclusive(">>>>>>> REPLACE\n")
+        .map(str::to_string);
+    deltas(
+        std::iter::once("Adding a comparison counter, as a patch to the page:\n\n".to_string())
+            .chain(pieces)
+            .chain(std::iter::once(
+                "\nOpen it and try 40: the counter stops at four.\n".to_string(),
+            )),
+    )
+}
+
+fn patch_fence() -> String {
+    let line = |text: &'static str| text.strip_suffix('\n').unwrap_or(text);
+    let hunks: String = REVISIONS
+        .iter()
+        .map(|(from, to)| {
+            format!(
+                "<<<<<<< SEARCH\n{}\n=======\n{}\n>>>>>>> REPLACE\n",
+                line(from),
+                line(to)
+            )
+        })
+        .collect();
+    format!("```html artifact-patch title=\"Binary search, step by step\"\n{hunks}```\n")
+}
+
 fn revised_page() -> String {
     REVISIONS
         .iter()
@@ -214,5 +248,36 @@ mod tests {
         assert!(revised.contains("const counted = () =>"));
         assert_eq!(revised.matches("counted();").count(), 2);
         assert!(super::revision().len() > 3);
+    }
+
+    #[test]
+    fn the_patch_makes_the_same_revision() {
+        let fence = super::patch_fence();
+        assert!(
+            fence.starts_with("```html artifact-patch title=\"Binary search, step by step\"\n")
+        );
+        assert_eq!(
+            fence.matches("<<<<<<< SEARCH\n").count(),
+            super::REVISIONS.len()
+        );
+        // Each hunk matches one place, verbatim, so applying them in order
+        // is replacing each once.
+        let mut page: String = super::SECTIONS[1..5].concat();
+        let mut lines = fence.lines();
+        while let Some(marker) = lines.next() {
+            if marker != "<<<<<<< SEARCH" {
+                continue;
+            }
+            let search: Vec<&str> = lines.by_ref().take_while(|l| *l != "=======").collect();
+            let replace: Vec<&str> = lines
+                .by_ref()
+                .take_while(|l| *l != ">>>>>>> REPLACE")
+                .collect();
+            let (search, replace) = (search.join("\n"), replace.join("\n"));
+            assert_eq!(page.matches(search.as_str()).count(), 1, "{search}");
+            page = page.replacen(search.as_str(), &replace, 1);
+        }
+        assert_eq!(page, super::revised_page());
+        assert!(super::patch().len() > 3);
     }
 }

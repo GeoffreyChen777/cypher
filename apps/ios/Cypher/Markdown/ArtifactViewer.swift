@@ -1,6 +1,7 @@
 // Artifact viewer — the desktop's Artifact surface (crates/ui/src/artifacts.rs)
 // as a full-screen page: the artifact live in a web view, its source a menu
-// pick away, and Copy.
+// pick away, and Copy. A named page follows its revisions (ArtifactShelf):
+// one landing while it is open reloads it in place.
 //
 // Pages load as text with no base URL into a non-persistent store, so they
 // can't read the app's files or keep state between openings; scripts and
@@ -11,16 +12,24 @@ import UIKit
 import WebKit
 
 struct ArtifactViewer: View {
-    let page: ArtifactPage
+    private let opened: ArtifactPage
+    /// The chat's named pages; nil shows `opened` as it was.
+    private let shelf: ArtifactShelf?
     @Environment(\.dismiss) private var dismiss
     @State private var source: Bool
 
-    init(page: ArtifactPage) {
-        self.page = page
+    init(page: ArtifactPage, shelf: ArtifactShelf? = nil) {
+        self.opened = page
+        self.shelf = shelf
         _source = State(initialValue: page.showsSource)
     }
 
+    /// The page's newest version, read from the shelf so a revision
+    /// re-renders it.
+    private var page: ArtifactPage { shelf?.latest(opened) ?? opened }
+
     var body: some View {
+        let page = self.page
         NavigationStack {
             ZStack {
                 // Kept under the source so going back finds the page as it was.

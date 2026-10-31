@@ -14,6 +14,8 @@ enum LineIcon {
     case flag
     case bolt
     case code
+    /// An artifact patch's card (artifact.rs `render_card`).
+    case pen
     case hierarchy
     case users
     case pulse
@@ -87,6 +89,13 @@ enum LineIcon {
             return (paths: ["M13.5 2.5L5 13.5h6.5l-1 8l8.5-11h-6.5z"], circles: [])
         case .code:
             return (paths: ["M8 7l-5 5l5 5m8-10l5 5l-5 5M13.5 4.5l-3 15"], circles: [])
+        case .pen:
+            return (
+                paths: [
+                    "m14.36 4.079l.927-.927a3.932 3.932 0 0 1 5.561 5.561l-.927.927m-5.56-5.561s.115 1.97 1.853 3.707C17.952 9.524 19.92 9.64 19.92 9.64m-5.56-5.561l-8.522 8.52c-.577.578-.866.867-1.114 1.185a6.6 6.6 0 0 0-.749 1.211c-.173.364-.302.752-.56 1.526l-1.094 3.281m17.6-10.162L11.4 18.16c-.577.577-.866.866-1.184 1.114a6.6 6.6 0 0 1-1.211.749c-.364.173-.751.302-1.526.56l-3.281 1.094m0 0l-.802.268a1.06 1.06 0 0 1-1.342-1.342l.268-.802m1.876 1.876l-1.876-1.876"
+                ],
+                circles: []
+            )
         case .hierarchy:
             return (
                 paths: ["M12 7.5V12m-6.5 4.5V14a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v2.5"],
