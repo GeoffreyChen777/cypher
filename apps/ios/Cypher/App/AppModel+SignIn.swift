@@ -51,6 +51,7 @@ extension AppModel {
         edgeURLString = edgeURL.absoluteString
         authModeRaw = AppConfig.Mode.workos.rawValue
         storedUserId = user.id
+        updateProfile(user)
         let orgs = try await client.orgs(accessToken: tokens.accessToken)
         switch OrgSelection.route(for: orgs) {
         case .autoSelect(let only):
@@ -75,9 +76,10 @@ extension AppModel {
         guard let url = URL(string: edgeURLString) else { return }
         // Re-scope the access token to the org (adds the org_id claim).
         let client = AuthClient(baseURL: url)
-        let scoped = try await client.refresh(
+        let (scoped, user) = try await client.refreshSession(
             refreshToken: tokens.refreshToken,
             organizationId: org.organizationId)
+        if let user { updateProfile(user) }
         Keychain.save(scoped.accessToken, key: "accessToken")
         Keychain.save(scoped.refreshToken, key: "refreshToken")
         storedOrgId = org.organizationId
@@ -88,7 +90,19 @@ extension AppModel {
 
     func enterDemoMode() {
         demo = DemoDataset.standard()
+        // The demo's account, not saved: an initial, never a network picture.
+        profile = AccountProfile(email: "demo@letscypher.app", name: "Demo", avatarURL: nil)
         phase = .ready
+    }
+
+    /// The account's profile from WorkOS (sign-in, or a token refresh):
+    /// shown and saved, for the signed-in user only.
+    func updateProfile(_ user: AuthUser) {
+        guard demo == nil, user.id == storedUserId else { return }
+        let profile = AccountProfile(user)
+        guard profile != self.profile else { return }
+        self.profile = profile
+        profile.save()
     }
 
     func signOut() {
@@ -108,6 +122,8 @@ extension AppModel {
             Keychain.delete(key: "developmentToken")
         #endif
         DocDisk.wipeAll()  // local doc state belongs to the signed-in identity
+        profile = nil
+        AccountProfile.clear()
         storedUserId = ""
         storedOrgId = ""
         phase = .signedOut
@@ -128,6 +144,14 @@ extension AppModel {
             deviceId: deviceId, deviceName: deviceName,
             tokens: tokens, devBearer: devBearer)
         self.config = config
+        // A refresh carries the user: keep the avatar current. Only while
+        // this is still the connection (a stale one's refresh says nothing).
+        config.onUser = { [weak self, weak config] user in
+            Task { @MainActor in
+                guard let self, let config, self.config === config else { return }
+                self.updateProfile(user)
+            }
+        }
         let trust = DeviceTrustStore(
             deviceId: deviceId, deviceName: deviceName, userId: userId,
             edge: HTTPTrustEdge(edgeURL: url, token: { [weak config] in await config?.currentToken() }))

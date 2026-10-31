@@ -113,9 +113,23 @@ struct AuthClient {
     }
 
     func refresh(refreshToken: String, organizationId: String? = nil) async throws -> AuthTokens {
+        try await refreshSession(refreshToken: refreshToken, organizationId: organizationId).tokens
+    }
+
+    /// The refresh with the user the edge returns beside the tokens: nil
+    /// when it didn't (an older edge) — keep the stored profile then.
+    func refreshSession(
+        refreshToken: String, organizationId: String? = nil
+    ) async throws -> (tokens: AuthTokens, user: AuthUser?) {
+        struct Response: Codable {
+            var accessToken: String
+            var refreshToken: String
+            var user: AuthUser?
+        }
         var body: [String: String] = ["refreshToken": refreshToken]
         if let organizationId { body["organizationId"] = organizationId }
-        return try await post("auth/refresh", body: body)
+        let r: Response = try await post("auth/refresh", body: body)
+        return (AuthTokens(accessToken: r.accessToken, refreshToken: r.refreshToken), r.user)
     }
 
     func orgs(accessToken: String) async throws -> [AuthOrg] {

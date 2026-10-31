@@ -387,6 +387,8 @@ struct HomeView: View {
         ToolbarItem(placement: .topBarTrailing) {
             accountMenu
         }
+        // The picture is the button, not a picture in a glass circle.
+        .sharedBackgroundVisibility(model.profile == nil ? .automatic : .hidden)
         // Account and New are unrelated: separate glass groups.
         ToolbarSpacer(.fixed, placement: .topBarTrailing)
         ToolbarItem(placement: .topBarTrailing) {
@@ -461,6 +463,13 @@ struct HomeView: View {
 
     private var accountMenu: some View {
         Menu {
+            if let profile = model.profile, model.demo == nil {
+                // Who's signed in, as the desktop's account menu heads it.
+                Section {
+                    Text(profile.name ?? profile.email ?? "Signed in")
+                    if profile.name != nil, let email = profile.email { Text(email) }
+                }
+            }
             if model.demo != nil {
                 Text("Demo mode")
             }
@@ -472,7 +481,11 @@ struct HomeView: View {
                 .disabled(model.config?.trust == nil)
             Button("Sign out", role: .destructive) { model.signOut() }
         } label: {
-            Image(systemName: "person.crop.circle")
+            if let profile = model.profile {
+                AccountAvatar(profile: profile)
+            } else {
+                Image(systemName: "person.crop.circle")
+            }
         }
         .accessibilityLabel("Account")
     }

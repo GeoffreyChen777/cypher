@@ -38,6 +38,9 @@ final class AppModel {
     /// it (registry rows carry previews, activity and unread state).
     static let liveSessionLimit = 8
     var config: AppConfig?
+    /// The signed-in account's name, email and picture (AccountProfile):
+    /// the toolbar's avatar. nil before sign-in, and in development mode.
+    var profile: AccountProfile? = AccountProfile.load()
     @ObservationIgnored var pathMonitor: NWPathMonitor?
     @ObservationIgnored var lastPathKey: String?
 
