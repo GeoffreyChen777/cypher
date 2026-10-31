@@ -120,6 +120,13 @@ node "$SPEC/patches/pi-claude-bridge-context-files.mjs" \
 node "$SPEC/patches/pi-claude-bridge-session-cleanup.mjs" \
   "$STAGE/npm/node_modules/pi-claude-bridge"
 
+# Claude Code keeps a resumed session's stored system prompt, so a prompt that
+# changed mid-chat (/explain, /orchestrate) never reached Claude. The bridge
+# now rebuilds the session when the prompt changed (see the patch header).
+# Missing anchors fail the build on purpose.
+node "$SPEC/patches/pi-claude-bridge-prompt-refresh.mjs" \
+  "$STAGE/npm/node_modules/pi-claude-bridge"
+
 # A Claude model could not use Claude Code's own WebSearch: the bridge runs
 # Claude Code without builtin tools and pi-web-search has no claude-bridge API.
 # The bridge now runs a WebSearch-only one-off query, and pi-web-search uses it
@@ -261,6 +268,9 @@ CYPHER_PI_RUNTIME_STAGE="$STAGE" \
 # killed one's, and nothing the bridge did not record is touched.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
   "$STAGE/bin/node" --test "$SPEC/patches/session-cleanup.staged.test.mjs"
+# A real bridge: a changed prompt rebuilds the session instead of resuming it.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/patches/prompt-refresh.staged.test.mjs"
 # The pinned search model decides whether web_search runs through Claude Code;
 # a stand-in replaces Claude Code itself.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
