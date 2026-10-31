@@ -808,6 +808,8 @@ struct TranscriptView: View {
             \.transcriptEntry,
             TranscriptEntryContext(entryId: row.entryId, role: row.role, settled: row.settled)
         )
+        // Artifact cards open a named page's newest version from here.
+        .environment(store.artifactShelf)
         .modifier(
             TurnAnchor(
                 round: store.transcriptCache.roundIndex[row.id].map { $0 + earlierRounds },

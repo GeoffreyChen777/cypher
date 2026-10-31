@@ -11,7 +11,7 @@ final class ArtifactTests: XCTestCase {
     }
 
     private func artifact(_ source: String) -> (ArtifactKind, String?, String, Bool)? {
-        guard case .artifact(let kind, let title, let code, let closed) = blocks(source).first else {
+        guard case .artifact(let kind, let title, let code, let closed, false) = blocks(source).first else {
             return nil
         }
         return (kind, title, code, closed)
@@ -44,6 +44,26 @@ final class ArtifactTests: XCTestCase {
         }
     }
 
+    func testPatchFencesNameThePageTheyEdit() {
+        let source =
+            "```html artifact-patch title=\"Session explainer\"\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n```\n"
+        XCTAssertEqual(
+            blocks(source).first,
+            .artifact(
+                kind: .html, title: "Session explainer",
+                code: "<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE", closed: true, patch: true))
+        guard case .artifact(.svg, _, _, _, true) = blocks("```Artifact-Patch svg title=Logo\nx\n```").first else {
+            return XCTFail("an SVG patch")
+        }
+        // A patch to no page in particular, or in a language that doesn't
+        // render, is only code.
+        for source in ["```html artifact-patch\nx\n```", "```python artifact-patch title=X\nx\n```"] {
+            guard case .codeBlock = blocks(source).first else {
+                return XCTFail("not a code block: \(source)")
+            }
+        }
+    }
+
     func testArtifactsKnowWhenTheirFenceClosed() {
         XCTAssertEqual(artifact("```html artifact\n<p>x</p>")?.3, false)
         XCTAssertEqual(artifact("```html artifact\n<p>x</p>\n``")?.3, false)
@@ -53,12 +73,13 @@ final class ArtifactTests: XCTestCase {
         XCTAssertEqual(artifact("~~~html artifact\nx\n~~~~\n")?.3, true)
         // After other blocks, the fence's own lines decide.
         guard
-            case .artifact(_, _, _, let closed) = blocks("intro\n\n```html artifact\nx\n```\n\nafter").dropFirst().first
+            case .artifact(_, _, _, let closed, _) = blocks("intro\n\n```html artifact\nx\n```\n\nafter").dropFirst()
+                .first
         else { return XCTFail("no artifact after the intro") }
         XCTAssertTrue(closed)
         // Inside a quote, the markers before the fences don't count.
         guard case .blockquote(let children) = blocks("> ```html artifact\n> <p>x</p>\n> ```\n").first,
-            case .artifact(_, _, _, true) = children.first
+            case .artifact(_, _, _, true, _) = children.first
         else { return XCTFail("no closed artifact in the quote") }
     }
 

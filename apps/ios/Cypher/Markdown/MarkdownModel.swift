@@ -45,7 +45,9 @@ indirect enum MDBlock: Hashable {
     case codeBlock(language: String?, code: String, closed: Bool = true)
     /// A fence tagged `artifact` (```html artifact title="…"```): a page the
     /// model wrote to be viewed. `closed` is false while its fence streams.
-    case artifact(kind: ArtifactKind, title: String?, code: String, closed: Bool)
+    /// `patch`: tagged `artifact-patch`, `code` is SEARCH/REPLACE hunks that
+    /// edit the latest version of the page `title` names (ArtifactPatch.swift).
+    case artifact(kind: ArtifactKind, title: String?, code: String, closed: Bool, patch: Bool = false)
     case blockquote([MDBlock])
     case list(orderedStart: Int?, items: [MDListItem])
     case table(header: [[InlineRun]], rows: [[[InlineRun]]], align: [MDAlign])
@@ -107,8 +109,8 @@ enum MarkdownParser {
             // language, as on the desktop.
             let info = code.language ?? ""
             let closed = code.range.map { fenceClosed($0, lines: context.lines) } ?? true
-            if let (kind, title) = ArtifactFence.info(info) {
-                return .artifact(kind: kind, title: title, code: body, closed: closed)
+            if let (kind, title, patch) = ArtifactFence.info(info) {
+                return .artifact(kind: kind, title: title, code: body, closed: closed, patch: patch)
             }
             let lang = info.split(whereSeparator: \.isWhitespace).first.map(String.init)
             return .codeBlock(language: lang, code: body, closed: closed)

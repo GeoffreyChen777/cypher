@@ -146,6 +146,14 @@ final class DemoDataset {
                 config: claude, lastMessagePreview: "Step through it here.",
                 lastMessageAt: now - 1_900_000, createdAt: now - 1_950_000,
                 spaceId: cypher.id, lastSeenAt: now - 1_900_000),
+            // A live explainer and its patches (the mock harness's
+            // [mock:explainer] showcases).
+            Chat(
+                id: "chat-explainer", deviceId: "dev-mac", title: "Session explainer",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "There was no release notes page to update.",
+                lastMessageAt: now - 1_960_000, createdAt: now - 2_000_000,
+                spaceId: cypher.id, lastSeenAt: now - 1_960_000),
             Chat(
                 id: "chat-deploy", deviceId: "dev-vps", title: "Wrangler deploy hygiene",
                 archived: false, cwd: edge.path, branch: nil, checkoutId: nil,
@@ -747,7 +755,32 @@ final class DemoDataset {
                 MessageEntry(
                     id: "m2", role: .assistant, parts: [.text(id: "t0", text: artifactsShowcase)],
                     createdAt: now - 1_900_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+                MessageEntry(
+                    id: "m3", role: .user,
+                    parts: [.text(id: "t0", text: "Add a comparison counter.")],
+                    createdAt: now - 1_890_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                MessageEntry(
+                    id: "m4", role: .assistant, parts: [.text(id: "t0", text: artifactsPatch)],
+                    createdAt: now - 1_880_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
             ]
+        case "chat-explainer":
+            let rounds = [
+                ("Explain what this session built.", explainerPage),
+                ("Port the patches to the iPhone app.", explainerPatch),
+                ("Reload open pages when a revision lands.", explainerPartial),
+                ("Bump the release notes.", explainerOrphan),
+            ]
+            return rounds.enumerated().flatMap { ix, round in
+                let at = now - 2_000_000 + Int64(ix) * 10_000
+                return [
+                    MessageEntry(
+                        id: "u\(ix)", role: .user, parts: [.text(id: "t0", text: round.0)],
+                        createdAt: at, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                    MessageEntry(
+                        id: "a\(ix)", role: .assistant, parts: [.text(id: "t0", text: round.1)],
+                        createdAt: at + 5_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+                ]
+            }
         case "chat-references":
             return [
                 MessageEntry(
@@ -809,6 +842,147 @@ final class DemoDataset {
         ```
 
         The diagram in `notes/diagram.svg` hasn't changed.
+        """#
+
+    /// The mock harness's [mock:explainer] replies
+    /// (crates/harness/src/mock/explainer.rs): the explainer page, a patch
+    /// whose edits all apply, one with an edit that matches nothing, and one
+    /// to a page the chat never had.
+    private static let explainerPage = #"""
+        Here's the session so far:
+
+        ```html artifact title="Session explainer"
+        <!doctype html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <title>Session explainer</title>
+        <style>
+          body { font: 15px/1.5 -apple-system, system-ui, sans-serif; margin: 24px; color: #1d1d1f; }
+          h1 { font-size: 20px; margin: 0 0 4px; }
+          h2 { font-size: 13px; margin: 20px 0 6px; color: #6e6e73; text-transform: uppercase; letter-spacing: .04em; }
+          li { margin: 4px 0; }
+          .done { color: #1a7f37; }
+        </style>
+        </head>
+        <body>
+        <h1>Live session explainer</h1>
+        <p>What this session built, kept up to date as the chat goes on.</p>
+        <h2>What changed</h2>
+        <ul>
+          <li>Patch fences: <code>artifact-patch</code> edits a page in place.</li>
+        </ul>
+        <h2>How it fits</h2>
+        <p>The chat folds every revision of a page in order; the newest one opens.</p>
+        <h2>Still open</h2>
+        <ul>
+          <li>The iPhone app shows patches as code.</li>
+          <li>Side chats don't follow revisions.</li>
+        </ul>
+        </body>
+        </html>
+        ```
+
+        It updates as we go; open it beside the chat.
+        """#
+
+    private static let explainerPatch = #"""
+        Ported the patches to the iPhone app.
+
+        ```html artifact-patch title="Session explainer"
+        <<<<<<< SEARCH
+          <li>Patch fences: <code>artifact-patch</code> edits a page in place.</li>
+        =======
+          <li>Patch fences: <code>artifact-patch</code> edits a page in place.</li>
+          <li>The iPhone app applies patches too, reading the whole chat.</li>
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+          <li>The iPhone app shows patches as code.</li>
+        =======
+          <li class="done">The iPhone app shows patches as code. Fixed.</li>
+        >>>>>>> REPLACE
+        ```
+
+        The explainer has the new item and the open one closed.
+        """#
+
+    private static let explainerPartial = #"""
+        Open pages now reload when a revision lands.
+
+        ```html artifact-patch title="Session explainer"
+        <<<<<<< SEARCH
+        <p>The chat folds every revision of a page in order; the newest one opens.</p>
+        =======
+        <p>The chat folds every revision of a page in order; the newest one opens, and an open page reloads.</p>
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+          <li>Mock sessions for every patch outcome.</li>
+        =======
+          <li class="done">Mock sessions for every patch outcome.</li>
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+          <li>Side chats don't follow revisions.</li>
+        =======
+          <li>Side chats don't follow revisions yet.</li>
+        >>>>>>> REPLACE
+        ```
+
+        One edit looked for a line the page never had, so it was skipped.
+        """#
+
+    private static let explainerOrphan = #"""
+        Bumped the release notes.
+
+        ```html artifact-patch title="Release notes"
+        <<<<<<< SEARCH
+        <h1>Release notes</h1>
+        =======
+        <h1>Release notes 1.2</h1>
+        >>>>>>> REPLACE
+        ```
+
+        There was no release notes page to update, so nothing changed.
+        """#
+
+    /// The reply of the mock harness's [mock:artifacts:patch] showcase
+    /// (crates/harness/src/mock/artifacts.rs `patch`): the showcase page's
+    /// comparison counter as edits to it, so its card opens the page patched.
+    private static let artifactsPatch = #"""
+        Adding a comparison counter, as a patch to the page:
+
+        ```html artifact-patch title="Binary search, step by step"
+        <<<<<<< SEARCH
+        each comparison discards half of what is left.</p>
+        =======
+        each comparison discards half of what is left. Sixteen numbers never take more than four (log₂ 16).</p>
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+        <div class="cells" id="cells"></div>
+        =======
+        <p id="count" class="lead"></p>
+        <div class="cells" id="cells"></div>
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+          let lo, hi, done, steps;
+        =======
+          let lo, hi, done, steps;
+          const count = document.getElementById("count");
+          const counted = () => { count.textContent = `${steps} of at most 4 comparisons`; };
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+        done = false; steps = 0; log.textContent = "";
+        =======
+        done = false; steps = 0; log.textContent = ""; counted();
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+            steps++;
+        =======
+            steps++;
+            counted();
+        >>>>>>> REPLACE
+        ```
+
+        Open it and try 40: the counter stops at four.
         """#
 
     /// The reply of the mock harness's [mock:artifacts] showcase

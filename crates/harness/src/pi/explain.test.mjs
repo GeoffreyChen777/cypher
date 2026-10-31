@@ -46,6 +46,14 @@ test("the tracking block goes after the appended prompt, once", () => {
   assert.ok(trackingBlock("sync").includes("focus on: sync"));
 });
 
+test("the tracking block offers a patch or the whole page, in the fences the chat reads", () => {
+  const block = trackingBlock();
+  assert.ok(block.includes("```html artifact-patch title=\"" + EXPLAIN_TITLE + "\"\n<<<<<<< SEARCH\n"));
+  assert.ok(block.includes("\n=======\n"));
+  assert.ok(block.includes("\n>>>>>>> REPLACE\n```"));
+  assert.ok(block.includes("```html artifact title=\"" + EXPLAIN_TITLE + "\"```"));
+});
+
 function harness(entries = []) {
   const calls = { entries: [], sent: [], notes: [], commands: {}, handlers: {} };
   const pi = {

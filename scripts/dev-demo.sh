@@ -40,6 +40,12 @@
 #                                 # Copy); its second round revises the HTML
 #                                 # page under the same title, so its open tab
 #                                 # reloads. --slow shows a card "Writing…"
+#                                 # (or "Updating…"). "Count the comparisons"
+#                                 # makes the same revision as a patch, and
+#                                 # "Session explainer" is /explain's page
+#                                 # followed by three patches: every edit
+#                                 # applies, one edit of three misses, and one
+#                                 # to a page the chat never had
 #   scripts/dev-demo.sh --changes # turn changes: "Due dates for tasks" under
 #                                 # "Turn changes demo", four rounds on a small
 #                                 # Git project — each round's answer lists the
@@ -319,6 +325,27 @@ JSON
     wait_round "$chat" 1
     prompt="Nice. Can it count the comparisons as it goes?"
     run_prompt "$chat" "$project" "$prompt" "$prompt [mock:artifacts:revise]"
+    # The same revision, as a patch to the page.
+    chat=$(new_id)
+    create_chat "$chat" "$space" "Count the comparisons"
+    prompt="How does binary search work? Show me."
+    run_prompt "$chat" "$project" "$prompt" "$prompt [mock:artifacts]"
+    wait_round "$chat" 1
+    prompt="Can it count the comparisons as it goes?"
+    run_prompt "$chat" "$project" "$prompt" "$prompt [mock:artifacts:patch]"
+    # A live explainer: the page, then a patch for each round of work.
+    chat=$(new_id)
+    create_chat "$chat" "$space" "Session explainer"
+    n=0
+    for step in "Explain what this session built.:explainer" \
+      "Port the patches to the iPhone app.:explainer:patch" \
+      "Reload open pages when a revision lands.:explainer:patch:partial" \
+      "Bump the release notes.:explainer:patch:orphan"; do
+      prompt="${step%%:*}" marker="${step#*:}"
+      run_prompt "$chat" "$project" "$prompt" "$prompt [mock:$marker]"
+      n=$((n + 1))
+      wait_round "$chat" "$n"
+    done
   elif [[ -n "$WORK" ]]; then
     # The scripted commands read this repo's files, so the project is this checkout.
     space=$(new_id) chat=$(new_id)

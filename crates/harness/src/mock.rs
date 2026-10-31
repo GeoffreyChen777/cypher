@@ -14,6 +14,7 @@ use crate::{Harness, HarnessError, RunControls};
 mod artifacts;
 mod changes;
 mod diffs;
+mod explainer;
 mod html;
 mod math;
 mod mermaid;
@@ -23,9 +24,16 @@ mod progress;
 mod refs;
 mod translation;
 
-pub use artifacts::{MARKER as ARTIFACTS_MARKER, REVISE_MARKER as ARTIFACTS_REVISE_MARKER};
+pub use artifacts::{
+    MARKER as ARTIFACTS_MARKER, PATCH_MARKER as ARTIFACTS_PATCH_MARKER,
+    REVISE_MARKER as ARTIFACTS_REVISE_MARKER,
+};
 pub use changes::{MARKER as CHANGES_MARKER, ROUNDS as CHANGES_ROUNDS};
 pub use diffs::MARKER as DIFFS_MARKER;
+pub use explainer::{
+    MARKER as EXPLAINER_MARKER, ORPHAN_MARKER as EXPLAINER_ORPHAN_MARKER,
+    PARTIAL_MARKER as EXPLAINER_PARTIAL_MARKER, PATCH_MARKER as EXPLAINER_PATCH_MARKER,
+};
 pub use html::MARKER as HTML_MARKER;
 pub use math::MARKER as MATH_MARKER;
 pub use mermaid::MARKER as MERMAID_MARKER;
@@ -338,6 +346,7 @@ impl Harness for MockHarness {
         // and translation showcases ([`DIFFS_MARKER`], [`MATH_MARKER`],
         // [`MERMAID_MARKER`], [`MERMAID_THEMES_MARKER`], [`HTML_MARKER`],
         // [`REFS_MARKER`], [`ARTIFACTS_MARKER`], [`ARTIFACTS_REVISE_MARKER`],
+        // [`ARTIFACTS_PATCH_MARKER`], the [`EXPLAINER_MARKER`] family,
         // [`TRANSLATION_MARKER`]): their reply replaces the
         // script's text and tools. `CYPHER_MOCK_TRANSLATION=1` (or `replace`)
         // answers every prompt with the translation showcase, so a message
@@ -367,8 +376,18 @@ impl Harness for MockHarness {
             Some(refs::reply())
         } else if request.prompt.contains(ARTIFACTS_REVISE_MARKER) {
             Some(artifacts::revision())
+        } else if request.prompt.contains(ARTIFACTS_PATCH_MARKER) {
+            Some(artifacts::patch())
         } else if request.prompt.contains(ARTIFACTS_MARKER) {
             Some(artifacts::reply())
+        } else if request.prompt.contains(EXPLAINER_PATCH_MARKER) {
+            Some(explainer::patch())
+        } else if request.prompt.contains(EXPLAINER_PARTIAL_MARKER) {
+            Some(explainer::partial())
+        } else if request.prompt.contains(EXPLAINER_ORPHAN_MARKER) {
+            Some(explainer::orphan())
+        } else if request.prompt.contains(EXPLAINER_MARKER) {
+            Some(explainer::reply())
         } else {
             translation_mode.map(translation::reply)
         };

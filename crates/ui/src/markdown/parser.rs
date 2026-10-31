@@ -79,6 +79,10 @@ pub enum Block {
         code: String,
         /// The closing fence has arrived (`false` while it streams).
         closed: bool,
+        /// Tagged `artifact-patch`: `code` is SEARCH/REPLACE hunks that edit
+        /// the latest version of the page titled `title`
+        /// ([`super::artifact::patch`]). A patch always has a title.
+        patch: bool,
     },
     BlockQuote {
         children: Vec<Block>,
@@ -125,18 +129,25 @@ impl ArtifactKind {
 /// and title. These fence rules are mirrored by the iPhone app
 /// (`apps/ios/Cypher/Markdown/ArtifactFence.swift`; see `protocol/README.md`). `None` unless a bare `artifact` word marks it. Without a
 /// language the page is HTML; a language that doesn't render (`python
-/// artifact`) stays an ordinary code block.
-fn artifact_info(info: &str) -> Option<(ArtifactKind, Option<String>)> {
+/// artifact`) stays an ordinary code block. A bare `artifact-patch` marks a
+/// patch to the page named by its `title=`, which it needs.
+fn artifact_info(info: &str) -> Option<(ArtifactKind, Option<String>, bool)> {
     let words = info_words(info);
+    let marker = |key: &str| {
+        key.eq_ignore_ascii_case("artifact") || key.eq_ignore_ascii_case("artifact-patch")
+    };
+    let patch = words
+        .iter()
+        .any(|(key, value)| value.is_none() && key.eq_ignore_ascii_case("artifact-patch"));
     if !words
         .iter()
-        .any(|(key, value)| value.is_none() && key.eq_ignore_ascii_case("artifact"))
+        .any(|(key, value)| value.is_none() && marker(key))
     {
         return None;
     }
     let kind = match words
         .iter()
-        .find(|(key, value)| value.is_none() && !key.eq_ignore_ascii_case("artifact"))
+        .find(|(key, value)| value.is_none() && !marker(key))
     {
         Some((language, _)) => ArtifactKind::for_language(language)?,
         None => ArtifactKind::Html,
@@ -147,7 +158,10 @@ fn artifact_info(info: &str) -> Option<(ArtifactKind, Option<String>)> {
         .and_then(|(_, value)| value)
         .map(|title| title.trim().to_string())
         .filter(|title| !title.is_empty());
-    Some((kind, title))
+    if patch && title.is_none() {
+        return None;
+    }
+    Some((kind, title, patch))
 }
 
 /// An info string's words: bare ones (`html`) and `key=value` pairs whose
@@ -476,12 +490,13 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
             if code.ends_with('\n') {
                 code.pop();
             }
-            if let Some((kind, title)) = artifact {
+            if let Some((kind, title, patch)) = artifact {
                 return vec![Block::Artifact {
                     kind,
                     title,
                     code,
                     closed,
+                    patch,
                 }];
             }
             vec![Block::CodeBlock {

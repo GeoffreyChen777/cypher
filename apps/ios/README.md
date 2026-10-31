@@ -404,8 +404,11 @@ Run these commands from the repository root.
   `round:README.md`) for the round's diff, `-sheet reference:Example.swift:44-45`
   for a chip's file, `reference:notes/guide.md` / `page.html` / `diagram.svg`
   / `icon.png` for the previews.
-  Artifacts fixture (an HTML and an SVG artifact, a plain HTML fence):
+  Artifacts fixture (an HTML and an SVG artifact, a plain HTML fence, then a
+  patch to the HTML page whose card opens it patched):
   `-demo -route chat:chat-artifacts`.
+  Live explainer fixture (the page, then patches that apply, partly apply
+  and find no page): `-demo -route chat:chat-explainer`.
   Context recovery fixtures: `-demo -route space:space-recovery`; the live
   replay is `-demo -route chat:chat-recovery-live`.
   Session list view menu (sort, Last active): `-demo -demo-history` adds

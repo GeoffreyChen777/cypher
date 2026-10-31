@@ -44,6 +44,7 @@ the tests on every side by hand.
 | Notifications model (badge payload, preferences) | — | `apps/edge/src/notifications/notifications-model.ts`; `notifications-model.test.ts` | `Notifications/NotificationModels.swift`; `NotificationTests.swift` |
 | Subagent aggregation | `crates/ui/src/subagents.rs` | — | `Models/Subagents.swift`; `SubagentsTests.swift` |
 | Artifact fences (a bare `artifact` info word, kind, `title=`) | `crates/ui/src/markdown/parser.rs` (`artifact_info`); `markdown/parser/tests.rs` | `crates/harness/src/pi/chat-rendering.ts` (the guide that names the fence) | `Markdown/ArtifactFence.swift`; `ArtifactTests.swift` |
+| Artifact patch fences (`artifact-patch`, `title=`, SEARCH/REPLACE hunks folded over the page's latest version) | `crates/ui/src/markdown/artifact/patch.rs`, `crates/ui/src/transcript/artifacts.rs`; vectors `artifact-patch-v1.json` | `crates/harness/src/pi/explain.ts` (the explainer's guide); `explain.test.mjs` | `Markdown/ArtifactPatch.swift`, `Sync/ArtifactOutline.swift`; `ArtifactPatchTests.swift`, `ArtifactOutlineTests.swift` |
 
 The iPhone app also ports desktop UI logic (markdown parser, theme, transcript
 rows, slash menu, context ring, loaders); those files cite their desktop source
@@ -103,6 +104,12 @@ Arrays. Stream preview cases are `{name, kind, header, text}` to encode or
 `{kind, header, text}` applied in order with the expected `display`,
 `interrupted` and `replies`. The preview protocol is dormant: the Rust and Swift clients
 carry it, but no Edge relays it (the production `ChatRoom` rejects its frames).
+
+### `artifact-patch-v1.json`
+
+An object; `apply` holds `{name, base, patch, code, applied, total}`: applying
+`patch` (SEARCH/REPLACE hunks) to `base` gives `code`, with `applied` of its
+`total` complete hunks taking. Matching is on UTF-8 bytes.
 
 ### `device-trust-v1.json`
 
