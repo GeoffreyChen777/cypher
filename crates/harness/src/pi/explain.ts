@@ -1,10 +1,13 @@
 // `/explain`: a page that explains what this session's work does, kept up to
 // date as the chat goes on. The command asks for the page now; while it is on,
 // every turn's appended system prompt asks the model to end each reply that
-// changed the work by writing the page again under the same title, which the
-// chat reads as a revision: the page's open tab reloads and every card with
-// that title opens the newest version. Like chat-rendering.ts, the engine
-// loads it into every Pi it starts (`-e`), so it ships with the app.
+// changed the work by updating the page: a patch fence for small changes
+// (`artifact-patch`, SEARCH/REPLACE hunks the chat applies to the latest
+// version; crates/ui/src/markdown/artifact/patch.rs and its iPhone mirror),
+// or the whole page again under the same title. The chat reads either as a
+// revision: the page's open tab reloads and every card with that title opens
+// the newest version. Like chat-rendering.ts, the engine loads it into every
+// Pi it starts (`-e`), so it ships with the app.
 //
 // The state is a custom entry in the chat's Pi session, the last one on the
 // branch winning, so the engine's `/` menu (crates/engine/src/pi/session_modes.rs)
@@ -62,7 +65,17 @@ export function firstPrompt(focus?: string): string {
 export function trackingBlock(focus?: string): string {
   return `<cypher_explain>
 The user turned on a live explainer for this session (/explain): an artifact titled "${EXPLAIN_TITLE}" that explains the session's work: what was built or changed and the features it adds, how the parts fit together, notable decisions, and what is still open.${focusLine(focus)}
-- At the end of every reply that changes the work (files written or changed, a design decision, a bug found or fixed, a change of plan), write the whole "${EXPLAIN_TITLE}" artifact again with the changes folded in, under exactly that title so it replaces the earlier version. Put it after everything else in the reply.
+- At the end of every reply that changes the work (files written or changed, a design decision, a bug found or fixed, a change of plan), bring the "${EXPLAIN_TITLE}" artifact up to date, after everything else in the reply, in one of two ways. Choose for each reply.
+- Small changes (a line, an item, a section): patch the latest version in place with one fence of SEARCH/REPLACE blocks, applied in order:
+\`\`\`html artifact-patch title="${EXPLAIN_TITLE}"
+<<<<<<< SEARCH
+lines copied exactly from the latest version
+=======
+the lines that replace them
+>>>>>>> REPLACE
+\`\`\`
+  The latest version is the last full page with the patches since applied. Copy each SEARCH verbatim, with just enough lines to match exactly one place; an empty REPLACE deletes. A block whose SEARCH matches nowhere, or in more than one place, is skipped.
+- Larger changes (a new structure, most of the page), or when you no longer have the latest version word for word (for example after the conversation was compacted): write the whole page again, \`\`\`html artifact title="${EXPLAIN_TITLE}"\`\`\`, under exactly that title so it replaces the earlier version.
 - Skip it when a reply changes nothing about the work, such as an answer to a question.
 - Write it in the user's language; keep the title as given.
 </cypher_explain>`;

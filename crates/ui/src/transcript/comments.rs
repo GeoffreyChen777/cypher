@@ -284,6 +284,10 @@ impl Transcript {
             diagram_toggled: Some(self.diagram_toggled_for(row_id, cx)),
             code_refs: Some(self.code_ref_ui(cx)),
             artifact: self.artifact_handler.clone(),
+            artifact_patches: Some({
+                let index = self.artifacts.clone();
+                Rc::new(move |row: &str, code: &str| index.borrow().patch_outcome(row, code))
+            }),
             live,
         };
         let highlight = self.code_highlight_for(row_id, tree, Some(block_ix), cx);

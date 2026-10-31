@@ -601,8 +601,43 @@ fn artifact(source: &str) -> (ArtifactKind, Option<String>, String, bool) {
             title,
             code,
             closed,
+            patch: false,
         }) => (kind, title, code, closed),
         other => panic!("not an artifact: {other:?}"),
+    }
+}
+
+#[test]
+fn patch_fences_name_the_page_they_edit() {
+    let source = "```html artifact-patch title=\"Session explainer\"\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n```\n";
+    assert_eq!(
+        blocks(source),
+        vec![Block::Artifact {
+            kind: ArtifactKind::Html,
+            title: Some("Session explainer".to_string()),
+            code: "<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE".to_string(),
+            closed: true,
+            patch: true,
+        }]
+    );
+    assert!(matches!(
+        blocks("```Artifact-Patch svg title=Logo\nx\n```").as_slice(),
+        [Block::Artifact {
+            kind: ArtifactKind::Svg,
+            patch: true,
+            ..
+        }]
+    ));
+    // A patch to no page in particular, or in a language that doesn't
+    // render, is only code.
+    for source in [
+        "```html artifact-patch\nx\n```",
+        "```python artifact-patch title=X\nx\n```",
+    ] {
+        assert!(
+            matches!(blocks(source).as_slice(), [Block::CodeBlock { .. }]),
+            "{source}"
+        );
     }
 }
 

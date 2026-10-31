@@ -1,0 +1,100 @@
+{
+  "apply": [
+    {
+      "name": "hunks apply in order, each to the text the last one left",
+      "base": "<h1>Explainer</h1>\n<ul>\n  <li>parser</li>\n  <li>index</li>\n</ul>\n",
+      "patch": "<<<<<<< SEARCH\n  <li>index</li>\n=======\n  <li>index</li>\n  <li>patches</li>\n>>>>>>> REPLACE\n<<<<<<< SEARCH\n<li>patches</li>\n=======\n<li>patches, folded</li>\n>>>>>>> REPLACE\n",
+      "code": "<h1>Explainer</h1>\n<ul>\n  <li>parser</li>\n  <li>index</li>\n  <li>patches, folded</li>\n</ul>\n",
+      "applied": 2,
+      "total": 2
+    },
+    {
+      "name": "indentation drift matches whole lines compared trimmed",
+      "base": "<h1>Explainer</h1>\n<ul>\n  <li>parser</li>\n  <li>index</li>\n</ul>\n",
+      "patch": "<<<<<<< SEARCH\n<ul>\n<li>parser</li>\n=======\n<ol>\n  <li>parser</li>\n>>>>>>> REPLACE\n",
+      "code": "<h1>Explainer</h1>\n<ol>\n  <li>parser</li>\n  <li>index</li>\n</ul>\n",
+      "applied": 1,
+      "total": 1
+    },
+    {
+      "name": "missing, ambiguous and empty searches are skipped; the rest apply",
+      "base": "<h1>Explainer</h1>\n<ul>\n  <li>parser</li>\n  <li>index</li>\n</ul>\n",
+      "patch": "<<<<<<< SEARCH\n<li>nowhere</li>\n=======\nx\n>>>>>>> REPLACE\n<<<<<<< SEARCH\nli>\n=======\nambiguous\n>>>>>>> REPLACE\n<<<<<<< SEARCH\n\n=======\nempty\n>>>>>>> REPLACE\n<<<<<<< SEARCH\n<h1>Explainer</h1>\n=======\n<h1>Session</h1>\n>>>>>>> REPLACE\n",
+      "code": "<h1>Session</h1>\n<ul>\n  <li>parser</li>\n  <li>index</li>\n</ul>\n",
+      "applied": 1,
+      "total": 4
+    },
+    {
+      "name": "a hunk still streaming is not a hunk yet",
+      "base": "<h1>Explainer</h1>\n<ul>\n  <li>parser</li>\n  <li>index</li>\n</ul>\n",
+      "patch": "<<<<<<< SEARCH\n<h1>Explainer</h1>\n=======\n<h1>One</h1>\n>>>>>>> REPLACE\n<<<<<<< SEARCH\n<li>parser</li>\n=======\n<li>pars",
+      "code": "<h1>One</h1>\n<ul>\n  <li>parser</li>\n  <li>index</li>\n</ul>\n",
+      "applied": 1,
+      "total": 1
+    },
+    {
+      "name": "text around hunks is ignored and an empty replace deletes",
+      "base": "<h1>Explainer</h1>\n<ul>\n  <li>parser</li>\n  <li>index</li>\n</ul>\n",
+      "patch": "Dropping the index:\n<<<<<<< SEARCH\n  <li>index</li>\n\n=======\n\n>>>>>>> REPLACE\n",
+      "code": "<h1>Explainer</h1>\n<ul>\n  <li>parser</li>\n</ul>\n",
+      "applied": 1,
+      "total": 1
+    },
+    {
+      "name": "occurrences are counted without overlap",
+      "base": "aaa",
+      "patch": "<<<<<<< SEARCH\naa\n=======\nb\n>>>>>>> REPLACE\n",
+      "code": "ba",
+      "applied": 1,
+      "total": 1
+    },
+    {
+      "name": "a CRLF patch reads like an LF one",
+      "base": "<p>x</p>\n",
+      "patch": "<<<<<<< SEARCH\r\n<p>x</p>\r\n=======\r\n<p>y</p>\r\n>>>>>>> REPLACE\r\n",
+      "code": "<p>y</p>\n",
+      "applied": 1,
+      "total": 1
+    },
+    {
+      "name": "a line match that isn't unique is skipped",
+      "base": "<li>a</li>\n  <li>a</li>\n",
+      "patch": "<<<<<<< SEARCH\n <li>a</li> \n=======\n<li>b</li>\n>>>>>>> REPLACE\n",
+      "code": "<li>a</li>\n  <li>a</li>\n",
+      "applied": 0,
+      "total": 1
+    },
+    {
+      "name": "a line match on the last line keeps it without a newline",
+      "base": "a\n  b",
+      "patch": "<<<<<<< SEARCH\n b \n=======\nB\n>>>>>>> REPLACE\n",
+      "code": "a\nB",
+      "applied": 1,
+      "total": 1
+    },
+    {
+      "name": "longer markers count",
+      "base": "x",
+      "patch": "<<<<<<<< SEARCH\nx\n=========\ny\n>>>>>>>> REPLACE\n",
+      "code": "y",
+      "applied": 1,
+      "total": 1
+    },
+    {
+      "name": "matching is by bytes, not canonical equivalence",
+      "base": "caf\u00e9\n",
+      "patch": "<<<<<<< SEARCH\ncafe\u0301\n=======\ntea\n>>>>>>> REPLACE\n",
+      "code": "caf\u00e9\n",
+      "applied": 0,
+      "total": 1
+    },
+    {
+      "name": "no hunks at all",
+      "base": "x",
+      "patch": "",
+      "code": "x",
+      "applied": 0,
+      "total": 0
+    }
+  ]
+}

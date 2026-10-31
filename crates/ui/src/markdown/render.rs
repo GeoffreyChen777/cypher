@@ -99,6 +99,9 @@ pub struct RenderOptions {
     /// Opens artifact cards and HTML fences' Preview; `None` renders the
     /// cards inert and the fences without the button.
     pub artifact: Option<super::artifact::ArtifactHandler>,
+    /// How the tree's patch fences went, for their cards; `None` renders
+    /// them inert (surfaces that index no pages).
+    pub artifact_patches: Option<super::artifact::PatchLookup>,
     /// The row is still streaming: an artifact whose fence hasn't closed
     /// is still being written.
     pub live: bool,
@@ -184,6 +187,7 @@ impl RenderOptions {
             diagram_toggled: None,
             code_refs: None,
             artifact: None,
+            artifact_patches: None,
             live: false,
         }
     }
@@ -368,7 +372,8 @@ pub fn render_block(
             title,
             code,
             closed,
-        } => super::artifact::render_card(*kind, title.as_deref(), code, *closed, ctx),
+            patch,
+        } => super::artifact::render_card(*kind, title.as_deref(), code, *closed, *patch, ctx),
         Block::BlockQuote { children } => {
             div()
                 // Accent-tinted quote: indigo rail + a whisper of the same hue
