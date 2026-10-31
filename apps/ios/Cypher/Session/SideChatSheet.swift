@@ -13,6 +13,8 @@ struct SideChatSheet: View {
     let store: SideChatStore
     /// Called with the promoted chat's id; the presenter navigates.
     let onPromoted: (String) -> Void
+    /// Close for the iPad inspector, which isn't dismissed like a sheet.
+    var onClose: (() -> Void)? = nil
 
     @State private var scroll = ScrollState()
     @State private var catalog = RemotePiCatalog()
@@ -30,7 +32,8 @@ struct SideChatSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Close", systemImage: "xmark") { dismiss() }
+                    Button("Close", systemImage: "xmark") { close() }
+                        .keyboardShortcut(.cancelAction)
                         .accessibilityIdentifier("side-chat-close")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -152,6 +155,10 @@ struct SideChatSheet: View {
         }
     }
 
+    private func close() {
+        if let onClose { onClose() } else { dismiss() }
+    }
+
     private func promote() {
         promoting = true
         promoteError = nil
@@ -159,7 +166,7 @@ struct SideChatSheet: View {
             defer { promoting = false }
             do {
                 let chatId = try await store.promote(demo: model.demo)
-                dismiss()
+                close()
                 onPromoted(chatId)
             } catch {
                 promoteError = "Couldn't open it as a chat — \(error.localizedDescription)"

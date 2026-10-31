@@ -30,6 +30,8 @@ final class AppModel {
     /// Chats with a session store, most recently opened first. Only the
     /// first `liveSessionLimit` keep their rooms; the rest are released.
     @ObservationIgnored var recentSessionIds: [String] = []
+    /// Session screens up per chat (`sessionOnScreen`): never trimmed.
+    @ObservationIgnored var onScreenSessions: [String: Int] = [:]
     /// Every live store holds a chat room WebSocket, and each (re)connect is a
     /// billed DO request plus a catch-up read. Warming every chat made each
     /// foreground a 100+ request reconnect storm; the sidebar needs none of
@@ -60,6 +62,9 @@ final class AppModel {
     /// Deep-link target applied by HomeView on first appearance (set by launch
     /// args in demo mode; simulator-driven screenshots use it).
     var launchRoute: Route?
+    /// Session windows opened since launch ("Open in New Window"); a demo
+    /// rig closes any other, restored from an earlier run.
+    @ObservationIgnored var openedSessionWindows: Set<String> = []
     /// Screenshot rig: "newsession" / "newspace" presents that sheet on arrival.
     var launchSheet: String?
     /// Screenshot rig: auto-send a canned prompt from the new-session canvas.
@@ -79,6 +84,9 @@ final class AppModel {
     var draftOffers = 0
 
     func restore() {
+        // Every window's root asks; the first restores (iPad windows share
+        // this model).
+        guard !restored else { return }
         defer { restored = true }
         if demo != nil { return }
         DocDisk.prune(keep: 80)

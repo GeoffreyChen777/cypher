@@ -290,9 +290,10 @@ final class AuthSessionCoordinator: NSObject, ASWebAuthenticationPresentationCon
 
     nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         MainActor.assumeIsolated {
-            UIApplication.shared.connectedScenes
-                .compactMap { ($0 as? UIWindowScene)?.keyWindow }
-                .first ?? ASPresentationAnchor()
+            // The window in front: on iPad there may be several.
+            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            let front = scenes.filter { $0.activationState == .foregroundActive } + scenes
+            return front.compactMap(\.keyWindow).first ?? ASPresentationAnchor()
         }
     }
 }

@@ -13,6 +13,8 @@ import SwiftUI
 struct NewSessionView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
+    /// The iPad split view's columns: the title clears the sidebar button.
+    @Environment(\.splitColumns) private var splitColumns
     let spaceId: String
     @Binding var path: [Route]
     /// Set for a quick chat: the device it runs on, no project.
@@ -135,38 +137,44 @@ struct NewSessionView: View {
             .contentShape(Rectangle())
             .onTapGesture { focused = false }
 
-            if let targetDeviceId, !model.deviceOnline(targetDeviceId), model.demo == nil {
-                offlineNotice(deviceId: targetDeviceId)
-            }
-            PiCatalogNotice(
-                catalog: catalog,
-                deviceName: model.deviceName(targetDeviceId ?? "")
-            ) {
-                catalogRevision += 1
-            }
-
-            // Where-it-runs scope row (checkout + base ref), left-aligned
-            // above the composer — the composer pill keeps only the agent chip.
-            if space?.gitDetected == true {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        chip(icon: checkoutIcon, label: checkoutLabel) {
-                            focused = false
-                            showCheckoutPicker = true
-                        }
-                        chip(icon: .gitBranch, label: refLabel) {
-                            focused = false
-                            showRefPicker = true
-                        }
-                    }
-                    .padding(.horizontal, 16)
+            // The transcript's reading column, as in a session: a wide
+            // window (iPad) keeps the composer at the width it'll stay.
+            VStack(spacing: 0) {
+                if let targetDeviceId, !model.deviceOnline(targetDeviceId), model.demo == nil {
+                    offlineNotice(deviceId: targetDeviceId)
                 }
-                .padding(.bottom, 8)
-                .disabled(busy)
-            }
+                PiCatalogNotice(
+                    catalog: catalog,
+                    deviceName: model.deviceName(targetDeviceId ?? "")
+                ) {
+                    catalogRevision += 1
+                }
 
-            composer
-                .padding(.bottom, 8)
+                // Where-it-runs scope row (checkout + base ref), left-aligned
+                // above the composer — the composer pill keeps only the agent chip.
+                if space?.gitDetected == true {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            chip(icon: checkoutIcon, label: checkoutLabel) {
+                                focused = false
+                                showCheckoutPicker = true
+                            }
+                            chip(icon: .gitBranch, label: refLabel) {
+                                focused = false
+                                showRefPicker = true
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                    .padding(.bottom, 8)
+                    .disabled(busy)
+                }
+
+                composer
+                    .padding(.bottom, 8)
+            }
+            .frame(maxWidth: TranscriptView.maxContentWidth)
+            .frame(maxWidth: .infinity)
         }
         .background(Theme.bg.ignoresSafeArea())
         .onGeometryChange(for: CGFloat.self) {
@@ -200,6 +208,7 @@ struct NewSessionView: View {
                         .truncationMode(.middle)
                 }
             }
+            .clearsHiddenSidebarButton(splitColumns)
             // Bound the title while leaving room for native Back.
             .frame(width: max(140, viewWidth - 170), alignment: .leading)
         }

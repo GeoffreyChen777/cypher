@@ -6,7 +6,8 @@ import SwiftUI
 /// session (the tap was swallowed while Home was covered, then replayed on
 /// the way back in the middle of the pop), and long composer drafts drawing
 /// over the model chips / send button. Both drive the REAL views (HomeView /
-/// SessionView) against the in-memory demo, in a full-size window.
+/// SessionView) against the in-memory demo, in a full-size window — Home
+/// pinned to compact width, the phone's stack, on any simulator.
 @MainActor
 final class NotificationNavigationTests: XCTestCase {
     private func settle(_ what: String, _ condition: () -> Bool) async throws {
@@ -122,7 +123,7 @@ final class NotificationNavigationTests: XCTestCase {
         defer { controller.disconnect() }
         try await settle("scope bound") { controller.scope == scope }
 
-        let hosted = try HostedWindow(HomeView().environment(model))
+        let hosted = try HostedWindow(HomeView().environment(model).environment(\.horizontalSizeClass, .compact))
         defer { hosted.close() }
         let hostVC = hosted.host
         try await settle("home mounted") { navigationController(in: hostVC) != nil }
@@ -233,7 +234,7 @@ extension NotificationNavigationTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertEqual(controller.pendingNavigation?.chatId, "chat-veil", "deferred tap completes on bind/refresh")
-        let hosted = try HostedWindow(HomeView().environment(model))
+        let hosted = try HostedWindow(HomeView().environment(model).environment(\.horizontalSizeClass, .compact))
         defer { hosted.close() }
         let hostVC = hosted.host
         try await settle("home mounted") { navigationController(in: hostVC) != nil }
