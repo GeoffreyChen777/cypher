@@ -236,6 +236,10 @@ impl PairingSection {
                         )
                         .child(caption(
                             theme,
+                            format!("On a Linux device, run cypher pair join {code}"),
+                        ))
+                        .child(caption(
+                            theme,
                             format!(
                                 "Waiting for the other device… The code works until {}.",
                                 clock(*expires_at)
@@ -389,7 +393,7 @@ impl PairingSection {
                 };
                 body.child(caption(
                     theme,
-                    "On a paired device, open Settings → Devices and click Add a device. Then enter the code it shows:",
+                    "On a paired device, open Settings → Devices and click Add a device (on Linux, run cypher pair add). Then enter the code it shows:",
                 ))
                 .when_some(failed, |el, error| el.child(widgets::warning_strip(theme, error)))
                 .child(

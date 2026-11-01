@@ -20,6 +20,7 @@ members runs inside an end-to-end Noise session.
 | iOS (joining, chain sync, client sessions) | `apps/ios/Cypher/Sync/{DeviceTrust,DeviceTrustStore,DeviceRelayClient}.swift`, Account › Paired devices |
 | Shared vectors | `protocol/vectors/device-trust-v1.json` |
 | UI | Settings → Devices → Pairing (`crates/ui/src/settings/device_pairing.rs`) |
+| CLI (headless devices) | `cypher pair`, `pair join`, `pair add` (`apps/cypher/src/pair_cli.rs`) |
 
 ## Keys
 
@@ -62,6 +63,10 @@ The chain lives per signed-in user (`{device_root}/trust/<user>/chain.json`).
    welcome — the entry's sequence number and hash — MACed the same way.
 4. The new device verifies the welcome, fetches the chain, checks that the
    entry at that position adds exactly its own record, and adopts the chain.
+
+A headless device takes either role from its own CLI over local IPC:
+`cypher pair join <code>` and `cypher pair add`, which asks on the terminal
+before approving ([Linux setup](../features/linux-setup.md#pairing)).
 
 The edge relays both messages but never sees the code. It cannot substitute a
 device (the join MAC fails) or a device list (the welcome pins the entry

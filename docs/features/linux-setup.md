@@ -24,6 +24,8 @@ In an interactive SSH shell:
    identity and readiness. Remote success also requires the synced workspace
    connection to be established.
 5. Select this device in Cypher desktop and configure Providers/MCP there.
+6. Optionally pair it with your other devices: `cypher pair` (see
+   [Pairing](#pairing)).
 
 Typical completion:
 
@@ -35,6 +37,7 @@ Service: running · starts at boot
 Updates: automatic (idle windows) · `cypher update` runs one now
 
 In Cypher desktop, select this device and configure Providers / MCP.
+To pair it with your other devices, run `cypher pair`.
 ```
 
 This means the device and Runtime are ready, not that an LLM provider is
@@ -52,6 +55,9 @@ cypher logs               # recent engine logs
 cypher logs --follow      # stream logs
 cypher update             # newest release + Runtime, service restart
 cypher update --check     # report only; exits 1 when something is newer
+cypher pair               # pairing status and the paired devices
+cypher pair join <code>   # join your paired devices with a code from one of them
+cypher pair add           # show a code for another device, then approve it here
 ```
 
 `cypher --version` prints the installed binary's version. `cypher update --check`
@@ -71,6 +77,27 @@ The low-level `headless`, `login`, `logout`, `sync` and `daemon` commands remain
 The guided flow handles stopping and restarting its own idle service around
 authentication; users do not need to chain `daemon stop; login; daemon start`.
 It will not silently switch an already connected device back to local-only.
+
+## Pairing
+
+Paired devices prove who they are to each other with their own keys, and
+calls between them run end to end encrypted ([Device trust](../design/device-trust.md)).
+Pairing is always done on the device itself: the relay refuses these calls,
+so the desktop cannot pair a Linux device remotely, and the CLI is how a
+headless device takes part.
+
+- **Join.** On a paired device, open Settings → Devices → Pairing and click
+  **Add a device** (or run `cypher pair add` on a paired Linux device). Then
+  run `cypher pair join <code>` here. It prints this device's key and waits
+  for approval; the other device shows the same key.
+- **Add.** `cypher pair add` shows a code for the new device, waits up to ten
+  minutes for it, then shows the device's name and key and asks before adding
+  it. It needs a terminal (`ssh -t` for a remote command), because approving
+  is a decision for a person. Anything but `y` declines.
+- Ctrl-C cancels either side. The first device of an account to sync founds
+  the group by itself, so a Linux device that was set up first is already
+  paired and adds the desktop with `cypher pair add`.
+- On Linux, `cypher status` shows a `Pairing:` line for a connected device.
 
 ## Pi and configuration
 
