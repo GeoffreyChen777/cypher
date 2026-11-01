@@ -8,6 +8,7 @@ mod auth_cli;
 mod daemon;
 mod dev_env;
 mod onboarding;
+mod pair_cli;
 mod setup_cli;
 mod sync_cli;
 mod update_cli;
@@ -49,6 +50,12 @@ enum Command {
     /// Live sync introspection from the running engine: per-room connection
     /// state, last pushed-frame/ack ages, rejoin/probe/resync counters.
     Sync,
+    /// Pair this device with your other devices. Without a subcommand, show
+    /// its pairing status.
+    Pair {
+        #[command(subcommand)]
+        command: Option<pair_cli::PairCommand>,
+    },
     /// Manage `cypher headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
@@ -236,6 +243,14 @@ fn main() -> anyhow::Result<()> {
                 .await
                 .map_err(|_| anyhow::anyhow!("engine sync diagnostics timed out"))?
             })
+        }
+        Some(Command::Pair { command }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let result = runtime.block_on(pair_cli::run(engine_config_from_env()?, command));
+            // An interrupted approval prompt may still own a blocking stdin
+            // read; don't wait for a keystroke to exit.
+            runtime.shutdown_timeout(std::time::Duration::from_millis(250));
+            result
         }
         Some(Command::Update { check, force }) => {
             let runtime = tokio::runtime::Runtime::new()?;
