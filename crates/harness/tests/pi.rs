@@ -1972,6 +1972,51 @@ async fn fork_maps_rewritten_prompts_by_position_when_counts_agree() {
     );
 }
 
+/// A prompt whose turn ended before pi recorded it (the dispatch failed or
+/// was interrupted) stays in the transcript with no pi user entry. It no
+/// longer blocks every fork of the chat: forks around it still map, and a
+/// fork at it lands where the next prompt pi did receive would — the leaf,
+/// when none did.
+#[tokio::test]
+async fn fork_sets_aside_a_prompt_that_never_reached_pi() {
+    let cases = [
+        // (prompts, boundary, the fixture's session file)
+        (
+            vec!["first prompt", "second prompt", "never sent"],
+            1,
+            "forked-u2.jsonl",
+        ),
+        (
+            vec!["first prompt", "second prompt", "never sent"],
+            2,
+            "cloned.jsonl",
+        ),
+        (
+            vec!["first prompt", "never sent", "second prompt"],
+            1,
+            "forked-u2.jsonl",
+        ),
+    ];
+    for (prompts, index, expected) in cases {
+        let (harness, root, _dir) = fork_harness();
+        let source = write_source(&root, "source.jsonl", b"{\"seed\":1}\n");
+        let result = harness
+            .fork_session(cypher_proto::PiSessionForkRequest {
+                source_session_path: source,
+                visible_user_prompts: prompts.iter().map(|p| p.to_string()).collect(),
+                boundary: cypher_proto::PiForkBoundary::BeforeUser(index),
+            })
+            .await
+            .unwrap_or_else(|err| panic!("{prompts:?} at {index}: {err}"));
+        assert_eq!(
+            std::path::PathBuf::from(result.session_path.as_deref().unwrap()),
+            expected_fork_path(&root, expected),
+            "{prompts:?} at {index}"
+        );
+        assert!(scratch_leftovers(&root).is_empty());
+    }
+}
+
 /// CloneLeaf accepts pi user entries past the last Cypher prompt: extensions
 /// append user messages of their own (`/goal` continuations). The race of a
 /// prompt sent while the helper runs is the engine's transcript recheck.
