@@ -1,7 +1,8 @@
 //! The HTML preview: a native `WKWebView` over the Files surface, wherever
 //! the preview element paints. gpui draws the whole window into one Metal
 //! layer, so a web page can only be a sibling AppKit view on top of it. Each
-//! paint moves it to the element's bounds, clipped to the pane.
+//! paint moves it to the element's bounds, clipped to the pane. PDFs open in
+//! the same view, in WebKit's own viewer (scrolling, zoom, text selection).
 //!
 //! Hiding it when the element stops painting goes through gpui's element
 //! state: every paint stores a [`Mount`] guard. A cached view's replay
@@ -12,7 +13,8 @@
 //! dialogs suppress every web preview while they show ([`set_suppressed`]),
 //! and the Files surface hides its own while its menu is open.
 //!
-//! macOS only: elsewhere HTML opens as source ([`AVAILABLE`]). Chat
+//! macOS only: elsewhere HTML opens as source and a PDF on the info card
+//! ([`AVAILABLE`]). Chat
 //! artifacts ([`crate::artifacts`]) show in the same view.
 
 use std::rc::Rc;
@@ -34,6 +36,8 @@ pub enum Source<'a> {
         html: &'a str,
         base: Option<&'a str>,
     },
+    /// A document's bytes and MIME type (another device's PDF).
+    Data { bytes: &'a [u8], mime: &'a str },
 }
 
 /// One Files surface's web view (created hidden; shown by painting
@@ -55,6 +59,7 @@ impl WebView {
             match source {
                 Source::File { path, root } => self.inner.load_file(path, root),
                 Source::Text { html, base } => self.inner.load(html, base),
+                Source::Data { bytes, mime } => self.inner.load_data(bytes, mime),
             }
         }
     }
@@ -333,6 +338,28 @@ mod native {
                     msg_send![self.web, loadFileURL: url allowingReadAccessToURL: access];
                 let _: () = msg_send![file, release];
                 let _: () = msg_send![folder, release];
+            }
+        }
+
+        pub(super) fn load_data(&self, bytes: &[u8], mime: &str) {
+            unsafe {
+                let data: *mut Object =
+                    msg_send![class!(NSData), dataWithBytes: bytes.as_ptr() length: bytes.len()];
+                let mime = ns_string(mime);
+                let encoding = ns_string("utf-8");
+                // Every argument is nonnull; nothing resolves against it.
+                let blank = ns_string("about:blank");
+                let base: *mut Object = msg_send![class!(NSURL), URLWithString: blank];
+                let _: *mut Object = msg_send![
+                    self.web,
+                    loadData: data
+                    MIMEType: mime
+                    characterEncodingName: encoding
+                    baseURL: base
+                ];
+                let _: () = msg_send![mime, release];
+                let _: () = msg_send![encoding, release];
+                let _: () = msg_send![blank, release];
             }
         }
 
@@ -685,6 +712,8 @@ mod native {
         pub(super) fn load(&self, _html: &str, _base: Option<&str>) {}
 
         pub(super) fn load_file(&self, _path: &str, _root: &str) {}
+
+        pub(super) fn load_data(&self, _bytes: &[u8], _mime: &str) {}
 
         pub(super) fn place(
             &self,

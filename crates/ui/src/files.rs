@@ -5,7 +5,7 @@
 //! Finder imports, a go-to-file filter and git status marks; beside it the
 //! picked file: a syntax-colored [`editor::CodeEditor`] saving back through
 //! `WriteWorkspaceFile`, rendered Markdown/SVG/HTML previews, an image
-//! viewer, or an info card and hex dump for other binaries.
+//! viewer, a PDF viewer, or an info card and hex dump for other binaries.
 //!
 //! Everything is fetched from the chat's HOST device (`targetDeviceId` relay
 //! forwarding, exactly like the diff pane): the tree is that checkout's, not
@@ -21,7 +21,9 @@
 //! renderer, fenced code highlighted in the background); a header toggle
 //! flips to the source editor and back. The preview re-parses lazily — only
 //! when it is shown and the text changed since the last parse. HTML files
-//! open the same way, as a live page in a native web view (macOS).
+//! open the same way, as a live page in a native web view (macOS). PDFs open
+//! in that view too: read from disk when the checkout is on this machine,
+//! fetched as bytes from another device's.
 
 pub mod editor;
 pub mod links;
@@ -191,7 +193,7 @@ struct OpenFile {
     /// size.
     svg: Option<Arc<Image>>,
     svg_dims: Option<(u32, u32)>,
-    /// Images, and binaries' hex dumps.
+    /// Images, other devices' PDFs, and binaries' hex dumps.
     media: Media,
     zoom: Zoom,
     /// Binaries: the hex dump instead of the info card.
@@ -762,17 +764,20 @@ impl FilesPanel {
                     _sub: sub,
                 },
             );
-            if !matches!(kind, FileKind::Image(_)) {
-                self.load_file(path.clone(), cx);
+            match kind {
+                FileKind::Image(_) => {}
+                FileKind::Pdf => self.load_pdf(path.clone(), cx),
+                _ => self.load_file(path.clone(), cx),
             }
         } else if let Some(file) = self.open_files.get_mut(&path)
             && std::mem::take(&mut file.stale)
             && !file.dirty
         {
-            if matches!(file.kind, FileKind::Image(_)) {
-                file.media = Media::Idle;
-            } else {
-                self.load_file(path.clone(), cx);
+            let kind = file.kind;
+            match kind {
+                FileKind::Image(_) => file.media = Media::Idle,
+                FileKind::Pdf => self.load_pdf(path.clone(), cx),
+                _ => self.load_file(path.clone(), cx),
             }
         }
         if let Some(file) = self.open_files.get(&path)
@@ -797,10 +802,8 @@ impl FilesPanel {
                 }
                 // Not loaded yet: focus once it is (if it is text).
                 _ => {
-                    self.focus_editor_pending = !matches!(
-                        self.open_files.get(&path).map(|f| f.kind),
-                        Some(FileKind::Image(_))
-                    )
+                    self.focus_editor_pending =
+                        !self.open_files.get(&path).is_some_and(|f| f.kind.media())
                 }
             }
         }
@@ -1011,6 +1014,73 @@ impl FilesPanel {
         cx.notify();
     }
 
+    /// PDFs: one on this machine loads from disk in the page view, so a
+    /// (re)load only moves the page's key on; another device's is fetched as
+    /// bytes first.
+    fn load_pdf(&mut self, path: String, cx: &mut Context<Self>) {
+        let local = self.is_local();
+        let remote = if local {
+            None
+        } else {
+            self.engine_and_context(cx)
+        };
+        let generation = self.generation;
+        let Some(file) = self.open_files.get_mut(&path) else {
+            return;
+        };
+        file.preview_gen += 1;
+        let Some((engine, context)) = remote else {
+            cx.notify();
+            return;
+        };
+        file.media = Media::Loading {
+            received: 0,
+            total: 0,
+        };
+        let params = context.params(&path);
+        let task_path = path.clone();
+        file._media_task = Some(cx.spawn(async move |this, cx| {
+            let progress_this = this.clone();
+            let mut progress_cx = cx.clone();
+            let progress_path = task_path.clone();
+            let read = preview::read_bytes(
+                &engine,
+                params,
+                preview::PDF_LIMIT,
+                false,
+                move |received, total| {
+                    progress_this
+                        .update(&mut progress_cx, |this, cx| {
+                            if let Some(file) = this.open_files.get_mut(&progress_path) {
+                                file.media = Media::Loading { received, total };
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                },
+            )
+            .await;
+            this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                let Some(file) = this.open_files.get_mut(&task_path) else {
+                    return;
+                };
+                match read {
+                    Ok((bytes, total)) => {
+                        file.bytes = total;
+                        file.media = Media::Pdf(Arc::new(bytes));
+                    }
+                    Err(error) => file.media = Media::Failed(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
     /// Track decoded images; past [`MAX_IMAGES`] the oldest hidden one is
     /// released (it reloads if shown again).
     fn note_image(&mut self, path: String) {
@@ -1110,6 +1180,7 @@ impl FilesPanel {
         }
         match file.kind {
             FileKind::Image(_) => self.load_image(path.to_string(), cx),
+            FileKind::Pdf => self.load_pdf(path.to_string(), cx),
             _ => {
                 if file.hex {
                     file.media = Media::Idle;
@@ -1321,7 +1392,7 @@ impl FilesPanel {
                 file.editor
                     .update(cx, |editor, cx| editor.set_path(&new, cx));
                 let kind = FileKind::for_path(&new);
-                if kind != file.kind && !matches!(file.kind, FileKind::Image(_)) {
+                if kind != file.kind && !file.kind.media() {
                     file.preview = kind.previews();
                     file.preview_stale = true;
                     file.kind = kind;
@@ -1852,14 +1923,14 @@ impl FilesPanel {
         let kind = file.map(|f| f.kind);
         let binary = file.is_some_and(|f| f.binary);
         let image = matches!(kind, Some(FileKind::Image(_)));
-        let read_only = file.is_some_and(|f| f.editor.read(cx).read_only()) && !image && !binary;
+        let media = kind.is_some_and(FileKind::media);
+        let read_only = file.is_some_and(|f| f.editor.read(cx).read_only()) && !media && !binary;
         let error = file.and_then(|f| f.error.clone());
         let preview = file.map(|f| f.preview);
         let zoom = file.map(|f| f.zoom);
         let hex = file.is_some_and(|f| f.hex);
-        let shows_text = file.is_some_and(|f| {
-            !f.binary && !matches!(f.kind, FileKind::Image(_)) && !(f.preview && f.kind.previews())
-        });
+        let shows_text =
+            file.is_some_and(|f| !f.binary && !f.kind.media() && !(f.preview && f.kind.previews()));
         let position = shows_text
             .then(|| file.map(|f| f.editor.read(cx).caret_position()))
             .flatten();
@@ -2344,10 +2415,9 @@ impl FilesPanel {
             && (file.clean.is_some() || file.error.is_some() || file.binary)
         {
             self.focus_editor_pending = false;
-            // Only into a shown editor — never a preview, image or binary.
-            let editing = !file.binary
-                && !matches!(file.kind, FileKind::Image(_))
-                && !(file.preview && file.kind.previews());
+            // Only into a shown editor — never a preview, image, PDF or binary.
+            let editing =
+                !file.binary && !file.kind.media() && !(file.preview && file.kind.previews());
             if editing {
                 let handle = file.editor.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
@@ -2356,8 +2426,9 @@ impl FilesPanel {
         let local = self.is_local();
         let modified = self.entry_meta(&path).and_then(|e| e.modified_ms);
         // An HTML preview of a file on this machine reads it from disk (or
-        // resolves unsaved text beside it), so its relative files load.
-        let html_file = local.then(|| (self.absolute_path(&path), self.absolute_path("")));
+        // resolves unsaved text beside it), so its relative files load. A PDF
+        // there loads from disk too.
+        let on_disk = local.then(|| (self.absolute_path(&path), self.absolute_path("")));
         let header_right = self.header_right;
         let menu_open = self.menu.is_open() || self.confirm.is_some();
         let generation = self.generation;
@@ -2390,6 +2461,60 @@ impl FilesPanel {
                 ),
                 _ => centered_note("Loading…".into(), &theme),
             };
+        }
+        if file.kind == FileKind::Pdf {
+            let source = match (&on_disk, &file.media) {
+                (Some((absolute, root)), _) => web_view::Source::File {
+                    path: absolute,
+                    root,
+                },
+                (None, Media::Pdf(bytes)) => web_view::Source::Data {
+                    bytes: bytes.as_slice(),
+                    mime: "application/pdf",
+                },
+                (None, Media::Loading { received, total }) if *total > 0 => {
+                    return centered_note(
+                        format!(
+                            "Loading… {} of {}",
+                            human_bytes(*received),
+                            human_bytes(*total)
+                        )
+                        .into(),
+                        &theme,
+                    );
+                }
+                (None, Media::Failed(error)) => {
+                    return self.render_info(
+                        &path,
+                        file.bytes,
+                        modified,
+                        Some(error.clone()),
+                        local,
+                        &theme,
+                        cx,
+                    );
+                }
+                _ => return centered_note("Loading…".into(), &theme),
+            };
+            let key = {
+                use std::hash::{Hash as _, Hasher as _};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                (
+                    "pdf",
+                    generation,
+                    &path,
+                    file.preview_gen,
+                    on_disk.is_some(),
+                )
+                    .hash(&mut hasher);
+                hasher.finish()
+            };
+            let web = self.web.get_or_insert_with(web_view::WebView::new);
+            web.load(key, source);
+            return preview::render_page(
+                web.element(format!("files-web:{panel}").into(), menu_open),
+                header_right,
+            );
         }
         if file.loading && file.clean.is_none() {
             return centered_note("Loading…".into(), &theme);
@@ -2481,17 +2606,17 @@ impl FilesPanel {
                     .into_any_element()
             }
             (true, FileKind::Html, _, _) => {
-                let from_disk = html_file.is_some() && !file.dirty;
+                let from_disk = on_disk.is_some() && !file.dirty;
                 let key = {
                     use std::hash::{Hash as _, Hasher as _};
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
                     (generation, &path, file.preview_gen, from_disk).hash(&mut hasher);
                     hasher.finish()
                 };
-                let base = html_file
+                let base = on_disk
                     .as_ref()
                     .map(|(absolute, _)| web_view::base_dir(absolute));
-                let source = match &html_file {
+                let source = match &on_disk {
                     Some((absolute, root)) if from_disk => web_view::Source::File {
                         path: absolute,
                         root,

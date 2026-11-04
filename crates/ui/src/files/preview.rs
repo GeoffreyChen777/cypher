@@ -1,7 +1,7 @@
 //! What the Files surface shows for a file that is not plain text: images
 //! (fetched as bytes through `ReadWorkspaceFileChunk`), SVG renders, an info
 //! card for other binaries, and a hex dump of a binary's head. (HTML pages
-//! render in [`super::web_view`].)
+//! and PDFs render in [`super::web_view`].)
 
 use std::sync::Arc;
 
@@ -16,6 +16,9 @@ use crate::kit::theme::{MonoStyled as _, Theme};
 
 /// Images larger than this are not fetched for a preview.
 pub(super) const IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
+/// Another device's PDF larger than this is not fetched for a preview (one
+/// on this machine loads from disk, at any size).
+pub(super) const PDF_LIMIT: u64 = 64 * 1024 * 1024;
 /// The hex view shows a binary's first bytes only.
 pub(super) const HEX_LIMIT: usize = 64 * 1024;
 pub(super) const HEX_ROW_HEIGHT: f32 = 18.0;
@@ -31,6 +34,9 @@ pub(super) enum FileKind {
     Markdown,
     /// Text that renders as a web page.
     Html,
+    /// A document the page view renders (macOS; elsewhere it is
+    /// [`Self::Other`] and opens on the info card).
+    Pdf,
     /// Text, or a binary the info card describes.
     Other,
 }
@@ -47,6 +53,7 @@ impl FileKind {
             Some("ico") => Self::Image(ImageFormat::Ico),
             Some("svg") => Self::Svg,
             Some("html" | "htm" | "xhtml") => Self::Html,
+            Some("pdf") if super::web_view::AVAILABLE => Self::Pdf,
             _ if super::is_markdown(path) => Self::Markdown,
             _ => Self::Other,
         }
@@ -57,8 +64,14 @@ impl FileKind {
         match self {
             Self::Svg | Self::Markdown => true,
             Self::Html => super::web_view::AVAILABLE,
-            Self::Image(_) | Self::Other => false,
+            Self::Image(_) | Self::Pdf | Self::Other => false,
         }
+    }
+
+    /// Opens from its bytes (or, for a PDF on this machine, from disk in the
+    /// page view), never as text in the editor.
+    pub(super) fn media(self) -> bool {
+        matches!(self, Self::Image(_) | Self::Pdf)
     }
 }
 
@@ -112,6 +125,8 @@ pub(super) enum Media {
         bytes: Arc<Vec<u8>>,
         total: u64,
     },
+    /// Another device's PDF, for the page view.
+    Pdf(Arc<Vec<u8>>),
     Failed(SharedString),
 }
 
@@ -558,6 +573,16 @@ mod tests {
         assert_eq!(FileKind::for_path("page.htm"), FileKind::Html);
         assert_eq!(FileKind::for_path("main.rs"), FileKind::Other);
         assert_eq!(FileKind::for_path(".png"), FileKind::Other);
+        assert_eq!(
+            FileKind::for_path("paper/Main.PDF"),
+            if super::super::web_view::AVAILABLE {
+                FileKind::Pdf
+            } else {
+                FileKind::Other
+            }
+        );
+        assert!(FileKind::Pdf.media() && !FileKind::Pdf.previews());
+        assert!(!FileKind::Html.media() && !FileKind::Other.media());
         assert_eq!(kind_label("doc.PDF"), "PDF document");
         assert_eq!(kind_label("blob"), "Binary file");
         assert!(FileKind::Svg.previews() && !FileKind::Other.previews());

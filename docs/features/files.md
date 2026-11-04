@@ -45,6 +45,10 @@ Narrow panes show one at a time.
 - **Markdown** and **SVG** open rendered, with a Source/Preview toggle.
 - **Images** (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO) show fitted to the pane or
   at 100%, with their format, pixel size and file size.
+- **PDFs** open in the pane in WebKit's viewer (scroll, pinch to zoom, select
+  and copy text) on macOS. A checkout on this machine is read straight from
+  disk, at any size; another device's PDF is fetched first, up to 64 MiB.
+  Refresh reloads it after the agent rebuilds it.
 - **Other binaries** get an info card (type, size, modification time) with
   Show Hex, Open with Default App and Reveal in Finder; Hex shows the first
   64 KiB.
