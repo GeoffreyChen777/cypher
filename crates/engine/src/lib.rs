@@ -38,7 +38,7 @@ pub use git::diff_sync::{
     capture_turn_diff, merge_base, read_diff_file_text, snapshot_tree, working_diff_base,
 };
 pub use git::repos::{Repos, worktree_branch_from_title};
-pub use host::doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
+pub use host::doc_host::{ChatDocHandle, CommandTrust, DocHost, DocHostConfig, EdgeConfig};
 pub use host::spaces::SpacesSync;
 pub use host::workspace_host::{DEFAULT_ORG_ID, DEFAULT_USER_ID, WorkspaceHost};
 pub use instance_lock::InstanceLock;

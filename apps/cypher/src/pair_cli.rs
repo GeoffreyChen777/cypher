@@ -1,4 +1,4 @@
-//! `cypher pair`: Settings → Devices → Pairing for a device without the
+//! `cypher pair`: Settings → Devices for a device without the
 //! desktop UI, such as a headless Linux engine. Every call goes to this
 //! device's own engine over IPC; the relay refuses them, so no other device
 //! can pair this one remotely.
@@ -29,7 +29,7 @@ pub enum PairCommand {
 /// a status that hasn't.
 const FIRST_SYNC: Duration = Duration::from_secs(10);
 
-const JOIN_HINT: &str = "On a paired device, open Settings → Devices → Pairing and click Add a device. Then run `cypher pair join <code>` here.";
+const JOIN_HINT: &str = "On a paired device, open Settings → Devices and click Add a device. Then run `cypher pair join <code>` here.";
 
 pub async fn run(config: EngineConfig, command: Option<PairCommand>) -> anyhow::Result<()> {
     if matches!(command, Some(PairCommand::Add)) && !std::io::stdin().is_terminal() {
@@ -147,7 +147,7 @@ where
     else {
         bail!("The engine didn't show a code. Run `cypher pair add` again.");
     };
-    println!("On the new device, open Settings → Devices → Pairing and enter this code:");
+    println!("On the new device, open Settings → Devices and enter this code:");
     println!("\n    {code}\n");
     println!("On a Linux device, run: cypher pair join {code}");
     println!(
@@ -371,7 +371,12 @@ fn members_text(members: &[TrustMember]) -> String {
         } else {
             format!("key {}", member.fingerprint)
         };
-        out.push_str(&format!("{label:<10}{name} · {detail}\n"));
+        let access = if member.receive_only {
+            " · receive-only"
+        } else {
+            ""
+        };
+        out.push_str(&format!("{label:<10}{name} · {detail}{access}\n"));
     }
     out
 }
@@ -386,6 +391,7 @@ mod tests {
             name: name.into(),
             fingerprint: format!("{name}-fp"),
             is_self,
+            receive_only: false,
         }
     }
 
@@ -400,6 +406,7 @@ mod tests {
                 Vec::new()
             },
             require_paired: false,
+            receive_only: false,
             pairing,
             conflict: false,
             error: None,

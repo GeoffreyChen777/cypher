@@ -205,6 +205,28 @@ struct DocHostInner {
     /// Shared client for sidecar blob fetches (30s timeout, uploads.rs
     /// discipline — diff_sync's untimed client hung on dead links).
     http: reqwest::Client,
+    /// Device trust for commands (see `set_command_trust`); unset without
+    /// it, when commands are neither signed nor checked.
+    command_trust: Mutex<Option<Arc<dyn CommandTrust>>>,
+}
+
+/// Device trust as the command plane uses it (the engine's `device_trust`
+/// implements it): signing the commands this device queues, and deciding on
+/// each command before the host runs it.
+#[async_trait::async_trait]
+pub trait CommandTrust: Send + Sync + 'static {
+    /// Sign `bytes` with this device's identity key; `None` while this device
+    /// isn't paired.
+    fn sign(&self, bytes: &[u8]) -> Option<[u8; 64]>;
+    /// Whether `auth` carries a valid signature by this device's own key.
+    /// Only such a command may be signed again under this device's name (a
+    /// retry, a re-queue): anything else could be someone else's payload.
+    fn is_own_signature(&self, auth: &cypher_doc::CommandAuth) -> bool;
+    /// Whether `device_id` is a receive-only member of the group.
+    fn is_receive_only(&self, device_id: &str) -> bool;
+    /// Whether this host may run a command `issued_by` queued, signed as
+    /// `auth` says; `Err` is the reason the command resolves with.
+    async fn check(&self, issued_by: &str, auth: &cypher_doc::CommandAuth) -> Result<(), String>;
 }
 
 #[derive(Clone)]
@@ -501,6 +523,7 @@ impl DocHost {
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
                     .unwrap_or_else(|_| reqwest::Client::new()),
+                command_trust: Mutex::new(None),
             }),
         }
     }

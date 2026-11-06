@@ -4,6 +4,65 @@
 use super::*;
 
 impl DocHost {
+    /// Sign the commands this device queues and check every command before
+    /// it runs (see `crate::device_trust`). Without it, commands are neither
+    /// signed nor checked.
+    pub fn set_command_trust(&self, trust: Arc<dyn CommandTrust>) {
+        *lock(&self.inner.command_trust) = Some(trust);
+    }
+
+    pub(super) fn command_trust(&self) -> Option<Arc<dyn CommandTrust>> {
+        lock(&self.inner.command_trust).clone()
+    }
+
+    fn is_receive_only(&self, device_id: &str) -> bool {
+        self.command_trust()
+            .is_some_and(|trust| trust.is_receive_only(device_id))
+    }
+
+    /// Append `entry` to `handle`'s ledger, signed when this device can and
+    /// `sign` says it may.
+    fn append_command(
+        &self,
+        handle: &ChatDocHandle,
+        entry: &SessionCommandEntry,
+        sign: bool,
+    ) -> Result<(), EngineError> {
+        let trust = self.command_trust().filter(|_| sign);
+        handle
+            .doc
+            .queue_signed_command(&handle.chat_id, entry, |bytes| {
+                trust.as_ref().and_then(|trust| trust.sign(bytes))
+            })?;
+        Ok(())
+    }
+
+    /// Whether a copy of a command signed as `auth` may carry this device's
+    /// signature: only when the original carried it.
+    pub(super) fn may_resign(&self, auth: &cypher_doc::CommandAuth) -> bool {
+        self.command_trust()
+            .is_some_and(|trust| trust.is_own_signature(auth))
+    }
+
+    /// Refuse to queue a command on a receive-only device for a chat another
+    /// device hosts.
+    fn check_may_command(&self, chat_id: &str) -> Result<(), EngineError> {
+        let device_id = &self.inner.config.device_id;
+        if !self.is_receive_only(device_id) {
+            return Ok(());
+        }
+        let hosted_elsewhere = self
+            .workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+            .is_some_and(|chat| chat.device_id != *device_id);
+        if hosted_elsewhere {
+            return Err(EngineError::Other(
+                "This device is receive-only: it can't control chats on your other devices.".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Host-only outcome write (ledger rule 2).
     pub(super) fn resolve_command(
         &self,
@@ -501,6 +560,7 @@ impl DocHost {
         chat_id: &str,
         payload: SessionCommandPayload,
     ) -> Result<String, EngineError> {
+        self.check_may_command(chat_id)?;
         let handle = self.open(chat_id)?;
         let id = new_id();
         let now = now_ms();
@@ -512,19 +572,23 @@ impl DocHost {
             payload,
             SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
         );
-        handle.doc.queue_command(&SessionCommandEntry {
-            id: id.clone(),
-            payload,
-            issued_by: self.inner.config.device_id.clone(),
-            issued_at: now,
-            based_on,
-            expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
-            status: SessionCommandStatus::Pending,
-            resolution: None,
-            // The first attempt IS the original send: the UI uses sent_at as
-            // the stable message-send clock across retries.
-            sent_at: Some(now),
-        })?;
+        self.append_command(
+            &handle,
+            &SessionCommandEntry {
+                id: id.clone(),
+                payload,
+                issued_by: self.inner.config.device_id.clone(),
+                issued_at: now,
+                based_on,
+                expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
+                status: SessionCommandStatus::Pending,
+                resolution: None,
+                // The first attempt IS the original send: the UI uses sent_at as
+                // the stable message-send clock across retries.
+                sent_at: Some(now),
+            },
+            true,
+        )?;
         // Sending a message revives an archived chat: the user is acting in it
         // again, so the LWW row flips back to active on every device. Best-
         // effort — the command itself is durable regardless.
@@ -555,13 +619,16 @@ impl DocHost {
     /// The retry inherits the ORIGINAL `sent_at` (the user's send clock) —
     /// only `issued_at` moves forward.
     pub fn retry_command(&self, chat_id: &str, command_id: &str) -> Result<String, EngineError> {
+        self.check_may_command(chat_id)?;
         let handle = self.open(chat_id)?;
-        let commands = handle.doc.read_commands()?;
-        let old = commands
+        let signed = handle.doc.read_commands_with_auth(&handle.chat_id)?;
+        let (old, old_auth) = signed
             .iter()
-            .find(|command| command.id == command_id)
+            .find(|(command, _)| command.id == command_id)
             .cloned()
             .ok_or_else(|| EngineError::Other("command not found".into()))?;
+        let commands: Vec<SessionCommandEntry> =
+            signed.into_iter().map(|(command, _)| command).collect();
         if !matches!(
             old.status,
             SessionCommandStatus::Rejected | SessionCommandStatus::Expired
@@ -613,7 +680,10 @@ impl DocHost {
             sent_at: old.sent_at.or(Some(old.issued_at)),
         };
         let retry_id = retry.id.clone();
-        handle.doc.queue_command(&retry)?;
+        // A command this device didn't sign — another device's, or one
+        // planted in the doc — is retried unsigned: Retry must not lend this
+        // device's signature to someone else's payload.
+        self.append_command(&handle, &retry, self.may_resign(&old_auth))?;
         self.nudge_remote_host(chat_id);
         Ok(retry_id)
     }
@@ -699,13 +769,15 @@ impl DocHost {
         // Entries this pass decided to leave alone (processed dedupe hits).
         let mut skipped: HashSet<String> = HashSet::new();
         loop {
-            let commands = match handle.doc.read_commands() {
-                Ok(commands) => commands,
+            let signed = match handle.doc.read_commands_with_auth(&handle.chat_id) {
+                Ok(signed) => signed,
                 Err(err) => {
                     tracing::warn!(chat = %handle.chat_id, error = %err, "command read failed");
                     return;
                 }
             };
+            let commands: Vec<SessionCommandEntry> =
+                signed.iter().map(|(entry, _)| entry.clone()).collect();
             let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
 
             // Dead-command recovery: a previous process may have committed
@@ -762,9 +834,10 @@ impl DocHost {
                 skipped.insert(command_id);
             }
 
-            let Some(entry) = commands
+            // The entry and its signature come from the same list item.
+            let Some((entry, auth)) = signed
                 .iter()
-                .find(|c| {
+                .find(|(c, _)| {
                     c.status == SessionCommandStatus::Pending
                         && !skipped.contains(&c.id)
                         && !is_processed(&c.id)
@@ -846,9 +919,25 @@ impl DocHost {
                     skipped.insert(entry.id.clone());
                 }
                 CommandDisposition::Execute => {
-                    let (status, resolution) = match self.execute(&sessions, handle, &entry).await {
-                        Ok(outcome) => outcome,
-                        Err(err) => (SessionCommandStatus::Rejected, Some(err.to_string())),
+                    let checked = match self.command_trust() {
+                        Some(trust) => trust.check(&entry.issued_by, &auth).await,
+                        None => Ok(()),
+                    };
+                    let (status, resolution) = match checked {
+                        Err(why) => {
+                            tracing::warn!(
+                                chat = %handle.chat_id,
+                                command = %entry.id,
+                                device = %entry.issued_by,
+                                reason = %why,
+                                "rejecting a command device trust refused"
+                            );
+                            (SessionCommandStatus::Rejected, Some(why))
+                        }
+                        Ok(()) => match self.execute(&sessions, handle, &entry).await {
+                            Ok(outcome) => outcome,
+                            Err(err) => (SessionCommandStatus::Rejected, Some(err.to_string())),
+                        },
                     };
                     self.resolve_command(handle, &entry.id, status, resolution.as_deref());
                 }

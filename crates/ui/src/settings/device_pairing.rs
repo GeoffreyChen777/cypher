@@ -1,7 +1,8 @@
-//! Settings → Devices → Pairing: this device's place in the account's trust
-//! group (the engine's `device_trust`). A paired device shows a code to add
-//! another one; an unpaired device enters that code to join. The group's
-//! "Only paired devices" policy lives here too. Every call goes to this
+//! Settings → Devices, the pairing half: this device's place in the
+//! account's trust group (the engine's `device_trust`). It watches the trust
+//! status the device list reads, runs the pairing flows above the list (show
+//! a code and approve, or enter one to join), and owns the dialogs for
+//! unpairing a device and making one receive-only. Every call goes to this
 //! device's own engine: the relay refuses these methods.
 
 use std::time::Duration;
@@ -10,6 +11,7 @@ use cypher_engine::device_trust::{PairingStatus, TrustMember, TrustState, TrustS
 use cypher_rpc::methods;
 use gpui::{AnyElement, Context, Entity, SharedString, Subscription, Task, div, prelude::*, px};
 
+use crate::kit::copy_code::{self, CodeSize};
 use crate::kit::popover;
 use crate::kit::theme::{MonoStyled, Theme};
 use crate::settings::widgets;
@@ -18,12 +20,25 @@ use crate::widgets::text_input::{TextInput, TextInputEvent};
 
 /// The policy switch's caption. Pure so the wording is unit-tested.
 pub fn policy_copy() -> &'static str {
-    "Your devices accept connections only from each other, over an encrypted channel the server can't read. \
-     Devices that aren't paired can't reach them — including the iPhone app until it supports pairing. \
+    "Your devices accept connections and chat messages only from each other: connections over an encrypted channel the server can't read, \
+     messages signed by the device that sent them. Devices that aren't paired can't reach them — including an iPhone app that isn't paired or up to date. \
      Applies to every paired device."
 }
 
-/// The status line for this device. Pure.
+/// Why the policy switch is locked, if it is. Pure.
+pub fn policy_lock_copy(status: &TrustStatus) -> Option<&'static str> {
+    if status.receive_only {
+        Some("Only a device with full control can change this.")
+    } else if status.require_paired && status.members.iter().any(|m| m.receive_only) {
+        Some(
+            "Stays on while a device is receive-only: a device that isn't paired can't be told apart from it.",
+        )
+    } else {
+        None
+    }
+}
+
+/// The status line for this device when it isn't paired. Pure.
 pub fn state_copy(state: TrustState) -> &'static str {
     match state {
         TrustState::Paired => "This device is paired.",
@@ -31,6 +46,25 @@ pub fn state_copy(state: TrustState) -> &'static str {
         TrustState::Removed => "This device was removed from your paired devices.",
         TrustState::Unknown => "Checking pairing…",
     }
+}
+
+/// The banner on a receive-only device. Pure.
+pub fn receive_only_banner() -> &'static str {
+    "This device is receive-only. Your other devices can control it, but it can't control them, add or remove devices, or change these settings. A device with full control can change this."
+}
+
+/// The receive-only confirmation's body; `turns_on_policy` when the group
+/// still lets unpaired devices in. Pure.
+pub fn receive_only_copy(name: &str, turns_on_policy: bool) -> String {
+    let mut copy = format!(
+        "Your other devices can still control \u{201c}{name}\u{201d}: open its sessions and send it messages. It won't be able to control them, add or remove devices, or change these settings."
+    );
+    if turns_on_policy {
+        copy.push_str(
+            " This also turns on Only paired devices, so devices that aren't paired — including an iPhone app without pairing — can no longer reach your devices.",
+        );
+    }
+    copy
 }
 
 pub struct PairingSection {
@@ -41,7 +75,8 @@ pub struct PairingSection {
     error: Option<SharedString>,
     busy: bool,
     code_input: Entity<TextInput>,
-    confirm_remove: Option<TrustMember>,
+    confirm_unpair: Option<TrustMember>,
+    confirm_receive_only: Option<TrustMember>,
     watch: Option<Task<()>>,
     action: Option<Task<()>>,
     _events: Subscription,
@@ -51,6 +86,11 @@ impl PairingSection {
     /// The latest status from the engine, once one has arrived.
     pub fn status(&self) -> Option<&TrustStatus> {
         self.status.as_ref()
+    }
+
+    /// A pairing call is in flight.
+    pub fn busy(&self) -> bool {
+        self.busy
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
@@ -67,7 +107,8 @@ impl PairingSection {
             error: None,
             busy: false,
             code_input,
-            confirm_remove: None,
+            confirm_unpair: None,
+            confirm_receive_only: None,
             watch: None,
             action: None,
             _events: events,
@@ -159,225 +200,179 @@ impl PairingSection {
         );
     }
 
-    fn render_body(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    // -- actions the device list asks for ------------------------------------
+
+    /// Show a code for a new device to enter.
+    pub fn start_invite(&mut self, cx: &mut Context<Self>) {
+        if !self.busy {
+            self.call(methods::START_DEVICE_PAIRING, serde_json::json!({}), cx);
+        }
+    }
+
+    /// Ask before unpairing `member`.
+    pub fn ask_unpair(&mut self, member: TrustMember, cx: &mut Context<Self>) {
+        self.confirm_receive_only = None;
+        self.confirm_unpair = Some(member);
+        cx.notify();
+    }
+
+    /// Give `member` full control back, or ask before making it receive-only.
+    pub fn set_access(&mut self, member: TrustMember, receive_only: bool, cx: &mut Context<Self>) {
+        if self.busy || member.receive_only == receive_only {
+            return;
+        }
+        if receive_only {
+            self.confirm_unpair = None;
+            self.confirm_receive_only = Some(member);
+            cx.notify();
+            return;
+        }
+        self.call(
+            methods::SET_DEVICE_RECEIVE_ONLY,
+            serde_json::json!({ "deviceId": member.id, "receiveOnly": false }),
+            cx,
+        );
+    }
+
+    /// "Only paired devices", for the whole group.
+    pub fn set_require_paired(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if !self.busy {
+            self.call(
+                methods::SET_REQUIRE_PAIRED_DEVICES,
+                serde_json::json!({ "enabled": enabled }),
+                cx,
+            );
+        }
+    }
+
+    // -- the panel above the device list ---------------------------------------
+
+    fn render_panel(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
         if let Some(message) = &self.unavailable {
-            return caption(theme, format!("Pairing isn't available: {message}"))
-                .into_any_element();
+            return Some(caption(
+                theme,
+                format!("Pairing isn't available: {message}"),
+            ));
         }
         let Some(status) = self.status.clone() else {
-            return caption(theme, "Checking pairing…").into_any_element();
+            return Some(caption(theme, "Checking pairing…"));
         };
-        let mut body = div().flex().flex_col().gap(px(12.0)).child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(widgets::row_title(theme, state_copy(status.state)))
-                .child(
-                    div()
-                        .mono(theme)
-                        .text_size(px(11.0))
-                        .text_color(theme.text_muted.opacity(0.7))
-                        .child(SharedString::from(format!("key {}", status.fingerprint))),
-                ),
-        );
+        let mut panel = div().flex().flex_col().gap(px(8.0));
+        let mut any = false;
         if status.conflict {
-            body = body.child(widgets::warning_strip(
+            any = true;
+            panel = panel.child(widgets::warning_strip(
                 theme,
                 "The server's list of paired devices disagrees with this device's copy. This device keeps its own copy. If you didn't change your devices, someone may be tampering with the server.",
             ));
         }
-        if let Some(error) = &status.error
-            && status.state == TrustState::Unknown
-        {
-            body = body.child(caption(
-                theme,
-                format!("Couldn't reach the server: {error}"),
-            ));
+        if status.state == TrustState::Paired && status.receive_only {
+            any = true;
+            panel = panel.child(widgets::warning_strip(theme, receive_only_banner()));
         }
-        let body = match status.state {
-            TrustState::Paired => self.paired_body(body, &status, theme, cx),
-            TrustState::Unpaired | TrustState::Removed => self.join_body(body, &status, theme, cx),
-            TrustState::Unknown => body,
+        let flow = match status.state {
+            TrustState::Paired => self.invite_flow(&status, theme, cx),
+            TrustState::Unpaired | TrustState::Removed => Some(self.join_flow(&status, theme, cx)),
+            TrustState::Unknown => Some(caption(
+                theme,
+                match &status.error {
+                    Some(error) => format!("Checking pairing… Couldn't reach the server: {error}"),
+                    None => "Checking pairing…".to_string(),
+                },
+            )),
         };
-        body.into_any_element()
+        if let Some(flow) = flow {
+            any = true;
+            panel = panel.child(flow);
+        }
+        any.then_some(panel)
     }
 
-    fn paired_body(
+    /// Showing a code, or approving the device that entered it.
+    fn invite_flow(
         &mut self,
-        mut body: gpui::Div,
         status: &TrustStatus,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        match &status.pairing {
+    ) -> Option<gpui::Div> {
+        let body = match &status.pairing {
             Some(PairingStatus::Inviting {
                 code,
                 expires_at,
                 request: None,
-            }) => {
-                body = body.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .child(caption(
-                            theme,
-                            "On the new device, open Settings → Devices and enter this code:",
-                        ))
-                        .child(
-                            div()
-                                .mono(theme)
-                                .text_size(px(20.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme.text)
-                                .child(SharedString::from(code.clone())),
-                        )
-                        .child(caption(
-                            theme,
-                            format!("On a Linux device, run cypher pair join {code}"),
-                        ))
-                        .child(caption(
-                            theme,
-                            format!(
-                                "Waiting for the other device… The code works until {}.",
-                                clock(*expires_at)
-                            ),
-                        ))
-                        .child(self.button_row(theme, cx, None, Some("Cancel"))),
-                );
-            }
+            }) => div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(widgets::row_title(theme, "Add a device"))
+                .child(caption(
+                    theme,
+                    "On the new device, open Settings → Devices and enter this code:",
+                ))
+                .child(copy_code::code_block(
+                    theme,
+                    "pairing-code",
+                    code.clone(),
+                    CodeSize::Display,
+                ))
+                .child(caption(theme, "On a Linux device, run:"))
+                .child(copy_code::code_block(
+                    theme,
+                    "pairing-linux-command",
+                    format!("cypher pair join {code}"),
+                    CodeSize::Command,
+                ))
+                .child(caption(
+                    theme,
+                    format!(
+                        "Waiting for the other device… The code works until {}.",
+                        clock(*expires_at)
+                    ),
+                ))
+                .child(self.button_row(theme, cx, None, Some("Cancel"))),
             Some(PairingStatus::Inviting {
                 request: Some(device),
                 ..
-            }) => {
-                body = body.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .child(widgets::row_title(
-                            theme,
-                            format!("\u{201c}{}\u{201d} wants to join.", device.name),
-                        ))
-                        .child(caption(
-                            theme,
-                            format!(
-                                "Approve only if this is the device you just entered the code on. Its key is {}; the new device shows the same.",
-                                device.fingerprint
-                            ),
-                        ))
-                        .child(self.button_row(theme, cx, Some("Approve"), Some("Decline"))),
-                );
-            }
-            _ => {
-                body = body.child(
-                    div().flex().flex_row().child(
-                        popover::btn_primary(theme, "Add a device")
-                            .id("pairing-add")
-                            .when(self.busy, |el| el.opacity(0.5))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.call(methods::START_DEVICE_PAIRING, serde_json::json!({}), cx)
-                            })),
-                    ),
-                );
-            }
-        }
-
-        let mut list = widgets::section_card(theme);
-        for (ix, member) in status.members.iter().enumerate() {
-            let remove = member.clone();
-            list = list.child(
-                widgets::card_row(theme, ix == 0)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(widgets::row_title(theme, member.name.clone()))
-                            .child(
-                                div()
-                                    .mono(theme)
-                                    .text_size(px(10.5))
-                                    .text_color(theme.text_muted.opacity(0.6))
-                                    .child(SharedString::from(format!(
-                                        "key {}",
-                                        member.fingerprint
-                                    ))),
-                            ),
-                    )
-                    .when(member.is_self, |el| {
-                        el.child(
-                            div()
-                                .text_size(px(10.5))
-                                .text_color(theme.text_muted)
-                                .child("This device"),
-                        )
-                    })
-                    .when(!member.is_self, |el| {
-                        el.child(
-                            widgets::ghost_action(theme)
-                                .id(("pairing-remove", ix))
-                                .opacity(0.7)
-                                .hover(|s| {
-                                    s.opacity(1.0)
-                                        .bg(theme.danger.opacity(0.08))
-                                        .text_color(theme.danger)
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.confirm_remove = Some(remove.clone());
-                                    cx.notify();
-                                }))
-                                .child(SharedString::from("Unpair")),
-                        )
-                    }),
-            );
-        }
-        body = body.child(list);
-
-        let require = status.require_paired;
-        body.child(
-            div()
+            }) => div()
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .child(
-                            widgets::toggle_switch(theme, require)
-                                .id("pairing-require")
-                                .cursor_pointer()
-                                .when(self.busy, |el| el.opacity(0.5))
-                                .when(!self.busy, |el| {
-                                    el.on_click(cx.listener(move |this, _, _, cx| {
-                                        this.call(
-                                            methods::SET_REQUIRE_PAIRED_DEVICES,
-                                            serde_json::json!({ "enabled": !require }),
-                                            cx,
-                                        )
-                                    }))
-                                }),
-                        )
-                        .child(widgets::field_label(theme, "Only paired devices")),
-                )
-                .child(caption(theme, policy_copy())),
-        )
+                .gap(px(8.0))
+                .child(widgets::row_title(
+                    theme,
+                    format!("\u{201c}{}\u{201d} wants to join.", device.name),
+                ))
+                .child(caption(
+                    theme,
+                    format!(
+                        "Approve only if this is the device you just entered the code on. Its key is {}; the new device shows the same. It joins with full control; you can make it receive-only afterwards.",
+                        device.fingerprint
+                    ),
+                ))
+                .child(self.button_row(theme, cx, Some("Approve"), Some("Decline"))),
+            _ => return None,
+        };
+        Some(panel_card(theme).child(body))
     }
 
-    fn join_body(
+    fn join_flow(
         &mut self,
-        body: gpui::Div,
         status: &TrustStatus,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        match &status.pairing {
-            Some(PairingStatus::Joining { error: None }) => body
+        let title = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(widgets::row_title(theme, state_copy(status.state)))
+            .child(key_label(theme, &status.fingerprint));
+        let body = match &status.pairing {
+            Some(PairingStatus::Joining { error: None }) => div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(title)
                 .child(caption(
                     theme,
                     format!(
@@ -391,29 +386,35 @@ impl PairingSection {
                     Some(PairingStatus::Joining { error: Some(error) }) => Some(error.clone()),
                     _ => None,
                 };
-                body.child(caption(
-                    theme,
-                    "On a paired device, open Settings → Devices and click Add a device (on Linux, run cypher pair add). Then enter the code it shows:",
-                ))
-                .when_some(failed, |el, error| el.child(widgets::warning_strip(theme, error)))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(div().w(px(280.0)).child(popover::dialog_field(
-                            self.code_input.clone().into_any_element(),
-                        )))
-                        .child(
-                            popover::btn_primary(theme, "Pair")
-                                .id("pairing-join")
-                                .when(self.busy, |el| el.opacity(0.5))
-                                .on_click(cx.listener(|this, _, _, cx| this.join(cx))),
-                        ),
-                )
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(title)
+                    .child(caption(
+                        theme,
+                        "Paired devices prove who they are to each other with their own keys. On a paired device, open Settings → Devices and click Add a device (on Linux, run cypher pair add). Then enter the code it shows:",
+                    ))
+                    .when_some(failed, |el, error| el.child(widgets::warning_strip(theme, error)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(div().w(px(280.0)).child(popover::dialog_field(
+                                self.code_input.clone().into_any_element(),
+                            )))
+                            .child(
+                                popover::btn_primary(theme, "Pair")
+                                    .id("pairing-join")
+                                    .when(self.busy, |el| el.opacity(0.5))
+                                    .on_click(cx.listener(|this, _, _, cx| this.join(cx))),
+                            ),
+                    )
             }
-        }
+        };
+        panel_card(theme).child(body)
     }
 
     /// `primary` approves; `secondary` cancels whatever is in progress.
@@ -449,53 +450,113 @@ impl PairingSection {
             })
     }
 
-    fn render_remove_dialog(
+    // -- dialogs ----------------------------------------------------------------
+
+    fn render_unpair_dialog(
         &mut self,
         viewport: gpui::Size<gpui::Pixels>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let member = self.confirm_remove.clone()?;
+        let member = self.confirm_unpair.clone()?;
         let card = popover::dialog_card(theme)
             .child(popover::dialog_title(theme, "Unpair device?"))
             .child(div().mt(px(6.0)).child(popover::dialog_body(
                 theme,
                 format!(
-                    "\u{201c}{}\u{201d} will no longer be trusted by your other devices. To use it with them again, pair it again with a new code.",
+                    "\u{201c}{}\u{201d} will no longer be trusted by your other devices. It stays signed in to your account. To use it with them again, pair it again with a new code.",
                     member.name
                 ),
             )))
-            .child(
-                div()
-                    .mt(px(16.0))
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap(px(8.0))
-                    .child(
-                        popover::btn_ghost(theme, "Cancel", "pairing-remove-cancel")
-                            .id("pairing-remove-cancel")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.confirm_remove = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        popover::btn_danger(theme, "Unpair")
-                            .id("pairing-remove-confirm")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.confirm_remove = None;
-                                this.call(
-                                    methods::REMOVE_TRUSTED_DEVICE,
-                                    serde_json::json!({ "deviceId": member.id }),
-                                    cx,
-                                );
-                            })),
-                    ),
-            )
+            .child(dialog_buttons(
+                popover::btn_ghost(theme, "Cancel", "pairing-remove-cancel")
+                    .id("pairing-remove-cancel")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.confirm_unpair = None;
+                        cx.notify();
+                    })),
+                popover::btn_danger(theme, "Unpair")
+                    .id("pairing-remove-confirm")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.confirm_unpair = None;
+                        this.call(
+                            methods::REMOVE_TRUSTED_DEVICE,
+                            serde_json::json!({ "deviceId": member.id }),
+                            cx,
+                        );
+                    })),
+            ))
             .into_any_element();
         Some(popover::modal("pairing-remove-dialog", viewport, card))
     }
+
+    fn render_receive_only_dialog(
+        &mut self,
+        viewport: gpui::Size<gpui::Pixels>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let member = self.confirm_receive_only.clone()?;
+        let turns_on_policy = self.status.as_ref().is_some_and(|s| !s.require_paired);
+        let card = popover::dialog_card(theme)
+            .child(popover::dialog_title(theme, "Make device receive-only?"))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(
+                theme,
+                receive_only_copy(&member.name, turns_on_policy),
+            )))
+            .child(dialog_buttons(
+                popover::btn_ghost(theme, "Cancel", "receive-only-cancel")
+                    .id("receive-only-cancel")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.confirm_receive_only = None;
+                        cx.notify();
+                    })),
+                popover::btn_primary(theme, "Make receive-only")
+                    .id("receive-only-confirm")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.confirm_receive_only = None;
+                        this.call(
+                            methods::SET_DEVICE_RECEIVE_ONLY,
+                            serde_json::json!({ "deviceId": member.id, "receiveOnly": true }),
+                            cx,
+                        );
+                    })),
+            ))
+            .into_any_element();
+        Some(popover::modal("receive-only-dialog", viewport, card))
+    }
+}
+
+fn dialog_buttons(cancel: impl IntoElement, confirm: impl IntoElement) -> gpui::Div {
+    div()
+        .mt(px(16.0))
+        .flex()
+        .flex_row()
+        .justify_end()
+        .gap(px(8.0))
+        .child(cancel)
+        .child(confirm)
+}
+
+/// The quiet card a pairing flow sits in, above the device list.
+fn panel_card(theme: &Theme) -> gpui::Div {
+    div()
+        .px(px(20.0))
+        .py(px(16.0))
+        .rounded(px(12.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.card_glass_bg())
+}
+
+/// `key 0123456789abcdef` in the quiet mono style rows use.
+pub fn key_label(theme: &Theme, fingerprint: &str) -> gpui::Div {
+    div()
+        .flex_none()
+        .mono(theme)
+        .text_size(px(10.5))
+        .text_color(theme.text_muted.opacity(0.6))
+        .child(SharedString::from(format!("key {fingerprint}")))
 }
 
 fn caption(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
@@ -516,21 +577,17 @@ impl Render for PairingSection {
     fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let viewport = window.viewport_size();
-        let dialog = self.render_remove_dialog(viewport, &theme, cx);
-        let body = self.render_body(&theme, cx);
+        let unpair = self.render_unpair_dialog(viewport, &theme, cx);
+        let receive_only = self.render_receive_only_dialog(viewport, &theme, cx);
+        let panel = self.render_panel(&theme, cx);
+        let error = self.error.clone();
         div()
             .id("device-pairing")
-            .mt(px(32.0))
             .flex()
             .flex_col()
-            .gap(px(4.0))
-            .child(widgets::page_header(&theme, "Pairing", None))
-            .child(widgets::page_subtitle(
-                &theme,
-                "Paired devices prove who they are to each other with their own keys, so a stolen sign-in or a compromised server can't control them.",
-            ))
-            .child(div().mt(px(12.0)).child(body))
-            .when_some(self.error.clone(), |el, message| {
+            .when(panel.is_some() || error.is_some(), |el| el.mt(px(16.0)))
+            .when_some(panel, |el, panel| el.child(panel))
+            .when_some(error, |el, message| {
                 el.child(
                     widgets::error_strip(&theme, message)
                         .id("pairing-error")
@@ -541,7 +598,8 @@ impl Render for PairingSection {
                         })),
                 )
             })
-            .when_some(dialog, |el, dialog| el.child(dialog))
+            .when_some(unpair, |el, dialog| el.child(dialog))
+            .when_some(receive_only, |el, dialog| el.child(dialog))
     }
 }
 
@@ -549,11 +607,63 @@ impl Render for PairingSection {
 mod tests {
     use super::*;
 
+    fn status(members: &[(&str, bool)], require_paired: bool, receive_only: bool) -> TrustStatus {
+        TrustStatus {
+            device_id: "me".into(),
+            fingerprint: "00".into(),
+            state: TrustState::Paired,
+            members: members
+                .iter()
+                .map(|(id, receive_only)| TrustMember {
+                    id: (*id).into(),
+                    name: (*id).into(),
+                    fingerprint: "00".into(),
+                    is_self: *id == "me",
+                    receive_only: *receive_only,
+                })
+                .collect(),
+            require_paired,
+            receive_only,
+            pairing: None,
+            conflict: false,
+            error: None,
+        }
+    }
+
     #[test]
     fn copy_names_each_state_and_the_policy_reach() {
         assert_eq!(state_copy(TrustState::Paired), "This device is paired.");
         assert!(state_copy(TrustState::Removed).contains("removed"));
         assert!(policy_copy().contains("every paired device"));
         assert!(policy_copy().contains("iPhone"));
+        assert!(policy_copy().contains("signed"));
+    }
+
+    #[test]
+    fn the_policy_locks_while_a_device_is_receive_only() {
+        assert_eq!(
+            policy_lock_copy(&status(&[("me", false), ("mac", false)], true, false)),
+            None
+        );
+        assert!(
+            policy_lock_copy(&status(&[("me", false), ("mac", true)], true, false))
+                .unwrap()
+                .contains("receive-only")
+        );
+        assert!(
+            policy_lock_copy(&status(&[("me", true), ("mac", false)], true, true))
+                .unwrap()
+                .contains("full control")
+        );
+    }
+
+    #[test]
+    fn receive_only_copy_says_what_stays_and_what_goes() {
+        let copy = receive_only_copy("vps", false);
+        assert!(copy.contains("vps"));
+        assert!(copy.contains("can still control"));
+        assert!(copy.contains("won't be able to control them"));
+        assert!(!copy.contains("Only paired devices"));
+        assert!(receive_only_copy("vps", true).contains("Only paired devices"));
     }
 }

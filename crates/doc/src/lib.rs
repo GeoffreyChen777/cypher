@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+mod command_auth;
 mod commands;
 mod constants;
 mod parts;
@@ -18,6 +19,7 @@ mod registry;
 mod schema;
 pub mod transcript_delta;
 
+pub use command_auth::*;
 pub use commands::*;
 pub use constants::*;
 pub use parts::*;

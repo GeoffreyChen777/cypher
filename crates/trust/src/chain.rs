@@ -4,7 +4,13 @@
 //! the one before it and is signed by a device that is a member at that point
 //! in the log. Policy entries (`requirePaired` / `allowUnpaired`) carry their
 //! signer's own record and set the group's "Only paired devices" policy: one
-//! weak member would otherwise be a way around every other member's switch. No key may appear in two `add`s, so a removed device's keys stay
+//! weak member would otherwise be a way around every other member's switch.
+//! Role entries (`receiveOnly` / `fullControl`) name another member: a
+//! receive-only member can still be controlled by the others but signs
+//! nothing, so it can't add, remove or restore devices, or change the policy.
+//! A device can only be made receive-only while the policy is on (a host
+//! can't tell who a plaintext client is), and the policy stays on while any
+//! member is receive-only. No key may appear in two `add`s, so a removed device's keys stay
 //! out for good; the same device id may return with fresh keys (re-pairing a
 //! machine after removing it by mistake). Replaying the log from the start
 //! yields the members; [`TrustChain::verify`] refuses any log that breaks a rule.
@@ -30,6 +36,10 @@ pub enum EntryKind {
     RequirePaired,
     /// Group policy: from here on, unpaired devices may connect again.
     AllowUnpaired,
+    /// Member `device` may be controlled but controls no other device.
+    ReceiveOnly,
+    /// Member `device` controls the other devices again.
+    FullControl,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +50,8 @@ pub struct TrustEntry {
     #[serde(with = "hex_bytes")]
     pub prev: [u8; 32],
     pub kind: EntryKind,
-    /// The device added, or the removed member's record as the group knew it.
+    /// The device added, or the member removed or given a role, as the group
+    /// knew it; the signer's own record in a policy entry.
     pub device: DevicePublic,
     /// Milliseconds since the epoch, as claimed by the signer. Informational.
     pub at: u64,
@@ -61,6 +72,8 @@ impl TrustEntry {
             EntryKind::Remove => 2,
             EntryKind::RequirePaired => 3,
             EntryKind::AllowUnpaired => 4,
+            EntryKind::ReceiveOnly => 5,
+            EntryKind::FullControl => 6,
         });
         self.device.put(&mut out);
         out.extend_from_slice(&self.at.to_be_bytes());
@@ -119,6 +132,7 @@ pub struct TrustChain {
     removed: BTreeSet<String>,
     keys_seen: BTreeSet<[u8; 32]>,
     require_paired: bool,
+    receive_only: BTreeSet<String>,
 }
 
 impl TrustChain {
@@ -159,6 +173,9 @@ impl TrustChain {
             &entry.device
         } else {
             match self.members.get(&entry.signer) {
+                Some(_) if self.receive_only.contains(&entry.signer) => {
+                    return bad("signed by a receive-only device");
+                }
                 Some(signer) => signer,
                 None => return bad("signed by a device outside the group"),
             }
@@ -185,14 +202,47 @@ impl TrustChain {
                 if self.members.get(&entry.device.id) != Some(&entry.device) {
                     return bad("removes a device that is not a member");
                 }
+                let left_in_control = self
+                    .members
+                    .keys()
+                    .any(|id| *id != entry.device.id && !self.receive_only.contains(id));
+                if self.members.len() > 1 && !left_in_control {
+                    return bad("removes the last device with full control");
+                }
                 self.members.remove(&entry.device.id);
+                self.receive_only.remove(&entry.device.id);
                 self.removed.insert(entry.device.id.clone());
             }
             EntryKind::RequirePaired | EntryKind::AllowUnpaired => {
                 if entry.device != *signer {
                     return bad("a policy entry must carry its signer's record");
                 }
+                if entry.kind == EntryKind::AllowUnpaired && !self.receive_only.is_empty() {
+                    return bad("unpaired devices can't be allowed while a device is receive-only");
+                }
                 self.require_paired = entry.kind == EntryKind::RequirePaired;
+            }
+            EntryKind::ReceiveOnly | EntryKind::FullControl => {
+                if self.members.get(&entry.device.id) != Some(&entry.device) {
+                    return bad("sets the role of a device that is not a member");
+                }
+                if entry.device.id == entry.signer {
+                    return bad("a device can't set its own role");
+                }
+                let receive_only = entry.kind == EntryKind::ReceiveOnly;
+                if self.receive_only.contains(&entry.device.id) == receive_only {
+                    return bad("the device already has that role");
+                }
+                if receive_only && !self.require_paired {
+                    return bad(
+                        "receive-only devices need the group to accept only paired devices",
+                    );
+                }
+                if receive_only {
+                    self.receive_only.insert(entry.device.id.clone());
+                } else {
+                    self.receive_only.remove(&entry.device.id);
+                }
             }
         }
         self.entries.push(entry);
@@ -232,6 +282,33 @@ impl TrustChain {
     /// The group's "Only paired devices" policy.
     pub fn require_paired(&self) -> bool {
         self.require_paired
+    }
+
+    /// Whether member `device_id` may only be controlled, never control.
+    pub fn is_receive_only(&self, device_id: &str) -> bool {
+        self.receive_only.contains(device_id)
+    }
+
+    /// The entry making member `device_id` receive-only (or giving it full
+    /// control back), signed by another member `signer` with full control.
+    pub fn propose_role(
+        &self,
+        signer: &DeviceKeys,
+        device_id: &str,
+        receive_only: bool,
+        at: u64,
+    ) -> Result<TrustEntry, TrustError> {
+        let device = self
+            .members
+            .get(device_id)
+            .cloned()
+            .ok_or_else(|| TrustError::InvalidEntry("not a member".into()))?;
+        let kind = if receive_only {
+            EntryKind::ReceiveOnly
+        } else {
+            EntryKind::FullControl
+        };
+        self.propose(signer, kind, device, at)
     }
 
     /// The entry setting the group's policy, signed by member `signer`.
@@ -425,6 +502,61 @@ mod tests {
         entry.device = b.public("B");
         entry.sig = a.sign(&entry.signing_bytes());
         assert!(chain.clone().append(entry).is_err());
+    }
+
+    #[test]
+    fn receive_only_members_are_controlled_but_sign_nothing() {
+        let (a, b, mut chain) = group();
+        let c = keys("c");
+        chain
+            .append(chain.propose_add(&a, c.public("C"), 3).unwrap())
+            .unwrap();
+        // Only while the group accepts only paired devices.
+        assert!(chain.propose_role(&a, "b", true, 4).is_err());
+        chain
+            .append(chain.propose_policy(&a, true, 4).unwrap())
+            .unwrap();
+        // Not on itself.
+        assert!(chain.propose_role(&b, "b", true, 5).is_err());
+        chain
+            .append(chain.propose_role(&a, "b", true, 5).unwrap())
+            .unwrap();
+        assert!(chain.is_receive_only("b"));
+        assert!(!chain.is_receive_only("a"));
+        assert!(chain.propose_role(&a, "b", true, 6).is_err(), "twice");
+        // B signs nothing: no adds, removals, roles or policy.
+        assert!(chain.propose_add(&b, keys("d").public("D"), 6).is_err());
+        assert!(chain.propose_remove(&b, "a", 6).is_err());
+        assert!(chain.propose_role(&b, "c", true, 6).is_err());
+        assert!(chain.propose_policy(&b, false, 6).is_err());
+        // The policy stays on while a member is receive-only.
+        assert!(chain.propose_policy(&a, false, 6).is_err());
+        // A member with full control can't leave only receive-only ones.
+        chain
+            .append(chain.propose_role(&a, "c", true, 6).unwrap())
+            .unwrap();
+        assert!(chain.propose_remove(&a, "a", 7).is_err());
+        chain
+            .append(chain.propose_role(&a, "c", false, 7).unwrap())
+            .unwrap();
+        chain
+            .append(chain.propose_remove(&c, "a", 8).unwrap())
+            .unwrap();
+        // Removing a receive-only member clears its role for a re-pairing.
+        chain
+            .append(chain.propose_remove(&c, "b", 9).unwrap())
+            .unwrap();
+        assert!(!chain.is_receive_only("b"));
+        let again = keys("b");
+        chain
+            .append(chain.propose_add(&c, again.public("B"), 10).unwrap())
+            .unwrap();
+        assert!(!chain.is_receive_only("b"));
+        chain
+            .append(chain.propose_policy(&c, false, 11).unwrap())
+            .unwrap();
+        let replayed = TrustChain::verify(chain.entries().to_vec()).unwrap();
+        assert_eq!(replayed.head(), chain.head());
     }
 
     #[test]

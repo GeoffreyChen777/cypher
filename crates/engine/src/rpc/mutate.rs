@@ -3,6 +3,13 @@
 use super::*;
 
 impl EngineRpc {
+    /// This device is a receive-only member of its trust group.
+    fn local_receive_only(&self) -> bool {
+        self.trust
+            .as_ref()
+            .is_some_and(|trust| trust.member_is_receive_only(self.doc_host.device_id()))
+    }
+
     pub(super) fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
         match params {
             MutateParams::CreateChat {
@@ -168,16 +175,31 @@ impl EngineRpc {
                 });
                 Ok(())
             }
-            MutateParams::RenameDevice { device_id, name } => self
-                .workspace
-                .rename_device(&device_id, &name)
-                .map_err(failed)
-                .map(drop),
-            MutateParams::DeleteDevice { device_id } => self
-                .workspace
-                .delete_device(&device_id)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::RenameDevice { device_id, name } => {
+                if device_id != self.doc_host.device_id() && self.local_receive_only() {
+                    return Err(RpcError::Failed(
+                        "This device is receive-only, so it can only rename itself.".into(),
+                    ));
+                }
+                self.workspace
+                    .rename_device(&device_id, &name)
+                    .map_err(failed)
+                    .map(drop)
+            }
+            MutateParams::DeleteDevice { device_id } => {
+                // Removing signs that machine out: a receive-only device
+                // doesn't get to do that to the devices that control it.
+                if self.local_receive_only() {
+                    return Err(RpcError::Failed(
+                        "This device is receive-only, so it can't remove your other devices."
+                            .into(),
+                    ));
+                }
+                self.workspace
+                    .delete_device(&device_id)
+                    .map_err(failed)
+                    .map(drop)
+            }
             #[cfg(feature = "development")]
             MutateParams::SeedDevice {
                 device_id,

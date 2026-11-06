@@ -324,6 +324,9 @@ pub mod methods {
     pub const REMOVE_TRUSTED_DEVICE: &str = "RemoveTrustedDevice";
     /// "Only paired devices": `{enabled}`.
     pub const SET_REQUIRE_PAIRED_DEVICES: &str = "SetRequirePairedDevices";
+    /// Make another paired device receive-only, or give it full control
+    /// back: `{deviceId, receiveOnly}`.
+    pub const SET_DEVICE_RECEIVE_ONLY: &str = "SetDeviceReceiveOnly";
 
     /// How one method is answered and routed. The engine derives its routing
     /// predicates from [`SPECS`], so adding a method means adding its constant
@@ -575,6 +578,7 @@ pub mod methods {
         MethodSpec::unary(JOIN_DEVICE_GROUP).local(),
         MethodSpec::unary(REMOVE_TRUSTED_DEVICE).local(),
         MethodSpec::unary(SET_REQUIRE_PAIRED_DEVICES).local(),
+        MethodSpec::unary(SET_DEVICE_RECEIVE_ONLY).local(),
     ];
 
     /// The spec for `name`, or `None` for an unknown method.

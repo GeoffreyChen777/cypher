@@ -4,6 +4,7 @@
 //! writes. Nothing here knows about app state, settings or any surface;
 //! modules outside the kit depend on it, never the other way round.
 
+pub mod copy_code;
 pub mod edge_fade;
 pub mod frost;
 pub mod fs_util;

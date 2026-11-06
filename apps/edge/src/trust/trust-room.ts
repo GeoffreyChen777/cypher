@@ -133,7 +133,8 @@ export class TrustRoom implements DurableObject {
         members: new Map(current.members),
         removed: new Set(current.removed),
         keysSeen: new Set(current.keysSeen),
-        requirePaired: current.requirePaired
+        requirePaired: current.requirePaired,
+        receiveOnly: new Set(current.receiveOnly)
       };
       const refused = await applyEntry(next, valid);
       if (refused) return json({ error: "invalid", reason: refused }, 400);

@@ -736,6 +736,10 @@ struct TestTrust {
     /// Clients this host accepts: (id, Noise key).
     members: Vec<(String, [u8; 32])>,
     require: bool,
+    /// Members this host refuses as clients.
+    receive_only: std::sync::Mutex<Vec<String>>,
+    /// This device itself is receive-only.
+    local_receive_only: bool,
 }
 
 #[async_trait]
@@ -758,6 +762,16 @@ impl cypher_rpc::PeerTrust for TestTrust {
     }
     fn require_paired(&self) -> bool {
         self.require
+    }
+    fn is_receive_only(&self, device_id: &str) -> bool {
+        self.receive_only
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|id| id == device_id)
+    }
+    fn local_receive_only(&self) -> bool {
+        self.local_receive_only
     }
 }
 
@@ -785,6 +799,8 @@ impl Pair {
                 Vec::new()
             },
             require,
+            receive_only: Default::default(),
+            local_receive_only: false,
         })
     }
 
@@ -799,6 +815,8 @@ impl Pair {
             },
             members: Vec::new(),
             require,
+            receive_only: Default::default(),
+            local_receive_only: false,
         })
     }
 }
@@ -906,6 +924,49 @@ async fn a_client_that_requires_pairing_never_talks_to_an_unknown_host() {
         .err()
         .expect("an unknown host is refused before dialing");
     assert!(err.to_string().contains("isn't paired"), "{err}");
+    assert!(relay.state.lock().unwrap().seen.is_empty());
+}
+
+#[tokio::test]
+async fn a_receive_only_device_is_controlled_but_controls_nothing() {
+    let relay = FakeRelay::start().await;
+    let pair = Pair::new();
+    let host_trust = pair.host(true, true);
+    let _host = trusted_host(&relay, host_trust.clone()).await;
+    let links = trusted_cache(&relay, pair.client(true, true));
+    let client = links.client("dev-a").await.expect("member connects");
+    client.call("Echo", serde_json::json!({})).await.unwrap();
+
+    // Made receive-only mid-session: the open session ends.
+    host_trust.receive_only.lock().unwrap().push("dev-b".into());
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.call("Echo", serde_json::json!({})),
+    )
+    .await
+    .expect("fails fast");
+    assert!(result.is_err(), "a receive-only device must not be served");
+    // A new session is refused at the handshake, with a reason people read.
+    let err = trusted_cache(&relay, pair.client(true, true))
+        .client("dev-a")
+        .await
+        .err()
+        .expect("refused");
+    assert!(err.to_string().contains("receive-only"), "{err}");
+
+    // A receive-only device's own engine dials nothing.
+    let relay = FakeRelay::start().await;
+    let _host = trusted_host(&relay, pair.host(true, true)).await;
+    let own = Arc::new(TestTrust {
+        local_receive_only: true,
+        ..Arc::into_inner(pair.client(true, true)).unwrap()
+    });
+    let err = trusted_cache(&relay, own)
+        .client("dev-a")
+        .await
+        .err()
+        .expect("refused before dialing");
+    assert!(err.to_string().contains("receive-only"), "{err}");
     assert!(relay.state.lock().unwrap().seen.is_empty());
 }
 

@@ -34,6 +34,7 @@ struct DeviceTrustVectors {
         precondition(chain.members.keys.sorted() == (chainFile["members"] as! [String]), "members")
         precondition(chain.removed.sorted() == (chainFile["removed"] as! [String]), "removed")
         precondition(chain.requirePaired == (chainFile["requirePaired"] as! Bool), "policy")
+        precondition(chain.receiveOnly.sorted() == (chainFile["receiveOnly"] as! [String]), "receive-only")
         precondition(chain.head == hex(rawEntries.last!["hash"]), "head")
 
         let invalid = file["invalidChains"] as! [[String: Any]]

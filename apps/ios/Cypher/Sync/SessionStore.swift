@@ -992,27 +992,38 @@ final class SessionStore {
         return true
     }
 
-    /// schema.rs queue_command, field for field. Returns the command id.
+    /// schema.rs queue_signed_command, field for field: signed when the
+    /// phone is paired, so a host that only accepts paired devices runs it.
+    /// Returns the command id.
     private func queueCommand(kind: String, payload: [String: Any]) -> String? {
         let commands = doc.getList(id: "commands")
         let id = UUID().uuidString.lowercased()
+        let now = nowMs()
+        var fields: [String: LoroValue] = [
+            "id": .string(value: id),
+            "kind": .string(value: kind),
+            "payload": LoroValue.fromJSON(payload),
+            "issuedBy": .string(value: config.deviceId),
+            "issuedAt": .i64(value: now),
+            "expiresAt": .i64(value: now + commandDefaultTtlMs),
+            "status": .string(value: "pending"),
+        ]
+        if let turnId = lastEntryId {
+            fields["basedOn"] = .map(value: [
+                "turnId": .string(value: turnId),
+                "frontier": .null,
+            ])
+        }
+        let signingBytes = CommandSigning.signingBytes(
+            chatId: chatId, fields: fields.mapValues(\.commandValue))
+        if let sig = config.trust?.signCommand(signingBytes) {
+            fields[CommandSigning.sigField] = .string(value: sig)
+        }
         do {
             let map = try commands.pushContainer(child: LoroMap())
-            try map.insert(key: "id", v: id)
-            try map.insert(key: "kind", v: kind)
-            try map.insert(key: "payload", v: LoroValue.fromJSON(payload))
-            try map.insert(key: "issuedBy", v: config.deviceId)
-            try map.insert(key: "issuedAt", v: nowMs())
-            if let turnId = lastEntryId {
-                try map.insert(
-                    key: "basedOn",
-                    v: LoroValue.map(value: [
-                        "turnId": .string(value: turnId),
-                        "frontier": .null,
-                    ]))
+            for (key, value) in fields {
+                try map.insert(key: key, v: value)
             }
-            try map.insert(key: "expiresAt", v: nowMs() + commandDefaultTtlMs)
-            try map.insert(key: "status", v: "pending")
             doc.commit()
         } catch { return nil }
         nudgeHost()

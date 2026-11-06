@@ -64,14 +64,16 @@ struct TrustDevicePublic: Codable, Equatable {
 struct TrustEntry: Codable, Equatable {
     let seq: UInt64
     let prev: String
-    /// `add` | `remove` | `requirePaired` | `allowUnpaired`.
+    /// `add` | `remove` | `requirePaired` | `allowUnpaired` | `receiveOnly` | `fullControl`.
     let kind: String
     let device: TrustDevicePublic
     let at: UInt64
     let signer: String
     let sig: String
 
-    static let kindBytes: [String: UInt8] = ["add": 1, "remove": 2, "requirePaired": 3, "allowUnpaired": 4]
+    static let kindBytes: [String: UInt8] = [
+        "add": 1, "remove": 2, "requirePaired": 3, "allowUnpaired": 4, "receiveOnly": 5, "fullControl": 6,
+    ]
 
     var signingBytes: Data {
         var out = Data("cypher-trust-entry-v1\u{0}".utf8)
@@ -118,6 +120,8 @@ struct TrustChain {
     private(set) var members: [String: TrustDevicePublic] = [:]
     private(set) var removed: Set<String> = []
     private(set) var requirePaired = false
+    /// Members that may be controlled but sign nothing.
+    private(set) var receiveOnly: Set<String> = []
     private var keysSeen: Set<String> = []
 
     var head: Data? { entries.last?.hash }
@@ -163,6 +167,7 @@ struct TrustChain {
             signer = entry.device
         } else {
             guard let member = members[entry.signer] else { throw bad("signed by a device outside the group") }
+            guard !receiveOnly.contains(entry.signer) else { throw bad("signed by a receive-only device") }
             signer = member
         }
         guard let signerKey = TrustHex.decode(signer.signPub),
@@ -182,11 +187,30 @@ struct TrustChain {
             guard members[entry.device.id] == entry.device else {
                 throw bad("removes a device that is not a member")
             }
+            let leftInControl = members.keys.contains { $0 != entry.device.id && !receiveOnly.contains($0) }
+            guard members.count <= 1 || leftInControl else { throw bad("removes the last device with full control") }
             members[entry.device.id] = nil
+            receiveOnly.remove(entry.device.id)
             removed.insert(entry.device.id)
-        default:
+        case "requirePaired", "allowUnpaired":
             guard entry.device == signer else { throw bad("a policy entry must carry its signer's record") }
+            guard entry.kind == "requirePaired" || receiveOnly.isEmpty else {
+                throw bad("unpaired devices can't be allowed while a device is receive-only")
+            }
             requirePaired = entry.kind == "requirePaired"
+        default:
+            guard members[entry.device.id] == entry.device else {
+                throw bad("sets the role of a device that is not a member")
+            }
+            guard entry.device.id != entry.signer else { throw bad("a device can't set its own role") }
+            let makeReceiveOnly = entry.kind == "receiveOnly"
+            guard receiveOnly.contains(entry.device.id) != makeReceiveOnly else {
+                throw bad("the device already has that role")
+            }
+            guard !makeReceiveOnly || requirePaired else {
+                throw bad("receive-only devices need the group to accept only paired devices")
+            }
+            if makeReceiveOnly { receiveOnly.insert(entry.device.id) } else { receiveOnly.remove(entry.device.id) }
         }
         entries.append(entry)
     }

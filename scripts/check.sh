@@ -122,6 +122,9 @@ stage_macos() {
   run xcrun swiftc -module-cache-path "$out/module-cache" apps/ios/Cypher/Sync/DeviceTrust.swift \
     scripts/tests/device-trust-vectors.swift -o "$out/trust-vectors"
   run "$out/trust-vectors" protocol/vectors/device-trust-v1.json
+  run xcrun swiftc -module-cache-path "$out/module-cache" apps/ios/Cypher/Sync/CommandSignature.swift \
+    scripts/tests/command-signing-vectors.swift -o "$out/command-vectors"
+  run "$out/command-vectors" protocol/vectors/command-signing-v1.json
   rm -rf "$out"
 }
 

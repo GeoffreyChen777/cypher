@@ -31,7 +31,7 @@ pub mod noise;
 mod pairing;
 
 pub use chain::{Comparison, EntryKind, TrustChain, TrustEntry};
-pub use keys::{DeviceKeys, DevicePublic};
+pub use keys::{COMMAND_DOMAIN, DeviceKeys, DevicePublic};
 pub use pairing::{JoinRequest, PairingCode, Welcome};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

@@ -86,7 +86,7 @@ Pairing is always done on the device itself: the relay refuses these calls,
 so the desktop cannot pair a Linux device remotely, and the CLI is how a
 headless device takes part.
 
-- **Join.** On a paired device, open Settings → Devices → Pairing and click
+- **Join.** On a paired device, open Settings → Devices and click
   **Add a device** (or run `cypher pair add` on a paired Linux device). Then
   run `cypher pair join <code>` here. It prints this device's key and waits
   for approval; the other device shows the same key.

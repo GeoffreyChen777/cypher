@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use cypher_doc::{CommandAuth, CommandSig};
 use cypher_rpc::{PeerTrust, TokenSource};
 use cypher_trust::{
     Comparison, DeviceKeys, DevicePublic, JoinRequest, PairingCode, TrustChain, TrustEntry,
@@ -27,6 +28,7 @@ use cypher_trust::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+use crate::host::doc_host::CommandTrust;
 use crate::util::lock;
 
 /// How long a shown code stays valid.
@@ -178,6 +180,9 @@ pub struct TrustMember {
     pub name: String,
     pub fingerprint: String,
     pub is_self: bool,
+    /// Controlled by the other devices, never controls them.
+    #[serde(default)]
+    pub receive_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +218,9 @@ pub struct TrustStatus {
     pub state: TrustState,
     pub members: Vec<TrustMember>,
     pub require_paired: bool,
+    /// This device is receive-only.
+    #[serde(default)]
+    pub receive_only: bool,
     pub pairing: Option<PairingStatus>,
     /// The server's copy rewrote history this device holds.
     pub conflict: bool,
@@ -432,6 +440,7 @@ impl DeviceTrust {
             name: device.name.clone(),
             fingerprint: device.fingerprint(),
             is_self: device.id == self.inner.device_id,
+            receive_only: paired && state.chain.is_receive_only(&device.id),
         };
         TrustStatus {
             device_id: self.inner.device_id.clone(),
@@ -443,6 +452,7 @@ impl DeviceTrust {
                 Vec::new()
             },
             require_paired: paired && state.chain.require_paired(),
+            receive_only: paired && state.chain.is_receive_only(&self.inner.device_id),
             pairing: state.pairing.as_ref().map(|pairing| match pairing {
                 Pairing::Inviting {
                     code,
@@ -591,6 +601,7 @@ impl DeviceTrust {
         if !self.is_paired_in(&lock(&self.inner.state).chain) {
             return Err("Pair this device before adding others.".into());
         }
+        self.check_full_control()?;
         self.cancel_pairing().await;
         let code = PairingCode::generate();
         lock(&self.inner.state).pairing = Some(Pairing::Inviting {
@@ -794,7 +805,25 @@ impl DeviceTrust {
 
     // -- membership and settings -----------------------------------------------
 
+    /// A receive-only device signs nothing; say so before the chain would.
+    fn check_full_control(&self) -> Result<(), String> {
+        if self.member_is_receive_only(&self.inner.device_id) {
+            return Err(
+                "This device is receive-only, so it can't change your devices. Use a device with full control."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether `device_id` is receive-only in the group this device belongs to.
+    pub fn member_is_receive_only(&self, device_id: &str) -> bool {
+        let state = lock(&self.inner.state);
+        self.is_paired_in(&state.chain) && state.chain.is_receive_only(device_id)
+    }
+
     pub async fn remove(&self, device_id: &str) -> Result<TrustStatus, String> {
+        self.check_full_control()?;
         let target = device_id.to_string();
         self.append(move |chain, keys| chain.propose_remove(keys, &target, now_ms()))
             .await?;
@@ -806,8 +835,51 @@ impl DeviceTrust {
         if !self.is_paired_in(&lock(&self.inner.state).chain) {
             return Err("Pair this device first.".into());
         }
+        self.check_full_control()?;
+        let receive_only = {
+            let state = lock(&self.inner.state);
+            state
+                .chain
+                .members()
+                .any(|member| state.chain.is_receive_only(&member.id))
+        };
+        if !enabled && receive_only {
+            return Err(
+                "Give every device full control first: receive-only devices need Only paired devices."
+                    .into(),
+            );
+        }
         self.append(move |chain, keys| chain.propose_policy(keys, enabled, now_ms()))
             .await?;
+        Ok(self.status())
+    }
+
+    /// Make another member receive-only, or give it full control back. A
+    /// receive-only device needs "Only paired devices" (a host can't tell
+    /// who a plaintext client is), so this turns the policy on first.
+    pub async fn set_receive_only(
+        &self,
+        device_id: &str,
+        receive_only: bool,
+    ) -> Result<TrustStatus, String> {
+        if !self.is_paired_in(&lock(&self.inner.state).chain) {
+            return Err("Pair this device first.".into());
+        }
+        self.check_full_control()?;
+        if device_id == self.inner.device_id {
+            return Err(
+                "A device can't change its own access. Use another device with full control."
+                    .into(),
+            );
+        }
+        if receive_only && !lock(&self.inner.state).chain.require_paired() {
+            self.append(|chain, keys| chain.propose_policy(keys, true, now_ms()))
+                .await?;
+        }
+        let target = device_id.to_string();
+        self.append(move |chain, keys| chain.propose_role(keys, &target, receive_only, now_ms()))
+            .await?;
+        tracing::info!(device = %device_id, receive_only, "trust: changed a device's access");
         Ok(self.status())
     }
 
@@ -859,8 +931,97 @@ impl PeerTrust for DeviceTrust {
         lock(&self.inner.state).chain.require_paired()
     }
 
+    fn is_receive_only(&self, device_id: &str) -> bool {
+        self.member_is_receive_only(device_id)
+    }
+
+    fn local_receive_only(&self) -> bool {
+        self.member_is_receive_only(&self.inner.device_id)
+    }
+
     async fn refresh(&self) {
         self.refresh_after_miss().await;
+    }
+}
+
+/// Why a host refuses a command, as the command's outcome says it.
+pub const COMMAND_UNSIGNED: &str = "Not signed by one of your paired devices, and this device only accepts paired devices. Send it again from a paired device.";
+pub const COMMAND_TAMPERED: &str = "Its signature doesn't match: the command was changed after it was sent, so this device didn't run it.";
+pub const COMMAND_FROM_RECEIVE_ONLY: &str =
+    "Sent from a receive-only device, which can't control this one.";
+
+enum CommandVerdict {
+    Accept,
+    Refuse(&'static str),
+    /// Signed by a device this copy of the group doesn't know: re-sync and
+    /// decide again.
+    UnknownSigner,
+}
+
+impl DeviceTrust {
+    fn command_verdict(&self, issued_by: &str, auth: &CommandAuth) -> CommandVerdict {
+        let state = lock(&self.inner.state);
+        let chain = &state.chain;
+        // Without a group this device belongs to there is nothing to check
+        // against — and nothing it could have turned on.
+        if !self.is_paired_in(chain) {
+            return CommandVerdict::Accept;
+        }
+        match (&auth.sig, chain.member(issued_by)) {
+            (CommandSig::Malformed, _) => return CommandVerdict::Refuse(COMMAND_TAMPERED),
+            (CommandSig::Present(sig), Some(member)) => {
+                if !member.verify_command(&auth.signing_bytes, sig) {
+                    return CommandVerdict::Refuse(COMMAND_TAMPERED);
+                }
+            }
+            (CommandSig::Present(_), None) if chain.require_paired() => {
+                return CommandVerdict::UnknownSigner;
+            }
+            (CommandSig::None, _) if chain.require_paired() => {
+                return CommandVerdict::Refuse(COMMAND_UNSIGNED);
+            }
+            // Unpaired devices may still command while the policy is off.
+            (CommandSig::Present(_), None) | (CommandSig::None, _) => {}
+        }
+        if issued_by != self.inner.device_id && chain.is_receive_only(issued_by) {
+            return CommandVerdict::Refuse(COMMAND_FROM_RECEIVE_ONLY);
+        }
+        CommandVerdict::Accept
+    }
+}
+
+#[async_trait]
+impl CommandTrust for DeviceTrust {
+    fn sign(&self, bytes: &[u8]) -> Option<[u8; 64]> {
+        if !self.is_paired_in(&lock(&self.inner.state).chain) {
+            return None;
+        }
+        self.keys().sign_command(bytes)
+    }
+
+    fn is_own_signature(&self, auth: &CommandAuth) -> bool {
+        match &auth.sig {
+            CommandSig::Present(sig) => self.public().verify_command(&auth.signing_bytes, sig),
+            CommandSig::None | CommandSig::Malformed => false,
+        }
+    }
+
+    fn is_receive_only(&self, device_id: &str) -> bool {
+        self.member_is_receive_only(device_id)
+    }
+
+    async fn check(&self, issued_by: &str, auth: &CommandAuth) -> Result<(), String> {
+        let mut verdict = self.command_verdict(issued_by, auth);
+        if matches!(verdict, CommandVerdict::UnknownSigner) {
+            // A device paired a moment ago.
+            self.refresh_after_miss().await;
+            verdict = self.command_verdict(issued_by, auth);
+        }
+        match verdict {
+            CommandVerdict::Accept => Ok(()),
+            CommandVerdict::Refuse(why) => Err(why.into()),
+            CommandVerdict::UnknownSigner => Err(COMMAND_UNSIGNED.into()),
+        }
     }
 }
 

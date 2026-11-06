@@ -15,9 +15,16 @@ export interface DevicePublic {
   dhPub: string;
 }
 
-export type EntryKind = "add" | "remove" | "requirePaired" | "allowUnpaired";
+export type EntryKind = "add" | "remove" | "requirePaired" | "allowUnpaired" | "receiveOnly" | "fullControl";
 
-const KIND_BYTE: Record<EntryKind, number> = { add: 1, remove: 2, requirePaired: 3, allowUnpaired: 4 };
+const KIND_BYTE: Record<EntryKind, number> = {
+  add: 1,
+  remove: 2,
+  requirePaired: 3,
+  allowUnpaired: 4,
+  receiveOnly: 5,
+  fullControl: 6
+};
 
 export interface TrustEntry {
   seq: number;
@@ -37,6 +44,8 @@ export interface ChainState {
   keysSeen: Set<string>;
   /** The group's "Only paired devices" policy. */
   requirePaired: boolean;
+  /** Members that may be controlled but sign nothing. */
+  receiveOnly: Set<string>;
 }
 
 export const MAX_ENTRIES = 1024;
@@ -55,7 +64,8 @@ export const emptyState = (): ChainState => ({
   members: new Map(),
   removed: new Set(),
   keysSeen: new Set(),
-  requirePaired: false
+  requirePaired: false,
+  receiveOnly: new Set()
 });
 
 const fromHex = (hex: string): Uint8Array => {
@@ -191,6 +201,7 @@ export const applyEntry = async (
   } else {
     signer = state.members.get(entry.signer);
     if (!signer) return "signed by a device outside the group";
+    if (state.receiveOnly.has(entry.signer)) return "signed by a receive-only device";
   }
   if (signatures && !(await verifySignature(signer.signPub, entry))) return "bad signature";
   if (entry.kind === "add") {
@@ -206,11 +217,31 @@ export const applyEntry = async (
     if (!sameDevice(state.members.get(entry.device.id), entry.device)) {
       return "removes a device that is not a member";
     }
+    const leftInControl = [...state.members.keys()].some(
+      (id) => id !== entry.device.id && !state.receiveOnly.has(id)
+    );
+    if (state.members.size > 1 && !leftInControl) return "removes the last device with full control";
     state.members.delete(entry.device.id);
+    state.receiveOnly.delete(entry.device.id);
     state.removed.add(entry.device.id);
-  } else {
+  } else if (entry.kind === "requirePaired" || entry.kind === "allowUnpaired") {
     if (!sameDevice(signer, entry.device)) return "a policy entry must carry its signer's record";
+    if (entry.kind === "allowUnpaired" && state.receiveOnly.size > 0) {
+      return "unpaired devices can't be allowed while a device is receive-only";
+    }
     state.requirePaired = entry.kind === "requirePaired";
+  } else {
+    if (!sameDevice(state.members.get(entry.device.id), entry.device)) {
+      return "sets the role of a device that is not a member";
+    }
+    if (entry.device.id === entry.signer) return "a device can't set its own role";
+    const receiveOnly = entry.kind === "receiveOnly";
+    if (state.receiveOnly.has(entry.device.id) === receiveOnly) return "the device already has that role";
+    if (receiveOnly && !state.requirePaired) {
+      return "receive-only devices need the group to accept only paired devices";
+    }
+    if (receiveOnly) state.receiveOnly.add(entry.device.id);
+    else state.receiveOnly.delete(entry.device.id);
   }
   state.length += 1;
   state.head = await entryHash(entry);

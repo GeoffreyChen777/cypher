@@ -91,6 +91,11 @@ fn build() -> Value {
         .propose_policy(&b.keys, true, 1_700_000_004_000)
         .unwrap();
     chain.append(policy).unwrap();
+    // B makes C receive-only.
+    let role = chain
+        .propose_role(&b.keys, "device-c", true, 1_700_000_005_000)
+        .unwrap();
+    chain.append(role).unwrap();
     let entries = chain.entries().to_vec();
 
     let mut edited = entries.clone();
@@ -134,6 +139,36 @@ fn build() -> Value {
             .propose_policy(&b.keys, true, 7)
             .unwrap();
         entry.device = c.keys.public(c.name);
+        resign(&b.keys, entry)
+    };
+    let signed_by_receive_only = resign(
+        &c.keys,
+        after_removal
+            .propose_add(&b.keys, x.keys.public(x.name), 8)
+            .unwrap(),
+    );
+    // The role entry again, but before the policy entry.
+    let role_while_open = {
+        let mut entry = entries[5].clone();
+        entry.seq = 4;
+        entry.prev = entries[3].hash();
+        resign(&b.keys, entry)
+    };
+    let open_while_receive_only = {
+        let mut entry = after_removal.propose_policy(&b.keys, true, 9).unwrap();
+        entry.kind = cypher_trust::EntryKind::AllowUnpaired;
+        resign(&b.keys, entry)
+    };
+    let own_role = {
+        let mut entry = entries[5].clone();
+        entry.device = b.keys.public(b.name);
+        resign(&b.keys, entry)
+    };
+    let last_in_control = {
+        let mut entry = after_removal
+            .propose_remove(&b.keys, "device-c", 10)
+            .unwrap();
+        entry.device = b.keys.public(b.name);
         resign(&b.keys, entry)
     };
     let signed_by_removed = resign(
@@ -213,6 +248,7 @@ fn build() -> Value {
             "members": chain.members().map(|m| m.id.clone()).collect::<Vec<_>>(),
             "removed": ["device-a"],
             "requirePaired": chain.require_paired(),
+            "receiveOnly": ["device-c"],
         },
         "invalidChains": [
             invalid("an edited entry", edited),
@@ -224,6 +260,11 @@ fn build() -> Value {
             invalid("adding a key already in use", [&entries[..2], &[duplicate_key]].concat()),
             invalid("signed by a removed device", [&entries[..], &[signed_by_removed]].concat()),
             invalid("a policy entry carrying another device's record", [&entries[..4], &[foreign_policy]].concat()),
+            invalid("signed by a receive-only device", [&entries[..], &[signed_by_receive_only]].concat()),
+            invalid("a receive-only device while unpaired devices are allowed", [&entries[..4], &[role_while_open]].concat()),
+            invalid("allowing unpaired devices while a device is receive-only", [&entries[..], &[open_while_receive_only]].concat()),
+            invalid("a device setting its own role", [&entries[..5], &[own_role]].concat()),
+            invalid("removing the last device with full control", [&entries[..], &[last_in_control]].concat()),
             invalid("no first entry", entries[1..].to_vec()),
         ],
         "pairing": {
@@ -297,6 +338,11 @@ fn the_committed_chain_verifies_and_the_invalid_ones_do_not() {
         json!(chain.require_paired()),
         file["chain"]["requirePaired"]
     );
+    let receive_only: Vec<_> = members
+        .iter()
+        .filter(|id| chain.is_receive_only(id))
+        .collect();
+    assert_eq!(json!(receive_only), file["chain"]["receiveOnly"]);
     for case in file["invalidChains"].as_array().unwrap() {
         let entries: Vec<TrustEntry> = serde_json::from_value(case["entries"].clone()).unwrap();
         let Err(cypher_trust::TrustError::InvalidEntry(reason)) = TrustChain::verify(entries)

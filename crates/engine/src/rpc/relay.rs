@@ -71,6 +71,7 @@ mod tests {
     async fn relayed_calls_cannot_reach_local_methods_or_other_devices() {
         for method in [
             methods::SET_REQUIRE_PAIRED_DEVICES,
+            methods::SET_DEVICE_RECEIVE_ONLY,
             methods::APPROVE_DEVICE_PAIRING,
             methods::JOIN_DEVICE_GROUP,
             methods::REMOVE_TRUSTED_DEVICE,

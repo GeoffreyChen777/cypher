@@ -16,8 +16,8 @@ use super::frames::{
     DeviceFrameHeader, decode_device_frame, encode_device_frame, relay_error_code,
 };
 use super::trust::{
-    HELLO, NOISE_KIND, NoTrust, PeerTrust, REFUSED, REPLY, SECURE_KIND, noise_payload,
-    refusal_message,
+    HELLO, NOISE_KIND, NoTrust, PeerTrust, RECEIVE_ONLY_MESSAGE, REFUSED, REPLY, SECURE_KIND,
+    noise_payload, refusal_message,
 };
 use super::{
     PING_INTERVAL, RELAY_KIND, RPC_KIND, SILENCE_LEASE, TokenSource, device_room_ws_url,
@@ -64,6 +64,9 @@ impl DeviceLink {
         host_device_id: &str,
         trust: &dyn PeerTrust,
     ) -> Result<Self, RpcError> {
+        if trust.local_receive_only() {
+            return Err(RpcError::Transport(RECEIVE_ONLY_MESSAGE.into()));
+        }
         let secure = trust.local_keys().zip(trust.peer_key(host_device_id));
         if secure.is_none() && trust.require_paired() {
             return Err(RpcError::Transport(format!(
