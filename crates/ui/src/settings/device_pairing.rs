@@ -11,6 +11,7 @@ use cypher_engine::device_trust::{PairingStatus, TrustMember, TrustState, TrustS
 use cypher_rpc::methods;
 use gpui::{AnyElement, Context, Entity, SharedString, Subscription, Task, div, prelude::*, px};
 
+use crate::kit::copy_code::{self, CodeSize};
 use crate::kit::popover;
 use crate::kit::theme::{MonoStyled, Theme};
 use crate::settings::widgets;
@@ -308,18 +309,23 @@ impl PairingSection {
                     theme,
                     "On the new device, open Settings → Devices and enter this code:",
                 ))
-                .child(
-                    div()
-                        .mono(theme)
-                        .text_size(px(20.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(SharedString::from(code.clone())),
-                )
+                .child(copy_code::code_block(
+                    theme,
+                    "pairing-code",
+                    code.clone(),
+                    CodeSize::Display,
+                ))
+                .child(caption(theme, "On a Linux device, run:"))
+                .child(copy_code::code_block(
+                    theme,
+                    "pairing-linux-command",
+                    format!("cypher pair join {code}"),
+                    CodeSize::Command,
+                ))
                 .child(caption(
                     theme,
                     format!(
-                        "On a Linux device, run cypher pair join {code}. Waiting for the other device… The code works until {}.",
+                        "Waiting for the other device… The code works until {}.",
                         clock(*expires_at)
                     ),
                 ))

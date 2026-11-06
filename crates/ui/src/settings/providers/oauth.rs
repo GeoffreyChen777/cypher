@@ -275,7 +275,14 @@ impl ProvidersPage {
             );
         }
         if let Some(code) = code {
-            body = body.child(caption(theme, format!("Code: {code}")).text_size(px(16.0)));
+            body = body
+                .child(caption(theme, "Enter this code on the authorization page:"))
+                .child(crate::kit::copy_code::code_block(
+                    theme,
+                    "provider-oauth-code",
+                    code,
+                    crate::kit::copy_code::CodeSize::Display,
+                ));
         }
         if waiting {
             body = body

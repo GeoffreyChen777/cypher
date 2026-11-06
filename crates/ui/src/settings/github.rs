@@ -23,9 +23,10 @@ use super::{
     widgets,
 };
 use crate::{
+    kit::copy_code::{self, CodeSize},
     kit::icons,
     kit::popover::Loadable,
-    kit::theme::{MonoStyled, Theme},
+    kit::theme::Theme,
     state::AppState,
 };
 
@@ -33,8 +34,8 @@ use crate::{
 /// device itself polls GitHub at GitHub's pace).
 const LOGIN_POLL: Duration = Duration::from_secs(2);
 
-/// How long "Copied" stays up after copying the code.
-const COPIED_FLASH: Duration = Duration::from_millis(1600);
+/// The code block's id: the "Copy code" button shares its confirmation.
+const CODE_BLOCK: &str = "github-login-code";
 
 /// Where approvals and grants live on github.com.
 const AUTHORIZATIONS_URL: &str = "https://github.com/settings/apps/authorizations";
@@ -44,8 +45,6 @@ struct LoginFlow {
     start: GithubLoginStart,
     error: Option<String>,
     copied: bool,
-    /// A copy made this recently shows "Copied" on the code and the button.
-    copied_flash: Option<std::time::Instant>,
 }
 
 pub struct GithubPage {
@@ -58,7 +57,6 @@ pub struct GithubPage {
     error: Option<String>,
     task: Option<Task<()>>,
     poll_task: Option<Task<()>>,
-    flash_task: Option<Task<()>>,
     _target_observer: Subscription,
 }
 
@@ -98,7 +96,6 @@ impl GithubPage {
             error: None,
             task: None,
             poll_task: None,
-            flash_task: None,
             _target_observer: observer,
         };
         page.load(cx);
@@ -186,7 +183,6 @@ impl GithubPage {
                             start,
                             error: None,
                             copied: true,
-                            copied_flash: None,
                         });
                         page.spawn_poll(cx);
                     }
@@ -254,25 +250,14 @@ impl GithubPage {
         }));
     }
 
-    /// Copy the code again, confirmed by a short "Copied" on the code chip
-    /// and the button.
-    fn copy_code(&mut self, cx: &mut Context<Self>) {
+    /// Copy the code again, confirmed by "Copied" on the code block and the
+    /// button.
+    fn copy_code(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(flow) = self.login.as_mut() else {
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(flow.start.user_code.clone()));
         flow.copied = true;
-        flow.copied_flash = Some(std::time::Instant::now());
-        self.flash_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(COPIED_FLASH).await;
-            this.update(cx, |page, cx| {
-                if let Some(flow) = page.login.as_mut() {
-                    flow.copied_flash = None;
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
+        copy_code::copy(CODE_BLOCK, &flow.start.user_code, window, cx);
         cx.notify();
     }
 
@@ -396,44 +381,20 @@ impl GithubPage {
         let flow = self.login.as_ref()?;
         let code = flow.start.user_code.clone();
         let url = flow.start.verification_uri.clone();
-        let flashing = flow.copied_flash.is_some();
-        let hover_bg = theme.ink(0.05);
-        let code_chip = div()
-            .id("github-login-code")
+        let flashing = copy_code::is_copied(CODE_BLOCK);
+        let code_block = copy_code::code_block(theme, CODE_BLOCK, code, CodeSize::Display)
             .mt(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .px(px(12.0))
-            .py(px(6.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(theme.border)
-            .cursor_pointer()
-            .hover(move |style| style.bg(hover_bg))
-            .on_click(cx.listener(|page, _, _, cx| page.copy_code(cx)))
-            .child(
-                div()
-                    .mono(theme)
-                    .text_size(px(22.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(SharedString::from(code)),
-            )
-            .child(
-                icons::icon(if flashing { icons::CHECK } else { icons::COPY })
-                    .size(px(14.0))
-                    .text_color(if flashing {
-                        theme.success_muted
-                    } else {
-                        theme.text_muted
-                    }),
-            );
+            .on_click(cx.listener(|page, _, _, cx| {
+                if let Some(flow) = page.login.as_mut() {
+                    flow.copied = true;
+                }
+                cx.notify();
+            }));
         let mut body = div()
             .flex_1()
             .min_w_0()
             .child(widgets::row_title(theme, "Enter this code on GitHub"))
-            .child(div().flex().child(code_chip));
+            .child(div().flex().child(code_block));
         body = match &flow.error {
             Some(error) => body.child(
                 div()
@@ -479,7 +440,7 @@ impl GithubPage {
                         "github-login-copy",
                         if flashing { "Copied" } else { "Copy code" },
                     )
-                    .on_click(cx.listener(|page, _, _, cx| page.copy_code(cx))),
+                    .on_click(cx.listener(|page, _, window, cx| page.copy_code(window, cx))),
                 )
                 .child(
                     Self::ghost(theme, "github-login-open", "Open GitHub")
