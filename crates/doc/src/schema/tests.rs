@@ -1088,3 +1088,74 @@ fn a_malformed_recovery_record_keeps_the_prompt() {
     assert_eq!(entries[0].id, "u1");
     assert_eq!(entries[0].recovery, None);
 }
+
+#[test]
+fn a_signed_command_reads_back_with_the_bytes_it_was_signed_over() {
+    use crate::commands::SessionCommandPayload;
+    let doc = SessionDoc::init("chat-1").unwrap();
+    let entry = SessionCommandEntry {
+        id: "c1".into(),
+        payload: SessionCommandPayload::Steer {
+            prompt: "naïve 🙂".into(),
+            message_id: Some("m1".into()),
+            agent_prompt: None,
+        },
+        issued_by: "dev-b".into(),
+        issued_at: 10,
+        based_on: Some(crate::commands::CommandBasedOn {
+            turn_id: Some("t1".into()),
+            frontier: None,
+        }),
+        expires_at: Some(99),
+        status: SessionCommandStatus::Pending,
+        resolution: None,
+        sent_at: Some(10),
+    };
+    let mut signed = Vec::new();
+    doc.queue_signed_command("chat-1", &entry, |bytes| {
+        signed = bytes.to_vec();
+        Some([7; 64])
+    })
+    .unwrap();
+    // Unsigned, like an older device.
+    doc.queue_command(&SessionCommandEntry {
+        id: "c2".into(),
+        ..entry.clone()
+    })
+    .unwrap();
+    // The host's outcome isn't covered; another replica reads the same bytes.
+    doc.set_command_status("c1", SessionCommandStatus::Rejected, Some("x"))
+        .unwrap();
+    let replica = LoroDoc::new();
+    replica
+        .import(&doc.doc().export(ExportMode::Snapshot).unwrap())
+        .unwrap();
+    let replica = SessionDoc::from_doc(replica);
+    for read in [&doc, &replica] {
+        let commands = read.read_commands_with_auth("chat-1").unwrap();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].0.id, "c1");
+        assert_eq!(commands[0].1.signing_bytes, signed);
+        assert_eq!(commands[0].1.sig, CommandSig::Present([7; 64]));
+        assert_eq!(commands[1].1.sig, CommandSig::None);
+    }
+    // Another chat, or any edit to a signed field, changes the bytes.
+    assert_ne!(
+        doc.read_commands_with_auth("chat-2").unwrap()[0]
+            .1
+            .signing_bytes,
+        signed
+    );
+    if let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+        doc.doc().get_list("commands").get(0)
+    {
+        map.insert("issuedBy", "dev-a").unwrap();
+        doc.doc().commit();
+    }
+    assert_ne!(
+        doc.read_commands_with_auth("chat-1").unwrap()[0]
+            .1
+            .signing_bytes,
+        signed
+    );
+}

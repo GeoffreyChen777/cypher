@@ -21,6 +21,7 @@ describe("device trust chain vectors", () => {
     expect([...state.members.keys()].sort()).toEqual(vectors.chain.members);
     expect([...state.removed]).toEqual(vectors.chain.removed);
     expect(state.requirePaired).toBe(vectors.chain.requirePaired);
+    expect([...state.receiveOnly].sort()).toEqual(vectors.chain.receiveOnly);
     expect(state.head).toBe(vectors.chain.entries.at(-1)!.hash);
   });
 

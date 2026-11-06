@@ -72,6 +72,7 @@ final class DeviceTrustVectorTests: XCTestCase {
         let verified = try TrustChain.verify(entries)
         XCTAssertEqual(verified.members.keys.sorted(), chain["members"] as? [String])
         XCTAssertEqual(verified.requirePaired, chain["requirePaired"] as? Bool)
+        XCTAssertEqual(verified.receiveOnly.sorted(), chain["receiveOnly"] as? [String])
         for invalid in try XCTUnwrap(file["invalidChains"] as? [[String: Any]]) {
             let name = invalid["name"] as? String ?? ""
             XCTAssertThrowsError(try TrustChain.verify(decode([TrustEntry].self, invalid["entries"])), name) {
@@ -193,6 +194,48 @@ final class DeviceTrustStoreTests: XCTestCase {
             desktop.sign(seq: chain.count, after: chain, kind: "requirePaired", device: desktop.record))
         await trust.sync()
         XCTAssertTrue(trust.requirePaired)
+    }
+
+    func testSharedCommandSigningVectors() throws {
+        let url = try TestSupport.repoRoot().appendingPathComponent("protocol/vectors/command-signing-v1.json")
+        let file = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        func value(_ tagged: Any) -> CommandValue {
+            let (tag, inner) = (tagged as! [String: Any]).first!
+            switch tag {
+            case "null": return .null
+            case "bool": return .bool(inner as! Bool)
+            case "i64": return .i64(Int64(inner as! String)!)
+            case "double": return .double((inner as! NSNumber).doubleValue)
+            case "string": return .string(inner as! String)
+            case "binary": return .binary(TrustHex.decode(inner as! String)!)
+            case "list": return .list((inner as! [Any]).map(value))
+            default: return .map((inner as! [String: Any]).mapValues(value))
+            }
+        }
+        for testCase in try XCTUnwrap(file["cases"] as? [[String: Any]]) {
+            let bytes = CommandSigning.signingBytes(
+                chatId: testCase["chatId"] as! String,
+                fields: (testCase["fields"] as! [String: Any]).mapValues(value))
+            XCTAssertEqual(TrustHex.encode(bytes), testCase["signingBytes"] as? String, "\(testCase["name"]!)")
+        }
+    }
+
+    func testThePhoneSignsCommandsOnlyWhilePaired() async throws {
+        let desktop = Desktop(id: "mac-1")
+        let edge = try await founded(by: desktop)
+        let trust = store(edge)
+        await trust.sync()
+        let bytes = CommandSigning.signingBytes(chatId: "chat", fields: ["id": .string("c1")])
+        XCTAssertNil(trust.signCommand(bytes), "unpaired")
+
+        let code = try XCTUnwrap(PairingCode("ABCD-EFGH-JKMN-PQRS-TVWX"))
+        trust.join(code: code.display)
+        _ = try await approve(on: edge, desktop: desktop, code: code)
+        try await waitUntil { trust.phase == .paired }
+        let sig = try XCTUnwrap(trust.signCommand(bytes).flatMap(TrustHex.decode))
+        XCTAssertTrue(trust.keys.sign.publicKey.isValidSignature(sig, for: bytes))
+        // Only command bytes: never a trust entry.
+        XCTAssertNil(trust.signCommand(Data("cypher-trust-entry-v1\u{0}".utf8)))
     }
 
     func testAJoinerRefusesADeviceListTheDesktopDidNotApprove() async throws {

@@ -25,6 +25,8 @@ pub(crate) const REFUSED: u8 = 3;
 
 /// Refusal reasons a host sends in a [`REFUSED`] frame.
 pub const UNTRUSTED_DEVICE: &str = "untrusted_device";
+/// The client is a receive-only member: it may be controlled, never control.
+pub const RECEIVE_ONLY: &str = "receive_only";
 pub const HANDSHAKE_FAILED: &str = "handshake_failed";
 pub const CHANNEL_FAILED: &str = "secure_channel_failed";
 
@@ -47,6 +49,15 @@ pub trait PeerTrust: Send + Sync + 'static {
     /// without refreshing: checked on every frame of an open session, so a
     /// removal cuts it off as soon as this device learns of it.
     fn is_known_member(&self, client_id: &str, client_key: &[u8; 32]) -> bool;
+    /// Whether member `device_id` is receive-only: hosts refuse it as a
+    /// client. Checked on every frame, like [`Self::is_known_member`].
+    fn is_receive_only(&self, _device_id: &str) -> bool {
+        false
+    }
+    /// Whether this device is receive-only, so it dials no other device.
+    fn local_receive_only(&self) -> bool {
+        false
+    }
     /// Re-read the group before deciding on a new client, so a
     /// policy switched on elsewhere a moment ago already holds. Implementations
     /// rate-limit it.
@@ -93,9 +104,13 @@ pub(crate) fn refusal_message(host: &str, reason: &str) -> String {
         UNTRUSTED_DEVICE => format!(
             "Device {host} only accepts paired devices, and this one isn't paired with it. Pair it in Settings → Devices."
         ),
+        RECEIVE_ONLY => RECEIVE_ONLY_MESSAGE.to_string(),
         _ => format!("Device {host} refused the secure connection ({reason})."),
     }
 }
+
+/// Why a receive-only device can't reach another one.
+pub(crate) const RECEIVE_ONLY_MESSAGE: &str = "This device is receive-only: your other devices can control it, but it can't control them. Give it full control in Settings → Devices on a device that has it.";
 
 /// The error a host that only accepts paired devices answers plaintext
 /// requests with.

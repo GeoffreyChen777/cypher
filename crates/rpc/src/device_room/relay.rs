@@ -17,7 +17,7 @@ use super::frames::{
 };
 use super::trust::{
     CHANNEL_FAILED, HANDSHAKE_FAILED, HELLO, NOISE_KIND, NoTrust, PLAINTEXT_REFUSED, PeerTrust,
-    REFUSED, REPLY, SECURE_KIND, UNTRUSTED_DEVICE, noise_payload,
+    RECEIVE_ONLY, REFUSED, REPLY, SECURE_KIND, UNTRUSTED_DEVICE, noise_payload,
 };
 use super::{
     NUDGE_KIND, NudgeHandler, PING_INTERVAL, RELAY_KIND, RPC_KIND, SILENCE_LEASE, TokenSource,
@@ -386,6 +386,16 @@ impl Host {
                     self.refuse(&from, UNTRUSTED_DEVICE).await;
                     return;
                 }
+                if conn
+                    .client
+                    .as_ref()
+                    .is_some_and(|(id, _)| self.trust.is_receive_only(id))
+                {
+                    tracing::warn!(conn = %from, "device-room: closing a session whose device became receive-only");
+                    conns.remove(&from);
+                    self.refuse(&from, RECEIVE_ONLY).await;
+                    return;
+                }
                 let opened = lock(session).open(&payload);
                 match opened {
                     Ok(Some(message)) => {
@@ -459,6 +469,12 @@ impl Host {
             }
             tracing::info!(conn = %from, client = %accepting.client_id,
                 "device-room: secure session from a device outside the trust group");
+        }
+        if member && self.trust.is_receive_only(&accepting.client_id) {
+            tracing::warn!(conn = %from, client = %accepting.client_id,
+                "device-room: refusing a receive-only device");
+            self.refuse(from, RECEIVE_ONLY).await;
+            return;
         }
         let client = accepting.client_id.clone();
         let client_key = accepting.client_key;

@@ -206,6 +206,16 @@ final class DeviceTrustStore {
         return try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: raw)
     }
 
+    /// Sign a durable command's signing bytes (CommandSignature.swift) with
+    /// this phone's identity key, as the `sig` field's hex; nil while the
+    /// phone isn't paired. Only command bytes: never a trust entry.
+    func signCommand(_ signingBytes: Data) -> String? {
+        guard isPaired(in: chain), signingBytes.starts(with: CommandSigning.domain),
+            let sig = try? keys.sign.signature(for: signingBytes)
+        else { return nil }
+        return TrustHex.encode(sig)
+    }
+
     private func isPaired(in chain: TrustChain) -> Bool {
         chain.members[deviceId]?.dhPub == TrustHex.encode(keys.dh.publicKey.rawRepresentation)
     }

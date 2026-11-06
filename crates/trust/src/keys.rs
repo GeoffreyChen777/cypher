@@ -10,6 +10,11 @@ use crate::encoding::{hex, hex_bytes, put_str, unhex};
 /// Longest device id or name a trust entry carries, in bytes.
 pub const MAX_FIELD: usize = 128;
 
+/// The prefix of a durable command's signing bytes
+/// (`cypher_doc::command_signing_bytes`): the only other thing a device's
+/// identity key signs besides trust entries.
+pub const COMMAND_DOMAIN: &[u8] = b"cypher-command-v1\0";
+
 /// One device as the trust group knows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +58,12 @@ impl DevicePublic {
             key.verify(message, &ed25519_dalek::Signature::from_bytes(signature))
                 .is_ok()
         })
+    }
+
+    /// Whether `signature` is this device's over a durable command's
+    /// signing bytes ([`COMMAND_DOMAIN`]-prefixed).
+    pub fn verify_command(&self, signing_bytes: &[u8], signature: &[u8; 64]) -> bool {
+        signing_bytes.starts_with(COMMAND_DOMAIN) && self.verify(signing_bytes, signature)
     }
 
     /// Short, human-comparable form of the device's identity key.
@@ -118,6 +129,15 @@ impl DeviceKeys {
         self.sign.sign(message).to_bytes()
     }
 
+    /// Sign a durable command's signing bytes. Anything without the
+    /// [`COMMAND_DOMAIN`] prefix is refused, so the identity key can't be
+    /// made to sign a trust entry this way.
+    pub fn sign_command(&self, signing_bytes: &[u8]) -> Option<[u8; 64]> {
+        signing_bytes
+            .starts_with(COMMAND_DOMAIN)
+            .then(|| self.sign(signing_bytes))
+    }
+
     /// Sign arbitrary bytes — only the vector generator needs this, to build
     /// invalid entries with valid signatures.
     #[doc(hidden)]
@@ -167,6 +187,25 @@ mod tests {
         let debug = format!("{keys:?}");
         assert!(!debug.contains(&hex(&keys.sign.to_bytes())));
         assert!(!debug.contains(&hex(keys.dh.as_slice())));
+    }
+
+    #[test]
+    fn command_signatures_are_scoped_to_commands() {
+        let keys = DeviceKeys::generate("a");
+        let public = keys.public("A");
+        let bytes = [COMMAND_DOMAIN, b"payload"].concat();
+        let sig = keys.sign_command(&bytes).unwrap();
+        assert!(public.verify_command(&bytes, &sig));
+        assert!(!public.verify_command(&[COMMAND_DOMAIN, b"other"].concat(), &sig));
+        assert!(
+            !DeviceKeys::generate("b")
+                .public("B")
+                .verify_command(&bytes, &sig)
+        );
+        // Nothing outside the command domain, such as a trust entry.
+        assert_eq!(keys.sign_command(b"cypher-trust-entry-v1\0..."), None);
+        let entry = b"cypher-trust-entry-v1\0...";
+        assert!(!public.verify_command(entry, &keys.sign(entry)));
     }
 
     #[test]

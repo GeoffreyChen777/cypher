@@ -299,3 +299,149 @@ async fn only_paired_devices_is_a_group_policy() {
     c.trust.sync().await.unwrap();
     assert!(c.trust.set_require_paired(true).await.is_err());
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_receive_only_device_is_controlled_but_changes_nothing() {
+    let edge = Arc::new(FakeEdge::default());
+    let (a, b) = paired_pair(&edge).await;
+    assert!(!a.trust.status().require_paired);
+
+    // Making B receive-only turns on "Only paired devices" first.
+    let status = a.trust.set_receive_only("dev-b", true).await.unwrap();
+    assert!(status.require_paired);
+    assert!(
+        status
+            .members
+            .iter()
+            .any(|m| m.id == "dev-b" && m.receive_only)
+    );
+    assert!(a.trust.member_is_receive_only("dev-b"));
+    assert!(!a.trust.local_receive_only());
+    // A device can't change its own access.
+    assert!(a.trust.set_receive_only("dev-a", true).await.is_err());
+
+    b.trust.sync().await.unwrap();
+    assert!(b.trust.status().receive_only);
+    assert!(b.trust.local_receive_only());
+    // B signs nothing.
+    for err in [
+        b.trust.start_invite().await.err(),
+        b.trust.remove("dev-a").await.err(),
+        b.trust.set_require_paired(false).await.err(),
+        b.trust.set_receive_only("dev-a", true).await.err(),
+    ] {
+        assert!(err.unwrap().contains("receive-only"));
+    }
+    // The policy stays on until B has full control again.
+    let err = a.trust.set_require_paired(false).await.unwrap_err();
+    assert!(err.contains("full control"), "{err}");
+    a.trust.set_receive_only("dev-b", false).await.unwrap();
+    a.trust.set_require_paired(false).await.unwrap();
+    b.trust.sync().await.unwrap();
+    assert!(!b.trust.local_receive_only());
+    assert!(!b.trust.status().require_paired);
+}
+
+/// What a host sees of a command `issued_by` queued into `chat`, signed by
+/// `signer` (or not).
+fn command(chat: &str, issued_by: &str, signer: Option<&DeviceTrust>) -> CommandAuth {
+    let doc = cypher_doc::SessionDoc::init(chat).unwrap();
+    let entry = cypher_doc::SessionCommandEntry {
+        id: "c1".into(),
+        payload: cypher_doc::SessionCommandPayload::Interrupt {},
+        issued_by: issued_by.into(),
+        issued_at: 1,
+        based_on: None,
+        expires_at: None,
+        status: cypher_doc::SessionCommandStatus::Pending,
+        resolution: None,
+        sent_at: None,
+    };
+    doc.queue_signed_command(chat, &entry, |bytes| signer.and_then(|s| s.sign(bytes)))
+        .unwrap();
+    doc.read_commands_with_auth(chat).unwrap().remove(0).1
+}
+
+#[tokio::test(start_paused = true)]
+async fn hosts_check_command_signatures_against_the_group() {
+    let edge = Arc::new(FakeEdge::default());
+    let (a, b) = paired_pair(&edge).await;
+    a.trust.sync().await.unwrap();
+    let outsider = device("dev-x", &edge);
+    outsider.trust.sync().await.unwrap();
+    assert_eq!(
+        outsider.trust.sign(b"cypher-command-v1\0"),
+        None,
+        "unpaired"
+    );
+
+    let by_b = command("chat", "dev-b", Some(&b.trust));
+    let unsigned = command("chat", "dev-b", None);
+    let mut tampered = by_b.clone();
+    tampered.signing_bytes.push(0);
+    // B's signature for another chat.
+    let mut elsewhere = command("chat-other", "dev-b", Some(&b.trust));
+    elsewhere.signing_bytes = command("chat", "dev-b", None).signing_bytes;
+    // B's signature, claimed for A.
+    let mut as_a = command("chat", "dev-a", None);
+    as_a.sig = by_b.sig.clone();
+    let malformed = CommandAuth {
+        sig: CommandSig::Malformed,
+        ..unsigned.clone()
+    };
+
+    // While unpaired devices are allowed, unsigned commands still run; a
+    // signature that doesn't match never does.
+    assert_eq!(a.trust.check("dev-b", &by_b).await, Ok(()));
+    assert_eq!(a.trust.check("dev-b", &unsigned).await, Ok(()));
+    assert_eq!(a.trust.check("dev-x", &unsigned).await, Ok(()));
+    for (issuer, auth) in [
+        ("dev-b", &tampered),
+        ("dev-b", &elsewhere),
+        ("dev-a", &as_a),
+        ("dev-b", &malformed),
+    ] {
+        assert_eq!(
+            a.trust.check(issuer, auth).await,
+            Err(COMMAND_TAMPERED.into())
+        );
+    }
+
+    // "Only paired devices": a member's signature, or nothing runs.
+    a.trust.set_require_paired(true).await.unwrap();
+    assert_eq!(a.trust.check("dev-b", &by_b).await, Ok(()));
+    let own = command("chat", "dev-a", Some(&a.trust));
+    assert_eq!(a.trust.check("dev-a", &own).await, Ok(()));
+    for (issuer, auth) in [
+        ("dev-b", &unsigned),
+        ("dev-a", &command("chat", "dev-a", None)),
+        ("dev-x", &command("chat", "dev-x", None)),
+    ] {
+        assert_eq!(
+            a.trust.check(issuer, auth).await,
+            Err(COMMAND_UNSIGNED.into())
+        );
+    }
+    // Only its own signature lets a device sign a copy again.
+    assert!(a.trust.is_own_signature(&own));
+    assert!(!a.trust.is_own_signature(&by_b));
+    assert!(!a.trust.is_own_signature(&command("chat", "dev-a", None)));
+    // A key the group doesn't know: re-sync, then refuse.
+    let stranger = DeviceKeys::generate("dev-x");
+    let mut foreign = command("chat", "dev-x", None);
+    foreign.sig = CommandSig::Present(stranger.sign_command(&foreign.signing_bytes).unwrap());
+    assert_eq!(
+        a.trust.check("dev-x", &foreign).await,
+        Err(COMMAND_UNSIGNED.into())
+    );
+
+    // A receive-only member's commands run only on itself.
+    a.trust.set_receive_only("dev-b", true).await.unwrap();
+    b.trust.sync().await.unwrap();
+    assert_eq!(
+        a.trust.check("dev-b", &by_b).await,
+        Err(COMMAND_FROM_RECEIVE_ONLY.into())
+    );
+    assert_eq!(b.trust.check("dev-b", &by_b).await, Ok(()));
+    assert_eq!(b.trust.check("dev-a", &own).await, Ok(()));
+}

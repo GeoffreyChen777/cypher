@@ -46,6 +46,13 @@ struct EnabledParams {
     enabled: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RoleParams {
+    device_id: String,
+    receive_only: bool,
+}
+
 pub(super) async fn call(
     rpc: &EngineRpc,
     method: &str,
@@ -70,6 +77,10 @@ pub(super) async fn call(
         methods::SET_REQUIRE_PAIRED_DEVICES => {
             let p: EnabledParams = parse_params(params)?;
             trust.set_require_paired(p.enabled).await
+        }
+        methods::SET_DEVICE_RECEIVE_ONLY => {
+            let p: RoleParams = parse_params(params)?;
+            trust.set_receive_only(&p.device_id, p.receive_only).await
         }
         other => return Err(RpcError::UnknownMethod(other.to_string())),
     }

@@ -234,6 +234,9 @@ actor DeviceRelayClient {
         case "untrusted_device":
             return
                 "This device only accepts paired devices, and your iPhone isn't paired with it. Pair it under Account › Paired devices."
+        case "receive_only":
+            return
+                "Your iPhone is receive-only: it can't control your other devices. Give it full control in Settings → Devices on a Mac."
         default:
             return "The device refused the secure connection (\(reason))."
         }

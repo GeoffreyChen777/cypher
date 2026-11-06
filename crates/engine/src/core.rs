@@ -353,6 +353,7 @@ impl EngineCore {
     }
 
     pub fn set_trust(&self, trust: crate::device_trust::DeviceTrust) {
+        self.doc_host.set_command_trust(Arc::new(trust.clone()));
         *lock(&self.trust) = Some(trust);
     }
 

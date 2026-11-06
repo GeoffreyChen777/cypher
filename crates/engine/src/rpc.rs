@@ -898,7 +898,8 @@ impl RpcService for EngineRpc {
             | methods::CANCEL_DEVICE_PAIRING
             | methods::JOIN_DEVICE_GROUP
             | methods::REMOVE_TRUSTED_DEVICE
-            | methods::SET_REQUIRE_PAIRED_DEVICES => trust::call(self, method, params).await,
+            | methods::SET_REQUIRE_PAIRED_DEVICES
+            | methods::SET_DEVICE_RECEIVE_ONLY => trust::call(self, method, params).await,
             methods::MIGRATE_CHATS => migrations::migrate_chats(self, params),
             methods::BEGIN_CHAT_MIGRATION
             | methods::WRITE_CHAT_MIGRATION_CHUNK

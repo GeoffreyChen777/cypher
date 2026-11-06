@@ -1,25 +1,33 @@
-//! Settings → Devices: the device registry — name,
-//! platform, last-seen, presence dot, a "This device" badge, a Paired / Not
-//! paired badge from the trust group, click-to-copy id, a Rename dialog
-//! (Mutate renameDevice), and in synced workspaces a Remove action for another
-//! machine (Mutate deleteDevice): that machine signs out of sync and continues
-//! in local-only mode, and when it is paired this device also unpairs it
-//! (RemoveTrustedDevice), so its keys stop being trusted too. This device
-//! cannot be removed from here.
+//! Settings → Devices: one list of the account's machines. Each row joins
+//! the device registry (name, platform, version, last-seen, presence dot)
+//! with the trust group (key fingerprint, and whether the device has full
+//! control or is receive-only), so paired devices that never registered —
+//! the iPhone — show up too. Pairing flows (show a code and approve, or
+//! enter one to join) sit above the list (`device_pairing`), and the
+//! group's "Only paired devices" policy below it.
+//!
+//! Row actions: Update; the access pill (Full control / Receive-only) on
+//! other paired devices; and a menu with Rename (Mutate renameDevice), Copy
+//! device ID, Unpair (RemoveTrustedDevice: the machine stays signed in, its
+//! keys stop being trusted) and Remove (Mutate deleteDevice: the machine
+//! signs out of sync and continues in local-only mode, and when it is paired
+//! this device also unpairs it). This device cannot be removed from here.
+//! On a receive-only device the list is read-only beyond this device itself.
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, Entity, SharedString, Subscription, Task, Window, div,
-    prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, Entity, MouseButton, SharedString, Subscription, Task,
+    Window, div, prelude::*, px,
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use cypher_engine::device_trust::{TrustMember, TrustStatus};
 use cypher_proto::{Device, WorkspaceScope};
 use cypher_rpc::methods;
 
 use crate::kit::popover;
-use crate::kit::theme::{MonoStyled, Theme};
+use crate::kit::theme::Theme;
 use crate::settings::widgets;
 use crate::state::{AppState, device_online};
 use crate::widgets::text_input::{TextInput, TextInputEvent};
@@ -47,7 +55,7 @@ pub fn devices_subtitle(scope: Option<WorkspaceScope>) -> &'static str {
     match scope {
         Some(WorkspaceScope::Local) => "Manage device details stored in this local workspace.",
         Some(WorkspaceScope::Synced | WorkspaceScope::Development) => {
-            "Rename devices or remove machines you no longer use."
+            "Rename, update or remove your machines, and choose which ones can control the others. Paired devices prove who they are with their own keys, so a stolen sign-in or a compromised server can't control them."
         }
         None => "Manage device names for this workspace.",
     }
@@ -77,33 +85,127 @@ pub fn delete_device_copy(name: &str, paired: bool) -> String {
     }
 }
 
-/// The pairing badge for a device row: `Some(("Paired", true))` for a member
-/// of the trust group, `Some(("Not paired", false))` for anyone else, and
-/// `None` while this device can't tell (pairing unavailable, or this device
-/// isn't paired itself, so it holds no trusted list). Pure.
-pub fn pairing_badge(
-    status: Option<&cypher_engine::device_trust::TrustStatus>,
-    device_id: &str,
-) -> Option<(&'static str, bool)> {
-    let status = status?;
-    if status.state != cypher_engine::device_trust::TrustState::Paired {
+/// One row of the list: a device from the registry, a member of the trust
+/// group, or both (matched by device id).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceRow {
+    pub id: String,
+    pub device: Option<Device>,
+    pub member: Option<TrustMember>,
+}
+
+impl DeviceRow {
+    /// The registry's name (renamable) over the name the device paired with.
+    pub fn name(&self) -> &str {
+        match (&self.device, &self.member) {
+            (Some(device), _) => &device.name,
+            (None, Some(member)) => &member.name,
+            (None, None) => &self.id,
+        }
+    }
+}
+
+/// Registry devices in registry order, then paired devices the registry
+/// doesn't list. `trust` lists members only while this device is paired.
+/// Pure.
+pub fn merge_rows(devices: Vec<Device>, trust: Option<&TrustStatus>) -> Vec<DeviceRow> {
+    let members: &[TrustMember] = trust.map_or(&[], |t| t.members.as_slice());
+    let mut rows: Vec<DeviceRow> = devices
+        .into_iter()
+        .map(|device| DeviceRow {
+            id: device.id.clone(),
+            member: members.iter().find(|m| m.id == device.id).cloned(),
+            device: Some(device),
+        })
+        .collect();
+    for member in members {
+        if !rows.iter().any(|row| row.id == member.id) {
+            rows.push(DeviceRow {
+                id: member.id.clone(),
+                device: None,
+                member: Some(member.clone()),
+            });
+        }
+    }
+    rows
+}
+
+/// What a device may do to the others, as the trust group says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    FullControl,
+    ReceiveOnly,
+    NotPaired,
+}
+
+/// A row's access pill, or `None` while this device can't tell (pairing
+/// unavailable, or this device isn't paired, so it holds no trusted list).
+/// Pure.
+pub fn row_access(row: &DeviceRow, trust: Option<&TrustStatus>) -> Option<Access> {
+    let trust = trust?;
+    if trust.state != cypher_engine::device_trust::TrustState::Paired {
         return None;
     }
-    Some(if status.members.iter().any(|m| m.id == device_id) {
-        ("Paired", true)
-    } else {
-        ("Not paired", false)
+    Some(match &row.member {
+        Some(member) if member.receive_only => Access::ReceiveOnly,
+        Some(_) => Access::FullControl,
+        None => Access::NotPaired,
     })
+}
+
+pub fn access_label(access: Access) -> &'static str {
+    match access {
+        Access::FullControl => "Full control",
+        Access::ReceiveOnly => "Receive-only",
+        Access::NotPaired => "Not paired",
+    }
+}
+
+/// Whether this device has full control in its group. Pure.
+fn controls(trust: Option<&TrustStatus>) -> bool {
+    trust.is_some_and(|t| {
+        t.state == cypher_engine::device_trust::TrustState::Paired && !t.receive_only
+    })
+}
+
+/// This device may change `row`'s access: `row` is another member, and this
+/// device has full control. Pure.
+pub fn can_set_access(row: &DeviceRow, trust: Option<&TrustStatus>) -> bool {
+    controls(trust) && row.member.as_ref().is_some_and(|m| !m.is_self)
+}
+
+/// Unpairing is the same decision as access. Pure.
+pub fn can_unpair(row: &DeviceRow, trust: Option<&TrustStatus>) -> bool {
+    can_set_access(row, trust)
+}
+
+/// This device is a receive-only member: beyond itself, the list is
+/// read-only. Pure.
+pub fn local_receive_only(trust: Option<&TrustStatus>) -> bool {
+    trust.is_some_and(|t| t.receive_only)
 }
 
 /// Whether removing `device_id` should also unpair it: it is another member
 /// of the group this device belongs to. Pure.
-pub fn unpair_on_remove(
-    status: Option<&cypher_engine::device_trust::TrustStatus>,
-    device_id: &str,
-) -> bool {
-    pairing_badge(status, device_id) == Some(("Paired", true))
-        && status.is_some_and(|s| s.device_id != device_id)
+pub fn unpair_on_remove(status: Option<&TrustStatus>, device_id: &str) -> bool {
+    status.is_some_and(|s| {
+        s.state == cypher_engine::device_trust::TrustState::Paired
+            && s.device_id != device_id
+            && s.members.iter().any(|m| m.id == device_id)
+    })
+}
+
+/// Which of a row's menus is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuKind {
+    Access,
+    More,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RowMenu {
+    device_id: String,
+    kind: MenuKind,
 }
 
 /// Where one device stands in the fleet-update flow (Devices → Update).
@@ -187,6 +289,8 @@ pub struct DevicesPage {
     update_tasks: Vec<Task<()>>,
     /// The first render with a device list runs one check across the fleet.
     auto_checked: bool,
+    /// A row's access or actions menu.
+    menu: popover::Popup<RowMenu>,
     /// Pairing: this device's place in the account's trust group.
     pairing: Entity<crate::settings::device_pairing::PairingSection>,
     _observe_pairing: Subscription,
@@ -216,6 +320,7 @@ impl DevicesPage {
             updates: HashMap::new(),
             update_tasks: Vec::new(),
             auto_checked: false,
+            menu: popover::Popup::default(),
             _observe: observe,
         }
     }
@@ -306,7 +411,7 @@ impl DevicesPage {
                     (Err(err), _) => page.error = Some(format!("Remove failed: {err}").into()),
                     (Ok(_), Some(Err(err))) => page.error = Some(
                         format!(
-                            "Removed, but it is still paired: {err}. Unpair it under Pairing below."
+                            "Removed, but it is still paired: {err}. Unpair it from its row's menu."
                         )
                         .into(),
                     ),
@@ -355,13 +460,15 @@ impl DevicesPage {
     /// Ask every online device whether a newer release is published for it.
     pub fn check_all(&mut self, cx: &mut Context<Self>) {
         let now = Utc::now();
-        let ids: Vec<String> = self
-            .state
-            .read(cx)
+        // A receive-only device can't reach the others.
+        let only_local = local_receive_only(self.pairing.read(cx).status());
+        let state = self.state.read(cx);
+        let ids: Vec<String> = state
             .devices
             .iter()
             .filter(|d| d.platform != "ios" && d.platform != "android")
             .filter(|d| device_online(d.last_seen_at, now))
+            .filter(|d| !only_local || state.local_device_id.as_deref() == Some(d.id.as_str()))
             .map(|d| d.id.clone())
             .collect();
         for id in ids {
@@ -604,15 +711,6 @@ pub fn platform_label(platform: &str) -> &str {
     }
 }
 
-/// Short device id for the click-to-copy chip (`abcd1234…wxyz`).
-pub fn short_id(id: &str) -> String {
-    if id.len() > 12 {
-        format!("{}…{}", &id[..8], &id[id.len() - 4..])
-    } else {
-        id.to_string()
-    }
-}
-
 impl Render for DevicesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -629,8 +727,7 @@ impl Render for DevicesPage {
         let viewport = window.viewport_size();
         let dialog = self.render_rename_dialog(viewport, cx);
         let delete_dialog = self.render_delete_dialog(viewport, cx);
-        let count = devices.len();
-        if !self.auto_checked && count > 0 && self.state.read(cx).engine().is_some() {
+        if !self.auto_checked && !devices.is_empty() && self.state.read(cx).engine().is_some() {
             self.auto_checked = true;
             self.check_all(cx);
         }
@@ -643,7 +740,17 @@ impl Render for DevicesPage {
             .values()
             .any(|phase| matches!(phase, DeviceUpdate::Checking));
 
-        let trust = self.pairing.read(cx).status().cloned();
+        let synced = matches!(
+            workspace_scope,
+            Some(WorkspaceScope::Synced | WorkspaceScope::Development)
+        );
+        let (trust, pairing_busy) = {
+            let pairing = self.pairing.read(cx);
+            (pairing.status().cloned(), pairing.busy())
+        };
+        let trust = trust.filter(|_| synced);
+        let rows = merge_rows(devices, trust.as_ref());
+        let count = rows.len();
         let ctx = DeviceRowContext {
             now,
             local_id,
@@ -651,11 +758,12 @@ impl Render for DevicesPage {
             workspace_scope,
             updates: &updates,
             trust: trust.as_ref(),
+            busy: pairing_busy,
         };
-        let rows: Vec<AnyElement> = devices
+        let rows: Vec<AnyElement> = rows
             .into_iter()
             .enumerate()
-            .map(|(ix, device)| self.device_row(ix, device, &ctx, &theme, cx))
+            .map(|(ix, row)| self.device_row(ix, row, &ctx, &theme, cx))
             .collect();
 
         let card = widgets::section_card(&theme);
@@ -672,6 +780,10 @@ impl Render for DevicesPage {
         } else {
             card.children(rows)
         };
+        // Add a device: a member with full control, nothing in progress.
+        let can_add = controls(trust.as_ref())
+            && trust.as_ref().is_some_and(|t| t.pairing.is_none())
+            && !pairing_busy;
 
         div()
             .id("devices-page")
@@ -692,9 +804,10 @@ impl Render for DevicesPage {
                     // ones with a newer release. Each device applies its own
                     // release and restarts itself; iOS updates through
                     // TestFlight and is left out.
-                    .when(count > 0, |el| {
-                        el.child(fleet_update_controls(checking, available_count, &theme, cx))
+                    .when(count > 0 || can_add, |el| {
+                        el.child(page_toolbar(checking, available_count, can_add, &theme, cx))
                     })
+                    .when(synced, |el| el.child(self.pairing.clone()))
                     .when_some(self.error.clone(), |el, message| {
                         el.child(
                             widgets::error_strip(&theme, message)
@@ -706,13 +819,12 @@ impl Render for DevicesPage {
                                 })),
                         )
                     })
-                    .child(card)
-                    .when(
-                        matches!(
-                            workspace_scope,
-                            Some(WorkspaceScope::Synced | WorkspaceScope::Development)
-                        ),
-                        |el| el.child(self.pairing.clone()),
+                    .child(card.mt(px(16.0)))
+                    .when_some(
+                        trust
+                            .as_ref()
+                            .filter(|t| t.state == cypher_engine::device_trust::TrustState::Paired),
+                        |el, trust| el.child(self.policy_row(trust, pairing_busy, &theme, cx)),
                     ),
             )
             .when_some(dialog, |el, dialog| el.child(dialog))
@@ -721,12 +833,12 @@ impl Render for DevicesPage {
 }
 
 impl DevicesPage {
-    /// One device card row: identity tile, name over the meta line, the
-    /// update pill and the row's actions.
+    /// One device row: identity tile, name over the meta line, the update and
+    /// access pills, Update, and the actions menu.
     fn device_row(
         &self,
         ix: usize,
-        device: Device,
+        row: DeviceRow,
         ctx: &DeviceRowContext<'_>,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -738,69 +850,88 @@ impl DevicesPage {
             workspace_scope,
             updates,
             trust,
+            busy,
         } = ctx;
-        let pairing = pairing_badge(*trust, &device.id);
-        let (now, workspace_scope) = (*now, *workspace_scope);
-        let online = device_online(device.last_seen_at, now);
-        let is_local = local_id.as_deref() == Some(device.id.as_str());
-        let id_copied = copied.as_deref() == Some(device.id.as_str());
-        let rename_id = device.id.clone();
-        let rename_name = device.name.clone();
-        let remove_id = device.id.clone();
-        let update_id = device.id.clone();
-        let show_remove = can_remove_device(workspace_scope, is_local);
-        let phase = updates.get(&device.id).cloned();
+        let (now, workspace_scope, trust) = (*now, *workspace_scope, *trust);
+        let device = row.device.as_ref();
+        let online = device.is_some_and(|d| device_online(d.last_seen_at, now));
+        let is_local = local_id.as_deref() == Some(row.id.as_str());
+        let read_only = local_receive_only(trust) && !is_local;
+        // A receive-only device can't reach the others: nothing to report.
+        let phase = updates.get(&row.id).cloned().filter(|_| !read_only);
         let update_action: Option<(&'static str, bool)> = match &phase {
             Some(DeviceUpdate::Available(_)) => Some(("Update", false)),
             Some(DeviceUpdate::Failed { busy: true, .. }) => Some(("Update anyway", true)),
             Some(DeviceUpdate::Failed { busy: false, .. }) => Some(("Retry", false)),
             _ => None,
         };
-        let platform_icon = match device.platform.as_str() {
-            "macos" | "darwin" => crate::kit::icons::LAPTOP,
-            "web" => crate::kit::icons::GLOBAL,
-            "ios" | "android" => crate::kit::icons::SMARTPHONE,
-            _ => crate::kit::icons::MONITOR,
+        let platform_icon = match device.map(|d| d.platform.as_str()) {
+            Some("macos" | "darwin") => crate::kit::icons::LAPTOP,
+            Some("web") => crate::kit::icons::GLOBAL,
+            Some("ios" | "android") => crate::kit::icons::SMARTPHONE,
+            Some(_) => crate::kit::icons::MONITOR,
+            // Paired but not in the registry: the iPhone app pairs without
+            // registering, so its name is the best hint there is.
+            None if row.name().starts_with("iPhone") || row.name().starts_with("iPad") => {
+                crate::kit::icons::SMARTPHONE
+            }
+            None => crate::kit::icons::KEY_MINIMALISTIC,
         };
-        let tile = device_tile(online, platform_icon, theme);
-        let meta = device_meta(ix, &device, online, now, id_copied, theme, cx);
-        // Update state rides a right-aligned pill (below), never the
-        // meta line: a long status pushed the id chip onto its own
-        // row and rows stopped lining up.
+        let tile = device_tile(device.map(|_| online), platform_icon, theme);
+        let id_copied = copied.as_deref() == Some(row.id.as_str());
+        let meta = device_meta(&row, online, now, id_copied, theme);
+        // Update state rides a right-aligned pill, never the meta line: a
+        // long status pushed the meta onto its own row and rows stopped
+        // lining up.
         let status_pill = phase.as_ref().map(|phase| update_status_pill(phase, theme));
+        let access = row_access(&row, trust);
+        let access_pill = access.map(|access| {
+            self.access_pill(
+                ix,
+                &row,
+                access,
+                can_set_access(&row, trust) && !busy,
+                theme,
+                cx,
+            )
+        });
+        let local_label = is_local.then_some(if workspace_scope == Some(WorkspaceScope::Local) {
+            "Local only"
+        } else {
+            "This device"
+        });
+        let update_id = row.id.clone();
 
         widgets::card_row(theme, ix == 0)
             .child(tile)
             .child(
                 div()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(px(220.0))
                     .flex()
                     .flex_col()
-                    .child(widgets::row_title(theme, device.name.clone()))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_baseline()
+                            .gap(px(8.0))
+                            .min_w_0()
+                            .child(widgets::row_title(theme, row.name().to_string()))
+                            .when_some(local_label, |el, label| {
+                                el.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(11.0))
+                                        .text_color(theme.text_muted.opacity(0.8))
+                                        .child(label),
+                                )
+                            }),
+                    )
                     .child(widgets::meta_line(theme, meta)),
             )
             .when_some(status_pill, |el, pill| el.child(pill))
-            .when_some(pairing, |el, (label, paired)| {
-                el.child(if paired {
-                    widgets::badge_active(theme, label)
-                } else {
-                    widgets::badge(theme, label)
-                })
-            })
-            .when(is_local, |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(10.5))
-                        .text_color(theme.text_muted)
-                        .child(if workspace_scope == Some(WorkspaceScope::Local) {
-                            "Local only"
-                        } else {
-                            "This device"
-                        }),
-                )
-            })
+            .when_some(access_pill, |el, pill| el.child(pill))
             .when_some(update_action, |el, (label, force)| {
                 let retry_check = label == "Retry";
                 let id = update_id.clone();
@@ -824,123 +955,451 @@ impl DevicesPage {
                         .child(SharedString::from(label)),
                 )
             })
-            .child(
-                // `opacity-70 hover:opacity-100` (zeron: also rises on
-                // row hover — gpui has no group-hover, so the button's
-                // own hover carries the reveal).
-                widgets::ghost_action(theme)
-                    .id(("device-rename", ix))
-                    .opacity(0.7)
-                    .hover(|s| {
-                        s.opacity(1.0)
-                            .bg(crate::kit::theme::ink(0.06))
-                            .text_color(theme.text)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_rename(rename_id.clone(), rename_name.clone(), cx);
-                    }))
-                    .child(
-                        crate::kit::icons::icon(crate::kit::icons::PEN)
-                            .size(px(14.0))
-                            .text_color(theme.text_muted),
-                    )
-                    .child(SharedString::from("Rename")),
-            )
-            .when(show_remove, |el| {
+            .child(self.more_button(ix, &row, ctx, theme, cx))
+            .into_any_element()
+    }
+
+    /// The access pill; a menu trigger where this device may change it.
+    fn access_pill(
+        &self,
+        ix: usize,
+        row: &DeviceRow,
+        access: Access,
+        editable: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (tone, text, glyph) = match access {
+            Access::FullControl => (
+                theme.success,
+                theme.success_muted,
+                Some(crate::kit::icons::SHIELD_CHECK),
+            ),
+            Access::ReceiveOnly => (
+                theme.warning,
+                theme.warning_muted,
+                Some(crate::kit::icons::SHIELD_KEYHOLE),
+            ),
+            Access::NotPaired => (theme.text_muted, theme.text_muted, None),
+        };
+        let pill = div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .px(px(8.0))
+            .py(px(2.0))
+            .rounded_full()
+            .text_size(px(10.5))
+            .text_color(text.opacity(0.9))
+            .map(|el| match access {
+                Access::NotPaired => el.border_1().border_color(theme.border),
+                _ => el.bg(tone.opacity(0.12)),
+            })
+            .when_some(glyph, |el, glyph| {
                 el.child(
-                    widgets::ghost_action(theme)
-                        .id(("device-remove", ix))
-                        .opacity(0.7)
-                        .hover(|s| {
-                            s.opacity(1.0)
-                                .bg(theme.danger.opacity(0.08))
-                                .text_color(theme.danger)
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_delete(remove_id.clone(), cx);
-                        }))
-                        .child(
-                            crate::kit::icons::icon(crate::kit::icons::TRASH_BIN_MINIMALISTIC)
-                                .size(px(14.0))
-                                .text_color(theme.danger),
-                        )
-                        .child(SharedString::from("Remove")),
+                    crate::kit::icons::icon(glyph)
+                        .size(px(11.0))
+                        .text_color(text.opacity(0.9)),
                 )
             })
-            .into_any_element()
+            .child(SharedString::from(access_label(access)));
+        if !editable {
+            return pill.into_any_element();
+        }
+        let open = self
+            .menu
+            .get()
+            .is_some_and(|m| m.device_id == row.id && m.kind == MenuKind::Access);
+        let device_id = row.id.clone();
+        let press_id = row.id.clone();
+        let mut trigger = pill
+            .id(("device-access", ix))
+            .relative()
+            .cursor_pointer()
+            .hover(|s| s.bg(tone.opacity(0.2)))
+            .when(open, |el| el.bg(tone.opacity(0.2)))
+            .child(
+                crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_DOWN)
+                    .size(px(10.0))
+                    .text_color(text.opacity(0.7)),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, _| {
+                    this.menu.note_trigger_press_matching(|m| {
+                        m.device_id == press_id && m.kind == MenuKind::Access
+                    });
+                }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_menu(device_id.clone(), MenuKind::Access, cx)
+            }));
+        if open && let Some(member) = row.member.clone() {
+            trigger = trigger.child(self.render_access_menu(member, theme, cx));
+        }
+        trigger.into_any_element()
+    }
+
+    /// The row's `•••` button and its menu.
+    fn more_button(
+        &self,
+        ix: usize,
+        row: &DeviceRow,
+        ctx: &DeviceRowContext<'_>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let items = self.more_items(row, ctx);
+        let open = self
+            .menu
+            .get()
+            .is_some_and(|m| m.device_id == row.id && m.kind == MenuKind::More);
+        let device_id = row.id.clone();
+        let press_id = row.id.clone();
+        let mut button = div()
+            .id(("device-more", ix))
+            .relative()
+            .flex_none()
+            .w(px(32.0))
+            .h(px(28.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.0))
+            .text_size(px(10.0))
+            .text_color(theme.text_muted)
+            .when(open, |el| el.bg(crate::kit::theme::ink(0.06)))
+            .when(items.is_empty(), |el| el.opacity(0.3))
+            .when(!items.is_empty(), |el| {
+                el.cursor_pointer()
+                    .hover(|s| widgets::ghost_hover(theme, s))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, _| {
+                            this.menu.note_trigger_press_matching(|m| {
+                                m.device_id == press_id && m.kind == MenuKind::More
+                            });
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_menu(device_id.clone(), MenuKind::More, cx)
+                    }))
+            })
+            .child(SharedString::from("•••"));
+        if open && !items.is_empty() {
+            button = button.child(self.render_more_menu(row.clone(), items, theme, cx));
+        }
+        button.into_any_element()
+    }
+
+    /// What the row's menu offers, in order.
+    fn more_items(&self, row: &DeviceRow, ctx: &DeviceRowContext<'_>) -> Vec<MoreItem> {
+        let is_local = ctx.local_id.as_deref() == Some(row.id.as_str());
+        let read_only = local_receive_only(ctx.trust) && !is_local;
+        let mut items = Vec::new();
+        if row.device.is_some() && !read_only {
+            items.push(MoreItem::Rename);
+        }
+        items.push(MoreItem::CopyId);
+        if can_unpair(row, ctx.trust) {
+            items.push(MoreItem::Unpair);
+        }
+        if row.device.is_some() && can_remove_device(ctx.workspace_scope, is_local) && !read_only {
+            items.push(MoreItem::Remove);
+        }
+        items
+    }
+
+    fn toggle_menu(&mut self, device_id: String, kind: MenuKind, cx: &mut Context<Self>) {
+        if self.menu.take_press_was_open() {
+            self.close_menu(cx);
+            return;
+        }
+        self.menu.open(RowMenu { device_id, kind });
+        cx.notify();
+    }
+
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.menu.begin_close() {
+            popover::reap_popup(cx, |page: &mut Self| &mut page.menu);
+            cx.notify();
+        }
+    }
+
+    fn render_access_menu(
+        &self,
+        member: TrustMember,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let closing = self.menu.closing_since();
+        let mut card = popover::popover_card(theme)
+            .id("device-access-menu")
+            .role(gpui::Role::Menu)
+            .aria_label("Device access")
+            .w(px(280.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_menu(cx)));
+        let choices = [
+            (
+                false,
+                "Full control",
+                "Can control your other devices, add or remove devices, and change these settings.",
+                crate::kit::icons::SHIELD_CHECK,
+            ),
+            (
+                true,
+                "Receive-only",
+                "Your other devices can control it and send it messages. It can't control them.",
+                crate::kit::icons::SHIELD_KEYHOLE,
+            ),
+        ];
+        for (index, (receive_only, title, caption, glyph)) in choices.into_iter().enumerate() {
+            let current = member.receive_only == receive_only;
+            let choice = member.clone();
+            card = card.child(
+                popover::menu_row(theme, false, format!("device-access-choice-{index}"))
+                    .id(("device-access-choice", index))
+                    .role(gpui::Role::MenuItem)
+                    .aria_label(title)
+                    .items_start()
+                    .py(px(8.0))
+                    .when(closing.is_none(), |el| {
+                        el.on_click(cx.listener(move |this, _, _, cx| {
+                            this.close_menu(cx);
+                            let member = choice.clone();
+                            this.pairing.update(cx, |pairing, cx| {
+                                pairing.set_access(member, receive_only, cx)
+                            });
+                        }))
+                    })
+                    .child(
+                        crate::kit::icons::icon(glyph)
+                            .size(px(15.0))
+                            .mt(px(1.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(SharedString::from(title))
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(caption)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(14.0))
+                            .mt(px(1.0))
+                            .when(current, |el| {
+                                el.child(
+                                    crate::kit::icons::icon(crate::kit::icons::CHECK)
+                                        .size(px(14.0))
+                                        .text_color(theme.text),
+                                )
+                            }),
+                    ),
+            );
+        }
+        popover::anchored_menu_below_end("device-access-layer", card.into_any_element(), closing)
+    }
+
+    fn render_more_menu(
+        &self,
+        row: DeviceRow,
+        items: Vec<MoreItem>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let closing = self.menu.closing_since();
+        let mut card = popover::popover_card(theme)
+            .id("device-actions-menu")
+            .role(gpui::Role::Menu)
+            .aria_label("Device actions")
+            .w(px(200.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_menu(cx)));
+        let mut separated = false;
+        for (index, item) in items.into_iter().enumerate() {
+            let destructive = matches!(item, MoreItem::Unpair | MoreItem::Remove);
+            // The destructive items form their own group.
+            let separate = destructive && index > 0 && !separated;
+            separated |= destructive;
+            let (label, glyph) = item.label();
+            let row = row.clone();
+            card = card
+                .when(separate, |el| el.child(popover::menu_separator()))
+                .child(
+                    popover::menu_row(theme, false, format!("device-action-{index}"))
+                        .id(("device-action", index))
+                        .role(gpui::Role::MenuItem)
+                        .aria_label(label)
+                        .min_h(px(32.0))
+                        .when(destructive, |el| el.text_color(theme.danger_muted))
+                        .when(closing.is_none(), |el| {
+                            el.on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_menu(cx);
+                                this.more_action(item, row.clone(), cx);
+                            }))
+                        })
+                        .child(crate::kit::icons::icon(glyph).size(px(15.0)).text_color(
+                            if destructive {
+                                theme.danger_muted
+                            } else {
+                                theme.text_muted
+                            },
+                        ))
+                        .child(SharedString::from(label)),
+                );
+        }
+        popover::anchored_menu_below_end("device-actions-layer", card.into_any_element(), closing)
+    }
+
+    fn more_action(&mut self, item: MoreItem, row: DeviceRow, cx: &mut Context<Self>) {
+        match item {
+            MoreItem::Rename => self.open_rename(row.id.clone(), row.name().to_string(), cx),
+            MoreItem::CopyId => self.copy_id(row.id, cx),
+            MoreItem::Unpair => {
+                if let Some(member) = row.member {
+                    self.pairing
+                        .update(cx, |pairing, cx| pairing.ask_unpair(member, cx));
+                }
+            }
+            MoreItem::Remove => self.open_delete(row.id, cx),
+        }
+    }
+
+    /// "Only paired devices", below the list.
+    fn policy_row(
+        &self,
+        trust: &TrustStatus,
+        busy: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let require = trust.require_paired;
+        let lock = crate::settings::device_pairing::policy_lock_copy(trust);
+        let enabled = lock.is_none() && !busy;
+        div()
+            .mt(px(20.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        widgets::toggle_switch(theme, require)
+                            .id("pairing-require")
+                            .when(!enabled, |el| el.opacity(0.5))
+                            .when(enabled, |el| {
+                                el.cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.pairing.update(cx, |pairing, cx| {
+                                            pairing.set_require_paired(!require, cx)
+                                        })
+                                    }))
+                            }),
+                    )
+                    .child(widgets::field_label(theme, "Only paired devices")),
+            )
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(theme.text_muted)
+                    .child(crate::settings::device_pairing::policy_copy()),
+            )
+            .when_some(lock, |el, lock| {
+                el.child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted.opacity(0.7))
+                        .child(lock),
+                )
+            })
+    }
+}
+
+/// One entry in a row's actions menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoreItem {
+    Rename,
+    CopyId,
+    Unpair,
+    Remove,
+}
+
+impl MoreItem {
+    fn label(self) -> (&'static str, &'static str) {
+        match self {
+            MoreItem::Rename => ("Rename…", crate::kit::icons::PEN),
+            MoreItem::CopyId => ("Copy device ID", crate::kit::icons::COPY),
+            MoreItem::Unpair => ("Unpair…", crate::kit::icons::SHIELD_CROSS),
+            MoreItem::Remove => (
+                "Remove from account…",
+                crate::kit::icons::TRASH_BIN_MINIMALISTIC,
+            ),
+        }
     }
 }
 
 /// One quiet meta line: platform · version · (offline: last seen) · added ·
-/// id chip.
+/// key, and the name the device paired with when it was renamed since.
 fn device_meta(
-    ix: usize,
-    device: &Device,
+    row: &DeviceRow,
     online: bool,
     now: DateTime<Utc>,
     id_copied: bool,
     theme: &Theme,
-    cx: &mut Context<DevicesPage>,
 ) -> Vec<AnyElement> {
-    let mut meta: Vec<AnyElement> = vec![
-        div()
-            .child(SharedString::from(
-                platform_label(&device.platform).to_string(),
-            ))
-            .into_any_element(),
-    ];
-    if let Some(version) = device.version.as_deref().filter(|v| !v.is_empty()) {
+    let text = |copy: String| div().child(SharedString::from(copy)).into_any_element();
+    let mut meta: Vec<AnyElement> = Vec::new();
+    if let Some(device) = &row.device {
+        meta.push(text(platform_label(&device.platform).to_string()));
+        if let Some(version) = device.version.as_deref().filter(|v| !v.is_empty()) {
+            meta.push(text(format!("v{version}")));
+        }
+        if !online {
+            meta.push(text(format!(
+                "Last seen {}",
+                format_last_seen(device.last_seen_at, now)
+            )));
+        }
+        // "Added {time ago}" — always present (zeron settings.devices.tsx).
+        if let Some(created) = device.created_at {
+            meta.push(text(format!(
+                "Added {}",
+                format_last_seen(Some(created), now)
+            )));
+        }
+    }
+    if let Some(member) = &row.member {
+        if row.device.as_ref().is_some_and(|d| d.name != member.name) {
+            meta.push(text(format!("paired as {}", member.name)));
+        }
         meta.push(
-            div()
-                .child(SharedString::from(format!("v{version}")))
+            crate::settings::device_pairing::key_label(theme, &member.fingerprint)
                 .into_any_element(),
         );
     }
-    if !online {
+    if id_copied {
         meta.push(
             div()
-                .child(SharedString::from(format!(
-                    "Last seen {}",
-                    format_last_seen(device.last_seen_at, now)
-                )))
+                .text_color(theme.success_muted.opacity(0.9))
+                .child(SharedString::from("ID copied"))
                 .into_any_element(),
         );
     }
-    // "Added {time ago}" — always present (zeron settings.devices.tsx).
-    if let Some(created) = device.created_at {
-        meta.push(
-            div()
-                .child(SharedString::from(format!(
-                    "Added {}",
-                    format_last_seen(Some(created), now)
-                )))
-                .into_any_element(),
-        );
-    }
-    // The id chip ends the meta line; with the update state on
-    // its own pill the line is short enough to stay one row.
-    let copy_id = device.id.clone();
-    let id_chip = div()
-        .id(("device-id", ix))
-        .flex_none()
-        .mono(theme)
-        .text_size(px(10.5))
-        .text_color(if id_copied {
-            theme.success_muted.opacity(0.9)
-        } else {
-            theme.text_muted.opacity(0.5)
-        })
-        .cursor_pointer()
-        .hover(|s| s.text_color(theme.text_muted))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.copy_id(copy_id.clone(), cx);
-        }))
-        .child(SharedString::from(if id_copied {
-            "Copied".to_string()
-        } else {
-            short_id(&device.id)
-        }));
-    meta.push(id_chip.into_any_element());
     meta
 }
 
@@ -951,36 +1410,43 @@ struct DeviceRowContext<'a> {
     copied: Option<String>,
     workspace_scope: Option<WorkspaceScope>,
     updates: &'a HashMap<String, DeviceUpdate>,
-    trust: Option<&'a cypher_engine::device_trust::TrustStatus>,
+    trust: Option<&'a TrustStatus>,
+    /// A pairing call is in flight.
+    busy: bool,
 }
 
 /// The device's identity tile. Presence lives ON the tile: a corner dot
 /// (emerald online with a soft glow, faint offline), ringed by the card
 /// tone so it "cuts" the tile — zeron settings.devices.tsx
 /// `border-2 border-[var(--card)]` +
-/// `shadow-[0_0_6px_rgba(52,211,153,0.55)]`.
-fn device_tile(online: bool, platform_icon: &'static str, theme: &Theme) -> gpui::Div {
+/// `shadow-[0_0_6px_rgba(52,211,153,0.55)]`. `None`: no registry record,
+/// so no presence to show.
+fn device_tile(online: Option<bool>, platform_icon: &'static str, theme: &Theme) -> gpui::Div {
     let emerald = theme.success; // emerald-400
-    widgets::row_tile(theme, platform_icon).relative().child(
-        div()
-            .absolute()
-            .bottom(px(-3.0))
-            .right(px(-3.0))
-            .size(px(9.0))
-            .rounded_full()
-            .border_2()
-            .border_color(theme.surface)
-            .when(online, |el| {
-                el.bg(emerald).shadow(vec![gpui::BoxShadow {
-                    color: emerald.opacity(0.55),
-                    offset: gpui::point(px(0.0), px(0.0)),
-                    blur_radius: px(6.0),
-                    spread_radius: px(0.0),
-                    inset: false,
-                }])
-            })
-            .when(!online, |el| el.bg(crate::kit::theme::ink(0.22))),
-    )
+    widgets::row_tile(theme, platform_icon)
+        .relative()
+        .when_some(online, |el, online| {
+            el.child(
+                div()
+                    .absolute()
+                    .bottom(px(-3.0))
+                    .right(px(-3.0))
+                    .size(px(9.0))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(theme.surface)
+                    .when(online, |el| {
+                        el.bg(emerald).shadow(vec![gpui::BoxShadow {
+                            color: emerald.opacity(0.55),
+                            offset: gpui::point(px(0.0), px(0.0)),
+                            blur_radius: px(6.0),
+                            spread_radius: px(0.0),
+                            inset: false,
+                        }])
+                    })
+                    .when(!online, |el| el.bg(crate::kit::theme::ink(0.22))),
+            )
+        })
 }
 
 /// The right-aligned pill naming a device's update state.
@@ -991,9 +1457,11 @@ fn update_status_pill(phase: &DeviceUpdate, theme: &Theme) -> gpui::Div {
         DeviceUpdate::UpToDate => theme.success_muted,
         _ => theme.text_muted,
     };
+    // Shrinks (truncating) before the device name does.
     div()
-        .flex_none()
-        .max_w(px(220.0))
+        .flex_shrink(1.0)
+        .min_w(px(48.0))
+        .max_w(px(200.0))
         .px(px(8.0))
         .py(px(2.0))
         .rounded_full()
@@ -1004,24 +1472,27 @@ fn update_status_pill(phase: &DeviceUpdate, theme: &Theme) -> gpui::Div {
         .child(SharedString::from(update_badge(phase)))
 }
 
-/// Fleet updates: check every online device, update the ones with a newer
-/// release. Each device applies its own release and restarts itself; iOS
-/// updates through TestFlight and is left out.
-fn fleet_update_controls(
+/// The toolbar over the list. Fleet updates: check every online device,
+/// update the ones with a newer release (each device applies its own release
+/// and restarts itself; iOS updates through TestFlight and is left out).
+/// Add a device sits on the trailing edge.
+fn page_toolbar(
     checking: bool,
     available_count: usize,
+    can_add: bool,
     theme: &Theme,
     cx: &mut Context<DevicesPage>,
 ) -> gpui::Div {
     div()
+        .mt(px(12.0))
         .flex()
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .pb(px(12.0))
         .child(
             widgets::ghost_action(theme)
                 .id("devices-check-updates")
+                .hover(|s| widgets::ghost_hover(theme, s))
                 .when(checking, |el| el.opacity(0.6))
                 .on_click(cx.listener(|this, _, _, cx| this.check_all(cx)))
                 .child(
@@ -1052,13 +1523,34 @@ fn fleet_update_controls(
                     ))),
             )
         })
+        .child(div().flex_1())
+        .when(can_add, |el| {
+            el.child(
+                widgets::ghost_action(theme)
+                    .id("pairing-add")
+                    .text_color(theme.text)
+                    .border_1()
+                    .border_color(theme.border)
+                    .hover(|s| widgets::ghost_hover(theme, s))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.pairing
+                            .update(cx, |pairing, cx| pairing.start_invite(cx))
+                    }))
+                    .child(
+                        crate::kit::icons::icon(crate::kit::icons::PLUS)
+                            .size(px(14.0))
+                            .text_color(theme.text),
+                    )
+                    .child(SharedString::from("Add a device")),
+            )
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeDelta;
-    use cypher_engine::device_trust::{TrustMember, TrustState, TrustStatus};
+    use cypher_engine::device_trust::TrustState;
 
     #[test]
     fn last_seen_formatting() {
@@ -1161,33 +1653,111 @@ mod tests {
                     name: (*id).into(),
                     fingerprint: "00".into(),
                     is_self: *id == "me",
+                    receive_only: false,
                 })
                 .collect(),
             require_paired: false,
+            receive_only: false,
             pairing: None,
             conflict: false,
             error: None,
         }
     }
 
+    fn device(id: &str, name: &str) -> Device {
+        Device {
+            id: id.into(),
+            name: name.into(),
+            platform: "macos".into(),
+            last_seen_at: None,
+            created_at: None,
+            version: None,
+        }
+    }
+
     #[test]
-    fn rows_show_pairing_only_when_this_device_can_tell() {
-        let paired = trust(TrustState::Paired, &["me", "mac"]);
-        assert_eq!(pairing_badge(Some(&paired), "mac"), Some(("Paired", true)));
-        assert_eq!(pairing_badge(Some(&paired), "me"), Some(("Paired", true)));
-        assert_eq!(
-            pairing_badge(Some(&paired), "vps"),
-            Some(("Not paired", false))
+    fn one_list_joins_the_registry_and_the_trust_group() {
+        let mut status = trust(TrustState::Paired, &["me", "mac", "phone"]);
+        status.members[1].name = "old name".into();
+        let rows = merge_rows(
+            vec![
+                device("mac", "Mac mini"),
+                device("me", "MacBook"),
+                device("vps", "vps"),
+            ],
+            Some(&status),
         );
+        let ids: Vec<_> = rows.iter().map(|r| r.id.as_str()).collect();
+        // Registry order first, then members the registry doesn't list.
+        assert_eq!(ids, ["mac", "me", "vps", "phone"]);
+        assert_eq!(rows[0].name(), "Mac mini", "the registry name wins");
+        assert!(rows[0].member.is_some());
+        assert!(rows[2].member.is_none());
+        assert!(rows[3].device.is_none());
+        assert_eq!(rows[3].name(), "phone");
+        // Without a trusted list, only the registry.
+        let rows = merge_rows(vec![device("mac", "Mac mini")], None);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].member.is_none());
+    }
+
+    #[test]
+    fn rows_show_access_only_when_this_device_can_tell() {
+        let mut paired = trust(TrustState::Paired, &["me", "mac"]);
+        paired.members[1].receive_only = true;
+        let rows = merge_rows(
+            vec![
+                device("me", "me"),
+                device("mac", "mac"),
+                device("vps", "vps"),
+            ],
+            Some(&paired),
+        );
+        assert_eq!(
+            row_access(&rows[0], Some(&paired)),
+            Some(Access::FullControl)
+        );
+        assert_eq!(
+            row_access(&rows[1], Some(&paired)),
+            Some(Access::ReceiveOnly)
+        );
+        assert_eq!(row_access(&rows[2], Some(&paired)), Some(Access::NotPaired));
         // Without a trusted list of its own, this device can't vouch either way.
         for state in [
             TrustState::Unpaired,
             TrustState::Removed,
             TrustState::Unknown,
         ] {
-            assert_eq!(pairing_badge(Some(&trust(state, &[])), "mac"), None);
+            assert_eq!(row_access(&rows[1], Some(&trust(state, &[]))), None);
         }
-        assert_eq!(pairing_badge(None, "mac"), None);
+        assert_eq!(row_access(&rows[1], None), None);
+        assert_eq!(access_label(Access::ReceiveOnly), "Receive-only");
+    }
+
+    #[test]
+    fn only_a_device_with_full_control_changes_the_others() {
+        let mut paired = trust(TrustState::Paired, &["me", "mac"]);
+        let rows = merge_rows(
+            vec![
+                device("me", "me"),
+                device("mac", "mac"),
+                device("vps", "vps"),
+            ],
+            Some(&paired),
+        );
+        assert!(!can_set_access(&rows[0], Some(&paired)), "not itself");
+        assert!(can_set_access(&rows[1], Some(&paired)));
+        assert!(
+            !can_set_access(&rows[2], Some(&paired)),
+            "not an unpaired device"
+        );
+        assert!(can_unpair(&rows[1], Some(&paired)));
+        assert!(!local_receive_only(Some(&paired)));
+        paired.receive_only = true;
+        paired.members[0].receive_only = true;
+        assert!(local_receive_only(Some(&paired)));
+        assert!(!can_set_access(&rows[1], Some(&paired)));
+        assert!(!can_unpair(&rows[1], Some(&paired)));
     }
 
     #[test]
