@@ -26,6 +26,9 @@ final class SessionStore {
     let chatId: String
     /// The chat's host device — nudge target for cold-host command drains.
     var hostDeviceId: String?
+    /// The chat's workspace row as this phone shows it: what a send signs
+    /// into launch records the chat lacks.
+    @ObservationIgnored var row: () -> Chat? = { nil }
     private(set) var entries: [MessageEntry] = []
     @ObservationIgnored private var durableEntries: [MessageEntry] = []
     @ObservationIgnored private var durablePreviewCoverage: PreviewCoverage?
@@ -1014,6 +1017,7 @@ final class SessionStore {
                 "frontier": .null,
             ])
         }
+        fillLaunchRecords()
         let signingBytes = CommandSigning.signingBytes(
             chatId: chatId, fields: fields.mapValues(\.commandValue))
         if let sig = config.trust?.signCommand(signingBytes) {
@@ -1028,6 +1032,73 @@ final class SessionStore {
         } catch { return nil }
         nudgeHost()
         return id
+    }
+
+    // MARK: Launch records
+
+    /// Sign `config` as how the chat's runs launch (doc_host `launch`): a
+    /// host that only accepts paired devices takes the permission level from
+    /// these, not from the row anyone can edit. Called when the user changes
+    /// the chat's settings here.
+    func recordLaunchConfig(_ config: ChatConfig) {
+        appendLaunchRecord(kind: "config", value: Self.configValue(config))
+    }
+
+    /// Before a send: sign the host and settings this phone shows when the
+    /// chat has no trusted record of them yet (a chat started here, or one
+    /// from before records). An existing record is never overridden.
+    private func fillLaunchRecords() {
+        guard let chat = row() else { return }
+        if !hasTrustedLaunchRecord(kind: "host") {
+            var fields: [String: LoroValue] = ["host": .string(value: chat.deviceId)]
+            if let cwd = chat.cwd { fields["cwd"] = .string(value: cwd) }
+            appendLaunchRecord(kind: "host", fields: fields)
+        }
+        if let config = chat.config, !hasTrustedLaunchRecord(kind: "config") {
+            appendLaunchRecord(kind: "config", value: Self.configValue(config))
+        }
+    }
+
+    private static func configValue(_ config: ChatConfig) -> LoroValue {
+        var config = config
+        // The engine's config needs a level; the composer's default.
+        if config.sandbox == nil { config.sandbox = "workspace-write" }
+        return LoroValue.fromJSON(encodableJSON(config))
+    }
+
+    private func appendLaunchRecord(kind: String, value: LoroValue) {
+        appendLaunchRecord(kind: kind, fields: [kind: value])
+    }
+
+    /// schema/launch.rs append_launch_record, field for field.
+    private func appendLaunchRecord(kind: String, fields extra: [String: LoroValue]) {
+        guard let trust = config.trust else { return }
+        var fields = extra
+        fields["kind"] = .string(value: kind)
+        fields["at"] = .i64(value: nowMs())
+        fields["signer"] = .string(value: config.deviceId)
+        let bytes = CommandSigning.signingBytes(chatId: chatId, fields: fields.mapValues(\.commandValue))
+        guard let sig = trust.signCommand(bytes) else { return }
+        fields[CommandSigning.sigField] = .string(value: sig)
+        do {
+            let map = try doc.getList(id: "launch").pushContainer(child: LoroMap())
+            for (key, value) in fields { try map.insert(key: key, v: value) }
+            doc.commit()
+        } catch {}
+    }
+
+    private func hasTrustedLaunchRecord(kind: String) -> Bool {
+        guard let trust = config.trust,
+            case .list(let items) = doc.getList(id: "launch").getDeepValue()
+        else { return false }
+        return items.contains { item in
+            guard case .map(let fields) = item, fields["kind"]?.stringValue == kind,
+                let signer = fields["signer"]?.stringValue,
+                let sig = fields[CommandSigning.sigField]?.stringValue
+            else { return false }
+            let bytes = CommandSigning.signingBytes(chatId: chatId, fields: fields.mapValues(\.commandValue))
+            return trust.trustsRecord(signer: signer, signingBytes: bytes, sig: sig)
+        }
     }
 
     /// Durable-nudge the host device so a cold host opens the doc and drains

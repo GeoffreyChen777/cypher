@@ -174,8 +174,48 @@ planted entry naming this device can't borrow its signature.
 Limits: a signed command can be re-inserted into the same chat. The host's
 processed-command ledger skips an id it has seen, and the signed `expiresAt`
 (a day by default) bounds the window on a host that hasn't, such as one a
-chat just migrated to. Transcripts, chat rows and other workspace-doc
-changes aren't signed.
+chat just migrated to. Transcripts and the display fields of chat rows
+(titles, pins) aren't signed.
+
+## Signed launch records
+
+A signed command says what to run, not how or where: the permission level,
+model and hosting device also live on the chat's workspace row, which any
+signed-in device can edit — a receive-only one included. Each chat doc
+therefore carries a `launch` list of records, signed like commands (same
+encoding, `kind` `host` or `config`, never a command's kind):
+
+- `host` — the device that runs the chat, and its folder;
+- `config` — the chat's launch settings (`ChatConfig`: permission level,
+  harness, model, reasoning).
+
+With "Only paired devices" on, a host counts records signed by itself or a
+member with full control, and the latest of each kind decides
+(`crates/engine/src/host/doc_host/launch.rs`):
+
+- which device drains the chat — a row edit no longer moves it;
+- the level and model every run path launches with, through
+  `WorkspaceHost::launch_config`: each run, steers rebuilt after a restart,
+  context recovery and subagent children;
+- the folder a rebuilt request runs in.
+
+A chat with no trusted record falls back to its row, with Full access capped
+at workspace-write.
+
+Records are written only for an explicit change made on the device itself,
+never for a relayed call: creating a chat, changing its settings or folder
+(`setChatConfig`, `setChatCwd`), a worktree the host creates for a run, and
+the source's hand-off at the end of a [migration](../features/session-migration.md),
+written while it still holds the chat's commands. Before sending, a desktop
+or phone signs the records a chat lacks from what it shows, and a host about
+to run a command records itself when no host record exists — so chats from
+before records are covered from their first message after the update.
+
+Limits: until a chat has records, its row still decides, so a row edited
+before then is what that first message signs. Command outcomes aren't
+signed either, so a device that edits docs can mark a waiting message
+resolved and keep it from running — it can stop a message, never make one
+run or change how it runs.
 
 ## What the relay-served service refuses
 
@@ -194,11 +234,12 @@ The relay serves `RelayRpc`, not the bare engine service:
 - The edge can still delay or drop traffic, withhold a newer chain from a
   device (it cannot forge or roll one back), and see who talks to whom.
 - A paired device that is compromised is a member until someone removes it.
-- Workspace-doc changes and transcripts aren't signed: anyone holding the
-  account's bearer can still rename chats, move their host row or edit what a
-  transcript shows. What runs on a device is covered: relayed RPC by Noise
-  sessions, durable commands by [signatures](#signed-commands) (while "Only
-  paired devices" is on).
+- Transcripts and display fields of the workspace doc aren't signed: anyone
+  holding the account's bearer can still rename chats or edit what a
+  transcript shows. What runs on a device, and how, is covered while "Only
+  paired devices" is on: relayed RPC by Noise sessions, durable commands by
+  [signatures](#signed-commands), and their host and settings by
+  [launch records](#signed-launch-records).
 - Devices on releases before receive-only can't verify a chain that contains
   a `receiveOnly` / `fullControl` entry. They keep their last good copy, stop
   following the group, and don't enforce the restriction; update every device

@@ -94,6 +94,33 @@ fn written_run() -> BTreeMap<String, LoroValue> {
     map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
+/// A config launch record as the engine writes it, read back from the doc.
+fn written_record() -> BTreeMap<String, LoroValue> {
+    let doc = SessionDoc::init("chat-7").unwrap();
+    let config = cypher_proto::ChatConfig {
+        harness: cypher_proto::HarnessId::Pi,
+        model: Some("model-a".into()),
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: cypher_proto::SandboxLevel::ReadOnly,
+    };
+    doc.append_launch_record(
+        "chat-7",
+        &cypher_doc::LaunchFact::Config(config),
+        1_700_000_000_000,
+        "device-b",
+        |_| Some([0x5a; 64]),
+    )
+    .unwrap();
+    let LoroValue::List(items) = doc.doc().get_list("launch").get_deep_value() else {
+        panic!("launch is a list")
+    };
+    let LoroValue::Map(map) = &items[0] else {
+        panic!("a record is a map")
+    };
+    map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
 /// Every value type, keys that sort by bytes, and the fields left unsigned.
 fn every_type() -> BTreeMap<String, LoroValue> {
     let map = |pairs: Vec<(&str, LoroValue)>| {
@@ -146,6 +173,7 @@ fn build() -> Value {
         "cases": [
             case("an entry as the engine writes it", "chat-7", &written_run()),
             case("every value type, with the unsigned fields", "chat-🙂", &every_type()),
+            case("a launch record as the engine writes it", "chat-7", &written_record()),
         ],
     })
 }

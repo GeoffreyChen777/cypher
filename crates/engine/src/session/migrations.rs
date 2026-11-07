@@ -342,6 +342,17 @@ impl ChatMigrations {
             {
                 tracing::warn!(chat = %moved.chat_id, error = %err, "moved chat: home write failed");
             }
+            // The signed hand-off: under "Only paired devices" the
+            // destination hosts the chat from this record, not the row.
+            // Written while this device still holds its commands, so none
+            // runs here after it.
+            let fact = cypher_doc::LaunchFact::Host {
+                device_id: moved.home.device_id.clone(),
+                cwd: Some(moved.home.cwd.clone()),
+            };
+            if let Err(err) = self.inner.doc_host.record_launch(&moved.chat_id, &fact) {
+                tracing::warn!(chat = %moved.chat_id, error = %err, "moved chat: host record failed");
+            }
         }
         self.drop_source_copies(&family, &sessions, peer.is_local());
         Ok(())

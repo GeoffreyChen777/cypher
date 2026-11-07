@@ -43,6 +43,7 @@ mod blobs;
 mod cache;
 mod chat2_sync;
 mod commands;
+mod launch;
 mod migration;
 mod open;
 mod persist;
@@ -227,6 +228,12 @@ pub trait CommandTrust: Send + Sync + 'static {
     /// Whether this host may run a command `issued_by` queued, signed as
     /// `auth` says; `Err` is the reason the command resolves with.
     async fn check(&self, issued_by: &str, auth: &cypher_doc::CommandAuth) -> Result<(), String>;
+    /// "Only paired devices": take a chat's host and launch settings from
+    /// signed launch records instead of its workspace row.
+    fn strict(&self) -> bool;
+    /// Whether a launch record `signer` signed as `auth` says counts here:
+    /// a valid signature by this device or by a member with full control.
+    fn trusts_record(&self, signer: &str, auth: &cypher_doc::CommandAuth) -> bool;
 }
 
 #[derive(Clone)]
@@ -792,7 +799,13 @@ impl DocHost {
     /// ours; a chat with no row is claimable (claim-on-first-command). Without a
     /// wired workspace host (bare-DocHost tests) every open chat is ours — M2's
     /// behavior, now the degenerate case.
+    ///
+    /// Under "Only paired devices" a trusted host record decides instead of
+    /// the row (`launch`): a device that edits rows can't move a chat.
     fn is_host(&self, chat_id: &str) -> bool {
+        if let Some(host) = self.trusted_host(chat_id) {
+            return host == self.inner.config.device_id;
+        }
         self.workspace().is_none_or(|ws| ws.is_host(chat_id))
     }
 
@@ -811,7 +824,7 @@ impl DocHost {
     /// Chat-config harness when the workspace row carries one, else the default.
     pub(crate) fn harness_for(&self, chat_id: &str) -> HarnessId {
         self.workspace()
-            .and_then(|ws| ws.chat_config(chat_id))
+            .and_then(|ws| ws.launch_config(chat_id))
             .map(|config| config.harness)
             .unwrap_or(self.inner.config.default_harness)
     }

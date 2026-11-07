@@ -22,9 +22,11 @@ use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::SESSION_SCHEMA_VERSION;
 use crate::parts::{MessagePart, MessageStatus};
 
+mod launch;
 mod salvage;
 mod segment_writer;
 
+pub use launch::{LaunchFact, LaunchRecord, latest_launch};
 use salvage::*;
 pub use segment_writer::*;
 

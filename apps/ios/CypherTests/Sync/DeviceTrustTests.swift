@@ -238,6 +238,29 @@ final class DeviceTrustStoreTests: XCTestCase {
         XCTAssertNil(trust.signCommand(Data("cypher-trust-entry-v1\u{0}".utf8)))
     }
 
+    func testLaunchRecordsCountFromFullControlMembersAndThePhone() async throws {
+        let desktop = Desktop(id: "mac-1")
+        let edge = try await founded(by: desktop)
+        let trust = store(edge)
+        await trust.sync()
+        let code = try XCTUnwrap(PairingCode("ABCD-EFGH-JKMN-PQRS-TVWX"))
+        trust.join(code: code.display)
+        _ = try await approve(on: edge, desktop: desktop, code: code)
+        try await waitUntil { trust.phase == .paired }
+
+        let bytes = CommandSigning.signingBytes(
+            chatId: "chat",
+            fields: ["kind": .string("host"), "host": .string("mac-1"), "at": .i64(1), "signer": .string("mac-1")])
+        let byDesktop = TrustHex.encode(try desktop.keys.sign.signature(for: bytes))
+        XCTAssertTrue(trust.trustsRecord(signer: "mac-1", signingBytes: bytes, sig: byDesktop))
+        XCTAssertFalse(trust.trustsRecord(signer: "ios-1", signingBytes: bytes, sig: byDesktop), "claimed for another")
+        var changed = bytes
+        changed.append(0)
+        XCTAssertFalse(trust.trustsRecord(signer: "mac-1", signingBytes: changed, sig: byDesktop))
+        let byPhone = try XCTUnwrap(trust.signCommand(bytes))
+        XCTAssertTrue(trust.trustsRecord(signer: "ios-1", signingBytes: bytes, sig: byPhone))
+    }
+
     func testAJoinerRefusesADeviceListTheDesktopDidNotApprove() async throws {
         let desktop = Desktop(id: "mac-1")
         let edge = try await founded(by: desktop)

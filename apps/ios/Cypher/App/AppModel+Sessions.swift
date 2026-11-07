@@ -26,6 +26,8 @@ extension AppModel {
         }
         let store = SessionStore(chatId: chat.id, config: config)
         store.hostDeviceId = chat.deviceId
+        let chatId = chat.id
+        store.row = { [weak self] in self?.chat(id: chatId) }
         sessionStores[chat.id] = store
         if !recentSessionIds.contains(chat.id) { recentSessionIds.append(chat.id) }
         store.start()

@@ -13,6 +13,17 @@ use async_trait::async_trait;
 use cypher_rpc::{RpcError, RpcReply, RpcService, methods};
 use serde_json::Value;
 
+tokio::task_local! {
+    /// Set while a relayed call runs: what it does is another device's
+    /// request, so this device signs no launch records for it.
+    static RELAYED: ();
+}
+
+/// Whether the current call came through the device-room relay.
+pub fn is_relayed() -> bool {
+    RELAYED.try_with(|_| ()).is_ok()
+}
+
 pub struct RelayRpc {
     inner: Arc<dyn RpcService>,
     device_id: String,
@@ -44,7 +55,7 @@ impl RpcService for RelayRpc {
                 "Calls through this device can't be passed on to another device.".into(),
             ));
         }
-        self.inner.handle(method, params).await
+        RELAYED.scope((), self.inner.handle(method, params)).await
     }
 }
 

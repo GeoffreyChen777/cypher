@@ -992,6 +992,24 @@ impl DeviceTrust {
 
 #[async_trait]
 impl CommandTrust for DeviceTrust {
+    fn strict(&self) -> bool {
+        let state = lock(&self.inner.state);
+        self.is_paired_in(&state.chain) && state.chain.require_paired()
+    }
+
+    fn trusts_record(&self, signer: &str, auth: &CommandAuth) -> bool {
+        let CommandSig::Present(sig) = &auth.sig else {
+            return false;
+        };
+        let state = lock(&self.inner.state);
+        let chain = &state.chain;
+        self.is_paired_in(chain)
+            && chain
+                .member(signer)
+                .is_some_and(|member| member.verify_command(&auth.signing_bytes, sig))
+            && (signer == self.inner.device_id || !chain.is_receive_only(signer))
+    }
+
     fn sign(&self, bytes: &[u8]) -> Option<[u8; 64]> {
         if !self.is_paired_in(&lock(&self.inner.state).chain) {
             return None;
