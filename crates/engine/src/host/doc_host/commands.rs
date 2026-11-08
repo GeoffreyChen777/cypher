@@ -1,6 +1,7 @@
 //! The command ledger: queueing and retrying commands, nudging a remote host,
 //! draining pending commands, and what each drained command does on this host.
 
+use super::launch::TrustedLaunch;
 use super::*;
 
 impl DocHost {
@@ -213,6 +214,13 @@ impl DocHost {
                 if let Err(err) = ws.set_chat_cwd(chat_id, &wt.path) {
                     tracing::warn!(chat = %chat_id, error = %err, "worktree cwd stamp failed");
                 }
+                let fact = cypher_doc::LaunchFact::Host {
+                    device_id: self.inner.config.device_id.clone(),
+                    cwd: Some(wt.path.clone()),
+                };
+                if let Err(err) = self.record_launch(chat_id, &fact) {
+                    tracing::warn!(chat = %chat_id, error = %err, "worktree host record failed");
+                }
                 if let Err(err) = ws.set_chat_branch(chat_id, &wt.branch) {
                     tracing::warn!(chat = %chat_id, error = %err, "worktree branch stamp failed");
                 }
@@ -234,7 +242,7 @@ impl DocHost {
         // clients (older ones included) send a fixed default in the
         // request. The Runtime's permission extension reads the level the
         // harness passes from `request.sandbox`.
-        if let Some(config) = self.workspace().and_then(|ws| ws.chat_config(chat_id)) {
+        if let Some(config) = self.workspace().and_then(|ws| ws.launch_config(chat_id)) {
             request.sandbox = config.sandbox;
         }
         if let Some(ws) = self.workspace()
@@ -476,8 +484,8 @@ impl DocHost {
     /// The chat row's current launch settings (model and permission level),
     /// if the row has a config.
     fn chat_launch_config(&self, chat_id: &str) -> Option<crate::session::engine::LaunchConfig> {
-        let chat = self.workspace()?.chat(chat_id).ok().flatten()?;
-        chat.config
+        self.workspace()?
+            .launch_config(chat_id)
             .as_ref()
             .map(crate::session::engine::LaunchConfig::of_chat)
     }
@@ -500,7 +508,16 @@ impl DocHost {
                 return None;
             }
         };
-        let config = chat.config;
+        let config = workspace.launch_config(chat_id);
+        // Under "Only paired devices" the folder is the trusted host
+        // record's, like the settings: the row's is anyone's to edit.
+        let cwd = match self.trusted_launch(chat_id) {
+            Some(TrustedLaunch {
+                host: Some((_, Some(cwd))),
+                ..
+            }) => Some(cwd),
+            _ => chat.cwd.clone(),
+        };
         Some(cypher_proto::RunRequest {
             prompt: prompt.to_string(),
             harness: config.as_ref().map(|c| c.harness),
@@ -513,7 +530,7 @@ impl DocHost {
             // Never an empty cwd: that would spawn the run in the ENGINE's own
             // working directory instead of the chat's. A row with no cwd means
             // project-less, which is the home directory (expanded at dispatch).
-            cwd: chat.cwd.unwrap_or_else(|| "~".into()),
+            cwd: cwd.unwrap_or_else(|| "~".into()),
             sandbox: config
                 .as_ref()
                 .map(|c| c.sandbox)
@@ -562,6 +579,9 @@ impl DocHost {
     ) -> Result<String, EngineError> {
         self.check_may_command(chat_id)?;
         let handle = self.open(chat_id)?;
+        // The host and settings this command runs with, signed from what
+        // this device shows when the chat has no record of them yet.
+        self.record_chat_launch(chat_id, true, true, true);
         let id = new_id();
         let now = now_ms();
         let based_on = handle.doc.read_entries()?.last().map(|m| CommandBasedOn {
@@ -621,6 +641,9 @@ impl DocHost {
     pub fn retry_command(&self, chat_id: &str, command_id: &str) -> Result<String, EngineError> {
         self.check_may_command(chat_id)?;
         let handle = self.open(chat_id)?;
+        // The host and settings this command runs with, signed from what
+        // this device shows when the chat has no record of them yet.
+        self.record_chat_launch(chat_id, true, true, true);
         let signed = handle.doc.read_commands_with_auth(&handle.chat_id)?;
         let (old, old_auth) = signed
             .iter()
@@ -699,8 +722,10 @@ impl DocHost {
         let Some(workspace) = self.workspace() else {
             return;
         };
-        let host_device = match workspace.chat(chat_id) {
-            Ok(Some(chat)) => chat.device_id,
+        // The trusted host, when records name one: that's who drains it.
+        let host_device = match (self.trusted_host(chat_id), workspace.chat(chat_id)) {
+            (Some(host), _) => host,
+            (None, Ok(Some(chat))) => chat.device_id,
             // Unclaimed chat: whoever drains first claims it — nobody to nudge.
             _ => return,
         };
@@ -919,6 +944,7 @@ impl DocHost {
                     skipped.insert(entry.id.clone());
                 }
                 CommandDisposition::Execute => {
+                    self.record_hosting(&handle.chat_id);
                     let checked = match self.command_trust() {
                         Some(trust) => trust.check(&entry.issued_by, &auth).await,
                         None => Ok(()),

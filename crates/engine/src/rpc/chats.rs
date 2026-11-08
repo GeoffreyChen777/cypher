@@ -256,9 +256,11 @@ impl EngineRpc {
                 reasoning: None,
                 model_options: Default::default(),
                 cwd: child_cwd.unwrap_or_else(|| "~".into()),
-                sandbox: parent
-                    .config
-                    .as_ref()
+                // The parent's launch level, not its row's (see
+                // `WorkspaceHost::launch_config`).
+                sandbox: self
+                    .workspace
+                    .launch_config(&parent.id)
                     .map(|c| c.sandbox)
                     .unwrap_or(cypher_proto::SandboxLevel::WorkspaceWrite),
                 auto_approve: false,

@@ -49,6 +49,14 @@ impl CommandTrust for FakeTrust {
         device_id == "dev-untrusted"
     }
 
+    fn strict(&self) -> bool {
+        true
+    }
+
+    fn trusts_record(&self, signer: &str, auth: &CommandAuth) -> bool {
+        !self.is_receive_only(signer) && self.is_own_signature(auth)
+    }
+
     async fn check(&self, issued_by: &str, auth: &CommandAuth) -> Result<(), String> {
         match &auth.sig {
             CommandSig::Present(sig) if *sig == checksum(&auth.signing_bytes) => {}
@@ -81,9 +89,17 @@ fn run(id: &str, issued_by: &str, prompt: &str) -> SessionCommandEntry {
 }
 
 async fn resolved(core: &cypher_engine::EngineCore, id: &str) -> (SessionCommandStatus, String) {
+    resolved_in(core, CHAT, id).await
+}
+
+async fn resolved_in(
+    core: &cypher_engine::EngineCore,
+    chat: &str,
+    id: &str,
+) -> (SessionCommandStatus, String) {
     common::wait_for_within(
         || {
-            command_statuses(core, CHAT)
+            command_statuses(core, chat)
                 .iter()
                 .any(|(c, status, _)| c == id && *status != SessionCommandStatus::Pending)
         },
@@ -91,7 +107,7 @@ async fn resolved(core: &cypher_engine::EngineCore, id: &str) -> (SessionCommand
         Duration::from_secs(20),
     )
     .await;
-    command_statuses(core, CHAT)
+    command_statuses(core, chat)
         .into_iter()
         .find(|(c, ..)| c == id)
         .map(|(_, status, resolution)| (status, resolution.unwrap_or_default()))
@@ -197,5 +213,169 @@ async fn the_host_runs_only_commands_device_trust_accepts() {
         .cloned()
         .collect();
     assert_eq!(ran, ["signed and retried", "signed by the host"]);
+    core.shutdown().await;
+}
+
+const LAUNCH_CHAT: &str = "chat-launch-records";
+
+async fn mutate(client: &cypher_rpc::RpcClient, params: serde_json::Value) {
+    client
+        .call(cypher_rpc::methods::MUTATE, params)
+        .await
+        .expect("mutate");
+}
+
+fn config(level: &str) -> serde_json::Value {
+    serde_json::json!({ "harness": "mock", "model": null, "reasoning": null, "sandbox": level })
+}
+
+/// What a device that can edit workspace rows, but holds no trusted key, can
+/// do: write the chat's row directly.
+fn tamper_level(core: &cypher_engine::EngineCore, level: cypher_proto::SandboxLevel) {
+    let mut row = core.workspace.chat_config(LAUNCH_CHAT).unwrap();
+    row.sandbox = level;
+    core.workspace.set_chat_config(LAUNCH_CHAT, &row).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runs_launch_from_signed_records_not_the_row() {
+    use cypher_proto::SandboxLevel;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let levels: Arc<Mutex<Vec<(String, SandboxLevel)>>> = Arc::default();
+    let log = levels.clone();
+    let harness = common::TestHarness::new(HarnessId::Mock, "Recorder", move |request, _| {
+        if !request.prompt.contains("concise 3-5 word title") {
+            log.lock()
+                .unwrap()
+                .push((request.prompt.clone(), request.sandbox));
+        }
+        common::reply(HarnessId::Mock, &request, "sess-launch", "ack")
+    });
+    let core = common::engine_at(&tmp.path().join("data"), harness);
+    core.doc_host.set_command_trust(Arc::new(FakeTrust));
+    core.workspace.set_launch_hook(core.doc_host.launch_hook());
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    mutate(
+        &client,
+        serde_json::json!({ "op": "createChat", "chatId": LAUNCH_CHAT, "deviceId": core.device_id }),
+    )
+    .await;
+    mutate(
+        &client,
+        serde_json::json!({ "op": "setChatConfig", "chatId": LAUNCH_CHAT, "config": config("workspace-write") }),
+    )
+    .await;
+
+    let send = |prompt: &str| {
+        let id = core
+            .doc_host
+            .queue_command(
+                LAUNCH_CHAT,
+                SessionCommandPayload::Run {
+                    request: run_request(prompt),
+                    message_id: format!("msg-{prompt}"),
+                    agent_prompt: None,
+                },
+            )
+            .unwrap();
+        let (core, prompt) = (&core, prompt.to_string());
+        async move {
+            let (status, why) = resolved_in(core, LAUNCH_CHAT, &id).await;
+            assert_eq!(status, SessionCommandStatus::Applied, "{prompt}: {why}");
+        }
+    };
+    let level_of = |prompt: &str| {
+        levels
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(p, _)| p == prompt)
+            .map(|(_, level)| *level)
+    };
+
+    // Someone edits the row to Full access: runs keep the signed level.
+    tamper_level(&core, SandboxLevel::DangerFullAccess);
+    send("after the row edit").await;
+    assert_eq!(
+        level_of("after the row edit"),
+        Some(SandboxLevel::WorkspaceWrite)
+    );
+    // A record from a device the host doesn't trust changes nothing either.
+    let raise = cypher_doc::LaunchFact::Config(
+        serde_json::from_value(config("danger-full-access")).unwrap(),
+    );
+    let doc = core.doc_host.open(LAUNCH_CHAT).unwrap();
+    doc.doc()
+        .append_launch_record(LAUNCH_CHAT, &raise, i64::MAX / 2, "dev-untrusted", |b| {
+            Some(checksum(b))
+        })
+        .unwrap();
+    send("after an untrusted record").await;
+    assert_eq!(
+        level_of("after an untrusted record"),
+        Some(SandboxLevel::WorkspaceWrite)
+    );
+    // The user changing it here does.
+    mutate(
+        &client,
+        serde_json::json!({ "op": "setChatConfig", "chatId": LAUNCH_CHAT, "config": config("read-only") }),
+    )
+    .await;
+    send("after the user's change").await;
+    assert_eq!(
+        level_of("after the user's change"),
+        Some(SandboxLevel::ReadOnly)
+    );
+
+    // Moving the chat by its row doesn't move it: this device still runs it.
+    core.workspace
+        .set_chat_host(LAUNCH_CHAT, "dev-other")
+        .unwrap();
+    send("after the row move").await;
+    assert_eq!(level_of("after the row move"), Some(SandboxLevel::ReadOnly));
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chat_without_records_runs_at_most_workspace_write() {
+    use cypher_proto::SandboxLevel;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let levels: Arc<Mutex<Vec<SandboxLevel>>> = Arc::default();
+    let log = levels.clone();
+    let harness = common::TestHarness::new(HarnessId::Mock, "Recorder", move |request, _| {
+        if !request.prompt.contains("concise 3-5 word title") {
+            log.lock().unwrap().push(request.sandbox);
+        }
+        common::reply(HarnessId::Mock, &request, "sess-legacy", "ack")
+    });
+    let core = common::engine_at(&tmp.path().join("data"), harness);
+    // Created before records existed: row only.
+    core.workspace
+        .create_chat(
+            LAUNCH_CHAT,
+            None,
+            Some(&core.device_id),
+            Some(serde_json::from_value(config("danger-full-access")).unwrap()),
+            None,
+        )
+        .unwrap();
+    core.doc_host.set_command_trust(Arc::new(FakeTrust));
+    core.workspace.set_launch_hook(core.doc_host.launch_hook());
+    // Queued signed, straight into the doc, as an older sender would.
+    core.doc_host
+        .open(LAUNCH_CHAT)
+        .unwrap()
+        .doc()
+        .queue_signed_command(
+            LAUNCH_CHAT,
+            &run("c-legacy", &core.device_id, "legacy"),
+            |b| Some(checksum(b)),
+        )
+        .unwrap();
+    let (status, why) = resolved_in(&core, LAUNCH_CHAT, "c-legacy").await;
+    assert_eq!(status, SessionCommandStatus::Applied, "{why}");
+    assert_eq!(levels.lock().unwrap()[..], [SandboxLevel::WorkspaceWrite]);
     core.shutdown().await;
 }

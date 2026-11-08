@@ -800,7 +800,7 @@ impl ContextRecoveryService {
             }
         };
         let chat = inner.workspace.chat(chat_id).ok()??;
-        let config = chat.config.clone()?;
+        let config = inner.workspace.launch_config(chat_id)?;
         (config.harness == HarnessId::Pi
             && chat.device_id == inner.doc_host.device_id()
             && settings.enabled_for(config.model.as_deref()))

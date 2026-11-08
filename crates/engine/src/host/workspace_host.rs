@@ -158,6 +158,9 @@ struct WorkspaceHostInner {
     /// wired to `LinkCache::reset_cooldown` so a peer that comes back is dialed
     /// immediately instead of waiting out the failure backoff.
     peer_alive: Mutex<Option<PeerAliveHook>>,
+    /// Where a chat's launch settings come from when the row isn't the last
+    /// word (see `launch_config`).
+    launch: Mutex<Option<LaunchHook>>,
     notification_event: Mutex<Option<NotificationEventHook>>,
     /// Deaf-socket tripwire state — see `check_presence_deafness`.
     presence_watch: Mutex<PresenceWatch>,
@@ -166,6 +169,9 @@ struct WorkspaceHostInner {
 /// "This peer is alive" callback (device id) — see `WorkspaceHost::set_peer_alive_hook`.
 pub type PeerAliveHook = Arc<dyn Fn(&str) + Send + Sync>;
 pub type NotificationEventHook = Arc<dyn Fn(&Session) + Send + Sync>;
+/// Given a chat id and its row's config, the config its runs launch with —
+/// `doc_host`'s signed launch records under "Only paired devices".
+pub type LaunchHook = Arc<dyn Fn(&str, Option<ChatConfig>) -> Option<ChatConfig> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct WorkspaceHost {
@@ -221,6 +227,7 @@ impl WorkspaceHost {
                 relay_probe_backoff: Mutex::new(std::collections::HashMap::new()),
                 relay_probe_wake: Arc::new(tokio::sync::Notify::new()),
                 peer_alive: Mutex::new(None),
+                launch: Mutex::new(None),
                 notification_event: Mutex::new(None),
                 presence_watch: Mutex::new(PresenceWatch::default()),
             }),
@@ -280,6 +287,11 @@ impl WorkspaceHost {
     /// the engine points this at `LinkCache::reset_cooldown`.
     pub fn set_peer_alive_hook(&self, hook: PeerAliveHook) {
         *lock(&self.inner.peer_alive) = Some(hook);
+    }
+
+    /// Decide launch settings through `hook` (see [`Self::launch_config`]).
+    pub fn set_launch_hook(&self, hook: LaunchHook) {
+        *lock(&self.inner.launch) = Some(hook);
     }
 
     pub fn set_notification_event_hook(&self, hook: NotificationEventHook) {
@@ -511,8 +523,21 @@ impl WorkspaceHost {
         Ok(space.id)
     }
 
-    /// The chat's configured harness/model row, when present (RunRequest harness
-    /// selection; callers fall back to the engine default).
+    /// The settings the chat's runs launch with: its row's config, unless
+    /// the launch hook says otherwise ("Only paired devices" takes them from
+    /// signed records, so a device that can edit rows can't raise a chat's
+    /// permission level). Every run path reads this, not [`Self::chat_config`].
+    pub fn launch_config(&self, chat_id: &str) -> Option<ChatConfig> {
+        let row = self.chat_config(chat_id);
+        let hook = lock(&self.inner.launch).clone();
+        match hook {
+            Some(hook) => hook(chat_id, row),
+            None => row,
+        }
+    }
+
+    /// The chat's configured harness/model row, when present (display and
+    /// row writes; runs read [`Self::launch_config`]).
     pub fn chat_config(&self, chat_id: &str) -> Option<ChatConfig> {
         match self.read(|doc| doc.chat(chat_id)) {
             Ok(chat) => chat.and_then(|c| c.config),

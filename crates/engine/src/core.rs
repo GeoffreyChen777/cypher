@@ -354,6 +354,8 @@ impl EngineCore {
 
     pub fn set_trust(&self, trust: crate::device_trust::DeviceTrust) {
         self.doc_host.set_command_trust(Arc::new(trust.clone()));
+        // Runs launch from signed records under "Only paired devices".
+        self.workspace.set_launch_hook(self.doc_host.launch_hook());
         *lock(&self.trust) = Some(trust);
     }
 

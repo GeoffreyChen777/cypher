@@ -445,3 +445,48 @@ async fn hosts_check_command_signatures_against_the_group() {
     assert_eq!(b.trust.check("dev-b", &by_b).await, Ok(()));
     assert_eq!(b.trust.check("dev-a", &own).await, Ok(()));
 }
+
+/// A launch record `signer` signed into `chat`'s doc, as a host reads it.
+fn record(chat: &str, signer: &DeviceTrust, signer_id: &str) -> CommandAuth {
+    let doc = cypher_doc::SessionDoc::init(chat).unwrap();
+    let fact = cypher_doc::LaunchFact::Host {
+        device_id: signer_id.into(),
+        cwd: None,
+    };
+    doc.append_launch_record(chat, &fact, 1, signer_id, |bytes| signer.sign(bytes))
+        .unwrap();
+    doc.read_launch_records(chat).remove(0).auth
+}
+
+#[tokio::test(start_paused = true)]
+async fn launch_records_count_from_full_control_members_and_the_host_itself() {
+    let edge = Arc::new(FakeEdge::default());
+    let (a, b) = paired_pair(&edge).await;
+    a.trust.sync().await.unwrap();
+    assert!(
+        !a.trust.strict(),
+        "rows decide while unpaired devices are allowed"
+    );
+    let by_a = record("chat", &a.trust, "dev-a");
+    let by_b = record("chat", &b.trust, "dev-b");
+    assert!(a.trust.trusts_record("dev-a", &by_a));
+    assert!(a.trust.trusts_record("dev-b", &by_b));
+    // Claimed for someone else, or changed after signing: no.
+    assert!(!a.trust.trusts_record("dev-a", &by_b));
+    let mut changed = by_b.clone();
+    changed.signing_bytes.push(0);
+    assert!(!a.trust.trusts_record("dev-b", &changed));
+    let unsigned = CommandAuth {
+        sig: CommandSig::None,
+        ..by_b.clone()
+    };
+    assert!(!a.trust.trusts_record("dev-b", &unsigned));
+
+    a.trust.set_receive_only("dev-b", true).await.unwrap();
+    b.trust.sync().await.unwrap();
+    assert!(a.trust.strict() && b.trust.strict());
+    // A receive-only member's records count only on itself.
+    assert!(!a.trust.trusts_record("dev-b", &by_b));
+    assert!(b.trust.trusts_record("dev-b", &by_b));
+    assert!(b.trust.trusts_record("dev-a", &by_a));
+}

@@ -64,7 +64,7 @@ mod uploads;
 
 pub use agent::AgentRpc;
 use params::*;
-pub use relay::RelayRpc;
+pub use relay::{RelayRpc, is_relayed};
 
 fn failed(e: impl std::fmt::Display) -> RpcError {
     RpcError::Failed(e.to_string())

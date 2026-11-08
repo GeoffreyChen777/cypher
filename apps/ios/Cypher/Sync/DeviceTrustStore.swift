@@ -216,6 +216,20 @@ final class DeviceTrustStore {
         return TrustHex.encode(sig)
     }
 
+    /// Whether a launch record `signer` signed counts: a valid signature by
+    /// this phone or by a member with full control (crates/engine
+    /// `trusts_record`). Only while the phone is paired.
+    func trustsRecord(signer: String, signingBytes: Data, sig: String) -> Bool {
+        guard isPaired(in: chain), signingBytes.starts(with: CommandSigning.domain),
+            signer == deviceId || !chain.receiveOnly.contains(signer),
+            let member = chain.members[signer],
+            let raw = TrustHex.decode(member.signPub),
+            let key = try? Curve25519.Signing.PublicKey(rawRepresentation: raw),
+            let signature = TrustHex.decode(sig)
+        else { return false }
+        return key.isValidSignature(signature, for: signingBytes)
+    }
+
     private func isPaired(in chain: TrustChain) -> Bool {
         chain.members[deviceId]?.dhPub == TrustHex.encode(keys.dh.publicKey.rawRepresentation)
     }

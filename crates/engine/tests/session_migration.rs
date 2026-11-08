@@ -616,3 +616,160 @@ async fn a_project_move_takes_its_chats_and_leaves_running_ones() {
     }
     let _ = a.core.sessions.interrupt("chat-busy").await;
 }
+
+/// Trusts every device, signs with a keyed checksum: enough to switch the
+/// engines into "Only paired devices" without a trust group.
+struct StrictTrust;
+
+fn checksum(bytes: &[u8]) -> [u8; 64] {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let mut sig = [0u8; 64];
+    for chunk in sig.chunks_mut(8) {
+        chunk.copy_from_slice(&hasher.finish().to_be_bytes());
+        hasher.write_u8(1);
+    }
+    sig
+}
+
+fn valid(auth: &cypher_doc::CommandAuth) -> bool {
+    auth.sig == cypher_doc::CommandSig::Present(checksum(&auth.signing_bytes))
+}
+
+#[async_trait]
+impl cypher_engine::CommandTrust for StrictTrust {
+    fn sign(&self, bytes: &[u8]) -> Option<[u8; 64]> {
+        Some(checksum(bytes))
+    }
+    fn is_own_signature(&self, auth: &cypher_doc::CommandAuth) -> bool {
+        valid(auth)
+    }
+    fn is_receive_only(&self, _: &str) -> bool {
+        false
+    }
+    async fn check(&self, _: &str, auth: &cypher_doc::CommandAuth) -> Result<(), String> {
+        valid(auth).then_some(()).ok_or_else(|| "unsigned".into())
+    }
+    fn strict(&self) -> bool {
+        true
+    }
+    fn trusts_record(&self, _: &str, auth: &cypher_doc::CommandAuth) -> bool {
+        valid(auth)
+    }
+}
+
+/// The chat doc's sync, done by hand: `to` gets everything `from` has.
+fn sync_doc(from: &EngineCore, to: &EngineCore, chat: &str) {
+    let snapshot = from
+        .doc_host
+        .open(chat)
+        .unwrap()
+        .doc()
+        .doc()
+        .export(loro::ExportMode::Snapshot)
+        .unwrap();
+    to.doc_host
+        .open(chat)
+        .unwrap()
+        .doc()
+        .doc()
+        .import(&snapshot)
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn under_only_paired_devices_a_move_hands_the_chat_over_by_signed_record() {
+    let (relay_url, _relay) = common::relay::fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let a = device(&dirs.path().join("a"), "device-a");
+    let b = device(&dirs.path().join("b"), "device-b");
+    for core in [&a.core, &b.core] {
+        core.doc_host.set_command_trust(Arc::new(StrictTrust));
+        core.workspace.set_launch_hook(core.doc_host.launch_hook());
+    }
+    let _host = b.core.start_host_relay(&relay_url);
+    let mut links = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    links.probe_timeout = Duration::from_secs(5);
+    a.core.set_links(LinkCache::new(links));
+
+    let from_dir = folder(dirs.path(), "laptop-project");
+    let to_dir = folder(dirs.path(), "server-project");
+    a.core
+        .workspace
+        .create_space("space-a", "device-a", &from_dir, None, false)
+        .unwrap();
+    a.core
+        .workspace
+        .create_space("space-b", "device-b", &to_dir, None, false)
+        .unwrap();
+    let client = cypher_rpc::memory_client(a.core.rpc_service());
+    client
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "createChat", "chatId": "chat-s", "spaceId": "space-a",
+                "config": serde_json::to_value(pi_config()).unwrap() }),
+        )
+        .await
+        .expect("createChat");
+    for space in a.core.workspace.read_spaces().unwrap() {
+        b.core.workspace.import_space_row(&space).unwrap();
+    }
+    for chat in a.core.workspace.read_chats().unwrap() {
+        b.core.workspace.import_chat_row(&chat).unwrap();
+    }
+    sync_doc(&a.core, &b.core, "chat-s");
+
+    // A row edit alone moves nothing: B doesn't take A's chat.
+    b.core
+        .workspace
+        .set_chat_host("chat-s", "device-b")
+        .unwrap();
+    assert!(b.core.doc_host.trusted_host("chat-s").as_deref() == Some("device-a"));
+    b.core
+        .workspace
+        .set_chat_host("chat-s", "device-a")
+        .unwrap();
+
+    wait_for_link(&client, "device-b").await;
+    let events = migrate(
+        &client,
+        serde_json::json!({ "chatIds": ["chat-s"], "toSpaceId": "space-b" }),
+    )
+    .await;
+    assert_eq!(done(&events), (1, 0), "{events:?}");
+
+    // A sends; the records travel with the doc. B runs it, A doesn't.
+    a.core
+        .doc_host
+        .queue_command(
+            "chat-s",
+            SessionCommandPayload::Run {
+                request: RunRequest {
+                    cwd: from_dir.clone(),
+                    ..common::run_request("after the move")
+                },
+                message_id: "m-after".into(),
+                agent_prompt: None,
+            },
+        )
+        .unwrap();
+    sync_doc(&a.core, &b.core, "chat-s");
+    common::wait_for_within(
+        || {
+            b.runs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.prompt == "after the move")
+        },
+        "B runs the moved chat's message",
+        Duration::from_secs(20),
+    )
+    .await;
+    assert_eq!(
+        b.core.doc_host.trusted_host("chat-s").as_deref(),
+        Some("device-b")
+    );
+    assert!(a.runs.lock().unwrap().is_empty(), "A no longer hosts it");
+}

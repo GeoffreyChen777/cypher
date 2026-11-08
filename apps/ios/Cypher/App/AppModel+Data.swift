@@ -338,6 +338,9 @@ extension AppModel {
 
     func setChatConfig(chatId: String, config: ChatConfig) {
         data?.setChatConfig(chatId: chatId, config: config)
+        // Signed, so a host that only accepts paired devices launches with
+        // it (the composer changes settings inside an open chat).
+        sessionStores[chatId]?.recordLaunchConfig(config)
     }
 
     func markSeen(chatId: String) {

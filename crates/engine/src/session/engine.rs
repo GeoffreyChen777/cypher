@@ -763,12 +763,13 @@ impl SessionsEngine {
             .unwrap_or_else(|| visible_prompt.clone());
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
-        // The chat's permission level is its row's, whatever request this
-        // turn was rebuilt from (a remembered one predates a level change).
+        // The chat's permission level is its launch config's (the row's, or
+        // under "Only paired devices" its signed record's), whatever request
+        // this turn was rebuilt from (a remembered one predates a change).
         if let Some(config) = self
             .inner
             .workspace()
-            .and_then(|ws| ws.chat_config(chat_id))
+            .and_then(|ws| ws.launch_config(chat_id))
         {
             request.sandbox = config.sandbox;
         }

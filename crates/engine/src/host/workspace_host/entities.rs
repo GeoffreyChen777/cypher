@@ -394,9 +394,8 @@ impl WorkspaceHost {
             }
         }
         let chat_id = crate::util::new_id();
-        let sandbox = parent
-            .config
-            .as_ref()
+        let sandbox = self
+            .launch_config(&parent.id)
             .map(|c| c.sandbox)
             .unwrap_or(SandboxLevel::WorkspaceWrite);
         self.mutate(|doc| {

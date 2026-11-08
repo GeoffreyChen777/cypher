@@ -34,6 +34,9 @@ impl EngineRpc {
                         .set_chat_branch(&chat_id, branch)
                         .map_err(failed)?;
                 }
+                // Sign where it runs and how, as created here (a retried
+                // create adds nothing).
+                self.doc_host.record_chat_launch(&chat_id, true, true, true);
                 Ok(())
             }
             MutateParams::CreateSpace {
@@ -86,11 +89,14 @@ impl EngineRpc {
                 .set_chat_branch(&chat_id, &branch)
                 .map_err(failed)
                 .map(drop),
-            MutateParams::SetChatCwd { chat_id, cwd } => self
-                .workspace
-                .set_chat_cwd(&chat_id, &cwd)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatCwd { chat_id, cwd } => {
+                self.workspace
+                    .set_chat_cwd(&chat_id, &cwd)
+                    .map_err(failed)?;
+                self.doc_host
+                    .record_chat_launch(&chat_id, true, false, false);
+                Ok(())
+            }
             MutateParams::SetChatActivity {
                 chat_id,
                 last_message_at,
@@ -100,11 +106,21 @@ impl EngineRpc {
                 .set_chat_activity(&chat_id, last_message_at, created_at)
                 .map_err(failed)
                 .map(drop),
-            MutateParams::SetChatHost { chat_id, device_id } => self
-                .workspace
-                .set_chat_host(&chat_id, &device_id)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatHost { chat_id, device_id } => {
+                self.workspace
+                    .set_chat_host(&chat_id, &device_id)
+                    .map_err(failed)?;
+                let cwd = self
+                    .workspace
+                    .chat(&chat_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|c| c.cwd);
+                self.doc_host
+                    .record_launch(&chat_id, &cypher_doc::LaunchFact::Host { device_id, cwd })
+                    .map_err(failed)?;
+                Ok(())
+            }
             MutateParams::SetChatArchived { chat_id, archived } => self
                 .workspace
                 .set_chat_archived(&chat_id, archived)
@@ -129,11 +145,14 @@ impl EngineRpc {
                 .set_space_appearance(&space_id, icon.as_deref(), color.as_deref())
                 .map_err(failed)
                 .map(drop),
-            MutateParams::SetChatConfig { chat_id, config } => self
-                .workspace
-                .set_chat_config(&chat_id, &config)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatConfig { chat_id, config } => {
+                self.workspace
+                    .set_chat_config(&chat_id, &config)
+                    .map_err(failed)?;
+                self.doc_host
+                    .record_chat_launch(&chat_id, false, true, false);
+                Ok(())
+            }
             MutateParams::DeleteChat { chat_id } => {
                 // Parent delete CASCADES to its Cypher child chats (rows + docs +
                 // session interruption): a deleted parent must not leave orphaned
