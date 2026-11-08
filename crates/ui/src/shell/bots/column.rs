@@ -21,7 +21,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let chat = self.render_board_chat(window, cx);
-        let panel = self.render_panel_column(cx);
+        let panel = self.render_panel_column(window, cx);
         div()
             .id("botboard")
             .flex_1()
@@ -234,7 +234,11 @@ impl Shell {
     /// The panel's animated container: it grows from the column's right
     /// edge as the chat narrows, and clips a fixed-width card so the content
     /// never reflows mid-slide. `None` once shut.
-    fn render_panel_column(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_panel_column(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let target = if self.board.panel.is_some() {
             PANEL_SPAN
         } else {
@@ -254,7 +258,7 @@ impl Shell {
             .or_else(|| self.board.panel_last.clone())?;
         // An item that no longer resolves (its record went away) slides the
         // panel shut, empty, instead of leaving the chat narrowed.
-        let card = match self.render_panel_card(&item, cx) {
+        let card = match self.render_panel_card(&item, window, cx) {
             Some(card) => card,
             None => {
                 if self.board.panel.as_ref() == Some(&item) {

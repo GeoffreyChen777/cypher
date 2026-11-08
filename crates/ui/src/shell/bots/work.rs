@@ -8,7 +8,7 @@
 use super::board::{card_corner, card_item, two_lines};
 use super::items::{
     ago, decision_bar, item_row, mark_cell, progress_bar, project_label, prose, section_label,
-    session_mark, status_value, step_mark, text_value, trailing, work_mark,
+    session_mark, status_value, step_mark, trailing, work_mark,
 };
 use super::panel::{PanelHead, PanelItem};
 use super::*;
@@ -80,6 +80,17 @@ type FlowStep = (
     Option<super::items::ProjectLabel>,
     Vec<(String, Option<(String, ChatIndicator)>)>,
 );
+
+/// A session's state in a word, beside its row; none while it sits idle.
+fn session_word(status: ChatIndicator, theme: &Theme) -> Option<(&'static str, gpui::Hsla)> {
+    match status {
+        ChatIndicator::Working => Some(("Working", theme.text_muted)),
+        ChatIndicator::AwaitingInput => Some(("Needs input", theme.warning)),
+        ChatIndicator::Errored => Some(("Failed", theme.danger)),
+        ChatIndicator::Completed => Some(("Done", theme.text_faint)),
+        ChatIndicator::Idle => None,
+    }
+}
 
 /// The rail's 18px cell a node's mark sits centred in.
 fn flow_cell() -> gpui::Div {
@@ -308,11 +319,12 @@ impl Shell {
         bot: &Bot,
         item: &PanelItem,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         match item {
             PanelItem::Work => Some(self.render_work_list(bot, theme, cx)),
-            PanelItem::WorkItem(id) => self.render_work_item(id, theme, cx),
+            PanelItem::WorkItem(id) => self.render_work_item(id, theme, window, cx),
             PanelItem::Thread(id) => self.render_thread(id, theme, cx),
             _ => None,
         }
@@ -381,6 +393,7 @@ impl Shell {
         &mut self,
         work_id: &str,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         let now = Utc::now();
@@ -407,8 +420,12 @@ impl Shell {
                         .map(|id| {
                             let chat = state.chats.iter().find(|c| c.id == *id).map(|chat| {
                                 (
+                                    // A title an agent wrote may carry markdown.
                                     transcript::single_line(
-                                        chat.title.as_deref().unwrap_or("New session"),
+                                        super::items::plain_markdown(
+                                            chat.title.as_deref().unwrap_or("New session"),
+                                        )
+                                        .trim_start_matches(['-', '*', '#', '>', ' ']),
                                     ),
                                     state.display_status_for(chat, now),
                                 )
@@ -472,17 +489,28 @@ impl Shell {
             phase_line(&work, now_ms),
             phase.tint(theme),
         );
-        let status = if matches!(phase, PlanPhase::Running | PlanPhase::Stopping) {
-            let (done, total) = work.progress();
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(status)
-                .child(progress_bar(done, total, theme))
-        } else {
-            div().child(status)
+        // When it was proposed, started and ended, under the status.
+        let when = |ms: i64| parts::past_full_ms(ms);
+        let timing = match (work.started_at, work.ended_at) {
+            (Some(start), Some(end)) => format!("Started {} · ended {}", when(start), when(end)),
+            (None, Some(end)) => {
+                format!("Proposed {} · closed {}", when(work.created_at), when(end))
+            }
+            (Some(start), None) => format!("Started {}", when(start)),
+            (None, None) => format!("Proposed {}", when(work.created_at)),
         };
+        let mut status = div().flex().flex_col().gap(px(3.0)).child(status);
+        if matches!(phase, PlanPhase::Running | PlanPhase::Stopping) {
+            let (done, total) = work.progress();
+            status = status.child(div().py(px(3.0)).child(progress_bar(done, total, theme)));
+        }
+        let status = status.child(
+            div()
+                .text_size(px(11.0))
+                .line_height(px(15.0))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(timing)),
+        );
         let mut body = div()
             .p(px(8.0))
             .flex()
@@ -494,10 +522,21 @@ impl Shell {
             norm(a) == norm(b)
         };
         if !work.instruction.trim().is_empty() && !same(&work.instruction, &work.title) {
-            body = body.child(parts::fact(theme, "Request", text_value(&work.instruction)));
+            body = body.child(parts::fact(
+                theme,
+                "Request",
+                super::items::panel_markdown(
+                    &work.instruction,
+                    format!("bot-work-request-{}", work.id),
+                    12.5,
+                    theme.text,
+                    theme,
+                    window,
+                ),
+            ));
         }
         if !work.steps.is_empty() {
-            body = body.child(self.work_flow(&work, steps, phase, now_ms, theme, cx));
+            body = body.child(self.work_flow(&work, steps, phase, theme, window, cx));
         }
 
         // ── footer: the decision it waits on ──
@@ -551,11 +590,15 @@ impl Shell {
         work: &BotWork,
         steps: Vec<FlowStep>,
         phase: PlanPhase,
-        now_ms: i64,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let now_ms = Utc::now().timestamp_millis();
         let ticker = self.pulse_ticker.entity_id();
+        let md = |text: &str, key: String, size: f32, tone: gpui::Hsla| {
+            super::items::panel_markdown(text, key, size, tone, theme, window)
+        };
         let numbered = matches!(
             phase,
             PlanPhase::Awaiting
@@ -612,15 +655,12 @@ impl Shell {
                 }),
         );
         if let Some(summary) = work.summary.as_ref().filter(|s| !s.trim().is_empty()) {
-            flow = flow.child(
-                div()
-                    .px(px(8.0))
-                    .pb(px(6.0))
-                    .text_size(px(12.0))
-                    .line_height(px(17.0))
-                    .text_color(theme.text_muted)
-                    .child(text_value(summary)),
-            );
+            flow = flow.child(div().px(px(8.0)).pb(px(6.0)).child(md(
+                summary,
+                format!("bot-work-summary-{}", work.id),
+                12.0,
+                theme.text_muted,
+            )));
         }
 
         // ── the rail: steps, then the result ──
@@ -733,17 +773,16 @@ impl Shell {
                     )
                 })
                 .when_some(detail, |el, detail| {
-                    el.child(
-                        div()
-                            .text_size(px(12.0))
-                            .line_height(px(17.0))
-                            .text_color(if asking {
-                                theme.warning
-                            } else {
-                                theme.text_muted
-                            })
-                            .child(text_value(&detail)),
-                    )
+                    el.child(md(
+                        &detail,
+                        format!("bot-work-step-{}-{ix}", work.id),
+                        12.0,
+                        if asking {
+                            theme.warning
+                        } else {
+                            theme.text_muted
+                        },
+                    ))
                 });
             if !sessions.is_empty() {
                 content = content.child(
@@ -767,19 +806,7 @@ impl Shell {
         let result = work
             .result
             .as_ref()
-            .filter(|r| !r.trim().is_empty() && done)
-            .map(|r| text_value(r));
-        let (text, color) = match (&result, done) {
-            (Some(text), _) => (text.clone(), theme.text),
-            (None, true) => (
-                SharedString::from(phase_line(work, now_ms)),
-                theme.text_muted,
-            ),
-            (None, false) => (
-                SharedString::from("Reported when the last step ends"),
-                theme.text_faint,
-            ),
-        };
+            .filter(|r| !r.trim().is_empty() && done);
         let mark = div()
             .size(px(18.0))
             .rounded_full()
@@ -789,25 +816,46 @@ impl Shell {
             .justify_center()
             .child(icon(icons::FLAG).size(px(10.5)).text_color(tone))
             .into_any_element();
-        let content = div()
-            .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .child(
+        let title = div()
+            .text_size(px(13.0))
+            .line_height(px(18.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(if done { theme.text } else { theme.text_muted })
+            .child("Result");
+        let content = match result {
+            // What it produced, on a quiet card: the flag carries the
+            // outcome's tone, so code and links keep their own colours.
+            Some(result) => div().flex().flex_col().gap(px(6.0)).child(title).child(
                 div()
-                    .text_size(px(13.0))
-                    .line_height(px(18.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(if done { theme.text } else { theme.text_muted })
-                    .child("Result"),
-            )
-            .child(
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .rounded(px(10.0))
+                    .bg(crate::kit::theme::ink(0.035))
+                    .border_1()
+                    .border_color(crate::kit::theme::hairline(0.08))
+                    .child(md(
+                        result,
+                        format!("bot-work-result-{}", work.id),
+                        12.5,
+                        theme.text,
+                    )),
+            ),
+            None => div().flex().flex_col().gap(px(2.0)).child(title).child(
                 div()
-                    .text_size(if result.is_some() { px(12.5) } else { px(12.0) })
-                    .line_height(px(18.0))
-                    .text_color(color)
-                    .child(text),
-            );
+                    .text_size(px(12.0))
+                    .line_height(px(17.0))
+                    .text_color(if done {
+                        theme.text_muted
+                    } else {
+                        theme.text_faint
+                    })
+                    .child(SharedString::from(if done {
+                        phase_line(work, now_ms)
+                    } else {
+                        "Reported when the last step ends".to_string()
+                    })),
+            ),
+        };
         flow.child(node(mark, None, content))
     }
 
@@ -852,6 +900,13 @@ impl Shell {
                         .text_color(motion::hover_blend(&key, theme.text_muted, theme.text))
                         .child(SharedString::from(title)),
                 )
+                .children(session_word(status, theme).map(|(word, color)| {
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(color)
+                        .child(word)
+                }))
                 .child(
                     icon(icons::ALT_ARROW_RIGHT)
                         .size(px(10.0))

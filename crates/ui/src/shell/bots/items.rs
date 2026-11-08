@@ -86,6 +86,36 @@ pub(super) fn prose(text: String, color: gpui::Hsla) -> gpui::Div {
         .child(SharedString::from(text))
 }
 
+/// Agent-written text in a panel (a request, a note, a result) as markdown
+/// at the panel's reading size: code, emphasis, lists and session links
+/// drawn as the chat draws them. `size` is the body size (the line height
+/// follows); `tone` colours the body text.
+pub(super) fn panel_markdown(
+    text: &str,
+    key: impl Into<SharedString>,
+    size: f32,
+    tone: gpui::Hsla,
+    theme: &Theme,
+    window: &Window,
+) -> AnyElement {
+    let mut compact = theme.clone();
+    compact.markdown = crate::kit::theme::MarkdownMetrics {
+        body_size: size,
+        body_line_height: (size * 1.44).round(),
+        code_size: size - 1.0,
+        code_line_height: (size * 1.3).round(),
+        block_gap: 6.0,
+    };
+    compact.text = tone;
+    crate::markdown::render::render_tree(
+        &crate::markdown::parser::parse_full(text),
+        &crate::markdown::render::RenderOptions::settled(key.into()),
+        &compact,
+        window,
+        &|_| None,
+    )
+}
+
 /// Markdown an agent wrote, read as plain text for a panel or a row: a
 /// link keeps its text (a cited `cypher://session/…` reads as the session's
 /// title), emphasis, code ticks and heading marks drop, a table row reads

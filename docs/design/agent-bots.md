@@ -1005,7 +1005,7 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 | Card | Shows | Opens in the detail panel |
 |---|---|---|
 | **Needs you** | Plans awaiting approval, workers asking or failed on an approval, tainted actions awaiting approval, and later review drafts | The item with its context and actions: the plan to approve, the question with the worker's recent messages and the bot's suggested answer, the action and why it needs approval |
-| **Work** | Running orchestrations with their current step, a step bar and elapsed time; the last few finished ones with a one-line result | The orchestration: its status and request, then one flow on one rail: each step with its state, duration and sessions, ending in the result; Stop |
+| **Work** | Running orchestrations with their current step, a step bar and elapsed time; the last few finished ones with a one-line result | The orchestration: its status (with when it was proposed, started and ended) and request, then one flow on one rail: each step with its state, duration, note and sessions, ending in the result; Stop. Agent-written text (request, summary, notes, result) renders as markdown |
 | **Routines** | Its routines in order of next run: name, where and when it runs, next run, last result | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
 | **Projects** | Each granted project with device, running and waiting sessions, and "works directly" or "via sessions" | The project's sessions in scope with status, the bot's worker sessions there, git state |
 | **Notebook** | The latest few entries, bot-written ones marked | All entries with their sources, editable and deletable |

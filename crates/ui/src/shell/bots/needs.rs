@@ -253,12 +253,13 @@ impl Shell {
         bot: &Bot,
         item: &PanelItem,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         match item {
             PanelItem::NeedsYou => Some(self.render_needs_list(bot, theme, cx)),
             // A plan is a work item waiting on its approval: one page.
-            PanelItem::Plan(id) => self.render_work_item(id, theme, cx),
+            PanelItem::Plan(id) => self.render_work_item(id, theme, window, cx),
             PanelItem::Approval(id) => self.render_approval_panel(bot, id, theme, cx),
             PanelItem::Asking { chat_id, work_id } => {
                 self.render_asking_panel(bot, chat_id, work_id, theme, cx)

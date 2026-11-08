@@ -134,6 +134,7 @@ impl Shell {
     pub(super) fn render_panel_card(
         &mut self,
         item: &PanelItem,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
@@ -152,9 +153,9 @@ impl Shell {
             | PanelItem::Plan(_)
             | PanelItem::Approval(_)
             | PanelItem::Asking { .. }
-            | PanelItem::Review(_) => self.render_needs_panel(&bot, item, &theme, cx)?,
+            | PanelItem::Review(_) => self.render_needs_panel(&bot, item, &theme, window, cx)?,
             PanelItem::Work | PanelItem::WorkItem(_) | PanelItem::Thread(_) => {
-                self.render_work_panel(&bot, item, &theme, cx)?
+                self.render_work_panel(&bot, item, &theme, window, cx)?
             }
             PanelItem::Schedule | PanelItem::Routine(_) | PanelItem::NewRoutine => {
                 self.render_schedule_panel(&bot, item, &theme, cx)?
