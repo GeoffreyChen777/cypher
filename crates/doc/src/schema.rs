@@ -518,14 +518,17 @@ impl SessionDoc {
             chat_id,
             fields.iter().map(|(key, value)| (*key, value)),
         ));
-        let commands = self.doc.get_list("commands");
-        let map = commands.push_container(LoroMap::new())?;
+        // Filled detached, then attached in one op: written field by field
+        // into the list, a drain reading meanwhile (another thread, same
+        // doc) saw the entry before its signature and rejected it unsigned.
+        let map = LoroMap::new();
         for (key, value) in fields {
             map.insert(key, value)?;
         }
         if let Some(sig) = sig {
             map.insert(SIG_FIELD, encode_sig(&sig))?;
         }
+        self.doc.get_list("commands").push_container(map)?;
         self.doc.commit();
         Ok(())
     }
