@@ -56,6 +56,7 @@ fn harness(runs: Runs, hold: Arc<Notify>) -> TestHarness {
                     kind: PermissionPromptKind::Escalate,
                     tool_call_id: None,
                 }),
+                asked_by: None,
             }]);
             let started =
                 common::session_started(HarnessId::Pi, "mock-1", &request.cwd, "s", "a-1");

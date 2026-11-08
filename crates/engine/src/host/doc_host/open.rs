@@ -18,32 +18,40 @@ impl DocHost {
                 return Ok(handle.clone());
             }
         }
-        let stored = self.inner.store.load_snapshot_with_cursor(chat_id)?;
+        let stored = self.inner.store.load_doc(chat_id)?;
+        let persister = Arc::new(DocPersister::new(self.inner.store.clone(), chat_id));
         let mut snapshot_len = 0usize;
         let mut chat2_cursor = 0u64;
-        let mut requeue_commands: Vec<SessionCommandEntry> = Vec::new();
-        let doc = match stored {
-            Some((bytes, cursor, epoch)) if epoch >= crate::host::chat2_host::CHAT2_DOC_EPOCH => {
-                snapshot_len = bytes.len();
-                chat2_cursor = cursor;
-                let raw = loro::LoroDoc::new();
-                raw.import(&bytes)
-                    .map_err(|e| EngineError::Other(format!("snapshot import failed: {e}")))?;
-                SessionDoc::from_doc(raw)
+        // With whether each may be signed again (`may_resign`).
+        let mut requeue_commands: Vec<(SessionCommandEntry, bool)> = Vec::new();
+        // Import the stored base + deltas and let the persister continue
+        // them. The version is read right after the import: everything later
+        // (outbox replay, requeues) is not stored yet and rides the next save.
+        let load = |stored: &cypher_sync::StoredDoc| -> Result<SessionDoc, EngineError> {
+            let raw = loro::LoroDoc::new();
+            if persist::import_stored(&raw, stored)? {
+                persister.adopt(stored, raw.oplog_vv());
             }
-            Some((bytes, _cursor, epoch)) if self.inner.config.edge.is_none() => {
+            Ok(SessionDoc::from_doc(raw))
+        };
+        let doc = match stored {
+            Some(stored) if stored.epoch >= crate::host::chat2_host::CHAT2_DOC_EPOCH => {
+                snapshot_len = stored.stored_len();
+                chat2_cursor = stored.cursor;
+                load(&stored)?
+            }
+            Some(stored) if self.inner.config.edge.is_none() => {
                 // Offline/edge-less: adopting would blank a readable
                 // transcript with no way to catch up. Keep the old doc
                 // read-only-ish; the adopt runs on the next online open.
-                tracing::info!(chat = %chat_id, old_epoch = epoch,
+                tracing::info!(chat = %chat_id, old_epoch = stored.epoch,
                     "chat2 adopt deferred (no edge configured)");
-                snapshot_len = bytes.len();
-                let raw = loro::LoroDoc::new();
-                raw.import(&bytes)
-                    .map_err(|e| EngineError::Other(format!("snapshot import failed: {e}")))?;
-                SessionDoc::from_doc(raw)
+                snapshot_len = stored.stored_len();
+                load(&stored)?
             }
-            Some((bytes, _cursor, epoch)) => {
+            Some(stored) => {
+                let epoch = stored.epoch;
+                let bytes = stored.into_snapshot()?;
                 // Discard-and-adopt: this device's doc predates the
                 // chat2 lineage. Keep the old snapshot under a suffixed
                 // id for rollback, carry over OUR OWN unresolved
@@ -65,13 +73,16 @@ impl DocHost {
                     old.import(&bytes).map(|_| old)
                 } {
                     let old_doc = SessionDoc::from_doc(raw);
-                    if let Ok(commands) = old_doc.read_commands() {
+                    if let Ok(commands) = old_doc.read_commands_with_auth(chat_id) {
+                        // Signed again only when this device signed them:
+                        // `issuedBy` alone is just a field anyone can write.
                         requeue_commands = commands
                             .into_iter()
-                            .filter(|c| {
+                            .filter(|(c, _)| {
                                 c.status == SessionCommandStatus::Pending
                                     && c.issued_by == self.inner.config.device_id
                             })
+                            .map(|(c, auth)| (c, self.may_resign(&auth)))
                             .collect();
                     }
                 }
@@ -86,13 +97,8 @@ impl DocHost {
                 // since (caught by the restart_resume suite: first-turn
                 // transcripts vanished on reopen).
                 let doc = SessionDoc::init(chat_id)?;
-                if let Ok(snapshot) = doc.export_snapshot() {
-                    let _ = self.inner.store.save_snapshot_with_cursor(
-                        chat_id,
-                        &snapshot,
-                        0,
-                        crate::host::chat2_host::CHAT2_DOC_EPOCH,
-                    );
+                if let Err(err) = persister.save_full_with_cursor(doc.doc(), 0) {
+                    tracing::warn!(chat = %chat_id, error = %err, "initial snapshot save failed");
                 }
                 doc
             }
@@ -128,6 +134,7 @@ impl DocHost {
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             snapshot_bytes: AtomicUsize::new(snapshot_len),
+            persister,
             ephemeral: AtomicBool::new(false),
             checkpointing: Arc::new(AtomicBool::new(false)),
             chat2: Mutex::new(None),
@@ -166,8 +173,14 @@ impl DocHost {
             // commit before it never enters the pending buffer or the
             // client, so the requeued command would sit in the local doc
             // and never reach the room (the host would never see it).
-            for command in &requeue_commands {
-                let _ = doc.queue_command(command);
+            let trust = self.command_trust();
+            for (command, resign) in &requeue_commands {
+                let _ = doc.queue_signed_command(chat_id, command, |bytes| {
+                    trust
+                        .as_ref()
+                        .filter(|_| *resign)
+                        .and_then(|trust| trust.sign(bytes))
+                });
             }
             // First contact with the room (cursor 0): everything
             // committed BEFORE the subscription above — SessionDoc::
@@ -237,6 +250,7 @@ impl DocHost {
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             snapshot_bytes: AtomicUsize::new(0),
+            persister: Arc::new(DocPersister::new(self.inner.store.clone(), chat_id)),
             ephemeral: AtomicBool::new(true),
             checkpointing: Arc::new(AtomicBool::new(false)),
             chat2: Mutex::new(None),

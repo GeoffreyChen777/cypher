@@ -154,6 +154,11 @@ struct Inner {
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
     sessions_tx: watch::Sender<Vec<Session>>,
+    /// Held across each publication. Writers change `statuses` and publish
+    /// after releasing it, so two publications can run in either order; each
+    /// reads the current row under this lock, so the last one to run carries
+    /// the latest state instead of its writer's older copy.
+    publish_order: Mutex<()>,
     /// Host-LOCAL messaging channel identity for child chats, keyed by child
     /// chat id. The channel root is an absolute host-local path
     /// (`/tmp/pi-subagents-messages/<session>`); it is NEVER persisted or
@@ -166,6 +171,13 @@ struct Inner {
     /// child's initial task can hand the retry the same channel. Same bound
     /// and lifetime as [`Self::child_channels`].
     spent_child_channels: Mutex<HashMap<String, LocalChildChannel>>,
+    /// Subagent questions open in a root chat, by the copy's request id
+    /// (see [`Inner::forward_input`]). Host memory only: a copy outlives
+    /// neither the engine nor the child's question.
+    forwarded: Mutex<HashMap<String, ForwardedFrom>>,
+    /// Root chats showing as awaiting input for a forwarded question, with
+    /// the status their own run last set (see [`Inner::set_status`]).
+    held_statuses: Mutex<HashMap<String, SessionStatus>>,
     /// chat_id → journal seq of the newest terminal `Done` published —
     /// context recovery keys its verdict on a round by it.
     done_seqs: Mutex<HashMap<String, u64>>,
@@ -247,6 +259,41 @@ impl QuiesceWindows {
     }
 }
 
+/// A turn is running (or waiting on the user mid-turn).
+fn is_active(status: SessionStatus) -> bool {
+    matches!(
+        status,
+        SessionStatus::Working | SessionStatus::AwaitingInput
+    )
+}
+
+/// How many child chats up [`Inner::forward_input`] looks for the root.
+const MAX_FORWARD_DEPTH: usize = 8;
+
+/// A child chat's question mirrored into its root chat by
+/// [`Inner::forward_input`]. Retired when the child's own question settles —
+/// answered (here or in the child chat), withdrawn, or dropped with its run.
+struct ForwardedInput {
+    inner: std::sync::Weak<Inner>,
+    mirror_id: String,
+}
+
+impl ForwardedInput {
+    fn retire(self) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.retire_forward(&self.mirror_id);
+        }
+    }
+}
+
+/// Where a mirrored question came from (see [`Inner::forwarded`]).
+#[derive(Debug, Clone)]
+struct ForwardedFrom {
+    root: String,
+    child: String,
+    request_id: String,
+}
+
 /// Host-local messaging channel for one child chat's INITIAL run (see
 /// [`Inner::child_channels`]). Not serialized, never synced.
 #[derive(Debug, Clone)]
@@ -307,8 +354,11 @@ impl SessionsEngine {
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
+                publish_order: Mutex::new(()),
                 child_channels: Mutex::new(HashMap::new()),
                 spent_child_channels: Mutex::new(HashMap::new()),
+                forwarded: Mutex::new(HashMap::new()),
+                held_statuses: Mutex::new(HashMap::new()),
                 done_seqs: Mutex::new(HashMap::new()),
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
@@ -473,17 +523,42 @@ impl SessionsEngine {
         }
     }
 
+    /// The harness session the chat's next run in `cwd` would resume — what
+    /// a session migration carries along. `None` when the next run would
+    /// start fresh anyway.
+    pub fn resumable_session(&self, chat_id: &str, cwd: &str) -> Option<String> {
+        self.inner.resume_for(chat_id, cwd)
+    }
+
+    /// Session migration, destination side: the chat resumes `session_id`
+    /// (empty = the "do not resume" tombstone) in `cwd` from now on. Memory
+    /// only — the migration writes the row itself, in the same write that
+    /// makes this device the host.
+    pub fn adopt_harness_session(&self, chat_id: &str, session_id: &str, cwd: &str) {
+        lock(&self.inner.harness_sessions).insert(
+            chat_id.to_string(),
+            HarnessSessionRef {
+                session_id: session_id.to_string(),
+                cwd: cwd.to_string(),
+            },
+        );
+        lock(&self.inner.last_requests).remove(chat_id);
+    }
+
+    /// Session migration, source side: the chat moved away. Drop what this
+    /// process remembered about running it, so a later move back starts
+    /// from the row rather than a session file that is gone.
+    pub fn forget_moved_chat(&self, chat_id: &str) {
+        lock(&self.inner.harness_sessions).remove(chat_id);
+        lock(&self.inner.last_requests).remove(chat_id);
+    }
+
     fn note_turn_start(&self, chat_id: &str, cwd: &str) {
         if self.inner.is_ephemeral(chat_id) {
             return; // temporary Side Chat: no checkout snapshot for the diff pane
         }
         if let Some(listener) = self.inner.turn_listener.get() {
-            let opens_round = !lock(&self.inner.statuses).get(chat_id).is_some_and(|s| {
-                matches!(
-                    s.status,
-                    SessionStatus::Working | SessionStatus::AwaitingInput
-                )
-            });
+            let opens_round = !self.inner.run_status(chat_id).is_some_and(is_active);
             listener(chat_id, TurnEvent::Start { cwd, opens_round });
         }
     }
@@ -726,12 +801,13 @@ impl SessionsEngine {
             .unwrap_or_else(|| visible_prompt.clone());
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
-        // The chat's permission level is its row's, whatever request this
-        // turn was rebuilt from (a remembered one predates a level change).
+        // The chat's permission level is its launch config's (the row's, or
+        // under "Only paired devices" its signed record's), whatever request
+        // this turn was rebuilt from (a remembered one predates a change).
         if let Some(config) = self
             .inner
             .workspace()
-            .and_then(|ws| ws.chat_config(chat_id))
+            .and_then(|ws| ws.launch_config(chat_id))
         {
             request.sandbox = config.sandbox;
         }
@@ -770,11 +846,13 @@ impl SessionsEngine {
                 ledger.push_back(RoutedSteer {
                     prompt: request.prompt.clone(),
                     agent_prompt: agent_prompt.clone(),
+                    attachments: request.attachments.clone(),
                     message_id: user_id.clone(),
                 });
                 let message = SteerMessage {
                     prompt: effective.clone(),
                     message_id: message_id.clone(),
+                    attachments: request.attachments.clone(),
                 };
                 let ok = steer_tx.try_send(message).is_ok();
                 if !ok {
@@ -860,6 +938,8 @@ impl SessionsEngine {
         } else {
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
+            let inner = Arc::downgrade(&self.inner);
+            let asking_chat = chat_id.to_string();
             Box::new(move |questions: Vec<UserInputQuestion>| {
                 let (tx, rx) = oneshot::channel();
                 let (mut answer_tx, answer_rx) = oneshot::channel();
@@ -867,8 +947,14 @@ impl SessionsEngine {
                 lock(&pending).insert(request_id.clone(), tx);
                 let _ = engine_tx.send(AgentEvent::InputRequested {
                     request_id: request_id.clone(),
-                    questions,
+                    questions: questions.clone(),
                 });
+                // A subagent's child chat is hidden: ask in the chat the
+                // user is watching too. Whichever copy is answered first
+                // wins; the mirror retires when this question settles.
+                let forward = inner
+                    .upgrade()
+                    .and_then(|inner| inner.forward_input(&asking_chat, &request_id, questions));
                 // Withdrawal watch: the harness drops its receiver when the
                 // dialog it bridges is gone (Pi resolves a timed-out dialog on
                 // its own, silently). Retire the question then, or it stays
@@ -888,6 +974,9 @@ impl SessionsEngine {
                                 let _ = engine_tx.send(AgentEvent::InputResolved { request_id });
                             }
                         }
+                    }
+                    if let Some(forward) = forward {
+                        forward.retire();
                     }
                 });
                 answer_rx
@@ -994,20 +1083,13 @@ impl SessionsEngine {
         request_id: &str,
         answers: Vec<UserInputAnswer>,
     ) -> Result<bool, EngineError> {
-        let target = lock(&self.inner.runs)
-            .get(chat_id)
-            .map(|h| (h.pending_inputs.clone(), h.engine_tx.clone()));
-        let Some((pending, engine_tx)) = target else {
-            return Ok(false);
-        };
-        let Some(resolver) = lock(&pending).remove(request_id) else {
-            return Ok(false);
-        };
-        let _ = resolver.send(answers);
-        let _ = engine_tx.send(AgentEvent::InputResolved {
-            request_id: request_id.to_string(),
-        });
-        Ok(true)
+        if self
+            .inner
+            .respond_forwarded(chat_id, request_id, answers.clone())
+        {
+            return Ok(true);
+        }
+        Ok(self.inner.respond_input(chat_id, request_id, answers))
     }
 
     /// Session Fork quiesce: cancel a PARKED (Idle) attached run so the fork
@@ -1051,14 +1133,9 @@ impl SessionsEngine {
     pub async fn recycle_idle_sessions(&self) {
         self.inner.plugin_epoch.fetch_add(1, Ordering::SeqCst);
         let idle: Vec<(String, CancellationToken, String)> = {
-            let statuses = lock(&self.inner.statuses);
             lock(&self.inner.runs)
                 .iter()
-                .filter(|&(id, _handle)| {
-                    statuses
-                        .get(id)
-                        .is_some_and(|session| session.status == SessionStatus::Idle)
-                })
+                .filter(|&(id, _handle)| self.inner.run_status(id) == Some(SessionStatus::Idle))
                 .map(|(id, handle)| {
                     (
                         id.clone(),
@@ -1095,6 +1172,11 @@ impl SessionsEngine {
         lock(&self.inner.runs)
             .get(chat_id)
             .is_some_and(|h| h.run_id == run_id)
+    }
+
+    /// Does any run, live or parked, still hold the chat's harness session?
+    pub fn has_run(&self, chat_id: &str) -> bool {
+        lock(&self.inner.runs).contains_key(chat_id)
     }
 
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
@@ -1232,40 +1314,59 @@ impl Inner {
 
     /// Publish a session status: ephemeral chats update ONLY their private
     /// watch (the Side Chat panel); normal chats update the public sessions
-    /// watch AND the workspace session row (remote sidebars).
+    /// watch AND the workspace session row (remote sidebars). Both get the
+    /// chat's row as it is now (see [`Inner::publish_order`]); `session`, the
+    /// change being published, goes to the notification hook.
     fn publish_session(&self, chat_id: &str, session: &Session) {
-        if !self.publish_local(chat_id, session) {
-            return;
+        {
+            let _order = lock(&self.publish_order);
+            let Some(current) = self.publish_current(chat_id) else {
+                return;
+            };
+            if let Some(ws) = self.workspace() {
+                ws.record_session(&current);
+            }
         }
         if let Some(ws) = self.workspace() {
-            ws.record_session(session);
             ws.notify_session_event(session);
         }
     }
 
     /// The engine-local half of [`Self::publish_session`]: refresh the
     /// ephemeral watch or the public `WatchSessions` list, without touching
-    /// the workspace registry. Returns whether the chat is public (i.e.
-    /// whether a registry mirror would apply).
-    fn publish_local(&self, chat_id: &str, session: &Session) -> bool {
+    /// the workspace registry.
+    fn publish_local(&self, chat_id: &str) {
+        let _order = lock(&self.publish_order);
+        self.publish_current(chat_id);
+    }
+
+    /// Under [`Inner::publish_order`]: send `chat_id`'s current row to the
+    /// ephemeral watch or the public `WatchSessions` list. Returns the row
+    /// when the chat is public (a registry mirror applies) and still has one.
+    fn publish_current(&self, chat_id: &str) -> Option<Session> {
         if self.is_ephemeral(chat_id) {
-            if let Some(tx) = lock(&self.ephemeral_tx).get(chat_id) {
-                let _ = tx.send_replace(Some(session.clone()));
+            let current = lock(&self.statuses).get(chat_id).cloned();
+            if let (Some(current), Some(tx)) = (current, lock(&self.ephemeral_tx).get(chat_id)) {
+                let _ = tx.send_replace(Some(current));
             }
-            return false;
+            return None;
         }
         let ephemeral = lock(&self.ephemeral);
-        let mut list: Vec<Session> = lock(&self.statuses)
-            .values()
-            .filter(|s| !ephemeral.contains(&s.chat_id))
-            .cloned()
-            .collect();
+        let (current, mut list) = {
+            let statuses = lock(&self.statuses);
+            let list: Vec<Session> = statuses
+                .values()
+                .filter(|s| !ephemeral.contains(&s.chat_id))
+                .cloned()
+                .collect();
+            (statuses.get(chat_id).cloned(), list)
+        };
         list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
         drop(ephemeral);
         // send_replace: keep the current value fresh even with no receivers,
         // so late WatchSessions subscribers see the last transition.
         self.sessions_tx.send_replace(list);
-        true
+        current
     }
 
     /// Bump the session's freshness on stream activity WITHOUT a status
@@ -1343,6 +1444,7 @@ impl Inner {
                     context_usage: seed,
                     throughput: None,
                     recovery: None,
+                    progress: None,
                 });
             if entry.context_usage == Some(usage) {
                 return;
@@ -1351,7 +1453,7 @@ impl Inner {
             entry.clone()
         };
         if session.status == SessionStatus::Working {
-            self.publish_local(chat_id, &session);
+            self.publish_local(chat_id);
         } else {
             self.publish_session(chat_id, &session);
         }
@@ -1383,8 +1485,37 @@ impl Inner {
         self.publish_session(chat_id, &session);
     }
 
-    fn set_throughput(&self, chat_id: &str, throughput: Option<Throughput>) {
+    /// A long turn's narrated progress (see [`crate::session::progress`]).
+    /// Applied only while `turn` — the `started_at` the narration was asked
+    /// for — is still the chat's running turn: a reading that lands after
+    /// its turn settled or a new one began is dropped. Each reading is a
+    /// registry write (one per half minute at most) so other devices' bars
+    /// follow; `updated_at` stays put, it is not a liveness signal.
+    fn set_progress(
+        &self,
+        chat_id: &str,
+        turn: chrono::DateTime<Utc>,
+        progress: cypher_proto::RunProgress,
+    ) {
         let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.status != SessionStatus::Working || entry.started_at != Some(turn) {
+                return;
+            }
+            entry.progress = Some(crate::session::progress::with_stages(
+                entry.progress.as_ref(),
+                progress,
+            ));
+            entry.clone()
+        };
+        self.publish_session(chat_id, &session);
+    }
+
+    fn set_throughput(&self, chat_id: &str, throughput: Option<Throughput>) {
+        {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {
                 return;
@@ -1393,9 +1524,8 @@ impl Inner {
                 return;
             }
             entry.throughput = throughput;
-            entry.clone()
-        };
-        self.publish_local(chat_id, &session);
+        }
+        self.publish_local(chat_id);
     }
 
     /// Live subagent projection (pi `cypher.subagents.v1`): update the chat's
@@ -1422,6 +1552,7 @@ impl Inner {
                     context_usage: seed,
                     throughput: None,
                     recovery: None,
+                    progress: None,
                 });
             entry.subagents = runs;
             entry.updated_at = now;
@@ -1430,7 +1561,77 @@ impl Inner {
         self.publish_session(chat_id, &session);
     }
 
+    /// Set the status a chat's run is in. A root chat with a subagent's
+    /// question open (see [`Inner::forward_input`]) keeps SHOWING awaiting
+    /// input meanwhile: its own run's status is held underneath, still
+    /// driving the turn timer and the end-of-turn hook, and comes back when
+    /// the last question closes.
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
+        let held = lock(&self.held_statuses)
+            .get_mut(chat_id)
+            .map(|run| std::mem::replace(run, status));
+        match held {
+            None => self.write_status(chat_id, status, status, None, fresh_start),
+            Some(before) => self.write_status(
+                chat_id,
+                SessionStatus::AwaitingInput,
+                status,
+                Some(is_active(before)),
+                fresh_start,
+            ),
+        }
+    }
+
+    /// The status the chat's own run is in, under any awaiting-input hold.
+    fn run_status(&self, chat_id: &str) -> Option<SessionStatus> {
+        if let Some(run) = lock(&self.held_statuses).get(chat_id) {
+            return Some(*run);
+        }
+        lock(&self.statuses).get(chat_id).map(|s| s.status)
+    }
+
+    /// Start showing `chat_id` as awaiting input for a forwarded question.
+    fn hold_awaiting_input(&self, chat_id: &str) {
+        let run = {
+            let mut held = lock(&self.held_statuses);
+            if held.contains_key(chat_id) {
+                return;
+            }
+            let run = lock(&self.statuses)
+                .get(chat_id)
+                .map_or(SessionStatus::Idle, |s| s.status);
+            held.insert(chat_id.to_string(), run);
+            run
+        };
+        self.write_status(
+            chat_id,
+            SessionStatus::AwaitingInput,
+            run,
+            Some(is_active(run)),
+            false,
+        );
+    }
+
+    /// Show `chat_id`'s own run status again.
+    fn release_awaiting_input(&self, chat_id: &str) {
+        let Some(run) = lock(&self.held_statuses).remove(chat_id) else {
+            return;
+        };
+        self.write_status(chat_id, run, run, Some(is_active(run)), false);
+    }
+
+    /// Write and publish a status row. `shown` is what the row says; `run`
+    /// (the chat's own run status) decides the turn timer and whether a turn
+    /// just settled, against `run_was_active` when the row does not show it.
+    fn write_status(
+        &self,
+        chat_id: &str,
+        shown: SessionStatus,
+        run: SessionStatus,
+        run_was_active: Option<bool>,
+        fresh_start: bool,
+    ) {
+        let status = shown;
         let now = Utc::now();
         let seed = self.durable_context_usage(chat_id);
         let (session, entered_attention, settled) = {
@@ -1455,6 +1656,7 @@ impl Inner {
                     context_usage: seed,
                     throughput: None,
                     recovery: None,
+                    progress: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -1462,28 +1664,26 @@ impl Inner {
             // the old base showed the previous turn's 30min on send), and a
             // settled session drops its base entirely so no later reader can
             // resurrect a stale elapsed.
-            let was_active = matches!(
-                entry.status,
-                SessionStatus::Working | SessionStatus::AwaitingInput
-            );
+            let was_active = run_was_active.unwrap_or_else(|| is_active(entry.status));
             entry.status = status;
             entry.updated_at = now;
             // Throughput belongs to one turn, like `started_at`: a settled
             // session must not keep the last tok/s, nor a new turn open with
             // the previous one's token count.
-            match status {
+            match run {
                 SessionStatus::Working if fresh_start || !was_active => {
                     entry.started_at = Some(now);
                     entry.throughput = None;
+                    entry.progress = None;
                 }
                 SessionStatus::Working | SessionStatus::AwaitingInput => {}
                 SessionStatus::Idle | SessionStatus::Errored => {
                     entry.started_at = None;
                     entry.throughput = None;
+                    entry.progress = None;
                 }
             }
-            let settled =
-                was_active && matches!(status, SessionStatus::Idle | SessionStatus::Errored);
+            let settled = was_active && matches!(run, SessionStatus::Idle | SessionStatus::Errored);
             (entry.clone(), entered_attention, settled)
         };
         // Statuses guard released before publish (publish re-locks it).
@@ -1568,6 +1768,163 @@ impl Inner {
             run_id: child.parent_run_id,
             agent: address.unwrap_or(child.agent),
             child_index,
+        }
+    }
+
+    /// Resolve a pending input request of `chat_id`'s live run; false when
+    /// no such request is pending (unknown id, or the run already settled).
+    fn respond_input(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        answers: Vec<UserInputAnswer>,
+    ) -> bool {
+        let target = lock(&self.runs)
+            .get(chat_id)
+            .map(|h| (h.pending_inputs.clone(), h.engine_tx.clone()));
+        let Some((pending, engine_tx)) = target else {
+            return false;
+        };
+        let Some(resolver) = lock(&pending).remove(request_id) else {
+            return false;
+        };
+        let _ = resolver.send(answers);
+        let _ = engine_tx.send(AgentEvent::InputResolved {
+            request_id: request_id.to_string(),
+        });
+        true
+    }
+
+    /// Mirror a Cypher-hosted child chat's question into its root chat — the
+    /// chat the user is looking at. Child chats are hidden, so a subagent's
+    /// question or permission prompt asked only there leaves it waiting on
+    /// something nobody sees.
+    ///
+    /// The copy is written straight into the root's transcript, whatever the
+    /// root is doing: a background subagent usually asks after the root's
+    /// turn ended, so it cannot ride the root's run. While a copy is open the
+    /// root shows as awaiting input (see [`Inner::set_status`]); its answer
+    /// is relayed to the child by [`Inner::respond_forwarded`].
+    fn forward_input(
+        self: &Arc<Self>,
+        chat_id: &str,
+        request_id: &str,
+        questions: Vec<UserInputQuestion>,
+    ) -> Option<ForwardedInput> {
+        if self.is_ephemeral(chat_id) {
+            return None;
+        }
+        let ws = self.workspace()?;
+        let asking = ws.chat(chat_id).ok()??;
+        let agent = asking.child.as_ref()?.agent.clone();
+        // Nested subagents: every chat between the asker and the root is a
+        // hidden child chat too.
+        let mut root = asking.parent_chat_id()?.to_owned();
+        for _ in 0..MAX_FORWARD_DEPTH {
+            let chat = ws.chat(&root).ok()??;
+            match chat.parent_chat_id() {
+                Some(parent) => root = parent.to_owned(),
+                None => break,
+            }
+        }
+        let handle = self.doc_host()?.open(&root).ok()?;
+        let mirror_id = new_id();
+        let questions = questions
+            .into_iter()
+            .map(|question| UserInputQuestion {
+                // The gated call is in the child's transcript, not the root's.
+                permission: question
+                    .permission
+                    .map(|prompt| cypher_proto::PermissionPrompt {
+                        tool_call_id: None,
+                        ..prompt
+                    }),
+                asked_by: Some(agent.clone()),
+                ..question
+            })
+            .collect();
+        let entry = cypher_doc::SessionMessageEntry {
+            id: new_id(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Input {
+                // Input parts carry their request id as their part id.
+                id: mirror_id.clone(),
+                request_id: mirror_id.clone(),
+                questions,
+                resolved: false,
+            }],
+            created_at: now_ms(),
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            completed_at: None,
+            comments: Vec::new(),
+            models: Vec::new(),
+            turn_changes: None,
+            recovery: None,
+        };
+        if let Err(err) = handle.doc().push_message(&entry) {
+            tracing::warn!(chat = %root, child = %chat_id, error = %err,
+                "subagent question could not be forwarded");
+            return None;
+        }
+        lock(&self.forwarded).insert(
+            mirror_id.clone(),
+            ForwardedFrom {
+                root: root.clone(),
+                child: chat_id.to_string(),
+                request_id: request_id.to_string(),
+            },
+        );
+        self.hold_awaiting_input(&root);
+        tracing::info!(chat = %root, child = %chat_id, "subagent question forwarded");
+        Some(ForwardedInput {
+            inner: Arc::downgrade(self),
+            mirror_id,
+        })
+    }
+
+    /// Answer a question forwarded into `chat_id`: the answer goes to the
+    /// subagent that asked. False when `request_id` is no open copy there.
+    fn respond_forwarded(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        answers: Vec<UserInputAnswer>,
+    ) -> bool {
+        let Some(from) = lock(&self.forwarded)
+            .get(request_id)
+            .filter(|from| from.root == chat_id)
+            .cloned()
+        else {
+            return false;
+        };
+        // The child's settle retires the copy; a child that is already gone
+        // never will, so retire it here.
+        if !self.respond_input(&from.child, &from.request_id, answers) {
+            self.retire_forward(request_id);
+        }
+        true
+    }
+
+    /// Close a forwarded copy (idempotent), and end the root's awaiting-input
+    /// hold with its last copy.
+    fn retire_forward(&self, mirror_id: &str) {
+        let (from, last) = {
+            let mut forwarded = lock(&self.forwarded);
+            let Some(from) = forwarded.remove(mirror_id) else {
+                return;
+            };
+            let last = !forwarded.values().any(|f| f.root == from.root);
+            (from, last)
+        };
+        if let Some(handle) = self.doc_host().and_then(|host| host.open(&from.root).ok())
+            && let Err(err) = handle.doc().resolve_input(mirror_id)
+        {
+            tracing::warn!(chat = %from.root, error = %err, "forwarded question resolve failed");
+        }
+        if last {
+            self.release_awaiting_input(&from.root);
         }
     }
 

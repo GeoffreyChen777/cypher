@@ -78,13 +78,18 @@ impl DocHost {
         let chat = handle.chat_id.clone();
         let doc = handle.doc.clone();
         let store = self.inner.store.clone();
+        let persister = handle.persister.clone();
         let http = self.inner.http.clone();
         let device = self.inner.config.device_id.clone();
         let weak = Arc::downgrade(handle);
         let host = self.clone();
         let mut token_changes = edge.token_changes();
         self.spawn_worker(async move {
-            let sink = Arc::new(crate::host::chat2_host::EngineChatSink::new(&doc, store, chat.clone()).with_preview(preview));
+            let sink = Arc::new(
+                crate::host::chat2_host::EngineChatSink::new(&doc, store, chat.clone())
+                    .with_persister(persister)
+                    .with_preview(preview),
+            );
             // The sink holds only a Weak doc ref (a strong one made every
             // chat2 handle read as perma-pinned — LRU eviction dead); this
             // task's own strong ref dies when the join resolves.

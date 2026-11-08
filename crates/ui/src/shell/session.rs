@@ -138,6 +138,8 @@ pub(super) struct SessionSlot {
     /// Files surfaces by id — each tab its own tree + editor over the
     /// chat's checkout.
     pub(super) files: std::collections::HashMap<u64, Entity<FilesPanel>>,
+    /// Event hookups for [`Self::files`] ("Mention in Chat").
+    pub(super) files_subs: std::collections::HashMap<u64, Subscription>,
     pub(super) files_seq: u64,
     /// Temporary Side Chat tabs: one [`SideChatPanel`] per open
     /// side chat, keyed by a slot-minted sequence id. Owned here so the
@@ -147,6 +149,10 @@ pub(super) struct SessionSlot {
     pub(super) side_chats: std::collections::HashMap<u64, Entity<crate::side_chats::SideChatPanel>>,
     pub(super) side_chat_subs: std::collections::HashMap<u64, Subscription>,
     pub(super) side_chat_seq: u64,
+    /// Artifact surfaces by id: pages opened from the chat's artifact
+    /// cards, one tab per page.
+    pub(super) artifacts: std::collections::HashMap<u64, Entity<crate::artifacts::ArtifactPanel>>,
+    pub(super) artifact_seq: u64,
     /// Context observation, composer / transcript / find-field events.
     _subscriptions: Vec<Subscription>,
 }

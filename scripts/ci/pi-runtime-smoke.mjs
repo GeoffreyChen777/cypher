@@ -58,6 +58,7 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
       join(runtime, "extensions/cypher-fast-mode.ts"),
       join(runtime, "extensions/cypher-codemode.ts"),
       join(runtime, "extensions/cypher-permissions.ts"),
+      join(runtime, "extensions/cypher-file-references.ts"),
     ];
     if (brokenExtension) {
       const path = join(root, "broken.ts");

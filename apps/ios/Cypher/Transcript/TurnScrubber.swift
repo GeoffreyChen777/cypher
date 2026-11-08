@@ -12,15 +12,32 @@ import UIKit
 struct TranscriptRound: Equatable {
     /// The prompt row's id, a ForEach id — `scrollTo(id:)` can target it.
     var rowId: String
-    /// Index into the full (unwindowed) row list.
-    var rowIndex: Int
+    /// Index into the full (unwindowed) row list; nil for a round above the
+    /// store's loaded window, which has no rows yet.
+    var rowIndex: Int?
     var preview: String
+    /// A round above the loaded window: its prompt's index among the doc's
+    /// messages, which the window reads down to before the jump lands.
+    var messageIndex: Int?
 
     static func rounds(in rows: [TranscriptRow]) -> [TranscriptRound] {
         rows.indices.compactMap { ix in
             guard case .user(let text, let isSteer, _) = rows[ix].kind, !isSteer else { return nil }
             return TranscriptRound(rowId: rows[ix].id, rowIndex: ix, preview: previewLine(text))
         }
+    }
+
+    /// The round `entry` starts, at `messageIndex` above the loaded window —
+    /// if it's a prompt that gets a bubble row (`TranscriptRowBuilder`: a
+    /// user message with text, not a steer).
+    static func prompt(_ entry: MessageEntry, at messageIndex: Int) -> TranscriptRound? {
+        guard entry.role == .user, !entry.isSteer else { return nil }
+        let text = entry.parts.compactMap { part -> String? in
+            if case .text(_, let text, _) = part { return text }
+            return nil
+        }.joined(separator: "\n")
+        guard !text.isEmpty else { return nil }
+        return TranscriptRound(rowId: entry.id, preview: previewLine(text), messageIndex: messageIndex)
     }
 
     /// The prompt's first non-blank line, whitespace collapsed.

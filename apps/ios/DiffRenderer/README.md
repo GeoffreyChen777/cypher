@@ -40,6 +40,14 @@ third-party license/notice files (Pierre is Apache-2.0).
 - Otherwise tokenization is capped at 1,000 characters per line, word comparison
   at 500. An explicit offline language allowlist replaces Shiki's full registry.
   Unknown file extensions use plain text.
+- A file opened from a chat reference arrives with `focusLines`: those lines
+  are selected (Pierre's own selection styling) and scrolled into view. A
+  round's diff opened at one file arrives with `focusFile`, an index into
+  the native-owned file list. Neither is a path or a bridge back to native.
+- Pierre 1.4.1 clamps a whole file's render window by a 50-line slice when
+  it would start above the file, dropping the rows past line 50 while the
+  viewport's middle is above it; `renderer.mjs` extends such a window to
+  what it covers. Recheck it when bumping Pierre.
 - Unchanged regions start folded. Only an explicit expansion requests the
   before/after pair through the existing `GetCheckoutFileDiffText` RPC, pinned
   to the captured checkout/checksum. Native rejects stale, binary, truncated,

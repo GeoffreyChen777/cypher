@@ -25,7 +25,9 @@ use crate::kit::theme::{
     MonoStyled, Theme, code_block_background, inline_code_text, inline_code_wash,
 };
 
-use super::parser::{Block, BlockTree, InlineRun, TableAlign};
+use super::code_ref::{self, CodeRef};
+use super::math::{self, GlueWidths, MathMetrics};
+use super::parser::{Block, BlockTree, InlineRun, InlineStyle, MathKind, TableAlign};
 use super::veil::{RowVeil, apply_veil};
 
 /// Gap between markdown blocks inside one message (zeron mdBlockGap).
@@ -36,6 +38,8 @@ pub const MD_LINE_HEIGHT: f32 = 22.0;
 /// Code block padding.
 pub const CODE_PADDING_X: f32 = 12.0;
 pub const CODE_PADDING_Y: f32 = 10.0;
+/// Corner radius of fenced blocks and artifact cards.
+pub const FENCE_RADIUS: f32 = 12.0;
 
 // Table metrics — a port of mugen-markdown 0.6.2's `TableBlock` under zeron's
 // resolved md theme. The design is frameless ("flat hairline"): 1px horizontal
@@ -82,6 +86,52 @@ pub struct RenderOptions {
     /// independently (paint order cannot conflict). Only read when
     /// [`Self::selection`] is `Some`.
     pub scope: super::selection::SelectionScope,
+    /// Offered every clicked link first; one it doesn't take (`false`), or
+    /// every link when `None`, opens through the system.
+    pub link: Option<LinkHandler>,
+    /// Called after a diagram fence switched between its diagram and its
+    /// source — the block changed height. `None` renders no switch.
+    pub diagram_toggled: Option<WindowHandler>,
+    /// File references in inline code show as chips that report hover and
+    /// clicks here ([`super::code_ref`]). `None` keeps them plain inline
+    /// code — surfaces with nothing to preview them against.
+    pub code_refs: Option<CodeRefUi>,
+    /// Opens artifact cards and HTML fences' Preview; `None` renders the
+    /// cards inert and the fences without the button.
+    pub artifact: Option<super::artifact::ArtifactHandler>,
+    /// How the tree's patch fences went, for their cards; `None` renders
+    /// them inert (surfaces that index no pages).
+    pub artifact_patches: Option<super::artifact::PatchLookup>,
+    /// The row is still streaming: an artifact whose fence hasn't closed
+    /// is still being written.
+    pub live: bool,
+}
+
+/// A link click's destination, offered to the surface: `true` when handled.
+pub type LinkHandler = Rc<dyn Fn(&str, &mut Window, &mut gpui::App) -> bool>;
+
+/// A file-reference chip under the pointer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodeRefHover {
+    /// The chip's identity: its text element's key and its index there.
+    pub key: SharedString,
+    /// The row the chip sits in ([`RenderOptions::row_key`]).
+    pub row_key: SharedString,
+    pub code_ref: CodeRef,
+    /// The chip's first visual line, in window coordinates.
+    pub anchor: Bounds<gpui::Pixels>,
+}
+
+/// The pointer entered a chip (`Some`) or left the one it was on (`None`).
+pub type CodeRefHoverHandler = Rc<dyn Fn(Option<CodeRefHover>, &mut Window, &mut gpui::App)>;
+/// A chip was clicked.
+pub type CodeRefClickHandler = Rc<dyn Fn(CodeRefHover, &mut Window, &mut gpui::App)>;
+
+/// What a surface does with file-reference chips.
+#[derive(Clone)]
+pub struct CodeRefUi {
+    pub on_hover: CodeRefHoverHandler,
+    pub on_click: CodeRefClickHandler,
 }
 
 /// Selection lifecycle callbacks fired from the frame-scoped selection mouse
@@ -133,6 +183,12 @@ impl RenderOptions {
             copy: None,
             selection: None,
             scope: super::selection::SelectionScope::Transcript(0),
+            link: None,
+            diagram_toggled: None,
+            code_refs: None,
+            artifact: None,
+            artifact_patches: None,
+            live: false,
         }
     }
 }
@@ -260,27 +316,64 @@ pub fn render_block(
 ) -> AnyElement {
     let (ix, theme) = (ctx.ix, ctx.theme);
     match block {
-        Block::Paragraph { runs } => text_element(
-            runs,
-            theme.markdown.body_size,
-            theme.markdown.body_line_height,
-            false,
-            ctx,
-        ),
+        Block::Paragraph { runs } => match paragraph_segments(runs) {
+            None => text_element(
+                runs,
+                theme.markdown.body_size,
+                theme.markdown.body_line_height,
+                false,
+                ctx,
+                window,
+            ),
+            // Display formulas get rows of their own between the prose.
+            Some(segments) => div()
+                .flex()
+                .flex_col()
+                .gap(px(theme.markdown.block_gap))
+                .children(segments.iter().enumerate().map(|(si, segment)| {
+                    let ctx = ctx.nested(ix * 100 + si);
+                    match segment {
+                        Segment::Prose(runs) => text_element(
+                            runs,
+                            theme.markdown.body_size,
+                            theme.markdown.body_line_height,
+                            false,
+                            ctx,
+                            window,
+                        ),
+                        Segment::Display(tex) => render_display_math(tex, ctx, window),
+                    }
+                }))
+                .into_any_element(),
+        },
         Block::Heading { level, runs } => {
             let (size, line) = heading_metrics(*level);
             let size = size * theme.markdown.body_size / MD_TEXT_SIZE;
             let line = line * theme.markdown.body_line_height / MD_LINE_HEIGHT;
-            text_element(runs, size, line, true, ctx)
+            text_element(runs, size, line, true, ctx, window)
         }
-        Block::CodeBlock { language, code }
+        Block::CodeBlock {
+            language,
+            code,
+            closed: true,
+        } if super::mermaid::is_mermaid_fence(language.as_deref()) => {
+            super::mermaid::render(code, ctx, window)
+        }
+        Block::CodeBlock { language, code, .. }
             if super::diff_fence::is_diff_fence(language.as_deref()) =>
         {
             super::diff_fence::render(code, ctx, highlight)
         }
-        Block::CodeBlock { language, code } => {
+        Block::CodeBlock { language, code, .. } => {
             render_code_block(language.as_deref(), code, ctx, highlight)
         }
+        Block::Artifact {
+            kind,
+            title,
+            code,
+            closed,
+            patch,
+        } => super::artifact::render_card(*kind, title.as_deref(), code, *closed, *patch, ctx),
         Block::BlockQuote { children } => {
             div()
                 // Accent-tinted quote: indigo rail + a whisper of the same hue
@@ -368,6 +461,108 @@ pub fn render_block(
             .bg(theme.border)
             .into_any_element(),
     }
+}
+
+/// One piece of a paragraph cut at its display formulas.
+enum Segment<'a> {
+    Prose(Vec<InlineRun>),
+    Display(&'a str),
+}
+
+/// A paragraph's runs cut at its display formulas, or `None` when it has
+/// none (the common case renders as one text element, as before). Whitespace
+/// left at a cut — the soft breaks around a `$$` on its own line — is
+/// dropped, and a prose piece with nothing else left vanishes.
+fn paragraph_segments(runs: &[InlineRun]) -> Option<Vec<Segment<'_>>> {
+    if !runs
+        .iter()
+        .any(|run| run.style.math == Some(MathKind::Display))
+    {
+        return None;
+    }
+    fn flush<'a>(out: &mut Vec<Segment<'a>>, prose: &mut Vec<InlineRun>) {
+        let mut runs = std::mem::take(prose);
+        if let Some(first) = runs.first_mut()
+            && first.style.math.is_none()
+        {
+            first.text = first.text.trim_start().to_string();
+        }
+        if let Some(last) = runs.last_mut()
+            && last.style.math.is_none()
+        {
+            last.text = last.text.trim_end().to_string();
+        }
+        runs.retain(|run| !run.text.is_empty());
+        if !runs.is_empty() {
+            out.push(Segment::Prose(runs));
+        }
+    }
+    let mut out = Vec::new();
+    let mut prose = Vec::new();
+    for run in runs {
+        if run.style.math == Some(MathKind::Display) {
+            flush(&mut out, &mut prose);
+            out.push(Segment::Display(&run.text));
+        } else {
+            prose.push(run.clone());
+        }
+    }
+    flush(&mut out, &mut prose);
+    Some(out)
+}
+
+/// A display formula on its own row, centered; a formula wider than the
+/// column scrolls sideways like a code block. It is one text element whose
+/// single line is as tall as the formula, so it selects and copies (as its
+/// `$$` source) with the prose around it. TeX RaTeX cannot typeset shows as
+/// a `latex` code block instead.
+fn render_display_math(tex: &str, ctx: BlockCtx, window: &Window) -> AnyElement {
+    let BlockCtx {
+        top_ix,
+        ix,
+        opts,
+        theme,
+    } = ctx;
+    let Some(metrics) = math::metrics(tex, MathKind::Display) else {
+        return render_code_block(Some("latex"), tex.trim(), ctx, None);
+    };
+    let size = theme.markdown.body_size;
+    let em_px = size * math::MATH_SCALE;
+    let line_height = ((metrics.height + metrics.depth) * em_px + 2.0 * math::DISPLAY_PAD_Y)
+        .max(theme.markdown.body_line_height);
+    let runs = [InlineRun {
+        text: tex.to_string(),
+        style: InlineStyle {
+            math: Some(MathKind::Display),
+            ..InlineStyle::default()
+        },
+    }];
+    let env = MathEnv::new(window, theme, size);
+    let flat = flatten_cached(
+        &runs,
+        FontWeight::NORMAL,
+        top_ix,
+        ix,
+        opts,
+        theme,
+        Some(&env),
+    );
+    let scroll_id: SharedString = format!("{}-math{ix}", opts.row_key).into();
+    horizontal_scroller(scroll_id)
+        .w_full()
+        .flex()
+        .flex_row()
+        .child(
+            // Auto margins center a narrow formula and collapse to zero for
+            // a wide one, so its left edge stays reachable by scrolling.
+            div()
+                .mx_auto()
+                .flex_none()
+                .text_size(px(size))
+                .line_height(px(line_height))
+                .child(flat_text_element(&flat, ix, opts, theme)),
+        )
+        .into_any_element()
 }
 
 /// Tight monochrome heading scale (zeron: h2 ≈ 16px semibold; headings step
@@ -467,7 +662,16 @@ fn render_table(
                 out.push(None);
                 continue;
             };
-            let flat = flatten_cached(runs, weight, top_ix, table_cell_ix(ix, r, c), opts, theme);
+            let env = has_math(runs).then(|| MathEnv::new(window, theme, theme.markdown.body_size));
+            let flat = flatten_cached(
+                runs,
+                weight,
+                top_ix,
+                table_cell_ix(ix, r, c),
+                opts,
+                theme,
+                env.as_ref(),
+            );
             if !flat.text.is_empty() {
                 // Cell sources are single-line; guard anyway (same byte count,
                 // so the runs still cover the text exactly).
@@ -593,6 +797,118 @@ pub struct FlatText {
     pub runs: Vec<TextRun>,
     pub links: Vec<(Range<usize>, String)>,
     pub code_ranges: Vec<Range<usize>>,
+    /// Formulas, each painted over the glue text at its range.
+    pub math: Vec<MathSpan>,
+    /// File-reference chips, each a glyph glue then its short label.
+    pub refs: Vec<RefSpan>,
+    /// What the formulas' ranges copy as (their TeX source) and chips copy
+    /// as (the reference as written), in text order; `None` without either.
+    /// Built once with the flat text so the selection registry can
+    /// recognize an unchanged element by pointer.
+    pub copy_sources: Option<CopySources>,
+}
+
+/// Byte ranges of a flat text that copy as a different string.
+pub type CopySources = std::sync::Arc<[(Range<usize>, String)]>;
+
+/// One file-reference chip in a flat text: its whole range (the
+/// [`code_ref::ICON_GLUE`] first, then the label) and what it cites.
+#[derive(Clone, Debug)]
+pub struct RefSpan {
+    pub range: Range<usize>,
+    pub code_ref: CodeRef,
+}
+
+impl RefSpan {
+    fn glue(&self) -> Range<usize> {
+        self.range.start..self.range.start + code_ref::ICON_GLUE.len()
+    }
+}
+
+/// One formula in a flat text: its glue placeholder's byte range and width,
+/// and what to typeset over it.
+#[derive(Clone)]
+pub struct MathSpan {
+    pub range: Range<usize>,
+    pub tex: SharedString,
+    pub kind: MathKind,
+    pub metrics: MathMetrics,
+    /// Math font size, px per em.
+    pub em_px: f32,
+    /// The glue's actual width (the formula centers in it).
+    pub glue_width: f32,
+}
+
+/// What flattening a formula needs from the window: the element's text size
+/// and its prose font's glue widths at that size.
+pub struct MathEnv {
+    pub font_size: f32,
+    pub glue: GlueWidths,
+}
+
+impl MathEnv {
+    pub fn new(window: &Window, theme: &Theme, font_size: f32) -> Self {
+        thread_local! {
+            static GLUE: RefCell<HashMap<(SharedString, u32), GlueWidths>> =
+                RefCell::new(HashMap::new());
+        }
+        let key = (theme.font_sans.clone(), font_size.to_bits());
+        let glue = GLUE.with(|cache| {
+            if let Some(hit) = cache.borrow().get(&key) {
+                return *hit;
+            }
+            let measure = |c: char| {
+                let text: SharedString = c.to_string().into();
+                let run = TextRun {
+                    len: text.len(),
+                    font: font(theme.font_sans.clone()),
+                    color: theme.text,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                f32::from(
+                    window
+                        .text_system()
+                        .shape_line(text, px(font_size), &[run], None)
+                        .width(),
+                )
+            };
+            let glue = GlueWidths {
+                nbsp: measure(math::NBSP),
+                narrow: measure(math::NARROW_NBSP),
+            };
+            let mut cache = cache.borrow_mut();
+            if cache.len() > 64 {
+                cache.clear();
+            }
+            cache.insert(key.clone(), glue);
+            glue
+        });
+        Self { font_size, glue }
+    }
+}
+
+fn has_math(runs: &[InlineRun]) -> bool {
+    runs.iter().any(|run| run.style.math.is_some())
+}
+
+/// A formula RaTeX cannot typeset reads as inline code of its source, so a
+/// typo still shows what the model wrote. Applied identically by the
+/// flattener and [`runs_text`], which must agree.
+fn settle_math(run: &InlineRun) -> std::borrow::Cow<'_, InlineRun> {
+    match run.style.math {
+        Some(kind) if math::metrics(&run.text, kind).is_none() => {
+            std::borrow::Cow::Owned(InlineRun {
+                text: run.text.trim().to_string(),
+                style: InlineStyle {
+                    code: true,
+                    ..InlineStyle::default()
+                },
+            })
+        }
+        _ => std::borrow::Cow::Borrowed(run),
+    }
 }
 
 /// Rounded-wash geometry: small radius on a box sized from the font, not the
@@ -620,20 +936,63 @@ const INLINE_CODE_MARGIN: &str = "\u{2009}";
 /// this beside the flattener it mirrors — and pinned to it by
 /// [`tests::runs_text_matches_the_flattened_text`] — is what makes the
 /// offscreen counts and the painted highlights agree.
+///
+/// A formula's glue is sized by the font, which offscreen counting cannot
+/// measure, so it counts as ONE no-break space: the rendered text holds a
+/// run of them, and queries do not contain them, so the counts still agree.
+///
+/// Find runs on the transcript, whose rows show file references as chips,
+/// so a reference counts as its chip: the glyph glue and the short label.
 pub fn runs_text(runs: &[InlineRun]) -> String {
     let mut text = String::new();
     let mut previous_was_code = None;
-    for run in runs {
+    let chips = chip_labels(runs, true);
+    for (run, chip) in runs.iter().zip(chips) {
         if run.text.is_empty() {
             continue;
         }
+        let run = settle_math(run);
         if previous_was_code.is_some_and(|was_code| was_code != run.style.code) {
             text.push_str(INLINE_CODE_MARGIN);
         }
-        text.push_str(&run.text);
+        if let Some((_, label)) = chip {
+            text.push_str(code_ref::ICON_GLUE);
+            text.push_str(&label);
+        } else if run.style.math.is_some() {
+            text.push(math::NBSP);
+        } else {
+            text.push_str(&run.text);
+        }
         previous_was_code = Some(run.style.code);
     }
     text
+}
+
+/// Per run: the file reference it shows as a chip, with the chip's label,
+/// when `chips` is on. Plain inline code only — a code span inside a link
+/// stays the link. Labels are decided across the element
+/// ([`code_ref::labels`]), which is why this is one pass over all runs.
+fn chip_labels(runs: &[InlineRun], chips: bool) -> Vec<Option<(CodeRef, String)>> {
+    if !chips {
+        return vec![None; runs.len()];
+    }
+    let found: Vec<Option<CodeRef>> = runs
+        .iter()
+        .map(|run| {
+            (run.style.code && run.style.link.is_none() && run.style.math.is_none())
+                .then(|| code_ref::detect(&run.text))
+                .flatten()
+        })
+        .collect();
+    let refs: Vec<&CodeRef> = found.iter().flatten().collect();
+    let mut labels = code_ref::labels(&refs).into_iter();
+    found
+        .into_iter()
+        .map(|code_ref| {
+            let code_ref = code_ref?;
+            Some((code_ref, labels.next().unwrap_or_default()))
+        })
+        .collect()
 }
 
 /// Find matches in one block, counted over the same text elements
@@ -648,18 +1007,43 @@ pub fn count_block_matches(block: &Block, query: &str) -> usize {
             .sum()
     };
     match block {
-        Block::Paragraph { runs } | Block::Heading { runs, .. } => {
+        Block::Paragraph { runs } => match paragraph_segments(runs) {
+            None => crate::markdown::find::count_matches(&runs_text(runs), query),
+            // Element by element, as the paragraph renders.
+            Some(segments) => segments
+                .iter()
+                .map(|segment| match segment {
+                    Segment::Prose(runs) => {
+                        crate::markdown::find::count_matches(&runs_text(runs), query)
+                    }
+                    Segment::Display(_) => 0,
+                })
+                .sum(),
+        },
+        Block::Heading { runs, .. } => {
             crate::markdown::find::count_matches(&runs_text(runs), query)
         }
         // A diff fence selects line by line, markers excluded.
-        Block::CodeBlock { language, code }
+        Block::CodeBlock { language, code, .. }
             if super::diff_fence::is_diff_fence(language.as_deref()) =>
         {
             super::diff_fence::count_matches(code, query)
         }
+        // A drawn diagram shows no text to find.
+        Block::CodeBlock {
+            language,
+            code,
+            closed: true,
+        } if super::mermaid::is_mermaid_fence(language.as_deref())
+            && super::mermaid::is_drawn(code) =>
+        {
+            0
+        }
         // A fence is ONE selectable text model (see `flatten_code`), so its
         // matches are counted over the raw source, newlines included.
         Block::CodeBlock { code, .. } => crate::markdown::find::count_matches(code, query),
+        // The card shows no text of the page's.
+        Block::Artifact { .. } => 0,
         Block::BlockQuote { children } => children
             .iter()
             .map(|child| count_block_matches(child, query))
@@ -680,16 +1064,45 @@ pub fn count_block_matches(block: &Block, query: &str) -> usize {
 /// Flatten inline runs into shaped-text inputs with an explicit base weight
 /// (table headers are 700 per zeron's `table.headerWeight`; strong runs never
 /// drop below semibold). Pure given a theme.
+#[cfg(test)]
 fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWeight) -> FlatText {
+    flatten_runs_math(runs, theme, base_weight, None, false)
+}
+
+/// [`flatten_runs_weighted`] with formulas: given the window-measured
+/// `math` env each formula becomes glue its typeset width wide; without one
+/// (nothing to measure with) it reads as inline code of its source. With
+/// `chips`, file references in inline code become chips ([`RefSpan`]).
+fn flatten_runs_math(
+    runs: &[InlineRun],
+    theme: &Theme,
+    base_weight: FontWeight,
+    math_env: Option<&MathEnv>,
+    chips: bool,
+) -> FlatText {
     let mut text = String::new();
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
     let mut code_ranges: Vec<Range<usize>> = Vec::new();
+    let mut math_spans: Vec<MathSpan> = Vec::new();
+    let mut refs: Vec<RefSpan> = Vec::new();
+    let mut copy: Vec<(Range<usize>, String)> = Vec::new();
     let mut previous_was_code = None;
-    for run in runs {
+    for (run, chip) in runs.iter().zip(chip_labels(runs, chips)) {
         if run.text.is_empty() {
             continue;
         }
+        let mut run = settle_math(run);
+        if run.style.math.is_some() && math_env.is_none() {
+            run = std::borrow::Cow::Owned(InlineRun {
+                text: run.text.trim().to_string(),
+                style: InlineStyle {
+                    code: true,
+                    ..InlineStyle::default()
+                },
+            });
+        }
+        let run = run.as_ref();
         // CSS-like separation without making the wash itself larger: a thin
         // space sits outside the code range at each prose/code boundary.
         if previous_was_code.is_some_and(|was_code| was_code != run.style.code) {
@@ -704,6 +1117,72 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
                 underline: None,
                 strikethrough: None,
             });
+        }
+        if let Some((code_ref, label)) = chip {
+            // The chip: glyph glue, the short label in the code font, its
+            // line suffix muted. It copies as the reference as written.
+            let start = text.len();
+            let mut f = theme.mono();
+            f.weight = if run.style.bold && base_weight.0 < FontWeight::SEMIBOLD.0 {
+                FontWeight::SEMIBOLD
+            } else {
+                base_weight
+            };
+            let suffix = code_ref.line_suffix();
+            let name = label.strip_suffix(suffix.as_str()).unwrap_or(&label);
+            let parts = [
+                (code_ref::ICON_GLUE, theme.text),
+                (name, theme.text),
+                (&label[name.len()..], theme.text_muted),
+            ];
+            for (part, color) in parts {
+                if part.is_empty() {
+                    continue;
+                }
+                text.push_str(part);
+                out.push(TextRun {
+                    len: part.len(),
+                    font: f.clone(),
+                    color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                });
+            }
+            copy.push((start..text.len(), run.text.to_string()));
+            refs.push(RefSpan {
+                range: start..text.len(),
+                code_ref,
+            });
+            previous_was_code = Some(true);
+            continue;
+        }
+        if let (Some(kind), Some(env)) = (run.style.math, math_env)
+            && let Some(metrics) = math::metrics(&run.text, kind)
+        {
+            let em_px = env.font_size * math::MATH_SCALE;
+            let (glue, glue_width) = math::glue(metrics.width * em_px, env.glue);
+            let start = text.len();
+            text.push_str(&glue);
+            // Plain prose font: the glue widths were measured in it.
+            out.push(TextRun {
+                len: glue.len(),
+                font: font(theme.font_sans.clone()),
+                color: theme.text,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+            math_spans.push(MathSpan {
+                range: start..text.len(),
+                tex: run.text.clone().into(),
+                kind,
+                metrics,
+                em_px,
+                glue_width,
+            });
+            previous_was_code = Some(false);
+            continue;
         }
         let start = text.len();
         text.push_str(&run.text);
@@ -774,11 +1253,20 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         });
         previous_was_code = Some(run.style.code);
     }
+    copy.extend(
+        math_spans
+            .iter()
+            .map(|span| (span.range.clone(), math::copy_source(&span.tex, span.kind))),
+    );
+    copy.sort_by_key(|(range, _)| range.start);
     FlatText {
         text: text.into(),
         runs: out,
         links,
         code_ranges,
+        copy_sources: (!copy.is_empty()).then(|| copy.into()),
+        math: math_spans,
+        refs,
     }
 }
 
@@ -792,7 +1280,10 @@ fn flatten_cached(
     ix: usize,
     opts: &RenderOptions,
     theme: &Theme,
+    math_env: Option<&MathEnv>,
 ) -> Rc<FlatText> {
+    let chips = opts.code_refs.is_some();
+    let build = || Rc::new(flatten_runs_math(runs, theme, base_weight, math_env, chips));
     match &opts.cache {
         Some(cache) => {
             let mut cache = cache.borrow_mut();
@@ -800,10 +1291,10 @@ fn flatten_cached(
             cache
                 .flats
                 .entry((opts.row_key.clone(), top_ix, ix))
-                .or_insert_with(|| Rc::new(flatten_runs_weighted(runs, theme, base_weight)))
+                .or_insert_with(build)
                 .clone()
         }
-        None => Rc::new(flatten_runs_weighted(runs, theme, base_weight)),
+        None => build(),
     }
 }
 
@@ -826,14 +1317,42 @@ fn flat_text_element(
     };
     let styled = StyledText::new(flat.text.clone()).with_runs(text_runs);
     let layout = styled.layout().clone();
-    let text_el: AnyElement = if flat.links.is_empty() {
+    let sel_key: std::sync::Arc<str> = format!("{}-t{ix}", opts.row_key).into();
+    let chip_ui = opts.code_refs.clone().filter(|_| !flat.refs.is_empty());
+    let text_el: AnyElement = if flat.links.is_empty() && chip_ui.is_none() {
         styled.into_any_element()
     } else {
-        let (ranges, urls): (Vec<_>, Vec<_>) = flat.links.iter().cloned().unzip();
+        // Links first, then chips: a click index past the links is a chip.
+        let (mut ranges, urls): (Vec<_>, Vec<_>) = flat.links.iter().cloned().unzip();
+        let link_count = ranges.len();
+        if chip_ui.is_some() {
+            ranges.extend(flat.refs.iter().map(|chip| chip.range.clone()));
+        }
         let id: SharedString = format!("{}-t{ix}", opts.row_key).into();
+        let handler = opts.link.clone();
+        let chip_click = chip_ui.clone().map(|ui| {
+            let (chips, key, row_key, layout) = (
+                flat.refs.clone(),
+                sel_key.clone(),
+                opts.row_key.clone(),
+                layout.clone(),
+            );
+            move |chip_ix: usize, window: &mut Window, cx: &mut gpui::App| {
+                if let Some(chip) = chips.get(chip_ix) {
+                    let hover = chip_hover(&key, &row_key, chip_ix, chip, &layout);
+                    (ui.on_click)(hover, window, cx);
+                }
+            }
+        });
         InteractiveText::new(id, styled)
             .on_click(ranges, move |clicked_ix, window, cx| {
-                if let Some(url) = urls.get(clicked_ix) {
+                if clicked_ix >= link_count {
+                    if let Some(click) = &chip_click {
+                        click(clicked_ix - link_count, window, cx);
+                    }
+                } else if let Some(url) = urls.get(clicked_ix)
+                    && !handler.as_ref().is_some_and(|take| take(url, window, cx))
+                {
                     crate::markdown::session_link::open_link(url, window, cx);
                 }
             })
@@ -844,7 +1363,18 @@ fn flat_text_element(
     // from the text's own layout handle. Pure paint — never in layout. The
     // same paint pass re-registers the frame-scoped window mouse listeners
     // that drive text selection (see markdown/selection.rs).
-    let sel_key: std::sync::Arc<str> = format!("{}-t{ix}", opts.row_key).into();
+    let chips = flat.refs.clone();
+    let chip_theme = theme.clone();
+    let chip_overlay = chip_ui.map(|ui| {
+        chip_hover_overlay(
+            ui,
+            opts.scope,
+            sel_key.clone(),
+            opts.row_key.clone(),
+            flat.refs.clone(),
+            layout.clone(),
+        )
+    });
     let code_ranges = flat.code_ranges.clone();
     let flat_text = flat.text.clone();
     let wash = inline_code_wash(theme);
@@ -860,17 +1390,24 @@ fn flat_text_element(
         &flat.text,
     );
     let find_washes = find_wash(theme);
+    let math_spans = flat.math.clone();
+    let math_color = theme.text;
+    let copy_sources = flat.copy_sources.clone();
+    let underlay_key = sel_key.clone();
     let underlay = canvas(
         |_, _, _| (),
-        move |_, _, window, _| {
+        move |_, _, window, cx| {
             let line_height = f32::from(layout.line_height());
-            for range in &code_ranges {
-                let inset_y = layout
-                    .line_layout_for_index(range.start)
+            let inset_for = |ix: usize| {
+                layout
+                    .line_layout_for_index(ix)
                     .map(|line| {
                         inline_code_inset_y(line_height, f32::from(line.unwrapped_layout.font_size))
                     })
-                    .unwrap_or(0.0);
+                    .unwrap_or(0.0)
+            };
+            for range in &code_ranges {
+                let inset_y = inset_for(range.start);
                 for rect in range_rects(&layout, range, INLINE_CODE_PAD_X, inset_y) {
                     window.paint_quad(quad(
                         rect,
@@ -880,6 +1417,26 @@ fn flat_text_element(
                         gpui::transparent_black(),
                         BorderStyle::default(),
                     ));
+                }
+            }
+            if !chips.is_empty() {
+                let hovered = hovered_chip(scope, &underlay_key);
+                for (chip_ix, chip) in chips.iter().enumerate() {
+                    let colors = ChipColors::new(&chip_theme, hovered == Some(chip_ix));
+                    if let Some((fill, border)) = colors.wash {
+                        let inset_y = inset_for(chip.range.start);
+                        for rect in range_rects(&layout, &chip.range, INLINE_CODE_PAD_X, inset_y) {
+                            window.paint_quad(quad(
+                                rect,
+                                px(INLINE_CODE_RADIUS),
+                                fill,
+                                px(1.0),
+                                border,
+                                BorderStyle::default(),
+                            ));
+                        }
+                    }
+                    paint_chip_glyph(window, cx, &layout, chip, colors.glyph);
                 }
             }
             // Under the selection wash below: a drag over a hit must still
@@ -896,6 +1453,13 @@ fn flat_text_element(
                         BorderStyle::default(),
                     ));
                 }
+            }
+            // Formulas over their glue, above the washes like glyphs are.
+            for span in &math_spans {
+                paint_math(window, cx, &layout, span, math_color);
+            }
+            if let Some(sources) = &copy_sources {
+                super::selection::set_copy_sources(&sel_key, &flat_text, sources.clone());
             }
             // Register this element into the frame's document-ordered
             // registry (paint order IS document order), then the frame's
@@ -916,7 +1480,228 @@ fn flat_text_element(
         .relative()
         .child(underlay)
         .child(text_el)
+        .children(chip_overlay)
         .into_any_element()
+}
+
+/// A chip's paint: bare text and glyph at rest, so a paragraph of
+/// references reads as prose; under the pointer (the chip opens its preview
+/// then) a quiet neutral wash with a hairline edge, and the glyph comes up
+/// to the text color. Never the inline-code green or the accent, so file
+/// references read apart from identifiers without shouting.
+struct ChipColors {
+    /// `(fill, border)`, hovered only.
+    wash: Option<(Hsla, Hsla)>,
+    glyph: Hsla,
+}
+
+impl ChipColors {
+    fn new(theme: &Theme, hovered: bool) -> Self {
+        if hovered {
+            Self {
+                wash: Some((theme.ink(0.06), theme.hairline(0.10))),
+                glyph: theme.text,
+            }
+        } else {
+            Self {
+                wash: None,
+                glyph: theme.text_muted,
+            }
+        }
+    }
+}
+
+/// The file glyph over a chip's leading glue, centered in the glue's box.
+fn paint_chip_glyph(
+    window: &mut Window,
+    cx: &mut gpui::App,
+    layout: &gpui::TextLayout,
+    chip: &RefSpan,
+    color: Hsla,
+) {
+    let Some(rect) = range_rects(layout, &chip.glue(), 0.0, 0.0)
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    let font_size = layout
+        .line_layout_for_index(chip.range.start)
+        .map_or(13.0, |line| f32::from(line.unwrapped_layout.font_size));
+    let side = (font_size * 0.86).min(f32::from(rect.size.width)).round();
+    let origin = point(
+        rect.left() + (rect.size.width - px(side)) / 2.0 - px(1.0),
+        rect.top() + (rect.size.height - px(side)) / 2.0,
+    );
+    let _ = window.paint_svg(
+        Bounds::new(origin, size(px(side), px(side))),
+        crate::kit::icons::DOCUMENT.into(),
+        None,
+        gpui::TransformationMatrix::unit(),
+        color,
+        cx,
+    );
+}
+
+thread_local! {
+    /// The chip under the pointer: `(scope, element key, chip index)`. Set
+    /// by the hover overlays' mouse listeners, read by the washes.
+    static HOVERED_CHIP: RefCell<Option<(super::selection::SelectionScope, std::sync::Arc<str>, usize)>> =
+        const { RefCell::new(None) };
+}
+
+fn hovered_chip(scope: super::selection::SelectionScope, key: &str) -> Option<usize> {
+    HOVERED_CHIP.with(|hovered| match &*hovered.borrow() {
+        Some((s, k, ix)) if *s == scope && k.as_ref() == key => Some(*ix),
+        _ => None,
+    })
+}
+
+fn chip_hover(
+    key: &str,
+    row_key: &SharedString,
+    chip_ix: usize,
+    chip: &RefSpan,
+    layout: &gpui::TextLayout,
+) -> CodeRefHover {
+    let anchor = range_rects(layout, &chip.range, INLINE_CODE_PAD_X, 0.0)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    CodeRefHover {
+        key: format!("{key}#{chip_ix}").into(),
+        row_key: row_key.clone(),
+        code_ref: chip.code_ref.clone(),
+        anchor,
+    }
+}
+
+/// An invisible layer over a text element's chips that reports which chip
+/// the pointer is on. It sits after the text so the text is laid out when
+/// it inserts one hitbox per chip line; hitboxes, unlike raw bounds, know
+/// when something floats over the chip (the composer over the transcript's
+/// foot, a popover). A drag never hovers: it is selecting text.
+fn chip_hover_overlay(
+    ui: CodeRefUi,
+    scope: super::selection::SelectionScope,
+    key: std::sync::Arc<str>,
+    row_key: SharedString,
+    chips: Vec<RefSpan>,
+    layout: gpui::TextLayout,
+) -> impl IntoElement {
+    let hit_layout = layout.clone();
+    let hit_chips = chips.clone();
+    canvas(
+        move |_, window, _| {
+            hit_chips
+                .iter()
+                .map(|chip| {
+                    range_rects(&hit_layout, &chip.range, INLINE_CODE_PAD_X, 0.0)
+                        .into_iter()
+                        .map(|rect| window.insert_hitbox(rect, gpui::HitboxBehavior::Normal))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        },
+        move |_, hitboxes, window, _| {
+            window.on_mouse_event(move |e: &gpui::MouseMoveEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Bubble {
+                    return;
+                }
+                let over = if e.dragging() {
+                    None
+                } else {
+                    hitboxes
+                        .iter()
+                        .position(|lines| lines.iter().any(|hitbox| hitbox.is_hovered(window)))
+                };
+                let current = hovered_chip(scope, &key);
+                if over == current {
+                    return;
+                }
+                match over {
+                    Some(chip_ix) => {
+                        HOVERED_CHIP.with(|hovered| {
+                            *hovered.borrow_mut() = Some((scope, key.clone(), chip_ix));
+                        });
+                        let hover = chip_hover(&key, &row_key, chip_ix, &chips[chip_ix], &layout);
+                        (ui.on_hover)(Some(hover), window, cx);
+                    }
+                    // Only the element that held the hover gives it up: a
+                    // move straight onto another element's chip is that
+                    // element's enter.
+                    None => {
+                        HOVERED_CHIP.with(|hovered| hovered.borrow_mut().take());
+                        (ui.on_hover)(None, window, cx);
+                    }
+                }
+                window.refresh();
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+}
+
+/// Forget the hovered chip of `scope` — the surface's preview closed over
+/// it, or it scrolled away under a still pointer.
+pub fn clear_chip_hover(scope: super::selection::SelectionScope) {
+    HOVERED_CHIP.with(|hovered| {
+        let mut hovered = hovered.borrow_mut();
+        if hovered.as_ref().is_some_and(|(s, _, _)| *s == scope) {
+            *hovered = None;
+        }
+    });
+}
+
+/// Paint one formula over its glue. Inline math sits on the text baseline
+/// (the line's own ascent/descent place it, as gpui places glyphs); display
+/// math centers in its element's single, formula-tall line. The raster is
+/// pixel-snapped so its device pixels land 1:1.
+fn paint_math(
+    window: &mut Window,
+    cx: &mut gpui::App,
+    layout: &gpui::TextLayout,
+    span: &MathSpan,
+    color: Hsla,
+) {
+    let Some(rect) = range_rects(layout, &span.range, 0.0, 0.0)
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    let scale = window.scale_factor();
+    let mut evicted = Vec::new();
+    let raster = math::raster(&span.tex, span.kind, span.em_px, scale, color, &mut evicted);
+    for image in evicted {
+        cx.drop_image(image, Some(window));
+    }
+    let Some(raster) = raster else {
+        return;
+    };
+    let line_height = f32::from(layout.line_height());
+    let line_top = f32::from(rect.top());
+    let ink_width = span.metrics.width * span.em_px;
+    let left = f32::from(rect.left()) + (span.glue_width - ink_width) / 2.0 - math::RASTER_PAD;
+    let top = match span.kind {
+        MathKind::Display => line_top + (line_height - raster.height) / 2.0,
+        MathKind::Inline => {
+            let Some(line) = layout.line_layout_for_index(span.range.start) else {
+                return;
+            };
+            let ascent = f32::from(line.unwrapped_layout.ascent);
+            let descent = f32::from(line.unwrapped_layout.descent);
+            let baseline = line_top + (line_height - ascent - descent) / 2.0 + ascent;
+            baseline - span.metrics.height * span.em_px - math::RASTER_PAD
+        }
+    };
+    let snap = |v: f32| (v * scale).round() / scale;
+    let bounds = Bounds::new(
+        point(px(snap(left)), px(snap(top))),
+        size(px(raster.width), px(raster.height)),
+    );
+    let _ = window.paint_image(bounds, gpui::Corners::default(), raster.image, 0, false);
 }
 
 /// Selection tint: the accent hue under the glyphs, dark-panel strength.
@@ -1036,6 +1821,23 @@ thread_local! {
     static REGISTRY: RefCell<
         std::collections::HashMap<super::selection::SelectionScope, Vec<RegEntry>>
     > = RefCell::new(std::collections::HashMap::new());
+    /// Whether a surface floating over selectable text took the current
+    /// left press ([`shield_selection`]). Every press's capture phase resets
+    /// it, before any bubble-phase listener can set or read it.
+    static PRESS_SHIELDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark `element` as floating over selectable text (the composer and the
+/// find bar over the transcript). The selection listeners only test bounds,
+/// and a press inside the element must never start a selection in the text
+/// underneath: that text treats the press as one elsewhere and drops its
+/// settled selection. Only text painted before the element is affected; its
+/// own selectable text (the question card) handles the press first, since
+/// bubble order runs front to back.
+pub fn shield_selection<E: gpui::InteractiveElement>(element: E) -> E {
+    element.on_mouse_down(gpui::MouseButton::Left, |_, _, _| {
+        PRESS_SHIELDED.with(|shielded| shielded.set(true));
+    })
 }
 
 /// A zero-size canvas that clears `scope`'s selection registry — paint it
@@ -1174,10 +1976,14 @@ fn register_selection_listeners(
         let (key, text, layout) = (key.clone(), text.clone(), layout.clone());
         let selection = selection.clone();
         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
-            if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
+            if phase == DispatchPhase::Capture {
+                PRESS_SHIELDED.with(|shielded| shielded.set(false));
                 return;
             }
-            if visible_bounds.contains(&e.position) {
+            if e.button != MouseButton::Left {
+                return;
+            }
+            if visible_bounds.contains(&e.position) && !PRESS_SHIELDED.with(|s| s.get()) {
                 let ix = match layout.index_for_position(e.position) {
                     Ok(ix) | Err(ix) => ix,
                 };
@@ -1353,6 +2159,7 @@ fn text_element(
     line_height: f32,
     bold_default: bool,
     ctx: BlockCtx,
+    window: &Window,
 ) -> AnyElement {
     let BlockCtx {
         top_ix,
@@ -1365,7 +2172,8 @@ fn text_element(
     } else {
         FontWeight::NORMAL
     };
-    let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme);
+    let env = has_math(runs).then(|| MathEnv::new(window, theme, size));
+    let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme, env.as_ref());
     let inner = flat_text_element(&flat, ix, opts, theme);
     div()
         .text_size(px(size))
@@ -1411,14 +2219,52 @@ fn flatten_code(code: &str, highlight: CodeHighlight, theme: &Theme) -> FlatText
         runs,
         links: Vec::new(),
         code_ranges: Vec::new(),
+        math: Vec::new(),
+        refs: Vec::new(),
+        copy_sources: None,
     }
 }
 
-fn render_code_block(
+/// A selectable, syntax-colored code excerpt without fence chrome — the
+/// file-reference preview's body. `highlight` holds the excerpt's own lines
+/// (index 0 is its first line); one text element, so a drag selects across
+/// lines and copies the source exactly. Scrolls sideways under `scroll_id`.
+pub fn code_excerpt(
+    code: &str,
+    highlight: CodeHighlight,
+    opts: &RenderOptions,
+    theme: &Theme,
+    scroll_id: SharedString,
+) -> gpui::Stateful<gpui::Div> {
+    let code_theme = code_block_theme(theme);
+    let flat = flatten_code(code, highlight, &code_theme);
+    horizontal_scroller(scroll_id)
+        .mono(theme)
+        .whitespace_nowrap()
+        .cursor_text()
+        .flex()
+        .flex_col()
+        .items_start()
+        .child(flat_text_element(&flat, 0, opts, &code_theme))
+}
+
+pub(super) fn render_code_block(
     language: Option<&str>,
     code: &str,
     ctx: BlockCtx,
     highlight: CodeHighlight,
+) -> AnyElement {
+    code_block_with_header(language.map(fence_label), code, ctx, highlight, language)
+}
+
+/// A code block under a header of the caller's own (or none). `preview` is
+/// the fence's language when an HTML or SVG fence offers its Preview.
+pub(super) fn code_block_with_header(
+    header: Option<AnyElement>,
+    code: &str,
+    ctx: BlockCtx,
+    highlight: CodeHighlight,
+    preview: Option<&str>,
 ) -> AnyElement {
     let BlockCtx {
         top_ix,
@@ -1456,11 +2302,18 @@ fn render_code_block(
     // This also applies the streaming veil without changing text or layout.
     let text = flat_text_element(&cached.flat, ix, opts, &code_theme);
     let scroll_id: SharedString = format!("{}-code{ix}", opts.row_key).into();
-    fence_frame(ctx, language.map(fence_label))
+    // Under a caption (light, no divider) the code follows the label closely.
+    let top = if header.is_some() && theme.appearance == crate::kit::theme::Appearance::Light {
+        2.0
+    } else {
+        CODE_PADDING_Y
+    };
+    fence_frame(ctx, header)
         .child(
             horizontal_scroller(scroll_id)
                 .px(px(CODE_PADDING_X))
-                .py(px(CODE_PADDING_Y))
+                .pt(px(top))
+                .pb(px(CODE_PADDING_Y))
                 .mono(theme)
                 .text_size(px(theme.markdown.code_size))
                 .line_height(px(theme.markdown.code_line_height))
@@ -1473,12 +2326,22 @@ fn render_code_block(
                 .items_start()
                 .child(text),
         )
-        // Overlay LAST so it paints above the header/body.
-        .children(copy_button(code, ctx))
+        // Overlay LAST so it paints above the header/body. An HTML fence's
+        // Preview sits beside Copy, the pair right-aligned so "Copied"
+        // grows leftward.
+        .children(match super::artifact::preview_chip(preview, code, ctx) {
+            Some(preview) => Some(
+                fence_actions()
+                    .child(preview)
+                    .children(copy_chip(code, ctx))
+                    .into_any_element(),
+            ),
+            None => copy_button(code, ctx),
+        })
         .into_any_element()
 }
 
-fn fence_label(language: &str) -> AnyElement {
+pub(super) fn fence_label(language: &str) -> AnyElement {
     SharedString::from(language.to_string()).into_any_element()
 }
 
@@ -1487,10 +2350,14 @@ fn fence_label(language: &str) -> AnyElement {
 pub(super) fn fence_frame(ctx: BlockCtx, header: Option<AnyElement>) -> gpui::Div {
     let theme = ctx.theme;
     let chrome_color = theme.code_block_text.unwrap_or(theme.text_muted);
+    // Dark keeps its tuned strip (a tone step and a divider under the
+    // label); on the light plate the label is a caption over the code, so
+    // the block carries one edge, not four layers.
+    let strip = theme.appearance == crate::kit::theme::Appearance::Dark;
     div()
-        .rounded(px(10.0))
-        // Faint white wash over the near-black panel ≈ #101010 (zeron's code
-        // surface), with the hairline border.
+        .rounded(px(FENCE_RADIUS))
+        // A plate a step above the chat (see `code_block_background`), with
+        // the hairline border.
         .bg(code_block_background(theme))
         .border_1()
         .border_color(theme.border)
@@ -1501,10 +2368,13 @@ pub(super) fn fence_frame(ctx: BlockCtx, header: Option<AnyElement>) -> gpui::Di
                 div()
                     .px(px(CODE_PADDING_X))
                     .py(px(5.0))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    // A whisper of tone separation between header and body.
-                    .bg(theme.ink(0.02))
+                    .when(strip, |el| {
+                        el.border_b_1()
+                            .border_color(theme.border)
+                            // A whisper of tone separation between header
+                            // and body.
+                            .bg(theme.ink(0.02))
+                    })
                     .text_size(px(11.0))
                     .text_color(chrome_color)
                     .child(header),
@@ -1518,6 +2388,23 @@ pub(super) fn fence_frame(ctx: BlockCtx, header: Option<AnyElement>) -> gpui::Di
 /// layout. Sits centered in the header when there is one, floats over the
 /// first code line otherwise.
 pub(super) fn copy_button(code: &str, ctx: BlockCtx) -> Option<AnyElement> {
+    copy_chip(code, ctx).map(|chip| fence_actions().child(chip).into_any_element())
+}
+
+/// The overlay row a fence's action chips sit in, top-right.
+fn fence_actions() -> gpui::Div {
+    div()
+        .absolute()
+        .top(px(3.0))
+        .right(px(5.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(2.0))
+}
+
+/// The Copy chip itself, unpositioned.
+fn copy_chip(code: &str, ctx: BlockCtx) -> Option<gpui::Stateful<gpui::Div>> {
     let BlockCtx {
         ix, opts, theme, ..
     } = ctx;
@@ -1529,9 +2416,6 @@ pub(super) fn copy_button(code: &str, ctx: BlockCtx) -> Option<AnyElement> {
         let fade_key = format!("{}-copy{ix}", opts.row_key);
         div()
             .id(SharedString::from(fade_key.clone()))
-            .absolute()
-            .top(px(3.0))
-            .right(px(5.0))
             .h(px(20.0))
             .px(px(6.0))
             .rounded(px(5.0))
@@ -1561,7 +2445,6 @@ pub(super) fn copy_button(code: &str, ctx: BlockCtx) -> Option<AnyElement> {
                 .text_color(chrome_color),
             )
             .when(copied, |el| el.child(SharedString::from("Copied")))
-            .into_any_element()
     })
 }
 

@@ -30,6 +30,8 @@ final class AppConfig: @unchecked Sendable {
     }
 
     private let lock = NSLock()
+    private var trustStore: DeviceTrustStore?
+    private var userHandler: (@Sendable (AuthUser) -> Void)?
     private var tokens: AuthTokens?
     private var devBearer: String?
     private var invalidated = false
@@ -54,6 +56,36 @@ final class AppConfig: @unchecked Sendable {
         self.tokens = tokens
         self.devBearer = devBearer
         self.previewRequested = developmentPreview
+    }
+
+    /// Device trust (DeviceTrustStore): set once by AppModel.connect; nil
+    /// in demo mode and tests, where relay clients speak plaintext.
+    var trust: DeviceTrustStore? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return trustStore
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            trustStore = newValue
+        }
+    }
+
+    /// Told the user each token refresh returns (name, email, picture), so
+    /// the account's profile follows WorkOS without signing in again.
+    var onUser: (@Sendable (AuthUser) -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return userHandler
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            userHandler = newValue
+        }
     }
 
     /// Current bearer, refreshing the WorkOS access token when needed.
@@ -111,10 +143,12 @@ final class AppConfig: @unchecked Sendable {
         guard let current = readTokens() else { return nil }
         let client = makeClient(edgeURL)
         do {
-            let refreshed = try await client.refresh(
+            let (refreshed, user) = try await client.refreshSession(
                 refreshToken: current.refreshToken,
                 organizationId: orgId)
-            return persist(refreshed) ? refreshed : nil
+            guard persist(refreshed) else { return nil }
+            if let user { onUser?(user) }
+            return refreshed
         } catch let error as AuthError {
             if error.isPermanent {
                 // The session is dead (revoked/deleted) and can never

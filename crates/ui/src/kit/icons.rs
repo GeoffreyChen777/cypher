@@ -64,6 +64,11 @@ icon_assets![
     (LAPTOP, "laptop"),
     (FOLDER_WITH_FILES, "folder-with-files"),
     (FOLDER, "folder"),
+    // Solar `add-folder` (Linear): the folder with a plus — the file tree's
+    // New Folder.
+    (FOLDER_ADD, "folder-add"),
+    // Solar `gallery` (Linear) — image files in the file tree.
+    (GALLERY, "gallery"),
     // Hand-drawn git-branch glyph in the Solar Linear style (like the
     // terminal/plus/return ports) — the set has no branch icon.
     (GIT_BRANCH, "git-branch"),

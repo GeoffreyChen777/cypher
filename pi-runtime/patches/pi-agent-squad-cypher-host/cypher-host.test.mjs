@@ -12,7 +12,7 @@ import {
 
 const ENV = {
   CYPHER_SUBAGENT_BRIDGE: "2",
-  CYPHER_ENGINE_SOCKET: "/tmp/cypher-ipc-501/0123456789abcdef0123456789abcdef/engine.sock",
+  CYPHER_ENGINE_SOCKET: "/tmp/cypher-ipc-501/0123456789abcdef0123456789abcdef/agent.sock",
   CYPHER_CHAT_ID: "parent-chat",
   CYPHER_ENGINE_CLIENT_MODULE: "/tmp/engine-client.mjs",
 };

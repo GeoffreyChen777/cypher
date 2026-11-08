@@ -298,3 +298,25 @@ fn word_ranges() {
     let u = "héllo wörld";
     assert_eq!(&u[word_range(u, 2)], "héllo");
 }
+
+#[test]
+fn formulas_copy_as_their_source() {
+    // "a ␣␣ b": the glue at 2..6 (two no-break spaces) shows a formula.
+    let text = "a \u{a0}\u{a0} b";
+    let subs = [(2..6, "$x$".to_string())];
+    assert_eq!(substitute(text, &(0..text.len()), &subs), "a $x$ b");
+    // A selection clipping the glue still copies the whole source.
+    assert_eq!(substitute(text, &(3..text.len()), &subs), "$x$ b");
+    assert_eq!(substitute(text, &(0..1), &subs), "a");
+
+    let key = "formula-copy-test-t0";
+    set_copy_sources(key, text, subs.to_vec().into());
+    let span = |text: &str| Span {
+        key: key.into(),
+        range: 0..text.len(),
+        text: text.into(),
+    };
+    assert_eq!(join_spans(&[span(text)]), "a $x$ b");
+    // Different element text (it re-rendered): no substitution applies.
+    assert_eq!(join_spans(&[span("a b")]), "a b");
+}

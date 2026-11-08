@@ -10,12 +10,13 @@ import SwiftUI
 
 enum Theme {
     // ---- paint: neutral surfaces (oklch chroma 0) ----
-    /// Main panel background — white / the original #060606.
-    static let bg = adaptive(light: .white, dark: grey(6))
+    /// Main panel background — white / #121212, lifted off the desktop's
+    /// #060606 so the phone's dark mode isn't near-black.
+    static let bg = adaptive(light: .white, dark: grey(0x12))
     /// Shell / sidebar surface.
-    static let surface = adaptive(light: neutral(0.968), dark: grey(13))
+    static let surface = adaptive(light: neutral(0.968), dark: grey(0x19))
     /// Raised surface: popovers, dialogs, cards.
-    static let surfaceRaised = adaptive(light: neutral(0.940), dark: neutral(0.235))
+    static let surfaceRaised = adaptive(light: neutral(0.940), dark: neutral(0.285))
     /// User message bubble: the desktop's bubble as painted (chat_style.rs
     /// `bubble`, a translucent muted blue over its chat panel). Nothing shows
     /// through the transcript here, so it carries those pixels opaque rather
@@ -23,10 +24,10 @@ enum Theme {
     /// also steps in lightness off the page so hue is not the only cue.
     static let userBubble = adaptive(
         light: Color(red: 0xE2 / 255.0, green: 0xE9 / 255.0, blue: 0xF4 / 255.0),
-        dark: Color(red: 0x2C / 255.0, green: 0x33 / 255.0, blue: 0x3E / 255.0))
-    static let sheetPanel = adaptive(light: .white, dark: grey(0x14))
+        dark: Color(red: 0x34 / 255.0, green: 0x3B / 255.0, blue: 0x46 / 255.0))
+    static let sheetPanel = adaptive(light: .white, dark: grey(0x20))
     /// Inset-grouped list cells: one step off the shell surface.
-    static let groupedRow = adaptive(light: .white, dark: grey(0x1a))
+    static let groupedRow = adaptive(light: .white, dark: grey(0x26))
     /// Hover/pressed wash for interactive rows (ink at low alpha).
     static let elementHover = whiteAlpha(0.06)
     /// Active/selected wash.

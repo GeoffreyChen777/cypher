@@ -36,7 +36,7 @@ mod session_store;
 mod workos;
 
 use loopback::loopback_loop;
-use session_store::{AccessEntry, StoredSession, write_private};
+use session_store::{AccessEntry, StoredSession, load_session, session_secret};
 pub(crate) use session_store::{consume_sync_rejoin, mark_sync_rejoin};
 use workos::{ExchangeOutcome, SignInResult, jwt_claims, new_pkce_verifier, pkce_s256_challenge};
 
@@ -254,10 +254,21 @@ impl Auth {
     /// Inspect cached account state without refreshing credentials or rewriting
     /// the session. Diagnostics may run while the engine owns the session lock.
     pub fn saved_state(data_dir: &std::path::Path) -> Option<AuthState> {
-        let raw = std::fs::read(data_dir.join("session.json")).ok()?;
-        let mut session: StoredSession = serde_json::from_slice(&raw).ok()?;
+        let mut session = load_session(data_dir)?;
         session.user.avatar_url = sanitize_avatar_url(session.user.avatar_url);
         Some(state_for(session.user, session.org_id))
+    }
+
+    /// Whether any session is stored, readable or not (an unreadable store
+    /// counts as one, so callers guarding against a cloud login fail closed).
+    pub fn has_saved_session(data_dir: &std::path::Path) -> bool {
+        !matches!(session_secret(data_dir).read(), Ok(None))
+    }
+
+    /// Where the stored session lives, for messages to the user: the login
+    /// Keychain on a signed macOS build, else `{data_dir}/session.json`.
+    pub fn session_location(data_dir: &std::path::Path) -> String {
+        session_secret(data_dir).location()
     }
 
     /// Build from config: dev mode unless a WorkOS client id is configured.
@@ -266,11 +277,9 @@ impl Auth {
             .workos_client_id
             .clone()
             .filter(|s| !s.trim().is_empty());
-        let session_file = config.data_dir.join("session.json");
+        let session_secret = session_secret(&config.data_dir);
         let stored: Option<StoredSession> = if workos.is_some() {
-            std::fs::read_to_string(&session_file)
-                .ok()
-                .and_then(|raw| serde_json::from_str(&raw).ok())
+            load_session(&config.data_dir)
         } else {
             None
         };
@@ -283,7 +292,7 @@ impl Auth {
             if session.user.avatar_url != cleaned {
                 session.user.avatar_url = cleaned;
                 if let Ok(bytes) = serde_json::to_vec(&session)
-                    && let Err(err) = write_private(&session_file, &bytes)
+                    && let Err(err) = session_secret.write(&bytes)
                 {
                     tracing::warn!(error = %err, "auth: failed to persist cleaned session");
                 }

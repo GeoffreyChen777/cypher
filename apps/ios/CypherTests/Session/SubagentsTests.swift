@@ -219,6 +219,25 @@ final class SubagentsTests: XCTestCase {
         )
     }
 
+    func testSplitLayoutNotificationSelectsTheChat() {
+        // iPad: `path.first` is the sidebar's selection. A chat elsewhere
+        // becomes the new selection; one already in the detail stack is
+        // popped to, as on the phone.
+        XCTAssertEqual(
+            SessionNavigation.openingNotification("chat", in: [.chat("other")], split: true),
+            [.chat("chat")])
+        XCTAssertEqual(
+            SessionNavigation.openingNotification("chat", in: [.space("project"), .chat("other")], split: true),
+            [.chat("chat")])
+        XCTAssertEqual(
+            SessionNavigation.openingNotification(
+                "parent", in: [.chat("parent"), .chat("child")], split: true),
+            [.chat("parent")])
+        XCTAssertEqual(
+            SessionNavigation.openingNotification("chat", in: [], split: true),
+            [.chat("chat")])
+    }
+
     @MainActor
     func testWorkspaceProjectsChildrenAndSnapshotsWithoutPollutingRootLists() throws {
         let doc = RegistryDoc(deviceId: "ios-test")

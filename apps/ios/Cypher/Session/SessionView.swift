@@ -26,6 +26,8 @@ struct SessionView: View {
     @State private var commentDrafts = CommentDrafts()
     @State private var catalog = RemotePiCatalog()
     @State private var connectionRetry = 0
+    /// The progress card, opened by tapping the working strip's bar.
+    @State private var showingProgress = false
     @State private var workspaceDestination: WorkspaceDestination?
     @State private var actions = SessionActions()
     /// The entry a fork / restart is in flight for (its strip button spins).
@@ -38,6 +40,21 @@ struct SessionView: View {
     @State private var noticeClear: Task<Void, Never>?
     @State private var sideChat: SideChatStore?
     @State private var promotedSideChat: String?
+    /// Regular width (iPad) docks Files, Changes and the side chat in an
+    /// inspector beside the transcript; compact keeps them in sheets.
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The iPad split view's columns, for making the inspector room.
+    @Environment(\.splitColumns) private var splitColumns
+    /// Where the split layout shows this session's inspector.
+    @Environment(\.detailInspector) private var detailInspector
+    @State private var inspectorShown = false
+    @State private var inspectorPane: SessionInspectorPane = .workspace
+    /// The inspector hid the sidebar to make room; closing it brings it back.
+    @State private var inspectorHidSidebar = false
+
+    /// Narrower than this beside the inspector, the chat takes the
+    /// sidebar's room instead.
+    static let minimumChatWidth: CGFloat = 480
 
     private var chat: Chat? { model.chat(id: chatId) }
     @Environment(\.scenePhase) private var scenePhase
@@ -73,8 +90,21 @@ struct SessionView: View {
                 commentDrafts.reset()
                 commentDrafts.bind(to: chatId)
             }
+            .onChange(of: workspaceDestination) { _, destination in
+                if docked, destination != nil { showInspector(.workspace) }
+            }
+            .onChange(of: inspectorKey, initial: true) { _, _ in publishInspector() }
+            .onAppear {
+                model.sessionOnScreen(chatId)
+                publishInspector()
+            }
             .onDisappear {
                 if path.last != .chat(chatId) { commentDrafts.reset() }
+                // The side chat belongs to this session's screen: it ends
+                // when the session leaves the path, not under a cover.
+                if !path.contains(.chat(chatId)) { endSideChat() }
+                detailInspector?.withdraw(owner: chatId)
+                model.sessionOffScreen(chatId)
                 model.markSeen(chatId: chatId)
                 model.releaseSessionStore(chatId: chatId)
             }
@@ -131,6 +161,7 @@ struct SessionView: View {
                         .truncationMode(.middle)
                 }
             }
+            .clearsHiddenSidebarButton(splitColumns)
             // Keep the title bounded without creating a leading
             // bar-button container or changing native Back behavior.
             .frame(
@@ -139,10 +170,23 @@ struct SessionView: View {
         }
         // Bare text on the bar, not a glass capsule.
         .sharedBackgroundVisibility(.hidden)
+        if docked {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    toggleInspector()
+                } label: {
+                    Image(systemName: "sidebar.trailing")
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .accessibilityLabel(inspectorShown ? "Hide Inspector" : "Show Inspector")
+                .accessibilityIdentifier("inspector-toggle")
+            }
+        }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 Button("Files", systemImage: "folder") { workspaceDestination = .files }
                 Button("Changes", systemImage: "plus.forwardslash.minus") { workspaceDestination = .changes }
+                OpenInNewWindowItem(chatId: chat.id)
                 if !chat.isChild {
                     Divider()
                     Button("Rename…", systemImage: "pencil") { actions.rename(chat) }
@@ -190,6 +234,22 @@ struct SessionView: View {
                     model.launchSheet = nil
                     workspaceDestination = destination
                 }
+                // `-sheet round[:path]` opens the session's last recorded
+                // round, `-sheet reference:path:12` a file as a chip would.
+                if model.demo != nil, let sheet = model.launchSheet, let chat {
+                    if sheet == "round" || sheet.hasPrefix("round:"),
+                        let changes = model.sessionStore(for: chat)?.entries.last(where: { $0.turnChanges != nil })?
+                            .turnChanges
+                    {
+                        model.launchSheet = nil
+                        workspaceDestination = .round(
+                            changes, focus: sheet.hasPrefix("round:") ? String(sheet.dropFirst(6)) : nil)
+                    } else if sheet.hasPrefix("reference:"), let ref = FileReference.detect(String(sheet.dropFirst(10)))
+                    {
+                        model.launchSheet = nil
+                        workspaceDestination = .reference(WorkspaceReference(path: ref.path, lines: ref.lines))
+                    }
+                }
                 if model.demo != nil, model.launchSheet == "comment" || model.launchSheet == "comments" {
                     let showList = model.launchSheet == "comments"
                     model.launchSheet = nil
@@ -205,6 +265,10 @@ struct SessionView: View {
             .sessionActionPrompts(actions) { _ in leave() }
             .environment(\.transcriptSelectionActions, chat.map(selectionActions))
             .environment(\.transcriptMessageActions, chat.map(messageActions))
+            // File chips, file links and a round's changed files open here.
+            .environment(\.openWorkspace, chat.map { _ in { workspaceDestination = $0 } })
+            .environment(\.fileReferenceContext, chat.map(referenceContext))
+            .environment(\.fileReferenceSnippet, chat.map(referenceSnippet))
             .confirmationDialog(
                 "Restart from here?",
                 isPresented: Binding(
@@ -220,7 +284,9 @@ struct SessionView: View {
                 Text(rewindWarning(for: entry))
             }
             .sheet(
-                item: $sideChat,
+                item: Binding(
+                    get: { docked ? nil : sideChat },
+                    set: { if !docked, $0 == nil { endSideChat() } }),
                 onDismiss: {
                     // Navigate once the sheet is gone: a path change during its
                     // dismissal can be dropped.
@@ -233,16 +299,128 @@ struct SessionView: View {
                 SideChatSheet(store: store) { chatId in
                     promotedSideChat = chatId
                 }
-                // Closing discards it on the host; a no-op once it's a chat.
-                .onDisappear { store.close() }
             }
             .environment(\.commentDrafts, chat?.config?.harness == "pi" ? commentDrafts : nil)
-            .sheet(isPresented: $commentDrafts.presented) {
+            .sheet(
+                isPresented: Binding(
+                    get: { commentDrafts.presented && commentDrafts.presenter == .session },
+                    set: { commentDrafts.presented = $0 })
+            ) {
                 CommentsPanel(drafts: commentDrafts)
             }
-            .sheet(item: $workspaceDestination) { destination in
-                if let chat { WorkspaceBrowserView(model: model, chat: chat, destination: destination) }
+            .sheet(
+                item: Binding(
+                    get: { docked ? nil : workspaceDestination },
+                    set: { if !docked { workspaceDestination = $0 } })
+            ) { destination in
+                if let chat {
+                    WorkspaceBrowserView(
+                        model: model, chat: chat, destination: destination,
+                        // Selections in a diff or a file comment like the
+                        // transcript's, on a Pi session.
+                        drafts: chat.config?.harness == "pi" ? commentDrafts : nil)
+                }
             }
+    }
+
+    // MARK: Inspector (iPad)
+
+    private var docked: Bool { sizeClass == .regular }
+
+    /// What the published panel depends on: republished when it changes.
+    private var inspectorKey: String {
+        [
+            "\(docked)", "\(inspectorShown)", "\(inspectorPane)",
+            sideChat.map { "\(ObjectIdentifier($0))" } ?? "", workspaceDestination?.id ?? "",
+            chat?.deviceId ?? "", chat?.cwd ?? "", chat?.config?.harness ?? "",
+        ].joined(separator: "|")
+    }
+
+    /// Hand the panel to the split layout's inspector, or take it down.
+    private func publishInspector() {
+        guard let detailInspector else { return }
+        guard docked, inspectorShown, let chat else {
+            detailInspector.withdraw(owner: chatId)
+            return
+        }
+        let panel = SessionInspector(
+            chat: chat, destination: $workspaceDestination, pane: $inspectorPane,
+            sideChat: sideChat,
+            drafts: chat.config?.harness == "pi" ? commentDrafts : nil,
+            close: hideInspector, closeSideChat: endSideChat
+        ) { chatId in
+            endSideChat()
+            path = SessionNavigation.opening(chatId, in: path)
+        }
+        detailInspector.present(owner: chatId, content: AnyView(panel), onHide: hideInspector)
+    }
+
+    private func showInspector(_ pane: SessionInspectorPane) {
+        inspectorPane = pane
+        guard !inspectorShown else { return }
+        // Measured before it opens: the chat's whole width (unknown, 0,
+        // before the first layout — leave the sidebar then).
+        if let splitColumns, splitColumns.wrappedValue != .detailOnly, viewWidth > 0,
+            viewWidth - SessionInspector.idealWidth < Self.minimumChatWidth
+        {
+            splitColumns.wrappedValue = .detailOnly
+            inspectorHidSidebar = true
+        }
+        inspectorShown = true
+    }
+
+    private func hideInspector() {
+        inspectorShown = false
+        workspaceDestination = nil
+        if inspectorHidSidebar {
+            inspectorHidSidebar = false
+            splitColumns?.wrappedValue = .all
+        }
+    }
+
+    private func toggleInspector() {
+        if inspectorShown {
+            hideInspector()
+        } else if sideChat != nil, inspectorPane == .sideChat {
+            showInspector(.sideChat)
+        } else {
+            if workspaceDestination == nil { workspaceDestination = .changes }
+            showInspector(.workspace)
+        }
+    }
+
+    /// Start a side chat on a selection, replacing (and ending) any other.
+    private func startSideChat(_ store: SideChatStore?) {
+        endSideChat()
+        sideChat = store
+        if docked, store != nil { showInspector(.sideChat) }
+    }
+
+    /// End the side chat: closing discards it on the host (a no-op once
+    /// it's a chat). The inspector falls back to Files / Changes, or hides
+    /// when the side chat was all it showed.
+    private func endSideChat() {
+        guard let store = sideChat else { return }
+        sideChat = nil
+        store.close()
+        if inspectorPane == .sideChat {
+            inspectorPane = .workspace
+            if inspectorShown, workspaceDestination == nil { hideInspector() }
+        }
+    }
+
+    /// The paths a reply cites, for reading a bare name in it.
+    private func referenceContext(_ chat: Chat) -> (String) -> [String] {
+        { [model] entryId in
+            TranscriptFileLinks.citedPaths(in: model.sessionStore(for: chat)?.entries.first { $0.id == entryId })
+        }
+    }
+
+    /// A reference's cited lines, read from this chat's checkout.
+    private func referenceSnippet(_ chat: Chat) -> (WorkspaceReference) async throws -> FileReferenceSnippet {
+        { [model] reference in
+            try await WorkspaceBrowserSession(model: model, chat: chat).snippet(reference)
+        }
     }
 
     /// Fork and Side Chat on a selection — only what this session can do
@@ -256,7 +434,7 @@ struct SessionView: View {
         return TranscriptSelectionActions(
             fork: canFork ? { entry in fork(chat, at: entry) } : nil,
             sideChat: { entry, quote in
-                sideChat = model.sideChat(parent: chat, quote: quote, anchorEntryId: entry.entryId)
+                startSideChat(model.sideChat(parent: chat, quote: quote, anchorEntryId: entry.entryId))
             })
     }
 
@@ -427,7 +605,8 @@ struct SessionView: View {
                 VStack(spacing: 0) {
                     HStack(spacing: 8) {
                         statusStrip(chat: chat, store: store, status: status)
-                            .allowsHitTesting(false)
+                            // Only the progress bar's strip takes a tap (its card).
+                            .allowsHitTesting(status == .working && sessionRow(chat: chat)?.progress != nil)
                             .lineLimit(1)
                         SubagentsAccessory(
                             parent: chat, store: store,
@@ -483,6 +662,10 @@ struct SessionView: View {
                     }
                     .padding(.bottom, 8)
                 }
+                // The transcript's reading column, so a wide window (iPad)
+                // keeps the composer under the messages.
+                .frame(maxWidth: TranscriptView.maxContentWidth)
+                .frame(maxWidth: .infinity)
                 // Report the inset's global top edge — the visual line the
                 // transcript's bottom pad should meet while pinned. Global
                 // frames stay honest when the keyboard's inset math doesn't
@@ -517,7 +700,9 @@ struct SessionView: View {
     /// shows the sunrise spinner + rotating flavour word + elapsed; a context
     /// recovery under way (render.rs `render_recovery_trailer`) shows the
     /// spinner + what it is doing; Errored shows "Run failed"; the strip
-    /// always reserves its height so the composer never shifts.
+    /// always reserves its height so the composer never shifts. A long turn's
+    /// narrated progress (render.rs's trailer bar) fills the rest of the row
+    /// with its bar and percentage; a tap opens its stages.
     private func statusStrip(chat: Chat, store: SessionStore, status: SessionStatus?) -> some View {
         let transportReady =
             model.demo != nil || (model.connected && model.deviceOnline(chat.deviceId) && store.connected)
@@ -537,6 +722,8 @@ struct SessionView: View {
                 ? nil : sessionRow(chat: chat)?.recovery.flatMap { $0.isLive(now: now) ? $0 : nil }
             // Every state but a quiet, connected session draws something here.
             let showing = connection != .ready || status == .working || status == .errored || recovery != nil
+            let progress =
+                connection == .ready && recovery == nil && status == .working ? sessionRow(chat: chat)?.progress : nil
             HStack(spacing: 6) {
                 if connection != .ready {
                     SessionConnectionIndicator(phase: connection, retryRevision: connectionRetry) {
@@ -564,10 +751,23 @@ struct SessionView: View {
                         Text("\(Motion.flavourWord(seed: Motion.flavourSeed(chat.id), elapsedSecs: elapsed))…")
                             .font(Theme.sans(12))
                             .foregroundStyle(Theme.textMuted)
+                            .layoutPriority(1)
                         Text(Motion.formatElapsed(elapsed))
                             .font(Theme.sans(11))
                             .foregroundStyle(Theme.textFaint)
                             .monospacedDigit()
+                            .fixedSize()
+                        if let progress {
+                            RunProgressBar(progress: progress)
+                                .frame(minWidth: 40, maxWidth: .infinity)
+                                .padding(.leading, 2)
+                            Text("\(progress.shownPercent)%")
+                                .font(Theme.sans(11))
+                                .foregroundStyle(Theme.textFaint)
+                                .monospacedDigit()
+                                .fixedSize()
+                                .accessibilityHidden(true)  // the bar's value reads it
+                        }
                     case .errored:
                         Text("Run failed")
                             .font(Theme.sans(11))
@@ -578,6 +778,18 @@ struct SessionView: View {
                 }
             }
             .modifier(StatusCapsule(active: showing))
+            .contentShape(Capsule())
+            .onTapGesture { if progress != nil { showingProgress = true } }
+            .accessibilityElement(children: progress != nil ? .combine : .contain)
+            .accessibilityAddTraits(progress != nil ? .isButton : [])
+            .accessibilityHint(progress != nil ? "Shows the turn's steps" : "")
+            .accessibilityIdentifier(progress != nil ? "run-progress" : "")
+            .popover(
+                isPresented: Binding(
+                    get: { showingProgress && progress != nil }, set: { showingProgress = $0 })
+            ) {
+                if let progress { RunProgressCard(progress: progress) }
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 16)  // the capsule on the composer's edge, its text on the composer's
         }

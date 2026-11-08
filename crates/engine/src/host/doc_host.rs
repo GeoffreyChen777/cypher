@@ -43,7 +43,12 @@ mod blobs;
 mod cache;
 mod chat2_sync;
 mod commands;
+mod launch;
+mod migration;
 mod open;
+mod persist;
+
+pub(crate) use persist::DocPersister;
 
 use cache::{DOC_RESIDENT_FLOOR_BYTES, RESIDENT_BYTES_PER_SNAPSHOT_BYTE};
 
@@ -191,9 +196,44 @@ struct DocHostInner {
     /// outcome write. A pending command in the ledger but not in this set
     /// after a restart is a dead attempt from the mark/execute crash window.
     executing: Mutex<HashSet<String>>,
+    /// Chats a session migration is moving off this device: their drains
+    /// stand still until the move commits (the destination hosts them from
+    /// then on) or fails (they drain here again).
+    held: Mutex<HashSet<String>>,
+    /// Chats that moved here: folders a Run queued before the move may still
+    /// name, and the folder the chat runs in now.
+    moved_cwds: Mutex<HashMap<String, migration::MovedCwd>>,
     /// Shared client for sidecar blob fetches (30s timeout, uploads.rs
     /// discipline — diff_sync's untimed client hung on dead links).
     http: reqwest::Client,
+    /// Device trust for commands (see `set_command_trust`); unset without
+    /// it, when commands are neither signed nor checked.
+    command_trust: Mutex<Option<Arc<dyn CommandTrust>>>,
+}
+
+/// Device trust as the command plane uses it (the engine's `device_trust`
+/// implements it): signing the commands this device queues, and deciding on
+/// each command before the host runs it.
+#[async_trait::async_trait]
+pub trait CommandTrust: Send + Sync + 'static {
+    /// Sign `bytes` with this device's identity key; `None` while this device
+    /// isn't paired.
+    fn sign(&self, bytes: &[u8]) -> Option<[u8; 64]>;
+    /// Whether `auth` carries a valid signature by this device's own key.
+    /// Only such a command may be signed again under this device's name (a
+    /// retry, a re-queue): anything else could be someone else's payload.
+    fn is_own_signature(&self, auth: &cypher_doc::CommandAuth) -> bool;
+    /// Whether `device_id` is a receive-only member of the group.
+    fn is_receive_only(&self, device_id: &str) -> bool;
+    /// Whether this host may run a command `issued_by` queued, signed as
+    /// `auth` says; `Err` is the reason the command resolves with.
+    async fn check(&self, issued_by: &str, auth: &cypher_doc::CommandAuth) -> Result<(), String>;
+    /// "Only paired devices": take a chat's host and launch settings from
+    /// signed launch records instead of its workspace row.
+    fn strict(&self) -> bool;
+    /// Whether a launch record `signer` signed as `auth` says counts here:
+    /// a valid signature by this device or by a member with full control.
+    fn trusts_record(&self, signer: &str, auth: &cypher_doc::CommandAuth) -> bool;
 }
 
 #[derive(Clone)]
@@ -220,8 +260,12 @@ pub struct ChatDocHandle {
     mirror_dirty: AtomicBool,
     /// Epoch ms of the last open/watch touch — the LRU eviction key.
     last_access: AtomicI64,
-    /// Last known snapshot blob size — the eviction budget estimate's input.
+    /// Last known stored size (base + deltas) — the eviction budget
+    /// estimate's input.
     snapshot_bytes: AtomicUsize,
+    /// Incremental snapshot writer, shared with the chat2 sink so both
+    /// extend the same stored base.
+    persister: Arc<DocPersister>,
     /// A threshold checkpoint POST is in flight (the quiesce
     /// tick must not stack concurrent full-snapshot uploads).
     checkpointing: Arc<AtomicBool>,
@@ -480,10 +524,13 @@ impl DocHost {
                 tasks: TaskTracker::new(),
                 handles: Mutex::new(HashMap::new()),
                 executing: Mutex::new(HashSet::new()),
+                held: Mutex::new(HashSet::new()),
+                moved_cwds: Mutex::new(HashMap::new()),
                 http: reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
                     .unwrap_or_else(|_| reqwest::Client::new()),
+                command_trust: Mutex::new(None),
             }),
         }
     }
@@ -650,13 +697,9 @@ impl DocHost {
         if !handle.ephemeral.load(Ordering::Acquire) {
             return Ok(()); // already promoted
         }
-        let snapshot = handle.doc.export_snapshot()?;
-        self.inner.store.save_snapshot_with_cursor(
-            chat_id,
-            &snapshot,
-            0,
-            crate::host::chat2_host::CHAT2_DOC_EPOCH,
-        )?;
+        handle
+            .persister
+            .save_full_with_cursor(handle.doc.doc(), 0)?;
         Ok(())
     }
 
@@ -793,7 +836,13 @@ impl DocHost {
     /// ours; a chat with no row is claimable (claim-on-first-command). Without a
     /// wired workspace host (bare-DocHost tests) every open chat is ours — M2's
     /// behavior, now the degenerate case.
+    ///
+    /// Under "Only paired devices" a trusted host record decides instead of
+    /// the row (`launch`): a device that edits rows can't move a chat.
     fn is_host(&self, chat_id: &str) -> bool {
+        if let Some(host) = self.trusted_host(chat_id) {
+            return host == self.inner.config.device_id;
+        }
         self.workspace().is_none_or(|ws| ws.is_host(chat_id))
     }
 
@@ -812,7 +861,7 @@ impl DocHost {
     /// Chat-config harness when the workspace row carries one, else the default.
     pub(crate) fn harness_for(&self, chat_id: &str) -> HarnessId {
         self.workspace()
-            .and_then(|ws| ws.chat_config(chat_id))
+            .and_then(|ws| ws.launch_config(chat_id))
             .map(|config| config.harness)
             .unwrap_or(self.inner.config.default_harness)
     }
@@ -834,15 +883,10 @@ impl DocHost {
         if handle.ephemeral.load(Ordering::Acquire) {
             return;
         }
-        match handle.doc.export_snapshot() {
-            Ok(bytes) => {
-                handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
-                if let Err(err) = self.inner.store.save_snapshot(&handle.chat_id, &bytes) {
-                    tracing::warn!(chat = %handle.chat_id, error = %err, "snapshot save failed");
-                }
-            }
+        match handle.persister.save(handle.doc.doc()) {
+            Ok(stored) => handle.snapshot_bytes.store(stored, Ordering::Relaxed),
             Err(err) => {
-                tracing::warn!(chat = %handle.chat_id, error = %err, "snapshot export failed");
+                tracing::warn!(chat = %handle.chat_id, error = %err, "snapshot save failed");
             }
         }
     }

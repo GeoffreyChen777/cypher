@@ -220,6 +220,21 @@ extension's own `spawnInteractiveSubagent` fallback untouched.
   snapshot goes empty or the parent restarts.
 - Parent delete **cascades**: the child chat rows/docs are tombstoned and live
   child runs interrupted (best-effort — see the deletion tests).
+- A child's **questions and permission prompts are forwarded** to its root
+  chat (the first ancestor that is not a child chat), because nobody is
+  looking at the hidden child. The engine writes the copy straight into the
+  root's transcript, whatever the root is doing: a background subagent
+  usually asks after the root's turn has ended. The copies carry `askedBy`
+  (the agent) for the card's title and drop the permission prompt's
+  `toolCallId` (the gated call is in the child's transcript), and a later
+  root message never hides one. The root's answer is relayed to the child;
+  the child's own question stays open too, and when it settles first
+  (answered in the child chat, withdrawn, or ended with its run) the copy is
+  resolved. While a copy is open the root's session row shows
+  `AwaitingInput`; the root run's own status is held underneath (turn timer,
+  end-of-turn hook, parked-run checks) and shown again when the last copy
+  closes. Copies live in host memory: after an engine restart an open copy is
+  closed when answered, never delivered to the root as a turn.
 
 ### Bridge surface (local engine IPC, private Unix socket)
 

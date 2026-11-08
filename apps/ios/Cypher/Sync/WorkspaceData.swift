@@ -68,6 +68,12 @@ extension WorkspaceData {
         return sortActive(live)
     }
 
+    /// Every active session — projects, project-less and quick chats — in
+    /// recency order: Home's list.
+    var activeChats: [Chat] {
+        sortActive(chats.filter { !$0.isChild && !$0.archived })
+    }
+
     /// A space's sessions, in the sidebar's Sessions order (recency).
     ///
     /// NOT desktop's `chats_in_space`, which is creation order because there

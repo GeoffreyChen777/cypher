@@ -220,6 +220,104 @@ fn fenced_code_drag_selects_across_blank_lines_and_reports_exact_quote(
     selection::clear(scope);
 }
 
+#[gpui::test]
+fn shielded_overlay_keeps_presses_out_of_the_text_beneath(cx: &mut gpui::TestAppContext) {
+    use crate::markdown::selection;
+    use gpui::MouseButton;
+    let _guard = selection::tests::state_lock();
+    let below = selection::next_side_chat_scope();
+    let own = selection::next_question_scope();
+    const BELOW: &str = "alpha bravo charlie delta echo foxtrot golf hotel";
+    const OVERLAY_LEFT: f32 = 160.0;
+    struct Layers {
+        below: selection::SelectionScope,
+        own: selection::SelectionScope,
+    }
+    impl gpui::Render for Layers {
+        fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            // A transcript line, and a composer floating over its right half
+            // with selectable text of its own (the question card).
+            div()
+                .relative()
+                .size_full()
+                .child(selection_frame_reset(self.below))
+                .child(selectable_plain_text(
+                    self.below,
+                    "below".into(),
+                    BELOW.into(),
+                    &theme,
+                ))
+                .child(
+                    shield_selection(div())
+                        .absolute()
+                        .top_0()
+                        .left(px(OVERLAY_LEFT))
+                        .right_0()
+                        .h(px(120.0))
+                        .flex()
+                        .flex_col()
+                        .justify_end()
+                        .child(selection_frame_reset(self.own))
+                        .child(selectable_plain_text(
+                            self.own,
+                            "own".into(),
+                            "india juliett".into(),
+                            &theme,
+                        )),
+                )
+        }
+    }
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    let window = cx.open_window(gpui::size(px(600.0), px(200.0)), |_, _| Layers {
+        below,
+        own,
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let layout_of = |scope: selection::SelectionScope| {
+        REGISTRY.with(|registry| registry.borrow()[&scope][0].layout.clone())
+    };
+    let point_in = |layout: &gpui::TextLayout, index| {
+        layout.position_for_index(index).unwrap() + point(px(1.0), layout.line_height() / 2.0)
+    };
+    let double_click = |visual: &mut gpui::VisualTestContext, position| {
+        visual.simulate_event(gpui::MouseDownEvent {
+            position,
+            modifiers: Default::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        visual.simulate_mouse_up(position, MouseButton::Left, Default::default());
+    };
+    let below_layout = layout_of(below);
+    let alpha = point_in(&below_layout, 0);
+    let golf = point_in(&below_layout, BELOW.find("golf").unwrap());
+    let hotel = point_in(&below_layout, BELOW.find("hotel").unwrap());
+    assert!(alpha.x < px(OVERLAY_LEFT) && golf.x > px(OVERLAY_LEFT + 10.0));
+
+    // Uncovered text selects as before.
+    double_click(&mut visual, alpha);
+    assert_eq!(selection::selected_text().as_deref(), Some("alpha"));
+    // A double click or a drag on the overlay never reaches the text under
+    // it, though it still drops that text's selection like a press elsewhere.
+    double_click(&mut visual, golf);
+    assert_eq!(selection::selected_text(), None);
+    visual.simulate_mouse_down(golf, MouseButton::Left, Default::default());
+    visual.simulate_mouse_move(hotel, MouseButton::Left, Default::default());
+    visual.simulate_mouse_up(hotel, MouseButton::Left, Default::default());
+    assert_eq!(selection::selected_text(), None);
+    // The overlay's own text, painted after its shield, still selects.
+    let own_layout = layout_of(own);
+    double_click(&mut visual, point_in(&own_layout, "india ".len()));
+    assert_eq!(selection::selected_text().as_deref(), Some("juliett"));
+    selection::clear(own);
+}
+
 #[test]
 fn clipped_long_line_cannot_start_selection_in_the_other_diff_column() {
     let text = Bounds::new(point(px(-80.0), px(0.0)), gpui::size(px(900.0), px(21.0)));
@@ -304,6 +402,60 @@ fn runs_text_matches_the_flattened_text() {
 }
 
 #[test]
+fn file_references_flatten_to_chips_that_copy_as_written() {
+    let code = |text: &str| InlineRun {
+        text: text.into(),
+        style: InlineStyle {
+            code: true,
+            ..Default::default()
+        },
+    };
+    let prose = |text: &str| InlineRun {
+        text: text.into(),
+        style: InlineStyle::default(),
+    };
+    let theme = Theme::dark();
+    let runs = vec![
+        prose("saved ("),
+        code("utils/checkpointing/processors/file.py:69-73"),
+        prose("), matched by "),
+        code("identity()"),
+        prose(" in "),
+        code("file.py:128-131"),
+    ];
+    let flat = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, None, true);
+    // Find counts over the same text the chips render.
+    assert_eq!(runs_text(&runs), flat.text.as_ref());
+    let glue = crate::markdown::code_ref::ICON_GLUE;
+    let shown: Vec<&str> = flat
+        .refs
+        .iter()
+        .map(|chip| &flat.text[chip.range.clone()])
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            format!("{glue}file.py:69-73"),
+            format!("{glue}file.py:128-131"),
+        ]
+    );
+    // Identifiers stay inline code; chips are not code washes.
+    assert_eq!(flat.code_ranges.len(), 1);
+    assert_eq!(&flat.text[flat.code_ranges[0].clone()], "identity()");
+    // Each chip copies as the reference the agent wrote.
+    let sources = flat.copy_sources.as_deref().unwrap();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0].0, flat.refs[0].range);
+    assert_eq!(sources[0].1, "utils/checkpointing/processors/file.py:69-73");
+    assert_eq!(sources[1].1, "file.py:128-131");
+    // Without chips the same runs stay plain inline code.
+    let plain = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, None, false);
+    assert!(plain.refs.is_empty());
+    assert_eq!(plain.code_ranges.len(), 3);
+    assert!(plain.copy_sources.is_none());
+}
+
+#[test]
 fn block_match_counts_walk_every_rendered_element() {
     let runs = |text: &str| {
         vec![InlineRun {
@@ -326,6 +478,7 @@ fn block_match_counts_walk_every_rendered_element() {
             &Block::CodeBlock {
                 language: None,
                 code: "let x = x;\nreturn x;".into(),
+                closed: true,
             },
             "x"
         ),
@@ -367,11 +520,11 @@ fn inline_color_changes_refresh_cached_runs() {
     }];
     let mut theme = Theme::dark();
     theme.text_style_revision = 1;
-    let before = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
+    let before = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme, None);
     theme.inline_code_text = Some(gpui::rgb(0xffcc88).into());
     theme.inline_code_background = Some(gpui::rgb(0x332200).into());
     theme.text_style_revision = 2;
-    let after = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
+    let after = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme, None);
     assert!(!Rc::ptr_eq(&before, &after));
     assert_eq!(after.runs[0].color, theme.inline_code_text.unwrap());
     assert_eq!(
@@ -384,7 +537,11 @@ fn inline_color_changes_refresh_cached_runs() {
 #[test]
 fn code_block_base_color_preserves_colored_syntax_and_other_renderers() {
     for mut theme in [Theme::dark(), Theme::light()] {
-        assert_eq!(code_block_background(&theme), theme.ink(0.035));
+        let plate = match theme.appearance {
+            crate::kit::theme::Appearance::Dark => theme.ink(0.035),
+            crate::kit::theme::Appearance::Light => gpui::hsla(0.0, 0.0, 1.0, 0.5),
+        };
+        assert_eq!(code_block_background(&theme), plate);
         let foreground = gpui::rgb(0x6655aa).into();
         theme.code_block_text = Some(foreground);
         theme.code_block_background = Some(gpui::rgb(0xf0f0f0).into());
@@ -485,12 +642,12 @@ fn chat_style_revision_invalidates_cached_fonts_and_colors() {
     }];
     let mut old = Theme::dark();
     old.text_style_revision = 1;
-    let before = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &old);
+    let before = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &old, None);
     let mut new = old.clone();
     new.text_style_revision = 2;
     new.font_sans = "Test Serif".into();
     new.markdown_link = Some(gpui::rgb(0x3388cc).into());
-    let after = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &new);
+    let after = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &new, None);
     assert!(!Rc::ptr_eq(&before, &after));
     assert_eq!(after.runs[0].font.family.as_ref(), "Test Serif");
     assert_eq!(after.runs[0].color, new.markdown_link.unwrap());
@@ -810,4 +967,114 @@ fn wide_blocks_scroll_sideways_only_on_sideways_gestures(cx: &mut gpui::TestAppC
         touch_phase: TouchPhase::Moved,
     });
     assert_eq!(block.offset().x, block_x);
+}
+
+#[test]
+fn formulas_flatten_to_code_without_a_window_and_count_as_one_space() {
+    let math = |tex: &str| InlineRun {
+        text: tex.into(),
+        style: InlineStyle {
+            math: Some(MathKind::Inline),
+            ..Default::default()
+        },
+    };
+    let prose = |text: &str| InlineRun {
+        text: text.into(),
+        style: InlineStyle::default(),
+    };
+    let theme = Theme::dark();
+    // No window to measure glue with: the source reads as inline code.
+    let flat = flatten_runs(&[prose("so "), math("x^2")], &theme, false);
+    assert_eq!(flat.text.as_ref(), format!("so {INLINE_CODE_MARGIN}x^2"));
+    assert_eq!(flat.code_ranges.len(), 1);
+    assert!(flat.math.is_empty());
+    // Find counts a typeset formula as one glue space, and TeX that does
+    // not typeset as the code it renders as.
+    assert_eq!(runs_text(&[prose("a "), math("x")]), "a \u{a0}");
+    assert_eq!(
+        runs_text(&[prose("a "), math(r"\frac{x")]),
+        format!("a {INLINE_CODE_MARGIN}\\frac{{x")
+    );
+}
+
+#[test]
+fn formulas_flatten_to_glue_with_a_math_env() {
+    let theme = Theme::dark();
+    let env = MathEnv {
+        font_size: 14.0,
+        glue: GlueWidths {
+            nbsp: 3.9,
+            narrow: 2.6,
+        },
+    };
+    let runs = [
+        InlineRun {
+            text: "x ".into(),
+            style: InlineStyle::default(),
+        },
+        InlineRun {
+            text: r"\alpha^2".into(),
+            style: InlineStyle {
+                math: Some(MathKind::Inline),
+                ..Default::default()
+            },
+        },
+    ];
+    let flat = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, Some(&env), false);
+    let [span] = flat.math.as_slice() else {
+        panic!("one formula");
+    };
+    assert_eq!(&flat.text[..2], "x ");
+    assert_eq!(span.range.start, 2);
+    assert_eq!(span.range.end, flat.text.len());
+    assert!(
+        flat.text[span.range.clone()]
+            .chars()
+            .all(|c| c == math::NBSP || c == math::NARROW_NBSP)
+    );
+    let ink = span.metrics.width * span.em_px;
+    assert!(
+        (span.glue_width - ink).abs() < 1.5,
+        "{} vs {ink}",
+        span.glue_width
+    );
+    assert_eq!(
+        flat.runs.iter().map(|r| r.len).sum::<usize>(),
+        flat.text.len()
+    );
+    let sources = flat.copy_sources.expect("formulas copy as source");
+    assert_eq!(sources[0], (span.range.clone(), r"$\alpha^2$".to_string()));
+}
+
+#[test]
+fn display_formulas_cut_a_paragraph_into_rows() {
+    let run = |text: &str, math: Option<MathKind>| InlineRun {
+        text: text.into(),
+        style: InlineStyle {
+            math,
+            ..Default::default()
+        },
+    };
+    let plain = [run("no display ", None), run("x", Some(MathKind::Inline))];
+    assert!(paragraph_segments(&plain).is_none());
+    let runs = [
+        run("so ", None),
+        run("x", Some(MathKind::Display)),
+        run(" thus ", None),
+        run("y", Some(MathKind::Display)),
+    ];
+    let segments = paragraph_segments(&runs).expect("has display math");
+    let shape: Vec<String> = segments
+        .iter()
+        .map(|segment| match segment {
+            Segment::Prose(runs) => format!("p:{}", runs_text(runs)),
+            Segment::Display(tex) => format!("m:{tex}"),
+        })
+        .collect();
+    assert_eq!(shape, ["p:so", "m:x", "p:thus", "m:y"]);
+    // Find counts element by element, as the rows render.
+    let block = Block::Paragraph {
+        runs: runs.to_vec(),
+    };
+    assert_eq!(count_block_matches(&block, "s"), 2);
 }

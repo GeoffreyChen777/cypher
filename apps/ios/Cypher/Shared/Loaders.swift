@@ -147,7 +147,10 @@ struct TranscriptSkeleton: View {
                 .padding(.horizontal, 16)
                 // Clears the status strip + composer fade, like the real rows.
                 .padding(.bottom, 56)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                // The transcript's centered column (its rows' 16pt inset
+                // included), so a wide window doesn't fling the bubble right.
+                .frame(maxWidth: TranscriptView.maxContentWidth + 32, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
         }
     }

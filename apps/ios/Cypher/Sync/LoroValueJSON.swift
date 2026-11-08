@@ -49,6 +49,21 @@ extension LoroValue {
         }
     }
 
+    /// The value as command signing encodes it (CommandSignature.swift).
+    var commandValue: CommandValue {
+        switch self {
+        case .null: return .null
+        case .bool(let v): return .bool(v)
+        case .double(let v): return .double(v)
+        case .i64(let v): return .i64(v)
+        case .binary(let v): return .binary(v)
+        case .string(let v): return .string(v)
+        case .list(let v): return .list(v.map(\.commandValue))
+        case .map(let v): return .map(v.mapValues(\.commandValue))
+        case .container: return .unsupported
+        }
+    }
+
     /// Build a LoroValue from Encodable JSON (command payloads).
     static func fromJSON(_ any: Any) -> LoroValue {
         switch any {

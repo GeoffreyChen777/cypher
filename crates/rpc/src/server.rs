@@ -135,8 +135,22 @@ async fn handle_request(
     }
 }
 
-pub(crate) async fn serve_ws_socket<S>(stream: S, service: Arc<dyn RpcService>)
-where
+/// Equal without an early exit, so a wrong key's timing says nothing about
+/// how much of it matched.
+fn same_key(given: &[u8], expected: &[u8]) -> bool {
+    given.len() == expected.len()
+        && given
+            .iter()
+            .zip(expected)
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            == 0
+}
+
+pub(crate) async fn serve_ws_socket<S>(
+    stream: S,
+    service: Arc<dyn RpcService>,
+    key: Option<Arc<str>>,
+) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     // Native Unix clients negotiate cypher.rpc.v1 and never send Origin.
@@ -148,6 +162,17 @@ where
                 "rpc: rejecting handshake carrying an Origin header (cross-origin browser dial)"
             );
             let mut err = ErrorResponse::new(Some("origin not allowed on local IPC".to_string()));
+            *err.status_mut() = StatusCode::FORBIDDEN;
+            return Err(err);
+        }
+        if let Some(key) = &key
+            && !req
+                .headers()
+                .get(crate::local::KEY_HEADER)
+                .is_some_and(|given| same_key(given.as_bytes(), key.as_bytes()))
+        {
+            tracing::warn!("rpc: rejecting an Engine IPC connection without the instance key");
+            let mut err = ErrorResponse::new(Some("Engine IPC key required".to_string()));
             *err.status_mut() = StatusCode::FORBIDDEN;
             return Err(err);
         }

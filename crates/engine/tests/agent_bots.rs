@@ -177,6 +177,43 @@ async fn bot_tools_see_only_the_granted_scope() {
     assert_eq!(refused, "This chat is not a workspace's agent.");
 }
 
+/// Bot runs reach their tools through the agent socket, which answers
+/// `BotTool` only for a workspace's own chat on this device: a session's
+/// agent cannot speak for a workspace.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_socket_answers_bot_tools_only_for_bot_chats() {
+    use cypher_rpc::RpcService;
+    let tmp = tempfile::tempdir().unwrap();
+    let core = common::assemble_mock(&tmp.path().join("data"));
+    seed(&core, tmp.path());
+    let bot = create_bot(&core, billing_only()).await;
+    let agent = core.agent_rpc_service();
+    let call = |chat_id: &str| serde_json::json!({ "chatId": chat_id, "tool": "list_projects", "args": {} });
+    let reply = agent
+        .handle(cypher_rpc::methods::BOT_TOOL, call(&bot.chat_id))
+        .await
+        .expect("the bot's own chat is answered");
+    let cypher_rpc::RpcReply::Value(reply) = reply else {
+        panic!("a unary reply");
+    };
+    let text = reply["text"].as_str().expect("text").to_string();
+    assert!(text.contains("sp-billing"), "{text}");
+    assert!(!text.contains("sp-secret"), "{text}");
+    let refused = agent
+        .handle(cypher_rpc::methods::BOT_TOOL, call("chat-billing"))
+        .await;
+    assert!(refused.is_err(), "a plain session's agent is refused");
+    let mut elsewhere = call(&bot.chat_id);
+    elsewhere["targetDeviceId"] = serde_json::json!("dev-other");
+    assert!(
+        agent
+            .handle(cypher_rpc::methods::BOT_TOOL, elsewhere)
+            .await
+            .is_err(),
+        "no other device"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn scope_edits_apply_to_the_next_call() {
     let tmp = tempfile::tempdir().unwrap();
@@ -461,6 +498,7 @@ fn asking_harness(answers: Arc<Mutex<Vec<Vec<UserInputAnswer>>>>) -> common::Tes
                 kind: PermissionPromptKind::Escalate,
                 tool_call_id: None,
             }),
+            asked_by: None,
         }]);
         if let Ok(immediate) = answer.try_recv() {
             answers.lock().unwrap().push(immediate);

@@ -202,6 +202,9 @@ pub struct CodeEditor {
     /// Keeps the caret in view through edits and moves; a wheel scroll
     /// pauses it until the next caret move.
     follow_cursor: bool,
+    /// The next prepaint scrolls the caret's line to the upper third
+    /// ([`Self::go_to_lines`]) rather than just into view.
+    center_caret: bool,
     // -- measured (written during prepaint) --
     text_bounds: Option<Bounds<Pixels>>,
     char_width: f32,
@@ -247,6 +250,7 @@ impl CodeEditor {
             scroll_top: 0.0,
             scroll_left: 0.0,
             follow_cursor: true,
+            center_caret: false,
             text_bounds: None,
             char_width: 0.0,
             visible: Vec::new(),
@@ -285,8 +289,43 @@ impl CodeEditor {
         &self.content
     }
 
+    /// The file was renamed or moved: re-pick its language by the new name
+    /// (an extension change re-highlights), keeping text, caret and history.
+    pub fn set_path(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.path = path.to_string();
+        let language = cypher_syntax::language_for_path(path)
+            .filter(|lang| cypher_syntax::supports_language(*lang));
+        if language != self.language {
+            self.language = language;
+            self.highlight = None;
+            self.schedule_highlight(Duration::ZERO, cx);
+            cx.notify();
+        }
+    }
+
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Select 1-based lines `first..=last` (clamped to the text) and scroll
+    /// the first to the upper third of the view — a link to `file:12-20`
+    /// landing.
+    pub fn go_to_lines(&mut self, first: usize, last: usize, cx: &mut Context<Self>) {
+        let ix = first.saturating_sub(1).min(self.line_count() - 1);
+        let last_ix = last.saturating_sub(1).clamp(ix, self.line_count() - 1);
+        let start = self.line_starts[ix];
+        let end = self
+            .line_starts
+            .get(last_ix + 1)
+            .map_or(self.content.len(), |next| next - 1);
+        self.selected_range = start..end;
+        // The caret at the line's start, so a long line doesn't scroll the
+        // view sideways to its end.
+        self.selection_reversed = true;
+        self.marked_range = None;
+        self.follow_cursor = true;
+        self.center_caret = true;
+        cx.notify();
     }
 
     /// `(line, column)` of the caret, 1-based, for a status readout.
@@ -747,7 +786,9 @@ impl CodeEditor {
 
         let cursor = self.cursor_offset();
         let cursor_line = self.line_of(cursor);
-        if self.follow_cursor {
+        if std::mem::take(&mut self.center_caret) {
+            self.scroll_top = cursor_line as f32 * LINE_HEIGHT - height / 3.0;
+        } else if self.follow_cursor {
             self.scroll_top = scroll_to_reveal(
                 self.scroll_top,
                 cursor_line as f32 * LINE_HEIGHT,

@@ -10,6 +10,12 @@
 //! chose into `web-search-claude-bridge.resolved.json`; that pointer is
 //! display-only and never written here. Enabling the feature is the
 //! package's presence in `settings.json`. All of it is device-local.
+//!
+//! Pinning a `claude-bridge/*` model searches with Claude Code's own
+//! WebSearch, in a query separate from the conversation's. That takes the
+//! runtime's pi-web-search and pi-claude-bridge patches; a runtime without
+//! them refuses the model, so it is only offered where they are (see
+//! `pi-runtime/patches/pi-web-search-claude-code.mjs`).
 
 use std::path::Path;
 
@@ -24,6 +30,11 @@ const CONFIG_FILE: &str = "web-search-claude-bridge.json";
 const RESOLVED_FILE: &str = "web-search-claude-bridge.resolved.json";
 /// The package's own sentinel for "rank one from the catalog".
 const AUTO: &str = "auto";
+/// Models that search through Claude Code rather than a native search API.
+const CLAUDE_CODE_PROVIDER: &str = "claude-bridge";
+/// Left in pi-web-search's source by the runtime patch that routes a pinned
+/// `claude-bridge/*` model through Claude Code.
+const CLAUDE_CODE_MARKER: &str = "CYPHER-RUNTIME-PATCH: claude-code";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -73,9 +84,20 @@ fn resolved_model(path: &Path) -> Option<String> {
     (!provider.is_empty() && !model.is_empty()).then(|| format!("{provider}/{model}"))
 }
 
+/// Whether this runtime's pi-web-search can search through Claude Code.
+fn claude_code_search(paths: &PiRuntimePaths) -> bool {
+    std::fs::read_to_string(
+        paths
+            .current
+            .join("npm/node_modules/pi-web-search/src/api.ts"),
+    )
+    .is_ok_and(|source| source.contains(CLAUDE_CODE_MARKER))
+}
+
 pub fn load(paths: &PiRuntimePaths) -> WebSearchFallbackSettings {
     let pinned = pinned_model(&agent_file(paths, CONFIG_FILE));
     WebSearchFallbackSettings {
+        claude_code: claude_code_search(paths),
         available: packages::bundled(paths, PACKAGE),
         enabled: packages::enabled(paths, PACKAGE),
         automatic: pinned.is_none(),
@@ -111,6 +133,12 @@ pub fn save(
         None => serde_json::json!({ "model": AUTO }),
         Some(model) => {
             let (provider, name) = validate_model(model)?;
+            if request.enabled && provider == CLAUDE_CODE_PROVIDER && !claude_code_search(paths) {
+                return Err(
+                    "This device's Pi Runtime can't search through Claude Code yet; update Runtime first."
+                        .into(),
+                );
+            }
             serde_json::json!({ "provider": provider, "model": name })
         }
     };
@@ -261,6 +289,59 @@ mod tests {
         std::fs::remove_file(&resolved).unwrap();
         std::fs::write(&config, r#"{"model":"auto"}"#).unwrap();
         assert_eq!(load(&paths).resolved, None);
+    }
+
+    #[test]
+    fn claude_code_models_need_the_patched_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = runtime_with_package(temp.path());
+        let claude = || SetWebSearchFallback {
+            enabled: true,
+            model: Some("claude-bridge/claude-haiku-4-5".into()),
+        };
+        let api = paths
+            .current
+            .join("npm/node_modules/pi-web-search/src/api.ts");
+        std::fs::create_dir_all(api.parent().unwrap()).unwrap();
+        std::fs::write(&api, "export async function callApiStream() {}\n").unwrap();
+
+        assert!(!load(&paths).claude_code);
+        let err = save(&paths, claude()).unwrap_err();
+        assert!(err.contains("update Runtime"), "{err}");
+        assert!(
+            !packages::enabled(&paths, PACKAGE),
+            "a refused pin enables nothing"
+        );
+        // Remembering it while disabled is fine; it routes nothing.
+        assert!(
+            save(
+                &paths,
+                SetWebSearchFallback {
+                    enabled: false,
+                    ..claude()
+                },
+            )
+            .is_ok()
+        );
+
+        std::fs::write(
+            &api,
+            "// CYPHER-RUNTIME-PATCH: claude-code\nexport async function callApiStream() {}\n",
+        )
+        .unwrap();
+        assert!(load(&paths).claude_code);
+        let saved = save(&paths, claude()).unwrap();
+        assert!(saved.enabled);
+        assert_eq!(
+            saved.model.as_deref(),
+            Some("claude-bridge/claude-haiku-4-5")
+        );
+        let file: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(agent_file(&paths, CONFIG_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(file["provider"], "claude-bridge");
+        assert_eq!(file["model"], "claude-haiku-4-5");
     }
 
     #[test]

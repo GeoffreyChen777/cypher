@@ -7,6 +7,7 @@ declare global {
       BOT_ROOMS: DurableObjectNamespace;
       DEVICE_ROOMS: DurableObjectNamespace;
       AUTH_MODE: string;
+      TRUST: DurableObjectNamespace;
     }
   }
 }

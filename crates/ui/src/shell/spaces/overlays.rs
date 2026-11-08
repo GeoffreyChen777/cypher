@@ -1,4 +1,5 @@
-//! A project card's context menu and its overlays: pin, rename, delete.
+//! A project card's context menu and its overlays: pin, rename, move
+//! sessions, delete.
 
 use super::*;
 
@@ -106,6 +107,10 @@ impl Shell {
             overlays.push(overlay);
         }
 
+        if let Some(overlay) = self.render_move_sessions_dialog(viewport, window, &theme, cx) {
+            overlays.push(overlay);
+        }
+
         overlays
     }
 
@@ -118,16 +123,19 @@ impl Shell {
         let delete_id = space_id.clone();
         let pin_id = space_id.clone();
         let window_id = space_id.clone();
+        let move_id = space_id.clone();
         let project_window = self.is_project_window();
-        let pinned = self
-            .state
-            .read(cx)
-            .space_row(&space_id)
-            .is_some_and(|s| s.pinned);
-        // Wide enough for the longest label ("Return to Main Window")
+        let (pinned, has_sessions) = {
+            let state = self.state.read(cx);
+            (
+                state.space_row(&space_id).is_some_and(|s| s.pinned),
+                space_has_sessions(&state.chats, &space_id),
+            )
+        };
+        // Wide enough for the longest label ("Move Sessions to Project…")
         // on one line.
         let menu = popover::popover_card(theme)
-            .w(px(210.0))
+            .w(px(230.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.close_space_menu(cx);
             }))
@@ -151,6 +159,25 @@ impl Shell {
                     .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                     .child(SharedString::from("Rename…")),
             )
+            .when(has_sessions, |menu| {
+                menu.child(
+                    popover::menu_row(theme, false, format!("space-menu-move-{space_id}"))
+                        .id("space-menu-move")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_move_sessions(MoveSource::Space(move_id.clone()), cx)
+                        }))
+                        .child(
+                            icon(icons::FOLDER)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .whitespace_nowrap()
+                                .child(SharedString::from("Move Sessions to Project…")),
+                        ),
+                )
+            })
             // The main window pops the project out; its own window
             // hands it back (same as closing the window).
             .child(

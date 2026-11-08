@@ -169,16 +169,41 @@ pub(super) async fn workspace_file(
     method: &str,
     params: Value,
 ) -> Result<RpcReply, RpcError> {
+    use crate::git::workspace_files::Op;
     let p: WorkspaceFileParams = parse_params(params)?;
-    let directory = method == methods::LIST_WORKSPACE_FILES;
-    let write = (method == methods::WRITE_WORKSPACE_FILE)
-        .then(|| {
-            p.text
-                .clone()
-                .ok_or_else(|| RpcError::BadParams("WriteWorkspaceFile needs text".into()))
-        })
-        .transpose()?;
-    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+    let needs = |value: Option<String>, what: &str| {
+        value.ok_or_else(|| RpcError::BadParams(format!("{method} needs {what}")))
+    };
+    let op = match method {
+        methods::LIST_WORKSPACE_FILES => Op::List,
+        methods::READ_WORKSPACE_FILE => Op::ReadText,
+        methods::WRITE_WORKSPACE_FILE => Op::ReplaceText(needs(p.text.clone(), "text")?),
+        methods::READ_WORKSPACE_FILE_CHUNK => Op::ReadChunk { offset: p.offset },
+        methods::CREATE_WORKSPACE_ENTRY => Op::Create {
+            directory: p.directory,
+        },
+        methods::WRITE_WORKSPACE_FILE_CHUNK => Op::WriteChunk {
+            offset: p.offset,
+            data: needs(p.data.clone(), "data")?,
+        },
+        methods::MOVE_WORKSPACE_ENTRY => Op::Move {
+            to: needs(p.to.clone(), "to")?,
+        },
+        methods::COPY_WORKSPACE_ENTRY => Op::Copy {
+            to: needs(p.to.clone(), "to")?,
+        },
+        methods::DELETE_WORKSPACE_ENTRY => Op::Delete {
+            permanent: p.permanent,
+        },
+        other => return Err(RpcError::UnknownMethod(other.to_string())),
+    };
+    // Copies and deletes walk whole trees; everything else is one entry.
+    let limit = if matches!(op, Op::Copy { .. } | Op::Delete { .. }) {
+        std::time::Duration::from_secs(120)
+    } else {
+        std::time::Duration::from_secs(8)
+    };
+    tokio::time::timeout(limit, async {
         let same_checkout = || -> Result<(), RpcError> {
             let chat = rpc
                 .workspace
@@ -204,11 +229,9 @@ pub(super) async fn workspace_file(
             })
             .await?;
         same_checkout()?;
-        let value = match write {
-            Some(text) => crate::git::workspace_files::write(root, p.path.clone(), text).await,
-            None => crate::git::workspace_files::read(root, p.path.clone(), directory).await,
-        }
-        .map_err(failed)?;
+        let value = crate::git::workspace_files::run(root, p.path.clone(), op)
+            .await
+            .map_err(failed)?;
         same_checkout()?;
         RpcReply::value(&value)
     })

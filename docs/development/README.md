@@ -70,8 +70,9 @@ bash scripts/check.sh runtime    # Pi runtime suites that need no staged runtime
 bash scripts/check.sh workflows  # actionlint + workflow policy (downloads actionlint)
 bash scripts/check.sh macos      # macOS: icon, workspace clippy, cypher-ui tests,
                                  # Rust/Swift preview vectors
-bash scripts/check.sh ios        # swift-format lint + iOS unit tests (Xcode 27)
+bash scripts/check.sh ios        # swift-format lint + iOS unit tests (pinned Xcode)
 bash scripts/check.sh all        # everything except ios; macos only on a Mac
+bash scripts/check-linux.sh      # CI's Linux checks in Docker, from a Mac (below)
 ```
 
 `lint` and `workflows` download pinned ShellCheck and actionlint binaries on
@@ -95,6 +96,17 @@ Tests per platform:
   [pi-runtime/README.md](../../pi-runtime/README.md#tests)).
 - **iOS**: `bash scripts/check.sh ios`, or Xcode; see
   [apps/ios/README.md](../../apps/ios/README.md).
+- **Same tools as CI**: Rust (`rust-toolchain.toml`), Node 24.19.0 and the iOS
+  Xcode (`.xcode-version`, matched by build number) are pinned for both. CI
+  fails when the runner lacks the pinned Xcode, so moving to a new Xcode is a
+  deliberate one-line change. Desktop macOS builds run on `macos-26`, the macOS
+  developers use, so releases link against the same SDK major.
+- **Linux from a Mac**: `bash scripts/check-linux.sh` runs the `scripts`,
+  `runtime` and `rust` stages in an `ubuntu:24.04` container with CI's Node,
+  Python and Rust, and the Python 3.8 installer regressions in `ubuntu:20.04`
+  (`scripts/ci/installer-py38.sh`, which CI runs too). It needs a running
+  Docker engine (for example `colima start`); the first run builds the headless
+  crates from scratch, later runs reuse the `cypher-linux-*` volumes.
 - **Cross-language vectors**: `protocol/vectors/*.json` (registry merge core, chat2
   frames, device-room frames, preview codec and reducer) are loaded by the Rust,
   TypeScript and Swift tests; [protocol/README.md](../../protocol/README.md) lists every
@@ -109,19 +121,26 @@ Tests per platform:
   headless engine with the mock harness; `scripts/dev-app.sh [local|dev]` runs a
   UI attached to it over Unix IPC. Data lives in `~/.cypher-development/`;
   `CYPHER_DEV_INSTANCE=<name>` keeps a second checkout's instance separate.
+  Typing `[mock:artifacts]` into a chat there answers with chat
+  [artifacts](../features/artifacts.md), and `[mock:artifacts:revise]` with a
+  revision of the page.
 - `scripts/dev-demo.sh` starts an offline engine seeded with demo chats. `--work` seeds a
   run of thoughts between commands; `--permissions` seeds permission control: a settled
   deploy (commands outside the sandbox, blocked, denied, approvals filed under their
   calls), chats waiting on a permission card and on an ordinary question, and command
   rules in Settings → Permissions (the mock harness's `[mock:permissions]` and
   `[mock:permission-card]` markers); `--diffs` seeds an answer with chat-style and
-  git-patch ```` ```diff ```` fences (the `[mock:diffs]` marker); `--changes` seeds four
+  git-patch ```` ```diff ```` fences (the `[mock:diffs]` marker); `--artifacts` seeds a
+  chat whose answer holds artifacts and whose second round revises one (the
+  `[mock:artifacts]` and `[mock:artifacts:revise]` markers); `--changes` seeds four
   rounds on a small Git project (`scripts/demo/tasks-app`), each answer listing the files
   its round changed (the `[mock:changes:N]` markers); `--translation` seeds a Chinese
   request worked in English, each step between tool calls translating in the background
   while the next tools run, then the answer — one chat appending translations, one
   replacing them (the `[mock:translation]` and `[mock:translation:replace]` markers;
-  paced, and every typed message plays the same run).
+  paced, and every typed message plays the same run). A prompt containing
+  `[mock:refs]` gets an answer citing this repository's files as inline code, to try
+  the file-reference chips in a chat opened on a Cypher checkout.
 - `scripts/dev-ios.sh` runs the iOS Dev bundle against a local Edge.
 - `dev` mode syncs through a local Edge: [Local Edge development](local-edge.md).
 - `scripts/e2e-smoke.sh` runs two headless engines against a local Edge.
@@ -181,7 +200,7 @@ local suppression.
 - Tests are named for behaviour, in folders mirroring the app's; helpers live only in
   `TestSupport` (repo fixtures through `TestSupport.repoRoot()`).
 - Formatting is `swift-format` with `apps/ios/.swift-format` (lint runs in the `ios` check
-  stage, with the Xcode the iOS tests pin); every configuration builds with complete Swift concurrency checking.
+  stage, with the Xcode pinned in `.xcode-version`); every configuration builds with complete Swift concurrency checking.
 
 ### TypeScript (`apps/edge`, `pi-runtime`)
 

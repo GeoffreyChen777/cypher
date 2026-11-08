@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 # Lowest layer first.
 LAYERS = [
-    ("foundation", ["cypher-env", "cypher-proto", "cypher-syntax"]),
+    ("foundation", ["cypher-env", "cypher-proto", "cypher-syntax", "cypher-secrets", "cypher-trust"]),
     ("model and transport", ["cypher-doc", "cypher-update", "cypher-net"]),
     ("clients", ["cypher-sync", "cypher-harness"]),
     ("relay", ["cypher-rpc"]),

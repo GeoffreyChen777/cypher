@@ -316,6 +316,52 @@ pub struct Session {
     /// devices see it too; `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<crate::RecoveryProgress>,
+    /// A long turn's narrated progress (the working trailer's progress bar):
+    /// written by a cheap model once the turn has run a minute, refreshed
+    /// every half minute. Belongs to one turn like `throughput` — a settled
+    /// or newly started turn drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<RunProgress>,
+}
+
+/// A cheap model's reading of how far a long turn has got. An estimate for
+/// the user's eyes only — nothing drives off it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunProgress {
+    /// 0–100.
+    pub percent: u8,
+    /// What the agent is doing now, one short line.
+    pub current: String,
+    /// The steps still to come after `current`, in order: the model's
+    /// estimate, revised with every reading (may be empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next: Vec<String>,
+    /// How many steps remain after `current`, when the model counts more
+    /// than it lists in `next`. `None` = `next` is the whole remainder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps_left: Option<u16>,
+    /// The stages the turn has been through, oldest first; the last one is
+    /// `current`. The host carries them over from reading to reading (the
+    /// progress bar's dots).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<ProgressStage>,
+    /// The most steps the turn's plan has counted — its stages and the
+    /// steps left after them — at the plan's largest. The host keeps it with
+    /// the stages: a reading whose plan grows past it shrinks the stages and
+    /// the fill to make room for the new steps. `None` = not counted yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned: Option<u16>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One stage of a long turn: what the agent was doing, and how far the turn
+/// had got (0–100) when that stage began.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressStage {
+    pub label: String,
+    pub percent: u8,
 }
 
 /// One output-throughput reading: an ESTIMATE made from the streamed deltas
@@ -472,12 +518,18 @@ pub struct FileSearchMatch {
     pub is_dir: bool,
 }
 
-/// Read-only, chat-checkout-scoped file browser. Paths are relative to cwd.
+/// Chat-checkout-scoped file browser. Paths are relative to cwd.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceFileEntry {
     pub name: String,
     pub is_dir: bool,
+    /// Regular files: the size in bytes. Absent from older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// Last modification as Unix milliseconds. Absent from older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_ms: Option<i64>,
 }
 
 /// Device-local Pi model for all automatic session titles. None preserves the
@@ -490,9 +542,11 @@ pub struct TitleModelSettings {
 
 /// Device-local web-search fallback for Claude Code sessions: while the
 /// conversation model is `claude-bridge/*`, Pi's `web_search` runs through
-/// another model, since Claude Code models cannot search. Backed by the
-/// bundled `pi-web-search-claude-bridge` package; `available` is false on
-/// runtimes that do not ship it.
+/// the chosen model, since Pi cannot reach the conversation's own Claude Code
+/// search. A pinned `claude-bridge/*` model searches with Claude Code's
+/// WebSearch in a separate query (`claude_code`). Backed by the bundled
+/// `pi-web-search-claude-bridge` package; `available` is false on runtimes
+/// that do not ship it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebSearchFallbackSettings {
@@ -511,6 +565,11 @@ pub struct WebSearchFallbackSettings {
     /// by the package as a runtime pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved: Option<String>,
+    /// This device's runtime can search through Claude Code, so a
+    /// `claude-bridge/*` model may be pinned. False from older engines and
+    /// runtimes.
+    #[serde(default)]
+    pub claude_code: bool,
 }
 
 /// Device-local instructions Pi appends to every chat's system prompt
@@ -552,6 +611,38 @@ pub struct WorkspaceFileContent {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceFileWritten {
     pub bytes: u64,
+}
+
+/// `ReadWorkspaceFileChunk` reply: one base64 slice of a regular file's
+/// bytes (image previews, hex views).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileChunk {
+    pub data: String,
+    pub offset: u64,
+    pub next_offset: u64,
+    /// The file's whole size when the slice was read.
+    pub bytes: u64,
+    pub done: bool,
+    /// Unix milliseconds — a reader compares it across slices to notice a
+    /// file rewritten mid-read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_ms: Option<i64>,
+}
+
+/// Reply of the workspace entry mutations (create, chunked write, move,
+/// copy, delete).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceEntryChanged {
+    /// The entry's relative path after the change.
+    pub path: String,
+    /// Chunked writes: the file's size after the slice.
+    #[serde(default)]
+    pub bytes: u64,
+    /// Deletes: moved to the host's Trash rather than removed.
+    #[serde(default)]
+    pub trashed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -632,9 +632,8 @@ actor ChatRoomClient {
             if !got.isEmpty {
                 request.setValue("bytes=\(got.count)-", forHTTPHeaderField: "Range")
             }
-            guard let (stream, response) = try? await URLSession.shared.bytes(for: request),
-                let http = response as? HTTPURLResponse
-            else { continue }
+            let fetch = await ChunkedFetch.run(request)
+            guard let http = fetch.response else { continue }
             let seq = http.value(forHTTPHeaderField: "x-chat2-checkpoint-seq")
             if let seq {
                 if let prev = seenSeq, seq != prev {
@@ -646,23 +645,76 @@ actor ChatRoomClient {
                 seenSeq = seq
             }
             switch http.statusCode {
-            case 200: got.removeAll()
-            case 206: break
+            case 200: got = fetch.body
+            case 206: got.append(fetch.body)
             default:
                 roomLog.warning("chat2 \(self.chatId, privacy: .public): checkpoint HTTP \(http.statusCode)")
                 return nil
             }
-            do {
-                for try await byte in stream {
-                    got.append(byte)
-                }
-                return got
-            } catch {
-                // Mid-body drop: keep the bytes, resume via Range.
-                roomLog.warning(
-                    "chat2 \(self.chatId, privacy: .public): checkpoint stream dropped at \(got.count)B; resuming")
-            }
+            if !fetch.dropped { return got }
+            // Mid-body drop: keep the bytes, resume via Range.
+            roomLog.warning(
+                "chat2 \(self.chatId, privacy: .public): checkpoint stream dropped at \(got.count)B; resuming")
         }
         return nil
+    }
+}
+
+/// One GET whose body arrives in the chunks URLSession receives, and is kept
+/// when the transfer drops partway (the checkpoint fetch resumes it by
+/// Range). A long session's checkpoint runs to megabytes: awaiting it a byte
+/// at a time through `URLSession.bytes` cost ~1s of CPU per 7.5MB on a Mac,
+/// several times that on a phone, before its first message could show.
+private final class ChunkedFetch: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    struct Result: Sendable {
+        var response: HTTPURLResponse?
+        var body: Data
+        /// The transfer failed after its response: `body` is a prefix.
+        var dropped: Bool
+    }
+
+    private let lock = NSLock()
+    private var response: HTTPURLResponse?
+    private var body = Data()
+    private var continuation: CheckedContinuation<Result, Never>?
+
+    static func run(_ request: URLRequest) async -> Result {
+        let fetch = ChunkedFetch()
+        let task = URLSession.shared.dataTask(with: request)
+        task.delegate = fetch
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                fetch.lock.withLock { fetch.continuation = continuation }
+                task.resume()
+            }
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        lock.withLock {
+            self.response = response as? HTTPURLResponse
+            if response.expectedContentLength > 0 {
+                body.reserveCapacity(Int(response.expectedContentLength))
+            }
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.withLock { body.append(data) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let waiter = continuation
+        continuation = nil
+        let result = Result(response: response, body: body, dropped: error != nil)
+        lock.unlock()
+        waiter?.resume(returning: result)
     }
 }

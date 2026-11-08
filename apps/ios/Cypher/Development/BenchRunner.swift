@@ -14,7 +14,9 @@ enum BenchRunner {
 
     // MARK: Synthetic doc (schema.rs shape — see SessionStore.entryFrom)
 
-    private static func buildDoc(turns: Int) -> LoroDoc {
+    /// The transcript as a session doc: `turns` prompts (`u{i}`) and replies
+    /// (`a{i}`).
+    static func buildDoc(turns: Int) -> LoroDoc {
         let doc = LoroDoc()
         let messages = doc.getList(id: "messages")
         for i in 0..<turns {

@@ -17,7 +17,10 @@ use gpui::{
 };
 
 use crate::kit::live_layer;
-use crate::kit::motion::{self, CYPHER_PULSE, GRADIENT_SPIN, MotionSpec, SPLASH_OUT, STATUS_SPIN};
+use crate::kit::motion::{
+    self, CYPHER_PULSE, GRADIENT_SPIN, MotionSpec, PROGRESS_FLOW, SPLASH_OUT, STATUS_SPIN,
+};
+use crate::kit::progress_bar::ProgressBar;
 use crate::kit::theme::{Appearance, MonoStyled, Theme, oklch};
 use gpui::Hsla;
 
@@ -61,6 +64,9 @@ pub enum Loader {
     /// [`pulse_wash`]: a rounded wash with a hairline border, its opacity
     /// pulsing (a loading thumbnail).
     Wash { bg: Hsla, border: Hsla, radius: f32 },
+    /// [`progress_bar`]: the working trailer's progress bar, its glint and
+    /// breathing ring moving once per [`PROGRESS_FLOW`] period.
+    Progress(ProgressBar),
 }
 
 impl Loader {
@@ -70,6 +76,7 @@ impl Loader {
             Loader::Matrix { .. } | Loader::Mini { .. } => &GRADIENT_SPIN,
             Loader::Arc { .. } => &STATUS_SPIN,
             Loader::Wash { .. } => &CYPHER_PULSE,
+            Loader::Progress(_) => &PROGRESS_FLOW,
         }
     }
 
@@ -94,6 +101,7 @@ impl Loader {
                     .paint_svg(bounds, ARC_GLYPH.into(), None, turn, color, cx)
                     .ok();
             }
+            Loader::Progress(bar) => bar.paint(bounds, delta, window),
             Loader::Wash { bg, border, radius } => {
                 let opacity = 0.35 + 0.4 * motion::pulse_wave(delta);
                 window.paint_quad(gpui::quad(
@@ -243,6 +251,14 @@ pub fn status_arc(color: Hsla, size: f32, view: EntityId) -> impl IntoElement {
 /// `radius`, with a 1px `border`, its opacity pulsing over [`CYPHER_PULSE`].
 pub fn pulse_wash(bg: Hsla, border: Hsla, radius: f32, view: EntityId) -> impl IntoElement {
     loader_element(Loader::Wash { bg, border, radius }, view).size_full()
+}
+
+/// The working trailer's progress bar ([`ProgressBar`]), as wide as its
+/// parent allows and [`crate::kit::progress_bar::HEIGHT`] tall.
+pub fn progress_bar(bar: ProgressBar, view: EntityId) -> impl IntoElement {
+    loader_element(Loader::Progress(bar), view)
+        .w_full()
+        .h(px(crate::kit::progress_bar::HEIGHT))
 }
 
 /// Full-window boot splash: a compact ASCII cypher wordmark over an opaque

@@ -352,3 +352,81 @@ final class AuthRefreshSingleFlightTests: XCTestCase {
         XCTAssertEqual(transport.requests.count, 1, "cleared tokens stop further refreshes")
     }
 }
+
+final class AccountProfileTests: XCTestCase {
+    private let pictureJSON = Data(
+        #"{"accessToken":"new-access","refreshToken":"new-refresh","user":{"id":"u1","email":"ada@example.com","firstName":"Ada","lastName":"Lovelace","profilePictureUrl":"https://avatars.example.com/a.png"}}"#
+            .utf8)
+
+    func testOnlySafeAvatarURLsAreKept() {
+        XCTAssertEqual(
+            AccountProfile.safeAvatarURL("https://avatars.githubusercontent.com/u/1?v=4")?.host(),
+            "avatars.githubusercontent.com")
+        for unsafe in [
+            nil, "", "http://avatars.example.com/a.png", "file:///etc/passwd", "https:///a.png",
+            "https://user:pw@avatars.example.com/a.png", "https://avatars.example.com/a b.png",
+            "https://avatars.example.com/\u{1}.png", "https://" + String(repeating: "a", count: 2050),
+        ] {
+            XCTAssertNil(AccountProfile.safeAvatarURL(unsafe), "\(unsafe ?? "nil")")
+        }
+    }
+
+    func testProfileNamesTheAccountAndFallsBackToTheEmailsInitial() {
+        let full = AccountProfile(
+            AuthUser(
+                id: "u1", email: "ada@example.com", firstName: " Ada ", lastName: "Lovelace",
+                profilePictureUrl: "http://insecure.example.com/a.png"))
+        XCTAssertEqual(full.name, "Ada Lovelace")
+        XCTAssertNil(full.avatarURL, "An unsafe picture shows the initial")
+        XCTAssertEqual(full.initial, "A")
+        let bare = AccountProfile(
+            AuthUser(id: "u1", email: "zed@example.com", firstName: nil, lastName: "", profilePictureUrl: nil))
+        XCTAssertNil(bare.name)
+        XCTAssertEqual(bare.initial, "Z")
+    }
+
+    func testProfileRoundTripsThroughDefaults() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "AccountProfileTests"))
+        defer { defaults.removePersistentDomain(forName: "AccountProfileTests") }
+        let profile = AccountProfile(
+            email: "ada@example.com", name: "Ada", avatarURL: URL(string: "https://a.example.com/a.png"))
+        profile.save(to: defaults)
+        XCTAssertEqual(AccountProfile.load(from: defaults), profile)
+        AccountProfile.clear(from: defaults)
+        XCTAssertNil(AccountProfile.load(from: defaults))
+    }
+
+    func testRefreshReturnsTheUserWhenTheEdgeSendsIt() async throws {
+        let transport = RecordingTransport()
+        var client = AuthClient(baseURL: URL(string: "https://edge.test")!)
+        client.perform = transport.perform
+        transport.body = pictureJSON
+        let (tokens, user) = try await client.refreshSession(refreshToken: "rt")
+        XCTAssertEqual(tokens.accessToken, "new-access")
+        XCTAssertEqual(user?.profilePictureUrl, "https://avatars.example.com/a.png")
+        // An older edge sends tokens alone: no user, so the stored profile stays.
+        transport.body = tokensJSON()
+        let (_, none) = try await client.refreshSession(refreshToken: "rt")
+        XCTAssertNil(none)
+    }
+
+    func testATokenRefreshHandsTheUserToTheApp() async {
+        let transport = RecordingTransport()
+        transport.body = pictureJSON
+        let config = AppConfig(
+            edgeURL: URL(string: "https://edge.test")!, mode: .workos,
+            userId: "u1", orgId: "org_1", deviceId: "dev-1", deviceName: "Test",
+            tokens: AuthTokens(accessToken: expiredJWT(), refreshToken: "rt-1"))
+        var client = AuthClient(baseURL: config.edgeURL)
+        client.perform = transport.perform
+        config.makeClient = { _ in client }
+        let seen = expectation(description: "user")
+        config.onUser = { user in
+            XCTAssertEqual(user.firstName, "Ada")
+            seen.fulfill()
+        }
+        let token = await config.currentToken()
+        XCTAssertEqual(token, "new-access")
+        await fulfillment(of: [seen], timeout: 2)
+    }
+}

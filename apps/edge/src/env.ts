@@ -9,6 +9,8 @@ export interface Env {
   /** Bot network rooms (`bot1/{botRoomId}`), one per networked bot
    * (docs/design/agent-bots.md §11). */
   BOT_ROOMS: DurableObjectNamespace;
+  /** Per-user device trust chains and pairing mailboxes (`t1/{userId}`). */
+  TRUST_ROOMS?: DurableObjectNamespace;
   BLOBS: R2Bucket;
   /** Release artifacts (headless tarballs, dmgs, latest.txt) served at
    * /releases/* for the curl-install flow. */

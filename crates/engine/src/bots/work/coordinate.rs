@@ -1492,6 +1492,7 @@ mod tests {
             options: vec!["A".into(), "B".into()],
             multi_select: false,
             permission: None,
+            asked_by: None,
         }
     }
 
@@ -1562,6 +1563,7 @@ mod state_tests {
             context_usage: None,
             throughput: None,
             recovery: None,
+            progress: None,
         }
     }
 
@@ -1608,6 +1610,7 @@ mod state_tests {
                             kind: PermissionPromptKind::Escalate,
                             tool_call_id: None,
                         }),
+                        asked_by: None,
                     }],
                     resolved: false,
                 },

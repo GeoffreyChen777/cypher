@@ -171,7 +171,7 @@ fn unescape_mention_label(label: &str) -> String {
     out
 }
 
-pub(in crate::composer) fn local_file_link(path: &str, is_dir: bool) -> String {
+pub(crate) fn local_file_link(path: &str, is_dir: bool) -> String {
     let path = path.trim_end_matches('/');
     let basename = path
         .rsplit('/')

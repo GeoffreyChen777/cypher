@@ -473,3 +473,56 @@ fn arrow_down_past_the_last_prompt_returns_to_the_bottom(cx: &mut gpui::TestAppC
         "back at the bottom, {distance}px off"
     );
 }
+
+/// Wheel down until the list glues to its end or the last row is on screen;
+/// panics if the view stops moving first.
+fn wheel_down_to_the_end(rig: &mut Rig) {
+    let mut last = None;
+    let mut still = 0;
+    for _ in 0..500 {
+        let (top, rows) = rig.transcript.read_with(&rig.visual, |t, _| {
+            (t.list.logical_scroll_top(), t.rows.len())
+        });
+        if top.item_ix >= rows || rig.row_top(rows - 1).is_some_and(|top| top < 600.0) {
+            return;
+        }
+        let at = (top.item_ix, f32::from(top.offset_in_item).round() as i32);
+        still = if last == Some(at) { still + 1 } else { 0 };
+        assert!(still < 5, "wheel-down stopped at {at:?} of {rows} rows");
+        last = Some(at);
+        rig.wheel(-120.0);
+        rig.frames(1);
+    }
+    panic!("never reached the end");
+}
+
+#[gpui::test]
+fn a_reply_that_lands_past_the_measured_window_releases_the_hold(cx: &mut gpui::TestAppContext) {
+    // A remote session's reply syncs in batches: it can grow past viewport +
+    // overdraw between two frames, so the reservation never sees its last
+    // row measured — the hold used to outlive the reply and wheel-down
+    // stopped dead at the prompt.
+    for chunks in [&[80][..], &[2, 40, 80]] {
+        let mut entries = history(10);
+        let mut rig = Rig::new(cx, entries.clone());
+        rig.own_send(&mut entries, "sent");
+        rig.land_hold();
+        let (ix, before) = rig.probe().unwrap();
+        for &paragraphs in chunks {
+            let mut live = entries.clone();
+            live.push(reply("answer", paragraphs, MessageStatus::Streaming));
+            rig.set(live);
+            rig.frames(3);
+        }
+        entries.push(reply("answer", 80, MessageStatus::Complete));
+        rig.set(entries);
+        rig.frames(5);
+        assert!(
+            rig.transcript
+                .read_with(&rig.visual, |t, _| t.own_turn.is_none())
+        );
+        // Released in place: the prompt stays where it was read.
+        assert_eq!(rig.row_top(ix).map(f32::round), Some(before.round()));
+        wheel_down_to_the_end(&mut rig);
+    }
+}

@@ -57,6 +57,7 @@ fn harness(runs: Runs, finish: bool) -> common::TestHarness {
                 options: vec!["invoices".into(), "credits".into()],
                 multi_select: false,
                 permission: None,
+                asked_by: None,
             }]);
             let rest = futures::stream::once(async move {
                 let picked = answer

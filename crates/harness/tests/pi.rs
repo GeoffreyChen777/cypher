@@ -135,12 +135,12 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
 /// seam builds the exact command a run would spawn, so no child is needed.
 #[test]
 fn engine_bridge_url_is_injected_into_children() {
-    let url = std::ffi::OsStr::new("/tmp/cypher-ipc-fixture/engine.sock");
+    let url = std::ffi::OsStr::new("/tmp/cypher-ipc-fixture/agent.sock");
     let key = std::ffi::OsStr::new("CYPHER_ENGINE_SOCKET");
 
     let bridged = PiHarness::new(std::env::temp_dir().join("cypher-pi-bridge-sessions"))
         .with_executable(fixture_path())
-        .with_engine_bridge(Some("/tmp/cypher-ipc-fixture/engine.sock".into()));
+        .with_engine_bridge(Some("/tmp/cypher-ipc-fixture/agent.sock".into()));
     let cmd = bridged
         .spawn_command(None, &RunHostContext::default(), None)
         .expect("command builds");
@@ -194,7 +194,7 @@ fn env_of(cmd: &tokio::process::Command, key: &str) -> Option<Option<String>> {
 }
 
 /// Each run profile becomes exactly its own flags and env: a root run adds
-/// nothing, a child run its allowlist plus the messaging tools, its prompt
+/// nothing beyond the extensions every run loads, a child run its allowlist plus the messaging tools, its prompt
 /// and its launch model, and a bot thread of every origin its allowlist, the
 /// embedded bot tools extension, its prompt and `CYPHER_BOT_ID`. Every run
 /// clears the env of the profiles it is not, so none inherits another's.
@@ -225,6 +225,20 @@ fn run_profiles_spawn_exact_args() {
     let root = harness
         .spawn_command(None, &RunHostContext::default(), Some(&prompt))
         .expect("command builds");
+    // Every run loads the app's own extensions after the base flags.
+    let mut base = base;
+    let loaded = args_of(&root)[base.len()..].to_vec();
+    assert_eq!(loaded.len(), 4, "{loaded:?}");
+    assert_eq!(
+        (loaded[0].as_str(), loaded[2].as_str()),
+        ("--extension", "--extension")
+    );
+    assert!(
+        loaded[1].ends_with("cypher-chat-rendering.ts"),
+        "{loaded:?}"
+    );
+    assert!(loaded[3].ends_with("cypher-explain.ts"), "{loaded:?}");
+    base.extend(loaded);
     assert_eq!(args_of(&root), base);
     for key in profile_env {
         assert_eq!(env_of(&root, key), Some(None), "root clears {key}");
@@ -250,7 +264,7 @@ fn run_profiles_spawn_exact_args() {
     expected.extend(
         [
             "--tools",
-            "read,send_message,read_inbox,reply_message",
+            "read,send_message,read_inbox,reply_message,request_permission",
             "--append-system-prompt",
             &prompt_arg,
             "--model",
@@ -450,6 +464,98 @@ fn the_chat_sandbox_level_reaches_the_permission_extension() {
         .spawn_command(None, &RunHostContext::default(), None)
         .expect("command builds");
     assert_eq!(level(&probe), Some(None));
+}
+
+/// A subagent's file-tool denials tell it to call `request_permission`, and
+/// Pi registers no tool its `--tools` allowlist leaves out.
+#[test]
+fn subagents_with_file_tools_can_request_permission() {
+    let harness = harness();
+    let tools_arg = |tools: &[&str]| {
+        let host = RunHostContext {
+            chat_id: Some("child-chat".into()),
+            profile: cypher_harness::RunProfile::Child(cypher_harness::ChildRunEnv {
+                system_prompt: String::new(),
+                tools: tools.iter().map(|tool| tool.to_string()).collect(),
+                model: None,
+                thinking: None,
+                channel_root: None,
+                run_id: "run".into(),
+                agent: "actor".into(),
+                child_index: 0,
+            }),
+        };
+        let cmd = harness
+            .spawn_command(None, &host, None)
+            .expect("command builds");
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let at = args
+            .iter()
+            .position(|arg| arg == "--tools")
+            .expect("--tools");
+        args[at + 1].clone()
+    };
+    assert_eq!(
+        tools_arg(&["read", "grep", "find", "ls", "bash"]),
+        "read,grep,find,ls,bash,send_message,read_inbox,reply_message,request_permission"
+    );
+    assert_eq!(
+        tools_arg(&["bash", "request_permission"]),
+        "bash,request_permission,send_message,read_inbox,reply_message",
+        "named once"
+    );
+    assert_eq!(
+        tools_arg(&["bash"]),
+        "bash,send_message,read_inbox,reply_message",
+        "bash escalates instead"
+    );
+}
+
+/// Every Pi, chat or discovery, loads the app's extensions: the one that
+/// tells the model what the chat renders, and `/explain`.
+#[test]
+fn every_pi_loads_the_app_extensions() {
+    let harness = harness();
+    let request = request("scenario:happy");
+    for cmd in [
+        harness
+            .spawn_run_command(
+                Some(&request.cwd),
+                &RunHostContext::default(),
+                None,
+                &request,
+            )
+            .expect("run command builds"),
+        harness
+            .spawn_command(None, &RunHostContext::default(), None)
+            .expect("command builds"),
+    ] {
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let extensions: Vec<&std::path::Path> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| *arg == "--extension")
+            .map(|(at, _)| std::path::Path::new(&args[at + 1]))
+            .collect();
+        let [rendering, explain] = extensions[..] else {
+            panic!("two --extension: {args:?}");
+        };
+        assert!(rendering.ends_with("cypher-chat-rendering.ts"), "{args:?}");
+        let source = std::fs::read_to_string(rendering).expect("extension written");
+        assert!(source.contains("before_agent_start"));
+        assert!(source.contains("mermaid fenced block"));
+        assert!(explain.ends_with("cypher-explain.ts"), "{args:?}");
+        let source = std::fs::read_to_string(explain).expect("extension written");
+        assert!(source.contains(r#"registerCommand("explain""#));
+    }
 }
 
 #[test]
@@ -969,6 +1075,7 @@ async fn notify_only_extension_state_survives_in_the_parked_process() {
                     .send(SteerMessage {
                         prompt: "/fast".into(),
                         message_id: None,
+                        attachments: Vec::new(),
                     })
                     .await
                     .expect("second toggle routed");
@@ -1101,6 +1208,7 @@ async fn steering_sends_a_steer_command_and_emits_the_boundary_before_content() 
                     .send(SteerMessage {
                         prompt: "redirect please".into(),
                         message_id: None,
+                        attachments: Vec::new(),
                     })
                     .await
                     .expect("steer sent");
@@ -1170,6 +1278,7 @@ async fn parked_compact_runs_the_builtin_and_reports_context_usage() {
                     .send(SteerMessage {
                         prompt: "/compact".into(),
                         message_id: None,
+                        attachments: Vec::new(),
                     })
                     .await
                     .expect("compact mailbox send");
@@ -1242,6 +1351,7 @@ async fn parked_mailbox_restarts_via_prompt_not_idle_steer() {
                     .send(SteerMessage {
                         prompt: "second message".into(),
                         message_id: None,
+                        attachments: Vec::new(),
                     })
                     .await
                     .expect("second mailbox send");
@@ -1314,6 +1424,7 @@ async fn parked_notify_only_turn_rearms_no_activity_and_resets_result() {
                     .send(SteerMessage {
                         prompt: "notify only".into(),
                         message_id: None,
+                        attachments: Vec::new(),
                     })
                     .await
                     .expect("second mailbox send");
@@ -1378,6 +1489,7 @@ async fn rapid_double_mailbox_queues_two_parked_turns() {
                         .send(SteerMessage {
                             prompt: prompt.into(),
                             message_id: None,
+                            attachments: Vec::new(),
                         })
                         .await
                         .expect("mailbox send");
@@ -1445,6 +1557,7 @@ async fn run_with_mailbox(
                     .send(SteerMessage {
                         prompt: message.into(),
                         message_id: None,
+                        attachments: Vec::new(),
                     })
                     .await
                     .expect("mailbox send");
@@ -1499,6 +1612,59 @@ async fn routed_steer_rides_an_atomic_prompt_and_splits_at_delivery() {
         boundary < position(&events, is_text("steered")),
         "{events:?}"
     );
+}
+
+#[tokio::test]
+async fn mailbox_messages_inline_their_own_images() {
+    // Each mailbox message carries its own attachments: the routed mid-turn
+    // prompt and the parked restart both inline the image as `images` — the
+    // fixture refuses either without one.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shot = dir.path().join("shot.png");
+    std::fs::write(&shot, b"\x89PNG\r\n\x1a\nfake").expect("write image");
+    let shot = shot.display().to_string();
+    let (controls, steer, _token) = controls();
+    let stream = harness()
+        .run(request("scenario:mailbox-images"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(10), async move {
+        let mut events = Vec::new();
+        let mut stream = stream;
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            let prompt = if is_text("first")(&ev) {
+                Some("live shot")
+            } else if matches!(ev, AgentEvent::Done { .. }) && dones_so_far(&events) == 0 {
+                Some("parked shot")
+            } else {
+                None
+            };
+            events.push(ev);
+            if let Some(prompt) = prompt {
+                steer
+                    .send(SteerMessage {
+                        prompt: prompt.into(),
+                        message_id: None,
+                        attachments: vec![shot.clone()],
+                    })
+                    .await
+                    .expect("mailbox send");
+            }
+        }
+        events
+    })
+    .await
+    .expect("run finished in time");
+
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None), (DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "parked reply".into()
+    }));
 }
 
 #[tokio::test]
@@ -1658,6 +1824,7 @@ async fn steer_accepted_around_settle_is_retried_as_an_idle_prompt() {
                     .send(SteerMessage {
                         prompt: "redirect".into(),
                         message_id: None,
+                        attachments: Vec::new(),
                     })
                     .await
                     .expect("steer sent");
@@ -2020,6 +2187,51 @@ async fn fork_maps_rewritten_prompts_by_position_when_counts_agree() {
         std::path::PathBuf::from(result.session_path.as_deref().unwrap()),
         expected_fork_path(&root, "forked-u2.jsonl")
     );
+}
+
+/// A prompt whose turn ended before pi recorded it (the dispatch failed or
+/// was interrupted) stays in the transcript with no pi user entry. It no
+/// longer blocks every fork of the chat: forks around it still map, and a
+/// fork at it lands where the next prompt pi did receive would — the leaf,
+/// when none did.
+#[tokio::test]
+async fn fork_sets_aside_a_prompt_that_never_reached_pi() {
+    let cases = [
+        // (prompts, boundary, the fixture's session file)
+        (
+            vec!["first prompt", "second prompt", "never sent"],
+            1,
+            "forked-u2.jsonl",
+        ),
+        (
+            vec!["first prompt", "second prompt", "never sent"],
+            2,
+            "cloned.jsonl",
+        ),
+        (
+            vec!["first prompt", "never sent", "second prompt"],
+            1,
+            "forked-u2.jsonl",
+        ),
+    ];
+    for (prompts, index, expected) in cases {
+        let (harness, root, _dir) = fork_harness();
+        let source = write_source(&root, "source.jsonl", b"{\"seed\":1}\n");
+        let result = harness
+            .fork_session(cypher_proto::PiSessionForkRequest {
+                source_session_path: source,
+                visible_user_prompts: prompts.iter().map(|p| p.to_string()).collect(),
+                boundary: cypher_proto::PiForkBoundary::BeforeUser(index),
+            })
+            .await
+            .unwrap_or_else(|err| panic!("{prompts:?} at {index}: {err}"));
+        assert_eq!(
+            std::path::PathBuf::from(result.session_path.as_deref().unwrap()),
+            expected_fork_path(&root, expected),
+            "{prompts:?} at {index}"
+        );
+        assert!(scratch_leftovers(&root).is_empty());
+    }
 }
 
 /// CloneLeaf accepts pi user entries past the last Cypher prompt: extensions

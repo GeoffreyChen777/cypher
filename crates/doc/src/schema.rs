@@ -17,13 +17,16 @@ use serde::{Deserialize, Serialize};
 
 use cypher_proto::{AnsweredModel, BotPost, ContextRecovery, TurnChanges};
 
+use crate::command_auth::{CommandAuth, CommandSig, SIG_FIELD, command_signing_bytes, encode_sig};
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::SESSION_SCHEMA_VERSION;
 use crate::parts::{MessagePart, MessageStatus};
 
+mod launch;
 mod salvage;
 mod segment_writer;
 
+pub use launch::{LaunchFact, LaunchRecord, latest_launch};
 use salvage::*;
 pub use segment_writer::*;
 
@@ -461,43 +464,105 @@ impl SessionDoc {
             .collect())
     }
 
-    /// Append a command entry (rule 1: own entries only, append-only).
+    /// Append a command entry (rule 1: own entries only, append-only),
+    /// unsigned. See [`Self::queue_signed_command`].
     pub fn queue_command(&self, entry: &SessionCommandEntry) -> Result<(), DocError> {
-        let commands = self.doc.get_list("commands");
-        let map = commands.push_container(LoroMap::new())?;
-        map.insert("id", entry.id.as_str())?;
-        map.insert(
-            "kind",
-            serde_json::to_value(entry.kind())?
-                .as_str()
-                .ok_or_else(|| DocError::Schema("kind not a string".into()))?,
-        )?;
-        map.insert(
-            "payload",
-            loro_value_from_json(&serde_json::to_value(&entry.payload)?),
-        )?;
-        map.insert("issuedBy", entry.issued_by.as_str())?;
-        map.insert("issuedAt", entry.issued_at)?;
+        self.queue_signed_command("", entry, |_| None)
+    }
+
+    /// Append a command entry signed by `sign` over its
+    /// [`command_signing_bytes`] for `chat_id`; `sign` answers `None` when
+    /// this device has no key to sign with.
+    pub fn queue_signed_command(
+        &self,
+        chat_id: &str,
+        entry: &SessionCommandEntry,
+        sign: impl FnOnce(&[u8]) -> Option<[u8; 64]>,
+    ) -> Result<(), DocError> {
+        let mut fields: Vec<(&str, LoroValue)> = vec![
+            ("id", entry.id.as_str().into()),
+            (
+                "kind",
+                serde_json::to_value(entry.kind())?
+                    .as_str()
+                    .ok_or_else(|| DocError::Schema("kind not a string".into()))?
+                    .into(),
+            ),
+            (
+                "payload",
+                loro_value_from_json(&serde_json::to_value(&entry.payload)?),
+            ),
+            ("issuedBy", entry.issued_by.as_str().into()),
+            ("issuedAt", entry.issued_at.into()),
+        ];
         if let Some(based_on) = &entry.based_on {
-            map.insert(
+            fields.push((
                 "basedOn",
                 loro_value_from_json(&serde_json::to_value(based_on)?),
-            )?;
+            ));
         }
         if let Some(expires_at) = entry.expires_at {
-            map.insert("expiresAt", expires_at)?;
+            fields.push(("expiresAt", expires_at.into()));
         }
         if let Some(sent_at) = entry.sent_at {
-            map.insert("sentAt", sent_at)?;
+            fields.push(("sentAt", sent_at.into()));
         }
-        map.insert(
+        fields.push((
             "status",
             serde_json::to_value(entry.status)?
                 .as_str()
-                .ok_or_else(|| DocError::Schema("status not a string".into()))?,
-        )?;
+                .ok_or_else(|| DocError::Schema("status not a string".into()))?
+                .into(),
+        ));
+        let sig = sign(&command_signing_bytes(
+            chat_id,
+            fields.iter().map(|(key, value)| (*key, value)),
+        ));
+        let commands = self.doc.get_list("commands");
+        let map = commands.push_container(LoroMap::new())?;
+        for (key, value) in fields {
+            map.insert(key, value)?;
+        }
+        if let Some(sig) = sig {
+            map.insert(SIG_FIELD, encode_sig(&sig))?;
+        }
         self.doc.commit();
         Ok(())
+    }
+
+    /// [`Self::read_commands`], each entry with what its signature covers for
+    /// `chat_id` — computed from the same list item, so a forged entry
+    /// reusing another one's id can't borrow its signature.
+    pub fn read_commands_with_auth(
+        &self,
+        chat_id: &str,
+    ) -> Result<Vec<(SessionCommandEntry, CommandAuth)>, DocError> {
+        let LoroValue::List(items) = self.doc.get_list("commands").get_deep_value() else {
+            return Ok(Vec::new());
+        };
+        Ok(items
+            .iter()
+            .filter_map(|item| {
+                let LoroValue::Map(fields) = item else {
+                    return None;
+                };
+                let entry = match serde_json::from_value(item.to_json_value()) {
+                    Ok(entry) => entry,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "skipping malformed command entry");
+                        return None;
+                    }
+                };
+                let auth = CommandAuth {
+                    signing_bytes: command_signing_bytes(
+                        chat_id,
+                        fields.iter().map(|(key, value)| (key.as_str(), value)),
+                    ),
+                    sig: CommandSig::parse(fields.get(SIG_FIELD)),
+                };
+                Some((entry, auth))
+            })
+            .collect())
     }
 
     /// Rule 2: host (or the issuing composer, for `cancelled`) writes an outcome.

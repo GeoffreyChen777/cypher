@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::kit::lock;
 
@@ -382,12 +382,65 @@ pub fn selected_text() -> Option<String> {
 }
 
 fn join_spans(spans: &[Span]) -> String {
+    let sources = lock(copy_sources());
     spans
         .iter()
         .filter(|s| !s.range.is_empty() || s.text.is_empty())
-        .map(|s| &s.text[s.range.clone()])
+        .map(|s| match sources.get(&s.key) {
+            Some((text, subs)) if text.as_ref() == s.text => substitute(&s.text, &s.range, subs),
+            _ => s.text[s.range.clone()].to_string(),
+        })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Per-element copy substitutions, by element key: `(element text, ranges
+/// that copy as something other than what they show)`.
+type CopySources = HashMap<String, (Arc<str>, Arc<[(Range<usize>, String)]>)>;
+
+fn copy_sources() -> &'static Mutex<CopySources> {
+    static SOURCES: OnceLock<Mutex<CopySources>> = OnceLock::new();
+    SOURCES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record that, while element `key` shows `text`, each range in `subs` copies
+/// as its paired string — a formula shows as glue spaces under its raster and
+/// copies as its TeX source. Painters call this every frame; it only writes
+/// when the element's text or substitutions changed. A selection made over
+/// different text never picks these up (the recorded text must match).
+pub fn set_copy_sources(key: &str, text: &str, subs: Arc<[(Range<usize>, String)]>) {
+    let mut sources = lock(copy_sources());
+    if let Some((known, known_subs)) = sources.get(key)
+        && known.as_ref() == text
+        && Arc::ptr_eq(known_subs, &subs)
+    {
+        return;
+    }
+    if sources.len() >= 2048 && !sources.contains_key(key) {
+        sources.clear();
+    }
+    sources.insert(key.to_string(), (text.into(), subs));
+}
+
+/// `text[range]` with every substituted range it touches copied as its
+/// source — whole, even when the selection only clips it.
+fn substitute(text: &str, range: &Range<usize>, subs: &[(Range<usize>, String)]) -> String {
+    let mut out = String::new();
+    let mut at = range.start;
+    for (sub, source) in subs {
+        if sub.end <= range.start || sub.start >= range.end {
+            continue;
+        }
+        if sub.start > at {
+            out.push_str(&text[at..sub.start]);
+        }
+        out.push_str(source);
+        at = at.max(sub.end);
+    }
+    if at < range.end {
+        out.push_str(&text[at..range.end]);
+    }
+    out
 }
 
 /// Word range around `ix` for double-click selection: an alphanumeric/`_`

@@ -1303,11 +1303,9 @@ pub async fn merge_base(root: &Path, base_ref: &str) -> Result<String, EngineErr
 /// dispatch, that is the same cost class as the untracked-file reads the watch
 /// capture already does.
 pub async fn snapshot_tree(root: &Path) -> Result<String, EngineError> {
-    let index = std::env::temp_dir().join(format!(
-        "cypher-turn-index-{}-{}",
-        std::process::id(),
-        chrono::Utc::now().timestamp_micros()
-    ));
+    // Unique per call: snapshots of different chats run concurrently, and a
+    // shared index would mix their trees or lock one of them out.
+    let index = std::env::temp_dir().join(format!("cypher-turn-index-{}", uuid::Uuid::new_v4()));
     let run = |args: &[&str]| {
         let mut cmd = tokio::process::Command::new("git");
         cmd.arg("-C").arg(root).args(args);

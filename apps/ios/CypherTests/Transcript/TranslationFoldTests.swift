@@ -73,7 +73,7 @@ final class TranslationFoldTests: XCTestCase {
         XCTAssertFalse(hasToggle(buildRows([entry("m1", text, agentText: fenced)])))
     }
 
-    func testFoldStateKeepsRoundIndicesOnTheRenderedRows() {
+    func testFoldStateKeepsRoundIndicesOnTheRenderedRows() throws {
         let user = { (id: String) in
             MessageEntry(
                 id: id, role: .user, parts: [.text(id: "t0", text: "Question \(id)")],
@@ -93,7 +93,8 @@ final class TranslationFoldTests: XCTestCase {
                 togglePins: open)
             XCTAssertEqual(rendered.count, open.isEmpty ? 4 : 6)
             for round in cache.rounds {
-                XCTAssertEqual(rendered[round.rowIndex].id, round.rowId)
+                let row = try XCTUnwrap(round.rowIndex)
+                XCTAssertEqual(rendered[row].id, round.rowId)
             }
             XCTAssertEqual(cache.rounds.map(\.rowId), ["u1", "u2"])
         }

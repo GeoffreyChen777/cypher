@@ -26,6 +26,12 @@ export interface CommandRule {
   /** The program's contents, for a program that lives in a writable place. */
   sha256?: string;
   createdAt?: string;
+  /** The project it applies in (`projectIdentity` in core.ts); every project when absent. */
+  project?: string;
+  /** Variables an `allow` may see assigned in front of the command (`NAME=value cmd`). */
+  env?: string[];
+  /** Set by the user in Settings: the rule may vouch for a dangerous command (risk.ts). */
+  acknowledgeDanger?: boolean;
 }
 
 export const MAX_PATTERN_WORDS = 32;
@@ -441,8 +447,108 @@ export function isCommandRule(value: unknown): value is CommandRule {
     (rule.decision === "allow" || rule.decision === "ask" || rule.decision === "deny") &&
     patternError(rule.match) === undefined &&
     (rule.label === undefined || typeof rule.label === "string") &&
-    (rule.sha256 === undefined || (typeof rule.sha256 === "string" && /^[0-9a-f]{64}$/.test(rule.sha256)))
+    (rule.sha256 === undefined || (typeof rule.sha256 === "string" && /^[0-9a-f]{64}$/.test(rule.sha256))) &&
+    (rule.project === undefined || (typeof rule.project === "string" && rule.project.startsWith("/"))) &&
+    (rule.env === undefined || (Array.isArray(rule.env) && rule.env.every((name) => typeof name === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)))) &&
+    (rule.acknowledgeDanger === undefined || typeof rule.acknowledgeDanger === "boolean")
   );
+}
+
+// --- Environment and wrappers ------------------------------------------------------
+
+/**
+ * Variables that change how programs load or run code, or where they look
+ * for it: assigning one in front of a command changes what the command is,
+ * so no rule can vouch for it and the reader treats the line as opaque.
+ */
+const DANGEROUS_ENV =
+  /^(PATH|\w*PATH|LD_\w*|DYLD_\w*|\w*_OPTIONS|\w*OPTS|\w*FLAGS|\w*_HOME|\w*ROOT|PYTHON\w*|RUBY\w*|PERL\w*|NODE_\w*|NPM_CONFIG_\w*|YARN_\w*|BUNDLE_\w*|BASH_ENV|ENV|IFS|HOME|XDG_\w*|SHELL|SHELLOPTS|BASHOPTS|EDITOR|VISUAL|\w*PAGER|GIT_\w*|SSH_\w*|\w*_PROXY|\w*_COMMAND|\w*_WRAPPER|RUSTC\w*|CARGO_\w*|CC|CXX|CPP|LD|AR|MAKE|MAKEFLAGS|LESSOPEN|LESSCLOSE|TMPDIR|PROMPT_COMMAND|PS4|CDPATH|GLOBIGNORE|HISTFILE|BROWSER|TERMINFO|\w*ASKPASS|DEVELOPER_DIR|SDKROOT|TOOLCHAINS|DOCKER_\w*|COMPOSE_\w*|KUBE\w*|AWS_\w*|GOOGLE_\w*|CLOUDSDK_\w*|AZURE_\w*|RUSTUP_\w*|DOTNET_\w*|\w*_HOOKS?|\w*PRELOAD\w*|\w*_PLUGINS?|GRADLE_\w*|MAVEN_\w*|TF_\w*|HELM_\w*|ANSIBLE_\w*|PIP_\w*|UV_\w*|POETRY_\w*|CONDA_\w*|VIRTUAL_ENV|GEM_\w*|GO\w*|\w*TOKEN\w*|\w*SECRET\w*|\w*PASSWORD\w*|\w*_KEY)$/i;
+
+/** Common settings that only tune output or a build, in families the list above names. */
+const BENIGN_ENV =
+  /^(NODE_ENV|NODE_NO_WARNINGS|RUST_LOG|RUST_BACKTRACE|RUST_MIN_STACK|CARGO_INCREMENTAL|CARGO_TERM_\w+|CARGO_TARGET_DIR|CARGO_BUILD_JOBS|CARGO_PROFILE_\w+_(DEBUG|OPT_LEVEL|INCREMENTAL|CODEGEN_UNITS|LTO|STRIP|SPLIT_DEBUGINFO)|PYTHONUNBUFFERED|PYTHONDONTWRITEBYTECODE|PYTHONIOENCODING|PYTHONHASHSEED|GIT_TERMINAL_PROMPT)$/;
+
+/** Whether a variable may stand assigned in front of a command: it does not change how programs load or run. */
+export function benignEnv(name: string): boolean {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return false;
+  return BENIGN_ENV.test(name) || !DANGEROUS_ENV.test(name);
+}
+
+/** A command seen through the wrappers that only run it (`nohup`, `timeout 30`, `env NAME=value`). */
+export interface Unwrapped {
+  words: string[];
+  /** The wrappers' program words, outermost first. */
+  wrappers: string[];
+  /** Variables `env` assigns. */
+  env: string[];
+}
+
+const TIMEOUT_VALUES = new Set(["-s", "--signal", "-k", "--kill-after"]);
+
+/**
+ * The command a wrapper runs, when it only runs it: `nohup`, `time [-p]`,
+ * `nice [-n N]`, `timeout [options] DURATION`, `caffeinate [-dimsu] [-t N]
+ * [-w PID]`, `env [-i] [-u NAME] [NAME=value]…`. Undefined when the wrapper
+ * does more (`env -S` splits a string into a command), its words are not
+ * all known, or `env` assigns a variable that changes how programs run.
+ * The caller checks that each wrapper is the system's program.
+ */
+export function unwrap(words: readonly string[]): Unwrapped | undefined {
+  let rest = [...words];
+  const wrappers: string[] = [];
+  const env: string[] = [];
+  for (let depth = 0; depth < 8; depth++) {
+    const program = rest[0];
+    if (program === undefined || program === UNKNOWN) return undefined;
+    const name = basename(program);
+    let i = 1;
+    switch (name) {
+      case "nohup":
+        break;
+      case "time":
+        while (rest[i] === "-p") i++;
+        break;
+      case "nice":
+        if (rest[i] === "-n") i += 2;
+        else if (/^(-\d+|-n\d+|--adjustment=-?\d+)$/.test(rest[i] ?? "")) i++;
+        break;
+      case "timeout":
+        for (; i < rest.length && rest[i].startsWith("-"); i++) {
+          if (TIMEOUT_VALUES.has(rest[i])) i++;
+          else if (!/^(--preserve-status|--foreground|-v|--verbose|--signal=\S+|--kill-after=\S+|-s\S+|-k\S+)$/.test(rest[i])) return undefined;
+        }
+        if (!/^\d+(\.\d+)?[smhd]?$/.test(rest[i] ?? "")) return undefined;
+        i++;
+        break;
+      case "caffeinate":
+        for (; i < rest.length && rest[i].startsWith("-"); i++) {
+          if (rest[i] === "-t" || rest[i] === "-w") i++;
+          else if (!/^-[dimsu]+$/.test(rest[i])) return undefined;
+        }
+        break;
+      case "env":
+        for (; i < rest.length; i++) {
+          const word = rest[i];
+          if (word === "-i" || word === "-" || word === "--ignore-environment") continue;
+          if (word === "-u" || word === "--unset") {
+            i++;
+            continue;
+          }
+          if (word === UNKNOWN || word.startsWith("-")) return undefined;
+          const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(word);
+          if (!assignment) break;
+          if (!benignEnv(assignment[1])) return undefined;
+          env.push(assignment[1]);
+        }
+        break;
+      default:
+        return depth === 0 ? undefined : { words: rest, wrappers, env };
+    }
+    if (rest.slice(1, i).includes(UNKNOWN)) return undefined;
+    wrappers.push(program);
+    rest = rest.slice(i);
+  }
+  return undefined;
 }
 
 function wordMatches(glob: string, word: string): boolean {
@@ -544,6 +650,11 @@ const SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
   tmux: ["-L", "-S", "-f"],
 };
 
+/** The options before a CLI's subcommand that take a value (`git -C dir push`). */
+export function globalValueOptions(program: string): readonly string[] {
+  return SUBCOMMANDS[program] ?? [];
+}
+
 /**
  * Subcommands whose next word picks what runs (`npm run build`, `uv run
  * pytest`): their category includes that word too. `xcrun` runs the tool
@@ -565,7 +676,7 @@ const RUNS_NEXT: Readonly<Record<string, ReadonlySet<string>>> = {
 const AS_WRITTEN: ReadonlySet<string> = new Set([
   "rm", "rmdir", "mv", "cp", "ln", "install", "chmod", "chown", "chgrp", "chflags", "xattr", "dd", "truncate", "shred", "srm", "tee", "touch", "mkdir",
   "cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "ag", "strings", "xxd", "hexdump", "od", "base64", "sqlite3", "plutil", "zip", "unzip", "tar", "gzip", "gunzip", "ditto",
-  "curl", "wget", "nc", "ncat", "socat", "telnet", "ftp", "scp", "sftp", "rsync",
+  "curl", "wget", "nc", "ncat", "socat", "telnet", "ftp", "sftp",
   "kill", "pkill", "killall", "open", "pbcopy", "pbpaste", "screencapture", "tccutil", "csrutil", "diskutil", "mount", "umount", "hdiutil", "crontab", "at",
   "gpg", "ssh-add", "ssh-keygen", "openssl", "printenv", "op", "pass", "vault", "keychain",
 ]);
@@ -587,7 +698,8 @@ export function categoryPattern(words: readonly string[]): string[] | string {
   if (BANNED_PROGRAMS.has(basename(program))) return anyCommand(program);
   if (program.includes("/")) return [program, "**"];
   if (INERT_PROGRAMS.has(program)) return `\`${program}\` never needs to leave the sandbox`;
-  if (program === "ssh") return sshCategory(words);
+  if (program === "ssh") return sshCategory(quietSsh(words));
+  if (program === "scp" || program === "rsync") return copyCategory(words);
   if (AS_WRITTEN.has(program)) return asWritten(words);
   const valueOptions = SUBCOMMANDS[program];
   if (!valueOptions) return [program, "**"];
@@ -616,6 +728,50 @@ function anyCommand(program: string): string {
 
 function computed(program: string): string {
   return `\`${program}\` is given words known only when it runs`;
+}
+
+/** Where `ssh [options] host [command …]` names its host; undefined when it names none. */
+export function sshHostIndex(words: readonly string[]): number | undefined {
+  let i = 1;
+  for (; i < words.length && words[i] !== UNKNOWN && words[i].startsWith("-") && words[i] !== "-"; i++) {
+    if (words[i] === "--") {
+      i++;
+      break;
+    }
+    const flags = words[i].slice(1);
+    const at = [...flags].findIndex((flag) => SSH_VALUE_OPTIONS.includes(flag));
+    if (at === flags.length - 1) i++;
+  }
+  return i < words.length ? i : undefined;
+}
+
+/** `ssh -o` settings that change nothing on this computer: how long to wait, whether to prompt, how much to log. */
+const QUIET_SSH_SETTINGS = /^(ConnectTimeout|ConnectionAttempts|BatchMode|ServerAliveInterval|ServerAliveCountMax|TCPKeepAlive|LogLevel|Compression|RequestTTY|IdentitiesOnly|StrictHostKeyChecking|PasswordAuthentication|NumberOfPasswordPrompts|ForwardAgent|ForwardX11)=[^\s]*$/i;
+
+/**
+ * An ssh command without the options that change nothing on this computer
+ * (`-q`, `-T`, `-o ConnectTimeout=20`, `-o BatchMode=yes`), so a rule for
+ * `ssh web …` covers it with or without them. Other commands as they are.
+ */
+export function quietSsh(words: readonly string[]): string[] {
+  if (basename(words[0] ?? "") !== "ssh") return [...words];
+  const out = [words[0]];
+  let i = 1;
+  for (; i < words.length; i++) {
+    const word = words[i];
+    if (word === UNKNOWN || !word.startsWith("-") || word === "-" || word === "--") break;
+    if (/^-[qTtnxCv46]+$/.test(word)) continue;
+    if (word === "-o" && words[i + 1] !== undefined && QUIET_SSH_SETTINGS.test(words[i + 1])) {
+      i++;
+      continue;
+    }
+    if (/^-o/.test(word) && QUIET_SSH_SETTINGS.test(word.slice(2))) continue;
+    out.push(word);
+    const flags = word.slice(1);
+    const at = [...flags].findIndex((flag) => SSH_VALUE_OPTIONS.includes(flag));
+    if (at === flags.length - 1 && words[i + 1] !== undefined) out.push(words[++i]);
+  }
+  return [...out, ...words.slice(i)];
 }
 
 /** `ssh [options] host …`: the options as written, the host, any command. */
@@ -651,12 +807,13 @@ function literal(words: readonly string[]): boolean {
  */
 export function ruleCannotVouch(words: readonly string[]): string | undefined {
   const name = basename(words[0] ?? "");
+  if (name === "rsync") return rsyncCannotVouch(words);
   if (name !== "ssh" && name !== "scp" && name !== "sftp") return undefined;
   const risky = `${name} is given an option that can run a command on this computer`;
   for (let i = 1; i < words.length; i++) {
     const word = words[i];
     if (word === "--") break;
-    if (word === UNKNOWN) return risky;
+    if (word === UNKNOWN) return `${name} is given a word known only when it runs, which could be an option that runs a command on this computer`;
     if (!word.startsWith("-") || word === "-") {
       if (name !== "ssh") continue;
       // ssh reads options again straight after the host.
@@ -679,6 +836,107 @@ export function ruleCannotVouch(words: readonly string[]): string | undefined {
     }
   }
   return undefined;
+}
+
+// --- scp and rsync ------------------------------------------------------------------
+
+/** scp options that take a value. */
+const SCP_VALUES = "cFiJloPSDX";
+
+/** rsync short options that take a value, and long ones that may take it as the next word. */
+const RSYNC_SHORT_VALUES = "BefMT@";
+const RSYNC_LONG_VALUES = new Set([
+  "--rsh", "--rsync-path", "--filter", "--exclude", "--include", "--exclude-from", "--include-from", "--files-from", "--temp-dir", "--partial-dir",
+  "--compare-dest", "--copy-dest", "--link-dest", "--backup-dir", "--suffix", "--chmod", "--chown", "--usermap", "--groupmap", "--timeout",
+  "--contimeout", "--port", "--sockopts", "--log-file", "--log-file-format", "--password-file", "--bwlimit", "--max-size", "--min-size",
+  "--max-delete", "--block-size", "--out-format", "--info", "--debug", "--stop-after", "--stop-at", "--iconv", "--checksum-choice",
+  "--compress-choice", "--compress-level", "--skip-compress", "--address", "--write-batch", "--only-write-batch", "--read-batch",
+  "--protocol", "--remote-option", "--outbuf", "--modify-window", "--max-alloc", "--copy-as", "--early-input",
+]);
+
+/** The machine an scp or rsync operand names (`host:path`, `user@host:path`, `rsync://host/…`), with its prefix as written; undefined for a local path. */
+export function remoteOperand(word: string): { host: string; prefix: string } | undefined {
+  const url = /^(rsync|scp):\/\/(?:[^@/]*@)?(\[[^\]]+\]|[^/:]+)/i.exec(word);
+  if (url) return { host: url[2], prefix: url[0] };
+  if (word.startsWith("/") || word.startsWith(".") || word.startsWith("~")) return undefined;
+  const remote = /^((?:[^@/:\s]+@)?(\[[^\]]+\]|[A-Za-z0-9_.-]+)):/.exec(word);
+  return remote ? { host: remote[2], prefix: `${remote[1]}:` } : undefined;
+}
+
+/**
+ * An scp or rsync line's operands: what it copies and where to. Undefined
+ * when a word is known only when it runs, or there is nothing to copy.
+ */
+export function copyOperands(words: readonly string[]): { sources: string[]; dest: string } | undefined {
+  const name = basename(words[0] ?? "");
+  const operands: string[] = [];
+  for (let i = 1; i < words.length; i++) {
+    const word = words[i];
+    if (word === UNKNOWN) return undefined;
+    if (word === "--") {
+      operands.push(...words.slice(i + 1));
+      break;
+    }
+    if (!word.startsWith("-") || word === "-") {
+      operands.push(word);
+      continue;
+    }
+    if (word.startsWith("--")) {
+      if (name === "rsync" && !word.includes("=") && RSYNC_LONG_VALUES.has(word)) i++;
+      continue;
+    }
+    const values = name === "rsync" ? RSYNC_SHORT_VALUES : SCP_VALUES;
+    const flags = word.slice(1);
+    const at = [...flags].findIndex((flag) => values.includes(flag));
+    if (at === flags.length - 1) i++;
+  }
+  if (operands.includes(UNKNOWN) || operands.length < 2) return undefined;
+  return { sources: operands.slice(0, -1), dest: operands.at(-1)! };
+}
+
+/**
+ * Why no rule may vouch for an rsync command: `-e`/`--rsh` with anything
+ * but ssh and options it may vouch for, or an option that writes or reads a
+ * file on this computer the line names (`--log-file`, batch files).
+ */
+function rsyncCannotVouch(words: readonly string[]): string | undefined {
+  const risky = "rsync is given an option that can run a command or write a file on this computer";
+  for (let i = 1; i < words.length; i++) {
+    const word = words[i];
+    if (word === "--") break;
+    if (word === UNKNOWN) return "rsync is given a word known only when it runs, which could be an option that runs a command on this computer";
+    let shell: string | undefined;
+    if (word === "--rsh" || word === "-e") shell = words[++i] ?? "";
+    else if (word.startsWith("--rsh=")) shell = word.slice("--rsh=".length);
+    else if (/^-[A-Za-z]*e$/.test(word) && word.length > 2) shell = words[++i] ?? "";
+    else if (/^-[A-Za-z]*e./.test(word) && !word.startsWith("--")) shell = word.slice(word.indexOf("e") + 1);
+    if (/^--(log-file|write-batch|only-write-batch|read-batch)(=|$)/.test(word)) return risky;
+    if (shell === undefined) {
+      if (/^--/.test(word) && !word.includes("=") && RSYNC_LONG_VALUES.has(word)) i++;
+      continue;
+    }
+    if (shell === UNKNOWN) return risky;
+    const [program, ...options] = shell.trim().split(/\s+/);
+    if (basename(program ?? "") !== "ssh" || options.some((option) => /['"`$\\;|&<>()]/.test(option)) || ruleCannotVouch(["ssh", ...options, "host"])) return risky;
+  }
+  return undefined;
+}
+
+/**
+ * Copies to or from one machine: kept per host. An upload (`… host:*`)
+ * covers any local files; a download (`… host:* *`) any place here. A copy
+ * between two machines, or where a word is known only when it runs, is
+ * allowed only as written; risk.ts makes the first dangerous.
+ */
+function copyCategory(words: readonly string[]): string[] | string {
+  const program = words[0];
+  const operands = copyOperands(words);
+  if (!operands) return computed(program);
+  const remotes = [...operands.sources, operands.dest].map(remoteOperand).filter((remote) => remote !== undefined);
+  if (remotes.length === 0 || new Set(remotes.map((remote) => remote.prefix)).size > 1) return asWritten(words);
+  const prefix = `${remotes[0].prefix}*`;
+  if (remoteOperand(operands.dest)) return operands.sources.every((source) => !remoteOperand(source)) ? [program, "**", prefix] : asWritten(words);
+  return [program, "**", prefix, "*"];
 }
 
 /** A pattern as people read it. */

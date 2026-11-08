@@ -66,6 +66,7 @@ cypher setup       # continue or repair setup
 cypher status      # device status (--verbose adds account, data and IPC details)
 cypher logs        # recent engine logs (--follow streams them)
 cypher update      # newest release and Pi runtime, then restart the service
+cypher pair        # pair with your other devices (join <code>, add)
 ```
 
 Non-interactive installs, SSH, data directories and repair:

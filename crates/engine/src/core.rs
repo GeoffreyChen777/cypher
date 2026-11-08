@@ -47,6 +47,9 @@ pub struct EngineCore {
     pub session_forks: SessionForks,
     /// Agent bots hosted here: creation and the bot tool surface.
     pub bots: crate::bots::Bots,
+    /// Session migration: moves chats to another project, on this device or
+    /// another one.
+    pub migrations: session::migrations::ChatMigrations,
     /// Context recovery: restarts a failed round with supplementary context.
     /// Owned HERE — the sessions engine's round-end listener only holds a
     /// weak handle to it.
@@ -60,6 +63,8 @@ pub struct EngineCore {
     auth: Mutex<Option<Auth>>,
     /// Peer link cache for `targetDeviceId` routing (attached when edge+auth are ready).
     links: Mutex<Option<Arc<cypher_rpc::LinkCache>>>,
+    /// Device trust (attached with the edge): keys, the group's chain, pairing.
+    trust: Mutex<Option<crate::device_trust::DeviceTrust>>,
     /// Release checker (attached by [`Engine::assemble_runtime`]) — the
     /// UpdateStatus stream + ApplyUpdate.
     updater: Mutex<Option<cypher_update::Updater>>,
@@ -140,7 +145,7 @@ impl EngineCore {
         let store = Arc::new(DocsStore::open(profile.store_root())?);
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
-        let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
+        let sessions = SessionsEngine::new(device_id.clone(), journal.clone(), registry.clone());
         let doc_host = DocHost::new(
             store.clone(),
             DocHostConfig {
@@ -230,6 +235,14 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
+        let migrations = session::migrations::ChatMigrations::new(
+            sessions.clone(),
+            doc_host.clone(),
+            workspace.clone(),
+            journal,
+            uploads.clone(),
+            profile.store_root(),
+        );
         let title_settings = session::title_settings::TitleSettingsStore::new(data_dir);
         let context_recovery = session::context_recovery::ContextRecoveryService::new(
             sessions.clone(),
@@ -301,12 +314,14 @@ impl EngineCore {
             side_chats,
             session_forks,
             bots,
+            migrations,
             context_recovery,
             device_id,
             local_import,
             workspace_scope: profile.scope(),
             auth: Mutex::new(None),
             links: Mutex::new(None),
+            trust: Mutex::new(None),
             updater: Mutex::new(None),
             pi_runtime: Mutex::new(None),
             updater_wake: Mutex::new(None),
@@ -364,6 +379,17 @@ impl EngineCore {
         lock(&self.links).clone()
     }
 
+    pub fn set_trust(&self, trust: crate::device_trust::DeviceTrust) {
+        self.doc_host.set_command_trust(Arc::new(trust.clone()));
+        // Runs launch from signed records under "Only paired devices".
+        self.workspace.set_launch_hook(self.doc_host.launch_hook());
+        *lock(&self.trust) = Some(trust);
+    }
+
+    pub fn trust(&self) -> Option<crate::device_trust::DeviceTrust> {
+        lock(&self.trust).clone()
+    }
+
     /// Attach the release checker (before building the RPC service).
     pub fn set_updater_wake(&self, handle: tokio::task::JoinHandle<()>) {
         *lock(&self.updater_wake) = Some(handle);
@@ -411,9 +437,12 @@ impl EngineCore {
     pub fn start_host_relay(&self, edge_url: &str) -> cypher_rpc::HostRelay {
         let auth = self.auth();
         let bots = self.bots.clone();
-        let config =
+        let mut config =
             cypher_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth))
                 .with_bots_nudge(Arc::new(move |room: String| bots.bots_nudged(room)));
+        if let Some(trust) = self.trust() {
+            config = config.with_trust(Arc::new(trust));
+        }
         let doc_host = self.doc_host.clone();
         let on_nudge: cypher_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
             // Opening the doc joins its room + syncs; drain fires on the change
@@ -425,7 +454,17 @@ impl EngineCore {
                 }
             }
         });
-        cypher_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        // Device-trust methods answer only for this device's own viewports.
+        let service = Arc::new(crate::rpc::RelayRpc::new(
+            self.rpc_service(),
+            self.device_id.clone(),
+        ));
+        cypher_rpc::HostRelay::spawn(config, service, on_nudge)
+    }
+
+    /// The restricted service behind the agent socket (`rpc::AgentRpc`).
+    pub fn agent_rpc_service(&self) -> Arc<crate::rpc::AgentRpc> {
+        Arc::new(crate::rpc::AgentRpc::new(self.rpc_service()))
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
@@ -447,10 +486,14 @@ impl EngineCore {
         .with_provider_logins(self.provider_logins.clone())
         .with_title_settings(self.title_settings.clone())
         .with_context_recovery(self.context_recovery.clone())
+        .with_migrations(self.migrations.clone())
         .with_github(self.github.clone())
         .with_bots(self.bots.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
+        }
+        if let Some(trust) = self.trust() {
+            rpc = rpc.with_trust(trust);
         }
         if let Some(updater) = self.updater() {
             rpc = rpc.with_updater(updater);
@@ -487,6 +530,9 @@ impl EngineCore {
         // every ephemeral doc (host-memory only — dispose leaves no durable
         // remnants; a promoted chat is untouched) BEFORE the general session
         // teardown settles/flushes the remaining normal chats.
+        if let Some(trust) = self.trust() {
+            trust.shutdown();
+        }
         self.side_chats.shutdown().await;
         self.sessions.shutdown().await;
         self.terminals.shutdown();

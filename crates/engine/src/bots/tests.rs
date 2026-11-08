@@ -248,6 +248,7 @@ fn session(chat: &str, status: SessionStatus, updated: i64) -> Session {
         context_usage: None,
         throughput: None,
         recovery: None,
+        progress: None,
     }
 }
 

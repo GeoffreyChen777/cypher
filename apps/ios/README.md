@@ -17,9 +17,22 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   "LOADING" appears only if it's still waiting after the decode. Foregrounding
   never shows it; Reduce Motion gets a static mark and a plain fade. Rigs
   (`-demo`, XCTest) skip it; `-splash` forces it.
-- **Project-first:** Home lists projects with their owning device;
-  open a project to create or resume its sessions, or access its archive.
-  `Space`/`spaceId` remain the shared wire-schema names — no schema migration.
+- **Session-first Home:** every active session in one list, one tap from
+  launch, under Now (running or waiting on an answer), Today, Yesterday,
+  Previous 7 Days, Previous 30 Days and Earlier; each row names its project
+  and device. Project chips across the top narrow it (then Quick chats and
+  No project); a chip's long press, or **Project ›** under the chips, opens
+  the project's own page with its archive. Search sits under the title;
+  once a swipe up scrolls it away, a search button top left brings it back,
+  focused. It matches every word against title, last message, project and
+  device, looks past the time filter, and lists matching archived sessions
+  too. The sliders menu filters by device and last activity and sorts (New
+  activity, Name, Device, Date created), as the desktop sidebar's view menu
+  does; saved on this phone only. The archived shelf sits folded at the
+  bottom. New (✎) starts a session in the chosen project, else the latest
+  session's, or in another project, a quick chat, or a new project.
+  `Space`/`spaceId` remain the shared wire-schema names — no schema
+  migration.
 - **Pi-only:** new sessions use Pi. Existing non-Pi sessions remain readable
   but cannot be driven from the mobile composer. The engine's mock harness
   is test infrastructure, not a selectable agent.
@@ -86,6 +99,17 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   **Context recovery** project has a session per state (writing context,
   restarting, recovered, out of attempts) and a live one that replays the
   whole flow when opened and again for each message sent in it.
+- **Run progress:** a long turn's narrated progress (`progress` on the
+  session row, the desktop working trailer's bar) fills the rest of the
+  working strip: the desktop's painted bar — passed stages as dots, the
+  current one as a breathing ring at the fill's end, the steps to come as
+  faint dots, a glint along the fill — and the percentage. Readings glide
+  into place; Reduce Motion jumps and stills the glint. A phone has no
+  hover: tapping the strip opens the stage tips as one card, each row
+  leading with its state — a green check for stages done (with where each
+  began), a pulsing ring in the text colour for the one under way (with how many steps
+  are left), a dashed grey circle for steps not started. Read leniently like `recovery`. Demo: the **Streaming
+  veil** session replays a run of readings while it's open.
 - **Composer focus:** the editor owns a native UITextView/delegate rather than
   relying on SwiftUI TextField's backing-view accessibility ID or FocusState.
   Empty focus and the first typed character expand the model/thinking toolbar;
@@ -103,12 +127,25 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   same native gesture/bounce window but may retarget its own spring. Negative
   bottom distance during a bounce is not treated as a broken/blank layout.
   Idle reflows and keyboard-end corrections remain enabled after settling.
-- **Long transcripts:** a session opens at its latest message and renders
-  the most recent 200 rows; **Show earlier messages** at the top prepends 200
-  more and keeps the row you were reading in place. The reveal reaches the
-  bottom by jumping to the last row's id, never to an estimated offset, so
-  opening doesn't lay out the rows in between (3,000 rows: ~0.3s, down from
-  3–4s of hidden loader on iOS 26–27).
+- **Long transcripts:** a session loads from its end. Opening one reads,
+  decodes and parses only its last 5 messages — message by message off the
+  main thread, never the whole doc — so its length doesn't change what
+  opening or a streamed update costs (3,000 messages on the simulator: ~30ms
+  in the background and ~3ms of rows, where the whole transcript took ~1s,
+  mostly on the main thread). Scrolling back reads the 40 above while the
+  reader is still two screens away (at once, if those 5 are shorter) and
+  shows them once the scroll rests,
+  holding the row being read where it is on screen; **Loading earlier
+  messages** marks the top until the first message (a tap or VoiceOver loads
+  at once). The turn scrubber still reaches every round: it knows the prompts
+  above what's loaded and reads down to the one it jumps to. Leaving the
+  session drops the pages loaded on the way back. The reveal reaches the
+  bottom by jumping to the last row's id, never to an estimated offset. Demo:
+  `-big` (120 turns), `-huge` (600), `-turns N`; `-slow-pages` makes a page
+  land 45s after it's asked for. A session this phone has never opened must
+  still download its whole doc first (the host's checkpoint — megabytes for
+  a long session); it arrives in URLSession's chunks, and the snapshot it
+  leaves on disk is written off the main thread.
 - **Session actions:** long-press a session row (or swipe) to Rename, Archive or
   Delete; the session's top-right menu has the same. Delete asks first, tells
   the host (`Mutate deleteChat`, which also removes its subagent children and
@@ -123,10 +160,11 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   stays dimmed and explains itself on tap. Restart asks first, naming how many
   messages it deletes, then calls the host's `RewindSession`; a prompt's text
   returns to an empty composer. Side chats show date and copy only.
-- **Quick chat:** Home's speech-bubble button starts a project-less session on
-  a chosen online device (`CreateScratchDir` on the host, then a row without a
-  space). Quick chats get their own Home section; other project-less sessions
-  appear under Other Sessions.
+- **Quick chat:** Home's New menu → Quick Chat starts a project-less session
+  on a chosen online device (`CreateScratchDir` on the host, then a row
+  without a space). Quick chats list with every other session as "Quick chat
+  @ device", with a chip of their own; other project-less sessions get the No
+  project chip.
 - **Slash commands:** typing `/` opens the desktop's grouped menu over the
   host's Pi commands (`ListCommands`): headings (Conversation, Agent modes,
   Subagents…), one line per command with its glyph and a badge for what it
@@ -169,7 +207,8 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   it, "Open as Chat" keeps it. A side chat whose device link drops for good,
   or that sits unwatched ~5 minutes on the host, ends.
 - **Files / Changes:** separate options in the chat's top-right menu open read-only remote directory
-  navigation, UTF-8 file previews and working-tree Git diffs with per-file
+  navigation, UTF-8 file previews (Markdown rendered, HTML and SVG as pages,
+  images fitted or at 100%) and working-tree Git diffs with per-file
   patches. Changes uses a continuous, collapsible list in a locally bundled
   Pierre Diffs viewer with line numbers, syntax/word highlighting and
   unified/side-by-side layouts. Unchanged code starts folded and loads from the
@@ -194,6 +233,37 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   reachable through their parent. Links require a synced parent/child relation
   on the same execution device; absent links are shown as unavailable rather
   than guessed. The persisted agent profile is left untouched.
+- **Math:** replies typeset LaTeX like the desktop: `$…$` and `\(…\)` in
+  the line, on the text baseline; `$$…$$` and `\[…\]` centered on a row of
+  their own, shrunk to fit a narrow screen. Prices ("$5 and $10") and code
+  keep their dollars, and TeX that does not typeset shows as inline code.
+  Formulas take the text color (appearance, thinking's muted tone, the
+  streaming fade) and copy or quote as their TeX source.
+- **File references and links:** inline code citing a file
+  (`` `src/a.rs:12-20` ``) shows as a chip — glyph, name, muted lines — and
+  copies as written; a chip or a file link (`a.rs#L12`, `file://…`) opens
+  the file in the Files sheet with its lines selected, found at the checkout
+  root or by the file search (several matches are listed). A long press
+  previews the cited lines. See
+  [workspace browser](../../docs/features/ios-workspace-browser.md#from-the-chat).
+- **Turn changes:** a settled round's `turnChanges` shows as the desktop's
+  card under its last answer ("3 files changed +17 −3", Review, up to five
+  files); a file opens the round's diff at that file (the `trees` mode).
+- **Diff fences:** ```` ```diff ````, `patch` and `udiff` fences draw as diff
+  rows — accent bars, washes, markers, hunk strips, line numbers under
+  numbered hunks and a path header with counts — parsed as leniently as the
+  desktop does; code takes syntax colors when a file header names its
+  language. The copy button copies the raw fence.
+- **Forwarded questions:** a subagent's question or permission request the
+  host forwarded into the chat (`askedBy`) is titled "Question from actor" /
+  "Permission request from actor".
+- **Diagrams:** a ```` ```mermaid ```` fence draws as a diagram once its
+  closing fence arrives (a fence still streaming shows as code), themed for
+  the appearance, fit to the column down to 60% of its size and scrolling
+  sideways past that. Its header switches between the diagram and its
+  source; source Mermaid cannot draw stays code, with the reason in the
+  header. Mermaid runs offline in one hidden WKWebView that hands back a
+  PNG (see [`MermaidRenderer/`](MermaidRenderer/README.md)).
 - **Comment / quote for the next input:** select text **directly in the chat**
   using native long-press/drag handles, then choose **Comment** from the system
   selection menu (Copy remains available). User bubbles, assistant paragraphs,
@@ -201,7 +271,9 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   in-place selection. A reply's consecutive paragraphs, headings and lists
   (lists holding only prose) are one selectable text, so a drag selection
   crosses them; code blocks, tables, quotes and rules are texts of their own,
-  and a selection stops at them and never crosses messages. While a reply
+  and a selection stops at them and never crosses messages. Selections in
+  the Files / Changes sheet's code (and rendered Markdown files) offer
+  Comment too; the editor opens over that sheet. While a reply
   streams, its arriving block stays separate until the reply settles, so only
   that block re-lays out per frame. The editor shows the frozen selected
   quote and asks only for the comment — no second selection step.
@@ -248,7 +320,7 @@ provider setup, offline recovery, existing sessions and archived sessions.
 For TestFlight/App Store preparation, signing and publication boundaries, see
 [`docs/operations/ios-release.md`](../../docs/operations/ios-release.md).
 
-Builds with Xcode 27 or newer, the version CI pins (the app targets iOS 26 and uses its Liquid Glass APIs).
+Builds with the Xcode pinned in [`.xcode-version`](../../.xcode-version), the one CI archives and tests with (the app targets iOS 26 and uses its Liquid Glass APIs).
 
 ```sh
 cd apps/ios
@@ -260,7 +332,11 @@ Or open `Cypher.xcodeproj` in Xcode and run. Dependencies (SPM, resolved
 automatically): [loro-swift 1.13.x](https://github.com/loro-dev/loro-swift)
 (matches the engine's loro 1.13), [swift-markdown](https://github.com/swiftlang/swift-markdown)
 (cmark-gfm: tables/strikethrough/tasklists — the same feature set as the
-desktop's pulldown-cmark config).
+desktop's pulldown-cmark config) and [SwiftMath 1.7.x](https://github.com/mgriebling/SwiftMath)
+(typesets LaTeX in replies; its math fonts add about 7 MB). Two offline web
+renderers ship as checked-in resource bundles built from pinned npm
+packages: [`DiffRenderer/`](DiffRenderer/README.md) and
+[`MermaidRenderer/`](MermaidRenderer/README.md) (about 3.6 MB).
 
 Simulator tests that exercise the real Keychain require local ad-hoc signing:
 use `CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=-` with `xcodebuild ... test`.
@@ -321,8 +397,23 @@ Run these commands from the repository root.
   `-demo -route chat:chat-veil -sheet subagents`.
   Child fixture: `-demo -route chat:demo-child-planner`.
   Script fixture: `-demo -route chat:chat-deploy`.
+  Math fixture (LaTeX in a reply): `-demo -route chat:chat-math`.
+  Diagram fixture (Mermaid in a reply): `-demo -route chat:chat-mermaid`.
+  File references, a file link, a diff fence and a round's changed files:
+  `-demo -route chat:chat-references`; add `-sheet round` (or
+  `round:README.md`) for the round's diff, `-sheet reference:Example.swift:44-45`
+  for a chip's file, `reference:notes/guide.md` / `page.html` / `diagram.svg`
+  / `icon.png` for the previews.
+  Artifacts fixture (an HTML and an SVG artifact, a plain HTML fence, then a
+  patch to the HTML page whose card opens it patched):
+  `-demo -route chat:chat-artifacts`.
+  Live explainer fixture (the page, then patches that apply, partly apply
+  and find no page): `-demo -route chat:chat-explainer`.
   Context recovery fixtures: `-demo -route space:space-recovery`; the live
   replay is `-demo -route chat:chat-recovery-live`.
+  Session list view menu (sort, Last active): `-demo -demo-history` adds
+  sessions from minutes to weeks old across projects, quick chats and
+  project-less sessions.
   Comment editor/list fixtures:
   `-demo -route chat:chat-tabs -sheet comment` (or `-sheet comments`).
 
@@ -340,7 +431,7 @@ Cypher/
                   bench rigs, Dev-bundle profile and interop probe
   Auth/           WorkOS/dev auth client, PKCE helpers, sign-in screen
   Notifications/  push registration and settings, payload models, banners
-  Home/           project list, project sessions, archived shelf, row actions
+  Home/           session list, project sessions, archived shelf, row actions
   Session/        session screen, new-session flow, side chats, subagents,
                   comments, connection notices
   Workspace/      Files / Changes browser over the host's workspace RPCs
@@ -348,7 +439,8 @@ Cypher/
                   and @ menus, model picker, question panel, attachments
   Transcript/     rows_for_entry port, transcript view, scroll state, veil,
                   turn scrubber, tool chips
-  Markdown/       incremental parser, highlighter, block views
+  Markdown/       incremental parser, highlighter, block views, math,
+                  Mermaid diagrams
   Theme/          theme.rs port: palette, fonts, motion, icons, appearance
   Shared/         sheet chrome, loaders, boot splash
   Models/         wire and registry entity types
@@ -368,10 +460,11 @@ mirrors and their vectors are listed in [protocol/README.md](../../protocol/READ
 
 | Desktop | iOS |
 | --- | --- |
-| Sidebar: Projects + Sessions | Project-first Home, owning device, then sessions |
-| Horizontal session tabs per project | Project detail: vertical session list (creation order) |
+| Sidebar: Projects + Sessions | Session-first Home: one list under day headings, project chips, search |
+| Sidebar view menu (device, last active, sort, order) | Same options in Home's sliders menu |
+| Horizontal session tabs per project | Project detail: vertical session list (the view menu's order) |
 | Tab close = archive | Swipe-to-archive |
-| Archived shelf under the sidebar list (open by default, Show-more paging, hover-swap Unarchive) | Same shelf under Home/space lists; unarchive is swipe-to-unarchive |
+| Archived shelf under the sidebar list (open by default, Show-more paging, hover-swap Unarchive) | Same shelf under Home (folded) and project lists; unarchive is swipe-to-unarchive |
 | Status word in the row corner (muted dots; Done keeps its pop; spinner rides bottom-right) | Same, same colors |
 | Composer `white_alpha(0.03)` pill + hairline | Liquid Glass pill (`glassEffect`) + hairline |
 | Harness brand SVG marks (icons.rs) | Same path data via a native SVG path parser (`BrandMarks.swift`) |

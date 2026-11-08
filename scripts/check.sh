@@ -14,8 +14,11 @@
 #   workflows  actionlint and the workflow policy (downloads actionlint)
 #   macos      macOS only: icon, workspace clippy (gpui included), UI tests, and the
 #              Rust/Swift preview vectors
-#   ios        swift-format lint and the iOS unit tests on a simulator (needs Xcode 27)
+#   ios        swift-format lint and the iOS unit tests on a simulator, with the
+#              Xcode pinned in .xcode-version
 #   all        fmt lint rust edge scripts runtime workflows, plus macos on macOS
+#
+# On a Mac, scripts/check-linux.sh runs the Linux-dependent stages in Docker.
 #
 # CARGO, PYTHON and NODE override the tools used (for example a wrapper that
 # serializes heavy builds).
@@ -29,7 +32,8 @@ NODE="${NODE:-node}"
 
 # Crates that build without gpui; the Linux CI job checks exactly this set.
 HEADLESS=(-p cypher -p cypher-env -p cypher-proto -p cypher-doc -p cypher-sync
-  -p cypher-net -p cypher-harness -p cypher-engine -p cypher-rpc -p cypher-update -p cypher-syntax)
+  -p cypher-net -p cypher-harness -p cypher-engine -p cypher-rpc -p cypher-update -p cypher-syntax
+  -p cypher-secrets -p cypher-trust)
 
 run() {
   if [[ -n "${GITHUB_ACTIONS:-}" ]]; then echo "::group::$*"; else echo "+ $*"; fi
@@ -115,12 +119,21 @@ stage_macos() {
     -o "$out/preview-vectors"
   run "$out/preview-vectors" protocol/vectors/stream-preview-v1.json \
     protocol/vectors/preview-reducer-v1.json
+  run xcrun swiftc -module-cache-path "$out/module-cache" apps/ios/Cypher/Sync/DeviceTrust.swift \
+    scripts/tests/device-trust-vectors.swift -o "$out/trust-vectors"
+  run "$out/trust-vectors" protocol/vectors/device-trust-v1.json
+  run xcrun swiftc -module-cache-path "$out/module-cache" apps/ios/Cypher/Sync/CommandSignature.swift \
+    scripts/tests/command-signing-vectors.swift -o "$out/command-vectors"
+  run "$out/command-vectors" protocol/vectors/command-signing-v1.json
   rm -rf "$out"
 }
 
 stage_ios() {
-  # Formatting is checked with the same Xcode the iOS tests pin; swift-format's
-  # output differs between toolchain versions.
+  # The Xcode pinned in .xcode-version, as in CI: swift-format's output and
+  # the compiler's verdicts differ between toolchain versions.
+  local selected
+  selected="$(bash scripts/ci/select-xcode.sh)" || return 1
+  export DEVELOPER_DIR="${selected##*DEVELOPER_DIR=}"
   run xcrun swift-format lint --strict --recursive --parallel apps/ios/Cypher apps/ios/CypherTests \
     apps/ios/CypherUITests
   run bash scripts/ci/ios-unit-tests.sh
@@ -137,7 +150,7 @@ stage_all() {
   if [[ "$(uname -s)" == Darwin ]]; then stage_macos; fi
 }
 
-[[ $# -gt 0 ]] || { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[[ $# -gt 0 ]] || { awk 'NR > 1 && !/^#/ {exit} NR > 1' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 for stage in "$@"; do
   case "$stage" in
     fmt | lint | rust | edge | scripts | runtime | workflows | macos | ios | all) "stage_$stage" ;;

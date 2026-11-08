@@ -47,6 +47,30 @@ export class Notifications {
   private recipients(): Recipient[] { return this.get<Recipient[]>("recipients") ?? []; }
   private settings(): NotificationSettings { return this.get<NotificationSettings>("settings") ?? defaultNotificationSettings(); }
   private target(chatId: string): SessionTarget | undefined { return this.get<SessionTarget>(`target:${chatId}`); }
+  /** The session went (back) to work at host time `at`: any question asked
+   * before it has been answered. */
+  private resumed(chatId: string, at: number): void {
+    if (at > (this.get<number>(`resumedAt:${chatId}`) ?? 0)) this.set(`resumedAt:${chatId}`, at);
+  }
+  /** Claim the right to announce `run/kind`, once. Both the host event and
+   * the registry mirror report the same transition, and either may replay.
+   *
+   * One run completes or fails once, but it can ask several questions: the
+   * run id survives `awaitingInput → working`. A question is new only when a
+   * resume newer than the last announced question was seen and it was asked
+   * after that resume. Every stamp is the host's session clock, so a replayed
+   * or late mirror of an answered question stays a duplicate. */
+  private claim(chatId: string, run: string, kind: NoticeKind, at: number): boolean {
+    const key = `${run}/${kind}`;
+    if (this.get<string>(`enqueued:${chatId}`) === key) {
+      const asked = this.get<number>(`enqueuedAt:${chatId}`) ?? 0;
+      const resumed = this.get<number>(`resumedAt:${chatId}`) ?? 0;
+      if (kind !== "input" || resumed <= asked || at <= resumed) return false;
+    }
+    this.set(`enqueued:${chatId}`, key);
+    this.set(`enqueuedAt:${chatId}`, at);
+    return true;
+  }
 
   /** Apply one activity report, whoever carried it.
    *
@@ -247,6 +271,7 @@ export class Notifications {
         if (previous === status && !childrenSettled) return json({ ok: true, duplicate: true });
         this.set(`eventStatus:${chatId}`, status);
         if (status === "working") {
+          this.resumed(chatId, body.updatedAt);
           this.set(`run:${chatId}`, typeof body.startedAt === "number" ? String(body.startedAt) : crypto.randomUUID());
           return json({ ok: true });
         }
@@ -271,8 +296,7 @@ export class Notifications {
           expires: Date.now() + (kind === "input" ? 8 * 3_600_000 : 600_000),
           recipients, attempt: 0, sessionStatus: status, source: "event", eventAt: body.updatedAt
         };
-        if (this.get<string>(`enqueued:${chatId}`) === `${run}/${kind}`) return json({ ok: true, duplicate: true });
-        this.set(`enqueued:${chatId}`, `${run}/${kind}`);
+        if (!this.claim(chatId, run, kind, body.updatedAt)) return json({ ok: true, duplicate: true });
         for (const pending of this.events()) if (pending.notice.chatId === chatId) this.remove(pending.notice.id);
         // An event arriving while the session is already visible is read too.
         // Remember the dedupe marker even if the viewer leaves before flush.
@@ -365,6 +389,7 @@ export class Notifications {
       const eventAt = childrenSettled ? children.latest : after.fields.updatedAt;
       if (!before || before.deleted || (previousStatus === status && !childrenSettled) ||
           typeof eventAt !== "number" || Math.abs(now - eventAt) > 300_000) continue;
+      if (status === "working") { this.resumed(chatId, eventAt); continue; }
       let kind: NoticeKind;
       if (status === "awaitingInput") kind = "input";
       else if (status === "errored") kind = "failed";
@@ -385,8 +410,7 @@ export class Notifications {
       if (!run) { run = crypto.randomUUID(); this.set(key, run); }
       const recipients = this.recipients().map(({ id, lease }) => ({ id, lease }));
       if (!recipients.length) continue;
-      if (this.get<string>(`enqueued:${chatId}`) === `${run}/${kind}`) continue;
-      this.set(`enqueued:${chatId}`, `${run}/${kind}`);
+      if (!this.claim(chatId, run, kind, eventAt)) continue;
       const notice: Notice = {
         id: crypto.randomUUID(), chatId, projectId: chat.fields.spaceId, kind,
         child: !!chat.fields.child, run, at: now, expires: now + (kind === "input" ? 8 * 3_600_000 : 600_000),

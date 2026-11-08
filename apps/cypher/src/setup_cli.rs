@@ -24,7 +24,7 @@ pub struct SetupOptions {
 
 pub(crate) struct LiveEngine {
     pub(crate) client: RpcClient,
-    scope: WorkspaceScope,
+    pub(crate) scope: WorkspaceScope,
     device: String,
 }
 
@@ -58,7 +58,7 @@ pub(crate) fn runtime_label(data: &Path) -> String {
         .unwrap_or_else(|| "installed (version unavailable)".into())
 }
 
-fn clean_label(label: &str) -> String {
+pub(crate) fn clean_label(label: &str) -> String {
     label
         .chars()
         .filter(|ch| !ch.is_control())
@@ -66,14 +66,14 @@ fn clean_label(label: &str) -> String {
         .collect()
 }
 
-type Cancel = tokio::sync::watch::Receiver<bool>;
+pub(crate) type Cancel = tokio::sync::watch::Receiver<bool>;
 fn check_cancel(cancel: &Cancel) -> anyhow::Result<()> {
     if *cancel.borrow() {
         bail!("Setup canceled. Run `cypher setup` to continue.");
     }
     Ok(())
 }
-async fn cancelled(mut cancel: Cancel) {
+pub(crate) async fn cancelled(mut cancel: Cancel) {
     let _ = cancel.wait_for(|stop| *stop).await;
 }
 
@@ -567,6 +567,7 @@ async fn run_inner(
     );
     if remote {
         println!("\nIn Cypher desktop, select this device and configure Providers / MCP.");
+        println!("To pair it with your other devices, run `cypher pair`.");
     } else {
         println!("\nRun `cypher setup` when you want to connect this device to desktop.");
     }
@@ -614,6 +615,9 @@ pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
                 "Desktop:  {}",
                 if online { "connected" } else { "reconnecting" }
             );
+            if let Some(pairing) = crate::pair_cli::status_line(&live.client).await {
+                println!("Pairing:  {pairing}");
+            }
         }
     } else {
         println!("Engine:   stopped");

@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use cypher_doc::MessageRole;
-use cypher_engine::{EngineCore, capture_tree_diff};
+use cypher_engine::{EngineCore, capture_tree_diff, snapshot_tree};
 use cypher_proto::{HarnessId, RunRequest, SessionStatus, TurnChanges};
 
 use common::{entries, feed_rig, run_request, status, text, wait_for};
@@ -58,6 +58,52 @@ fn paths(changes: &TurnChanges) -> Vec<(&str, &str)> {
         .iter()
         .map(|file| (file.path.as_str(), file.status.as_str()))
         .collect()
+}
+
+/// Chats start rounds at the same moment: each snapshot reads its own
+/// checkout, never another's index (an empty tree or a lock-out otherwise).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_snapshots_keep_their_own_trees() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut repos = Vec::new();
+    for n in 0..8 {
+        let repo = dir.path().join(format!("repo-{n}"));
+        common::init_repo(&repo, &format!("repo {n}\n")).await;
+        std::fs::write(repo.join("untracked.txt"), format!("{n}\n")).expect("untracked");
+        repos.push(repo);
+    }
+    let mut expected = Vec::new();
+    for repo in &repos {
+        expected.push(snapshot_tree(repo).await.expect("lone snapshot"));
+    }
+    for _ in 0..10 {
+        // Released together on separate workers, as two chats' turn starts are.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(repos.len()));
+        let tasks: Vec<_> = repos
+            .iter()
+            .cloned()
+            .map(|repo| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("runtime");
+                    barrier.wait();
+                    runtime.block_on(snapshot_tree(&repo))
+                })
+            })
+            .collect();
+        let trees: Vec<String> = tasks
+            .into_iter()
+            .map(|task| {
+                task.join()
+                    .expect("snapshot thread")
+                    .expect("concurrent snapshot")
+            })
+            .collect();
+        assert_eq!(trees, expected);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

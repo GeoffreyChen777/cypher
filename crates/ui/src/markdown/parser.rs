@@ -13,7 +13,7 @@
 
 use std::ops::Range;
 
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 // ---------------------------------------------------------------------------
 // Tree model
@@ -28,6 +28,19 @@ pub struct InlineStyle {
     pub strikethrough: bool,
     /// Destination URL when inside a link.
     pub link: Option<String>,
+    /// The run is a LaTeX formula (its text is the TeX source), not prose.
+    pub math: Option<MathKind>,
+}
+
+/// How a formula was delimited: `$…$` / `\(…\)` set inline in the text
+/// style, `$$…$$` / `\[…\]` in the display style. The renderer gives display
+/// math in a paragraph a centered row of its own; inside headings and table
+/// cells it stays in the line (in display style). The tree keeps it as a run
+/// either way, so a paragraph stays one block for the incremental parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MathKind {
+    Inline,
+    Display,
 }
 
 /// One run of identically-styled inline text.
@@ -52,6 +65,24 @@ pub enum Block {
     CodeBlock {
         language: Option<String>,
         code: String,
+        /// The fence has its closing line (indented blocks always do). A
+        /// fence still streaming has none yet, so renderers that turn the
+        /// code into something else (diagrams) wait for this.
+        closed: bool,
+    },
+    /// A fence tagged `artifact` (```` ```html artifact title="…" ````): a
+    /// page the model wrote to be viewed, not read. The chat shows a card
+    /// that opens it in the side panel ([`super::artifact`]).
+    Artifact {
+        kind: ArtifactKind,
+        title: Option<String>,
+        code: String,
+        /// The closing fence has arrived (`false` while it streams).
+        closed: bool,
+        /// Tagged `artifact-patch`: `code` is SEARCH/REPLACE hunks that edit
+        /// the latest version of the page titled `title`
+        /// ([`super::artifact::patch`]). A patch always has a title.
+        patch: bool,
     },
     BlockQuote {
         children: Vec<Block>,
@@ -67,6 +98,108 @@ pub enum Block {
         align: Vec<TableAlign>,
     },
     Rule,
+}
+
+/// What an artifact renders as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArtifactKind {
+    Html,
+    Svg,
+}
+
+impl ArtifactKind {
+    /// The kind a fence language names; `None` for one that doesn't render.
+    pub fn for_language(language: &str) -> Option<Self> {
+        match language.to_ascii_lowercase().as_str() {
+            "html" | "htm" | "xhtml" => Some(Self::Html),
+            "svg" => Some(Self::Svg),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Html => "HTML",
+            Self::Svg => "SVG",
+        }
+    }
+}
+
+/// An artifact fence's info string, `html artifact title="Sorting"`: its kind
+/// and title. These fence rules are mirrored by the iPhone app
+/// (`apps/ios/Cypher/Markdown/ArtifactFence.swift`; see `protocol/README.md`). `None` unless a bare `artifact` word marks it. Without a
+/// language the page is HTML; a language that doesn't render (`python
+/// artifact`) stays an ordinary code block. A bare `artifact-patch` marks a
+/// patch to the page named by its `title=`, which it needs.
+fn artifact_info(info: &str) -> Option<(ArtifactKind, Option<String>, bool)> {
+    let words = info_words(info);
+    let marker = |key: &str| {
+        key.eq_ignore_ascii_case("artifact") || key.eq_ignore_ascii_case("artifact-patch")
+    };
+    let patch = words
+        .iter()
+        .any(|(key, value)| value.is_none() && key.eq_ignore_ascii_case("artifact-patch"));
+    if !words
+        .iter()
+        .any(|(key, value)| value.is_none() && marker(key))
+    {
+        return None;
+    }
+    let kind = match words
+        .iter()
+        .find(|(key, value)| value.is_none() && !marker(key))
+    {
+        Some((language, _)) => ArtifactKind::for_language(language)?,
+        None => ArtifactKind::Html,
+    };
+    let title = words
+        .into_iter()
+        .find(|(key, value)| value.is_some() && key.eq_ignore_ascii_case("title"))
+        .and_then(|(_, value)| value)
+        .map(|title| title.trim().to_string())
+        .filter(|title| !title.is_empty());
+    if patch && title.is_none() {
+        return None;
+    }
+    Some((kind, title, patch))
+}
+
+/// An info string's words: bare ones (`html`) and `key=value` pairs whose
+/// value may be quoted (`title="Two words"`, `title='x'`).
+fn info_words(info: &str) -> Vec<(String, Option<String>)> {
+    let mut words = Vec::new();
+    let mut chars = info.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        if chars.peek().is_none() {
+            return words;
+        }
+        let mut key = String::new();
+        while let Some(c) = chars.next_if(|c| !c.is_whitespace() && *c != '=') {
+            key.push(c);
+        }
+        if chars.next_if_eq(&'=').is_none() {
+            words.push((key, None));
+            continue;
+        }
+        let mut value = String::new();
+        match chars.next_if(|c| *c == '"' || *c == '\'') {
+            Some(quote) => {
+                for c in chars.by_ref() {
+                    if c == quote {
+                        break;
+                    }
+                    value.push(c);
+                }
+            }
+            None => {
+                while let Some(c) = chars.next_if(|c| !c.is_whitespace()) {
+                    value.push(c);
+                }
+            }
+        }
+        words.push((key, Some(value)));
+    }
 }
 
 /// GFM column alignment for a table (mdast `align`; `None` renders as Left).
@@ -108,17 +241,24 @@ impl BlockTree {
 // ---------------------------------------------------------------------------
 
 pub fn options() -> Options {
-    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
+    Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_MATH
 }
 
 /// Parse a whole source into a [`BlockTree`].
 pub fn parse_full(source: &str) -> BlockTree {
+    let (rewritten, paren_math) = rewrite_tex_delimiters(source).unzip();
+    let source = rewritten.as_deref().unwrap_or(source);
     let events: Vec<(Event, Range<usize>)> = Parser::new_ext(source, options())
         .into_offset_iter()
         .collect();
     let mut cur = Cursor {
+        source,
         events: &events,
         ix: 0,
+        paren_math: paren_math.as_deref().unwrap_or(&[]),
     };
     let mut blocks = Vec::new();
     while let Some((event, range)) = cur.peek() {
@@ -146,9 +286,98 @@ pub fn parse_full(source: &str) -> BlockTree {
     BlockTree { blocks }
 }
 
+/// Rewrite TeX's own `\(…\)` and `\[…\]` math delimiters — models write
+/// them as often as dollars — into the dollar forms pulldown's math extension
+/// reads. CommonMark sees `\(` as an escaped paren, so a first parse finds
+/// exactly the escapes that are real (code spans and fences keep theirs) and
+/// only pairs that open and close inside one block are touched.
+///
+/// The rewrite keeps every byte offset: `\(`→`${` and `\)`→`}$` (the braces
+/// only group the formula), `\[`/`\]`→`$$`. Block ranges therefore still
+/// index the caller's source, which the incremental parser relies on. Also
+/// returns where each `\(` stood (ascending), so the parser can drop the
+/// grouping braces again. `None` when there is nothing to rewrite — the
+/// common case costs one `contains`.
+fn rewrite_tex_delimiters(source: &str) -> Option<(String, Vec<usize>)> {
+    if !source.contains("\\(") && !source.contains("\\[") {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    let mut edits: Vec<(usize, &'static str)> = Vec::new();
+    // The pending opener: its backslash's offset and the paren it waits for.
+    let mut open: Option<(usize, u8)> = None;
+    for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
+        match event {
+            // pulldown drops an escape's backslash and starts a fresh text
+            // event at the escaped char, so a real `\(` is a text event that
+            // begins with `(` right after a `\`.
+            Event::Text(_) => {
+                let at = range.start;
+                if at == 0 || bytes[at - 1] != b'\\' {
+                    continue;
+                }
+                match (bytes[at], open) {
+                    (b'(', _) => open = Some((at - 1, b')')),
+                    (b'[', _) => open = Some((at - 1, b']')),
+                    (closer, Some((start, wanted))) if closer == wanted => {
+                        let (open_with, close_with) = if wanted == b')' {
+                            ("${", "}$")
+                        } else {
+                            ("$$", "$$")
+                        };
+                        edits.push((start, open_with));
+                        edits.push((at - 1, close_with));
+                        open = None;
+                    }
+                    _ => {}
+                }
+            }
+            // Emphasis and links nest inside a formula's span harmlessly —
+            // the rewritten source parses them as math — but a formula never
+            // crosses a block boundary.
+            Event::Start(
+                Tag::Emphasis
+                | Tag::Strong
+                | Tag::Strikethrough
+                | Tag::Link { .. }
+                | Tag::Image { .. },
+            )
+            | Event::End(
+                TagEnd::Emphasis
+                | TagEnd::Strong
+                | TagEnd::Strikethrough
+                | TagEnd::Link
+                | TagEnd::Image,
+            )
+            | Event::SoftBreak
+            | Event::HardBreak
+            | Event::Code(_)
+            | Event::InlineHtml(_) => {}
+            _ => open = None,
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    let mut out = source.as_bytes().to_vec();
+    let mut parens = Vec::new();
+    for (at, with) in edits {
+        if with == "${" {
+            parens.push(at);
+        }
+        out[at..at + 2].copy_from_slice(with.as_bytes());
+    }
+    // Two-byte ASCII swapped for two-byte ASCII: still valid UTF-8.
+    Some((String::from_utf8(out).ok()?, parens))
+}
+
 struct Cursor<'a, 'e> {
+    /// The parsed text, which event ranges index.
+    source: &'a str,
     events: &'a [(Event<'e>, Range<usize>)],
     ix: usize,
+    /// Offsets of formulas written `\(…\)` ([`rewrite_tex_delimiters`]).
+    paren_math: &'a [usize],
 }
 
 impl<'a, 'e> Cursor<'a, 'e> {
@@ -173,6 +402,27 @@ impl<'a, 'e> Cursor<'a, 'e> {
     }
 }
 
+/// Whether a fenced block's source — its event range, opening fence through
+/// closing fence, with any container markers — ends in a closing fence: a
+/// line of at least the opener's run of the opener's character.
+fn fence_closed(block: &str) -> bool {
+    fn strip(line: &str) -> &str {
+        line.trim_start_matches([' ', '\t', '>']).trim_end()
+    }
+    let mut lines = block.trim_end_matches(['\n', '\r']).lines();
+    let Some(opener) = lines.next().map(strip) else {
+        return false;
+    };
+    let Some(fence) = opener.chars().next().filter(|c| matches!(c, '`' | '~')) else {
+        return false;
+    };
+    let run = opener.chars().take_while(|&c| c == fence).count();
+    lines
+        .last()
+        .map(strip)
+        .is_some_and(|closer| closer.chars().count() >= run && closer.chars().all(|c| c == fence))
+}
+
 fn is_block_tag(tag: &Tag) -> bool {
     matches!(
         tag,
@@ -191,6 +441,10 @@ fn is_block_tag(tag: &Tag) -> bool {
 /// Consume a `Start(tag)` and everything through its matching `End`, producing
 /// block(s). Unknown containers are transparent (children splice in).
 fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
+    let range = cur
+        .peek()
+        .map(|(_, range)| range.clone())
+        .unwrap_or_default();
     let Some(Event::Start(tag)) = cur.next_event() else {
         return Vec::new();
     };
@@ -205,6 +459,14 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
             runs: parse_inline_container(cur, &InlineStyle::default()),
         }],
         Tag::CodeBlock(kind) => {
+            let closed = match &kind {
+                CodeBlockKind::Fenced(_) => cur.source.get(range).is_some_and(fence_closed),
+                CodeBlockKind::Indented => true,
+            };
+            let artifact = match &kind {
+                CodeBlockKind::Fenced(info) => artifact_info(info),
+                CodeBlockKind::Indented => None,
+            };
             let language = match kind {
                 CodeBlockKind::Fenced(info) => {
                     let lang = info.split_whitespace().next().unwrap_or("");
@@ -228,7 +490,20 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
             if code.ends_with('\n') {
                 code.pop();
             }
-            vec![Block::CodeBlock { language, code }]
+            if let Some((kind, title, patch)) = artifact {
+                return vec![Block::Artifact {
+                    kind,
+                    title,
+                    code,
+                    closed,
+                    patch,
+                }];
+            }
+            vec![Block::CodeBlock {
+                language,
+                code,
+                closed,
+            }]
         }
         Tag::BlockQuote(_) => vec![Block::BlockQuote {
             children: parse_block_sequence(cur),
@@ -388,6 +663,7 @@ fn parse_inline_container(cur: &mut Cursor, style: &InlineStyle) -> Vec<InlineRu
 }
 
 fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &InlineStyle) {
+    let start = cur.peek().map_or(0, |(_, range)| range.start);
     let Some(event) = cur.next_event() else {
         return;
     };
@@ -403,6 +679,15 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
             s.code = true;
             push(runs, t.into_string(), s);
         }
+        Event::InlineMath(t) => {
+            let mut tex = t.into_string();
+            // `\(x\)` was parsed as `${x}$`: the braces are ours, not the TeX.
+            if cur.paren_math.binary_search(&start).is_ok() {
+                tex = tex[1..tex.len() - 1].to_string();
+            }
+            push(runs, tex, math_style(MathKind::Inline));
+        }
+        Event::DisplayMath(t) => push(runs, t.into_string(), math_style(MathKind::Display)),
         Event::SoftBreak => push(runs, " ".into(), style.clone()),
         Event::HardBreak => push(runs, "\n".into(), style.clone()),
         Event::Html(t) | Event::InlineHtml(t) => push(runs, t.into_string(), style.clone()),
@@ -430,6 +715,15 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
     }
 }
 
+/// A formula's run style. Math ignores the surrounding emphasis and link: it
+/// is set by the TeX engine, not the prose fonts.
+fn math_style(kind: MathKind) -> InlineStyle {
+    InlineStyle {
+        math: Some(kind),
+        ..InlineStyle::default()
+    }
+}
+
 /// Promote bare `http(s)://` URLs into link runs — GFM's autolink extension,
 /// which pulldown-cmark has no option for (agents paste naked PR/issue URLs
 /// constantly; user report: the link isn't clickable). Runs already inside a
@@ -438,7 +732,7 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
 fn autolink_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out = Vec::with_capacity(runs.len());
     for run in runs {
-        if run.style.link.is_some() || run.style.code {
+        if run.style.link.is_some() || run.style.code || run.style.math.is_some() {
             out.push(run);
         } else {
             push_text_autolinked(&mut out, &run.text, &run.style);
@@ -530,7 +824,10 @@ fn merge_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out: Vec<InlineRun> = Vec::with_capacity(runs.len());
     for run in runs {
         match out.last_mut() {
-            Some(last) if last.style == run.style => last.text.push_str(&run.text),
+            // Two adjacent formulas stay two formulas.
+            Some(last) if last.style == run.style && run.style.math.is_none() => {
+                last.text.push_str(&run.text)
+            }
             _ => out.push(run),
         }
     }
@@ -699,7 +996,7 @@ impl IncrementalParser {
         // rules and tables have no inline tail to mend.
         if matches!(
             last.block,
-            Block::CodeBlock { .. } | Block::Rule | Block::Table { .. }
+            Block::CodeBlock { .. } | Block::Artifact { .. } | Block::Rule | Block::Table { .. }
         ) {
             return;
         }

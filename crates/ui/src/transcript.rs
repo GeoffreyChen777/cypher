@@ -59,8 +59,10 @@ mod rows;
 pub use rows::*;
 mod chips;
 pub use chips::*;
+mod code_ref;
 mod highlight;
 use highlight::*;
+mod artifacts;
 mod attachments;
 pub mod bot_plan;
 mod find;
@@ -69,6 +71,7 @@ mod render;
 mod scroll;
 use render::*;
 mod comments;
+mod progress;
 mod recovery;
 mod translation_cue;
 mod turn_changes;
@@ -216,6 +219,12 @@ pub struct Transcript {
     show_original: std::collections::HashSet<SharedString>,
     /// Shift held over a translated message, and the switch's entrance.
     shift_cue: translation_cue::ShiftCue,
+    /// What changed between the progress readings shown, so the working
+    /// trailer's bar animates the change.
+    progress_motion: progress::ProgressMotion,
+    /// The progress bar dot the pointer is on (its key), so only one tip
+    /// shows at a time.
+    progress_hover: Option<SharedString>,
     /// Streaming fade veils, one per live markdown row (dropped on completion).
     veils: HashMap<SharedString, Rc<RefCell<RowVeil>>>,
     /// Live rows present in the transcript's REPLAY after (re)attaching to a
@@ -280,6 +289,19 @@ pub struct Transcript {
     /// temporary panel so a side chat beside the main transcript (or two side
     /// chats) never collide in the selection registry.
     scope: crate::markdown::selection::SelectionScope,
+    /// Takes the replies' link clicks before the system does (the shell's
+    /// file links); `None` opens every link through the system.
+    link_handler: Option<crate::markdown::render::LinkHandler>,
+    /// Opens the replies' artifacts (the shell's side panel); `None` shows
+    /// their cards inert.
+    artifact_handler: Option<crate::markdown::artifact::ArtifactHandler>,
+    /// Takes the named pages' new revisions as they land.
+    artifact_revised: Option<crate::markdown::artifact::ArtifactRevised>,
+    /// The named pages' newest revisions, which their cards open.
+    artifacts: Rc<RefCell<artifacts::ArtifactIndex>>,
+    /// Armed at attach like [`Self::veil_attach_pending`]: the replay's
+    /// pages index without reloading anything.
+    artifacts_attach_pending: bool,
     /// Embedded (temporary Side Chat) layout: narrow-panel row gutters and a
     /// smaller first-row top inset instead of the main surface's titlebar
     /// chrome gap. Also disables the annotation surface (no Comment pill, no
@@ -302,6 +324,9 @@ pub struct Transcript {
     synced_revision: Option<SyncedRevision>,
     /// Hovered rail tick (grows + shows the preview card).
     rail_hover: Option<usize>,
+    /// The replies' file-reference chips: the hovered one's preview card
+    /// and the resolved files behind it.
+    code_refs: code_ref::CodeRefPreview,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
     /// strip (zeron chat-view.tsx `group-hover`; the rows report hover
     /// themselves). Keyed by ROW so a row→row move within one entry can't
@@ -437,6 +462,27 @@ impl Transcript {
         )
     }
 
+    /// Offer the replies' link clicks to `handler` before the system.
+    pub fn set_link_handler(&mut self, handler: crate::markdown::render::LinkHandler) {
+        self.link_handler = Some(handler);
+    }
+
+    /// Open the replies' artifacts (and HTML fences' Preview) with `handler`
+    /// — a named page at its newest revision — and hand `revised` each
+    /// revision as it lands.
+    pub fn set_artifact_handler(
+        &mut self,
+        handler: crate::markdown::artifact::ArtifactHandler,
+        revised: crate::markdown::artifact::ArtifactRevised,
+    ) {
+        let index = self.artifacts.clone();
+        self.artifact_handler = Some(Rc::new(move |artifact, window, cx| {
+            let artifact = index.borrow().latest(artifact);
+            handler(artifact, window, cx)
+        }));
+        self.artifact_revised = Some(revised);
+    }
+
     /// A temporary Side Chat transcript: the EXISTING
     /// renderer against a Side Chat fork state, with a fresh selection scope
     /// (never colliding with the main transcript or another panel), the rail
@@ -510,6 +556,8 @@ impl Transcript {
             toggle_pins: HashMap::new(),
             show_original: std::collections::HashSet::new(),
             shift_cue: translation_cue::ShiftCue::new(cx),
+            progress_motion: Default::default(),
+            progress_hover: None,
             veils: HashMap::new(),
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,
@@ -532,11 +580,17 @@ impl Transcript {
             prompt_nav: None,
             rail_enabled,
             scope,
+            link_handler: None,
+            artifact_handler: None,
+            artifact_revised: None,
+            artifacts: Rc::default(),
+            artifacts_attach_pending: true,
             embedded,
             bottom_clearance: 0.0,
             viewport_size: None,
             synced_revision: None,
             rail_hover: None,
+            code_refs: Default::default(),
             hovered_entry: None,
             copied_code: None,
             copied_clear: None,

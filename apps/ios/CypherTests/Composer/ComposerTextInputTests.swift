@@ -84,4 +84,27 @@ final class ComposerTextInputTests: XCTestCase {
         XCTAssertNotNil(view.markedTextRange)
         view.unmarkText()
     }
+
+    func testHardwareKeyboardSendAndStopAreTheEditorsOwnPriorityCommands() {
+        let view = ComposerUITextView()
+        XCTAssertFalse(
+            view.keyCommands?.contains { $0.modifierFlags == .command } ?? false,
+            "An editor without actions claims no ⌘ keys")
+        var sent = 0
+        var stopped = 0
+        view.onCommandReturn = { sent += 1 }
+        view.onCommandPeriod = { stopped += 1 }
+        let commands = view.keyCommands ?? []
+        let send = commands.first { $0.input == "\r" && $0.modifierFlags == .command }
+        let stop = commands.first { $0.input == "." && $0.modifierFlags == .command }
+        XCTAssertEqual(send?.title, "Send")
+        XCTAssertEqual(stop?.title, "Stop")
+        // Ahead of text input, which keeps Return for itself.
+        XCTAssertEqual(send?.wantsPriorityOverSystemBehavior, true)
+        XCTAssertEqual(stop?.wantsPriorityOverSystemBehavior, true)
+        if let action = send?.action { view.perform(action) }
+        if let action = stop?.action { view.perform(action) }
+        XCTAssertEqual(sent, 1)
+        XCTAssertEqual(stopped, 1)
+    }
 }

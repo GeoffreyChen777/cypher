@@ -23,8 +23,11 @@ struct CypherApp: App {
         }
     }
 
+    /// The main window's scene: Home (RootView).
+    static let mainWindowID = "main"
+
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: Self.mainWindowID) {
             RootView()
                 .environment(model)
                 // Monochrome controls: glass buttons, toolbar icons, and
@@ -50,6 +53,16 @@ struct CypherApp: App {
                         model.foregrounded()
                     }
                 }
+        }
+        .commands { CypherCommands() }
+
+        // iPad: a session in a window of its own ("Open in New Window").
+        WindowGroup("Session", id: SessionWindow.id, for: String.self) { $chatId in
+            SessionWindow(chatId: chatId)
+                .environment(model)
+                .tint(Theme.text)
+                .background(Theme.bg)
+                .modifier(AppAppearanceModifier())
         }
     }
 }

@@ -121,6 +121,52 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Select `range` whole, the caret at its start when `reversed`. A chip
+    /// it touches is taken whole.
+    pub(super) fn select_span(
+        &mut self,
+        range: Range<usize>,
+        reversed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_range = self.projection.normalize_range(range);
+        self.selection_reversed = reversed;
+        self.follow_cursor = true;
+        self.reset_blink();
+        cx.emit(TextInputEvent::CursorMoved);
+        cx.notify();
+    }
+
+    /// The word or line around `offset`; `chip` (the raw range of a chip under
+    /// the pointer) is one word. Words break as in transcript text. A secret
+    /// field's units are the whole field: its word breaks would show through
+    /// the mask.
+    pub(super) fn unit_range_at(
+        &self,
+        unit: SelectUnit,
+        offset: usize,
+        chip: Option<Range<usize>>,
+    ) -> Range<usize> {
+        match unit {
+            SelectUnit::Char => offset..offset,
+            _ if self.secret => 0..self.content.len(),
+            SelectUnit::Word => chip
+                .unwrap_or_else(|| crate::markdown::selection::word_range(&self.content, offset)),
+            SelectUnit::Line => self.line_range_at(offset),
+        }
+    }
+
+    /// Drag a word/line selection onto `target`, the unit under the pointer:
+    /// the pressed span joined with it, the caret on the moving end.
+    pub(super) fn extend_unit_selection(&mut self, target: Range<usize>, cx: &mut Context<Self>) {
+        let origin = self.drag_origin.clone();
+        if target.start < origin.start {
+            self.select_span(target.start..origin.end, true, cx);
+        } else {
+            self.select_span(origin.start..target.end.max(origin.end), false, cx);
+        }
+    }
+
     fn previous_boundary(&self, offset: usize) -> usize {
         if let Some(boundary) = self.projection.previous_boundary(offset) {
             return boundary;

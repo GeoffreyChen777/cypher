@@ -91,6 +91,11 @@ final class CommentDrafts {
     private(set) var owner: String?
     var presented = false
     var editor: CommentSource?
+    /// Where the editor shows: over the session, or over the Files / Changes
+    /// sheet while that is up (a view can't present a sheet from under one).
+    var presenter = Presenter.session
+
+    enum Presenter { case session, workspace }
 
     func bind(to chatId: String) {
         guard owner != chatId else { return }
@@ -181,7 +186,7 @@ extension MDBlock {
     var commentText: String {
         switch self {
         case .paragraph(let runs), .heading(_, let runs): return runs.map(\.text).joined()
-        case .codeBlock(_, let code): return code
+        case .codeBlock(_, let code, _), .artifact(_, _, let code, _, _): return code
         case .blockquote(let blocks): return blocks.map(\.commentText).joined(separator: "\n\n")
         case .list(let start, let items):
             return items.enumerated().map { index, item in

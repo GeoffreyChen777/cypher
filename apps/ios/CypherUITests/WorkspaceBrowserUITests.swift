@@ -70,6 +70,10 @@ final class WorkspaceBrowserUITests: XCTestCase {
         let readme = app.buttons["workspace-item-README.md"]
         XCTAssertTrue(readme.waitForExistence(timeout: 5))
         readme.tap()
+        // Markdown opens rendered, its source a menu pick away.
+        XCTAssertTrue(app.descendants(matching: .any)["workspace-markdown"].waitForExistence(timeout: 5))
+        app.buttons["workspace-preview-toggle"].tap()
+        app.buttons["Source"].tap()
         XCTAssertTrue(code.waitForExistence(timeout: 5))
         XCTAssertTrue(
             code.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Read-only file browsing")).firstMatch

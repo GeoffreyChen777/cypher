@@ -62,6 +62,35 @@ fn every_default_shortcut_binds_on_this_platform() {
     }
 }
 
+#[gpui::test]
+fn the_files_editor_saves_on_mod_s_despite_the_sidebar_shortcut(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        apply_keymap(cx, &crate::prefs::KeymapConfig::default());
+        let keystroke = Keystroke::parse(&platform_combo("mod-s")).unwrap();
+        let resolve = |contexts: &[gpui::KeyContext]| {
+            cx.key_bindings()
+                .borrow()
+                .bindings_for_input(std::slice::from_ref(&keystroke), contexts)
+                .0
+                .first()
+                .map(|binding| binding.action().name())
+        };
+        let editor = [
+            gpui::KeyContext::parse("Workspace").unwrap(),
+            gpui::KeyContext::parse(crate::files::editor::KEY_CONTEXT).unwrap(),
+        ];
+        assert_eq!(
+            resolve(&editor),
+            Some(gpui::Action::name(&crate::files::editor::Save))
+        );
+        // Elsewhere the default still toggles the sidebar.
+        assert_eq!(
+            resolve(&[gpui::KeyContext::parse("Workspace").unwrap()]),
+            Some(gpui::Action::name(&ToggleSidebar))
+        );
+    });
+}
+
 fn test_chat(id: &str, archived: bool) -> cypher_proto::Chat {
     cypher_proto::Chat {
         id: id.into(),

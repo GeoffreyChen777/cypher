@@ -146,8 +146,7 @@ impl Shell {
                 )
                 .tooltip(move |_, cx| cx.new(|_| FindTooltip(tooltip.into())).into())
         };
-        let bar = div()
-            .id("find-bar")
+        let bar = crate::markdown::render::shield_selection(div().id("find-bar"))
             .h(px(34.0))
             .flex()
             .flex_row()

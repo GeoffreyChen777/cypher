@@ -38,6 +38,16 @@ fn engine_identity_is_not_forwardable() {
     assert!(forwardable(methods::LIST_WORKSPACE_FILES));
     assert!(forwardable(methods::READ_WORKSPACE_FILE));
     assert!(forwardable(methods::WRITE_WORKSPACE_FILE));
+    for method in [
+        methods::READ_WORKSPACE_FILE_CHUNK,
+        methods::CREATE_WORKSPACE_ENTRY,
+        methods::WRITE_WORKSPACE_FILE_CHUNK,
+        methods::MOVE_WORKSPACE_ENTRY,
+        methods::COPY_WORKSPACE_ENTRY,
+        methods::DELETE_WORKSPACE_ENTRY,
+    ] {
+        assert!(forwardable(method), "{method}");
+    }
     assert!(forwardable(methods::GET_TITLE_MODEL_SETTINGS));
     assert!(forwardable(methods::SET_TITLE_MODEL_SETTINGS));
     assert!(forwardable(methods::GET_CONTEXT_RECOVERY_SETTINGS));

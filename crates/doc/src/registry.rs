@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use cypher_proto::{Bot, Chat, ChatConfig, Device, Session, Space};
+use cypher_proto::{Bot, Chat, ChatConfig, ChatHome, Device, Session, Space};
 
 use crate::schema::DocError;
 
@@ -74,6 +74,34 @@ pub struct PendingBatch {
     pub in_flight: bool,
 }
 
+/// Whether applying `old` then `newer` always equals applying `newer` alone,
+/// so an unsent `old` can be dropped. Holds when `newer` is the later write
+/// (same device, monotonic HLC) to the same row, sets every field `old` sets,
+/// and can't differ on row existence: an upsert overrides an upsert or
+/// update, an update only another update (an update never creates or revives,
+/// so it can't stand in for a creating upsert). Per-field clock overrides
+/// (re-seeds) keep their exact clocks and are never dropped.
+fn op_shadows(newer: &RowOp, old: &RowOp) -> bool {
+    if newer.kind != old.kind
+        || newer.id != old.id
+        || newer.clocks.is_some()
+        || old.clocks.is_some()
+        || newer.hlc <= old.hlc
+    {
+        return false;
+    }
+    let ops_compatible = matches!(
+        (old.op, newer.op),
+        (OpKind::Upsert | OpKind::Update, OpKind::Upsert) | (OpKind::Update, OpKind::Update)
+    );
+    match (&old.set, &newer.set) {
+        (Some(old_set), Some(new_set)) if ops_compatible => {
+            old_set.keys().all(|field| new_set.contains_key(field))
+        }
+        _ => false,
+    }
+}
+
 // ── the doc ─────────────────────────────────────────────────────────────────
 
 /// What [`RegistryDoc::apply_state`] decided about a `state` frame.
@@ -107,6 +135,24 @@ struct PersistedState {
     rows: Vec<RegistryRow>,
     pending: Vec<PendingBatch>,
 }
+
+/// [`PersistedState`] minus rows and pending — the `meta` item of
+/// [`RegistryDoc::to_items`].
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedMeta {
+    v: u32,
+    #[serde(default)]
+    resync_epoch: u32,
+    device_id: String,
+    server_seq: u64,
+    gc_floor: u64,
+    clock: HlcClock,
+}
+
+const ITEM_META: &str = "meta";
+const ITEM_PENDING: &str = "pending";
+const ITEM_ROW_PREFIX: &str = "row/";
 
 /// The local registry replica. Pure data — no I/O, no async; the transport
 /// (`cypher_sync::RegistryClient`) and the engine host drive it under a lock.
@@ -175,8 +221,76 @@ impl RegistryDoc {
         Ok(serde_json::to_vec(&state)?)
     }
 
+    /// The replica as independent `(key, bytes)` items — one per row plus
+    /// `meta` and `pending` — so a store can rewrite only the items that
+    /// changed. Rows are a few hundred bytes each; the whole replica is
+    /// routinely ~1MB, and it changes on every heartbeat.
+    pub fn to_items(&self) -> Result<Vec<(String, Vec<u8>)>, DocError> {
+        let meta = PersistedMeta {
+            v: 1,
+            resync_epoch: CURRENT_RESYNC_EPOCH,
+            device_id: self.device_id.clone(),
+            server_seq: self.server_seq,
+            gc_floor: self.gc_floor,
+            clock: self.clock.clone(),
+        };
+        let mut items =
+            Vec::with_capacity(self.authoritative.values().map(HashMap::len).sum::<usize>() + 2);
+        items.push((ITEM_META.to_string(), serde_json::to_vec(&meta)?));
+        items.push((ITEM_PENDING.to_string(), serde_json::to_vec(&self.pending)?));
+        for (kind, rows) in &self.authoritative {
+            for (id, row) in rows {
+                items.push((
+                    format!("{ITEM_ROW_PREFIX}{kind}/{id}"),
+                    serde_json::to_vec(row)?,
+                ));
+            }
+        }
+        Ok(items)
+    }
+
+    /// Inverse of [`Self::to_items`]; `None` when there is no `meta` item
+    /// (nothing stored in this form).
+    pub fn from_items(
+        items: impl IntoIterator<Item = (String, Vec<u8>)>,
+        device_id: &str,
+    ) -> Result<Option<Self>, DocError> {
+        let mut meta: Option<PersistedMeta> = None;
+        let mut pending = Vec::new();
+        let mut rows = Vec::new();
+        for (key, bytes) in items {
+            if key == ITEM_META {
+                meta = Some(serde_json::from_slice(&bytes)?);
+            } else if key == ITEM_PENDING {
+                pending = serde_json::from_slice(&bytes)?;
+            } else if key.starts_with(ITEM_ROW_PREFIX) {
+                rows.push(serde_json::from_slice(&bytes)?);
+            }
+        }
+        let Some(meta) = meta else {
+            return Ok(None);
+        };
+        Self::from_state(
+            PersistedState {
+                v: meta.v,
+                resync_epoch: meta.resync_epoch,
+                device_id: meta.device_id,
+                server_seq: meta.server_seq,
+                gc_floor: meta.gc_floor,
+                clock: meta.clock,
+                rows,
+                pending,
+            },
+            device_id,
+        )
+        .map(Some)
+    }
+
     pub fn from_bytes(bytes: &[u8], device_id: &str) -> Result<Self, DocError> {
-        let state: PersistedState = serde_json::from_slice(bytes)?;
+        Self::from_state(serde_json::from_slice(bytes)?, device_id)
+    }
+
+    fn from_state(state: PersistedState, device_id: &str) -> Result<Self, DocError> {
         if state.v != 1 {
             return Err(DocError::Schema(format!(
                 "unknown registry snapshot version {}",
@@ -359,6 +473,30 @@ impl RegistryDoc {
         // atomically (only cross-chunk atomicity is given up).
         const MAX_OPS_PER_BATCH: usize = 400;
         self.generation += 1;
+        // An unsent batch every op of which a new op fully overrides can
+        // never matter again: drop it. Without this, every write queued while
+        // nothing acks (offline, a stuck room) was kept forever — a session
+        // heartbeat every 30s grew `pending` (persisted, and replayed by every
+        // overlay read) by thousands of batches a day.
+        // Newest first, so a batch that stays pins its rows: an older write
+        // to a row a kept later op still touches must stay too, or that op
+        // (an update, say) would apply to a row its dropped create never made.
+        let mut pinned: std::collections::HashSet<(String, String)> = Default::default();
+        let mut keep = vec![true; self.pending.len()];
+        for (ix, batch) in self.pending.iter().enumerate().rev() {
+            let shadowed = !batch.in_flight
+                && batch.ops.iter().all(|old| {
+                    ops.iter().any(|new| op_shadows(new, old))
+                        && !pinned.contains(&(old.kind.clone(), old.id.clone()))
+                });
+            if shadowed {
+                keep[ix] = false;
+            } else {
+                pinned.extend(batch.ops.iter().map(|op| (op.kind.clone(), op.id.clone())));
+            }
+        }
+        let mut keep = keep.into_iter();
+        self.pending.retain(|_| keep.next().unwrap_or(true));
         while !ops.is_empty() {
             let tail = if ops.len() > MAX_OPS_PER_BATCH {
                 ops.split_off(MAX_OPS_PER_BATCH)
@@ -375,6 +513,25 @@ impl RegistryDoc {
             });
             ops = tail;
         }
+    }
+
+    /// Edge-less replicas: no server will ever ack, so fold every pending op
+    /// straight into the local rows (what the overlay already shows) instead
+    /// of keeping it queued. Returns whether anything was folded.
+    pub fn settle_pending_locally(&mut self) -> bool {
+        if self.pending.is_empty() {
+            return false;
+        }
+        for batch in std::mem::take(&mut self.pending) {
+            for op in &batch.ops {
+                let current = self.authoritative.get(&op.kind).and_then(|m| m.get(&op.id));
+                if let (Some(next), _) = apply_op(current, op) {
+                    self.put_authoritative(next);
+                }
+            }
+        }
+        self.generation += 1;
+        true
     }
 
     fn write(&mut self, kind: &str, id: &str, op: OpKind, set: BTreeMap<String, Value>) {
@@ -855,6 +1012,33 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// Session migration: move the chat to another project, and possibly
+    /// another host device, in ONE write. Every field naming where the chat
+    /// runs changes together, so no reader sees the new host with the old
+    /// folder or session. Title, config, pins and activity are untouched
+    /// (per-field LWW). `branch` and `checkoutId` clear: the new host's diff
+    /// reconciler stamps the destination checkout.
+    pub fn rehome_chat(&mut self, chat_id: &str, home: &ChatHome) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([
+                ("deviceId", json!(home.device_id)),
+                ("spaceId", json!(home.space_id)),
+                ("cwd", json!(home.cwd)),
+                ("branch", Value::Null),
+                ("checkoutId", Value::Null),
+                ("harnessSessionId", json!(home.harness_session_id)),
+                ("harnessSessionCwd", json!(home.harness_session_cwd)),
+            ]),
+        );
+        Ok(true)
+    }
+
     /// Retarget the chat onto another folder — the mid-session "switch to an
     /// existing worktree" move. Harness resume is cwd-scoped, so the next run
     /// in the new folder starts a fresh harness conversation by design.
@@ -991,7 +1175,8 @@ impl RegistryDoc {
     /// the stored one in place rather than blanking other devices' rings.
     /// Throughput is the opposite: it belongs to one turn, so a row without
     /// it (settled, or a new turn before its first reading) clears it. So
-    /// does a context recovery: a row without one ends it.
+    /// does a context recovery: a row without one ends it, and a turn's
+    /// narrated progress.
     pub fn upsert_session(&mut self, session: &Session) -> Result<(), DocError> {
         let subagents = serde_json::to_value(&session.subagents)?;
         let mut set = fields([
@@ -1019,6 +1204,13 @@ impl RegistryDoc {
                 "recovery",
                 match &session.recovery {
                     Some(recovery) => serde_json::to_value(recovery)?,
+                    None => Value::Null,
+                },
+            ),
+            (
+                "progress",
+                match &session.progress {
+                    Some(progress) => serde_json::to_value(progress)?,
                     None => Value::Null,
                 },
             ),

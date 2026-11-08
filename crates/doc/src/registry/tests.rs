@@ -331,6 +331,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         context_usage: None,
         throughput: None,
         recovery: None,
+        progress: None,
     }
 }
 
@@ -505,6 +506,39 @@ fn session_throughput_syncs_and_clears_with_the_turn() {
     assert_eq!(row.throughput, None);
 }
 
+/// A long turn's narrated progress rides the host's Working row to its peers
+/// (every device's progress bar), and the settle write clears it.
+#[test]
+fn session_progress_syncs_and_clears_with_the_turn() {
+    let reading = cypher_proto::RunProgress {
+        percent: 40,
+        current: "Wiring the UI".into(),
+        next: vec!["Run tests".into()],
+        steps_left: Some(2),
+        stages: vec![cypher_proto::ProgressStage {
+            label: "Wiring the UI".into(),
+            percent: 30,
+        }],
+        planned: Some(3),
+        updated_at: ts(3_400),
+    };
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let (mut server, mut seq) = (HashMap::new(), 0);
+    let mut working = session("chat-1", "dev-a", SessionStatus::Working);
+    working.progress = Some(reading.clone());
+    a.upsert_session(&working).unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].progress, Some(reading));
+
+    a.upsert_session(&session("chat-1", "dev-a", SessionStatus::Idle))
+        .unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].progress, None);
+}
+
 /// A context recovery under way rides the host's row to its peers (the
 /// transcript spinner on every device), and a row without one ends it; a
 /// malformed one reads as none without costing the row.
@@ -618,6 +652,72 @@ fn field_mutators_round_trip() {
     let dev = &ws.read_devices().unwrap()[0];
     assert_eq!(dev.name, "workstation");
     assert_eq!(dev.last_seen_at, Some(ts(6_000)));
+}
+
+fn home(device_id: &str, space_id: &str, cwd: &str, session: &str) -> ChatHome {
+    ChatHome {
+        device_id: device_id.into(),
+        space_id: space_id.into(),
+        cwd: cwd.into(),
+        harness_session_id: session.into(),
+        harness_session_cwd: cwd.into(),
+    }
+}
+
+#[test]
+fn rehome_chat_moves_location_fields_only() {
+    let mut ws = RegistryDoc::new("dev-a");
+    let mut row = chat("chat-1", "dev-a");
+    row.space_id = Some("space-a".into());
+    row.checkout_id = Some("checkout-a".into());
+    row.harness_session_id = Some("/a/agent-sessions/s.jsonl".into());
+    row.harness_session_cwd = Some("/tmp/repo".into());
+    row.pinned = true;
+    ws.upsert_chat(&row).unwrap();
+    ws.rename_chat("chat-1", "Kept").unwrap();
+
+    let to = home("dev-b", "space-b", "/srv/repo", "/b/agent-sessions/s.jsonl");
+    assert!(ws.rehome_chat("chat-1", &to).unwrap());
+    assert!(!ws.rehome_chat("nope", &to).unwrap());
+
+    let moved = ws.chat("chat-1").unwrap().unwrap();
+    assert_eq!(moved.device_id, "dev-b");
+    assert_eq!(moved.space_id.as_deref(), Some("space-b"));
+    assert_eq!(moved.cwd.as_deref(), Some("/srv/repo"));
+    assert_eq!(moved.branch, None);
+    assert_eq!(moved.checkout_id, None);
+    assert_eq!(
+        moved.harness_session_id.as_deref(),
+        Some("/b/agent-sessions/s.jsonl")
+    );
+    assert_eq!(moved.harness_session_cwd.as_deref(), Some("/srv/repo"));
+    assert_eq!(moved.title.as_deref(), Some("Kept"));
+    assert!(moved.pinned);
+    assert_eq!(moved.config, row.config);
+}
+
+/// Both ends of a migration write the same home; whichever clock wins, the
+/// replicas agree.
+#[test]
+fn rehome_written_by_both_hosts_converges() {
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    a.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+
+    let to = home("dev-b", "space-b", "/srv/repo", "/b/s.jsonl");
+    b.rehome_chat("chat-1", &to).unwrap();
+    a.rehome_chat("chat-1", &to).unwrap();
+    a.rename_chat("chat-1", "Renamed meanwhile").unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+
+    let on_a = a.chat("chat-1").unwrap().unwrap();
+    assert_eq!(on_a, b.chat("chat-1").unwrap().unwrap());
+    assert_eq!(on_a.device_id, "dev-b");
+    assert_eq!(on_a.cwd.as_deref(), Some("/srv/repo"));
+    assert_eq!(on_a.title.as_deref(), Some("Renamed meanwhile"));
 }
 
 #[test]
@@ -913,6 +1013,167 @@ fn persistence_round_trips_rows_pending_and_cursor() {
         restored.chat("chat-1").unwrap().unwrap().title.as_deref(),
         Some("unacked")
     );
+}
+
+#[test]
+fn items_round_trip_rows_pending_and_cursor() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    doc.upsert_chat(&chat("chat-2", "dev-a")).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut doc]);
+    doc.rename_chat("chat-1", "unacked").unwrap();
+
+    let items = doc.to_items().unwrap();
+    assert_eq!(items.len(), 2 + 2, "meta + pending + one item per row");
+    let restored = RegistryDoc::from_items(items, "dev-a").unwrap().unwrap();
+    assert_eq!(restored.cursor(), doc.cursor());
+    assert_eq!(restored.pending_len(), 1);
+    assert_eq!(restored.read_all().unwrap(), doc.read_all().unwrap());
+    assert!(
+        RegistryDoc::from_items(Vec::new(), "dev-a")
+            .unwrap()
+            .is_none(),
+        "no meta item: nothing stored in item form"
+    );
+}
+
+#[test]
+fn one_row_change_touches_one_row_item() {
+    let mut doc = RegistryDoc::new("dev-a");
+    for id in ["chat-1", "chat-2", "chat-3"] {
+        doc.upsert_chat(&chat(id, "dev-a")).unwrap();
+    }
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut doc]);
+    let before: HashMap<_, _> = doc.to_items().unwrap().into_iter().collect();
+    doc.rename_chat("chat-2", "renamed").unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut doc]);
+    let changed: Vec<String> = doc
+        .to_items()
+        .unwrap()
+        .into_iter()
+        .filter(|(key, bytes)| before.get(key) != Some(bytes))
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(
+        changed.len(),
+        2,
+        "meta (cursor) + the renamed row: {changed:?}"
+    );
+    assert!(changed.contains(&"meta".to_string()));
+    assert!(changed.iter().any(|key| key.ends_with("/chat-2")));
+}
+
+#[test]
+fn unsent_heartbeats_coalesce_instead_of_piling_up() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut session = session("chat-1", "dev-a", SessionStatus::Working);
+    for beat in 0..100 {
+        session.updated_at = ts(1_000 + beat);
+        doc.upsert_session(&session).unwrap();
+    }
+    assert_eq!(
+        doc.pending_len(),
+        1,
+        "each full-row upsert overrides the last"
+    );
+    assert_eq!(
+        doc.read_sessions().unwrap()[0].updated_at,
+        ts(1_099),
+        "the newest write survives"
+    );
+
+    // A batch already on the wire stays until its ACK; the next beat queues.
+    let in_flight = doc.take_pushable();
+    assert_eq!(in_flight.len(), 1);
+    session.updated_at = ts(2_000);
+    doc.upsert_session(&session).unwrap();
+    assert_eq!(doc.pending_len(), 2);
+}
+
+#[test]
+fn coalescing_keeps_writes_a_newer_op_does_not_cover() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    // A partial update (title only) never shadows the creating upsert.
+    doc.rename_chat("chat-1", "one").unwrap();
+    assert_eq!(doc.pending_len(), 2);
+    // The same partial field set again shadows the earlier rename only.
+    doc.rename_chat("chat-1", "two").unwrap();
+    assert_eq!(doc.pending_len(), 2);
+    // A different row is never touched.
+    doc.upsert_chat(&chat("chat-2", "dev-a")).unwrap();
+    assert_eq!(doc.pending_len(), 3);
+
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut doc]);
+    let chats = doc.read_chats().unwrap();
+    assert_eq!(chats.len(), 2);
+    assert_eq!(
+        doc.chat("chat-1").unwrap().unwrap().title.as_deref(),
+        Some("two")
+    );
+}
+
+#[test]
+fn coalescing_keeps_a_create_a_pending_update_still_needs() {
+    // Create, then a partial update, then an upsert that covers the create
+    // but not the update: dropping the create would leave the update with no
+    // row to apply to, and its fields would vanish.
+    let fields = |pairs: &[(&str, Value)]| {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect::<serde_json::Map<String, Value>>()
+    };
+    let mut row = vec![
+        ("id", json!("cn-1")),
+        ("botId", json!("b")),
+        ("createdAt", json!(1)),
+        (
+            "peer",
+            json!({"roomId": "r", "name": "n", "ownerName": "o"}),
+        ),
+    ];
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.put_record("botConnections", "cn-1", fields(&row))
+        .unwrap();
+    doc.update_record(
+        "botConnections",
+        "cn-1",
+        fields(&[("replyMode", json!("off"))]),
+    )
+    .unwrap();
+    row.push(("lastExchangeAt", json!(5)));
+    doc.put_record("botConnections", "cn-1", fields(&row))
+        .unwrap();
+    let shown = doc.record("botConnections", "cn-1").unwrap();
+    assert_eq!(shown["replyMode"], json!("off"));
+    assert_eq!(shown["lastExchangeAt"], json!(5));
+    assert!(doc.settle_pending_locally());
+    assert_eq!(doc.record("botConnections", "cn-1").unwrap(), shown);
+}
+
+#[test]
+fn settling_locally_folds_pending_into_rows() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    doc.rename_chat("chat-1", "titled").unwrap();
+    doc.upsert_chat(&chat("chat-2", "dev-a")).unwrap();
+    doc.delete_chat("chat-2").unwrap();
+    let shown = doc.read_all().unwrap();
+    assert!(doc.settle_pending_locally());
+    assert_eq!(doc.pending_len(), 0);
+    assert_eq!(
+        doc.read_all().unwrap(),
+        shown,
+        "settling changes nothing visible"
+    );
+    assert!(!doc.settle_pending_locally(), "nothing left to fold");
 }
 
 #[test]

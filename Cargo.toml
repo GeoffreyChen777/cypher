@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/env",
+    "crates/secrets",
+    "crates/trust",
     "crates/proto",
     "crates/doc",
     "crates/net",
@@ -16,7 +18,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.56"
+version = "0.3.70"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -43,6 +45,8 @@ result_large_err = "allow"
 
 [workspace.dependencies]
 cypher-env = { path = "crates/env" }
+cypher-secrets = { path = "crates/secrets" }
+cypher-trust = { path = "crates/trust" }
 cypher-proto = { path = "crates/proto" }
 cypher-doc = { path = "crates/doc" }
 cypher-net = { path = "crates/net" }
@@ -122,10 +126,26 @@ getrandom = "0.4"
 # TIFF/BMP images as PNG before upload.
 image = { version = "0.25", default-features = false, features = ["png", "tiff", "bmp"] }
 objc = "0.2"
+# Calls the WebKit navigation delegate's decision handler (an ObjC block).
+block = "0.1"
+# The gpui window's NSView, for the HTML preview's native web view.
+raw-window-handle = "0.6"
 notify = "7"
 portable-pty = "0.8"
 alacritty_terminal = "0.26"
 pulldown-cmark = "0.12"
+# LaTeX math in chat markdown: RaTeX is a pure-Rust KaTeX port (parse → layout
+# → tiny-skia raster). `embed-fonts` bundles the KaTeX TTFs (~1MB), so formulas
+# render identically without a TeX install or a JS engine.
+ratex-parser = "0.1.15"
+ratex-layout = "0.1.15"
+ratex-types = "0.1.15"
+ratex-render = { version = "0.1.15", features = ["embed-fonts"] }
+# Mermaid diagrams in chat markdown: a headless Rust Mermaid (parse → layout →
+# SVG), rasterized by gpui's resvg. Default features would add the EPL-2.0 ELK
+# layout and a second math stack; dagre and the Cytoscape layouts cover every
+# family without them.
+merman = { version = "0.9.2", default-features = false, features = ["all-diagrams", "svg", "layout-cytoscape"] }
 unicode-segmentation = "1"
 # `rustls-tls` alone is webpki-roots only: the bundled CA list never consults the
 # OS trust store, so a corporate TLS-inspecting proxy's CA — installed in the
@@ -174,6 +194,10 @@ strip = "symbols"
 [profile.dev]
 # gpui is slow unoptimized; match zed's approach for deps
 opt-level = 0
+# Full DWARF made each worktree's target/ grow by tens of GB; line tables
+# still give file:line backtraces.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+debug = false

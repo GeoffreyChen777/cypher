@@ -9,6 +9,7 @@ extension AppModel {
     func applyDemoLaunchArguments(_ args: [String]) {
         enterDemoMode()
         if args.contains("-demo-many") { demo?.addManyProjects() }
+        if args.contains("-demo-history") { demo?.addSessionHistory() }
         if let ix = args.firstIndex(of: "-route"), ix + 1 < args.count {
             let spec = args[ix + 1]
             if spec.hasPrefix("chat:") {
@@ -38,6 +39,12 @@ extension AppModel {
                     demo.sessionStore(for: chatId)
                         .setEntries(BenchRunner.syntheticEntries(turns: 600))
                 }
+                if args.contains("-slow-pages"), let demo {
+                    // Earlier pages land 45s after they're asked for, so one
+                    // lands while the reader rests at the top — even the page
+                    // a short opening window asks for as it shows.
+                    demo.sessionStore(for: chatId).fedPageDelay = .seconds(45)
+                }
                 if args.contains("-stream"), let demo {
                     // Screenshot rig: kick off the scripted streaming reply.
                     let store = demo.sessionStore(for: chatId)
@@ -59,7 +66,7 @@ extension AppModel {
         // later — the live checkpoint-backfill shape (loader → reveal).
         if args.contains("-hydrate-late"), case .chat(let lateId)? = launchRoute, let demo {
             let store = demo.sessionStore(for: lateId)
-            let full = store.entries
+            let full = store.fedEntries
             store.setEntries([])
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 2_500_000_000)

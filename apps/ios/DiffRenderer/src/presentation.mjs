@@ -72,7 +72,7 @@ export const sourceCSS = `
 // and ochre numbers. Token scopes remain distinct in both appearances.
 export function theme(dark) {
   const colors = dark
-    ? ["#dedede", "#060606", "#d9958d", "#8cc8ae", "#d3b67b", "#9fb8d5", "#b5a3d4", "#898989"]
+    ? ["#dedede", "#121212", "#d9958d", "#8cc8ae", "#d3b67b", "#9fb8d5", "#b5a3d4", "#898989"]
     : ["#292929", "#ffffff", "#a34940", "#316d58", "#82621f", "#426589", "#765991", "#757575"];
   const [fg, bg, keyword, string, number, callable, type, comment] = colors;
   return {

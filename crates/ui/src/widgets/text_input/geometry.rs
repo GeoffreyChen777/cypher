@@ -140,11 +140,41 @@ impl TextInput {
         self.drag_generation = self.drag_generation.wrapping_add(1);
         self.drag_autoscroll_active = false;
         let index = self.index_for_mouse_position(event.position);
-        if event.modifiers.shift {
+        self.drag_unit = match event.click_count {
+            0 | 1 => SelectUnit::Char,
+            2 => SelectUnit::Word,
+            _ => SelectUnit::Line,
+        };
+        if self.drag_unit != SelectUnit::Char {
+            // A double or triple press selects the word or line it landed on,
+            // the span a drag from it keeps.
+            self.drag_origin =
+                self.unit_range_at(self.drag_unit, index, self.chip_at(event.position));
+            self.select_span(self.drag_origin.clone(), false, cx);
+        } else if event.modifiers.shift {
             self.select_to(index, cx);
         } else {
             self.move_to(index, cx);
         }
+    }
+
+    /// Extend the press's selection to `position`, by the press's unit.
+    fn drag_select_to(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let index = self.index_for_mouse_position(position);
+        if self.drag_unit == SelectUnit::Char {
+            self.select_to(index, cx);
+        } else {
+            let target = self.unit_range_at(self.drag_unit, index, self.chip_at(position));
+            self.extend_unit_selection(target, cx);
+        }
+    }
+
+    /// The raw range of the chip painted under `position`, if any.
+    fn chip_at(&self, position: Point<Pixels>) -> Option<Range<usize>> {
+        self.chip_hits
+            .iter()
+            .find(|hit| hit.bounds.contains(&position))
+            .map(|hit| hit.target.range.clone())
     }
 
     pub(super) fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -159,7 +189,7 @@ impl TextInput {
         if self.is_selecting {
             self.drag_position = Some(event.position);
             let position = self.drag_selection_position(event.position);
-            self.select_to(self.index_for_mouse_position(position), cx);
+            self.drag_select_to(position, cx);
             if self.drag_scroll_delta(event.position) != 0.0 && !self.drag_autoscroll_active {
                 self.start_drag_autoscroll(cx);
             }
@@ -230,7 +260,7 @@ impl TextInput {
         }
         self.scroll_top = next;
         let edge_position = self.drag_selection_position(position);
-        self.select_to(self.index_for_mouse_position(edge_position), cx);
+        self.drag_select_to(edge_position, cx);
         // Selection motion normally resumes caret following. During an edge
         // drag the autoscroll loop owns the viewport instead.
         self.follow_cursor = false;

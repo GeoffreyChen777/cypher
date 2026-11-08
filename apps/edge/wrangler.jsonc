@@ -33,6 +33,7 @@
       { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
       { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
       { "name": "PUSH_DEVICES", "class_name": "PushDevice" },
+      { "name": "TRUST_ROOMS", "class_name": "TrustRoom" },
       // Bot network rooms (docs/design/agent-bots.md §11), `bot1/{botRoomId}`.
       { "name": "BOT_ROOMS", "class_name": "BotRoom" }
     ]
@@ -74,8 +75,14 @@
       "deleted_classes": ["Sync3Room", "WorkspaceHub"]
     },
     {
-      // Bot network rooms (docs/design/agent-bots.md §11).
-      "tag": "v7",
+      // Device trust chains + pairing mailboxes (crates/trust).
+      "tag": "v7-trust",
+      "new_sqlite_classes": ["TrustRoom"]
+    },
+    {
+      // Bot network rooms (docs/design/agent-bots.md §11). After main's
+      // v7-trust, which production already applied.
+      "tag": "v8-bots",
       "new_sqlite_classes": ["BotRoom"]
     }
   ],
@@ -105,8 +112,12 @@
   },
   "observability": {
     "enabled": true,
+    // Invocation logs record every request's URL and headers, and older
+    // clients still put their bearer in WebSocket URLs (`?token=`). Keep only
+    // the Worker's own console output.
+    "logs": { "invocation_logs": false },
     // APNs device addresses are embedded in outbound URLs; do not persist
-    // outbound request tracing. Incoming routes contain no token/lease.
+    // outbound request tracing.
     "traces": { "enabled": false }
   }
 }

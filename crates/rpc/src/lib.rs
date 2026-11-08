@@ -26,8 +26,8 @@ mod server;
 
 pub use client::RpcClient;
 pub use device_room::{
-    DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
-    NudgeHandler, StaticToken, TokenSource, decode_device_frame, device_room_ws_url,
+    DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig, NoTrust,
+    NudgeHandler, PeerTrust, StaticToken, TokenSource, decode_device_frame, device_room_ws_url,
     encode_device_frame,
 };
 pub use local::{LocalListener, connect_local, probe_local};
@@ -206,6 +206,21 @@ pub mod methods {
     /// text}. Same checkout/path rules as the reads (no creation, no symlink
     /// traversal, bounded size).
     pub const WRITE_WORKSPACE_FILE: &str = "WriteWorkspaceFile";
+    /// One base64 slice of a regular file's bytes; {chatId, cwd, path,
+    /// offset}. Image previews and hex views.
+    pub const READ_WORKSPACE_FILE_CHUNK: &str = "ReadWorkspaceFileChunk";
+    /// The file manager's mutations, under the same checkout/path rules as
+    /// the reads. Create an empty file or a folder; {.., path, directory}.
+    pub const CREATE_WORKSPACE_ENTRY: &str = "CreateWorkspaceEntry";
+    /// Import: offset 0 creates the file (never replacing one), later
+    /// slices append exactly at its end; {.., path, offset, data}.
+    pub const WRITE_WORKSPACE_FILE_CHUNK: &str = "WriteWorkspaceFileChunk";
+    /// Rename/move without replacing anything; {.., path, to}.
+    pub const MOVE_WORKSPACE_ENTRY: &str = "MoveWorkspaceEntry";
+    /// Copy a file or folder tree to a new path; {.., path, to}.
+    pub const COPY_WORKSPACE_ENTRY: &str = "CopyWorkspaceEntry";
+    /// Move to the host's Trash, or remove for good; {.., path, permanent}.
+    pub const DELETE_WORKSPACE_ENTRY: &str = "DeleteWorkspaceEntry";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
     pub const DELETE_WORKTREE: &str = "DeleteWorktree";
     // Quick-chat scratch folders live on the chat's host device.
@@ -302,6 +317,37 @@ pub mod methods {
     /// `{chatId, tool, args}` → `{text}`. The engine resolves the bot from
     /// `chatId` and enforces its scope.
     pub const BOT_TOOL: &str = "BotTool";
+    /// Move root chats (with their child chats) to another project, on this
+    /// or another device (stream of `ChatMigrationEvent`s). Answered by the
+    /// chats' current host, which drives the destination with the calls
+    /// below.
+    pub const MIGRATE_CHATS: &str = "MigrateChats";
+    /// Session migration, engine to engine: open a staging folder for the
+    /// destination project.
+    pub const BEGIN_CHAT_MIGRATION: &str = "BeginChatMigration";
+    /// One base64 slice of a staged migration file.
+    pub const WRITE_CHAT_MIGRATION_CHUNK: &str = "WriteChatMigrationChunk";
+    /// Install the staged files and become the chats' host.
+    pub const COMMIT_CHAT_MIGRATION: &str = "CommitChatMigration";
+    /// Drop a migration's staging folder.
+    pub const ABORT_CHAT_MIGRATION: &str = "AbortChatMigration";
+    /// This device's place in the user's trust group (stream of
+    /// `TrustStatus`): pairing state, members, "Only paired devices".
+    pub const WATCH_DEVICE_TRUST: &str = "WatchDeviceTrust";
+    /// Show a code for a new device to enter (this device must be paired).
+    pub const START_DEVICE_PAIRING: &str = "StartDevicePairing";
+    /// Add the device that entered the shown code.
+    pub const APPROVE_DEVICE_PAIRING: &str = "ApproveDevicePairing";
+    pub const CANCEL_DEVICE_PAIRING: &str = "CancelDevicePairing";
+    /// Ask to join the group with a code shown on a paired device: `{code}`.
+    pub const JOIN_DEVICE_GROUP: &str = "JoinDeviceGroup";
+    /// Remove a device from the group: `{deviceId}`.
+    pub const REMOVE_TRUSTED_DEVICE: &str = "RemoveTrustedDevice";
+    /// "Only paired devices": `{enabled}`.
+    pub const SET_REQUIRE_PAIRED_DEVICES: &str = "SetRequirePairedDevices";
+    /// Make another paired device receive-only, or give it full control
+    /// back: `{deviceId, receiveOnly}`.
+    pub const SET_DEVICE_RECEIVE_ONLY: &str = "SetDeviceReceiveOnly";
 
     /// How one method is answered and routed. The engine derives its routing
     /// predicates from [`SPECS`], so adding a method means adding its constant
@@ -320,6 +366,9 @@ pub mod methods {
         /// Carries credentials or server configuration, so it may only be
         /// relayed over an HTTPS/WSS (or loopback development) link.
         pub credentials: bool,
+        /// Answered only for this device's own viewports and CLI: the relay
+        /// refuses it, so no other device can change it remotely.
+        pub local: bool,
     }
 
     impl MethodSpec {
@@ -330,6 +379,7 @@ pub mod methods {
                 forwardable: false,
                 auth: false,
                 credentials: false,
+                local: false,
             }
         }
 
@@ -354,6 +404,13 @@ pub mod methods {
         const fn credentials(self) -> Self {
             Self {
                 credentials: true,
+                ..self
+            }
+        }
+
+        const fn local(self) -> Self {
+            Self {
+                local: true,
                 ..self
             }
         }
@@ -480,6 +537,12 @@ pub mod methods {
         MethodSpec::unary(LIST_WORKSPACE_FILES).forwardable(),
         MethodSpec::unary(READ_WORKSPACE_FILE).forwardable(),
         MethodSpec::unary(WRITE_WORKSPACE_FILE).forwardable(),
+        MethodSpec::unary(READ_WORKSPACE_FILE_CHUNK).forwardable(),
+        MethodSpec::unary(CREATE_WORKSPACE_ENTRY).forwardable(),
+        MethodSpec::unary(WRITE_WORKSPACE_FILE_CHUNK).forwardable(),
+        MethodSpec::unary(MOVE_WORKSPACE_ENTRY).forwardable(),
+        MethodSpec::unary(COPY_WORKSPACE_ENTRY).forwardable(),
+        MethodSpec::unary(DELETE_WORKSPACE_ENTRY).forwardable(),
         MethodSpec::unary(CREATE_WORKTREE).forwardable(),
         MethodSpec::unary(DELETE_WORKTREE).forwardable(),
         MethodSpec::unary(CREATE_SCRATCH_DIR).forwardable(),
@@ -527,6 +590,23 @@ pub mod methods {
         MethodSpec::unary(CREATE_BOT_INVITE).forwardable(),
         MethodSpec::unary(REDEEM_BOT_INVITE).forwardable(),
         MethodSpec::unary(BOT_TOOL),
+        // A migration runs on the chats' current host; the staging calls
+        // land on the destination project's device.
+        MethodSpec::stream(MIGRATE_CHATS).forwardable(),
+        MethodSpec::unary(BEGIN_CHAT_MIGRATION).forwardable(),
+        MethodSpec::unary(WRITE_CHAT_MIGRATION_CHUNK).forwardable(),
+        MethodSpec::unary(COMMIT_CHAT_MIGRATION).forwardable(),
+        MethodSpec::unary(ABORT_CHAT_MIGRATION).forwardable(),
+        // Device trust signs with this device's keys and gates the relay
+        // itself: never changed by another device.
+        MethodSpec::stream(WATCH_DEVICE_TRUST).local(),
+        MethodSpec::unary(START_DEVICE_PAIRING).local(),
+        MethodSpec::unary(APPROVE_DEVICE_PAIRING).local(),
+        MethodSpec::unary(CANCEL_DEVICE_PAIRING).local(),
+        MethodSpec::unary(JOIN_DEVICE_GROUP).local(),
+        MethodSpec::unary(REMOVE_TRUSTED_DEVICE).local(),
+        MethodSpec::unary(SET_REQUIRE_PAIRED_DEVICES).local(),
+        MethodSpec::unary(SET_DEVICE_RECEIVE_ONLY).local(),
     ];
 
     /// The spec for `name`, or `None` for an unknown method.
@@ -587,6 +667,11 @@ pub mod methods {
                 assert!(
                     !(spec.auth && spec.forwardable),
                     "{}: auth methods answer for the local engine only",
+                    spec.name
+                );
+                assert!(
+                    !(spec.local && spec.forwardable),
+                    "{}: local methods are never relayed",
                     spec.name
                 );
             }

@@ -208,7 +208,8 @@ struct ComposerShell<Chips: View>: View {
     private var input: some View {
         ComposerTextInput(
             text: $draft, focus: focus, editorID: editorID, enabled: !busy,
-            placeholder: placeholder, caretToEnd: caretRequest, mentions: mentions
+            placeholder: placeholder, caretToEnd: caretRequest, mentions: mentions,
+            onCommandReturn: keyboardSend, onCommandPeriod: keyboardStop
         )
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .topLeading) {
@@ -239,6 +240,20 @@ struct ComposerShell<Chips: View>: View {
         }
         .buttonStyle(.plain)
         .disabled(busy)
+    }
+
+    /// ⌘↩: what the send button would do with content (send, or steer).
+    private func keyboardSend() {
+        guard hasContent, buttonActive else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        onSend()
+    }
+
+    /// ⌘.: stop the run.
+    private func keyboardStop() {
+        guard showStop else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        onStop()
     }
 
     /// Attachments count as content: an image-only send is a send, never a stop.

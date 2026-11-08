@@ -14,6 +14,7 @@
 //! (the RPC layer supplies the cwd roots) — and only supported image types, as
 //! in zeron.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,6 +53,10 @@ struct UploadsInner {
     /// them. RwLock: a local-profile import adds its source root at runtime so
     /// imported transcripts resolve without an engine restart.
     read_only_roots: std::sync::RwLock<Vec<PathBuf>>,
+    /// Images that came with migrated chats: the path the transcript names
+    /// (on the old host) → the copy in `{uploads_root}/migrated/`. Loaded
+    /// from `migrated/aliases.json` on first use.
+    aliases: std::sync::RwLock<Option<HashMap<String, String>>>,
 }
 
 #[derive(Clone)]
@@ -82,6 +87,7 @@ impl Uploads {
                         .map(Path::to_path_buf)
                         .collect(),
                 ),
+                aliases: std::sync::RwLock::new(None),
             }),
         }
     }
@@ -202,7 +208,73 @@ impl Uploads {
         })
     }
 
+    /// Session migration, source side: the file behind a transcript image,
+    /// when this device's upload cache serves it. Project files stay out:
+    /// they belong to the project, not to the chat.
+    pub fn migratable_image(&self, path: &str) -> Option<PathBuf> {
+        self.inspect_at(path, &[]).ok().map(|file| file.resolved)
+    }
+
+    /// Session migration, destination side: keep a moved chat's image and
+    /// serve it under `source_path`, the path its transcript keeps naming.
+    pub fn adopt_migrated(&self, source_path: &str, staged: &Path) -> Result<PathBuf, EngineError> {
+        let dir = self.inner.dir.join("migrated");
+        std::fs::create_dir_all(&dir)?;
+        let id8: String = crate::util::new_id().chars().take(8).collect();
+        let target = dir.join(format!("{id8}-{}", sanitize(source_path)));
+        if std::fs::rename(staged, &target).is_err() {
+            std::fs::copy(staged, &target)?;
+            let _ = std::fs::remove_file(staged);
+        }
+        let mut aliases = self.aliases_mut();
+        let map = aliases.get_or_insert_with(HashMap::new);
+        map.insert(
+            source_path.to_string(),
+            target.to_string_lossy().to_string(),
+        );
+        let json = serde_json::to_vec_pretty(&*map)
+            .map_err(|e| EngineError::Other(format!("image aliases: {e}")))?;
+        let tmp = dir.join("aliases.json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, dir.join("aliases.json"))?;
+        Ok(target)
+    }
+
     // ── internals ───────────────────────────────────────────────────────────
+
+    /// The local copy of a migrated image, by the path its transcript names.
+    fn alias(&self, path: &str) -> Option<String> {
+        {
+            let aliases = self
+                .inner
+                .aliases
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(map) = aliases.as_ref() {
+                return map.get(path).cloned();
+            }
+        }
+        self.aliases_mut().as_ref()?.get(path).cloned()
+    }
+
+    /// The alias map, loaded from disk the first time.
+    fn aliases_mut(&self) -> std::sync::RwLockWriteGuard<'_, Option<HashMap<String, String>>> {
+        let mut aliases = self
+            .inner
+            .aliases
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if aliases.is_none() {
+            let path = self.inner.dir.join("migrated").join("aliases.json");
+            *aliases = Some(
+                std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                    .unwrap_or_default(),
+            );
+        }
+        aliases
+    }
 
     fn staging_dir(&self, upload_id: &str) -> Result<PathBuf, EngineError> {
         // The id becomes a directory name — jail it to a safe charset.
@@ -246,7 +318,23 @@ impl Uploads {
         }
     }
 
+    /// [`Self::inspect_at`], falling back to a migrated image's local copy
+    /// (which always lives under the uploads dir).
     fn inspect(&self, path: &str, extra_roots: &[PathBuf]) -> Result<InspectedFile, EngineError> {
+        match self.inspect_at(path, extra_roots) {
+            Ok(file) => Ok(file),
+            Err(err) => match self.alias(path) {
+                Some(local) => self.inspect_at(&local, &[]),
+                None => Err(err),
+            },
+        }
+    }
+
+    fn inspect_at(
+        &self,
+        path: &str,
+        extra_roots: &[PathBuf],
+    ) -> Result<InspectedFile, EngineError> {
         let outside = || EngineError::Other("Attachment is outside the upload cache".into());
         // Canonicalize BOTH sides so `..` segments and symlinks can't escape.
         let resolved = std::fs::canonicalize(path).map_err(|_| outside())?;

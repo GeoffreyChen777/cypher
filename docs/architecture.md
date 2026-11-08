@@ -47,6 +47,7 @@ Single binary `cypher`:
   permissions, peer-UID checks and the `cypher.rpc.v1` subprotocol.
 - `cypher headless` — engine only. A clean installation immediately serves its local profile over Unix IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
+See [Device trust](design/device-trust.md) for how devices authenticate each other over the relay.
 See [Unix IPC](design/unix-ipc.md) for endpoint ownership, service names, Pi bridge,
 and separate UI/Engine data directories. TCP IPC and its environment setting
 have been removed; remote Edge transports are unchanged.
@@ -102,7 +103,7 @@ Two persistent kinds of data. When sync is enabled, session docs ride the chat2 
 2. **Workspace registry** (per profile) — a table of last-writer-wins rows
    ([Registry sync](design/registry-sync.md)); the `registry1` snapshot stores spaces (id, deviceId, path, name?, gitDetected, checkoutId), the chats index (id, deviceId, title, archived, cwd, branch, checkoutId, spaceId, lastSeenAt, lastMessagePreview/At, config), devices, session-status rows, and checkout-diff summary pointers. A space is a device+folder pair in the active profile; the owning device's `SpacesSync` stamps git presence so branch pickers and the diff sidebar can gate without another RPC. Local scope keeps the registry entirely in its profile store. Synced and development scopes join `/registry/{orgId}/ws`, backed by the private per-user room `reg1/{orgId}/{userId}`; rows are never visible to every member of an organization.
 
-   Writer discipline: each device writes its own device and session-status rows, rows for chats it hosts, and git stamps for spaces it owns. Creates, renames, archives, and seen marks are LWW sets accepted from any device. `deleteSpace` tombstones the space and every chat/session row in it in one commit. Presence uses ephemeral room frames rather than durable heartbeat writes.
+   Writer discipline: each device writes its own device and session-status rows, rows for chats it hosts, and git stamps for spaces it owns. Creates, renames, archives, and seen marks are LWW sets accepted from any device. `deleteSpace` tombstones the space and every chat/session row in it in one commit. A [session migration](features/session-migration.md) hands a chat to another host: the old and new host both write its new home (device, space, cwd, Pi session) in one row update, after the new host has installed the chat's Pi session. Presence uses ephemeral room frames rather than durable heartbeat writes.
 
    *Why one registry and not N tiny docs:* the sidebar needs one subscription for the whole list (grouping, resort animations, unseen markers). Its rows contain indexes rather than transcripts, so one local snapshot and, when enabled, one room connection remain bounded and cheap.
 
@@ -163,8 +164,8 @@ Modules follow the `foo.rs` + `foo/` layout; a folder groups one feature.
 
 - **`cypher-engine`**: `pi/` (Pi runtime install and updates, packages, providers,
   session modes, subagents, translation, web-search fallback), `session/` (the sessions
-  engine and its run loop, forks, side chats, context recovery, run journal, titles,
-  scratch chats), `host/`
+  engine and its run loop, forks, side chats, context recovery, session migration, run
+  journal, titles, scratch chats), `host/`
   (doc host and its chat2 sync, workspace registry host, local import, spaces, viewport
   activity, notification events), `git/` (repos and worktrees, checkout diffs, GitHub,
   workspace files), `rpc/` (the dispatcher plus one module per method group), `mcp/`,
@@ -197,7 +198,7 @@ Each crate depends only on crates in lower layers, dev-dependencies included;
 
 | Layer | Crates |
 | --- | --- |
-| foundation | `cypher-env`, `cypher-proto`, `cypher-syntax` |
+| foundation | `cypher-env`, `cypher-proto`, `cypher-syntax`, `cypher-secrets`, `cypher-trust` |
 | model and transport | `cypher-doc`, `cypher-update`, `cypher-net` |
 | clients | `cypher-sync`, `cypher-harness` |
 | relay | `cypher-rpc` |

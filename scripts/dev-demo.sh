@@ -23,6 +23,29 @@
 #   scripts/dev-demo.sh --diffs   # "Diff fences" under "Diff fence demo": an
 #                                 # answer with chat-style and git-patch
 #                                 # ```diff blocks
+#   scripts/dev-demo.sh --mermaid # "How a prompt travels" under "Mermaid
+#                                 # demo": an answer with ```mermaid diagrams
+#                                 # (flowchart, sequence, state, pie, mindmap,
+#                                 # class, a wide one, a broken one) that draw
+#                                 # as their fences close; each header switches
+#                                 # between the diagram and its source; and
+#                                 # "Diagram themes", the same two diagrams
+#                                 # under every Mermaid theme and a few editor
+#                                 # palettes
+#   scripts/dev-demo.sh --artifacts
+#                                 # chat artifacts: "Explain binary search"
+#                                 # under "Artifacts demo" answers with an
+#                                 # interactive HTML artifact, an SVG artifact
+#                                 # and a plain ```html fence (Preview beside
+#                                 # Copy); its second round revises the HTML
+#                                 # page under the same title, so its open tab
+#                                 # reloads. --slow shows a card "Writing…"
+#                                 # (or "Updating…"). "Count the comparisons"
+#                                 # makes the same revision as a patch, and
+#                                 # "Session explainer" is /explain's page
+#                                 # followed by three patches: every edit
+#                                 # applies, one edit of three misses, and one
+#                                 # to a page the chat never had
 #   scripts/dev-demo.sh --changes # turn changes: "Due dates for tasks" under
 #                                 # "Turn changes demo", four rounds on a small
 #                                 # Git project — each round's answer lists the
@@ -39,13 +62,37 @@
 #                                 # translations, one replaces. Paced like
 #                                 # --slow; every message typed into the demo
 #                                 # plays the same run (CYPHER_MOCK_TRANSLATION)
+#   scripts/dev-demo.sh --progress
+#                                 # narrated progress for long turns: under
+#                                 # "Progress demo", "Paginate the tasks API"
+#                                 # works through a plan for about four
+#                                 # minutes. After its first minute a progress
+#                                 # bar fills the spinner's row, with a dot per
+#                                 # step still to come and how many are left;
+#                                 # it moves every half minute, and midway the
+#                                 # agent finds a new step, so the upcoming
+#                                 # steps refresh. Every message typed into the
+#                                 # demo plays the same run (CYPHER_MOCK_PROGRESS)
+#   scripts/dev-demo.sh --migration
+#                                 # moving sessions between projects: "Payments
+#                                 # API" holds four sessions (one archived, one
+#                                 # still working until you Stop it), "Payments
+#                                 # v2" is empty, and an offline "Build server"
+#                                 # has a project the palette lists but can't
+#                                 # pick. Right-click a session → Move to
+#                                 # Project…, or a project card → Move Sessions
+#                                 # to Project… (scripts/demo/seed-migration.sh;
+#                                 # a development build, for the offline device)
 #
-# The flags combine (--permissions, --diffs, --changes or --translation takes
-# the place of the default seed).
+# The flags combine (--permissions, --diffs, --mermaid, --artifacts, --changes,
+# --translation, --progress or --migration takes the place of the default
+# seed).
 # Everything lives under /tmp/cypher-demo-* (--work: /tmp/cypher-demo-work-*,
 # --permissions: /tmp/cypher-demo-permissions-*, --diffs:
-# /tmp/cypher-demo-diffs-*, --changes: /tmp/cypher-demo-changes-*,
-# --translation: /tmp/cypher-demo-translation-*); re-runs
+# /tmp/cypher-demo-diffs-*, --mermaid: /tmp/cypher-demo-mermaid-*, --artifacts:
+# /tmp/cypher-demo-artifacts-*, --changes: /tmp/cypher-demo-changes-*,
+# --translation: /tmp/cypher-demo-translation-*, --progress:
+# /tmp/cypher-demo-progress-*, --migration: /tmp/cypher-demo-migration-*); re-runs
 # reuse it (delete
 # those directories to reseed). Quitting the app stops the engine.
 set -euo pipefail
@@ -55,22 +102,32 @@ WORK=""
 DELAY=""
 PERMS=""
 DIFFS=""
+MERMAID=""
+ARTIFACTS=""
 CHANGES=""
 TRANSLATION=""
+PROGRESS=""
+MIGRATION=""
 for arg in "$@"; do
   case "$arg" in
     --work) WORK=1 ;;
     --slow) DELAY=350 ;;
     --permissions) PERMS=1 ;;
     --diffs) DIFFS=1 ;;
+    --mermaid) MERMAID=1 ;;
+    --artifacts) ARTIFACTS=1 ;;
     --changes) CHANGES=1 ;;
     --translation) TRANSLATION=1 ;;
-    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs] [--changes] [--translation]' >&2; exit 2 ;;
+    --progress) PROGRESS=1 ;;
+    --migration) MIGRATION=1 ;;
+    *) echo 'Usage: dev-demo.sh [--work] [--slow] [--permissions] [--diffs] [--mermaid] [--artifacts] [--changes] [--translation] [--progress] [--migration]' >&2; exit 2 ;;
   esac
 done
 # Translation is about what happens while the agent works, so it is paced.
 [[ -n "$TRANSLATION" ]] && DELAY="${DELAY:-250}"
-DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}${CHANGES:+-changes}${TRANSLATION:+-translation}
+# About 12s for the Mermaid reply, so each fence streams as code and then draws.
+[[ -n "$MERMAID" ]] && DELAY="${DELAY:-120}"
+DEMO_DIR=/tmp/cypher-demo${WORK:+-work}${PERMS:+-permissions}${DIFFS:+-diffs}${MERMAID:+-mermaid}${ARTIFACTS:+-artifacts}${CHANGES:+-changes}${TRANSLATION:+-translation}${PROGRESS:+-progress}${MIGRATION:+-migration}
 DAEMON_DIR=$DEMO_DIR-daemon
 UI_DIR=$DEMO_DIR-ui
 
@@ -79,13 +136,14 @@ for var in $(compgen -e | grep '^CYPHER_' || true); do unset "$var"; done
 export CYPHER_PROFILE=local CYPHER_AUTO_UPDATE=0
 
 echo "▸ building (first run takes a few minutes)…"
-cargo build -p cypher -q
+# The migration demo seeds an offline peer device (a development-only RPC).
+cargo build -p cypher -q ${MIGRATION:+--features development}
 cargo build -p cypher-rpc --example rpc_probe -q
 
 echo "▸ starting the mock engine with private Unix IPC"
 env CYPHER_DATA_DIR="$DAEMON_DIR" CYPHER_HARNESS=mock \
   ${WORK:+CYPHER_MOCK_WORK=1} ${DELAY:+CYPHER_MOCK_DELAY_MS=$DELAY} \
-  ${TRANSLATION:+CYPHER_MOCK_TRANSLATION=1} RUST_LOG=warn \
+  ${TRANSLATION:+CYPHER_MOCK_TRANSLATION=1} ${PROGRESS:+CYPHER_MOCK_PROGRESS=1} RUST_LOG=warn \
   ./target/debug/cypher headless &
 DAEMON_PID=$!
 trap 'kill $DAEMON_PID 2>/dev/null || true' EXIT
@@ -228,12 +286,66 @@ JSON
   "translateIntermediateResponses": true
 }
 JSON
+  elif [[ -n "$MIGRATION" ]]; then
+    bash scripts/demo/seed-migration.sh "$DAEMON_DIR" "$DEMO_DIR-projects"
+  elif [[ -n "$PROGRESS" ]]; then
+    # The run is scripted (crates/harness/src/mock/progress.rs); the bar
+    # comes from the engine's progress narrator asking the mock for readings.
+    project="$DEMO_DIR-projects/tasks-api"
+    mkdir -p "$project"
+    space=$(new_id) chat=$(new_id)
+    create_space "$space" "$project" '"name":"Progress demo"'
+    create_chat "$chat" "$space" "Paginate the tasks API"
+    run_prompt "$chat" "$project" "Add cursor pagination to GET /tasks, and keep the client returning every task." \
+      "Add cursor pagination to GET /tasks, and keep the client returning every task. [mock:progress]"
   elif [[ -n "$DIFFS" ]]; then
     space=$(new_id) chat=$(new_id)
     create_space "$space" "$PWD" '"name":"Diff fence demo","gitDetected":true'
     create_chat "$chat" "$space" "Diff fences"
     run_prompt "$chat" "$PWD" "Show me the fingerprint changes as diffs." \
       "Show me the fingerprint changes as diffs. [mock:diffs]"
+  elif [[ -n "$MERMAID" ]]; then
+    space=$(new_id) chat=$(new_id) themes=$(new_id)
+    create_space "$space" "$PWD" '"name":"Mermaid demo","gitDetected":true'
+    create_chat "$themes" "$space" "Diagram themes"
+    run_prompt "$themes" "$PWD" "Show me the same diagrams in every theme." \
+      "Show me the same diagrams in every theme. [mock:mermaid-themes]"
+    sleep 1
+    create_chat "$chat" "$space" "How a prompt travels"
+    run_prompt "$chat" "$PWD" "Draw me how a prompt travels through the app." \
+      "Draw me how a prompt travels through the app. [mock:mermaid]"
+  elif [[ -n "$ARTIFACTS" ]]; then
+    project="$DEMO_DIR-projects/algorithms"
+    mkdir -p "$project"
+    space=$(new_id) chat=$(new_id)
+    create_space "$space" "$project" '"name":"Artifacts demo"'
+    create_chat "$chat" "$space" "Explain binary search"
+    prompt="How does binary search work? Show me."
+    run_prompt "$chat" "$project" "$prompt" "$prompt [mock:artifacts]"
+    wait_round "$chat" 1
+    prompt="Nice. Can it count the comparisons as it goes?"
+    run_prompt "$chat" "$project" "$prompt" "$prompt [mock:artifacts:revise]"
+    # The same revision, as a patch to the page.
+    chat=$(new_id)
+    create_chat "$chat" "$space" "Count the comparisons"
+    prompt="How does binary search work? Show me."
+    run_prompt "$chat" "$project" "$prompt" "$prompt [mock:artifacts]"
+    wait_round "$chat" 1
+    prompt="Can it count the comparisons as it goes?"
+    run_prompt "$chat" "$project" "$prompt" "$prompt [mock:artifacts:patch]"
+    # A live explainer: the page, then a patch for each round of work.
+    chat=$(new_id)
+    create_chat "$chat" "$space" "Session explainer"
+    n=0
+    for step in "Explain what this session built.:explainer" \
+      "Port the patches to the iPhone app.:explainer:patch" \
+      "Reload open pages when a revision lands.:explainer:patch:partial" \
+      "Bump the release notes.:explainer:patch:orphan"; do
+      prompt="${step%%:*}" marker="${step#*:}"
+      run_prompt "$chat" "$project" "$prompt" "$prompt [mock:$marker]"
+      n=$((n + 1))
+      wait_round "$chat" "$n"
+    done
   elif [[ -n "$WORK" ]]; then
     # The scripted commands read this repo's files, so the project is this checkout.
     space=$(new_id) chat=$(new_id)

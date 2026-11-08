@@ -20,6 +20,8 @@ Every language loads the same JSON file and runs every case in it.
 | Device-room frame codec `uleb128(len) ‖ header JSON ‖ payload`, header key order `s, k, to, from` | [`crates/rpc/src/device_room/frames.rs`](../crates/rpc/src/device_room/frames.rs); tests [`device_room/tests.rs`](../crates/rpc/src/device_room/tests.rs) | [`apps/edge/src/device/device-frame.ts`](../apps/edge/src/device/device-frame.ts); [`device-frame.test.ts`](../apps/edge/src/device/device-frame.test.ts) | [`Sync/DeviceRelayClient.swift`](../apps/ios/Cypher/Sync/DeviceRelayClient.swift) (frame codec); [`DeviceFrameTests.swift`](../apps/ios/CypherTests/Sync/DeviceFrameTests.swift) | [`device-frames-v1.json`](vectors/device-frames-v1.json) |
 | Bot network frames (`ask`, `answer`, `state`, `link`) and invite codes | [`crates/proto/src/bot_wire.rs`](../crates/proto/src/bot_wire.rs) (inline tests) | [`apps/edge/src/bots/bot-frames.ts`](../apps/edge/src/bots/bot-frames.ts); [`bot-frames.test.ts`](../apps/edge/src/bots/bot-frames.test.ts) | — | [`bot-frames-v1.json`](vectors/bot-frames-v1.json) |
 | Stream preview codec (inactive: the Edge relay is removed) | [`crates/sync/src/stream_preview.rs`](../crates/sync/src/stream_preview.rs) (inline tests) | — (the Edge rejects preview frames: `apps/edge/test/workerd/preview.workerd.test.ts`) | [`Sync/StreamPreview.swift`](../apps/ios/Cypher/Sync/StreamPreview.swift); [`StreamPreviewTests.swift`](../apps/ios/CypherTests/Sync/StreamPreviewTests.swift) | [`stream-preview-v1.json`](vectors/stream-preview-v1.json) |
+| Device trust: chain entries (`signingBytes`, hash, replay rules, refusal reasons), pairing code and MACs, Noise IK transcript and fragmenting | [`crates/trust/src`](../crates/trust/src); generator and check [`crates/trust/tests/vectors.rs`](../crates/trust/tests/vectors.rs) | [`apps/edge/src/trust/trust-chain.ts`](../apps/edge/src/trust/trust-chain.ts) (chain only); [`trust-chain.test.ts`](../apps/edge/src/trust/trust-chain.test.ts), [`trust-room.workerd.test.ts`](../apps/edge/test/workerd/trust-room.workerd.test.ts) | [`Sync/DeviceTrust.swift`](../apps/ios/Cypher/Sync/DeviceTrust.swift); [`scripts/tests/device-trust-vectors.swift`](../scripts/tests/device-trust-vectors.swift) | [`device-trust-v1.json`](vectors/device-trust-v1.json) |
+| Signed durable commands and launch records: the bytes a signature covers, from the entry's Loro value tree | [`crates/doc/src/command_auth.rs`](../crates/doc/src/command_auth.rs); generator and check [`crates/doc/tests/command_vectors.rs`](../crates/doc/tests/command_vectors.rs) | — (the Edge never sees inside commands) | [`Sync/CommandSignature.swift`](../apps/ios/Cypher/Sync/CommandSignature.swift); [`scripts/tests/command-signing-vectors.swift`](../scripts/tests/command-signing-vectors.swift), [`DeviceTrustTests.swift`](../apps/ios/CypherTests/Sync/DeviceTrustTests.swift) | [`command-signing-v1.json`](vectors/command-signing-v1.json) |
 | Preview reducer | [`crates/sync/src/preview_link.rs`](../crates/sync/src/preview_link.rs) (inline tests) | — | [`Sync/PreviewProjection.swift`](../apps/ios/Cypher/Sync/PreviewProjection.swift); [`PreviewProjectionTests.swift`](../apps/ios/CypherTests/Sync/PreviewProjectionTests.swift) | [`preview-reducer-v1.json`](vectors/preview-reducer-v1.json) |
 
 The two preview files are also run without a simulator: the macOS stage of
@@ -45,6 +47,8 @@ the tests on every side by hand.
 | Translation language aliases | `crates/engine/src/pi/translation.rs` | `pi-runtime/extensions/cypher-translation.ts` (`LANGUAGE_ALIASES`) | — |
 | Notifications model (badge payload, preferences) | — | `apps/edge/src/notifications/notifications-model.ts`; `notifications-model.test.ts` | `Notifications/NotificationModels.swift`; `NotificationTests.swift` |
 | Subagent aggregation | `crates/ui/src/subagents.rs` | — | `Models/Subagents.swift`; `SubagentsTests.swift` |
+| Artifact fences (a bare `artifact` info word, kind, `title=`) | `crates/ui/src/markdown/parser.rs` (`artifact_info`); `markdown/parser/tests.rs` | `crates/harness/src/pi/chat-rendering.ts` (the guide that names the fence) | `Markdown/ArtifactFence.swift`; `ArtifactTests.swift` |
+| Artifact patch fences (`artifact-patch`, `title=`, SEARCH/REPLACE hunks folded over the page's latest version) | `crates/ui/src/markdown/artifact/patch.rs`, `crates/ui/src/transcript/artifacts.rs`; vectors `artifact-patch-v1.json` | `crates/harness/src/pi/explain.ts` (the explainer's guide); `explain.test.mjs` | `Markdown/ArtifactPatch.swift`, `Sync/ArtifactOutline.swift`; `ArtifactPatchTests.swift`, `ArtifactOutlineTests.swift` |
 
 The iPhone app also ports desktop UI logic (markdown parser, theme, transcript
 rows, slash menu, context ring, loaders); those files cite their desktop source
@@ -114,6 +118,42 @@ Arrays. Stream preview cases are `{name, kind, header, text}` to encode or
 `{kind, header, text}` applied in order with the expected `display`,
 `interrupted` and `replies`. The preview protocol is dormant: the Rust and Swift clients
 carry it, but no Edge relays it (the production `ChatRoom` rejects its frames).
+
+### `artifact-patch-v1.json`
+
+An object; `apply` holds `{name, base, patch, code, applied, total}`: applying
+`patch` (SEARCH/REPLACE hunks) to `base` gives `code`, with `applied` of its
+`total` complete hunks taking. Matching is on UTF-8 bytes.
+
+### `device-trust-v1.json`
+
+Generated by `crates/trust/tests/vectors.rs` (`UPDATE_VECTORS=1`), which also
+fails when the file is stale. Byte strings are lowercase hex.
+
+- `devices`: `{signSecret, dhSecret, public, fingerprint}` — the keys derive
+  `public.signPub` / `public.dhPub`.
+- `chain`: `entries` (each with its `signingBytes` and `hash`), and the
+  `members`, `removed`, `requirePaired` and `receiveOnly` that replaying them
+  yields.
+- `invalidChains`: `{name, reason, entries}` — replay must refuse with exactly
+  `reason`.
+- `pairing`: `input` normalizes to `display`; `mailbox`; `join` and `welcome`
+  MACs for `chain` device C.
+- `noise`: the client's first message and the host's reply under fixed
+  ephemeral keys, then `messages` in order: client messages give `fragments`
+  (or their `fragmentSha256`), host fragments open to `plaintext[i] = i % 251`
+  of `plaintextLen` bytes.
+
+### `command-signing-v1.json`
+
+Generated by `crates/doc/tests/command_vectors.rs` (`UPDATE_VECTORS=1`).
+`cases`: `{name, chatId, fields, signingBytes}` — encoding the entry `fields`
+for `chatId` gives `signingBytes` (hex). Values are tagged so the integer /
+double split survives JSON: `{"null": true}`, `{"bool": b}`, `{"i64": "n"}`
+(a decimal string), `{"double": x}`, `{"string": s}`, `{"binary": hex}`,
+`{"list": [...]}`, `{"map": {...}}`. The first case is an entry as the engine
+writes it; the second covers every type, key ordering by bytes and the
+fields the signature leaves out; the third is a `launch` record.
 
 ## Where the loaders run
 

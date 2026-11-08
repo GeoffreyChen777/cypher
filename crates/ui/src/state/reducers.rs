@@ -55,6 +55,7 @@ impl AppState {
             context_usage: None,
             throughput: None,
             recovery: None,
+            progress: None,
         };
         if let Some(existing) = self
             .sessions

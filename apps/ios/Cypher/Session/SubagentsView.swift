@@ -65,7 +65,9 @@ struct SubagentsAccessory: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .frame(maxWidth: maxWidth, alignment: .trailing)
+                // Hugs its label, so the status strip beside it keeps the
+                // rest of the row (the progress bar's room).
+                .modifier(HuggingWidth(maxWidth: maxWidth))
                 .accessibilityIdentifier("subagents-trigger")
                 .accessibilityLabel("Subagents: \(counts.summary)")
                 .accessibilityHint("Show progress and open child sessions")
@@ -229,5 +231,33 @@ private struct SubagentDetailRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 14))
         .background(whiteAlpha(0.04), in: RoundedRectangle(cornerRadius: 14))
         .foregroundStyle(Theme.text)
+    }
+}
+
+/// As wide as its content, up to `maxWidth` (and what's offered), where the
+/// content truncates. A `frame(maxWidth:)` takes everything offered up to
+/// its cap instead, halving a row it shares with another flexible view.
+private struct HuggingWidth: ViewModifier {
+    let maxWidth: CGFloat
+
+    func body(content: Content) -> some View {
+        HuggingWidthLayout(maxWidth: maxWidth) { content }
+    }
+}
+
+private struct HuggingWidthLayout: Layout {
+    let maxWidth: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let content = subviews.first else { return .zero }
+        let ideal = content.sizeThatFits(.unspecified).width
+        let width = min(ideal, maxWidth, proposal.width ?? .infinity)
+        return content.sizeThatFits(ProposedViewSize(width: width, height: proposal.height))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(
+            at: CGPoint(x: bounds.maxX, y: bounds.midY), anchor: .trailing,
+            proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
     }
 }

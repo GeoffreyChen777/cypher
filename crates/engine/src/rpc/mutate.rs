@@ -3,6 +3,13 @@
 use super::*;
 
 impl EngineRpc {
+    /// This device is a receive-only member of its trust group.
+    fn local_receive_only(&self) -> bool {
+        self.trust
+            .as_ref()
+            .is_some_and(|trust| trust.member_is_receive_only(self.doc_host.device_id()))
+    }
+
     pub(super) fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
         match params {
             MutateParams::CreateChat {
@@ -27,6 +34,9 @@ impl EngineRpc {
                         .set_chat_branch(&chat_id, branch)
                         .map_err(failed)?;
                 }
+                // Sign where it runs and how, as created here (a retried
+                // create adds nothing).
+                self.doc_host.record_chat_launch(&chat_id, true, true, true);
                 Ok(())
             }
             MutateParams::CreateSpace {
@@ -79,11 +89,14 @@ impl EngineRpc {
                 .set_chat_branch(&chat_id, &branch)
                 .map_err(failed)
                 .map(drop),
-            MutateParams::SetChatCwd { chat_id, cwd } => self
-                .workspace
-                .set_chat_cwd(&chat_id, &cwd)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatCwd { chat_id, cwd } => {
+                self.workspace
+                    .set_chat_cwd(&chat_id, &cwd)
+                    .map_err(failed)?;
+                self.doc_host
+                    .record_chat_launch(&chat_id, true, false, false);
+                Ok(())
+            }
             MutateParams::SetChatActivity {
                 chat_id,
                 last_message_at,
@@ -93,11 +106,21 @@ impl EngineRpc {
                 .set_chat_activity(&chat_id, last_message_at, created_at)
                 .map_err(failed)
                 .map(drop),
-            MutateParams::SetChatHost { chat_id, device_id } => self
-                .workspace
-                .set_chat_host(&chat_id, &device_id)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatHost { chat_id, device_id } => {
+                self.workspace
+                    .set_chat_host(&chat_id, &device_id)
+                    .map_err(failed)?;
+                let cwd = self
+                    .workspace
+                    .chat(&chat_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|c| c.cwd);
+                self.doc_host
+                    .record_launch(&chat_id, &cypher_doc::LaunchFact::Host { device_id, cwd })
+                    .map_err(failed)?;
+                Ok(())
+            }
             MutateParams::SetChatArchived { chat_id, archived } => self
                 .workspace
                 .set_chat_archived(&chat_id, archived)
@@ -122,11 +145,14 @@ impl EngineRpc {
                 .set_space_appearance(&space_id, icon.as_deref(), color.as_deref())
                 .map_err(failed)
                 .map(drop),
-            MutateParams::SetChatConfig { chat_id, config } => self
-                .workspace
-                .set_chat_config(&chat_id, &config)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatConfig { chat_id, config } => {
+                self.workspace
+                    .set_chat_config(&chat_id, &config)
+                    .map_err(failed)?;
+                self.doc_host
+                    .record_chat_launch(&chat_id, false, true, false);
+                Ok(())
+            }
             MutateParams::DeleteChat { chat_id } => {
                 // Parent delete CASCADES to its Cypher child chats (rows + docs +
                 // session interruption): a deleted parent must not leave orphaned
@@ -168,16 +194,31 @@ impl EngineRpc {
                 });
                 Ok(())
             }
-            MutateParams::RenameDevice { device_id, name } => self
-                .workspace
-                .rename_device(&device_id, &name)
-                .map_err(failed)
-                .map(drop),
-            MutateParams::DeleteDevice { device_id } => self
-                .workspace
-                .delete_device(&device_id)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::RenameDevice { device_id, name } => {
+                if device_id != self.doc_host.device_id() && self.local_receive_only() {
+                    return Err(RpcError::Failed(
+                        "This device is receive-only, so it can only rename itself.".into(),
+                    ));
+                }
+                self.workspace
+                    .rename_device(&device_id, &name)
+                    .map_err(failed)
+                    .map(drop)
+            }
+            MutateParams::DeleteDevice { device_id } => {
+                // Removing signs that machine out: a receive-only device
+                // doesn't get to do that to the devices that control it.
+                if self.local_receive_only() {
+                    return Err(RpcError::Failed(
+                        "This device is receive-only, so it can't remove your other devices."
+                            .into(),
+                    ));
+                }
+                self.workspace
+                    .delete_device(&device_id)
+                    .map_err(failed)
+                    .map(drop)
+            }
             #[cfg(feature = "development")]
             MutateParams::SeedBotRecord {
                 kind,

@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		A1000000000000000000B001 /* Loro in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P002 /* Loro */; };
 		A1000000000000000000B002 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P004 /* Markdown */; };
+		A1000000000000000000B003 /* SwiftMath in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P006 /* SwiftMath */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -66,6 +67,7 @@
 			files = (
 				A1000000000000000000B001 /* Loro in Frameworks */,
 				A1000000000000000000B002 /* Markdown in Frameworks */,
+				A1000000000000000000B003 /* SwiftMath in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -123,6 +125,7 @@
 			packageProductDependencies = (
 				A1000000000000000000P002 /* Loro */,
 				A1000000000000000000P004 /* Markdown */,
+				A1000000000000000000P006 /* SwiftMath */,
 			);
 			productName = Cypher;
 			productReference = A1000000000000000000PR01 /* Cypher.app */;
@@ -195,6 +198,7 @@
 			packageReferences = (
 				A1000000000000000000P001 /* XCRemoteSwiftPackageReference "loro-swift" */,
 				A1000000000000000000P003 /* XCRemoteSwiftPackageReference "swift-markdown" */,
+				A1000000000000000000P005 /* XCRemoteSwiftPackageReference "SwiftMath" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A1000000000000000000G002 /* Products */;
@@ -310,7 +314,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Cypher/Cypher.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 41;
 				CYPHER_APNS_ENVIRONMENT = development;
 				CYPHER_BUILD_ENVIRONMENT = production;
 				CYPHER_DISPLAY_NAME = Cypher;
@@ -323,7 +327,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "ai.mvp-lab.cypher.ios";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -340,8 +344,9 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Cypher/Cypher.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 31;
+				CODE_SIGN_IDENTITY = "$(CYPHER_SIGN_IDENTITY:default=Apple Development)";
+				CODE_SIGN_STYLE = "$(CYPHER_SIGN_STYLE:default=Automatic)";
+				CURRENT_PROJECT_VERSION = 41;
 				CYPHER_APNS_ENVIRONMENT = production;
 				CYPHER_BUILD_ENVIRONMENT = production;
 				CYPHER_DISPLAY_NAME = Cypher;
@@ -354,9 +359,10 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "ai.mvp-lab.cypher.ios";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(CYPHER_PROVISIONING_PROFILE)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -370,10 +376,10 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 41;
 				DEVELOPMENT_TEAM = 999875MHT4;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "ai.mvp-lab.cypher.ios.tests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -389,10 +395,10 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 41;
 				DEVELOPMENT_TEAM = 999875MHT4;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "ai.mvp-lab.cypher.ios.tests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -535,6 +541,14 @@
 				minimumVersion = 0.4.0;
 			};
 		};
+		A1000000000000000000P005 /* XCRemoteSwiftPackageReference "SwiftMath" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/mgriebling/SwiftMath.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.7.3;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -547,6 +561,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1000000000000000000P003 /* XCRemoteSwiftPackageReference "swift-markdown" */;
 			productName = Markdown;
+		};
+		A1000000000000000000P006 /* SwiftMath */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1000000000000000000P005 /* XCRemoteSwiftPackageReference "SwiftMath" */;
+			productName = SwiftMath;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

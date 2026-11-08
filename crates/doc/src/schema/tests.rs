@@ -1134,3 +1134,140 @@ fn a_malformed_recovery_record_keeps_the_prompt() {
     assert_eq!(entries[0].id, "u1");
     assert_eq!(entries[0].recovery, None);
 }
+
+#[test]
+fn a_signed_command_reads_back_with_the_bytes_it_was_signed_over() {
+    use crate::commands::SessionCommandPayload;
+    let doc = SessionDoc::init("chat-1").unwrap();
+    let entry = SessionCommandEntry {
+        id: "c1".into(),
+        payload: SessionCommandPayload::Steer {
+            prompt: "naïve 🙂".into(),
+            message_id: Some("m1".into()),
+            agent_prompt: None,
+        },
+        issued_by: "dev-b".into(),
+        issued_at: 10,
+        based_on: Some(crate::commands::CommandBasedOn {
+            turn_id: Some("t1".into()),
+            frontier: None,
+        }),
+        expires_at: Some(99),
+        status: SessionCommandStatus::Pending,
+        resolution: None,
+        sent_at: Some(10),
+    };
+    let mut signed = Vec::new();
+    doc.queue_signed_command("chat-1", &entry, |bytes| {
+        signed = bytes.to_vec();
+        Some([7; 64])
+    })
+    .unwrap();
+    // Unsigned, like an older device.
+    doc.queue_command(&SessionCommandEntry {
+        id: "c2".into(),
+        ..entry.clone()
+    })
+    .unwrap();
+    // The host's outcome isn't covered; another replica reads the same bytes.
+    doc.set_command_status("c1", SessionCommandStatus::Rejected, Some("x"))
+        .unwrap();
+    let replica = LoroDoc::new();
+    replica
+        .import(&doc.doc().export(ExportMode::Snapshot).unwrap())
+        .unwrap();
+    let replica = SessionDoc::from_doc(replica);
+    for read in [&doc, &replica] {
+        let commands = read.read_commands_with_auth("chat-1").unwrap();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].0.id, "c1");
+        assert_eq!(commands[0].1.signing_bytes, signed);
+        assert_eq!(commands[0].1.sig, CommandSig::Present([7; 64]));
+        assert_eq!(commands[1].1.sig, CommandSig::None);
+    }
+    // Another chat, or any edit to a signed field, changes the bytes.
+    assert_ne!(
+        doc.read_commands_with_auth("chat-2").unwrap()[0]
+            .1
+            .signing_bytes,
+        signed
+    );
+    if let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+        doc.doc().get_list("commands").get(0)
+    {
+        map.insert("issuedBy", "dev-a").unwrap();
+        doc.doc().commit();
+    }
+    assert_ne!(
+        doc.read_commands_with_auth("chat-1").unwrap()[0]
+            .1
+            .signing_bytes,
+        signed
+    );
+}
+
+#[test]
+fn launch_records_round_trip_with_their_signing_bytes() {
+    let doc = SessionDoc::init("chat-1").unwrap();
+    let config = cypher_proto::ChatConfig {
+        harness: cypher_proto::HarnessId::Pi,
+        model: Some("m".into()),
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: cypher_proto::SandboxLevel::DangerFullAccess,
+    };
+    let host = LaunchFact::Host {
+        device_id: "dev-a".into(),
+        cwd: Some("~/src".into()),
+    };
+    let mut signed = Vec::new();
+    assert!(
+        doc.append_launch_record("chat-1", &host, 5, "dev-a", |bytes| {
+            signed.push(bytes.to_vec());
+            Some([1; 64])
+        })
+        .unwrap()
+    );
+    doc.append_launch_record(
+        "chat-1",
+        &LaunchFact::Config(config.clone()),
+        6,
+        "dev-b",
+        |bytes| {
+            signed.push(bytes.to_vec());
+            Some([2; 64])
+        },
+    )
+    .unwrap();
+    // No key, no record.
+    assert!(
+        !doc.append_launch_record("chat-1", &host, 7, "dev-c", |_| None)
+            .unwrap()
+    );
+    let records = doc.read_launch_records("chat-1");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].fact, host);
+    assert_eq!(records[1].fact, LaunchFact::Config(config));
+    assert_eq!(records[1].signer, "dev-b");
+    for (record, bytes) in records.iter().zip(&signed) {
+        assert_eq!(&record.auth.signing_bytes, bytes);
+    }
+    assert_eq!(records[0].auth.sig, CommandSig::Present([1; 64]));
+    assert_ne!(
+        doc.read_launch_records("chat-2")[0].auth.signing_bytes,
+        signed[0],
+        "bound to the chat"
+    );
+
+    let (latest_host, latest_config) = latest_launch(records.clone());
+    assert_eq!(latest_host.unwrap().at, 5);
+    assert_eq!(latest_config.unwrap().signer, "dev-b");
+    let mut newer = records[0].clone();
+    newer.at = 9;
+    newer.fact = LaunchFact::Host {
+        device_id: "dev-b".into(),
+        cwd: None,
+    };
+    let (latest_host, _) = latest_launch([records[0].clone(), newer.clone()]);
+    assert_eq!(latest_host.unwrap(), newer);
+}

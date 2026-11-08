@@ -42,6 +42,7 @@ use crate::session::side_chats::SideChats;
 use crate::terminals::Terminals;
 use crate::uploads::Uploads;
 
+mod agent;
 mod bots;
 mod chats;
 mod diffs;
@@ -50,16 +51,21 @@ mod files;
 mod github;
 mod harnesses;
 mod mcp;
+mod migrations;
 mod mutate;
 mod params;
 mod pi;
+mod relay;
 mod repos;
 mod settings;
 mod terminals;
+mod trust;
 mod updates;
 mod uploads;
 
+pub use agent::AgentRpc;
 use params::*;
+pub use relay::{RelayRpc, is_relayed};
 
 fn failed(e: impl std::fmt::Display) -> RpcError {
     RpcError::Failed(e.to_string())
@@ -94,8 +100,10 @@ pub struct EngineRpc {
     local_import: Option<crate::host::local_import::LocalImporter>,
     title_settings: Option<crate::session::title_settings::TitleSettingsStore>,
     context_recovery: Option<crate::session::context_recovery::ContextRecoveryService>,
+    migrations: Option<crate::session::migrations::ChatMigrations>,
     github: Option<crate::git::github::Github>,
     bots: Option<crate::bots::Bots>,
+    trust: Option<crate::device_trust::DeviceTrust>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
     /// so concurrent starts of the same `(parentChatId, runId)` cannot race the
@@ -153,8 +161,10 @@ impl EngineRpc {
             local_import: None,
             title_settings: None,
             context_recovery: None,
+            migrations: None,
             github: None,
             bots: None,
+            trust: None,
             engine_info,
             start_subagent_lock: Mutex::new(()),
         }
@@ -177,6 +187,21 @@ impl EngineRpc {
     ) -> Self {
         self.context_recovery = Some(recovery);
         self
+    }
+
+    /// Session migration, both ends (see `session::migrations`).
+    pub fn with_migrations(
+        mut self,
+        migrations: crate::session::migrations::ChatMigrations,
+    ) -> Self {
+        self.migrations = Some(migrations);
+        self
+    }
+
+    fn migrations(&self) -> Result<&crate::session::migrations::ChatMigrations, RpcError> {
+        self.migrations.as_ref().ok_or_else(|| {
+            RpcError::Failed("Session migration isn't available on this engine".into())
+        })
     }
 
     /// This device's GitHub sign-in and API access.
@@ -206,6 +231,12 @@ impl EngineRpc {
     /// Attach the auth service (AuthStatus + AuthRpc mutations).
     pub fn with_auth(mut self, auth: Auth) -> Self {
         self.auth = Some(auth);
+        self
+    }
+
+    /// Attach device trust (Settings → Devices pairing).
+    pub fn with_trust(mut self, trust: crate::device_trust::DeviceTrust) -> Self {
+        self.trust = Some(trust);
         self
     }
 
@@ -626,6 +657,18 @@ impl RpcService for AuthRpc {
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         preflight(method, &params)?;
+        // A device-local method never runs anywhere else; naming another
+        // device must not quietly apply it here instead.
+        if methods::spec(method).is_some_and(|spec| spec.local)
+            && params
+                .get("targetDeviceId")
+                .and_then(|v| v.as_str())
+                .is_some_and(|target| target != self.doc_host.device_id())
+        {
+            return Err(RpcError::BadParams(format!(
+                "{method} only applies to this device."
+            )));
+        }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
@@ -633,7 +676,7 @@ impl RpcService for EngineRpc {
             && target != self.doc_host.device_id()
         {
             let target = target.to_string();
-            return self.forward(&target, method, params).await;
+            return Box::pin(self.forward(&target, method, params)).await;
         }
         if AuthRpc::handles(method) {
             return AuthRpc::new(self.auth()?.clone())
@@ -641,6 +684,10 @@ impl RpcService for EngineRpc {
                 .await;
         }
         self.refuse_during_login(method)?;
+        // Handler futures are boxed: in debug builds each future awaited
+        // inline adds its whole size to this poll's frame, and the sum
+        // beneath the diff handlers overflowed a 2 MiB worker stack (see
+        // `checkout_file_diff_text_rpc_fits_the_default_worker_stack`).
         match method {
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
@@ -649,62 +696,70 @@ impl RpcService for EngineRpc {
             methods::LIST_PI_PACKAGES => {
                 RpcReply::value(&crate::pi::packages::list(self.pi_runtime()?.paths()))
             }
-            methods::INSTALL_PI => pi::install_pi(self).await,
-            methods::INSTALL_PI_PACKAGE => pi::install_pi_package(self, params).await,
-            methods::SET_PI_PACKAGE_ENABLED => pi::set_pi_package_enabled(self, params).await,
+            methods::INSTALL_PI => Box::pin(pi::install_pi(self)).await,
+            methods::INSTALL_PI_PACKAGE => Box::pin(pi::install_pi_package(self, params)).await,
+            methods::SET_PI_PACKAGE_ENABLED => {
+                Box::pin(pi::set_pi_package_enabled(self, params)).await
+            }
             methods::PI_RUNTIME_STATUS => RpcReply::value(&self.pi_runtime()?.status()),
-            methods::LIST_PI_SUBAGENTS => pi::list_pi_subagents(self).await,
-            methods::SAVE_PI_SUBAGENT => pi::save_pi_subagent(self, params).await,
-            methods::DELETE_PI_SUBAGENT => pi::delete_pi_subagent(self, params).await,
-            methods::GET_PI_TRANSLATION_SETTINGS => pi::get_pi_translation_settings(self).await,
+            methods::LIST_PI_SUBAGENTS => Box::pin(pi::list_pi_subagents(self)).await,
+            methods::SAVE_PI_SUBAGENT => Box::pin(pi::save_pi_subagent(self, params)).await,
+            methods::DELETE_PI_SUBAGENT => Box::pin(pi::delete_pi_subagent(self, params)).await,
+            methods::GET_PI_TRANSLATION_SETTINGS => {
+                Box::pin(pi::get_pi_translation_settings(self)).await
+            }
             methods::SET_PI_TRANSLATION_SETTINGS => {
-                pi::set_pi_translation_settings(self, params).await
+                Box::pin(pi::set_pi_translation_settings(self, params)).await
             }
             methods::DETECT_PI_LANGUAGE => pi::detect_pi_language(params),
-            methods::GET_PI_PERMISSION_SETTINGS => pi::get_pi_permission_settings(self).await,
+            methods::GET_PI_PERMISSION_SETTINGS => {
+                Box::pin(pi::get_pi_permission_settings(self)).await
+            }
             methods::SET_PI_PERMISSION_SETTINGS => {
-                pi::set_pi_permission_settings(self, params).await
+                Box::pin(pi::set_pi_permission_settings(self, params)).await
             }
             methods::LIST_PI_PROVIDERS
             | methods::SAVE_PI_PROVIDER
             | methods::REFRESH_PI_PROVIDER
             | methods::LOGOUT_PI_PROVIDER
-            | methods::REMOVE_PI_PROVIDER => pi::pi_provider(self, method, params).await,
+            | methods::REMOVE_PI_PROVIDER => Box::pin(pi::pi_provider(self, method, params)).await,
             methods::BEGIN_PI_PROVIDER_LOGIN => pi::begin_pi_provider_login(self, params),
             methods::PI_PROVIDER_LOGIN_STATUS
             | methods::COMPLETE_PI_PROVIDER_LOGIN
             | methods::CANCEL_PI_PROVIDER_LOGIN => {
-                pi::pi_provider_login(self, method, params).await
+                Box::pin(pi::pi_provider_login(self, method, params)).await
             }
-            methods::LIST_MCP_SERVERS => mcp::list_mcp_servers(self).await,
-            methods::ADD_MCP_SERVERS => mcp::add_mcp_servers(self, params).await,
-            methods::SET_MCP_SERVER_ENABLED => mcp::set_mcp_server_enabled(self, params).await,
-            methods::REMOVE_MCP_SERVER => mcp::remove_mcp_server(self, params).await,
+            methods::LIST_MCP_SERVERS => Box::pin(mcp::list_mcp_servers(self)).await,
+            methods::ADD_MCP_SERVERS => Box::pin(mcp::add_mcp_servers(self, params)).await,
+            methods::SET_MCP_SERVER_ENABLED => {
+                Box::pin(mcp::set_mcp_server_enabled(self, params)).await
+            }
+            methods::REMOVE_MCP_SERVER => Box::pin(mcp::remove_mcp_server(self, params)).await,
             methods::BEGIN_MCP_LOGIN => mcp::begin_mcp_login(self, params),
             methods::MCP_LOGIN_STATUS | methods::COMPLETE_MCP_LOGIN | methods::CANCEL_MCP_LOGIN => {
-                mcp::mcp_login(self, method, params).await
+                Box::pin(mcp::mcp_login(self, method, params)).await
             }
-            methods::START_MCP_AUTH => mcp::start_mcp_auth(self, params).await,
-            methods::LOGOUT_MCP_SERVER => mcp::logout_mcp_server(self, params).await,
+            methods::START_MCP_AUTH => Box::pin(mcp::start_mcp_auth(self, params)).await,
+            methods::LOGOUT_MCP_SERVER => Box::pin(mcp::logout_mcp_server(self, params)).await,
             methods::GET_WEB_SEARCH_FALLBACK => {
                 RpcReply::value(&crate::pi::web_search::load(self.pi_runtime()?.paths()))
             }
             methods::SET_WEB_SEARCH_FALLBACK => {
-                settings::set_web_search_fallback(self, params).await
+                Box::pin(settings::set_web_search_fallback(self, params)).await
             }
             methods::GET_APPEND_SYSTEM_PROMPT => {
                 RpcReply::value(&crate::pi::system_prompt::load(self.pi_runtime()?.paths()))
             }
             methods::SET_APPEND_SYSTEM_PROMPT => {
-                settings::set_append_system_prompt(self, params).await
+                Box::pin(settings::set_append_system_prompt(self, params)).await
             }
             methods::GET_TITLE_MODEL_SETTINGS => settings::get_title_model_settings(self),
             methods::SET_TITLE_MODEL_SETTINGS => {
-                settings::set_title_model_settings(self, params).await
+                Box::pin(settings::set_title_model_settings(self, params)).await
             }
             methods::GET_CONTEXT_RECOVERY_SETTINGS => settings::get_context_recovery_settings(self),
             methods::SET_CONTEXT_RECOVERY_SETTINGS => {
-                settings::set_context_recovery_settings(self, params).await
+                Box::pin(settings::set_context_recovery_settings(self, params)).await
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;
@@ -712,8 +767,8 @@ impl RpcService for EngineRpc {
                 let models = harness.models().await.map_err(failed)?;
                 RpcReply::value(&models)
             }
-            methods::LIST_COMMANDS => harnesses::list_commands(self, params).await,
-            methods::PI_SESSION_MODES => pi::pi_session_modes(self, params).await,
+            methods::LIST_COMMANDS => Box::pin(harnesses::list_commands(self, params)).await,
+            methods::PI_SESSION_MODES => Box::pin(pi::pi_session_modes(self, params)).await,
             methods::QUEUE_COMMAND => docs::queue_command(self, params),
             methods::RETRY_COMMAND => docs::retry_command(self, params),
             methods::WATCH_DOC_MESSAGES => docs::watch_doc_messages(self, params),
@@ -734,19 +789,19 @@ impl RpcService for EngineRpc {
                 self.workspace.watch_spaces(),
             ))),
             methods::WATCH_SESSIONS => docs::watch_sessions(self),
-            methods::LOCAL_IMPORT_STATUS => docs::local_import_status(self).await,
+            methods::LOCAL_IMPORT_STATUS => Box::pin(docs::local_import_status(self)).await,
             methods::IMPORT_LOCAL_WORKSPACE => docs::import_local_workspace(self),
             methods::UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(self.updater()?.watch()))),
             methods::CHECK_UPDATE => RpcReply::value(&self.updater()?.check().await),
             methods::UPDATE_ON_ACTIVATION => RpcReply::value(&serde_json::json!({
                 "woke": self.updater()?.check_on_activation(),
             })),
-            methods::APPLY_UPDATE => updates::apply_update(self, params).await,
+            methods::APPLY_UPDATE => Box::pin(updates::apply_update(self, params)).await,
             methods::PI_UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(
                 self.pi_runtime()?.watch_updates(),
             ))),
-            methods::CHECK_PI_UPDATE => updates::check_pi_update(self).await,
-            methods::APPLY_PI_UPDATES => updates::apply_pi_updates(self).await,
+            methods::CHECK_PI_UPDATE => Box::pin(updates::check_pi_update(self)).await,
+            methods::APPLY_PI_UPDATES => Box::pin(updates::apply_pi_updates(self)).await,
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
                 self.mutate(p)?;
@@ -778,11 +833,11 @@ impl RpcService for EngineRpc {
                 let repo = self.repos.create(&p.name).await.map_err(failed)?;
                 RpcReply::value(&repo)
             }
-            methods::LIST_BRANCHES => repos::list_branches(self, params).await,
-            methods::LIST_REFS => repos::list_refs(self, params).await,
-            methods::LIST_GIT_HISTORY => repos::list_git_history(self, params).await,
-            methods::FETCH_ALL => repos::fetch_all(self, params).await,
-            methods::SWITCH_REF => repos::switch_ref(self, params).await,
+            methods::LIST_BRANCHES => Box::pin(repos::list_branches(self, params)).await,
+            methods::LIST_REFS => Box::pin(repos::list_refs(self, params)).await,
+            methods::LIST_GIT_HISTORY => Box::pin(repos::list_git_history(self, params)).await,
+            methods::FETCH_ALL => Box::pin(repos::fetch_all(self, params)).await,
+            methods::SWITCH_REF => Box::pin(repos::switch_ref(self, params)).await,
             methods::LIST_FOLDERS => {
                 let p: ListFoldersParams = parse_params(params)?;
                 let listing = self.repos.list_folders(p.path).await.map_err(failed)?;
@@ -790,10 +845,20 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_WORKSPACE_FILES
             | methods::READ_WORKSPACE_FILE
-            | methods::WRITE_WORKSPACE_FILE => files::workspace_file(self, method, params).await,
-            methods::SEARCH_FILES => files::search_files(self, params).await,
-            methods::SEARCH_GITHUB_ISSUES => github::search_github_issues(self, params).await,
-            methods::GET_GITHUB_ISSUE => github::get_github_issue(self, params).await,
+            | methods::WRITE_WORKSPACE_FILE
+            | methods::READ_WORKSPACE_FILE_CHUNK
+            | methods::CREATE_WORKSPACE_ENTRY
+            | methods::WRITE_WORKSPACE_FILE_CHUNK
+            | methods::MOVE_WORKSPACE_ENTRY
+            | methods::COPY_WORKSPACE_ENTRY
+            | methods::DELETE_WORKSPACE_ENTRY => {
+                Box::pin(files::workspace_file(self, method, params)).await
+            }
+            methods::SEARCH_FILES => Box::pin(files::search_files(self, params)).await,
+            methods::SEARCH_GITHUB_ISSUES => {
+                Box::pin(github::search_github_issues(self, params)).await
+            }
+            methods::GET_GITHUB_ISSUE => Box::pin(github::get_github_issue(self, params)).await,
             methods::GITHUB_ACCOUNT_STATUS => RpcReply::value(&self.github()?.status().await),
             methods::START_GITHUB_LOGIN => {
                 let start = self.github()?.start_login().await.map_err(failed)?;
@@ -806,8 +871,8 @@ impl RpcService for EngineRpc {
                 self.github()?.sign_out().await;
                 RpcReply::ok()
             }
-            methods::CREATE_WORKTREE => repos::create_worktree(self, params).await,
-            methods::DELETE_WORKTREE => repos::delete_worktree(self, params).await,
+            methods::CREATE_WORKTREE => Box::pin(repos::create_worktree(self, params)).await,
+            methods::DELETE_WORKTREE => Box::pin(repos::delete_worktree(self, params)).await,
             methods::CREATE_SCRATCH_DIR => {
                 let p: ChatParams = parse_params(params)?;
                 let path = crate::session::scratch::create(&p.chat_id).map_err(RpcError::Failed)?;
@@ -831,14 +896,16 @@ impl RpcService for EngineRpc {
             methods::UPLOAD_CHUNK => uploads::upload_chunk(self, params),
             methods::UPLOAD_COMMIT => uploads::upload_commit(self, params),
             methods::READ_ATTACHMENT_CHUNK => uploads::read_attachment_chunk(self, params),
-            methods::FETCH_TOOL_BLOB => uploads::fetch_tool_blob(self, params).await,
+            methods::FETCH_TOOL_BLOB => Box::pin(uploads::fetch_tool_blob(self, params)).await,
             methods::START_SUBAGENT => {
                 let p: StartSubagentParams = parse_params(params)?;
-                self.start_subagent(p).await
+                Box::pin(self.start_subagent(p)).await
             }
             methods::START_SIDE_CHAT => chats::start_side_chat(self, params),
-            methods::SEND_SIDE_CHAT => chats::send_side_chat(self, params).await,
-            methods::INTERRUPT_SIDE_CHAT => chats::interrupt_side_chat(self, params).await,
+            methods::SEND_SIDE_CHAT => Box::pin(chats::send_side_chat(self, params)).await,
+            methods::INTERRUPT_SIDE_CHAT => {
+                Box::pin(chats::interrupt_side_chat(self, params)).await
+            }
             methods::RESPOND_SIDE_CHAT_INPUT => chats::respond_side_chat_input(self, params),
             methods::WATCH_SIDE_CHAT_STATUS => chats::watch_side_chat_status(self, params),
             methods::PROMOTE_SIDE_CHAT => {
@@ -846,15 +913,17 @@ impl RpcService for EngineRpc {
                 let promoted = self.side_chats.promote(&p.side_chat_id).map_err(failed)?;
                 RpcReply::value(&promoted)
             }
-            methods::DISPOSE_SIDE_CHAT => chats::dispose_side_chat(self, params).await,
+            methods::DISPOSE_SIDE_CHAT => Box::pin(chats::dispose_side_chat(self, params)).await,
             methods::FORK_SESSION => {
                 let p: SessionForkRequest = parse_params(params)?;
-                let reply = self.session_forks.fork(p).await.map_err(failed)?;
+                let reply = Box::pin(self.session_forks.fork(p)).await.map_err(failed)?;
                 RpcReply::value(&reply)
             }
             methods::REWIND_SESSION => {
                 let p: cypher_proto::SessionRewindRequest = parse_params(params)?;
-                let reply = self.session_forks.rewind(p).await.map_err(failed)?;
+                let reply = Box::pin(self.session_forks.rewind(p))
+                    .await
+                    .map_err(failed)?;
                 RpcReply::value(&reply)
             }
             methods::WATCH_AGENT_EVENTS => chats::watch_agent_events(self, params),
@@ -868,6 +937,21 @@ impl RpcService for EngineRpc {
             methods::BOT_TOOL => Box::pin(bots::bot_tool(self, params)).await,
             methods::CREATE_BOT_INVITE => Box::pin(bots::create_bot_invite(self, params)).await,
             methods::REDEEM_BOT_INVITE => Box::pin(bots::redeem_bot_invite(self, params)).await,
+            methods::WATCH_DEVICE_TRUST => trust::watch(self),
+            methods::START_DEVICE_PAIRING
+            | methods::APPROVE_DEVICE_PAIRING
+            | methods::CANCEL_DEVICE_PAIRING
+            | methods::JOIN_DEVICE_GROUP
+            | methods::REMOVE_TRUSTED_DEVICE
+            | methods::SET_REQUIRE_PAIRED_DEVICES
+            | methods::SET_DEVICE_RECEIVE_ONLY => Box::pin(trust::call(self, method, params)).await,
+            methods::MIGRATE_CHATS => migrations::migrate_chats(self, params),
+            methods::BEGIN_CHAT_MIGRATION
+            | methods::WRITE_CHAT_MIGRATION_CHUNK
+            | methods::COMMIT_CHAT_MIGRATION
+            | methods::ABORT_CHAT_MIGRATION => {
+                Box::pin(migrations::receive(self, method, params)).await
+            }
             other => Err(RpcError::UnknownMethod(other.to_string())),
         }
     }

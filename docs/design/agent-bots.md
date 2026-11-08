@@ -600,7 +600,8 @@ device. As built:
 The extension `crates/harness/src/pi/bot-tools.ts` is embedded in the engine binary like
 `engine-client.mjs` and loaded with `-e` into bot runs only, so bot tools never appear in
 other sessions and need no Runtime release. Each tool is one `BotTool` call (`{chatId,
-tool, args}` → `{text}`) over the private socket; the engine resolves the bot and thread
+tool, args}` → `{text}`) over the agent socket, which answers it only for a workspace's own
+chat hosted on that device (a session's agent can't speak for a workspace); the engine resolves the bot and thread
 from the chat id, enforces scope, origin and capabilities, and formats the answer. Answers
 are plain text, bounded to 48 KiB.
 
@@ -729,7 +730,7 @@ safety net, not a guarantee, and the UI says so.
 ### 11.2 Edge `BotRoom`
 
 One Durable Object class, `BotRoom` (`apps/edge/src/bots/bot-room.ts`), keyed
-`bot1/{botRoomId}` and bound as `BOT_ROOMS` (wrangler migration `v7`,
+`bot1/{botRoomId}` and bound as `BOT_ROOMS` (wrangler migration `v8-bots`, after main's `v7-trust`,
 `new_sqlite_classes: ["BotRoom"]`), one room per networked bot. The host engine mints
 the room id. The room learns it from `?room=`, which the Worker adds to every forwarded
 request.

@@ -33,6 +33,9 @@ struct MarkdownBlockView: View {
     let block: MDBlock
     /// Identity for async highlight caching (row id).
     var cacheKey: String = ""
+    /// The row is still streaming (an artifact's unclosed fence is still
+    /// being written).
+    var streaming = false
 
     var body: some View {
         switch block {
@@ -48,8 +51,17 @@ struct MarkdownBlockView: View {
             )
             .frame(maxWidth: .infinity, alignment: .leading)
 
-        case .codeBlock(let language, let code):
-            CodeBlockView(language: language, code: code, cacheKey: cacheKey)
+        case .codeBlock(let language, let code, let closed):
+            if closed, isMermaidFence(language) {
+                MermaidBlockView(code: code)
+            } else if DiffFence.isDiff(language) {
+                DiffFenceView(code: code)
+            } else {
+                CodeBlockView(language: language, code: code, cacheKey: cacheKey)
+            }
+
+        case .artifact(let kind, let title, let code, let closed, let patch):
+            ArtifactCard(kind: kind, title: title, code: code, closed: closed, patch: patch, streaming: streaming)
 
         case .blockquote(let children):
             BlockquoteView(children: children, cacheKey: cacheKey)
@@ -75,10 +87,57 @@ struct CodeBlockView: View {
     let code: String
     var cacheKey: String = ""
 
+    /// An HTML or SVG fence's page, opened from its Preview button.
+    @State private var page: ArtifactPage?
+
+    var body: some View {
+        Group {
+            if let language, !language.isEmpty {
+                FencePanel {
+                    HStack(spacing: 8) {
+                        Text(language)
+                        Spacer(minLength: 0)
+                        if let kind = ArtifactKind(language: language) {
+                            Button {
+                                page = ArtifactPage(
+                                    kind: kind,
+                                    title: ArtifactFence.displayTitle(kind: kind, title: nil, code: code),
+                                    code: code)
+                            } label: {
+                                Text("Preview").font(Theme.sans(11, weight: .medium))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("code-block-preview")
+                        }
+                    }
+                } content: {
+                    HighlightedCodeView(language: language, code: code)
+                }
+            } else {
+                FencePanel(header: nil) {
+                    HighlightedCodeView(language: language, code: code)
+                }
+            }
+        }
+        .fullScreenCover(item: $page) { ArtifactViewer(page: $0) }
+    }
+}
+
+/// A fence's chrome: the rounded panel and, when given, the label strip above
+/// its body (desktop `fence_frame`).
+struct FencePanel<Header: View, Content: View>: View {
+    let header: Header?
+    @ViewBuilder let content: Content
+
+    init(@ViewBuilder header: () -> Header, @ViewBuilder content: () -> Content) {
+        self.header = header()
+        self.content = content()
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if let language, !language.isEmpty {
-                Text(language)
+            if let header {
+                header
                     .font(Theme.sans(11))
                     .foregroundStyle(Theme.textMuted)
                     .padding(.horizontal, 12)
@@ -89,7 +148,7 @@ struct CodeBlockView: View {
                         Rectangle().fill(Theme.border).frame(height: 1)
                     }
             }
-            HighlightedCodeView(language: language, code: code)
+            content
         }
         .background(whiteAlpha(0.035))
         .clipShape(RoundedRectangle(cornerRadius: Theme.panelRadius))
@@ -97,6 +156,13 @@ struct CodeBlockView: View {
             RoundedRectangle(cornerRadius: Theme.panelRadius)
                 .strokeBorder(whiteAlpha(0.06), lineWidth: 1)
         )
+    }
+}
+
+extension FencePanel where Header == EmptyView {
+    init(header: Header?, @ViewBuilder content: () -> Content) {
+        self.header = header
+        self.content = content()
     }
 }
 

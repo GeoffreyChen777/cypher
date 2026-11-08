@@ -57,7 +57,9 @@ extension WorkspaceStore {
         deviceId: String, method: String,
         params: [String: Any]
     ) async throws -> T {
-        guard ["ListWorkspaceFiles", "ReadWorkspaceFile", "GetCheckoutDiff"].contains(method) else {
+        guard
+            ["ListWorkspaceFiles", "ReadWorkspaceFile", "ReadWorkspaceFileChunk", "GetCheckoutDiff"].contains(method)
+        else {
             throw RelayError.notConnected
         }
         return try await relayClient(for: deviceId).call(method: method, params: params, timeoutSeconds: 30)

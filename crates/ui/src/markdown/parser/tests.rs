@@ -30,6 +30,10 @@ const CORPORA: &[&str] = &[
     "    indented code line one\n    line two\n\npara\n",
     "para with <span>inline html</span> inside\n\n<div>\nblock html\n</div>\n",
     "###### deep heading\n\n#### h4\n",
+    "Euler: $e^{i\\pi} + 1 = 0$ holds.\n\n$$\n\\int_0^1 x\\,dx = \\tfrac12\n$$\n\nafter $a_1$ and $b_2$\n",
+    "TeX delimiters \\(x_1\\) and\n\\[\n\\sum_k k\n\\]\nthen prose, prices $5 and $10\n",
+    "Here it is:\n\n```html artifact title=\"Bubble sort\"\n<!doctype html>\n<p>hi</p>\n```\n\nafter\n",
+    "- item\n\n  ````svg artifact\n  <svg/>\n  ````\n",
 ];
 
 #[test]
@@ -132,12 +136,75 @@ fn block_structure_basics() {
         other => panic!("unexpected {other:?}"),
     }
     match &tree.blocks[2].block {
-        Block::CodeBlock { language, code } => {
+        Block::CodeBlock {
+            language,
+            code,
+            closed,
+        } => {
             assert_eq!(language.as_deref(), Some("ts"));
             assert_eq!(code, "let x = 1;");
+            assert!(closed);
         }
         other => panic!("unexpected {other:?}"),
     }
+}
+
+fn closed_flags(source: &str) -> Vec<bool> {
+    parse_full(source)
+        .blocks
+        .iter()
+        .filter_map(|top| match &top.block {
+            Block::CodeBlock { closed, .. } => Some(*closed),
+            Block::List { items, .. } => items.iter().flatten().find_map(|block| match block {
+                Block::CodeBlock { closed, .. } => Some(*closed),
+                _ => None,
+            }),
+            Block::BlockQuote { children } => children.iter().find_map(|block| match block {
+                Block::CodeBlock { closed, .. } => Some(*closed),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn code_blocks_know_whether_their_fence_closed() {
+    assert_eq!(
+        closed_flags("```mermaid\ngraph TD\n  A --> B\n```\n"),
+        [true]
+    );
+    assert_eq!(closed_flags("```mermaid\ngraph TD\n  A --> B\n```"), [true]);
+    assert_eq!(closed_flags("```mermaid\ngraph TD\n  A --> B\n"), [false]);
+    assert_eq!(closed_flags("```mermaid\ngraph TD\n  A --> B\n``"), [false]);
+    assert_eq!(closed_flags("```mermaid"), [false]);
+    // A shorter run inside a longer fence is content, not a closer.
+    assert_eq!(closed_flags("````md\n```\nstill code\n```\n"), [false]);
+    assert_eq!(closed_flags("````md\n```\ncode\n````\n"), [true]);
+    assert_eq!(closed_flags("~~~\nx\n~~~\n"), [true]);
+    assert_eq!(closed_flags("    indented\n    code\n"), [true]);
+    // Container markers ride the block's lines.
+    assert_eq!(closed_flags("- ```mermaid\n  graph TD\n  ```\n"), [true]);
+    assert_eq!(closed_flags("> ```mermaid\n> graph TD\n> ```\n"), [true]);
+    assert_eq!(closed_flags("> ```mermaid\n> graph TD\n"), [false]);
+}
+
+#[test]
+fn a_streamed_fence_closes_with_its_last_line() {
+    let source = "intro\n\n```mermaid\ngraph TD\n  A --> B\n```\n";
+    let mut p = IncrementalParser::default();
+    let closer = source.rfind("```").unwrap();
+    p.set_text(&source[..closer]);
+    assert!(matches!(
+        p.tree().blocks.last().map(|top| &top.block),
+        Some(Block::CodeBlock { closed: false, .. })
+    ));
+    p.set_text(source);
+    assert!(matches!(
+        p.tree().blocks.last().map(|top| &top.block),
+        Some(Block::CodeBlock { closed: true, .. })
+    ));
+    assert_eq!(p.tree(), &parse_full(source));
 }
 
 #[test]
@@ -403,4 +470,250 @@ fn empty_and_whitespace_sources() {
     let mut p = IncrementalParser::default();
     p.append("");
     assert!(p.tree().is_empty());
+}
+
+fn math_run(tex: &str, kind: MathKind) -> InlineRun {
+    InlineRun {
+        text: tex.into(),
+        style: InlineStyle {
+            math: Some(kind),
+            ..Default::default()
+        },
+    }
+}
+
+fn prose_run(text: &str) -> InlineRun {
+    InlineRun {
+        text: text.into(),
+        style: InlineStyle::default(),
+    }
+}
+
+fn blocks(source: &str) -> Vec<Block> {
+    parse_full(source)
+        .blocks
+        .into_iter()
+        .map(|b| b.block)
+        .collect()
+}
+
+#[test]
+fn inline_math_is_its_own_run() {
+    assert_eq!(
+        blocks("where $x_1$ and $y$ hold"),
+        vec![Block::Paragraph {
+            runs: vec![
+                prose_run("where "),
+                math_run("x_1", MathKind::Inline),
+                prose_run(" and "),
+                math_run("y", MathKind::Inline),
+                prose_run(" hold"),
+            ]
+        }]
+    );
+    // Adjacent formulas never merge into one.
+    assert_eq!(
+        blocks("$a$$b$"),
+        vec![Block::Paragraph {
+            runs: vec![
+                math_run("a", MathKind::Inline),
+                math_run("b", MathKind::Inline)
+            ]
+        }]
+    );
+}
+
+#[test]
+fn display_math_stays_a_run_of_its_paragraph() {
+    // One paragraph stays one block (the incremental parser's unit); the
+    // renderer gives the formula its own row.
+    assert_eq!(
+        blocks("so\n$$x$$\nthus"),
+        vec![Block::Paragraph {
+            runs: vec![
+                prose_run("so "),
+                math_run("x", MathKind::Display),
+                prose_run(" thus"),
+            ]
+        }]
+    );
+    assert_eq!(
+        blocks("$$\nE = mc^2\n$$"),
+        vec![Block::Paragraph {
+            runs: vec![math_run("\nE = mc^2\n", MathKind::Display)]
+        }]
+    );
+}
+
+#[test]
+fn tex_delimiters_read_as_math() {
+    assert_eq!(
+        blocks(r"a \(x\) b"),
+        vec![Block::Paragraph {
+            runs: vec![
+                prose_run("a "),
+                math_run("x", MathKind::Inline),
+                prose_run(" b"),
+            ]
+        }]
+    );
+    assert_eq!(
+        blocks("\\[\n\\frac{a}{b}\n\\]"),
+        vec![Block::Paragraph {
+            runs: vec![math_run("\n\\frac{a}{b}\n", MathKind::Display)]
+        }]
+    );
+    // The rewrite keeps every offset: ranges still index the real source.
+    let source = "intro\n\n\\[x\\]\n\nend";
+    let tree = parse_full(source);
+    assert_eq!(source[tree.blocks[1].range.clone()].trim_end(), "\\[x\\]");
+}
+
+#[test]
+fn tex_delimiters_stay_literal_where_they_are_not_math() {
+    // Unpaired, escaped-backslash, inside code, or split across blocks.
+    let text = |source: &str| -> String { blocks(source).iter().map(flat).collect() };
+    assert_eq!(text(r"just \( a paren"), "just ( a paren");
+    assert_eq!(text(r"\\(not\\)"), r"\(not\)");
+    assert_eq!(text(r"`\(code\)`"), r"\(code\)");
+    assert_eq!(text("\\(a\n\n b\\)"), "(ab)");
+    assert!(
+        blocks("```\n\\[x\\]\n```")
+            .iter()
+            .all(|b| matches!(b, Block::CodeBlock { code, .. } if code == "\\[x\\]"))
+    );
+}
+
+#[test]
+fn dollar_prices_stay_prose() {
+    assert_eq!(
+        blocks("costs $5 and $10 today"),
+        vec![Block::Paragraph {
+            runs: vec![prose_run("costs $5 and $10 today")]
+        }]
+    );
+}
+
+fn artifact(source: &str) -> (ArtifactKind, Option<String>, String, bool) {
+    match blocks(source).into_iter().next() {
+        Some(Block::Artifact {
+            kind,
+            title,
+            code,
+            closed,
+            patch: false,
+        }) => (kind, title, code, closed),
+        other => panic!("not an artifact: {other:?}"),
+    }
+}
+
+#[test]
+fn patch_fences_name_the_page_they_edit() {
+    let source = "```html artifact-patch title=\"Session explainer\"\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n```\n";
+    assert_eq!(
+        blocks(source),
+        vec![Block::Artifact {
+            kind: ArtifactKind::Html,
+            title: Some("Session explainer".to_string()),
+            code: "<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE".to_string(),
+            closed: true,
+            patch: true,
+        }]
+    );
+    assert!(matches!(
+        blocks("```Artifact-Patch svg title=Logo\nx\n```").as_slice(),
+        [Block::Artifact {
+            kind: ArtifactKind::Svg,
+            patch: true,
+            ..
+        }]
+    ));
+    // A patch to no page in particular, or in a language that doesn't
+    // render, is only code.
+    for source in [
+        "```html artifact-patch\nx\n```",
+        "```python artifact-patch title=X\nx\n```",
+    ] {
+        assert!(
+            matches!(blocks(source).as_slice(), [Block::CodeBlock { .. }]),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn artifact_fences_carry_kind_title_and_code() {
+    assert_eq!(
+        artifact("```html artifact title=\"Bubble sort\"\n<p>a</p>\n<p>b</p>\n```\n"),
+        (
+            ArtifactKind::Html,
+            Some("Bubble sort".to_string()),
+            "<p>a</p>\n<p>b</p>".to_string(),
+            true
+        )
+    );
+    // The marker can come first; titles may be single-quoted or bare.
+    assert_eq!(
+        artifact("```artifact svg title='Logo'\n<svg/>\n```").0,
+        ArtifactKind::Svg
+    );
+    assert_eq!(
+        artifact("```Artifact HTML title=Plain\nx\n```")
+            .1
+            .as_deref(),
+        Some("Plain")
+    );
+    // No language: HTML. No title: none.
+    assert_eq!(artifact("```artifact\nx\n```").0, ArtifactKind::Html);
+    assert_eq!(artifact("```html artifact title=\"  \"\nx\n```").1, None);
+}
+
+#[test]
+fn only_marked_renderable_fences_are_artifacts() {
+    for source in [
+        "```html\n<p>x</p>\n```",
+        "```python artifact\nprint(1)\n```",
+        "```html title=\"artifact\"\n<p>x</p>\n```",
+        "```html artifacts\n<p>x</p>\n```",
+    ] {
+        assert!(
+            matches!(blocks(source).as_slice(), [Block::CodeBlock { .. }]),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn artifacts_know_when_their_fence_closed() {
+    assert!(!artifact("```html artifact\n<p>x</p>").3);
+    assert!(!artifact("```html artifact\n<p>x</p>\n``").3);
+    assert!(artifact("```html artifact\n<p>x</p>\n```").3);
+    // A longer opening fence needs a closing one as long.
+    assert!(!artifact("````html artifact\n```\n").3);
+    assert!(artifact("~~~html artifact\nx\n~~~~\n").3);
+    // Inside a quote, the markers before the fences don't count.
+    match blocks("> ```html artifact\n> <p>x</p>\n> ```\n").as_slice() {
+        [Block::BlockQuote { children }] => assert!(matches!(
+            children.as_slice(),
+            [Block::Artifact { closed: true, .. }]
+        )),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_streamed_artifact_closes_when_its_fence_does() {
+    let source = "intro\n\n```html artifact title=\"Demo\"\n<p>x</p>\n```\n";
+    let mut parser = IncrementalParser::default();
+    let fence_end = source.rfind("```").unwrap();
+    parser.set_text(&source[..fence_end]);
+    assert!(matches!(
+        parser.tree().blocks.last().map(|top| &top.block),
+        Some(Block::Artifact { closed: false, .. })
+    ));
+    parser.set_text(source);
+    assert!(matches!(
+        parser.tree().blocks.last().map(|top| &top.block),
+        Some(Block::Artifact { closed: true, .. })
+    ));
 }

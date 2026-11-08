@@ -246,7 +246,7 @@ extension DemoDataset {
         recoveryTask = Task { [weak self, weak store] in
             guard let self, let store else { return }
             let start = nowMs()
-            let before = store.entries
+            let before = store.fedEntries
             let failedId = "a-\(start)"
             self.setRecoverySession(chatId, status: .working, startedAt: start)
             store.setEntries(
@@ -342,7 +342,7 @@ extension DemoDataset {
     private static func update(_ entryId: String, of store: SessionStore, _ change: (inout MessageEntry) -> Void)
         -> Bool
     {
-        var entries = store.entries
+        var entries = store.fedEntries
         guard let ix = entries.firstIndex(where: { $0.id == entryId }) else { return false }
         change(&entries[ix])
         store.setEntries(entries)

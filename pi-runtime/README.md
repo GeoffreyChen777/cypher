@@ -101,14 +101,30 @@ those of a process that was killed first
 recorded; your own Claude Code sessions in the same directory are untouched,
 and files left by Runtimes before this change stay.
 
-Claude Code has its own web search, but Cypher cannot drive it yet:
-`pi-claude-bridge` does not expose that builtin tool, and `pi-web-search`
-cannot call a `claude-bridge` API. The bundled
-**pi-web-search-claude-bridge** package routes that tool through a fallback
-model only while a `claude-bridge/*` model is selected (other models keep
-their own search). Claude → **Manage** carries the toggle and the search
-model; they write `agent/web-search-claude-bridge.json` and enable/disable the
-package in `settings.json` on the selected device. Both are device-local.
+Claude Code stores a session's system prompt in its file on the first query
+and keeps it on every resume, whatever prompt it is given. So when Pi's prompt
+changes mid-chat (`/explain` or `/orchestrate on` in a running chat), the
+bridge rebuilds the session from Pi's history instead of resuming it, and
+Claude reads the new prompt; that turn runs without the prompt cache
+(`patches/pi-claude-bridge-prompt-refresh.mjs`).
+
+The conversation's Claude Code session cannot search: `pi-claude-bridge`
+runs it without Claude Code's builtin tools, and `pi-web-search` cannot call a
+`claude-bridge` API. The bundled **pi-web-search-claude-bridge** package
+routes that tool through a fallback model only while a `claude-bridge/*` model
+is selected (other models keep their own search). Claude → **Manage** carries
+the toggle and the search model; they write
+`agent/web-search-claude-bridge.json` and enable/disable the package in
+`settings.json` on the selected device. Both are device-local.
+
+The fallback may itself be a `claude-bridge/*` model: the bridge then runs a
+separate one-off Claude Code query whose only tool is WebSearch (nothing from
+`~/.claude` loaded, no session kept), on the Claude subscription, and
+`pi-web-search` reports its answer and cited links like any native search
+(`patches/pi-claude-bridge-web-search.mjs`,
+`patches/pi-web-search-claude-code.mjs`). A small model such as Haiku answers
+in about 20 seconds. Settings offers Claude models only when the device's
+Runtime carries these patches.
 
 The default is **Automatic** (`{"model":"auto"}`, also the shape of a missing
 file): the package ranks a search-capable model from that device's own
@@ -158,6 +174,23 @@ Automatic when unsure.
 The package script runs `provider-service.test.mjs` against the staged Runtime
 and a local fixture endpoint, including the full credential lifecycle and
 redaction checks. No real provider credentials are needed.
+
+## File references
+
+Cypher's own `extensions/cypher-file-references.ts` gives every chat default
+instructions for naming files: a path as inline code, relative to the working
+directory, with an optional `:42` or `:42-58` line suffix and a trailing `/`
+for a folder, the whole path every time. The desktop transcript turns that
+shape into a chip that previews and opens the file (see
+[Files](../docs/features/files.md#from-the-chat)).
+
+The block is put in front of Pi's appended system prompt (the `<addendum>`
+section) before every turn, ahead of the user's `APPEND_SYSTEM.md` text, which
+it never writes. That section keeps its place when it first appears in an
+older session and survives a subagent's replacement prompt, and
+pi-claude-bridge forwards it to Claude Code; a custom prompt section could
+replay out of order, which the bridge refuses. The text is fixed, so prompt
+caching is unaffected.
 
 ## GPT Fast mode
 

@@ -151,6 +151,8 @@ export interface CompileInput {
   /** Filtered network mode: the command reaches the network only through this proxy port. */
   proxyPort?: number;
   home?: string;
+  /** A linked worktree's git directories outside it (core.ts `gitWritable`). */
+  gitWritable?: string[];
 }
 
 export interface CompiledPolicy {
@@ -259,6 +261,7 @@ export function compilePolicy(input: CompileInput): CompiledPolicy {
     if (matrix.workspace.write === "allow") {
       for (const root of input.roots) allowWrite.add(root);
       for (const dir of input.supportDirs) allowWrite.add(dir);
+      for (const dir of input.gitWritable ?? []) allowWrite.add(dir);
     }
     if (matrix.external.write === "allow") allowWrite.add("/");
     for (const grant of fileGrants) {

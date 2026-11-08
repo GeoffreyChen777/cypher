@@ -15,7 +15,7 @@ test("isolated Pi bridge: Unix RPC, streaming, cancellation, disconnect and perm
   mkdirSync(root, { mode: 0o700, recursive: true });
   const dir = join(root, randomBytes(16).toString("hex"));
   mkdirSync(dir, { mode: 0o700 });
-  const socketPath = join(dir, "engine.sock");
+  const socketPath = join(dir, "agent.sock");
   const server = http.createServer();
   const ws = new WebSocketServer({ server });
   const cancellations = new Set();

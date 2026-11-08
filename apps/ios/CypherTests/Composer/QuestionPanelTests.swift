@@ -23,6 +23,15 @@ final class QuestionPanelTests: XCTestCase {
         XCTAssertEqual(wire.question, raw, "Presentation must not mutate the protocol payload")
     }
 
+    func testForwardedQuestionsDecodeWhoAsked() throws {
+        let json = """
+            [{"id":"q","header":"Pick","question":"Which?","options":["a","b"],"askedBy":"actor"},
+             {"id":"r","header":"Pick","question":"Which?","options":["a"]}]
+            """
+        let questions = try JSONDecoder().decode([UserInputQuestion].self, from: Data(json.utf8))
+        XCTAssertEqual(questions.map(\.askedBy), ["actor", nil])
+    }
+
     func testShortNamedHeaderIsPreservedButDuplicateHeadingIsNot() {
         XCTAssertEqual(QuestionPresentation(question()).header, "Your input")
         XCTAssertEqual(QuestionPresentation(question(header: "Catalog source")).header, "Catalog source")

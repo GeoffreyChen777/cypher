@@ -1178,6 +1178,79 @@ async fn rpc_repos_search_and_workspace_files() {
         .await
         .expect("ReadWorkspaceFile");
     assert_eq!(content["text"], "hello\n");
+
+    // The file manager's mutations round-trip through the same jail.
+    let scoped = |path: &str, extra: serde_json::Value| {
+        let mut params = serde_json::json!({"chatId":"search-chat", "cwd":repo_path, "path":path});
+        for (key, value) in extra.as_object().unwrap() {
+            params[key] = value.clone();
+        }
+        params
+    };
+    client
+        .call(
+            methods::CREATE_WORKSPACE_ENTRY,
+            scoped("docs", serde_json::json!({"directory": true})),
+        )
+        .await
+        .expect("CreateWorkspaceEntry folder");
+    client
+        .call(
+            methods::WRITE_WORKSPACE_FILE_CHUNK,
+            scoped(
+                "docs/logo.bin",
+                serde_json::json!({"offset": 0, "data": "AAEC"}),
+            ),
+        )
+        .await
+        .expect("WriteWorkspaceFileChunk");
+    let chunk = client
+        .call(
+            methods::READ_WORKSPACE_FILE_CHUNK,
+            scoped("docs/logo.bin", serde_json::json!({"offset": 0})),
+        )
+        .await
+        .expect("ReadWorkspaceFileChunk");
+    assert_eq!(chunk["data"], "AAEC");
+    assert_eq!(chunk["bytes"], 3);
+    assert_eq!(chunk["done"], true);
+    client
+        .call(
+            methods::MOVE_WORKSPACE_ENTRY,
+            scoped("docs/logo.bin", serde_json::json!({"to": "logo.bin"})),
+        )
+        .await
+        .expect("MoveWorkspaceEntry");
+    client
+        .call(
+            methods::COPY_WORKSPACE_ENTRY,
+            scoped("logo.bin", serde_json::json!({"to": "docs/logo copy.bin"})),
+        )
+        .await
+        .expect("CopyWorkspaceEntry");
+    assert!(
+        client
+            .call(
+                methods::MOVE_WORKSPACE_ENTRY,
+                scoped("logo.bin", serde_json::json!({"to": "../escaped.bin"})),
+            )
+            .await
+            .is_err(),
+        "moves stay inside the checkout"
+    );
+    let deleted = client
+        .call(
+            methods::DELETE_WORKSPACE_ENTRY,
+            scoped("docs", serde_json::json!({"permanent": true})),
+        )
+        .await
+        .expect("DeleteWorkspaceEntry");
+    assert_eq!(deleted["trashed"], false);
+    let repo_dir = std::path::Path::new(&repo_path);
+    assert!(!repo_dir.join("docs").exists());
+    assert_eq!(std::fs::read(repo_dir.join("logo.bin")).unwrap(), [0, 1, 2]);
+    std::fs::remove_file(repo_dir.join("logo.bin")).unwrap();
+
     for path in ["../file.txt", "/etc/passwd", ".git/config", ""] {
         assert!(
             client

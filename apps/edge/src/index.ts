@@ -11,6 +11,7 @@
  *   revoke-route.ts              POST /notifications/revoke (revocation-only capability)
  *   ── bearer verified below; 401 otherwise ──
  *   room-routes.ts               /chat2/*, /registry/*, /device/*, /bots/* → Durable Objects
+ *   trust/trust-route.ts         /trust/* → the caller's TrustRoom
  *   blob-route.ts                GET|HEAD /blob/:chatId/:partId (read-only R2)
  *   legacy/attachments-route.ts  PUT /attachments/* (retired, acknowledged)
  *
@@ -26,6 +27,7 @@ import { handlePublicRoute } from "./public-routes";
 import { handleRevokeRoute } from "./revoke-route";
 import { handleRoomRoute } from "./room-routes";
 import { routeContext } from "./router";
+import { handleTrustRoute } from "./trust/trust-route";
 
 export { APNsSender } from "./notifications/apns-sender";
 export { BotRoom } from "./bots/bot-room";
@@ -34,6 +36,7 @@ export { DeviceRoom } from "./device/device-room";
 export { PushDevice } from "./notifications/push-device";
 export { RegistryRoom } from "./registry/registry-room";
 export { SessionRoom } from "./legacy/session-room";
+export { TrustRoom } from "./trust/trust-room";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -49,6 +52,7 @@ export default {
     const authed = { ...context, auth };
     return (
       (await handleRoomRoute(authed)) ??
+      (await handleTrustRoute(authed)) ??
       (await handleBlobRoute(authed)) ??
       handleRetiredAttachments(authed) ??
       json({ error: "not_found" }, 404)

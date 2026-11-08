@@ -48,6 +48,25 @@ const BOT_TOOLS_EXTENSION: &str = "cypher-bot-tools.ts";
 /// extension's `spawn.ts` appends the same trio).
 const MESSAGING_TOOLS: [&str; 3] = ["send_message", "read_inbox", "reply_message"];
 
+/// The file tools whose approvals go through `request_permission` (the
+/// permission extension's `OWN_TOOLS`, less `bash`, which escalates instead).
+const FILE_TOOLS: [&str; 6] = ["read", "write", "edit", "ls", "grep", "find"];
+/// Every file-tool denial tells the agent to call this, so it comes with any
+/// file tool: Pi drops a tool the allowlist does not name even when an
+/// extension registers it. With permission control off nothing registers it
+/// and Pi ignores the name.
+const PERMISSION_TOOL: &str = "request_permission";
+
+/// `tools` plus `request_permission` when it names a file tool.
+fn with_permission_tool(mut tools: Vec<String>) -> Vec<String> {
+    if tools.iter().any(|t| FILE_TOOLS.contains(&t.as_str()))
+        && !tools.iter().any(|t| t == PERMISSION_TOOL)
+    {
+        tools.push(PERMISSION_TOOL.to_string());
+    }
+    tools
+}
+
 /// Every env var a [`RunProfile`] sets; each spawn clears them all first.
 const PROFILE_ENV: [&str; 7] = [
     ENV_ROLE,
@@ -77,8 +96,9 @@ fn profile_launch(
     match profile {
         RunProfile::Root => {}
         // Child-subagent semantics (Cypher-hosted child chats): the persisted
-        // agent allowlist plus the messaging tools, and the child-mode env
-        // the subagents extension keys on.
+        // agent allowlist plus the messaging tools (and `request_permission`
+        // beside file tools), and the child-mode env the subagents extension
+        // keys on.
         RunProfile::Child(child) => {
             let mut tools = child.tools.clone();
             for tool in MESSAGING_TOOLS {
@@ -86,6 +106,7 @@ fn profile_launch(
                     tools.push(tool.to_string());
                 }
             }
+            let tools = with_permission_tool(tools);
             if !tools.is_empty() {
                 args.push("--tools".into());
                 args.push(tools.join(","));
@@ -103,11 +124,12 @@ fn profile_launch(
         }
         // Bot runs see only their allowlist, even an empty one: an absent
         // `--tools` would hand them every tool. No shell or file access
-        // unless the engine lists them, no MCP or subagents. The engine
-        // enforces the bot's scope inside each bot tool.
+        // unless the engine lists them (then `request_permission` beside
+        // them), no MCP or subagents. The engine enforces the bot's scope
+        // inside each bot tool.
         RunProfile::Bot(bot) => {
             args.push("--tools".into());
-            args.push(bot.tools.join(","));
+            args.push(with_permission_tool(bot.tools.clone()).join(","));
             args.push("-e".into());
             args.push(
                 private_support_dir()?
@@ -152,8 +174,16 @@ pub(super) fn write_temp_prompt(agent: &str, prompt: &str) -> std::io::Result<Pa
     Ok(path)
 }
 
+/// The extension that tells the model what the chat renders
+/// (`chat-rendering.ts`), loaded into every Pi with `-e`.
+const CHAT_RENDERING_EXTENSION: &str = "cypher-chat-rendering.ts";
+/// The `/explain` command and its live session explainer (`explain.ts`),
+/// loaded beside it.
+const EXPLAIN_EXTENSION: &str = "cypher-explain.ts";
+
 /// Private files Cypher-spawned Pi processes load: the engine client module
-/// the bundled extensions import, and the bot tools extension bot runs load.
+/// the bundled extensions import, the app's own extensions, and the bot
+/// tools extension bot runs load.
 fn private_support_dir() -> std::io::Result<&'static std::path::Path> {
     static DIRECTORY: std::sync::OnceLock<Result<tempfile::TempDir, String>> =
         std::sync::OnceLock::new();
@@ -167,6 +197,8 @@ fn private_support_dir() -> std::io::Result<&'static std::path::Path> {
         for (name, contents) in [
             ("engine-client.mjs", include_str!("engine-client.mjs")),
             (BOT_TOOLS_EXTENSION, include_str!("bot-tools.ts")),
+            (CHAT_RENDERING_EXTENSION, include_str!("chat-rendering.ts")),
+            (EXPLAIN_EXTENSION, include_str!("explain.ts")),
         ] {
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
@@ -288,6 +320,10 @@ impl PiHarness {
         sandbox: Option<SandboxLevel>,
     ) -> Result<Command, HarnessError> {
         let (exe, mut args) = self.resolve_program()?;
+        for extension in [CHAT_RENDERING_EXTENSION, EXPLAIN_EXTENSION] {
+            args.push("--extension".into());
+            args.push(private_support_dir()?.join(extension).display().to_string());
+        }
         let profile = profile_launch(&host.profile, append_prompt)?;
         args.extend(profile.args);
         // A child profile is authoritative for model/thinking when it

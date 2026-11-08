@@ -1,0 +1,188 @@
+{
+  "cases": [
+    {
+      "chatId": "chat-7",
+      "fields": {
+        "basedOn": {
+          "map": {
+            "frontier": {
+              "null": true
+            },
+            "turnId": {
+              "string": "turn-9"
+            }
+          }
+        },
+        "expiresAt": {
+          "i64": "1700086400000"
+        },
+        "id": {
+          "string": "cmd-1"
+        },
+        "issuedAt": {
+          "i64": "1700000000000"
+        },
+        "issuedBy": {
+          "string": "device-b"
+        },
+        "kind": {
+          "string": "run"
+        },
+        "payload": {
+          "map": {
+            "kind": {
+              "string": "run"
+            },
+            "messageId": {
+              "string": "msg-1"
+            },
+            "request": {
+              "map": {
+                "autoApprove": {
+                  "bool": false
+                },
+                "cwd": {
+                  "string": "~/src/app"
+                },
+                "model": {
+                  "string": "model-a"
+                },
+                "modelOptions": {
+                  "map": {}
+                },
+                "prompt": {
+                  "string": "Fix the build — 修复构建 🙂"
+                },
+                "reasoning": {
+                  "null": true
+                },
+                "resume": {
+                  "null": true
+                },
+                "sandbox": {
+                  "string": "workspace-write"
+                }
+              }
+            }
+          }
+        },
+        "sentAt": {
+          "i64": "1700000000000"
+        },
+        "sig": {
+          "string": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+        },
+        "status": {
+          "string": "pending"
+        }
+      },
+      "name": "an entry as the engine writes it",
+      "signingBytes": "6379706865722d636f6d6d616e642d76310000000006636861742d3707000000080000000762617365644f6e07000000020000000866726f6e7469657200000000067475726e496404000000067475726e2d3900000009657870697265734174020000018bd50bc4000000000269640400000005636d642d31000000086973737565644174020000018bcfe5680000000008697373756564427904000000086465766963652d62000000046b696e64040000000372756e000000077061796c6f61640700000003000000046b696e64040000000372756e000000096d657373616765496404000000056d73672d31000000077265717565737407000000080000000b6175746f417070726f766501000000000363776404000000097e2f7372632f617070000000056d6f64656c04000000076d6f64656c2d610000000c6d6f64656c4f7074696f6e7307000000000000000670726f6d7074040000002346697820746865206275696c6420e2809420e4bfaee5a48de69e84e5bbba20f09f998200000009726561736f6e696e670000000006726573756d65000000000773616e64626f78040000000f776f726b73706163652d77726974650000000673656e744174020000018bcfe56800"
+    },
+    {
+      "chatId": "chat-🙂",
+      "fields": {
+        "id": {
+          "string": "cmd-2"
+        },
+        "issuedAt": {
+          "i64": "0"
+        },
+        "payload": {
+          "map": {
+            "": {
+              "null": true
+            },
+            "Z": {
+              "i64": "9223372036854775807"
+            },
+            "a": {
+              "bool": false
+            },
+            "ab": {
+              "bool": true
+            },
+            "bin": {
+              "binary": "0001feff"
+            },
+            "empty": {
+              "list": []
+            },
+            "list": {
+              "list": [
+                {
+                  "i64": "1"
+                },
+                {
+                  "double": 1.0
+                },
+                {
+                  "string": "1"
+                }
+              ]
+            },
+            "none": {
+              "map": {}
+            },
+            "z": {
+              "i64": "-1"
+            },
+            "é": {
+              "double": -0.5
+            }
+          }
+        },
+        "resolution": {
+          "string": "done"
+        },
+        "sig": {
+          "string": "00"
+        },
+        "status": {
+          "string": "applied"
+        }
+      },
+      "name": "every value type, with the unsigned fields",
+      "signingBytes": "6379706865722d636f6d6d616e642d76310000000009636861742df09f998207000000030000000269640400000005636d642d32000000086973737565644174020000000000000000000000077061796c6f6164070000000a0000000000000000015a027fffffffffffffff0000000161010000000002616201010000000362696e05000000040001feff00000005656d7074790600000000000000046c6973740600000003020000000000000001033ff0000000000000040000000131000000046e6f6e650700000000000000017a02ffffffffffffffff00000002c3a903bfe0000000000000"
+    },
+    {
+      "chatId": "chat-7",
+      "fields": {
+        "at": {
+          "i64": "1700000000000"
+        },
+        "config": {
+          "map": {
+            "harness": {
+              "string": "pi"
+            },
+            "model": {
+              "string": "model-a"
+            },
+            "modelOptions": {
+              "map": {}
+            },
+            "reasoning": {
+              "null": true
+            },
+            "sandbox": {
+              "string": "read-only"
+            }
+          }
+        },
+        "kind": {
+          "string": "config"
+        },
+        "sig": {
+          "string": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+        },
+        "signer": {
+          "string": "device-b"
+        }
+      },
+      "name": "a launch record as the engine writes it",
+      "signingBytes": "6379706865722d636f6d6d616e642d76310000000006636861742d370700000004000000026174020000018bcfe5680000000006636f6e6669670700000005000000076861726e65737304000000027069000000056d6f64656c04000000076d6f64656c2d610000000c6d6f64656c4f7074696f6e73070000000000000009726561736f6e696e67000000000773616e64626f780400000009726561642d6f6e6c79000000046b696e640400000006636f6e666967000000067369676e657204000000086465766963652d62"
+    }
+  ],
+  "comment": "Generated by crates/doc/tests/command_vectors.rs. Byte strings are lowercase hex."
+}

@@ -1,7 +1,7 @@
 //! The sidebar as its own cached view.
 //!
 //! The shell is the window's root view, and gpui re-renders the root on every
-//! frame. While any session works, the pulse clock drives ~30 frames a second
+//! frame. While any session works, the pulse clock drives 20 frames a second
 //! for the loaders, and each of those re-rendered and re-laid-out the whole
 //! sidebar — every project card and session row — just to step a few 5×8px
 //! working marks. [`SidebarPane`] renders the same shell code behind a cached

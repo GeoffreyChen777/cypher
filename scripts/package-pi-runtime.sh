@@ -56,6 +56,7 @@ cp "$SPEC/extensions/cypher-translation.ts" "$STAGE/extensions/"
 cp "$SPEC/extensions/cypher-fast-mode.ts" "$STAGE/extensions/"
 cp "$SPEC/extensions/cypher-codemode.ts" "$STAGE/extensions/"
 cp "$SPEC/extensions/cypher-permissions.ts" "$STAGE/extensions/"
+cp "$SPEC/extensions/cypher-file-references.ts" "$STAGE/extensions/"
 mkdir -p "$STAGE/extensions/cypher-permissions"
 cp "$SPEC"/extensions/cypher-permissions/*.ts "$STAGE/extensions/cypher-permissions/"
 cp "$SPEC/provider-service.mjs" "$STAGE/"
@@ -78,6 +79,20 @@ node "$SPEC/patches/pi-agent-squad-cypher-host.mjs" \
 # prompt options instead (see the patch header). Missing anchors fail the build
 # on purpose.
 node "$SPEC/patches/pi-agent-squad-prompt-options.mjs" \
+  "$STAGE/npm/node_modules/pi-agent-squad"
+
+# A subagent's `--tools` allowlist dropped the permission extension's
+# request_permission, which every file-tool denial tells the agent to call. Add
+# it beside the file tools (see the patch header). Missing anchors fail the
+# build on purpose.
+node "$SPEC/patches/pi-agent-squad-permission-tool.mjs" \
+  "$STAGE/npm/node_modules/pi-agent-squad"
+
+# A subagent's model and thinking level came only from its agent file, so the
+# orchestrating model could not choose either for one task. The `subagent`
+# tool now takes per-run `model` and `thinking` (see the patch header).
+# Missing anchors fail the build on purpose.
+node "$SPEC/patches/pi-agent-squad-model-options.mjs" \
   "$STAGE/npm/node_modules/pi-agent-squad"
 
 # Cypher labels each answer with the model that wrote it. pi-ai's Responses
@@ -104,6 +119,23 @@ node "$SPEC/patches/pi-claude-bridge-context-files.mjs" \
 # header). Missing anchors fail the build on purpose.
 node "$SPEC/patches/pi-claude-bridge-session-cleanup.mjs" \
   "$STAGE/npm/node_modules/pi-claude-bridge"
+
+# Claude Code keeps a resumed session's stored system prompt, so a prompt that
+# changed mid-chat (/explain, /orchestrate) never reached Claude. The bridge
+# now rebuilds the session when the prompt changed (see the patch header).
+# Missing anchors fail the build on purpose.
+node "$SPEC/patches/pi-claude-bridge-prompt-refresh.mjs" \
+  "$STAGE/npm/node_modules/pi-claude-bridge"
+
+# A Claude model could not use Claude Code's own WebSearch: the bridge runs
+# Claude Code without builtin tools and pi-web-search has no claude-bridge API.
+# The bridge now runs a WebSearch-only one-off query, and pi-web-search uses it
+# when the pinned search model is a Claude Code one (see the patch headers).
+# Missing anchors fail the build on purpose.
+node "$SPEC/patches/pi-claude-bridge-web-search.mjs" \
+  "$STAGE/npm/node_modules/pi-claude-bridge"
+node "$SPEC/patches/pi-web-search-claude-code.mjs" \
+  "$STAGE/npm/node_modules/pi-web-search"
 
 # The permission extension runs ripgrep (behind `grep`) inside Landstrip and
 # checks apply_patch's file access at the operation (see the patch headers).
@@ -220,6 +252,12 @@ PI_PACKAGE_DIR="$STAGE/pi" \
 # Loads the real squad and bridge in both orders: what reaches Claude Code.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
   "$STAGE/bin/node" --test "$SPEC/patches/pi-agent-squad-prompt-options.staged.test.mjs"
+# Runs each subagent allowlist the squad builds.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/patches/pi-agent-squad-permission-tool.staged.test.mjs"
+# Calls the real `subagent` tool with a stub spawner: what each run launches with.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/patches/pi-agent-squad-model-options.staged.test.mjs"
 # Feeds the patched Responses stream; loads the patched bridge.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
   "$STAGE/bin/node" --test "$SPEC/patches/response-model.staged.test.mjs"
@@ -230,12 +268,23 @@ CYPHER_PI_RUNTIME_STAGE="$STAGE" \
 # killed one's, and nothing the bridge did not record is touched.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
   "$STAGE/bin/node" --test "$SPEC/patches/session-cleanup.staged.test.mjs"
+# A real bridge: a changed prompt rebuilds the session instead of resuming it.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/patches/prompt-refresh.staged.test.mjs"
+# The pinned search model decides whether web_search runs through Claude Code;
+# a stand-in replaces Claude Code itself.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/patches/web-search.staged.test.mjs"
 # Language gating decides whether a message costs a translation request at all,
 # so it is covered here rather than only through a live session.
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-translation.test.mjs"
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-fast-mode.test.mjs"
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-codemode.test.mjs"
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-permissions.test.mjs"
+"$STAGE/bin/node" --test "$SPEC/extensions/cypher-file-references.test.mjs"
+# The file-reference instructions in a prompt the staged Pi builds.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/extensions/cypher-file-references.staged.test.mjs"
 # A real Pi with the patched tools, a scripted model and the real Landstrip:
 # the sandbox, the grep and apply_patch hooks and the approval dialogs.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \

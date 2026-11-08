@@ -29,6 +29,30 @@ struct WorkspaceChange: Decodable, Hashable, Identifiable {
     var deletions: Int
     var binary: Bool
     var id: String { path }
+
+    init(path: String, oldPath: String? = nil, status: String, additions: Int, deletions: Int, binary: Bool) {
+        self.path = path
+        self.oldPath = oldPath
+        self.status = status
+        self.additions = additions
+        self.deletions = deletions
+        self.binary = binary
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case path, oldPath, status, additions, deletions, binary
+    }
+
+    /// `binary` is `#[serde(default)]` on the wire.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        oldPath = try c.decodeIfPresent(String.self, forKey: .oldPath)
+        status = try c.decode(String.self, forKey: .status)
+        additions = try c.decode(Int.self, forKey: .additions)
+        deletions = try c.decode(Int.self, forKey: .deletions)
+        binary = try c.decodeIfPresent(Bool.self, forKey: .binary) ?? false
+    }
 }
 
 struct WorkspaceChanges: Decodable {

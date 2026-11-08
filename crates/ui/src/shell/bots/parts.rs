@@ -622,19 +622,6 @@ pub(super) fn next_full<Tz: TimeZone>(at: &DateTime<Tz>, now: &DateTime<Tz>) -> 
     }
 }
 
-/// When something happened, short: "14:02" (today), "Yesterday", "Mon"
-/// (this week), "Oct 12", "Oct 12, 2025" (another year).
-pub(super) fn past_label<Tz: TimeZone>(at: &DateTime<Tz>, now: &DateTime<Tz>) -> String {
-    let days = (now.date_naive() - at.date_naive()).num_days();
-    match days {
-        ..=0 => hm(at),
-        1 => "Yesterday".into(),
-        2..=6 => WEEKDAYS[at.weekday().num_days_from_monday() as usize].into(),
-        _ if at.year() == now.year() => day_month(at),
-        _ => format!("{}, {}", day_month(at), at.year()),
-    }
-}
-
 /// When something happened, in a panel: "Today 14:02", "Yesterday 09:00",
 /// "Oct 12, 14:02".
 pub(super) fn past_full<Tz: TimeZone>(at: &DateTime<Tz>, now: &DateTime<Tz>) -> String {
@@ -700,14 +687,8 @@ mod tests {
     }
 
     #[test]
-    fn past_labels_shorten_with_age() {
+    fn past_full_names_the_day() {
         let now = at("2026-10-18T10:00:00+01:00");
-        let label = |s: &str| past_label(&at(s), &now);
-        assert_eq!(label("2026-10-18T08:05:00+01:00"), "08:05");
-        assert_eq!(label("2026-10-17T22:00:00+01:00"), "Yesterday");
-        assert_eq!(label("2026-10-14T09:00:00+01:00"), "Wed");
-        assert_eq!(label("2026-10-02T09:00:00+01:00"), "Oct 2");
-        assert_eq!(label("2025-12-30T09:00:00+01:00"), "Dec 30, 2025");
         assert_eq!(
             past_full(&at("2026-10-12T14:02:00+01:00"), &now),
             "Oct 12, 14:02"

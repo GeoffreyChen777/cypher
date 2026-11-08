@@ -300,6 +300,7 @@ mod tests {
                 kind,
                 tool_call_id: None,
             }),
+            asked_by: None,
         };
         assert_eq!(
             unattended_stop_reason(&[question(

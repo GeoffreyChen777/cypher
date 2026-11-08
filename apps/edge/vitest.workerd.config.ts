@@ -17,7 +17,8 @@ export default defineConfig({
           // The bot network rooms and the DeviceRoom they nudge, for the
           // cross-room BotRoom tests.
           BOT_ROOMS: { className: "BotRoom", useSQLite: true },
-          DEVICE_ROOMS: { className: "DeviceRoom", useSQLite: true }
+          DEVICE_ROOMS: { className: "DeviceRoom", useSQLite: true },
+          TRUST: { className: "TrustRoom", useSQLite: true }
         }
       }
     })

@@ -107,7 +107,7 @@ pub fn validate_development_environment() -> anyhow::Result<()> {
     );
     if profile == "local" {
         anyhow::ensure!(
-            !cypher_env::data_dir().join("session.json").exists(),
+            !cypher_engine::Auth::has_saved_session(&cypher_env::data_dir()),
             "Local profile cannot load a saved cloud login; choose an isolated local data directory"
         );
     }

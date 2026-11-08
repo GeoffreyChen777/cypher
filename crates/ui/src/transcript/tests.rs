@@ -2654,6 +2654,7 @@ fn permission_question(request: &str, call: Option<&str>, marked: bool) -> Messa
                 kind: cypher_proto::PermissionPromptKind::Escalate,
                 tool_call_id: call.map(str::to_owned),
             }),
+            asked_by: None,
         }],
         resolved: true,
     }
@@ -2766,6 +2767,7 @@ fn a_permission_prompt_without_a_call_is_a_permission_row_not_a_question() {
                     options: vec!["main".into(), "dev".into()],
                     multi_select: false,
                     permission: None,
+                    asked_by: None,
                 }],
                 resolved: true,
             },

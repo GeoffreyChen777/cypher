@@ -8,8 +8,9 @@ use super::*;
 
 /// One dock surface tab: a git-diff page (each tab its own [`Changes`]
 /// viewer — multiple diff panels, user request), a file browser/editor over
-/// the chat's checkout ([`FilesPanel`]), or a temporary Side Chat (round
-/// 21). `Picker` is the empty state ("Open a surface").
+/// the chat's checkout ([`FilesPanel`]), a temporary Side Chat, or a page
+/// from the chat ([`crate::artifacts::ArtifactPanel`]). `Picker` is the
+/// empty state ("Open a surface").
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum DockSurface {
     #[default]
@@ -17,6 +18,7 @@ pub enum DockSurface {
     Diff(u64),
     Files(u64),
     SideChat(u64),
+    Artifact(u64),
 }
 
 /// A tile's right dock state. Everything defaults CLOSED (user request —
@@ -42,6 +44,20 @@ pub(super) struct Dock {
     /// Surface-tab strip scroll (the strip overflows horizontally, t3
     /// ScrollArea-style; drag drop-math reads the offset back out).
     pub(super) tab_scroll: gpui::ScrollHandle,
+    /// The rail shows every button while hovered; otherwise only the
+    /// necessary ones ([`Shell::render_session_rail`]).
+    pub(super) rail_hovered: bool,
+    /// The pointer is over the rail's card now (`rail_hovered` lags it on
+    /// the way out).
+    pub(super) rail_inside: bool,
+    /// Bumped on every rail hover change, so a delayed collapse drops when
+    /// the pointer came back.
+    pub(super) rail_hover_seq: u64,
+    /// The rail's expand/collapse tween: whether it is (heading) expanded,
+    /// its progress when that last changed, and since when.
+    pub(super) rail_shown: bool,
+    pub(super) rail_from: f32,
+    pub(super) rail_since: Option<std::time::Instant>,
 }
 
 impl Dock {
@@ -54,7 +70,130 @@ impl Dock {
             tween: None,
             tab_drag: None,
             tab_scroll: gpui::ScrollHandle::new(),
+            rail_hovered: false,
+            rail_inside: false,
+            rail_hover_seq: 0,
+            rail_shown: false,
+            rail_from: 0.0,
+            rail_since: None,
         }
+    }
+}
+
+/// How long the rail stays expanded after the pointer leaves it.
+const RAIL_COLLAPSE_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The rail's expand/collapse tween.
+const RAIL_MOTION: motion::MotionSpec = motion::COLLAPSE;
+
+/// The rail's expansion (0 collapsed, 1 expanded) at `now`.
+fn rail_progress(dock: &Dock, now: std::time::Instant) -> f32 {
+    let to = if dock.rail_shown { 1.0 } else { 0.0 };
+    match dock.rail_since {
+        Some(since) => {
+            let raw = now.duration_since(since).as_secs_f32() / RAIL_MOTION.total().as_secs_f32();
+            motion::lerp(dock.rail_from, to, RAIL_MOTION.progress(raw))
+        }
+        None => to,
+    }
+}
+
+/// How the rail lays out this frame.
+#[derive(Clone, Copy, PartialEq)]
+enum RailPhase {
+    /// The necessary buttons only.
+    Collapsed,
+    /// Every button; the surfaces as their draggable column.
+    Expanded,
+    /// Every button, the extra ones revealed this far (0..1) into the tween.
+    Animating(f32),
+}
+
+impl RailPhase {
+    /// How much of a button shows: an `extra` (expanded-only) one is gone
+    /// collapsed and partly revealed while animating; the rest always show.
+    fn shown(self, extra: bool) -> f32 {
+        match self {
+            Self::Collapsed if extra => 0.0,
+            Self::Animating(p) if extra => p,
+            _ => 1.0,
+        }
+    }
+}
+
+/// One column of the rail, its items [`RAIL_GAP`] apart. While the rail
+/// animates, a partly shown item grows from nothing (its height, and the gap
+/// before it), fading with it, so everything below glides.
+///
+/// The gaps are padding, not a flex `gap` cancelled by negative margins:
+/// taffy sizes a column around negative margins wrongly (it scales them by
+/// the item's height), so the card shrank to its padding mid-tween and its
+/// buttons spilled out over the transcript.
+struct RailStack {
+    phase: RailPhase,
+    /// Each item and the gap above it.
+    items: Vec<(AnyElement, f32)>,
+    /// The most any item so far shows.
+    shown: f32,
+}
+
+impl RailStack {
+    fn new(phase: RailPhase) -> Self {
+        Self {
+            phase,
+            items: Vec::new(),
+            shown: 0.0,
+        }
+    }
+
+    /// Add a `height`-tall button that shows `shown` (0 skips it).
+    fn push(&mut self, el: impl IntoElement, shown: f32, height: f32) {
+        if shown >= 1.0 {
+            self.place(el.into_any_element(), shown);
+        } else if shown > 0.0 {
+            let reveal = div()
+                .flex_none()
+                .h(px(height * shown))
+                .overflow_hidden()
+                .opacity(shown)
+                .child(el);
+            self.place(reveal.into_any_element(), shown);
+        }
+    }
+
+    /// Add a nested column, shown as much as its most shown item.
+    fn push_stack(&mut self, stack: RailStack) {
+        let shown = stack.shown;
+        if shown > 0.0 {
+            self.place(stack.into_div().into_any_element(), shown);
+        }
+    }
+
+    /// The gap above an item is as open as it is and as anything above it
+    /// is: none before the first, all of it between two shown items.
+    fn place(&mut self, el: AnyElement, shown: f32) {
+        let gap = RAIL_GAP * shown.min(self.shown);
+        self.shown = self.shown.max(shown);
+        self.items.push((el, gap));
+    }
+
+    /// Settled, a plain flex `gap`; animating, padding above each item.
+    fn into_div(self) -> gpui::Div {
+        let column = div().flex().flex_col().items_center();
+        if !matches!(self.phase, RailPhase::Animating(_)) {
+            return column
+                .gap(px(RAIL_GAP))
+                .children(self.items.into_iter().map(|(el, _)| el));
+        }
+        column.children(self.items.into_iter().map(|(el, gap)| {
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt(px(gap))
+                .child(el)
+        }))
     }
 }
 
@@ -352,6 +491,10 @@ impl Shell {
                     .side_chats
                     .get(id)
                     .map(|panel| (*surface, panel.read(cx).tab_title())),
+                DockSurface::Artifact(id) => slot
+                    .artifacts
+                    .get(id)
+                    .map(|panel| (*surface, panel.read(cx).tab_title())),
                 DockSurface::Picker => None,
             })
             .collect()
@@ -449,14 +592,71 @@ impl Shell {
                     panel.update(cx, |panel, cx| panel.ensure_content(cx));
                 }
             }
-            DockSurface::SideChat(_) | DockSurface::Picker => {}
+            DockSurface::SideChat(_) | DockSurface::Artifact(_) | DockSurface::Picker => {}
         }
         cx.notify();
     }
 
+    /// An artifact card's click: the page opens in its own tab — or the tab
+    /// already showing it (a named page's revision included) comes forward
+    /// with it.
+    pub(in crate::shell) fn open_artifact(
+        &mut self,
+        sid: SlotId,
+        artifact: crate::markdown::artifact::ArtifactOpen,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
+            return;
+        };
+        let open = slot
+            .artifacts
+            .iter()
+            .find(|(_, panel)| panel.read(cx).shows(&artifact))
+            .map(|(id, panel)| (*id, panel.clone()));
+        self.ensure_dock_open(sid, cx);
+        let id = match open {
+            Some((id, panel)) => {
+                panel.update(cx, |panel, cx| panel.show(artifact, cx));
+                id
+            }
+            None => {
+                let panel = cx.new(|cx| crate::artifacts::ArtifactPanel::new(artifact, cx));
+                let Some(slot) = self.tiles.slots.get_mut(&sid) else {
+                    return;
+                };
+                slot.artifact_seq += 1;
+                let id = slot.artifact_seq;
+                slot.artifacts.insert(id, panel);
+                slot.dock.surfaces.push(DockSurface::Artifact(id));
+                id
+            }
+        };
+        self.set_dock_active(sid, DockSurface::Artifact(id), cx);
+    }
+
+    /// A named page's revision landed in the chat: its open tab reloads in
+    /// place, without coming forward.
+    pub(in crate::shell) fn refresh_artifact(
+        &mut self,
+        sid: SlotId,
+        artifact: crate::markdown::artifact::ArtifactOpen,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(panel) = self.tiles.slots.get(&sid).and_then(|slot| {
+            slot.artifacts
+                .values()
+                .find(|panel| panel.read(cx).shows(&artifact))
+                .cloned()
+        }) else {
+            return;
+        };
+        panel.update(cx, |panel, cx| panel.show(artifact, cx));
+    }
+
     /// The picker's Files card / the `+` menu's Files row: a fresh file
     /// browser tab over the session's checkout.
-    fn add_files_surface(&mut self, sid: SlotId, cx: &mut Context<Self>) {
+    fn add_files_surface(&mut self, sid: SlotId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
@@ -464,7 +664,24 @@ impl Shell {
         let id = slot.files_seq;
         let state = slot.state.clone();
         let panel = cx.new(|cx| FilesPanel::new(state, cx));
+        let sub = cx.subscribe_in(
+            &panel,
+            window,
+            move |this: &mut Self, _, event, window, cx| match event {
+                crate::files::FilesEvent::Mention { path, is_dir } => {
+                    if let Some(composer) = this.tiles.slots.get(&sid).map(|s| s.composer.clone()) {
+                        composer.update(cx, |composer, cx| {
+                            composer.insert_file_mention(path, *is_dir, window, cx)
+                        });
+                    }
+                }
+            },
+        );
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
+            return;
+        };
         slot.files.insert(id, panel);
+        slot.files_subs.insert(id, sub);
         slot.dock.surfaces.push(DockSurface::Files(id));
         self.set_dock_active(sid, DockSurface::Files(id), cx);
     }
@@ -530,6 +747,69 @@ impl Shell {
         }
     }
 
+    /// A reply's file link: the file opens in the session's Files tab (the
+    /// active one, else the first, else a new one), at its line. A path
+    /// outside the checkout can't show there; one on this device is
+    /// revealed in the system file manager instead.
+    pub(in crate::shell) fn open_file_link(
+        &mut self,
+        sid: SlotId,
+        link: crate::files::links::FileLink,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
+            return;
+        };
+        let context = crate::files::context_for(slot.state.read(cx));
+        let resolved = match &context {
+            Ok(context) => crate::files::links::resolve(&link.path, &context.cwd),
+            Err(_) => Err(link.path.clone()),
+        };
+        let path = match resolved {
+            Ok(path) => path,
+            Err(outside) => {
+                let here = context.as_ref().is_ok_and(|c| c.target.is_none());
+                let path = std::path::Path::new(&outside);
+                if (here || context.is_err()) && path.is_absolute() && path.exists() {
+                    cx.reveal_path(path);
+                }
+                return;
+            }
+        };
+        self.ensure_dock_open(sid, cx);
+        let Some(slot) = self.tiles.slots.get(&sid) else {
+            return;
+        };
+        let shown = match self.resolved_dock_active(slot, cx) {
+            DockSurface::Files(id) => Some(id),
+            _ => slot.dock.surfaces.iter().find_map(|surface| match surface {
+                DockSurface::Files(id) if slot.files.contains_key(id) => Some(*id),
+                _ => None,
+            }),
+        };
+        match shown {
+            Some(id) => self.set_dock_active(sid, DockSurface::Files(id), cx),
+            None => self.add_files_surface(sid, window, cx),
+        }
+        let panel = self
+            .tiles
+            .slots
+            .get(&sid)
+            .and_then(|slot| match slot.dock.active {
+                DockSurface::Files(id) => slot.files.get(&id).cloned(),
+                _ => None,
+            });
+        if let Some(panel) = panel {
+            panel.update(cx, |panel, cx| {
+                let lines = link
+                    .line
+                    .map(|first| (first, link.end_line.unwrap_or(first)));
+                panel.open_link(path, lines, link.dir, cx)
+            });
+        }
+    }
+
     fn register_diff_surface(
         &mut self,
         sid: SlotId,
@@ -577,6 +857,10 @@ impl Shell {
                 // Dropping the entity drops its editors — unsaved edits go
                 // with them (the tab title carries the ● warning).
                 slot.files.remove(&id);
+                slot.files_subs.remove(&id);
+            }
+            DockSurface::Artifact(id) => {
+                slot.artifacts.remove(&id);
             }
             DockSurface::SideChat(_) | DockSurface::Picker => {}
         }
@@ -634,6 +918,7 @@ impl Shell {
                     // surface tab strip (user request).
                     let controls =
                         changes.update(cx, |changes, cx| changes.render_header_controls(cx));
+                    let live = changes.read(cx).live_layer();
                     div()
                         .size_full()
                         .flex()
@@ -654,16 +939,20 @@ impl Shell {
                                 .flex_1()
                                 .min_h_0()
                                 .pb(px(PANEL_CORNER_RADIUS))
-                                .child(changes),
+                                .child(self.cached_surface(changes.clone(), live)),
                         )
                         .into_any_element()
                 }
                 DockSurface::Files(id) if slot.files.contains_key(&id) => {
                     let panel = slot.files.get(&id).cloned().expect("checked");
-                    panel.update(cx, |panel, cx| panel.ensure_content(cx));
+                    panel.update(cx, |panel, cx| {
+                        panel.set_header_right(header_right, cx);
+                        panel.ensure_content(cx);
+                    });
                     // Same two-row shape as the diff pane: the surface's own
                     // controls row under the tab strip, then the body.
                     let controls = panel.update(cx, |panel, cx| panel.render_header_controls(cx));
+                    let live = panel.read(cx).live_layer();
                     div()
                         .size_full()
                         .flex()
@@ -681,7 +970,7 @@ impl Shell {
                                 .flex_1()
                                 .min_h_0()
                                 .pb(px(PANEL_CORNER_RADIUS))
-                                .child(panel),
+                                .child(self.cached_surface(panel.clone(), live)),
                         )
                         .into_any_element()
                 }
@@ -692,6 +981,11 @@ impl Shell {
                     } else {
                         self.render_surface_picker(sid, cx)
                     }
+                }
+                DockSurface::Artifact(id) if slot.artifacts.contains_key(&id) => {
+                    let panel = slot.artifacts.get(&id).cloned().expect("checked");
+                    panel.update(cx, |panel, cx| panel.set_header_right(header_right, cx));
+                    panel.into_any_element()
                 }
                 _ => self.render_surface_picker(sid, cx),
             }
@@ -786,6 +1080,23 @@ impl Shell {
         )
     }
 
+    /// A dock surface's body: the surface view cached, so the animation
+    /// clock's ticks replay it instead of rebuilding it, with its live
+    /// layer's overlay right after it painting the loaders and hover fades
+    /// inside.
+    fn cached_surface<V: Render>(
+        &self,
+        view: Entity<V>,
+        live: crate::kit::live_layer::LiveLayer,
+    ) -> AnyElement {
+        let host = view.entity_id();
+        div()
+            .size_full()
+            .child(view.cached(gpui::StyleRefinement::default().size_full()))
+            .child(live.overlay(host, self.pulse_ticker.entity_id()))
+            .into_any_element()
+    }
+
     /// The right pane's empty state: the "Open a surface" heading over a
     /// compact vertical list of surface rows (icon + label) — the Capy
     /// arrangement (user request): the old two-card grid clipped in narrow
@@ -877,8 +1188,8 @@ impl Shell {
                             .when(files_available, |el| {
                                 el.child(
                                     row("surface-card-files", icons::FOLDER_WITH_FILES, "Files")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.add_files_surface(sid, cx);
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.add_files_surface(sid, window, cx);
                                         })),
                                 )
                             })
@@ -939,16 +1250,94 @@ impl Shell {
         }
     }
 
+    /// Expand the rail at once on hover; collapse it a moment after the
+    /// pointer leaves (a pass over its edge does not flicker it).
+    fn set_rail_hovered(&mut self, sid: SlotId, hovered: bool, cx: &mut Context<Self>) {
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
+            return;
+        };
+        if slot.dock.rail_inside == hovered {
+            return;
+        }
+        slot.dock.rail_inside = hovered;
+        slot.dock.rail_hover_seq = slot.dock.rail_hover_seq.wrapping_add(1);
+        if hovered {
+            if !slot.dock.rail_hovered {
+                slot.dock.rail_hovered = true;
+                cx.notify();
+            }
+            return;
+        }
+        let seq = slot.dock.rail_hover_seq;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RAIL_COLLAPSE_DELAY).await;
+            this.update(cx, |this, cx| {
+                if let Some(slot) = this.tiles.slots.get_mut(&sid)
+                    && slot.dock.rail_hover_seq == seq
+                    && slot.dock.rail_hovered
+                {
+                    slot.dock.rail_hovered = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The rail's phase this frame, starting its tween when `expanded`
+    /// changed (from wherever a reversed tween stood). Every item reads the
+    /// one wall-clock progress, and each frame of the tween asks for the
+    /// next until the layout settles.
+    fn rail_phase(
+        &mut self,
+        sid: SlotId,
+        expanded: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> RailPhase {
+        let settled = if expanded {
+            RailPhase::Expanded
+        } else {
+            RailPhase::Collapsed
+        };
+        let reduced = motion::reduced_motion(cx);
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
+            return settled;
+        };
+        let dock = &mut slot.dock;
+        let now = std::time::Instant::now();
+        if dock.rail_shown != expanded {
+            dock.rail_from = rail_progress(dock, now);
+            dock.rail_shown = expanded;
+            dock.rail_since = (!reduced).then_some(now);
+        }
+        match dock.rail_since {
+            Some(since) if now.duration_since(since) < RAIL_MOTION.total() => {
+                window.request_animation_frame();
+                RailPhase::Animating(rail_progress(dock, now))
+            }
+            _ => settled,
+        }
+    }
+
     /// The session's vertical rail in the tile's top-right corner (user
     /// request; `top` clears native caption buttons), one
     /// raised card: the tile actions (terminal, dock, split, zoom), a divider,
     /// then the dock's surfaces (icon-only, titles on hover) and the `+`
     /// menu; the dock-expand toggle sits under the card while the dock is
     /// open. Surfaces reorder by dragging; middle-click or the hover ✕ closes.
+    ///
+    /// Collapsed until hovered (user request): only the side-panel toggle and
+    /// what is on — an open terminal, a zoomed tile, the side panel's shown
+    /// surface. It stays expanded while its `+` menu is open or a surface
+    /// drags. Expanding slides the other buttons open and fades them in;
+    /// collapsing reverses it.
     pub(super) fn render_session_rail(
         &mut self,
         sid: SlotId,
         top: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let has_drag = cx.has_active_drag();
@@ -979,25 +1368,46 @@ impl Shell {
         let files_available = self.files_available(slot, cx);
         let git = self.slot_git_detected(slot, cx);
         let tab_scroll = slot.dock.tab_scroll.clone();
+        let expanded = slot.dock.rail_hovered
+            || slot.dock.tab_drag.is_some()
+            || self.menus.right_plus.get() == Some(&sid);
         let drag = slot
             .dock
             .tab_drag
             .as_ref()
             .map(|d| (d.from, d.over, d.epoch, d.prev_over));
 
-        let tabs = render_rail_tabs(
-            RailTabs {
-                sid,
-                rows,
-                dock_open,
-                active,
-                drag,
-                tab_scroll,
-            },
-            &theme,
-            cx,
-        );
-        let plus = self.render_rail_plus(sid, files_available, git, &theme, cx);
+        let phase = self.rail_phase(sid, expanded, window, cx);
+        // Collapsed, the surfaces column is the shown surface alone.
+        let shows_surface = dock_open && rows.iter().any(|(surface, _)| *surface == active);
+        // Settled and expanded, the surfaces are their draggable column;
+        // otherwise plain rows.
+        let mut tabs = RailStack::new(phase);
+        let mut tab_column = None;
+        if phase == RailPhase::Expanded {
+            tab_column = (count > 0).then(|| {
+                render_rail_tabs(
+                    RailTabs {
+                        sid,
+                        rows,
+                        dock_open,
+                        active,
+                        drag,
+                        tab_scroll,
+                    },
+                    &theme,
+                    cx,
+                )
+            });
+        } else {
+            for (ix, (surface, title)) in rows.into_iter().enumerate() {
+                let is_active = dock_open && surface == active;
+                let button = rail_tab_button(sid, ix, surface, title, is_active, &theme, cx);
+                tabs.push(button, phase.shown(!is_active), RAIL_BUTTON);
+            }
+        }
+        let plus = (phase != RailPhase::Collapsed)
+            .then(|| self.render_rail_plus(sid, files_available, git, &theme, cx));
         let raised_bg = Theme::of(cx).surface_raised;
         let (on, off) = (theme.text, theme.text_muted.opacity(0.55));
         let hover = theme.text_muted;
@@ -1012,34 +1422,60 @@ impl Shell {
                 group,
                 zoomed,
                 can_zoom,
+                phase,
             },
             tone,
             cx,
         );
+        // 5px: the 1px line and its 2px margins, as one box the reveal can
+        // size.
         let divider = div()
             .flex_none()
-            .w(px(RAIL_BUTTON - 10.0))
-            .h(px(1.0))
-            .my(px(2.0))
-            .bg(theme.border);
-        let card = div()
+            .h(px(5.0))
+            .flex()
+            .items_center()
+            .child(div().w(px(RAIL_BUTTON - 10.0)).h(px(1.0)).bg(theme.border));
+        let mut card = RailStack::new(phase);
+        card.push_stack(actions);
+        // The dock's surfaces + `+` (not on a canvas — no dock there).
+        if has_dock {
+            card.push(divider, phase.shown(!shows_surface), 5.0);
+            match tab_column {
+                Some(column) => card.place(column.into_any_element(), 1.0),
+                None => card.push_stack(tabs),
+            }
+            if let Some(plus) = plus {
+                card.push(plus, phase.shown(true), RAIL_BUTTON);
+            }
+        }
+        // Hover by position: the buttons occlude the card, so its own
+        // hitbox never reads as hovered under them.
+        let shell = cx.entity().downgrade();
+        let watcher = gpui::canvas(
+            |_, _, _| {},
+            move |bounds, (), window, _| {
+                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                    if phase == gpui::DispatchPhase::Bubble {
+                        let inside = bounds.contains(&event.position);
+                        shell
+                            .update(cx, |this, cx| this.set_rail_hovered(sid, inside, cx))
+                            .ok();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0();
+        let card = card
+            .into_div()
+            .relative()
             .flex_none()
             .min_h_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(RAIL_GAP))
             .p(px(3.0))
             .rounded(px(RIGHT_TAB_RADIUS + 5.0))
             .bg(raised_bg)
             .shadow_sm()
-            .child(actions)
-            // The dock's surfaces + `+` (not on a canvas — no dock there).
-            .when(has_dock, |el| {
-                el.child(divider)
-                    .when(count > 0, |el| el.child(tabs))
-                    .child(plus)
-            });
+            .child(watcher);
         let expand = dock_open.then(|| {
             header_icon_button(
                 ("dock-expand", sid),
@@ -1227,6 +1663,7 @@ fn rail_tab_button(
     let icon_path = match surface {
         DockSurface::Diff(_) => icons::GIT_BRANCH,
         DockSurface::Files(_) => icons::FOLDER_WITH_FILES,
+        DockSurface::Artifact(_) => icons::CODE,
         _ => icons::CHAT_ROUND_LINE,
     };
     let group: SharedString = format!("dock-rail-tab-{sid}-{ix}").into();
@@ -1375,9 +1812,9 @@ fn rail_plus_menu(
                     el.child(
                         popover::menu_row(&theme, false, "right-plus-files")
                             .id("right-plus-files-row")
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.ensure_dock_open(sid, cx);
-                                this.add_files_surface(sid, cx);
+                                this.add_files_surface(sid, window, cx);
                                 this.close_right_plus(cx);
                             }))
                             .child(
@@ -1425,15 +1862,19 @@ struct RailActions {
     group: Option<crate::workspace::GroupId>,
     zoomed: bool,
     can_zoom: bool,
+    /// Collapsed, only the dock toggle and what is on show.
+    phase: RailPhase,
 }
 
 /// The tile actions — moved here from the tab row (user request).
+/// Collapsed: the dock toggle (the terminal where there is no dock), and
+/// the terminal and zoom while they are on.
 fn render_rail_actions(
     sid: SlotId,
     state: RailActions,
     tone: RailTone,
     cx: &mut Context<Shell>,
-) -> gpui::Div {
+) -> RailStack {
     let RailActions {
         terminal_open,
         terminal,
@@ -1442,53 +1883,70 @@ fn render_rail_actions(
         group,
         zoomed,
         can_zoom,
+        phase,
     } = state;
-    let mut actions = div().flex().flex_col().items_center().gap(px(RAIL_GAP));
+    let mut actions = RailStack::new(phase);
+    // A bot conversation has no terminal.
     if terminal {
-        actions = actions.child(rail_button(
-            format!("rail-terminal-{sid}").into(),
-            icons::TERMINAL,
-            terminal_open,
-            "Terminal",
-            tone,
-            cx.listener(move |this, _, window, cx| this.toggle_terminal(sid, window, cx)),
-        ));
+        actions.push(
+            rail_button(
+                format!("rail-terminal-{sid}").into(),
+                icons::TERMINAL,
+                terminal_open,
+                "Terminal",
+                tone,
+                cx.listener(move |this, _, window, cx| this.toggle_terminal(sid, window, cx)),
+            ),
+            phase.shown(!terminal_open && has_dock),
+            RAIL_BUTTON,
+        );
     }
-
     if has_dock {
-        actions = actions.child(rail_button(
-            format!("rail-dock-{sid}").into(),
-            icons::SIDEBAR_MINIMALISTIC,
-            dock_open,
-            "Side panel",
-            tone,
-            cx.listener(move |this, _, _, cx| this.toggle_dock(sid, cx)),
-        ));
+        actions.push(
+            rail_button(
+                format!("rail-dock-{sid}").into(),
+                icons::SIDEBAR_MINIMALISTIC,
+                dock_open,
+                "Side panel",
+                tone,
+                cx.listener(move |this, _, _, cx| this.toggle_dock(sid, cx)),
+            ),
+            1.0,
+            RAIL_BUTTON,
+        );
     }
     if let Some(group) = group {
-        actions = actions.child(rail_button(
-            format!("rail-split-{sid}").into(),
-            icons::DIFF_SPLIT,
-            false,
-            "Split right",
-            tone,
-            cx.listener(move |this, _, _, cx| {
-                this.workspace.focus(group);
-                this.split_focused(crate::workspace::Edge::Right, cx);
-            }),
-        ));
-        if can_zoom {
-            actions = actions.child(rail_button(
-                format!("rail-zoom-{sid}").into(),
-                icons::EXPAND_ARROWS,
-                zoomed,
-                if zoomed { "Restore tiles" } else { "Zoom tile" },
+        actions.push(
+            rail_button(
+                format!("rail-split-{sid}").into(),
+                icons::DIFF_SPLIT,
+                false,
+                "Split right",
                 tone,
                 cx.listener(move |this, _, _, cx| {
-                    this.workspace.toggle_zoom(group);
-                    this.workspace_changed(cx);
+                    this.workspace.focus(group);
+                    this.split_focused(crate::workspace::Edge::Right, cx);
                 }),
-            ));
+            ),
+            phase.shown(true),
+            RAIL_BUTTON,
+        );
+        if can_zoom {
+            actions.push(
+                rail_button(
+                    format!("rail-zoom-{sid}").into(),
+                    icons::EXPAND_ARROWS,
+                    zoomed,
+                    if zoomed { "Restore tiles" } else { "Zoom tile" },
+                    tone,
+                    cx.listener(move |this, _, _, cx| {
+                        this.workspace.toggle_zoom(group);
+                        this.workspace_changed(cx);
+                    }),
+                ),
+                phase.shown(!zoomed),
+                RAIL_BUTTON,
+            );
         }
     }
     actions
@@ -1583,6 +2041,82 @@ mod tests {
         assert!(!reorder_dock_surfaces(&mut tabs, 1, 1));
         assert!(!reorder_dock_surfaces(&mut tabs, 1, 9));
         assert_eq!(tabs, before);
+    }
+
+    /// A rail card of three buttons, the outer two expanded-only.
+    struct RailProbe(RailPhase);
+
+    impl gpui::Render for RailProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let phase = self.0;
+            let button = |selector: &'static str| {
+                div()
+                    .size(px(RAIL_BUTTON))
+                    .debug_selector(move || selector.into())
+            };
+            let mut card = RailStack::new(phase);
+            card.push(button("rail-probe-first"), phase.shown(true), RAIL_BUTTON);
+            card.push(button("rail-probe-kept"), 1.0, RAIL_BUTTON);
+            card.push(button("rail-probe-last"), phase.shown(true), RAIL_BUTTON);
+            div().child(
+                card.into_div()
+                    .p(px(3.0))
+                    .debug_selector(|| "rail-probe-card".into()),
+            )
+        }
+    }
+
+    /// The card's height and the kept button's offset in it at `phase`.
+    fn rail_probe_layout(
+        cx: &mut gpui::TestAppContext,
+        window: gpui::WindowHandle<RailProbe>,
+        phase: RailPhase,
+    ) -> (f32, f32) {
+        window
+            .update(cx, |probe, _, cx| {
+                probe.0 = phase;
+                cx.notify();
+            })
+            .unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let card = visual.debug_bounds("rail-probe-card").unwrap();
+        let kept = visual.debug_bounds("rail-probe-kept").unwrap();
+        (
+            f32::from(card.size.height),
+            f32::from(kept.top() - card.top()),
+        )
+    }
+
+    /// Mid-tween the card wraps what it shows: its height and the kept
+    /// button's place run straight from collapsed to expanded. (On
+    /// negative margins it shrank to its padding: taffy sizes a column
+    /// around them wrongly.)
+    #[gpui::test]
+    fn the_rail_card_grows_with_its_buttons(cx: &mut gpui::TestAppContext) {
+        let window = cx.open_window(gpui::size(px(200.0), px(400.0)), |_, _| {
+            RailProbe(RailPhase::Collapsed)
+        });
+        let near =
+            |(a, b): (f32, f32), (x, y): (f32, f32)| (a - x).abs() <= 1.0 && (b - y).abs() <= 1.0;
+        // Collapsed: the kept button alone. Expanded: all three, 4px apart.
+        let collapsed = (3.0 + RAIL_BUTTON + 3.0, 3.0);
+        let expanded = (collapsed.0 + 2.0 * RAIL_SLOT, 3.0 + RAIL_SLOT);
+        let layout = rail_probe_layout(cx, window, RailPhase::Collapsed);
+        assert!(near(layout, collapsed), "collapsed: {layout:?}");
+        let layout = rail_probe_layout(cx, window, RailPhase::Expanded);
+        assert!(near(layout, expanded), "expanded: {layout:?}");
+        for p in [0.0, 0.1, 0.5, 0.9, 1.0] {
+            let layout = rail_probe_layout(cx, window, RailPhase::Animating(p));
+            let want = (
+                motion::lerp(collapsed.0, expanded.0, p),
+                motion::lerp(collapsed.1, expanded.1, p),
+            );
+            assert!(near(layout, want), "p = {p}: {layout:?}, want {want:?}");
+        }
     }
 
     #[test]

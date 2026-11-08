@@ -58,6 +58,25 @@ enum DocDisk {
         return cursor
     }
 
+    /// Chat snapshot writes, in the order they were asked for. Exporting a
+    /// long session's doc takes tens of milliseconds (a 7.5MB doc: ~40ms on
+    /// a Mac, more on a phone) — a hitch on the main thread just as a
+    /// freshly synced transcript lands.
+    private static let writer = DispatchQueue(label: "ai.mvp-lab.cypher.doc-disk", qos: .utility)
+
+    /// `saveChat2` on the writer queue. Read `cursor` before the export runs:
+    /// the doc can only gain rows meanwhile, and content ahead of its cursor
+    /// costs a re-fetch, never a gap.
+    static func saveChat2Later(doc: LoroDoc, id: String, cursor: UInt64) {
+        writer.async { saveChat2(doc: doc, id: id, cursor: cursor) }
+    }
+
+    /// Waits out every queued write (backgrounding: the app may be
+    /// suspended next).
+    static func finishWrites() {
+        writer.sync {}
+    }
+
     /// Atomically persist the chat2 doc snapshot + its room cursor.
     static func saveChat2(doc: LoroDoc, id: String, cursor: UInt64) {
         guard let snapshot = try? doc.export(mode: .snapshot) else { return }
@@ -95,7 +114,10 @@ enum DocDisk {
 
     /// Sign-out hygiene: local doc state belongs to the signed-in identity.
     static func wipeAll() {
-        try? FileManager.default.removeItem(at: directory)
+        // After the writes already queued, or one would bring a doc back.
+        writer.sync {
+            try? FileManager.default.removeItem(at: directory)
+        }
     }
 }
 

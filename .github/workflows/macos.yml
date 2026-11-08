@@ -34,7 +34,11 @@ jobs:
 
   macos:
     needs: preflight
-    runs-on: macos-15
+    # The macOS developers build on, so the release links against the same SDK
+    # major (macOS 26) as local builds. On macos-15 it linked against SDK 15 and
+    # ran in compatibility mode on macOS 26. The deployment target is
+    # unchanged (rustc's default, minos 11.0; Info.plist asks for 12.0).
+    runs-on: macos-26
     timeout-minutes: 40
     env:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}

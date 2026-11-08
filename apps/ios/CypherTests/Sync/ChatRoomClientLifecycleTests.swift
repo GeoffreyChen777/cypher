@@ -82,16 +82,16 @@ final class ChatRoomClientLifecycleTests: XCTestCase {
 
     private func advance(seconds: Int) async {
         for _ in 0..<seconds {
-            clock.advance(nanoseconds: 1_000 * Self.ms)
-            await settle()
+            await tick(clock)
         }
     }
 
     private func advance(upTo seconds: Int, until condition: () -> Bool) async {
         for _ in 0..<seconds where !condition() {
-            await advance(seconds: 1)
+            await tick(clock, unless: condition)
         }
-        XCTAssertTrue(condition(), "still waiting after \(seconds)s")
+        // The last step's tick may still be tearing the session down.
+        await eventually("still waiting after \(seconds)s") { condition() }
     }
 
     private func expectRedial(after delayMs: UInt64, sockets expected: Int) async {

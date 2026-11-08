@@ -589,7 +589,7 @@ mod tests {
         let plain = default_registry(sessions.clone());
         let bridge = default_registry_with_bridge(
             sessions,
-            Some("/tmp/cypher-ipc-fixture/engine.sock".into()),
+            Some("/tmp/cypher-ipc-fixture/agent.sock".into()),
         );
         let plain_ids: Vec<HarnessId> = plain.descriptors().iter().map(|d| d.id).collect();
         let bridge_ids: Vec<HarnessId> = bridge.descriptors().iter().map(|d| d.id).collect();

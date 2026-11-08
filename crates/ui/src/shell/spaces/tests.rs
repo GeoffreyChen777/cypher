@@ -358,3 +358,41 @@ fn orphan_worktree_after_delete_cases() {
         }
     }
 }
+
+/// A project move takes every root session, archived ones too; subagent
+/// chats ride along with their parent and never count on their own.
+#[test]
+fn project_moves_count_root_sessions_only() {
+    let in_space = |id: &str, space: &str| Chat {
+        id: id.into(),
+        space_id: Some(space.into()),
+        ..crate::test_fixtures::chat()
+    };
+    let mut archived = in_space("archived", "s1");
+    archived.archived = true;
+    let mut child = in_space("child", "s1");
+    child.child = Some(cypher_proto::ChildChat {
+        parent_chat_id: "root".into(),
+        parent_run_id: "run".into(),
+        agent: "planner".into(),
+        task: "t".into(),
+        mode: cypher_proto::SubagentRunMode::Sync,
+        tool_call_id: None,
+        profile: cypher_proto::ChildAgentProfile {
+            system_prompt: String::new(),
+            tools: vec![],
+            model: None,
+            thinking: None,
+        },
+    });
+    let chats = vec![
+        in_space("root", "s1"),
+        archived,
+        child,
+        in_space("other", "s2"),
+    ];
+    assert!(space_has_sessions(&chats, "s1"));
+    assert!(space_has_sessions(&chats, "s2"));
+    assert!(!space_has_sessions(&chats, "s3"));
+    assert!(!space_has_sessions(&chats[2..3], "s1"));
+}

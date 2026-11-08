@@ -200,9 +200,15 @@ impl WorkspaceHost {
         Ok(true)
     }
 
-    /// Re-home a chat to another device (tooling/seeds; a future device
-    /// migration flow will drive this). Returns false when the chat doesn't
-    /// exist.
+    /// Session migration: move the chat to another project (and host) in
+    /// one registry write. Returns false when the chat doesn't exist.
+    pub fn rehome_chat(&self, chat_id: &str, home: &ChatHome) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.rehome_chat(chat_id, home))?)
+    }
+
+    /// Re-home a chat to another device, nothing else (tooling/seeds — a
+    /// real move goes through [`Self::rehome_chat`]). Returns false when the
+    /// chat doesn't exist.
     pub fn set_chat_host(&self, chat_id: &str, device_id: &str) -> Result<bool, EngineError> {
         let Some(mut chat) = self.read(|doc| doc.chat(chat_id))? else {
             return Ok(false);
@@ -391,9 +397,8 @@ impl WorkspaceHost {
             }
         }
         let chat_id = crate::util::new_id();
-        let sandbox = parent
-            .config
-            .as_ref()
+        let sandbox = self
+            .launch_config(&parent.id)
             .map(|c| c.sandbox)
             .unwrap_or(SandboxLevel::WorkspaceWrite);
         self.mutate(|doc| {

@@ -23,6 +23,8 @@
 //! consumes, so they never anchor the alignment. The one positional fallback
 //! is a transcript with no slash commands whose prompt and user-entry counts
 //! agree — a translated session from before the extension recorded originals.
+//! A prompt that never reached pi (its turn failed or was interrupted before
+//! pi recorded it) is set aside when pi provably holds nothing in its place.
 //! The source session file is never written; the returned new session file is
 //! verified non-empty and different from the source.
 //!
@@ -164,6 +166,11 @@ pub(crate) enum PromptEntry {
     /// Complete alignments disagree on this prompt's entry (repeated text,
     /// e.g. a prompt pi holds twice after a resend).
     Ambiguous,
+    /// The prompt never reached pi: Cypher writes a prompt to the transcript
+    /// before dispatching it, so a turn that fails or is interrupted before
+    /// pi records the message leaves one behind. Pi holds no user entry where
+    /// it would have landed (see [`map_prompts_to_entries`]).
+    Unsent,
 }
 
 /// Map the ordered Cypher visible USER prompts onto the pi active branch's
@@ -184,20 +191,61 @@ pub(crate) enum PromptEntry {
 /// prompt produced exactly one user message and only the text differs (a
 /// translation from before the extension recorded originals). A prompt whose
 /// text matches some OTHER entry but not its own position vetoes that
-/// fallback. Returns one [`PromptEntry`] per prompt.
+/// fallback.
+///
+/// Last, the prompts whose text matches NO user entry are set aside as
+/// [`PromptEntry::Unsent`] and the rest must align. That stands only when at
+/// least one prompt anchors and pi holds no user entry between the placed
+/// prompts around each unsent one — an entry there means the prompt probably
+/// did reach pi, under text the transcript does not show. Returns one
+/// [`PromptEntry`] per prompt.
 pub(crate) fn map_prompts_to_entries(
     active_users: &[PiEntry],
     visible_prompts: &[String],
 ) -> Result<Vec<PromptEntry>, HarnessError> {
-    let mut mapped = vec![PromptEntry::Command; visible_prompts.len()];
     // The prompts that anchor the alignment, as indices into `visible_prompts`.
     let anchors: Vec<usize> = (0..visible_prompts.len())
         .filter(|&j| !is_command_prompt(&visible_prompts[j]))
         .collect();
+    if let Some(mapped) = align(active_users, visible_prompts, &anchors) {
+        return Ok(mapped);
+    }
+    if let Some(positional) = positional_mapping(active_users, visible_prompts) {
+        tracing::info!(
+            prompts = visible_prompts.len(),
+            "session fork mapping: prompt text differs from the pi user entries; \
+             mapping by position (equal counts, no slash commands)"
+        );
+        return Ok(positional);
+    }
+    if let Some(mapped) = unsent_mapping(active_users, visible_prompts, &anchors) {
+        tracing::info!(
+            prompts = visible_prompts.len(),
+            unsent = mapped.iter().filter(|p| **p == PromptEntry::Unsent).count(),
+            "session fork mapping: setting aside prompts that never reached the pi session"
+        );
+        return Ok(mapped);
+    }
+    Err(HarnessError::Protocol(first_unmatched_detail(
+        active_users,
+        visible_prompts,
+        &anchors,
+    )))
+}
+
+/// The monotonic alignment of `anchors` described on
+/// [`map_prompts_to_entries`]; every other prompt maps to
+/// [`PromptEntry::Command`]. `None` when no complete alignment exists.
+fn align(
+    active_users: &[PiEntry],
+    visible_prompts: &[String],
+    anchors: &[usize],
+) -> Option<Vec<PromptEntry>> {
+    let mut mapped = vec![PromptEntry::Command; visible_prompts.len()];
     let n = anchors.len();
     let m = active_users.len();
     if n == 0 {
-        return Ok(mapped);
+        return Some(mapped);
     }
     let matches: Vec<Vec<bool>> = anchors
         .iter()
@@ -230,19 +278,7 @@ pub(crate) fn map_prompts_to_entries(
         }
     }
     if !reach_fwd[n - 1].iter().any(|&r| r) {
-        if let Some(positional) = positional_mapping(active_users, visible_prompts) {
-            tracing::info!(
-                prompts = visible_prompts.len(),
-                "session fork mapping: prompt text differs from the pi user entries; \
-                 mapping by position (equal counts, no slash commands)"
-            );
-            return Ok(positional);
-        }
-        return Err(HarnessError::Protocol(first_unmatched_detail(
-            active_users,
-            visible_prompts,
-            &anchors,
-        )));
+        return None;
     }
     for (j, &prompt) in anchors.iter().enumerate() {
         let mut feasible = (0..m).filter(|&i| reach_fwd[j][i] && reach_back[j][i]);
@@ -251,7 +287,92 @@ pub(crate) fn map_prompts_to_entries(
             _ => PromptEntry::Ambiguous,
         };
     }
-    Ok(mapped)
+    Some(mapped)
+}
+
+/// The unsent-prompt fallback described on [`map_prompts_to_entries`];
+/// `None` when it does not apply.
+fn unsent_mapping(
+    active_users: &[PiEntry],
+    visible_prompts: &[String],
+    anchors: &[usize],
+) -> Option<Vec<PromptEntry>> {
+    let (unsent, sent): (Vec<usize>, Vec<usize>) = anchors.iter().copied().partition(|&j| {
+        !(0..active_users.len()).any(|i| matches_entry(active_users, i, &visible_prompts[j]))
+    });
+    if unsent.is_empty() || sent.is_empty() {
+        return None;
+    }
+    let mut mapped = align(active_users, visible_prompts, &sent)?;
+    for &j in &unsent {
+        mapped[j] = PromptEntry::Unsent;
+    }
+    let placed = |p: &&PromptEntry| !matches!(p, PromptEntry::Command | PromptEntry::Unsent);
+    for &j in &unsent {
+        // The user entries pi holds between the placed prompts around this
+        // one: where it would have landed. An ambiguous neighbour leaves that
+        // span unknown.
+        let start = match mapped[..j].iter().rev().find(placed) {
+            None => 0,
+            Some(PromptEntry::Entry(i)) => i + 1,
+            Some(_) => return None,
+        };
+        let end = match mapped[j + 1..].iter().find(placed) {
+            None => active_users.len(),
+            Some(PromptEntry::Entry(i)) => *i,
+            Some(_) => return None,
+        };
+        if end > start {
+            return None;
+        }
+    }
+    Some(mapped)
+}
+
+/// Where a fork before one Cypher prompt lands in the pi session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForkPoint {
+    /// Before this active-branch user entry.
+    Before(usize),
+    /// At the active leaf (a clone).
+    Leaf,
+}
+
+/// Resolve a fork before Cypher prompt `index`. An unsent prompt forks where
+/// the next prompt pi did receive does — nothing between them reached pi —
+/// or at the leaf when none followed it.
+pub(crate) fn fork_point(mapping: &[PromptEntry], index: usize) -> Result<ForkPoint, HarnessError> {
+    match mapping.get(index) {
+        Some(PromptEntry::Entry(i)) => Ok(ForkPoint::Before(*i)),
+        Some(PromptEntry::Command) => Err(HarnessError::Protocol(
+            "session fork: that message is a slash command, which has no user entry of its \
+             own in the Pi session — fork or restart from a neighbouring message instead"
+                .into(),
+        )),
+        Some(PromptEntry::Ambiguous) => Err(HarnessError::Protocol(
+            "session fork mapping: ambiguous — the Pi session holds that message more than \
+             once and the transcript cannot tell which one it is; refusing a positional guess"
+                .into(),
+        )),
+        Some(PromptEntry::Unsent) => {
+            match mapping[index + 1..]
+                .iter()
+                .find(|p| **p != PromptEntry::Unsent)
+            {
+                None => Ok(ForkPoint::Leaf),
+                Some(PromptEntry::Entry(i)) => Ok(ForkPoint::Before(*i)),
+                Some(_) => Err(HarnessError::Protocol(
+                    "session fork: that message never reached the Pi session, and the one \
+                     after it has no single user entry there to fork before — fork or \
+                     restart from an earlier message instead"
+                        .into(),
+                )),
+            }
+        }
+        None => Err(HarnessError::Protocol(format!(
+            "session fork: boundary user index {index} out of range"
+        ))),
+    }
 }
 
 /// The equal-count positional fallback described on
@@ -447,70 +568,37 @@ impl PiHarness {
 
                 // (3) Execute the boundary: fork before the mapped user entry
                 // or clone at the current leaf.
-                let entry_id = match request.boundary {
-                    cypher_proto::PiForkBoundary::CloneLeaf => {
-                        // Extensions append user messages of their own
-                        // (`/goal` continuations), so pi may legitimately hold
-                        // user entries past the last Cypher prompt. The race
-                        // this once guarded — a prompt sent while the helper
-                        // ran — is caught by the engine, which rechecks the
-                        // transcript (Cypher writes a prompt there BEFORE
-                        // dispatching it to pi) before publishing the fork.
-                        // The mapping above still had to succeed: it is what
-                        // proves this session belongs to this transcript.
-                        let resp = client.request("clone", Map::new()).await?;
-                        if resp
-                            .get("cancelled")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false)
-                        {
-                            return Err(HarnessError::Protocol(
-                                "session fork: clone was cancelled".into(),
-                            ));
-                        }
-                        None
-                    }
-                    cypher_proto::PiForkBoundary::BeforeUser(index) => {
-                        let entry = match mapping.get(index) {
-                            Some(PromptEntry::Entry(i)) => active_users.get(*i),
-                            Some(PromptEntry::Command) => {
-                                return Err(HarnessError::Protocol(
-                                    "session fork: that message is a slash command, which \
-                                     has no user entry of its own in the Pi session — \
-                                     fork or restart from a neighbouring message instead"
-                                        .into(),
-                                ));
-                            }
-                            Some(PromptEntry::Ambiguous) => {
-                                return Err(HarnessError::Protocol(
-                                    "session fork mapping: ambiguous — the Pi session holds \
-                                     that message more than once and the transcript cannot \
-                                     tell which one it is; refusing a positional guess"
-                                        .into(),
-                                ));
-                            }
-                            None => None,
-                        };
-                        let Some(entry) = entry else {
-                            return Err(HarnessError::Protocol(format!(
-                                "session fork: boundary user index {index} out of range"
-                            )));
-                        };
+                let point = match request.boundary {
+                    // Extensions append user messages of their own (`/goal`
+                    // continuations), so pi may legitimately hold user
+                    // entries past the last Cypher prompt. The race this once
+                    // guarded — a prompt sent while the helper ran — is
+                    // caught by the engine, which rechecks the transcript
+                    // (Cypher writes a prompt there BEFORE dispatching it to
+                    // pi) before publishing the fork. The mapping above still
+                    // had to succeed: it is what proves this session belongs
+                    // to this transcript.
+                    cypher_proto::PiForkBoundary::CloneLeaf => ForkPoint::Leaf,
+                    cypher_proto::PiForkBoundary::BeforeUser(index) => fork_point(&mapping, index)?,
+                };
+                let (method, params) = match point {
+                    ForkPoint::Leaf => ("clone", Map::new()),
+                    ForkPoint::Before(i) => {
                         let mut params = Map::new();
-                        params.insert("entryId".into(), Value::String(entry.id.clone()));
-                        let resp = client.request("fork", params).await?;
-                        if resp
-                            .get("cancelled")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false)
-                        {
-                            return Err(HarnessError::Protocol(
-                                "session fork: fork was cancelled".into(),
-                            ));
-                        }
-                        Some(entry.id.clone())
+                        params.insert("entryId".into(), Value::String(active_users[i].id.clone()));
+                        ("fork", params)
                     }
                 };
+                let resp = client.request(method, params).await?;
+                if resp
+                    .get("cancelled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    return Err(HarnessError::Protocol(format!(
+                        "session fork: {method} was cancelled"
+                    )));
+                }
 
                 // (4) The NEW session's file: pi switches the active session
                 // to the fork/clone, so `get_state.sessionFile` names it.
@@ -558,7 +646,6 @@ impl PiHarness {
                         Some(session_path)
                     }
                 };
-                let _ = entry_id;
                 Ok::<cypher_proto::PiSessionForkResult, HarnessError>(
                     cypher_proto::PiSessionForkResult { session_path },
                 )
@@ -780,7 +867,7 @@ fn set_scratch_perms(_path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::PromptEntry::{Ambiguous, Command, Entry};
+    use super::PromptEntry::{Ambiguous, Command, Entry, Unsent};
     use super::*;
     use cypher_proto::{PiForkBoundary, PiSessionForkRequest};
 
@@ -1103,6 +1190,77 @@ mod tests {
             map_prompts_to_entries(&users, &prompts(&["是 redis 最好吗？", "发布新版本", "ok"]))
                 .unwrap_err();
         assert!(err.to_string().contains("no matching user entry"), "{err}");
+    }
+
+    #[test]
+    fn prompts_that_never_reached_pi_are_set_aside() {
+        let users = vec![
+            user("a", None, "one"),
+            user("b", Some("a"), "two"),
+            user("c", Some("b"), "three"),
+        ];
+        // The latest prompt's turn ended before pi recorded it.
+        let mapped =
+            map_prompts_to_entries(&users, &prompts(&["one", "two", "three", "？？"])).unwrap();
+        assert_eq!(mapped, vec![Entry(0), Entry(1), Entry(2), Unsent]);
+
+        // The conversation went on after one.
+        let mapped =
+            map_prompts_to_entries(&users, &prompts(&["one", "？？", "two", "three"])).unwrap();
+        assert_eq!(mapped, vec![Entry(0), Unsent, Entry(1), Entry(2)]);
+
+        // A slash command beside one anchors nothing; the gap is still empty.
+        let mapped = map_prompts_to_entries(
+            &users,
+            &prompts(&["one", "/subagents", "？？", "two", "three"]),
+        )
+        .unwrap();
+        assert_eq!(mapped, vec![Entry(0), Command, Unsent, Entry(1), Entry(2)]);
+    }
+
+    #[test]
+    fn an_unsent_prompt_needs_an_empty_gap_in_the_pi_session() {
+        let users = vec![
+            user("a", None, "one"),
+            user("b", Some("a"), "two, as an extension rewrote it"),
+            user("c", Some("b"), "three"),
+        ];
+        // "two" matches nothing, but pi holds an entry where it would have
+        // landed: it probably did reach pi, under other text.
+        let err =
+            map_prompts_to_entries(&users, &prompts(&["one", "two", "three", "four"])).unwrap_err();
+        assert!(err.to_string().contains("user message #2"), "{err}");
+
+        // A transcript none of whose prompts pi holds proves nothing.
+        let err = map_prompts_to_entries(&users, &prompts(&["x", "y"])).unwrap_err();
+        assert!(err.to_string().contains("user message #1"), "{err}");
+
+        // An ambiguous neighbour leaves the gap unknown.
+        let dup = vec![user("a", None, "hi"), user("b", Some("a"), "hi")];
+        let err = map_prompts_to_entries(&dup, &prompts(&["hi", "？？", "again"])).unwrap_err();
+        assert!(err.to_string().contains("user message #2"), "{err}");
+    }
+
+    #[test]
+    fn an_unsent_prompt_forks_where_the_next_received_one_does() {
+        let mapping = vec![Entry(0), Unsent, Unsent, Entry(1), Command, Unsent];
+        assert_eq!(fork_point(&mapping, 0).unwrap(), ForkPoint::Before(0));
+        assert_eq!(fork_point(&mapping, 1).unwrap(), ForkPoint::Before(1));
+        assert_eq!(fork_point(&mapping, 2).unwrap(), ForkPoint::Before(1));
+        assert_eq!(fork_point(&mapping, 3).unwrap(), ForkPoint::Before(1));
+        // Nothing after the last one reached pi: the leaf is where it stood.
+        assert_eq!(fork_point(&mapping, 5).unwrap(), ForkPoint::Leaf);
+
+        // A command after an unsent prompt may have changed the session.
+        let err = fork_point(&[Entry(0), Unsent, Command], 1).unwrap_err();
+        assert!(
+            err.to_string().contains("never reached the Pi session"),
+            "{err}"
+        );
+        let err = fork_point(&mapping, 4).unwrap_err();
+        assert!(err.to_string().contains("slash command"), "{err}");
+        let err = fork_point(&mapping, 6).unwrap_err();
+        assert!(err.to_string().contains("out of range"), "{err}");
     }
 
     #[test]

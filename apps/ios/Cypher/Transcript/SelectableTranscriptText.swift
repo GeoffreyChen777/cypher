@@ -35,7 +35,67 @@ enum TranscriptTextStyle {
         weight: UIFont.Weight = .regular, lineHeight: CGFloat = MD.lineHeight
     ) -> NSAttributedString {
         let result = NSMutableAttributedString(string: "")
-        for run in runs {
+        let proseAttributes: [NSAttributedString.Key: Any] = [
+            .font: Theme.sansUI(size, weight: weight),
+            .foregroundColor: UIColor(Theme.text),
+        ]
+        // A display formula ended the paragraph; the next text starts a new one.
+        var breakPending = false
+        // File references show as chips, labelled together so two files of
+        // one name keep a folder apart.
+        let references = runs.map { run in
+            run.style.code && run.style.link == nil && run.style.math == nil ? FileReference.detect(run.text) : nil
+        }
+        let labels = FileReference.labels(references.compactMap { $0 })
+        var chips = 0
+        for (index, var run) in runs.enumerated() {
+            if let reference = references[index] {
+                if breakPending {
+                    result.append(NSAttributedString(string: "\n", attributes: proseAttributes))
+                    breakPending = false
+                }
+                // A thin space apart from the prose on either side, as
+                // inline code sits on the desktop.
+                if index > 0, !runs[index - 1].style.code {
+                    result.append(FileReferenceChip.margin(proseAttributes))
+                }
+                result.append(
+                    FileReferenceChip.string(raw: run.text, reference: reference, label: labels[chips], size: size))
+                if index + 1 < runs.count, !runs[index + 1].style.code {
+                    result.append(FileReferenceChip.margin(proseAttributes))
+                }
+                chips += 1
+                continue
+            }
+            if let kind = run.style.math {
+                if let attachment = MathRenderer.attachment(run.text, kind: kind, size: size) {
+                    let math = MathRenderer.string(attachment, tex: run.text, kind: kind, attributes: proseAttributes)
+                    if kind == .display {
+                        // Its own paragraph: the soft breaks around a `$$`
+                        // on its own line are not text.
+                        trimTrailingWhitespace(result)
+                        if result.length > 0 {
+                            result.append(NSAttributedString(string: "\n", attributes: proseAttributes))
+                        }
+                        breakPending = true
+                    } else if breakPending {
+                        result.append(NSAttributedString(string: "\n", attributes: proseAttributes))
+                        breakPending = false
+                    }
+                    result.append(math)
+                    continue
+                }
+                // TeX that does not typeset reads as code, so the source shows.
+                run = InlineRun(
+                    text: run.text.trimmingCharacters(in: .whitespacesAndNewlines), style: InlineStyle(code: true))
+            }
+            if breakPending {
+                let rest = String(run.text.drop(while: \.isWhitespace))
+                if rest.isEmpty { continue }
+                run.text = rest
+                result.append(NSAttributedString(string: "\n", attributes: proseAttributes))
+                breakPending = false
+            }
             var font =
                 run.style.code
                 ? Theme.monoUI(size - 1.5)
@@ -52,7 +112,7 @@ enum TranscriptTextStyle {
             ]
             if run.style.code { attributes[.cypherInlineCode] = UIColor(Theme.inlineCodeWash) }
             if run.style.strikethrough { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
-            if let link = run.style.link, let url = URL(string: link) {
+            if let link = run.style.link, let url = TranscriptFileLinks.url(forLink: link) {
                 attributes[.link] = url
                 attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
             }
@@ -61,8 +121,69 @@ enum TranscriptTextStyle {
         let paragraph = NSMutableParagraphStyle()
         paragraph.minimumLineHeight = lineHeight
         paragraph.maximumLineHeight = lineHeight
-        result.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: result.length))
+        let full = NSRange(location: 0, length: result.length)
+        result.addAttribute(.paragraphStyle, value: paragraph, range: full)
+        applyMathParagraphs(result, in: full, base: paragraph)
         return result
+    }
+
+    private static func trimTrailingWhitespace(_ text: NSMutableAttributedString) {
+        let string = text.string as NSString
+        var end = string.length
+        while end > 0, let scalar = Unicode.Scalar(string.character(at: end - 1)),
+            CharacterSet.whitespacesAndNewlines.contains(scalar)
+        {
+            end -= 1
+        }
+        text.deleteCharacters(in: NSRange(location: end, length: string.length - end))
+    }
+
+    /// Re-style the paragraphs of `text[range]` (all given `base`) around its
+    /// formulas: lines may grow past `base`'s fixed height to hold a tall
+    /// formula, a display formula's paragraph is centered with the block gap
+    /// around it, and prose after one hangs at the text edge like the
+    /// paragraph's own wrapped lines. Text without formulas is untouched.
+    static func applyMathParagraphs(
+        _ text: NSMutableAttributedString, in range: NSRange, base: NSParagraphStyle
+    ) {
+        var hasMath = false
+        text.enumerateAttribute(.cypherMathSource, in: range) { value, _, stop in
+            if value != nil {
+                hasMath = true
+                stop.pointee = true
+            }
+        }
+        guard hasMath else { return }
+        let string = text.string as NSString
+        var at = range.location
+        var first = true
+        while at < NSMaxRange(range) {
+            let paragraph = NSIntersectionRange(
+                string.paragraphRange(for: NSRange(location: at, length: 0)), range)
+            guard paragraph.length > 0 else { break }
+            var display = false
+            text.enumerateAttribute(.cypherDisplayMath, in: paragraph) { value, _, stop in
+                if value != nil {
+                    display = true
+                    stop.pointee = true
+                }
+            }
+            let style = (base.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+            style.maximumLineHeight = 0
+            if !first {
+                style.firstLineHeadIndent = base.headIndent
+                style.paragraphSpacingBefore = 0
+            }
+            if display {
+                style.alignment = .center
+                style.tabStops = []
+                if !first { style.paragraphSpacingBefore = MD.blockGap }
+                if NSMaxRange(paragraph) < NSMaxRange(range) { style.paragraphSpacing = MD.blockGap }
+            }
+            text.addAttribute(.paragraphStyle, value: style, range: paragraph)
+            at = NSMaxRange(paragraph)
+            first = false
+        }
     }
 
     /// Thinking's quieter tone: body text takes the muted color; inline code
@@ -111,7 +232,7 @@ enum TranscriptTextStyle {
             return true
         case .list(_, let items):
             return items.allSatisfy { $0.children.allSatisfy(isProse) }
-        case .codeBlock, .blockquote, .table, .rule:
+        case .codeBlock, .artifact, .blockquote, .table, .rule:
             return false
         }
     }
@@ -183,7 +304,7 @@ enum TranscriptTextStyle {
                     appendProse(child, to: result, indent: indent + listIndent, spacingBefore: listItemGap)
                 }
             }
-        case .codeBlock, .blockquote, .table, .rule:
+        case .codeBlock, .artifact, .blockquote, .table, .rule:
             // Not prose: callers only pass `isProse` blocks.
             break
         }
@@ -208,8 +329,12 @@ enum TranscriptTextStyle {
             style.tabStops = [NSTextTab(textAlignment: .left, location: indent + listIndent)]
         }
         if result.length > 0 {
-            // The break belongs to the paragraph before it.
-            let previous = result.attributes(at: result.length - 1, effectiveRange: nil)
+            // The break belongs to the paragraph before it (but is not part
+            // of a formula that ends it).
+            var previous = result.attributes(at: result.length - 1, effectiveRange: nil)
+            for key in [NSAttributedString.Key.attachment, .cypherMathSource, .cypherDisplayMath] {
+                previous[key] = nil
+            }
             result.append(NSAttributedString(string: "\n", attributes: previous))
         }
         let start = result.length
@@ -223,9 +348,9 @@ enum TranscriptTextStyle {
                     ]))
         }
         result.append(text)
-        result.addAttribute(
-            .paragraphStyle, value: style,
-            range: NSRange(location: start, length: result.length - start))
+        let range = NSRange(location: start, length: result.length - start)
+        result.addAttribute(.paragraphStyle, value: style, range: range)
+        applyMathParagraphs(result, in: range, base: style)
     }
 
     static func code(
@@ -272,6 +397,8 @@ final class TranscriptTextLayoutManager: NSLayoutManager {
     override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
         if let storage = textStorage, let container = textContainers.first {
             let characters = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
+            FileReferenceChip.paintGlyphs(
+                self, storage: storage, container: container, characters: characters, origin: origin)
             storage.enumerateAttribute(.cypherInlineCode, in: characters) { value, range, _ in
                 guard let color = value as? UIColor else { return }
                 let glyphs = self.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
@@ -295,6 +422,16 @@ final class TranscriptTextLayoutManager: NSLayoutManager {
 
 final class TranscriptUITextView: UITextView {
     var selectionEnded: (() -> Void)?
+
+    /// Formulas copy as their TeX source; everything else as UIKit copies.
+    override func copy(_ sender: Any?) {
+        if let attributedText, let text = MathRenderer.plainText(attributedText, range: selectedRange) {
+            UIPasteboard.general.string = text
+            return
+        }
+        super.copy(sender)
+    }
+
     override func resignFirstResponder() -> Bool {
         let result = super.resignFirstResponder()
         if result {
@@ -312,6 +449,9 @@ struct SelectableTranscriptText: UIViewRepresentable {
     @Environment(\.commentDrafts) private var drafts
     @Environment(\.transcriptEntry) private var entry
     @Environment(\.transcriptSelectionActions) private var actions
+    @Environment(\.openWorkspace) private var openWorkspace
+    @Environment(\.fileReferenceContext) private var referenceContext
+    @Environment(\.fileReferenceSnippet) private var referenceSnippet
 
     func makeUIView(context: Context) -> TranscriptUITextView {
         let storage = NSTextStorage()
@@ -327,10 +467,9 @@ struct SelectableTranscriptText: UIViewRepresentable {
         view.backgroundColor = .clear
         view.textContainerInset = .zero
         view.dataDetectorTypes = []
-        view.linkTextAttributes = [
-            .foregroundColor: UIColor(Theme.text),
-            .underlineStyle: NSUnderlineStyle.single.rawValue,
-        ]
+        // Links carry their own look (underlined text; a chip's glyph, name
+        // and muted lines), so the view adds none.
+        view.linkTextAttributes = [:]
         view.tintColor = UIColor(Theme.accent)
         // Repaint custom inline-code backgrounds as well as glyphs on a live
         // appearance change. Do not replace text or clear an active selection.
@@ -347,6 +486,8 @@ struct SelectableTranscriptText: UIViewRepresentable {
         }
         context.coordinator.entry = entry
         context.coordinator.actions = actions
+        context.coordinator.files = .init(
+            open: openWorkspace, context: referenceContext, snippet: referenceSnippet)
         context.coordinator.update(view, attributed: attributed, drafts: drafts)
         return view
     }
@@ -354,6 +495,8 @@ struct SelectableTranscriptText: UIViewRepresentable {
     func updateUIView(_ view: TranscriptUITextView, context: Context) {
         context.coordinator.entry = entry
         context.coordinator.actions = actions
+        context.coordinator.files = .init(
+            open: openWorkspace, context: referenceContext, snippet: referenceSnippet)
         context.coordinator.update(view, attributed: attributed, drafts: drafts)
     }
 
@@ -380,6 +523,14 @@ struct SelectableTranscriptText: UIViewRepresentable {
 final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
     var entry: TranscriptEntryContext?
     var actions: TranscriptSelectionActions?
+    var files = TranscriptFiles()
+
+    /// What file chips and file links reach: the session's Files sheet.
+    struct TranscriptFiles {
+        var open: ((WorkspaceDestination) -> Void)?
+        var context: ((String) -> [String])?
+        var snippet: ((WorkspaceReference) async throws -> FileReferenceSnippet)?
+    }
     private var latest: NSAttributedString?
     private weak var drafts: CommentDrafts?
     private var applying = false
@@ -405,9 +556,15 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
         if textView.selectedRange.length == 0 { applyLatest(to: textView) }
     }
 
+    /// The selected text, formulas as their TeX source.
+    private func quote(in textView: UITextView, range: NSRange) -> String {
+        textView.attributedText.flatMap { MathRenderer.plainText($0, range: range) }
+            ?? CommentPrompt.selectedText(textView.text ?? "", range: range)
+    }
+
     func commentAction(in textView: UITextView, range: NSRange) -> UIAction? {
         guard let drafts, drafts.owner != nil else { return nil }
-        let quote = CommentPrompt.selectedText(textView.text ?? "", range: range)
+        let quote = quote(in: textView, range: range)
         guard !CommentPrompt.normalize(quote).isEmpty else { return nil }
         let generation = drafts.generation
         return UIAction(title: "Comment", image: UIImage(systemName: "text.bubble")) { [weak drafts, weak textView] _ in
@@ -433,7 +590,7 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
     /// A temporary side chat about the selected text.
     func sideChatAction(in textView: UITextView, range: NSRange) -> UIAction? {
         guard let entry, let sideChat = actions?.sideChat else { return nil }
-        let quote = CommentPrompt.selectedText(textView.text ?? "", range: range)
+        let quote = quote(in: textView, range: range)
         guard !CommentPrompt.normalize(quote).isEmpty else { return nil }
         return UIAction(title: "Side Chat", image: UIImage(systemName: "bubble.left.and.bubble.right")) {
             [weak textView] _ in
@@ -441,6 +598,56 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
             textView?.resignFirstResponder()
             sideChat(entry, quote)
         }
+    }
+
+    /// The file a chip or a file link opens; nil for any other link.
+    private func reference(_ textItem: UITextItem) -> WorkspaceReference? {
+        guard case .link(let url) = textItem.content else { return nil }
+        let context = entry.flatMap { entry in files.context?(entry.entryId) } ?? []
+        return TranscriptFileLinks.reference(url, context: context)
+    }
+
+    /// A tap on a chip or a file link opens the file in Files; other links
+    /// open as before. With no Files to open (a side chat) a chip does
+    /// nothing, and a file link — no URL the system can open — neither.
+    func textView(
+        _ textView: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction
+    ) -> UIAction? {
+        guard let reference = reference(textItem) else { return defaultAction }
+        guard let open = files.open else { return nil }
+        return UIAction { _ in open(.reference(reference)) }
+    }
+
+    /// A long press on a chip or a file link: its cited lines as they are
+    /// in the checkout now, with Open in Files and Copy.
+    func textView(
+        _ textView: UITextView, menuConfigurationFor textItem: UITextItem, defaultMenu: UIMenu
+    ) -> UITextItem.MenuConfiguration? {
+        guard let reference = reference(textItem), case .link(let url) = textItem.content else {
+            return UITextItem.MenuConfiguration(menu: defaultMenu)
+        }
+        var actions: [UIMenuElement] = []
+        if let open = files.open {
+            actions.append(
+                UIAction(title: "Open in Files", image: UIImage(systemName: "folder")) { _ in
+                    open(.reference(reference))
+                })
+        }
+        let written = TranscriptFileLinks.written(url) ?? reference.path
+        actions.append(
+            UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
+                UIPasteboard.general.string = written
+            })
+        let menu = UIMenu(children: actions)
+        guard let snippet = files.snippet else { return UITextItem.MenuConfiguration(menu: menu) }
+        let card: UIView = UIHostingController(
+            rootView: FileReferencePreviewCard(reference: reference, load: snippet)
+        ).view
+        card.frame = CGRect(
+            x: 0, y: 0, width: FileReferencePreviewCard.width,
+            height: FileReferencePreviewCard.height(for: reference))
+        card.backgroundColor = UIColor(Theme.sheetPanel)
+        return UITextItem.MenuConfiguration(preview: .view(card), menu: menu)
     }
 
     func textView(

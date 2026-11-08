@@ -29,8 +29,25 @@ final class ScrollState {
     @ObservationIgnored var padOwner: UUID?
     /// Latest turn-scrubber jump; an older jump's trailing landing yields.
     @ObservationIgnored var turnJump: UInt64 = 0
-    /// Window paging: the row to hold at the top once a prepended page lands.
-    @ObservationIgnored var restoreTopRowId: String?
+    /// Paging: a page was shown above the reader, and the next content-height
+    /// change (its layout) moves the offset by the page's height.
+    @ObservationIgnored var revealPending = false
+    @ObservationIgnored var revealGeneration: UInt64 = 0
+    /// The row a page was shown above, held at `revealAnchorY` (its global
+    /// minY then) while the page's rows near it measure, until
+    /// `revealSettleUntil`.
+    @ObservationIgnored var revealAnchorId: String?
+    @ObservationIgnored var revealAnchorY: CGFloat = 0
+    @ObservationIgnored var revealSettleUntil: TimeInterval = 0
+    /// The anchor row's latest global minY.
+    @ObservationIgnored var revealAnchorSeen: CGFloat?
+    /// Where the last reveal scroll was sent: a layout from before it landed
+    /// doesn't count.
+    @ObservationIgnored var revealTarget: CGFloat?
+    @ObservationIgnored var revealSettleQueued = false
+    /// The earlier-messages loader's global maxY — where the first shown row
+    /// starts — while it's realized.
+    @ObservationIgnored var loaderMaxY: CGFloat?
     @ObservationIgnored var insetTopGlobalY: CGFloat = 0
     /// When the boundary last moved — correctPin trails transitions.
     @ObservationIgnored var insetTopChangedAt: TimeInterval = 0

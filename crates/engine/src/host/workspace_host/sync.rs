@@ -170,17 +170,22 @@ impl WorkspaceHost {
 
 impl WorkspaceHostInner {
     pub(super) fn save_snapshot(&self) {
-        let bytes = lock(&self.reg).to_bytes();
-        match bytes {
-            Ok(bytes) => {
-                if let Err(err) = self.store.save_snapshot(REGISTRY_DOC_ID, &bytes) {
-                    tracing::warn!(error = %err, "registry snapshot save failed");
-                }
+        let saved = self.persisted.save(&self.store, || {
+            let mut reg = lock(&self.reg);
+            if self.settles_locally() {
+                reg.settle_pending_locally();
             }
-            Err(err) => {
-                tracing::warn!(error = %err, "registry snapshot export failed");
-            }
+            reg.to_items()
+        });
+        if let Err(err) = saved {
+            tracing::warn!(error = %err, "registry snapshot save failed");
         }
+    }
+
+    /// The local profile never has a server to ack its writes: they settle
+    /// into the rows at save time instead of queueing forever.
+    fn settles_locally(&self) -> bool {
+        self.config.edge.is_none() && self.config.org_id == crate::profile::LOCAL_ORG_ID
     }
 }
 

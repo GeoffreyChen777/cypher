@@ -1,8 +1,9 @@
 /**
  * Edge auth: verify WorkOS AuthKit access-token JWTs (jose against the WorkOS
- * JWKS) before any DO forwarding or R2 access. WebSocket upgrades carry the
- * token as `?token=` (WS clients cannot always set headers); plain requests
- * use `Authorization: Bearer`.
+ * JWKS) before any DO forwarding or R2 access. Every request, WebSocket
+ * upgrades included, carries `Authorization: Bearer`. `?token=` is still
+ * accepted for clients released before the native dialers moved the bearer
+ * into the header (crates/net/src/dial.rs, iOS `liftingBearer`).
  *
  * Registry rooms (`reg1/{orgId}/{userId}`) authorize on the token's WorkOS organization
  * claim (`org_id`, present when the session was refreshed scoped to an org):

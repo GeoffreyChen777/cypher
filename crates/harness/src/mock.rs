@@ -5,24 +5,46 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
-    UserInputQuestion,
+    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    SteeringMode, UserInputQuestion,
 };
 
 use crate::{Harness, HarnessError, RunControls};
 
+mod artifacts;
 mod changes;
 mod diffs;
+mod explainer;
+mod html;
+mod math;
+mod mermaid;
+mod mermaid_themes;
 mod permissions;
+mod progress;
+mod refs;
 mod translation;
 
+pub use artifacts::{
+    MARKER as ARTIFACTS_MARKER, PATCH_MARKER as ARTIFACTS_PATCH_MARKER,
+    REVISE_MARKER as ARTIFACTS_REVISE_MARKER,
+};
 pub use changes::{MARKER as CHANGES_MARKER, ROUNDS as CHANGES_ROUNDS};
 pub use diffs::MARKER as DIFFS_MARKER;
+pub use explainer::{
+    MARKER as EXPLAINER_MARKER, ORPHAN_MARKER as EXPLAINER_ORPHAN_MARKER,
+    PARTIAL_MARKER as EXPLAINER_PARTIAL_MARKER, PATCH_MARKER as EXPLAINER_PATCH_MARKER,
+};
+pub use html::MARKER as HTML_MARKER;
+pub use math::MARKER as MATH_MARKER;
+pub use mermaid::MARKER as MERMAID_MARKER;
+pub use mermaid_themes::{MARKER as MERMAID_THEMES_MARKER, text as mermaid_themes_text};
 pub use permissions::{
     CARD_MARKER as PERMISSION_CARD_MARKER,
     MULTILINE_CARD_MARKER as MULTILINE_PERMISSION_CARD_MARKER, STORY_MARKER as PERMISSIONS_MARKER,
     TALL_CARD_MARKER as TALL_PERMISSION_CARD_MARKER,
 };
+pub use progress::MARKER as PROGRESS_MARKER;
+pub use refs::MARKER as REFS_MARKER;
 pub use translation::{
     MARKER as TRANSLATION_MARKER, Mode as TranslationMode, PROMPT as TRANSLATION_PROMPT,
     REPLACE_MARKER as TRANSLATION_REPLACE_MARKER, settled as translation_settled,
@@ -213,6 +235,26 @@ impl Harness for MockHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        // The engine's progress narrator asking for a reading of a long turn
+        // ([`PROGRESS_MARKER`] runs one): answered at once from the plan it
+        // quotes.
+        if progress::is_reading(&request.prompt) {
+            return Ok(futures::stream::iter(
+                [
+                    AgentEvent::TextDelta {
+                        text: progress::reading(&request.prompt),
+                    },
+                    AgentEvent::Done {
+                        status: DoneStatus::Completed,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    },
+                ]
+                .map(Ok),
+            )
+            .boxed());
+        }
         // Optional pacing knob for demos/manual testing: `CYPHER_MOCK_DELAY_MS`
         // spaces the scripted events out so live-run UI states (working
         // indicator, streaming fade, trailing tool-group auto-open) are
@@ -271,8 +313,14 @@ impl Harness for MockHarness {
             ));
         }
         // Turn changes demo ([`CHANGES_MARKER`]): round N edits the run's
-        // checkout between the script's opening and its Done.
-        if let Some(round) = changes::round_of(&request.prompt) {
+        // checkout between the script's opening and its Done. A read-only run
+        // edits nothing, as a real agent's could not: the auto-titler sends
+        // the chat's first prompt — marker included — through the harness
+        // in the same checkout, and must not replay the round's edits into
+        // the next one.
+        if let Some(round) = changes::round_of(&request.prompt)
+            && request.sandbox != SandboxLevel::ReadOnly
+        {
             return Ok(changes::run(
                 body[..lead].to_vec(),
                 tail.to_vec(),
@@ -281,11 +329,28 @@ impl Harness for MockHarness {
                 delay,
             ));
         }
-        // Diff fence and translation showcases ([`DIFFS_MARKER`],
-        // [`TRANSLATION_MARKER`]): their reply replaces the script's text and
-        // tools. `CYPHER_MOCK_TRANSLATION=1` (or `replace`) answers every
-        // prompt with the translation showcase, so a message typed into the
-        // demo translates too.
+        // Narrated progress demo ([`PROGRESS_MARKER`]): a run of about four
+        // minutes through a plan that gains a step midway, between the
+        // script's opening and its Done. `CYPHER_MOCK_PROGRESS=1` plays it for
+        // every prompt, so a message typed into the demo runs long too.
+        if request.prompt.contains(PROGRESS_MARKER)
+            || cypher_env::var("MOCK_PROGRESS").is_some_and(|v| !v.is_empty() && v != "0")
+        {
+            return Ok(progress::run(
+                body[..lead].to_vec(),
+                tail.to_vec(),
+                controls.interrupt,
+            ));
+        }
+        // Diff fence, math, Mermaid, HTML preview, file reference, artifact
+        // and translation showcases ([`DIFFS_MARKER`], [`MATH_MARKER`],
+        // [`MERMAID_MARKER`], [`MERMAID_THEMES_MARKER`], [`HTML_MARKER`],
+        // [`REFS_MARKER`], [`ARTIFACTS_MARKER`], [`ARTIFACTS_REVISE_MARKER`],
+        // [`ARTIFACTS_PATCH_MARKER`], the [`EXPLAINER_MARKER`] family,
+        // [`TRANSLATION_MARKER`]): their reply replaces the
+        // script's text and tools. `CYPHER_MOCK_TRANSLATION=1` (or `replace`)
+        // answers every prompt with the translation showcase, so a message
+        // typed into the demo translates too.
         let translation_mode = translation::mode_of(&request.prompt).or_else(|| {
             cypher_env::var("MOCK_TRANSLATION")
                 .filter(|v| !v.is_empty() && v != "0")
@@ -299,6 +364,30 @@ impl Harness for MockHarness {
         });
         let showcase = if request.prompt.contains(DIFFS_MARKER) {
             Some(diffs::reply())
+        } else if request.prompt.contains(MATH_MARKER) {
+            Some(math::reply())
+        } else if request.prompt.contains(MERMAID_MARKER) {
+            Some(mermaid::reply())
+        } else if request.prompt.contains(MERMAID_THEMES_MARKER) {
+            Some(mermaid_themes::reply())
+        } else if request.prompt.contains(HTML_MARKER) {
+            Some(html::reply())
+        } else if request.prompt.contains(REFS_MARKER) {
+            Some(refs::reply())
+        } else if request.prompt.contains(ARTIFACTS_REVISE_MARKER) {
+            Some(artifacts::revision())
+        } else if request.prompt.contains(ARTIFACTS_PATCH_MARKER) {
+            Some(artifacts::patch())
+        } else if request.prompt.contains(ARTIFACTS_MARKER) {
+            Some(artifacts::reply())
+        } else if request.prompt.contains(EXPLAINER_PATCH_MARKER) {
+            Some(explainer::patch())
+        } else if request.prompt.contains(EXPLAINER_PARTIAL_MARKER) {
+            Some(explainer::partial())
+        } else if request.prompt.contains(EXPLAINER_ORPHAN_MARKER) {
+            Some(explainer::orphan())
+        } else if request.prompt.contains(EXPLAINER_MARKER) {
+            Some(explainer::reply())
         } else {
             translation_mode.map(translation::reply)
         };
@@ -401,6 +490,7 @@ fn tall_question() -> UserInputQuestion {
         ],
         multi_select: false,
         permission: None,
+        asked_by: None,
     }
 }
 
@@ -443,6 +533,7 @@ fn marked_run(
                                 ],
                                 multi_select: false,
                                 permission: None,
+                                asked_by: None,
                             }
                         }]);
                         tokio::select! {

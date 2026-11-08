@@ -26,6 +26,8 @@ extension AppModel {
         }
         let store = SessionStore(chatId: chat.id, config: config)
         store.hostDeviceId = chat.deviceId
+        let chatId = chat.id
+        store.row = { [weak self] in self?.chat(id: chatId) }
         sessionStores[chat.id] = store
         if !recentSessionIds.contains(chat.id) { recentSessionIds.append(chat.id) }
         store.start()
@@ -34,6 +36,17 @@ extension AppModel {
 
     func releaseSessionStore(chatId: String) {
         trimSessionStores()
+    }
+
+    /// A session screen appeared. Its store stays live while any is up:
+    /// on iPad another window may show the session past the recency cap.
+    func sessionOnScreen(_ chatId: String) {
+        onScreenSessions[chatId, default: 0] += 1
+    }
+
+    func sessionOffScreen(_ chatId: String) {
+        let count = (onScreenSessions[chatId] ?? 0) - 1
+        onScreenSessions[chatId] = count > 0 ? count : nil
     }
 
     /// Warm the most recently active sessions, up to the live limit: stores
@@ -67,7 +80,8 @@ extension AppModel {
                 guard await !store.hasUnpushedUpdates(), let self,
                     self.sessionStores[id] === store,
                     let rank = self.recentSessionIds.firstIndex(of: id),
-                    rank >= Self.liveSessionLimit
+                    rank >= Self.liveSessionLimit,
+                    self.onScreenSessions[id] == nil
                 else { return }
                 self.sessionStores.removeValue(forKey: id)
                 self.recentSessionIds.remove(at: rank)

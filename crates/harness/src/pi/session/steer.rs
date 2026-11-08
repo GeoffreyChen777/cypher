@@ -1,7 +1,7 @@
 //! Mailbox routing: steering a live turn, reading pi's disposition for each
 //! routed message, and retrying steers a settled turn stranded.
 
-use super::run::park_turn;
+use super::run::{message_params, park_turn};
 use super::*;
 
 /// What pi did with an accepted `prompt` / `steer`. pi ≥ 0.99 reports it as
@@ -28,17 +28,32 @@ pub(super) fn disposition(data: &Value) -> Option<Disposition> {
     }
 }
 
+/// A mailbox message: its text and its own attachments, kept together
+/// through every queue so a parked, routed or retried delivery still inlines
+/// its images.
+pub(super) struct MailboxMessage {
+    pub(super) text: String,
+    pub(super) attachments: Vec<String>,
+}
+
+impl MailboxMessage {
+    /// The `prompt` / `steer` params that deliver it.
+    pub(super) fn params(&self) -> Map<String, Value> {
+        message_params(&self.text, &self.attachments)
+    }
+}
+
 /// A mailbox message routed into the live turn, awaiting its response —
 /// [`Incoming::Response`] with this id, in order with the event stream.
 pub(super) struct RoutedSteer {
     id: String,
-    text: String,
+    message: MailboxMessage,
 }
 
 /// The next turn a parked run opens (the main loop's top branch).
 pub(super) enum NextTurn {
     /// A mailbox message to dispatch as a parked `prompt`.
-    Prompt(String),
+    Prompt(MailboxMessage),
     /// A routed message pi already took after the turn it was meant to steer
     /// had ended: it started a fresh run, or an extension consumed it. The
     /// turn opens with nothing left to dispatch.
@@ -51,9 +66,8 @@ pub(super) enum NextTurn {
 /// runtimes get a raw `steer`, whose fate the loop infers from the turn
 /// state. Either response arrives in stdout order, so one that followed a
 /// settle is always seen after it.
-fn route_steer(client: &PiClient, text: String, atomic: bool) -> Option<RoutedSteer> {
-    let mut params = Map::new();
-    params.insert("message".into(), Value::String(text.clone()));
+fn route_steer(client: &PiClient, message: MailboxMessage, atomic: bool) -> Option<RoutedSteer> {
+    let mut params = message.params();
     let command = if atomic {
         params.insert("streamingBehavior".into(), Value::String("steer".into()));
         "prompt"
@@ -61,7 +75,7 @@ fn route_steer(client: &PiClient, text: String, atomic: bool) -> Option<RoutedSt
         "steer"
     };
     match client.send_ordered(command, params) {
-        Ok(id) => Some(RoutedSteer { id, text }),
+        Ok(id) => Some(RoutedSteer { id, message }),
         Err(e) => {
             // The child is gone; its EOF ends the run.
             tracing::debug!(error = %e, "steer not sent (dropped)");
@@ -98,7 +112,7 @@ pub(super) async fn emit_boundaries(
 /// as a parked prompt.
 pub(super) fn requeue_stranded(
     client: &PiClient,
-    stranded: &mut VecDeque<String>,
+    stranded: &mut VecDeque<MailboxMessage>,
     backlog: &mut VecDeque<NextTurn>,
 ) {
     if stranded.is_empty() {
@@ -123,7 +137,7 @@ impl PiRun {
             match result.map(|data| disposition(&data)) {
                 // pi was running: delivered at its next step,
                 // where the Steered boundary fires.
-                Ok(Some(Disposition::Queued)) => self.steers_queued.push_back(call.text),
+                Ok(Some(Disposition::Queued)) => self.steers_queued.push_back(call.message),
                 Ok(Some(Disposition::Handled)) if self.in_turn => self.handled_steers += 1,
                 // pi was idle — the turn this message meant to
                 // steer had ended — so it started a fresh run, or
@@ -158,12 +172,12 @@ impl PiRun {
                 }
                 // A runtime without dispositions: a steer accepted
                 // in a live turn is delivered at its next step...
-                Ok(None) if self.in_turn => self.steers_queued.push_back(call.text),
+                Ok(None) if self.in_turn => self.steers_queued.push_back(call.message),
                 // ...but one the turn settled ahead of is stranded
                 // (an idle pi only QUEUES steers).
                 Ok(None) => requeue_stranded(
                     &self.client,
-                    &mut VecDeque::from([call.text]),
+                    &mut VecDeque::from([call.message]),
                     &mut self.prompt_backlog,
                 ),
                 Err(e) if self.in_turn => {
@@ -172,7 +186,9 @@ impl PiRun {
                 // Rejected once the turn had ended: restart with
                 // it like any parked message — a real failure
                 // surfaces there as that turn's error.
-                Err(_) => self.prompt_backlog.push_back(NextTurn::Prompt(call.text)),
+                Err(_) => self
+                    .prompt_backlog
+                    .push_back(NextTurn::Prompt(call.message)),
             }
         }
         if !self.in_turn {
@@ -180,8 +196,8 @@ impl PiRun {
             // steers — they restart the next turn via prompt.
             self.prompt_backlog
                 .extend(self.steer_backlog.drain(..).map(NextTurn::Prompt));
-        } else if let Some(text) = self.steer_backlog.pop_front() {
-            self.steer_call = route_steer(&self.client, text, self.atomic_steer);
+        } else if let Some(message) = self.steer_backlog.pop_front() {
+            self.steer_call = route_steer(&self.client, message, self.atomic_steer);
         }
         if !self.steering_open
             && !self.in_turn
@@ -198,6 +214,10 @@ impl PiRun {
     pub(super) fn on_steer(&mut self, steer: Option<crate::SteerMessage>) -> Flow {
         match steer {
             Some(msg) => {
+                let message = MailboxMessage {
+                    text: msg.prompt,
+                    attachments: msg.attachments,
+                };
                 if !self.in_turn || self.idle_prompt.is_some() {
                     // Parked (or a parked-turn prompt still in preflight):
                     // this mailbox message starts a NEW turn via RPC
@@ -205,15 +225,15 @@ impl PiRun {
                     // one idle would strand it forever. Followers queue
                     // for after the turn settles (never concurrent with
                     // the in-flight prompt).
-                    self.prompt_backlog.push_back(NextTurn::Prompt(msg.prompt));
+                    self.prompt_backlog.push_back(NextTurn::Prompt(message));
                 } else {
                     // Active turn: pi-native mid-run steer — delivered
                     // after the current assistant message's tool calls,
                     // before the next LLM call. One in flight at a time.
                     if self.steer_call.is_some() {
-                        self.steer_backlog.push_back(msg.prompt);
+                        self.steer_backlog.push_back(message);
                     } else {
-                        self.steer_call = route_steer(&self.client, msg.prompt, self.atomic_steer);
+                        self.steer_call = route_steer(&self.client, message, self.atomic_steer);
                     }
                 }
             }

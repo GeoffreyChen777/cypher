@@ -157,14 +157,16 @@ fn assisted() -> ApprovalMode {
     ApprovalMode::Assisted
 }
 
-/// Model first everywhere, as the extension's `DEFAULT_APPROVAL`: the judge
-/// approves what plainly serves the user's request and asks them about the
-/// rest. Writes to Cypher's own data have no setting: always a human.
+/// Model first, as the extension's `DEFAULT_APPROVAL`: the judge approves
+/// what plainly serves the user's request and asks them about the rest.
+/// Writes to protected files (they run code later) are a human's, whatever
+/// the file says; writes to Cypher's own data have no setting: always a
+/// human.
 impl Default for PermissionApprovals {
     fn default() -> Self {
         Self {
             external_write: ApprovalMode::Assisted,
-            protected_write: ApprovalMode::Assisted,
+            protected_write: ApprovalMode::Ask,
             sensitive_read: ApprovalMode::Assisted,
             sensitive_write: ApprovalMode::Assisted,
             network: ApprovalMode::Assisted,
@@ -219,6 +221,10 @@ pub struct PermissionRule {
     pub path: String,
     #[serde(default)]
     pub created_at: String,
+    /// The project it applies in (the repository, else the working
+    /// directory); every project when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +255,17 @@ pub struct CommandRule {
     pub sha256: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub created_at: String,
+    /// The project it applies in ("Always in <project>"); every project when
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Variables an `allow` may see assigned in front of the command.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    /// The user acknowledged that it may vouch for a dangerous command
+    /// (`cypher-permissions/risk.ts`); no dialog sets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub acknowledge_danger: bool,
 }
 
 impl CommandRule {
@@ -285,6 +302,18 @@ impl CommandRule {
             .is_some_and(|label| label.chars().count() > 512 || label.contains('\0'))
         {
             return Err("A command rule's label is too long.".into());
+        }
+        if self.project.as_ref().is_some_and(|project| {
+            !project.starts_with('/') || project.contains(['\r', '\n', '\0'])
+        }) {
+            return Err("A command rule's project is an absolute path.".into());
+        }
+        if self.env.iter().any(|name| {
+            name.is_empty()
+                || name.starts_with(|c: char| c.is_ascii_digit())
+                || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }) {
+            return Err("A command rule's variables are names like NODE_ENV.".into());
         }
         Ok(())
     }
@@ -866,6 +895,7 @@ mod tests {
             capability: "write".into(),
             path: "relative".into(),
             created_at: String::new(),
+            project: None,
         });
         assert!(settings.validate().is_err());
     }
@@ -927,9 +957,64 @@ mod tests {
                 label: None,
                 sha256: None,
                 created_at: String::new(),
+                project: None,
+                env: Vec::new(),
+                acknowledge_danger: false,
             });
             assert!(settings.validate().is_err(), "{pattern:?}");
         }
+    }
+
+    #[test]
+    fn project_rules_variables_and_acknowledged_dangers_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        let commands = serde_json::json!([
+            { "match": ["scripts/dev-app.sh", "**"], "decision": "allow", "project": "/r/app", "env": ["DEV"], "sha256": "a".repeat(64) },
+            { "match": ["git", "push", "origin", "main"], "decision": "allow", "acknowledgeDanger": true }
+        ]);
+        let rules = serde_json::json!([{ "capability": "write", "path": "/x", "createdAt": "t", "project": "/r/app" }]);
+        std::fs::write(
+            settings_path(&paths),
+            serde_json::to_vec(&serde_json::json!({
+                "commands": commands,
+                "rules": rules,
+                "rulesVersion": 2,
+                "protectedTargets": { "add": ["staging"] },
+                "inspect": [["make", "help"]]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let settings = load(&paths).settings;
+        assert_eq!(settings.commands[0].project.as_deref(), Some("/r/app"));
+        assert_eq!(settings.commands[0].env, ["DEV"]);
+        assert!(settings.commands[1].acknowledge_danger);
+        save(&paths, settings).unwrap();
+        let root: Value =
+            serde_json::from_slice(&std::fs::read(settings_path(&paths)).unwrap()).unwrap();
+        assert_eq!(
+            root["commands"], commands,
+            "nothing the extension wrote is lost"
+        );
+        assert_eq!(root["rules"], rules);
+        assert_eq!(root["rulesVersion"], 2);
+        assert_eq!(root["protectedTargets"]["add"][0], "staging");
+        assert_eq!(root["inspect"][0][1], "help");
+
+        let mut bad = PiPermissionSettings::default();
+        bad.commands.push(CommandRule {
+            pattern: vec!["make".into()],
+            decision: CommandDecision::Allow,
+            label: None,
+            sha256: None,
+            created_at: String::new(),
+            project: None,
+            env: vec!["NOT A NAME".into()],
+            acknowledge_danger: false,
+        });
+        assert!(bad.validate().is_err());
     }
 
     #[test]

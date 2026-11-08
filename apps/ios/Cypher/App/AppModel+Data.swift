@@ -36,6 +36,9 @@ extension AppModel {
     /// Active quick chats across devices.
     var quickChats: [Chat] { data?.quickChats ?? [] }
 
+    /// Every active session, recency order (Home's list).
+    var activeChats: [Chat] { data?.activeChats ?? [] }
+
     /// Registered devices, online first then by name (the quick-chat
     /// palette's order, minus "this device": the phone isn't one).
     var devices: [DeviceRow] {
@@ -145,6 +148,29 @@ extension AppModel {
         data?.chats(in: spaceId) ?? []
     }
 
+    /// A list's sessions under the view menu's time filter and sort.
+    func listed(_ chats: [Chat], options: SessionListOptions) -> [Chat] {
+        options.arrange(chats, now: nowMs(), indicator: indicator(for:))
+    }
+
+    /// A project's sessions as its list shows them.
+    func listedChats(in spaceId: String, options: SessionListOptions) -> [Chat] {
+        listed(chats(in: spaceId), options: options)
+    }
+
+    /// Home's search over a session: title, last message, project, device.
+    func matches(_ chat: Chat, query: String) -> Bool {
+        SessionSearch.matches(
+            chat, query: query, project: space(for: chat)?.displayName, device: deviceName(chat.deviceId))
+    }
+
+    /// The project cards under the view menu's time filter and sort.
+    func listedSpaces(options: SessionListOptions) -> [Space] {
+        options.arrange(
+            spaces: spaces, activeChats: overviewChats, now: nowMs(),
+            indicator: indicator(for:), deviceName: deviceName)
+    }
+
     func chat(id: String) -> Chat? {
         data?.chat(id: id)
     }
@@ -231,7 +257,7 @@ extension AppModel {
 
     private func referenceContext(_ chat: Chat) async throws -> String {
         if let demo {
-            let entries = SessionReferences.entries(demo.sessionStore(for: chat.id).entries)
+            let entries = SessionReferences.entries(demo.sessionStore(for: chat.id).fedEntries)
             return SessionReferences.boundedContext(entries) ?? ""
         }
         guard let store = warmSessionStore(for: chat) else {
@@ -312,6 +338,9 @@ extension AppModel {
 
     func setChatConfig(chatId: String, config: ChatConfig) {
         data?.setChatConfig(chatId: chatId, config: config)
+        // Signed, so a host that only accepts paired devices launches with
+        // it (the composer changes settings inside an open chat).
+        sessionStores[chatId]?.recordLaunchConfig(config)
     }
 
     func markSeen(chatId: String) {

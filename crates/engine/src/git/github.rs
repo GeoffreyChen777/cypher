@@ -393,8 +393,19 @@ impl Github {
 
     // ── account ─────────────────────────────────────────────────────────
 
+    /// The account holds GitHub OAuth tokens: a [`cypher_secrets::Secret`].
+    fn account_secret(&self) -> cypher_secrets::Secret {
+        cypher_secrets::Secret::new(&self.inner.account_path)
+    }
+
     fn load_account(&self) -> Option<StoredAccount> {
-        let bytes = std::fs::read(&self.inner.account_path).ok()?;
+        let bytes = match self.account_secret().read() {
+            Ok(bytes) => bytes?,
+            Err(err) => {
+                tracing::warn!(error = %err, "github: account unreadable; treating as signed out");
+                return None;
+            }
+        };
         match serde_json::from_slice(&bytes) {
             Ok(account) => Some(account),
             Err(err) => {
@@ -405,15 +416,12 @@ impl Github {
     }
 
     fn save_account(&self, account: Option<&StoredAccount>) {
-        let path = &self.inner.account_path;
+        let secret = self.account_secret();
         let outcome = match account {
             Some(account) => serde_json::to_vec(account)
                 .map_err(std::io::Error::other)
-                .and_then(|bytes| write_private_atomic(path, &bytes)),
-            None => match std::fs::remove_file(path) {
-                Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
-                _ => Ok(()),
-            },
+                .and_then(|bytes| secret.write(&bytes)),
+            None => secret.delete(),
         };
         if let Err(err) = outcome {
             tracing::warn!(error = %err, "github: failed to persist the account");
@@ -1055,30 +1063,6 @@ fn stored_from(
         refresh_token: tokens.refresh_token.clone(),
         refresh_expires_at: tokens.refresh_token_expires_in.map(|secs| now + secs),
     }
-}
-
-/// Write `bytes` readable only by the owner, atomically (temp + rename).
-fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    {
-        use std::io::Write;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp)?;
-        #[cfg(unix)]
-        file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    std::fs::rename(tmp, path)
 }
 
 // ── local credentials ──────────────────────────────────────────────────────

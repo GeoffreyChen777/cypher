@@ -112,7 +112,7 @@ final class SlashMenuTests: XCTestCase {
         let facts = SlashFacts(
             modes: PiSessionModes(
                 fast: true, codemode: false, orchestrate: false,
-                goal: .init(status: "paused", text: "Ship the menu")),
+                goal: .init(status: "paused", text: "Ship the menu"), explain: true),
             context: ContextUsage(used: 170_000, size: 200_000),
             runningSubagents: 2)
         XCTAssertEqual(SlashMenu.badge(for: "fast", facts: facts), SlashBadge(label: "On", tone: .on))
@@ -140,6 +140,12 @@ final class SlashMenuTests: XCTestCase {
         XCTAssertFalse(SlashMenu.choiceInEffect(choices[0], of: "orchestrate", facts: facts))
         XCTAssertEqual(SlashMenu.choiceSummary(of: "goal", facts: facts), "Paused: Ship the menu")
         XCTAssertEqual(SlashMenu.choiceSummary(of: "orchestrate", facts: facts), "Adaptive orchestration is off")
+        XCTAssertEqual(SlashMenu.badge(for: "explain", facts: facts), SlashBadge(label: "On", tone: .on))
+        let explain = SlashMenu.choices(for: "explain")
+        XCTAssertTrue(SlashMenu.choiceInEffect(explain[0], of: "explain", facts: facts))
+        XCTAssertFalse(SlashMenu.choiceInEffect(explain[1], of: "explain", facts: facts))
+        XCTAssertEqual(
+            SlashMenu.choiceSummary(of: "explain", facts: facts), "The session explainer is on and follows the chat")
         var noGoal = facts
         noGoal.modes?.goal = nil
         XCTAssertEqual(SlashMenu.choiceSummary(of: "goal", facts: noGoal), "No goal yet. Type one to start it.")
@@ -147,17 +153,19 @@ final class SlashMenuTests: XCTestCase {
     }
 
     func testSessionModesDecodeTheEnginesShape() throws {
-        let json = #"{"fast":true,"codemode":false,"orchestrate":true,"goal":{"status":"active","text":"Ship"}}"#
+        let json =
+            #"{"fast":true,"codemode":false,"orchestrate":true,"goal":{"status":"active","text":"Ship"},"explain":true}"#
         let modes = try JSONDecoder().decode(PiSessionModes.self, from: Data(json.utf8))
         XCTAssertEqual(
             modes,
             PiSessionModes(
                 fast: true, codemode: false, orchestrate: true,
-                goal: .init(status: "active", text: "Ship")))
+                goal: .init(status: "active", text: "Ship"), explain: true))
         // An engine from before the Scripts switch sends no codemode: on.
         let old = try JSONDecoder().decode(PiSessionModes.self, from: Data(#"{"fast":false,"orchestrate":false}"#.utf8))
         XCTAssertTrue(old.codemode)
         XCTAssertNil(old.goal)
+        XCTAssertFalse(old.explain)
     }
 
     func testModesKeepTheLastReadingForTheSameChatOnly() async {

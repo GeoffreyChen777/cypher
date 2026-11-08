@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod edge;
+pub mod relay;
 
 use std::path::Path;
 use std::sync::Arc;

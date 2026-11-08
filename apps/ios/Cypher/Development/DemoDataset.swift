@@ -59,6 +59,8 @@ final class DemoDataset {
     private var streamTask: Task<Void, Never>?
     /// The context recovery replay (DemoDataset+ContextRecovery.swift).
     @ObservationIgnored var recoveryTask: Task<Void, Never>?
+    /// The run progress replay (DemoDataset+RunProgress.swift).
+    @ObservationIgnored var progressTask: Task<Void, Never>?
 
     static let dummyConfig = AppConfig(
         edgeURL: URL(string: "http://localhost:8787")!, mode: .dev,
@@ -115,6 +117,43 @@ final class DemoDataset {
                 config: codex, lastMessagePreview: "Done — failed children stay quiet.",
                 lastMessageAt: now - 900_000, createdAt: now - 86_400_000,
                 spaceId: cypher.id, lastSeenAt: now - 3_600_000),
+            // LaTeX in a reply (the mock harness's [mock:math] showcase).
+            Chat(
+                id: "chat-math", deviceId: "dev-mac", title: "Quadratic formula and friends",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "Here is the quadratic formula.",
+                lastMessageAt: now - 2_000_000, createdAt: now - 2_100_000,
+                spaceId: cypher.id, lastSeenAt: now - 2_000_000),
+            // Mermaid diagrams in a reply (the mock harness's [mock:mermaid] showcase).
+            Chat(
+                id: "chat-mermaid", deviceId: "dev-mac", title: "How a prompt travels",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "Here is how a prompt travels through the app.",
+                lastMessageAt: now - 2_200_000, createdAt: now - 2_300_000,
+                spaceId: cypher.id, lastSeenAt: now - 2_200_000),
+            // File references, file links, a diff fence and the round's
+            // changed files in a reply.
+            Chat(
+                id: "chat-references", deviceId: "dev-mac", title: "Greet from Cypher",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "Changed the greeting in Example.swift.",
+                lastMessageAt: now - 1_700_000, createdAt: now - 1_800_000,
+                spaceId: cypher.id, lastSeenAt: now - 1_700_000),
+            // Artifacts in a reply (the mock harness's [mock:artifacts] showcase).
+            Chat(
+                id: "chat-artifacts", deviceId: "dev-mac", title: "Explain binary search",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "Step through it here.",
+                lastMessageAt: now - 1_900_000, createdAt: now - 1_950_000,
+                spaceId: cypher.id, lastSeenAt: now - 1_900_000),
+            // A live explainer and its patches (the mock harness's
+            // [mock:explainer] showcases).
+            Chat(
+                id: "chat-explainer", deviceId: "dev-mac", title: "Session explainer",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "There was no release notes page to update.",
+                lastMessageAt: now - 1_960_000, createdAt: now - 2_000_000,
+                spaceId: cypher.id, lastSeenAt: now - 1_960_000),
             Chat(
                 id: "chat-deploy", deviceId: "dev-vps", title: "Wrangler deploy hygiene",
                 archived: false, cwd: edge.path, branch: nil, checkoutId: nil,
@@ -139,7 +178,8 @@ final class DemoDataset {
             "chat-veil": SessionRow(
                 chatId: "chat-veil", deviceId: "dev-mac", status: .working,
                 startedAt: now - 95_000, updatedAt: now - 5_000,
-                contextUsage: ContextUsage(used: 124_000, size: 200_000)),
+                contextUsage: ContextUsage(used: 124_000, size: 200_000),
+                progress: Self.runProgressReadings.first),
             // Idle, near full: the composer's context ring in amber.
             "chat-tabs": SessionRow(
                 chatId: "chat-tabs", deviceId: "dev-mac", status: .idle,
@@ -406,6 +446,7 @@ final class DemoDataset {
         }
         stores[chatId] = store
         refreshRecoveryShowcase(chatId)
+        if chatId == Self.runProgressChatId { playRunProgressStory() }
         if chatId == Self.recoveryReplayChatId {
             // Plays once the session has opened and settled.
             recoveryTask = Task { [weak self, weak store] in
@@ -685,6 +726,91 @@ final class DemoDataset {
                         ),
                     ], createdAt: now - 86_400_000, deviceId: "dev-vps", status: .complete, continuationOf: nil),
             ]
+        case "chat-math":
+            return [
+                MessageEntry(
+                    id: "m1", role: .user,
+                    parts: [.text(id: "t0", text: "Show me some formulas.")],
+                    createdAt: now - 2_100_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                MessageEntry(
+                    id: "m2", role: .assistant, parts: [.text(id: "t0", text: mathShowcase)],
+                    createdAt: now - 2_000_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+            ]
+        case "chat-mermaid":
+            return [
+                MessageEntry(
+                    id: "m1", role: .user,
+                    parts: [.text(id: "t0", text: "Draw me how a prompt travels through the app.")],
+                    createdAt: now - 2_300_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                MessageEntry(
+                    id: "m2", role: .assistant, parts: [.text(id: "t0", text: mermaidShowcase)],
+                    createdAt: now - 2_200_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+            ]
+        case "chat-artifacts":
+            return [
+                MessageEntry(
+                    id: "m1", role: .user,
+                    parts: [.text(id: "t0", text: "How does binary search work? Show me.")],
+                    createdAt: now - 1_950_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                MessageEntry(
+                    id: "m2", role: .assistant, parts: [.text(id: "t0", text: artifactsShowcase)],
+                    createdAt: now - 1_900_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+                MessageEntry(
+                    id: "m3", role: .user,
+                    parts: [.text(id: "t0", text: "Add a comparison counter.")],
+                    createdAt: now - 1_890_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                MessageEntry(
+                    id: "m4", role: .assistant, parts: [.text(id: "t0", text: artifactsPatch)],
+                    createdAt: now - 1_880_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+            ]
+        case "chat-explainer":
+            let rounds = [
+                ("Explain what this session built.", explainerPage),
+                ("Port the patches to the iPhone app.", explainerPatch),
+                ("Reload open pages when a revision lands.", explainerPartial),
+                ("Bump the release notes.", explainerOrphan),
+            ]
+            return rounds.enumerated().flatMap { ix, round in
+                let at = now - 2_000_000 + Int64(ix) * 10_000
+                return [
+                    MessageEntry(
+                        id: "u\(ix)", role: .user, parts: [.text(id: "t0", text: round.0)],
+                        createdAt: at, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                    MessageEntry(
+                        id: "a\(ix)", role: .assistant, parts: [.text(id: "t0", text: round.1)],
+                        createdAt: at + 5_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+                ]
+            }
+        case "chat-references":
+            return [
+                MessageEntry(
+                    id: "m1", role: .user,
+                    parts: [.text(id: "t0", text: "Make the demo greet from Cypher.")],
+                    createdAt: now - 1_800_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                MessageEntry(
+                    id: "m2", role: .assistant,
+                    parts: [
+                        .tool(
+                            id: "c1", call: RenderToolCall(tag: "readFile", fields: ["path": "Sources/Example.swift"]),
+                            isError: false, resolved: true),
+                        .tool(
+                            id: "c2", call: RenderToolCall(tag: "editFile", fields: ["path": "Sources/Example.swift"]),
+                            isError: false, resolved: true),
+                        .text(id: "t0", text: referencesShowcase),
+                    ],
+                    createdAt: now - 1_700_000, deviceId: "dev-mac", status: .complete, continuationOf: nil,
+                    turnChanges: TurnChanges(
+                        cwd: "/Users/dev/Projects/cypher",
+                        base: String(repeating: "a1", count: 20), head: String(repeating: "b2", count: 20),
+                        files: [
+                            .init(
+                                path: "Sources/Example.swift", status: "modified", additions: 2, deletions: 2,
+                                binary: false),
+                            .init(path: "README.md", status: "modified", additions: 1, deletions: 1, binary: false),
+                            .init(path: "notes/guide.md", status: "added", additions: 14, deletions: 0, binary: false),
+                        ],
+                        fileCount: 3, additions: 17, deletions: 3)),
+            ]
         case "chat-permissions-story":
             return permissionStory(now: now)
         case "chat-permissions-card":
@@ -694,6 +820,419 @@ final class DemoDataset {
             return recoveryTranscript(for: chatId, now: now) ?? []
         }
     }
+
+    /// A reply that cites the demo checkout's files the way the Runtime asks
+    /// every model to, links one, and shows its change as a diff fence.
+    private static let referencesShowcase = #"""
+        The greeting lives in `Sources/Example.swift:20` — I changed it there and switched the flag at `Example.swift:45`. The [README](README.md#L3) says what the demo is for, and `notes/guide.md` covers the previews.
+
+        ```diff
+        --- a/Sources/Example.swift
+        +++ b/Sources/Example.swift
+        @@ -18,5 +18,5 @@
+         let value18 = 18
+         let value19 = 19
+        -let message = "Hello"
+        +let message = "Hello from Cypher"
+         let value21 = 21
+        @@ -43,3 +43,3 @@
+         let value43 = 43
+        -let enabled = false
+        +let enabled = true
+        ```
+
+        The diagram in `notes/diagram.svg` hasn't changed.
+        """#
+
+    /// The mock harness's [mock:explainer] replies
+    /// (crates/harness/src/mock/explainer.rs): the explainer page, a patch
+    /// whose edits all apply, one with an edit that matches nothing, and one
+    /// to a page the chat never had.
+    private static let explainerPage = #"""
+        Here's the session so far:
+
+        ```html artifact title="Session explainer"
+        <!doctype html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <title>Session explainer</title>
+        <style>
+          body { font: 15px/1.5 -apple-system, system-ui, sans-serif; margin: 24px; color: #1d1d1f; }
+          h1 { font-size: 20px; margin: 0 0 4px; }
+          h2 { font-size: 13px; margin: 20px 0 6px; color: #6e6e73; text-transform: uppercase; letter-spacing: .04em; }
+          li { margin: 4px 0; }
+          .done { color: #1a7f37; }
+        </style>
+        </head>
+        <body>
+        <h1>Live session explainer</h1>
+        <p>What this session built, kept up to date as the chat goes on.</p>
+        <h2>What changed</h2>
+        <ul>
+          <li>Patch fences: <code>artifact-patch</code> edits a page in place.</li>
+        </ul>
+        <h2>How it fits</h2>
+        <p>The chat folds every revision of a page in order; the newest one opens.</p>
+        <h2>Still open</h2>
+        <ul>
+          <li>The iPhone app shows patches as code.</li>
+          <li>Side chats don't follow revisions.</li>
+        </ul>
+        </body>
+        </html>
+        ```
+
+        It updates as we go; open it beside the chat.
+        """#
+
+    private static let explainerPatch = #"""
+        Ported the patches to the iPhone app.
+
+        ```html artifact-patch title="Session explainer"
+        <<<<<<< SEARCH
+          <li>Patch fences: <code>artifact-patch</code> edits a page in place.</li>
+        =======
+          <li>Patch fences: <code>artifact-patch</code> edits a page in place.</li>
+          <li>The iPhone app applies patches too, reading the whole chat.</li>
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+          <li>The iPhone app shows patches as code.</li>
+        =======
+          <li class="done">The iPhone app shows patches as code. Fixed.</li>
+        >>>>>>> REPLACE
+        ```
+
+        The explainer has the new item and the open one closed.
+        """#
+
+    private static let explainerPartial = #"""
+        Open pages now reload when a revision lands.
+
+        ```html artifact-patch title="Session explainer"
+        <<<<<<< SEARCH
+        <p>The chat folds every revision of a page in order; the newest one opens.</p>
+        =======
+        <p>The chat folds every revision of a page in order; the newest one opens, and an open page reloads.</p>
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+          <li>Mock sessions for every patch outcome.</li>
+        =======
+          <li class="done">Mock sessions for every patch outcome.</li>
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+          <li>Side chats don't follow revisions.</li>
+        =======
+          <li>Side chats don't follow revisions yet.</li>
+        >>>>>>> REPLACE
+        ```
+
+        One edit looked for a line the page never had, so it was skipped.
+        """#
+
+    private static let explainerOrphan = #"""
+        Bumped the release notes.
+
+        ```html artifact-patch title="Release notes"
+        <<<<<<< SEARCH
+        <h1>Release notes</h1>
+        =======
+        <h1>Release notes 1.2</h1>
+        >>>>>>> REPLACE
+        ```
+
+        There was no release notes page to update, so nothing changed.
+        """#
+
+    /// The reply of the mock harness's [mock:artifacts:patch] showcase
+    /// (crates/harness/src/mock/artifacts.rs `patch`): the showcase page's
+    /// comparison counter as edits to it, so its card opens the page patched.
+    private static let artifactsPatch = #"""
+        Adding a comparison counter, as a patch to the page:
+
+        ```html artifact-patch title="Binary search, step by step"
+        <<<<<<< SEARCH
+        each comparison discards half of what is left.</p>
+        =======
+        each comparison discards half of what is left. Sixteen numbers never take more than four (log₂ 16).</p>
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+        <div class="cells" id="cells"></div>
+        =======
+        <p id="count" class="lead"></p>
+        <div class="cells" id="cells"></div>
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+          let lo, hi, done, steps;
+        =======
+          let lo, hi, done, steps;
+          const count = document.getElementById("count");
+          const counted = () => { count.textContent = `${steps} of at most 4 comparisons`; };
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+        done = false; steps = 0; log.textContent = "";
+        =======
+        done = false; steps = 0; log.textContent = ""; counted();
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+            steps++;
+        =======
+            steps++;
+            counted();
+        >>>>>>> REPLACE
+        ```
+
+        Open it and try 40: the counter stops at four.
+        """#
+
+    /// The reply of the mock harness's [mock:artifacts] showcase
+    /// (crates/harness/src/mock/artifacts.rs): an interactive HTML artifact,
+    /// an SVG artifact and a plain HTML fence.
+    private static let artifactsShowcase = #"""
+        Binary search halves the range it still has to look at on every step, so a sorted list of a million numbers takes at most 20 comparisons. Step through it here:
+
+        ```html artifact title="Binary search, step by step"
+        <!doctype html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <title>Binary search, step by step</title>
+        <style>
+          :root { color-scheme: light dark; font-family: -apple-system, system-ui, sans-serif; }
+          body { margin: 0; padding: 24px; background: Canvas; color: CanvasText; }
+          h1 { font-size: 18px; margin: 0 0 4px; }
+          p.lead { margin: 0 0 18px; opacity: .7; font-size: 13px; }
+          .cells { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 18px; }
+          .cell { width: 40px; height: 40px; border-radius: 8px; display: grid; place-items: center;
+                  font: 600 14px ui-monospace, monospace; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+                  transition: background .2s, opacity .2s, transform .2s; }
+          .cell.out { opacity: .25; }
+          .cell.mid { background: #6366f1; color: white; transform: translateY(-3px); }
+          .cell.found { background: #16a34a; color: white; }
+          .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; }
+          input { width: 70px; padding: 6px 8px; border-radius: 6px; border: 1px solid #8884; font-size: 14px; }
+          button { padding: 7px 14px; border-radius: 6px; border: 0; background: #6366f1; color: white; font-weight: 600; cursor: pointer; }
+          button.ghost { background: transparent; color: inherit; border: 1px solid #8886; }
+          #log { font: 13px ui-monospace, monospace; line-height: 1.7; white-space: pre-wrap; }
+        </style>
+        </head>
+        <body>
+        <h1>Binary search</h1>
+        <p class="lead">Pick a target, then step: each comparison discards half of what is left.</p>
+        <div class="controls">
+          <label>Target <input id="target" type="number" value="37"></label>
+          <button id="step">Step</button>
+          <button id="reset" class="ghost">Reset</button>
+        </div>
+        <div class="cells" id="cells"></div>
+        <div id="log"></div>
+        <script>
+          const values = [2, 5, 8, 12, 16, 23, 29, 37, 41, 48, 56, 63, 72, 81, 90, 99];
+          const cells = document.getElementById("cells");
+          const log = document.getElementById("log");
+          let lo, hi, done, steps;
+          function reset() {
+            lo = 0; hi = values.length - 1; done = false; steps = 0; log.textContent = "";
+            render(-1);
+          }
+          function render(mid, found) {
+            cells.innerHTML = "";
+            values.forEach((v, i) => {
+              const el = document.createElement("div");
+              el.className = "cell" + (i < lo || i > hi ? " out" : "") + (i === mid ? (found ? " found" : " mid") : "");
+              el.textContent = v;
+              cells.appendChild(el);
+            });
+          }
+          function step() {
+            if (done) return;
+            const target = Number(document.getElementById("target").value);
+            if (lo > hi) { log.textContent += `Range empty: ${target} is not in the list.\n`; done = true; return; }
+            const mid = (lo + hi) >> 1;
+            steps++;
+            if (values[mid] === target) {
+              log.textContent += `Step ${steps}: values[${mid}] = ${values[mid]} — found it.\n`;
+              done = true; render(mid, true); return;
+            }
+            const lower = values[mid] < target;
+            log.textContent += `Step ${steps}: values[${mid}] = ${values[mid]} ${lower ? "<" : ">"} ${target}, keep the ${lower ? "right" : "left"} half.\n`;
+            if (lower) lo = mid + 1; else hi = mid - 1;
+            render(mid);
+          }
+          document.getElementById("step").onclick = step;
+          document.getElementById("reset").onclick = reset;
+          document.getElementById("target").oninput = reset;
+          reset();
+        </script>
+        </body>
+        </html>
+        ```
+
+        The same idea as a picture — each level is one comparison, and the range shrinks by half:
+
+        ```svg artifact title="Halving the range"
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 220" font-family="system-ui, sans-serif" font-size="12">
+          <rect width="420" height="220" fill="#ffffff"/>
+          <g fill="#6366f1" fill-opacity="0.85">
+            <rect x="20" y="20" width="380" height="28" rx="6"/>
+            <rect x="210" y="70" width="190" height="28" rx="6"/>
+            <rect x="210" y="120" width="95" height="28" rx="6"/>
+            <rect x="257" y="170" width="48" height="28" rx="6" fill="#16a34a"/>
+          </g>
+          <g fill="#ffffff" font-weight="600">
+            <text x="30" y="39">16 candidates</text>
+            <text x="220" y="89">8 left</text>
+            <text x="220" y="139">4 left</text>
+            <text x="262" y="189">2</text>
+          </g>
+          <g fill="#555555">
+            <text x="20" y="89">step 1: 37 &gt; 29</text>
+            <text x="20" y="139">step 2: 37 &lt; 56</text>
+            <text x="20" y="189">step 3: 37 = 37 ✓</text>
+          </g>
+        </svg>
+        ```
+
+        And a plain HTML snippet, which keeps its code but can still be previewed from the button beside Copy:
+
+        ```html
+        <button style="padding:8px 16px;border-radius:8px;border:0;background:#6366f1;color:white;font:600 14px system-ui">
+          Search
+        </button>
+        ```
+        """#
+
+    /// The reply of the mock harness's [mock:math] showcase
+    /// (crates/harness/src/mock/math.rs): every delimiter, prices and code
+    /// that keep their dollars, and TeX that does not typeset.
+    private static let mathShowcase = #"""
+        Here is the quadratic formula. For $ax^2 + bx + c = 0$ with $a \neq 0$, the roots are
+
+        $$
+        x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
+        $$
+
+        and the discriminant \(\Delta = b^2 - 4ac\) decides how many are real: two when $\Delta > 0$, one when $\Delta = 0$.
+
+        **Euler's identity** links the five constants $e$, $i$, $\pi$, $1$ and $0$:
+        \[
+        e^{i\pi} + 1 = 0
+        \]
+
+        A few more shapes, inline: $\sum_{k=1}^{n} k = \frac{n(n+1)}{2}$, $\int_0^1 x^2\,dx = \tfrac{1}{3}$, $\lim_{x \to 0} \frac{\sin x}{x} = 1$, and a matrix:
+
+        $$
+        A = \begin{pmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{pmatrix}, \qquad \det A = 1
+        $$
+
+        | Quantity | Formula |
+        | --- | --- |
+        | Gaussian | $\frac{1}{\sigma\sqrt{2\pi}} e^{-\frac{(x-\mu)^2}{2\sigma^2}}$ |
+        | Big-O | $O(n \log n)$ |
+
+        - Prices stay prose: it costs $5 today and $10 tomorrow.
+        - Code keeps its dollars: `echo $HOME` and `\(not math\)`.
+        - TeX that does not typeset shows as code: $\undefinedmacro{x}$.
+        """#
+
+    /// The reply of the mock harness's [mock:mermaid] showcase
+    /// (crates/harness/src/mock/mermaid.rs): the common diagram families, a
+    /// CJK one, one wider than the column, one in a list and one that does
+    /// not parse.
+    private static let mermaidShowcase = #"""
+        Here is how a prompt travels through the app:
+
+        ```mermaid
+        flowchart TD
+            A[User sends a prompt] --> B{Needs tools?}
+            B -->|yes| C[Run tool calls]
+            B -->|no| D[Stream the reply]
+            C --> E[(Session store)]
+            C --> D
+            D --> F([Done])
+        ```
+
+        The same exchange as a sequence:
+
+        ```mermaid
+        sequenceDiagram
+            participant UI
+            participant Engine
+            participant Model
+            UI->>Engine: send(prompt)
+            Engine->>Model: complete
+            Model-->>Engine: stream deltas
+            Note over Engine,Model: tool loop
+            Engine-->>UI: transcript update
+        ```
+
+        A session's lifecycle:
+
+        ```mermaid
+        stateDiagram-v2
+            [*] --> Idle
+            Idle --> Streaming: send
+            Streaming --> Tools: tool call
+            Tools --> Streaming: result
+            Streaming --> Idle: done
+            Streaming --> Error: failure
+            Error --> [*]
+        ```
+
+        Where the tokens went, and the pieces of the app:
+
+        ```mermaid
+        pie title Tokens per turn
+            "Prompt" : 42
+            "Tool output" : 30
+            "Reply" : 28
+        ```
+
+        ```mermaid
+        mindmap
+          root((Cypher))
+            UI
+              Transcript
+              Composer
+            Engine
+              Sessions
+              Tools
+        ```
+
+        ```mermaid
+        flowchart LR
+            用户[用户] --> 引擎[引擎处理请求] --> 模型[模型生成回复]
+        ```
+
+        A pipeline wider than the column scrolls sideways:
+
+        ```mermaid
+        flowchart LR
+            Fetch[Fetch sources] --> Parse[Parse markdown] --> Layout[Lay out blocks] --> Highlight[Highlight code] --> Typeset[Typeset math] --> Diagram[Draw diagrams] --> Paint[Paint the frame] --> Present[Present to screen]
+        ```
+
+        1. Diagrams work inside lists too:
+
+           ```mermaid
+           classDiagram
+               class Transcript {
+                   +rows: Vec~Row~
+                   +sync()
+               }
+               class Row {
+                   +id: String
+                   +version: u64
+               }
+               Transcript "1" --> "*" Row
+           ```
+
+        2. A diagram that does not parse stays code, with the reason:
+
+        ```mermaid
+        flowchart TD
+            A --> 
+        ```
+        """#
 
     // MARK: Permission control (the mock harness's [mock:permissions] story)
 
@@ -843,7 +1382,7 @@ final class DemoDataset {
     private func simulateTurn(store: SessionStore, chatId: String, prompt: String, isSteer: Bool) {
         streamTask?.cancel()
         let now = nowMs()
-        var entries = store.entries
+        var entries = store.fedEntries
         entries.append(
             MessageEntry(
                 id: "u-\(now)", role: .user,
@@ -907,7 +1446,7 @@ final class DemoDataset {
             for parts in toolPhases {
                 if Task.isCancelled { return }
                 guard let store else { return }
-                var current = store.entries
+                var current = store.fedEntries
                 guard let last = current.indices.last, current[last].id == liveId else { return }
                 current[last].parts = parts
                 store.setEntries(current)
@@ -919,14 +1458,14 @@ final class DemoDataset {
                 if Task.isCancelled { return }
                 text += (ix == 0 ? "" : " ") + word
                 guard let store else { return }
-                var current = store.entries
+                var current = store.fedEntries
                 guard let last = current.indices.last, current[last].id == liveId else { return }
                 current[last].parts = tools + [.text(id: "t0", text: text)]
                 store.setEntries(current)
                 try? await Task.sleep(nanoseconds: UInt64.random(in: 30_000_000...140_000_000))
             }
             guard let self, let store else { return }
-            var current = store.entries
+            var current = store.fedEntries
             if let last = current.indices.last, current[last].id == liveId {
                 current[last].status = .complete
                 store.setEntries(current)

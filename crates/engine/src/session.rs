@@ -5,6 +5,8 @@ pub mod context_recovery;
 pub(crate) mod engine;
 pub mod forks;
 pub mod journal;
+pub mod migrations;
+pub(crate) mod progress;
 pub(crate) mod scratch;
 pub(crate) mod side_chats;
 pub(crate) mod title_settings;

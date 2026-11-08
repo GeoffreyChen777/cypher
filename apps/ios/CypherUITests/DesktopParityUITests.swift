@@ -69,15 +69,39 @@ final class DesktopParityUITests: XCTestCase {
         XCTAssertTrue(compact.isEnabled)
     }
 
-    func testAProjectCardOpensItsProject() {
+    func testHomeListsSessionsAndAChipNarrowsToAProject() {
         let app = launch([])
-        let card = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'cypher'")).firstMatch
-        XCTAssertTrue(card.waitForHittable(timeout: 10))
-        XCTAssertTrue(card.label.contains("1 needs input"), "the card reads its activity: \(card.label)")
-        card.tap()
-        XCTAssertTrue(
-            text(app, containing: "Tool group header colors").waitForExistence(timeout: 5),
-            "the project's sessions open")
+        // Every project's sessions, one tap away; running and waiting ones lead.
+        XCTAssertTrue(app.staticTexts["Now"].waitForExistence(timeout: 10))
+        XCTAssertTrue(text(app, containing: "Streaming veil on transcript rows").waitForHittable(timeout: 5))
+        XCTAssertTrue(text(app, containing: "Is the app on web healthy?").exists, "another project's too")
+        let chip = element(app, "scope-chip-cypher")
+        XCTAssertTrue(chip.waitForHittable(timeout: 5))
+        chip.tap()
+        XCTAssertTrue(text(app, containing: "Is the app on web healthy?").waitForNonExistence(timeout: 5))
+        XCTAssertTrue(text(app, containing: "Tool group header colors").waitForExistence(timeout: 5))
+        element(app, "open-project").tap()
+        XCTAssertTrue(app.navigationBars["cypher"].waitForExistence(timeout: 5), "the project's own page opens")
+    }
+
+    func testSearchFindsSessionsArchivedOnesIncluded() {
+        let app = launch([])
+        let field = app.textFields["home-search"]
+        XCTAssertTrue(field.waitForHittable(timeout: 10), "under the title at the top")
+        let button = element(app, "search-button")
+        XCTAssertFalse(button.exists)
+        // A swipe up scrolls the field away; the top-left button takes over
+        // and brings it back, ready to type.
+        app.collectionViews.firstMatch.swipeUp()
+        XCTAssertTrue(button.waitForHittable(timeout: 5), "search moves to the toolbar")
+        XCTAssertFalse(field.isHittable)
+        button.tap()
+        XCTAssertTrue(field.waitForHittable(timeout: 5), "back under the title")
+        XCTAssertTrue(field.wait(until: "hasKeyboardFocus == true", timeout: 5), "ready to type")
+        XCTAssertTrue(button.waitForNonExistence(timeout: 5))
+        field.typeText("presence")
+        XCTAssertTrue(text(app, containing: "Presence beat coalescing").waitForExistence(timeout: 5))
+        XCTAssertFalse(text(app, containing: "Tool group header colors").exists)
     }
 
     func testTheStatusRowSitsOnCapsulesOverTheTranscript() {
@@ -132,9 +156,10 @@ final class DesktopParityUITests: XCTestCase {
 
     func testQuickChatStartsOnADeviceAndListsOnHome() {
         let app = launch([])
-        let menu = element(app, "quick-chat")
+        let menu = element(app, "compose")
         XCTAssertTrue(menu.waitForHittable(timeout: 10))
         menu.tap()
+        app.buttons["Quick Chat"].tap()
         app.buttons["MacBook Pro"].tap()
         XCTAssertTrue(app.staticTexts["Quick chat"].waitForExistence(timeout: 5))
         let input = editor(app)
@@ -146,7 +171,8 @@ final class DesktopParityUITests: XCTestCase {
             app.staticTexts["Quick chat @ MacBook Pro"].waitForExistence(timeout: 10),
             "sending opens the new session")
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        XCTAssertTrue(app.staticTexts["Quick chats"].waitForExistence(timeout: 5))
+        XCTAssertTrue(element(app, "scope-chip-Quick chats").waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Quick chat @ MacBook Pro"].exists, "the row names what it is")
     }
 
     func testForkAfterAReplyOpensTheFork() {

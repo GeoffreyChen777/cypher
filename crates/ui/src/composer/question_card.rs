@@ -62,10 +62,12 @@ impl Composer {
             .is_none()
             .then(|| permission_card::parse(&question, &prompt))
             .flatten();
-        let chrome_title = wizard
-            .slash
-            .clone()
-            .unwrap_or_else(|| SharedString::from("Question"));
+        let chrome_title = wizard.slash.clone().unwrap_or_else(|| {
+            SharedString::from(match &question.asked_by {
+                Some(agent) => format!("Question from {agent}"),
+                None => "Question".into(),
+            })
+        });
         let multi = question.multi_select;
         // Card text selects + copies like transcript text. Keys carry the
         // request and page, so a selection never washes another page's copy.
@@ -140,7 +142,10 @@ impl Composer {
                 } else {
                     theme.text_muted
                 },
-                SharedString::from("Permission request"),
+                SharedString::from(match &frame.question.asked_by {
+                    Some(agent) => format!("Permission request from {agent}"),
+                    None => "Permission request".into(),
+                }),
             ),
             None if frame.wizard.slash.is_some() => (
                 crate::kit::icons::TUNING,

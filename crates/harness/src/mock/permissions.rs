@@ -163,6 +163,7 @@ fn prompt(
             kind,
             tool_call_id: call.map(str::to_owned),
         }),
+        asked_by: None,
     }
 }
 
@@ -350,7 +351,7 @@ impl Script {
         .await;
         self.settled(prompt(
             "prompt-perm-4",
-            "Allow the agent to write outside the workspace?\n\nContext:\nPath: ~/Developer/shared/deploy-notes.md\nTool: edit\nReason: Record today's restart in the team's deploy notes.",
+            "Allow the agent to write outside the project folders?\n\nContext:\nPath: ~/Developer/shared/deploy-notes.md\nTool: edit\nReason: Record today's restart in the team's deploy notes.",
             &ACCESS_OPTIONS,
             Some((PermissionPromptKind::Access, Some("perm-4"))),
         ))

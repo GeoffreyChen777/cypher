@@ -4,9 +4,10 @@
 //! [`crate::host::doc_host::ChatDocHandle`]'s live doc to a chat2 room.
 //!
 //! The C2 rule is enforced HERE: every sink method persists doc content AND
-//! the room cursor in one `save_snapshot_with_cursor` transaction, so a
-//! restored backup can never disagree with its own cursor — the root cause
-//! of the redownload-forever class the old s2 clients suffered.
+//! the room cursor in one store transaction (incrementally, through the
+//! handle's [`DocPersister`]), so a restored backup can never disagree with
+//! its own cursor — the root cause of the redownload-forever class the old
+//! s2 clients suffered.
 
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ use cypher_sync::chat_client::{ChatDocSink, ChatTransport, CheckpointFetcher};
 use cypher_sync::{DocsStore, SyncError};
 use futures::future::BoxFuture;
 
-use crate::host::doc_host::EdgeConfig;
+use crate::host::doc_host::{DocPersister, EdgeConfig};
 
 /// Doc epoch stamped on every chat2-synced snapshot (docs/design/chat2-sync.md M1:
 /// thin docs are lineage epoch 2; readers discard-and-adopt below it).
@@ -37,17 +38,28 @@ pub struct EngineChatSink {
     /// call; a dead doc (evicted handle) is a no-op.
     doc: std::sync::Weak<SessionDoc>,
     store: Arc<DocsStore>,
+    /// Writes only what changed since the last write. The engine passes the
+    /// doc handle's own ([`Self::with_persister`]) so sink writes and the
+    /// debounced save extend one stored base.
+    persister: Arc<DocPersister>,
     chat_id: String,
 }
 
 impl EngineChatSink {
     pub fn new(doc: &Arc<SessionDoc>, store: Arc<DocsStore>, chat_id: impl Into<String>) -> Self {
+        let chat_id = chat_id.into();
         Self {
             preview: None,
             doc: Arc::downgrade(doc),
+            persister: Arc::new(DocPersister::new(store.clone(), chat_id.clone())),
             store,
-            chat_id: chat_id.into(),
+            chat_id,
         }
+    }
+
+    pub(crate) fn with_persister(mut self, persister: Arc<DocPersister>) -> Self {
+        self.persister = persister;
+        self
     }
 
     pub fn with_preview(
@@ -58,27 +70,14 @@ impl EngineChatSink {
         self
     }
 
-    /// Export the CURRENT doc and persist it with `cursor` in one tx.
+    /// Persist the CURRENT doc with `cursor` in one tx.
     fn persist_with_cursor(&self, cursor: u64) {
         let Some(doc) = self.doc.upgrade() else {
             return;
         };
-        match doc.export_snapshot() {
-            Ok(bytes) => {
-                if let Err(err) = self.store.save_snapshot_with_cursor(
-                    &self.chat_id,
-                    &bytes,
-                    cursor,
-                    CHAT2_DOC_EPOCH,
-                ) {
-                    tracing::warn!(chat = %self.chat_id, error = %err,
-                        "chat2 sink: snapshot persist failed (will retry on next change)");
-                }
-            }
-            Err(err) => {
-                tracing::warn!(chat = %self.chat_id, error = %err,
-                    "chat2 sink: snapshot export failed");
-            }
+        if let Err(err) = self.persister.save_with_cursor(doc.doc(), cursor) {
+            tracing::warn!(chat = %self.chat_id, error = %err,
+                "chat2 sink: snapshot persist failed (will retry on next change)");
         }
     }
 }
@@ -117,9 +116,9 @@ impl ChatDocSink for EngineChatSink {
 
     fn acknowledge_outbox(&self, batch_id: &str, cursor: u64) -> Result<(), String> {
         let doc = self.doc.upgrade().ok_or("doc evicted")?;
-        let snapshot = doc.export_snapshot().map_err(|e| e.to_string())?;
-        self.store
-            .acknowledge_outbox(&self.chat_id, batch_id, &snapshot, cursor, CHAT2_DOC_EPOCH)
+        self.persister
+            .acknowledge(doc.doc(), batch_id, cursor)
+            .map(|_| ())
             .map_err(|e| e.to_string())
     }
     fn preview(&self) -> Option<Arc<cypher_sync::preview_link::PreviewLink>> {
