@@ -1,19 +1,19 @@
 //! The **Work** card (§13.1): running orchestrations with their current step,
 //! a step bar and elapsed time, then the last few finished ones with a
-//! one-line result. A row opens the orchestration: every step with its
-//! project, sessions, state and duration, Stop while it runs, the result
-//! once it ends, and its thread, read-only in the panel.
+//! one-line result. A row opens the orchestration: its status and request,
+//! then the plan as one flow (each step with its state, duration and
+//! sessions, ending in the result), Stop while it runs, and its thread,
+//! read-only in the panel.
 
 use super::board::{card_corner, card_item, two_lines};
 use super::items::{
     ago, decision_bar, item_row, mark_cell, progress_bar, project_label, prose, section_label,
     session_mark, status_value, step_mark, text_value, trailing, work_mark,
 };
-use super::needs::{number_mark, step_block};
 use super::panel::{PanelHead, PanelItem};
 use super::*;
 use crate::transcript::bot_plan::{PlanPhase, format_span, phase_line, plan_phase, step_span};
-use cypher_proto::{BotWork, WorkState};
+use cypher_proto::{BotWork, StepState, WorkState};
 
 /// Finished work the card keeps under the running ones.
 const CARD_FINISHED: usize = 3;
@@ -72,6 +72,44 @@ pub(super) fn result_line(work: &BotWork) -> String {
         .map(|r| transcript::single_line(&super::items::plain_markdown(r)))
         .filter(|r| !r.is_empty())
         .unwrap_or_else(|| phase_line(work, 0))
+}
+
+/// A step as the flow draws it: its project, and its sessions (id, then
+/// title and status when this device lists the chat).
+type FlowStep = (
+    Option<super::items::ProjectLabel>,
+    Vec<(String, Option<(String, ChatIndicator)>)>,
+);
+
+/// The rail's 18px cell a node's mark sits centred in.
+fn flow_cell() -> gpui::Div {
+    div()
+        .size(px(18.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+}
+
+/// A step's number while the plan waits, as the chat's plan card draws it:
+/// an even ring, the digit nudged to its optical middle.
+fn flow_number(n: usize, theme: &Theme) -> AnyElement {
+    div()
+        .size(px(18.0))
+        .rounded_full()
+        .border_1()
+        .border_color(crate::kit::theme::hairline(0.16))
+        .pr(px(1.0))
+        .pb(px(1.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(10.0))
+        .line_height(px(10.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text_muted)
+        .child(SharedString::from(n.to_string()))
+        .into_any_element()
 }
 
 impl Shell {
@@ -336,7 +374,7 @@ impl Shell {
     }
 
     /// One work item in every phase, the plan to approve included: its
-    /// status, what was asked, its steps and their sessions, and its result.
+    /// status and what was asked, then [`Self::work_flow`].
     /// Approve / Cancel or Stop sit in the footer; opening its background
     /// session and Delete in the header.
     pub(super) fn render_work_item(
@@ -445,28 +483,11 @@ impl Shell {
         } else {
             div().child(status)
         };
-        // Where it works, named once when every step shares the project.
-        let place = |p: &super::items::ProjectLabel| format!("{} · {}", p.name, p.device);
-        let common = steps
-            .first()
-            .and_then(|(p, _)| p.as_ref().map(place))
-            .filter(|first| {
-                steps
-                    .iter()
-                    .all(|(p, _)| p.as_ref().map(place).as_deref() == Some(first.as_str()))
-            });
         let mut body = div()
             .p(px(8.0))
             .flex()
             .flex_col()
             .child(parts::fact(theme, "Status", status));
-        if let Some(common) = &common {
-            body = body.child(parts::fact(
-                theme,
-                "Project",
-                SharedString::from(common.clone()),
-            ));
-        }
         // The request, unless it only repeats the title.
         let same = |a: &str, b: &str| {
             let norm = |t: &str| t.trim().trim_end_matches('.').to_lowercase();
@@ -475,73 +496,8 @@ impl Shell {
         if !work.instruction.trim().is_empty() && !same(&work.instruction, &work.title) {
             body = body.child(parts::fact(theme, "Request", text_value(&work.instruction)));
         }
-        if let Some(summary) = work.summary.as_ref().filter(|s| !s.trim().is_empty()) {
-            body = body.child(parts::fact(theme, "Plan", text_value(summary)));
-        }
-        if phase.ended()
-            && let Some(result) = work.result.as_ref().filter(|r| !r.trim().is_empty())
-        {
-            body = body.child(parts::fact(theme, "Result", text_value(result)));
-        }
-
-        // ── steps ──
-        let numbered = matches!(
-            phase,
-            PlanPhase::Awaiting
-                | PlanPhase::Starting
-                | PlanPhase::Cancelling
-                | PlanPhase::Cancelled
-        );
-        body = body.child(section_label("Steps", theme));
-        for (ix, (step, (project, sessions))) in work.steps.iter().zip(steps).enumerate() {
-            let project = project.filter(|_| common.is_none());
-            let mark = if numbered {
-                number_mark(ix + 1, theme)
-            } else {
-                step_mark(step.state, ticker, theme)
-            };
-            let span = (!numbered).then(|| step_span(step, now_ms)).flatten();
-            body = body.child(step_block(step, project, mark, theme).children(
-                span.map(|span| div().pt(px(1.0)).child(trailing(span, theme.text_faint))),
-            ));
-            for (chat_id, chat) in sessions {
-                let key = format!("bot-work-session-{chat_id}");
-                // Its mark sits under the step's title.
-                let row = item_row(&key, false).ml(px(24.0)).py(px(4.0));
-                body = body.child(match chat {
-                    Some((title, status)) => {
-                        let open = chat_id.clone();
-                        row.on_click(
-                            cx.listener(move |this, _, _, cx| this.open_chat(open.clone(), cx)),
-                        )
-                        .child(mark_cell(session_mark(status, ticker, theme)))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(12.5))
-                                .text_color(theme.text)
-                                .child(SharedString::from(title)),
-                        )
-                        .child(
-                            icon(icons::ALT_ARROW_RIGHT)
-                                .size(px(10.0))
-                                .flex_none()
-                                .text_color(theme.text_faint.opacity(motion::hover_t(&key))),
-                        )
-                    }
-                    None => row
-                        .cursor_default()
-                        .child(mark_cell(session_mark(ChatIndicator::Idle, ticker, theme)))
-                        .child(
-                            div()
-                                .text_size(px(12.5))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from("A session not on this device yet")),
-                        ),
-                });
-            }
+        if !work.steps.is_empty() {
+            body = body.child(self.work_flow(&work, steps, phase, now_ms, theme, cx));
         }
 
         // ── footer: the decision it waits on ──
@@ -585,6 +541,331 @@ impl Shell {
             );
         }
         Some((head, body))
+    }
+
+    /// The plan as one flow on one rail: each step (its sessions under it),
+    /// then the result the last step leads to. The rail fills in as steps
+    /// finish; a project every step shares is named once, over the flow.
+    fn work_flow(
+        &self,
+        work: &BotWork,
+        steps: Vec<FlowStep>,
+        phase: PlanPhase,
+        now_ms: i64,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let ticker = self.pulse_ticker.entity_id();
+        let numbered = matches!(
+            phase,
+            PlanPhase::Awaiting
+                | PlanPhase::Starting
+                | PlanPhase::Cancelling
+                | PlanPhase::Cancelled
+        );
+        let place = |p: &super::items::ProjectLabel| format!("{} · {}", p.name, p.device);
+        let common = steps
+            .first()
+            .and_then(|(p, _)| p.as_ref().map(|p| (p.glyph, p.tint, place(p))))
+            .filter(|(_, _, first)| {
+                steps
+                    .iter()
+                    .all(|(p, _)| p.as_ref().map(place).as_deref() == Some(first.as_str()))
+            });
+
+        // ── its heading: "PLAN", where it works, and the plan's summary ──
+        let mut flow = div().flex().flex_col().child(
+            div()
+                .px(px(8.0))
+                .pt(px(14.0))
+                .pb(px(4.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text_muted.opacity(0.75))
+                        .child(SharedString::from(format!(
+                            "PLAN · {} STEP{}",
+                            work.steps.len(),
+                            if work.steps.len() == 1 { "" } else { "S" }
+                        ))),
+                )
+                .child(div().flex_1())
+                .when_some(common.clone(), |el, (glyph, tint, place)| {
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(5.0))
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted.opacity(0.85))
+                            .child(icon(glyph).size(px(11.0)).flex_none().text_color(tint))
+                            .child(div().min_w_0().truncate().child(SharedString::from(place))),
+                    )
+                }),
+        );
+        if let Some(summary) = work.summary.as_ref().filter(|s| !s.trim().is_empty()) {
+            flow = flow.child(
+                div()
+                    .px(px(8.0))
+                    .pb(px(6.0))
+                    .text_size(px(12.0))
+                    .line_height(px(17.0))
+                    .text_color(theme.text_muted)
+                    .child(text_value(summary)),
+            );
+        }
+
+        // ── the rail: steps, then the result ──
+        let node = |mark: AnyElement, joined: Option<gpui::Hsla>, content: gpui::Div| {
+            let rail = div()
+                .flex_none()
+                .w(px(18.0))
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(flow_cell().child(mark))
+                .when_some(joined, |el, color| {
+                    el.child(
+                        div()
+                            .flex_1()
+                            .w(px(1.5))
+                            .my(px(3.0))
+                            .rounded_full()
+                            .bg(color),
+                    )
+                });
+            div()
+                .px(px(8.0))
+                .flex()
+                .flex_row()
+                .items_stretch()
+                .gap(px(12.0))
+                .child(rail)
+                .child(content.flex_1().min_w_0())
+        };
+        // A segment past a finished step is filled; the rest stay a hairline.
+        let segment = |state: StepState| {
+            if state == StepState::Done {
+                theme.success.opacity(0.45)
+            } else {
+                crate::kit::theme::hairline(0.12)
+            }
+        };
+        flow = flow.child(div().h(px(6.0)));
+        for (ix, (step, (project, sessions))) in work.steps.iter().zip(steps).enumerate() {
+            let mark = if numbered {
+                flow_number(ix + 1, theme)
+            } else {
+                step_mark(step.state, ticker, theme)
+            };
+            let span = (!numbered).then(|| step_span(step, now_ms)).flatten();
+            let project = project.filter(|_| common.is_none());
+            // While it waits the plan says what each step will do; once it
+            // runs, what the step reported.
+            let detail = if numbered {
+                step.detail.clone()
+            } else {
+                step.note.clone()
+            }
+            .filter(|d| !d.trim().is_empty());
+            let asking = step.state == StepState::Asking;
+            let mut content = div()
+                .pb(px(16.0))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .min_h(px(18.0))
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(13.0))
+                                .line_height(px(18.0))
+                                .text_color(if step.state == StepState::Skipped {
+                                    theme.text_muted
+                                } else {
+                                    theme.text
+                                })
+                                .child(SharedString::from(step.title.clone())),
+                        )
+                        .children(span.map(|span| {
+                            div()
+                                .flex_none()
+                                .pt(px(2.0))
+                                .child(trailing(span, theme.text_faint))
+                        })),
+                )
+                .when_some(project, |el, project| {
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(5.0))
+                            .text_size(px(11.5))
+                            .line_height(px(16.0))
+                            .text_color(theme.text_muted.opacity(0.85))
+                            .child(
+                                icon(project.glyph)
+                                    .size(px(11.0))
+                                    .flex_none()
+                                    .text_color(project.tint),
+                            )
+                            .child(div().min_w_0().truncate().child(SharedString::from(format!(
+                                "{} · {}",
+                                project.name, project.device
+                            )))),
+                    )
+                })
+                .when_some(detail, |el, detail| {
+                    el.child(
+                        div()
+                            .text_size(px(12.0))
+                            .line_height(px(17.0))
+                            .text_color(if asking {
+                                theme.warning
+                            } else {
+                                theme.text_muted
+                            })
+                            .child(text_value(&detail)),
+                    )
+                });
+            if !sessions.is_empty() {
+                content = content.child(
+                    div().pt(px(4.0)).flex().flex_col().gap(px(1.0)).children(
+                        sessions
+                            .into_iter()
+                            .map(|(chat_id, chat)| self.flow_session(chat_id, chat, theme, cx)),
+                    ),
+                );
+            }
+            flow = flow.child(node(mark, Some(segment(step.state)), content));
+        }
+
+        // ── the result: where the last step leads ──
+        let (tone, done) = match phase {
+            PlanPhase::Done => (theme.success, true),
+            PlanPhase::Failed => (theme.danger, true),
+            _ if phase.ended() => (theme.text_muted, true),
+            _ => (theme.text_faint, false),
+        };
+        let result = work
+            .result
+            .as_ref()
+            .filter(|r| !r.trim().is_empty() && done)
+            .map(|r| text_value(r));
+        let (text, color) = match (&result, done) {
+            (Some(text), _) => (text.clone(), theme.text),
+            (None, true) => (
+                SharedString::from(phase_line(work, now_ms)),
+                theme.text_muted,
+            ),
+            (None, false) => (
+                SharedString::from("Reported when the last step ends"),
+                theme.text_faint,
+            ),
+        };
+        let mark = div()
+            .size(px(18.0))
+            .rounded_full()
+            .bg(tone.opacity(if done { 0.14 } else { 0.08 }))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon(icons::FLAG).size(px(10.5)).text_color(tone))
+            .into_any_element();
+        let content = div()
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .line_height(px(18.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(if done { theme.text } else { theme.text_muted })
+                    .child("Result"),
+            )
+            .child(
+                div()
+                    .text_size(if result.is_some() { px(12.5) } else { px(12.0) })
+                    .line_height(px(18.0))
+                    .text_color(color)
+                    .child(text),
+            );
+        flow.child(node(mark, None, content))
+    }
+
+    /// A session a step started, under the step: its status, title, and a
+    /// click that opens it.
+    fn flow_session(
+        &self,
+        chat_id: String,
+        chat: Option<(String, ChatIndicator)>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let ticker = self.pulse_ticker.entity_id();
+        let key = format!("bot-work-session-{chat_id}");
+        let row = div()
+            .id(SharedString::from(key.clone()))
+            .h(px(24.0))
+            .ml(px(-6.0))
+            .px(px(6.0))
+            .rounded(px(6.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .text_size(px(12.0));
+        match chat {
+            Some((title, status)) => row
+                .cursor_pointer()
+                .bg(motion::hover_blend(
+                    &key,
+                    crate::kit::theme::wash(0.0),
+                    crate::kit::theme::wash(0.06),
+                ))
+                .on_hover(motion::hover_listener(key.clone()))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)))
+                .child(mark_cell(session_mark(status, ticker, theme)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(motion::hover_blend(&key, theme.text_muted, theme.text))
+                        .child(SharedString::from(title)),
+                )
+                .child(
+                    icon(icons::ALT_ARROW_RIGHT)
+                        .size(px(10.0))
+                        .flex_none()
+                        .text_color(theme.text_faint.opacity(motion::hover_t(&key))),
+                ),
+            None => row
+                .child(mark_cell(session_mark(ChatIndicator::Idle, ticker, theme)))
+                .child(
+                    div()
+                        .text_color(theme.text_faint)
+                        .child("A session not on this device yet"),
+                ),
+        }
     }
 
     /// The orchestration's thread, read-only, with the way back to its work.
