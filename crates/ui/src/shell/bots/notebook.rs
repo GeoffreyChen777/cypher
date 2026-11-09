@@ -53,6 +53,8 @@ impl NoteFilter {
 #[derive(Default)]
 pub(super) struct NotebookUi {
     add: Option<(Entity<TextInput>, Subscription)>,
+    /// The new-note editor is open (the header's + opened it).
+    adding: bool,
     editing: Option<NoteEdit>,
     filter: NoteFilter,
 }
@@ -84,6 +86,7 @@ impl Shell {
             return;
         };
         input.update(cx, |input, cx| input.set_text("", cx));
+        self.board.notebook.adding = false;
         self.board_mutate(
             serde_json::json!({
                 "op": "saveBotNote",
@@ -104,6 +107,7 @@ impl Shell {
                 this.save_note_edit(cx);
             }
         });
+        self.board.notebook.adding = false;
         self.board.notebook.editing = Some(NoteEdit {
             note_id: note.id.clone(),
             input,
@@ -228,30 +232,25 @@ impl Shell {
             tint: None,
             title: "Notebook".into(),
         };
-        let add = self.note_add_input(cx);
-        let add_row = div()
-            .px(px(2.0))
-            .pt(px(4.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .child(parts::field(&add).flex_1().min_w_0().mx(px(0.0)))
-            .child(
-                popover::btn_primary(theme, "Add")
-                    .id("bot-note-add")
-                    .h(px(32.0))
-                    .flex()
-                    .items_center()
-                    .on_click(cx.listener(|this, _, _, cx| this.add_note(cx))),
-            );
-        let mut body = div().p(px(8.0)).flex().flex_col().child(add_row);
+        // The header's one button: + opens a new note at the top.
+        self.set_panel_actions(vec![
+            super::items::icon_button("bot-note-new", icons::PLUS, "New note", theme)
+                .on_click(cx.listener(|this, _, window, cx| this.open_new_note(window, cx)))
+                .into_any_element(),
+        ]);
+        let mut body = div().p(px(8.0)).flex().flex_col();
+        if self.board.notebook.adding {
+            let input = self.note_add_input(cx);
+            body = body.child(self.new_note_editor(&input, theme, cx));
+        }
         if notes.is_empty() {
-            body = body.child(parts::quiet_line(
-                theme,
-                "No notes yet. Try \u{201C}The release waits on the migration\u{201D} \
-                 or \u{201C}Alice owns auth\u{201D}.",
-            ));
+            if !self.board.notebook.adding {
+                body = body.child(parts::quiet_line(
+                    theme,
+                    "No notes yet. Press + to add one, like \u{201C}The release waits on \
+                     the migration\u{201D} or \u{201C}Alice owns auth\u{201D}.",
+                ));
+            }
             return Some((head, body));
         }
 
@@ -305,18 +304,20 @@ impl Shell {
                         .child(SharedString::from(count(f).to_string())),
                 )
         });
-        body = body.child(section_rule()).child(
-            section_head("Notes", false, theme)
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .mr(px(-7.0))
-                        .flex()
-                        .flex_row()
-                        .gap(px(2.0))
-                        .children(chips),
-                ),
-        );
+        body = body
+            .when(self.board.notebook.adding, |el| el.child(section_rule()))
+            .child(
+                section_head("Notes", !self.board.notebook.adding, theme)
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .mr(px(-7.0))
+                            .flex()
+                            .flex_row()
+                            .gap(px(2.0))
+                            .children(chips),
+                    ),
+            );
         let shown: Vec<BotNote> = notes.into_iter().filter(|n| filter.keeps(n)).collect();
         if shown.is_empty() {
             body = body.child(parts::quiet_line(
@@ -501,6 +502,59 @@ impl Shell {
                                     .text_color(theme.text_muted.opacity(0.85)),
                             )
                             .child(tools),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Open the new-note editor at the top of the panel, focused.
+    fn open_new_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.board.notebook.editing = None;
+        self.board.notebook.adding = true;
+        let input = self.note_add_input(cx);
+        window.focus(&input.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// The new note: its field, then Cancel and Add. Enter adds,
+    /// Shift+Enter breaks a line.
+    fn new_note_editor(
+        &self,
+        input: &Entity<TextInput>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .px(px(2.0))
+            .pt(px(4.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(parts::field(input).mx(px(0.0)))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(6.0))
+                    .child(
+                        popover::btn_ghost(theme, "Cancel", "bot-note-new-cancel")
+                            .id("bot-note-new-cancel")
+                            .py(px(4.0))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.board.notebook.adding = false;
+                                if let Some((input, _)) = &this.board.notebook.add {
+                                    input.update(cx, |input, cx| input.set_text("", cx));
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_primary(theme, "Add")
+                            .id("bot-note-add")
+                            .py(px(4.0))
+                            .on_click(cx.listener(|this, _, _, cx| this.add_note(cx))),
                     ),
             )
             .into_any_element()
