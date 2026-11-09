@@ -613,11 +613,11 @@ impl Shell {
     }
 }
 
-/// A note's mark: the bot's own avatar for what it wrote, a page for the
-/// owner's.
+/// A note's mark: the bot's own face, bare in its colour, for what it
+/// wrote; a page for the owner's.
 fn note_mark(source: &NoteSource, bot: &Bot, theme: &Theme) -> AnyElement {
     match source {
-        NoteSource::Bot { .. } => crate::appearance::bot_style::bot_avatar(
+        NoteSource::Bot { .. } => crate::appearance::bot_style::bot_glyph(
             &bot.name,
             bot.icon.as_deref(),
             bot.color.as_deref(),
