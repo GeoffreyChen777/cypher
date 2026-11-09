@@ -478,8 +478,8 @@ bot chat**: a complete assistant entry (id `routine-<routineId>-<run start ms>`,
 posted once) with one `post` part, written straight into the doc. It starts no turn. If
 the bot chat is in the middle of a turn, the post waits until that turn settles. The post
 also sets the bot chat's preview to "<name>: <output>" and bumps its activity, so it shows
-unread. A failed run posts its reason the same way; failed routines are listed by
-`BotRecords::needs_you`.
+unread. A failed run posts its reason the same way and marks its routine; it is not
+in Needs you, which holds decisions only.
 
 The `post` part (`cypher_doc::MessagePart::Post`) is additive: `{id, kind: "post", text,
 from}`, with the body under `text` so readers that predate the kind show it as a text
@@ -512,8 +512,8 @@ to its listeners (`SessionsEngine::add_unattended_listener`); the scheduler's re
 reason and settles the run `failed` with it.
 
 **Notifications.** There is no new notification path. A failed routine run raises
-attention through its post (unread bot chat on every device) and Needs you, whichever
-target it ran in.
+attention through its post (unread bot chat on every device) and the mark on its
+routine, whichever target it ran in.
 
 ## 9. Bot runtime on the host device
 
@@ -1009,7 +1009,7 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 | **Routines** | Its routines in order of next run: name, where and when it runs, next run, last result | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
 | **Projects** | Each granted project with device, running and waiting sessions, and "works directly" or "via sessions" | The list groups projects by device (sessions, what runs or asks, last activity). A project's page: its device beside the title (the folder on hover, a click copies it), its sessions in scope with status, the bot's work there and its routines there |
 | **Notebook** | The latest few entries, bot-written ones marked | A + in the header opens a new note at the top; then all entries with their sources, filtered All / You / the bot; text renders as markdown; on hover Copy, Edit, Delete |
-| **Network** (P4) | Only answers awaiting the owner's review, one row each (opening its review); otherwise just the header, saying how many workspaces are connected | The Network panel lists connections, invites and recent questions; a connection opens its own page (scope, reply mode, exchanges, revoke) with a back arrow to Network |
+| **Network** (P4) | Just its header: how many workspaces are connected, or "N to review" in amber when answers wait in Needs you (a click opens the review) | The Network panel lists connections, invites and recent questions; a connection opens its own page (scope, reply mode, exchanges, revoke) with a back arrow to Network |
 
 There is no Activity card: it mostly repeated Work, Routines and Network. The full audit
 log, filterable as Plans, Sessions, Routines, Notes or Network, opens from the chat header's activity button and from "View all
@@ -1053,7 +1053,9 @@ As built, beyond the table:
 - **Needs you** lists, most pressing first: the bot chat waiting on the owner, actions
   awaiting approval, sessions the bot started that are asking (whatever their work did
   since: an orchestration can end while its session's question stays open), plans
-  awaiting approval, review drafts, and routines whose last run failed. The Asking panel
+  awaiting approval, and review drafts: decisions only, and the only place in the sidebar
+  they are listed (other cards show state; Network says "N to review" in amber and opens
+  them). A failed routine is state, marked on its routine. The Asking panel
   answers a single-question prompt with its options; others say to answer in the
   session.
 - **The bot learns where its plans stand.** Approval, progress and results happen

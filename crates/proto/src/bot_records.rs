@@ -957,8 +957,6 @@ pub enum NeedsYou {
     Asking { chat_id: String, work_id: String },
     /// A peer's answer drafted in Review mode (exchange id).
     Review(String),
-    /// A routine's last run failed (routine id).
-    RoutineFailed(String),
 }
 
 impl BotRecords {
@@ -966,9 +964,10 @@ impl BotRecords {
         *self == Self::default()
     }
 
-    /// What needs the owner for `bot_id`, oldest first within each kind and
-    /// most pressing kind first. `asking(chat id)` says whether a session is
-    /// waiting on an answer.
+    /// What waits on the owner's decision for `bot_id`, oldest first within
+    /// each kind and most pressing kind first. `asking(chat id)` says
+    /// whether a session is waiting on an answer. Only decisions: a failed
+    /// routine run is state, shown on the routine, not here.
     pub fn needs_you(&self, bot_id: &str, asking: impl Fn(&str) -> bool) -> Vec<NeedsYou> {
         let mut items = Vec::new();
         let mut approvals: Vec<&BotApproval> = self
@@ -1009,18 +1008,6 @@ impl BotRecords {
             .collect();
         reviews.sort_by_key(|e| e.asked_at);
         items.extend(reviews.into_iter().map(|e| NeedsYou::Review(e.id.clone())));
-        items.extend(
-            self.routines
-                .iter()
-                .filter(|r| {
-                    r.bot_id == bot_id
-                        && r.enabled
-                        && r.last_run
-                            .as_ref()
-                            .is_some_and(|run| run.outcome == RunOutcome::Failed)
-                })
-                .map(|r| NeedsYou::RoutineFailed(r.id.clone())),
-        );
         items
     }
 

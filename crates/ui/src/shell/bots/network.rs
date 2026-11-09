@@ -6,7 +6,6 @@
 //! RPCs on the bot's host; an engine that does not have them yet answers
 //! an unknown method, and the panel says so instead of failing.
 
-use super::board::{card_corner, card_item};
 use super::panel::{PanelHead, PanelItem};
 use super::parts::{self, CallError};
 use super::*;
@@ -263,9 +262,10 @@ impl Shell {
         );
     }
 
-    /// The sidebar card. Rows only for what waits on the owner: answers
-    /// to review before they go back. Otherwise just its header, saying
-    /// how many workspaces are connected; it opens the Network panel.
+    /// The sidebar card: only its header. It says how many workspaces are
+    /// connected, or, in the amber of Needs you, how many answers wait on
+    /// the owner's review; those rows live in Needs you, so a click opens
+    /// the one review (or Needs you for several), else the Network panel.
     pub(super) fn render_network_card(
         &self,
         bot: &Bot,
@@ -276,86 +276,60 @@ impl Shell {
         let (connections, invites, reviews) = {
             let state = self.state.read(cx);
             let records = &state.bot_records;
-            let mut reviews: Vec<(BotExchange, String)> = records
+            let reviews: Vec<String> = records
                 .exchanges
                 .iter()
                 .filter(|e| e.bot_id == bot.id && e.awaiting_review())
-                .map(|e| {
-                    let peer = records
-                        .connections
-                        .iter()
-                        .find(|c| c.id == e.connection_id)
-                        .map(|c| c.peer.name.clone())
-                        .unwrap_or_default();
-                    (e.clone(), peer)
-                })
+                .map(|e| e.id.clone())
                 .collect();
-            reviews.sort_by_key(|(e, _)| std::cmp::Reverse(e.asked_at));
             (
                 live_connections(&records.connections, &bot.id).len(),
                 open_invites(&records.invites, &bot.id, now).len(),
                 reviews,
             )
         };
-        if reviews.is_empty() {
-            let hint = if !self.network_ready(cx) {
-                "Sign in to connect".to_string()
-            } else {
-                let mut parts = vec![match connections {
-                    0 => "No connections".to_string(),
-                    1 => "1 connection".to_string(),
-                    n => format!("{n} connections"),
-                }];
-                if invites > 0 {
-                    parts.push(format!(
-                        "{invites} open invite{}",
-                        if invites == 1 { "" } else { "s" }
-                    ));
-                }
-                parts.join(" · ")
-            };
-            return Some(parts::empty_card(
-                "bot-network-empty",
-                icons::GLOBAL,
-                "Network",
-                hint,
-                PanelItem::Network,
-                self.card_focused("network", cx),
-                theme,
-                cx,
-            ));
-        }
-        let open = self.board.panel.clone();
-        let header = self.card_header(
-            "network",
-            "bot-network-header",
+        let (hint, color, open) = match reviews.as_slice() {
+            [] => {
+                let hint = if !self.network_ready(cx) {
+                    "Sign in to connect".to_string()
+                } else {
+                    let mut parts = vec![match connections {
+                        0 => "No connections".to_string(),
+                        1 => "1 connection".to_string(),
+                        n => format!("{n} connections"),
+                    }];
+                    if invites > 0 {
+                        parts.push(format!(
+                            "{invites} open invite{}",
+                            if invites == 1 { "" } else { "s" }
+                        ));
+                    }
+                    parts.join(" · ")
+                };
+                (hint, None, PanelItem::Network)
+            }
+            [one] => (
+                "1 to review".to_string(),
+                Some(theme.warning),
+                PanelItem::Review(one.clone()),
+            ),
+            many => (
+                format!("{} to review", many.len()),
+                Some(theme.warning),
+                PanelItem::NeedsYou,
+            ),
+        };
+        Some(parts::header_card(
+            "bot-network-card",
             icons::GLOBAL,
             "Network",
-            reviews.len(),
-            PanelItem::Network,
-            None,
+            hint,
+            color,
+            open,
+            self.card_focused("network", cx),
             theme,
             cx,
-        );
-        let rows: Vec<AnyElement> = reviews
-            .into_iter()
-            .take(parts::CARD_ROWS)
-            .map(|(exchange, peer)| {
-                let item = PanelItem::Review(exchange.id.clone());
-                let selected = open.as_ref() == Some(&item);
-                card_item(
-                    &format!("bot-network-review-{}", exchange.id),
-                    Some(peer_avatar(&peer, 14.0, theme).into_any_element()),
-                    transcript::single_line(&exchange.question),
-                    Some(card_corner("review", Some(theme.warning), theme)),
-                    selected,
-                    theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
-                .into_any_element()
-            })
-            .collect();
-        Some(self.fold_card("network", header, rows, theme))
+        ))
     }
 
     /// A connection row: the peer's neutral avatar, "<bot> · <owner>", and

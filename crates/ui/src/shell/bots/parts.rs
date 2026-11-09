@@ -32,6 +32,23 @@ pub(super) fn empty_card(
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> AnyElement {
+    header_card(key, glyph, title, hint, None, open, focused, theme, cx)
+}
+
+/// A card that is only its header: its glyph, title and a one-line hint
+/// (`hint_color`, else quiet), opening `open`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn header_card(
+    key: &'static str,
+    glyph: &'static str,
+    title: &'static str,
+    hint: impl Into<SharedString>,
+    hint_color: Option<gpui::Hsla>,
+    open: PanelItem,
+    focused: bool,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
     let header = super::board::header_frame(key, glyph, title, focused, None, theme)
         .cursor_pointer()
         .on_hover(motion::hover_listener(key))
@@ -42,7 +59,7 @@ pub(super) fn empty_card(
                 .min_w_0()
                 .truncate()
                 .text_size(px(11.5))
-                .text_color(theme.text_muted.opacity(0.6))
+                .text_color(hint_color.unwrap_or(theme.text_muted.opacity(0.6)))
                 .child(hint.into()),
         );
     super::board::card(theme).child(header).into_any_element()

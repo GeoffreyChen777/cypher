@@ -381,10 +381,8 @@ async fn run_now_failures_and_the_pause_switch() {
     assert_eq!(failed.summary.as_deref(), Some(reason));
     assert_eq!(routine(&core, "r-ask").next_run_at, None, "manual");
     let records = core.workspace.read_bot_records();
-    assert_eq!(
-        records.needs_you(&bot.id, |_| false),
-        vec![p::NeedsYou::RoutineFailed("r-ask".into())]
-    );
+    // A failed run is state on its routine, not a decision for Needs you.
+    assert_eq!(records.needs_you(&bot.id, |_| false), vec![]);
     wait_for(
         || {
             posts(&core, &bot.chat_id).iter().any(|(text, from)| {

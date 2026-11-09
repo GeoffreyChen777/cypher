@@ -1,8 +1,10 @@
 //! The **Needs you** card (§13.1): what waits on the owner, most pressing
 //! first, right under Status in the amber the sidebar gives a session
 //! awaiting input. Its rows are the bot's own question, actions and plans
-//! awaiting approval, sessions the bot started that are asking, review
-//! drafts and failed routines; the header opens the whole list.
+//! awaiting approval, sessions the bot started that are asking, and review
+//! drafts: decisions only, each listed here and nowhere else in the sidebar
+//! (a failed routine is state, marked on its routine). The header opens the
+//! whole list.
 //!
 //! Each item opens in the detail panel with its context and its actions:
 //! the plan to approve, the action and why it needs approval, the worker's
@@ -130,21 +132,6 @@ fn need_rows(
                     title: transcript::single_line(&exchange.question),
                     sub: format!("Review the answer to {peer}"),
                     at: Some(super::items::at(exchange.asked_at)),
-                })
-            }
-            Need::Record(NeedsYou::RoutineFailed(id)) => {
-                let routine = records.routines.iter().find(|r| r.id == id)?;
-                let run = routine.last_run.as_ref();
-                Some(NeedRow {
-                    item: Some(PanelItem::Routine(id)),
-                    glyph: icons::DANGER_TRIANGLE,
-                    tint: theme.danger,
-                    title: transcript::single_line(&routine.name),
-                    sub: run
-                        .and_then(|r| r.summary.as_deref())
-                        .map(|s| format!("Failed · {}", transcript::single_line(s)))
-                        .unwrap_or_else(|| "Its last run failed".into()),
-                    at: run.map(|r| super::items::at(r.at)),
                 })
             }
         })
