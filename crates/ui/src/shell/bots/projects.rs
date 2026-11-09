@@ -453,6 +453,10 @@ fn two_line(title: String, detail: String, theme: &Theme) -> gpui::Div {
         )
 }
 
+/// The folder glyph in a project's hover card, and the gap after it.
+const FOLDER_TIP_ICON: f32 = 12.0;
+const FOLDER_TIP_GAP: f32 = 6.0;
+
 /// The hover card of a project's device: the folder it lives in, and that
 /// a click copies it.
 struct FolderTip {
@@ -467,8 +471,9 @@ impl Render for FolderTip {
             "bot-project-folder-tip",
             div()
                 .max_w(px(360.0))
-                .px(px(10.0))
-                .py(px(8.0))
+                // The work status card's padding.
+                .px(px(12.0))
+                .py(px(10.0))
                 .rounded(px(8.0))
                 .border_1()
                 .border_color(theme.border_strong)
@@ -482,10 +487,12 @@ impl Render for FolderTip {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(6.0))
+                        .items_start()
+                        .gap(px(FOLDER_TIP_GAP))
                         .child(
                             icon(icons::FOLDER)
-                                .size(px(12.0))
+                                .size(px(FOLDER_TIP_ICON))
+                                .mt(px(2.5))
                                 .flex_none()
                                 .text_color(theme.text_muted),
                         )
@@ -499,8 +506,10 @@ impl Render for FolderTip {
                                 .child(SharedString::from(self.path.clone())),
                         ),
                 )
+                // Under the path, not the folder glyph.
                 .child(
                     div()
+                        .pl(px(FOLDER_TIP_ICON + FOLDER_TIP_GAP))
                         .text_size(px(11.0))
                         .text_color(if self.copied {
                             theme.success
