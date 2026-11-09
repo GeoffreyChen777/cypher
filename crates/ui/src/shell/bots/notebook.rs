@@ -162,7 +162,6 @@ impl Shell {
         if notes.is_empty() {
             return Some(parts::empty_card(
                 "bot-notebook-empty",
-                icons::BOOK,
                 "Notebook",
                 "No notes yet",
                 PanelItem::Notebook,
@@ -174,7 +173,6 @@ impl Shell {
         let header = self.card_header(
             "notebook",
             "bot-notebook-header",
-            icons::BOOK,
             "Notebook",
             notes.len(),
             PanelItem::Notebook,

@@ -321,7 +321,6 @@ impl Shell {
         };
         Some(parts::header_card(
             "bot-network-card",
-            icons::GLOBAL,
             "Network",
             hint,
             color,

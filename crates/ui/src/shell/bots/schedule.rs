@@ -549,7 +549,6 @@ impl Shell {
         if jobs.is_empty() {
             return Some(parts::empty_card(
                 "bot-schedule-empty",
-                icons::CLOCK,
                 "Routines",
                 "No routines yet",
                 PanelItem::Schedule,
@@ -563,7 +562,6 @@ impl Shell {
         let header = self.card_header(
             "schedule",
             "bot-schedule-header",
-            icons::CLOCK,
             "Routines",
             jobs.len(),
             PanelItem::Schedule,

@@ -381,7 +381,6 @@ impl Shell {
         let header = self.card_header(
             "projects",
             "bot-projects-header",
-            icons::WIDGET,
             "Projects",
             rows.len(),
             PanelItem::Projects,
@@ -432,11 +431,10 @@ impl Shell {
         &self,
         card: &'static str,
         key: &'static str,
-        glyph: &'static str,
         title: &'static str,
         count: usize,
         list: PanelItem,
-        tint: Option<gpui::Hsla>,
+        count_tint: Option<gpui::Hsla>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -475,7 +473,7 @@ impl Shell {
                         theme.text,
                     ),
                 ));
-        header_frame(key, glyph, title, self.card_focused(card, cx), tint, theme)
+        header_frame(key, title, self.card_focused(card, cx), theme)
             .pr(px(7.0))
             .cursor_pointer()
             .on_hover(motion::hover_listener(key))
@@ -484,10 +482,10 @@ impl Shell {
                 div()
                     .flex_none()
                     .text_size(px(11.5))
-                    .when(tint.is_some(), |el| {
+                    .when(count_tint.is_some(), |el| {
                         el.font_weight(gpui::FontWeight::MEDIUM)
                     })
-                    .text_color(tint.unwrap_or(theme.text_muted.opacity(0.6)))
+                    .text_color(count_tint.unwrap_or(theme.text_muted.opacity(0.6)))
                     .child(SharedString::from(count.to_string())),
             )
             .child(div().flex_1())
@@ -534,39 +532,27 @@ impl Shell {
 
 /// The header row both full and empty cards start from: glyph and title on
 /// the project header's grid.
+/// Where a card's title starts: in line with its rows' icons.
+const CARD_TITLE_INSET: f32 = 26.0;
+
 pub(super) fn header_frame(
     key: &'static str,
-    glyph: &'static str,
     title: &'static str,
     focused: bool,
-    tint: Option<gpui::Hsla>,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(key)
         .h(px(GROUP_CARD_HEADER_HEIGHT))
         .flex_none()
-        .px(px(10.0))
+        // Text only: the title starts on the rows' icon column (their 6px
+        // margin and 20px inset), the icons kept for the rows.
+        .pl(px(CARD_TITLE_INSET))
+        .pr(px(10.0))
         .flex()
         .flex_row()
         .items_center()
         .gap(px(7.0))
-        // The project header's 20px glyph box pulled 3px left, so titles
-        // share its column.
-        .child(
-            div()
-                .flex_none()
-                .size(px(20.0))
-                .ml(px(-3.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    icon(glyph)
-                        .size(px(14.0))
-                        .text_color(tint.unwrap_or(theme.text.opacity(0.85))),
-                ),
-        )
         .child(
             div()
                 .flex_none()

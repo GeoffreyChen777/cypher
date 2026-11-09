@@ -204,7 +204,6 @@ impl Shell {
         let header = self.card_header(
             "needs",
             "bot-needs-header",
-            icons::BELL,
             "Needs you",
             total,
             PanelItem::NeedsYou,

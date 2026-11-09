@@ -24,7 +24,6 @@ pub(super) enum Confirm {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn empty_card(
     key: &'static str,
-    glyph: &'static str,
     title: &'static str,
     hint: impl Into<SharedString>,
     open: PanelItem,
@@ -32,7 +31,7 @@ pub(super) fn empty_card(
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> AnyElement {
-    header_card(key, glyph, title, hint, None, open, focused, theme, cx)
+    header_card(key, title, hint, None, open, focused, theme, cx)
 }
 
 /// A card that is only its header: its glyph, title and a one-line hint
@@ -40,7 +39,6 @@ pub(super) fn empty_card(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn header_card(
     key: &'static str,
-    glyph: &'static str,
     title: &'static str,
     hint: impl Into<SharedString>,
     hint_color: Option<gpui::Hsla>,
@@ -49,7 +47,7 @@ pub(super) fn header_card(
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> AnyElement {
-    let header = super::board::header_frame(key, glyph, title, focused, None, theme)
+    let header = super::board::header_frame(key, title, focused, theme)
         .cursor_pointer()
         .on_hover(motion::hover_listener(key))
         .on_click(cx.listener(move |this, _, _, cx| this.open_panel(open.clone(), cx)))

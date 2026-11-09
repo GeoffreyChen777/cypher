@@ -409,7 +409,6 @@ impl Shell {
         let header = self.card_header(
             "work",
             "bot-work-header",
-            icons::HIERARCHY,
             "Work",
             if running.is_empty() {
                 finished.len()
