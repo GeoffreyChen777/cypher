@@ -35,10 +35,11 @@ pub const BOT_TOOLS: [&str; 6] = [
 
 /// Coordination tools (P2, *Coordinate*): `propose_plan` in the bot chat,
 /// the rest in orchestration threads (`list_work` and `get_work` in both).
-pub const BOT_WORK_TOOLS: [&str; 11] = [
+pub const BOT_WORK_TOOLS: [&str; 12] = [
     "propose_plan",
     "list_work",
     "get_work",
+    "stop_work",
     "create_worktree",
     "start_session",
     "wait_for_session",
@@ -64,7 +65,15 @@ pub const BOT_DIRECT_TOOLS: [&str; 8] = [
 
 /// Routine tools (P3). The notebook tools these once sat beside are gone:
 /// memory is every run's `memory` tool ([`crate::MEMORY_TOOLS`]).
-pub const BOT_SCHEDULE_TOOLS: [&str; 2] = ["list_routines", "save_routine"];
+pub const BOT_SCHEDULE_TOOLS: [&str; 4] = [
+    "list_routines",
+    "save_routine",
+    "run_routine",
+    "delete_routine",
+];
+
+/// The workspace's own activity log: its owner's threads and routines.
+pub const BOT_ACTIVITY_TOOLS: [&str; 1] = ["list_activity"];
 
 /// Shortcut tools: the workspace chat's only (shortcuts are made by asking).
 pub const BOT_SHORTCUT_TOOLS: [&str; 3] = ["list_shortcuts", "save_shortcut", "delete_shortcut"];

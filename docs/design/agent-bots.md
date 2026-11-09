@@ -166,8 +166,9 @@ As built (P2), `bots/work.rs`:
 
 - **Tools.** Routine and peer threads get the read tools only. An owner thread with *Work
   directly* adds Pi's `bash`, `read`, `write`, `edit`, `grep`, `find`, `ls` and
-  `request_permission`. With *Coordinate*, the bot chat adds `propose_plan`, `list_work`
-  and `get_work`, and an orchestration thread adds every other coordination tool (§10.3).
+  `request_permission`. With *Coordinate*, the bot chat adds `propose_plan`, `list_work`,
+  `get_work` and `stop_work`, and an orchestration thread adds every other coordination
+  tool but `stop_work` (§10.3).
 - **Roots.** The paths of the bot's granted spaces on this device, canonical. The run gets
   them as `CYPHER_BOT_WORKSPACE_ROOTS` (JSON); the bot tools extension writes each as the
   permission extension's `cypher-permissions.root` entry for the chat in its own
@@ -615,13 +616,15 @@ workspace roots and the engine's permission level; the engine checks each call f
 
 ### 10.3 Coordination (owner threads with *Coordinate*)
 
-All built. The bot chat gets `propose_plan`, `list_work` and `get_work`; an orchestration
-thread gets the rest (§6.7).
+All built. The bot chat gets `propose_plan`, `list_work`, `get_work` and `stop_work`; an
+orchestration thread gets the rest but `stop_work` (it ends its own work with
+`finish_work`) (§6.7).
 
 | Tool | Does |
 |---|---|
 | `propose_plan {title, summary?, steps: [{title, project?, detail?}]}` | Writes the plan; its card waits for the owner's approval, which starts an orchestration thread. Bot chat only. |
 | `list_work`, `get_work {work_id}` | The bot's plans with state and progress; one plan's steps, their sessions with status and links, and its result. |
+| `stop_work {work_id}` | Bot chat: stops running work at the owner's word, like the work page's Stop. A plan awaiting approval is the owner's to cancel. After a peer's answer, the owner approves it first (§4.3). |
 | `create_worktree {project, branch?}` | A new `cypher/<name>` worktree in one of the plan's projects, off `branch` (default HEAD), on that project's device: locally through the engine's repos, on another device through its forwardable `CreateWorktree` within 30 s. Returns the path. |
 | `start_session {step, project, prompt, title?, cwd?, model?}` | A session in one of the plan's projects or a worktree from `create_worktree`, recorded on the step; returns its id. |
 | `wait_for_session {session_id, timeout_s?}` | Waits (default 300 s, at most 900) until a session settles or asks; returns its state, its last message and any question with its options, as quoted data. |
@@ -637,9 +640,19 @@ thread gets the rest (§6.7).
 | `memory`, `search_history`, `read_history` | owner, routine | Memory ([memory.md](memory.md) §3, §5): the workspace's and the user's files, project stores read-only, and its own past threads. |
 | `list_routines` | owner, routine | The bot's routines: name, id, where each runs, schedule in words, next run, last result. |
 | `save_routine {id?, name, prompt, schedule, write_notes?, work_directly?, enabled?, project?, worktree?, model?}` | bot chat | Creates or changes a routine; with `project` (a project in scope, and *Coordinate*) it runs as a session there. Validates it and answers with what was saved and its next run. |
+| `run_routine {id}` | bot chat | Runs a routine now, like its page's Run now: a fresh run whose result posts in the bot chat; says when it will be skipped (paused, no *Coordinate*) or wait for a run in progress. After a peer's answer, the owner approves it first (§4.3). |
+| `delete_routine {id}` | bot chat | Deletes a routine and its sessions, like its page's Delete; same approval rule. |
+| `list_activity {since_hours?, kind?}` | owner, routine | The workspace's own activity log, newest first (default the last 24 h; `kind` = plans, sessions, routines, memory or network). |
+| `list_shortcuts`, `save_shortcut {id?, label, icon?, request}`, `delete_shortcut {id}` | bot chat | The sidebar's shortcut buttons (§13.1), kept only by asking. |
 | `list_connections` | owner | Connected bots: name, owner, connection id, how this bot replies to them, last question. |
 | `ask_bot` | owner | Asks one connected bot (by name, any case, or connection id); waits up to `wait_s` (default 120 s, at most 600). Taints the thread when an answer comes back (§4.3). |
 | `ask_group` | owner | Fans a question out to a group; returns the answers received in the window. Not built. |
+
+Deliberately not tools: what changes the agent's own reach or decides on its own requests
+stays the owner's, in the app. That means editing the workspace (name, instructions, scope,
+capabilities), pausing it, approving or cancelling plans and approvals, sending or declining
+drafted peer answers, changing, revoking or inviting connections, deleting finished work,
+and memory's settings (Settings › Memory).
 
 Network tools never exist in peer threads, so a peer cannot use the bot to relay
 questions to third parties.

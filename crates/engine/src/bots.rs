@@ -33,6 +33,7 @@ pub(crate) use network::scrub_secrets;
 pub use network::{BotEdge, HttpBotEdge, InviteReply, NetError, OwnerName, SIGNED_OUT};
 pub(crate) use prompt::space_name as prompt_space_name;
 
+mod activity;
 mod git;
 mod history;
 mod index;

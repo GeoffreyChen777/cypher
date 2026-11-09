@@ -106,7 +106,7 @@ fn script_summary(code: &str) -> String {
 }
 
 /// An agent bot's own tools (`crate::BOT_TOOLS`, `BOT_WORK_TOOLS`,
-/// `BOT_SCHEDULE_TOOLS`, `BOT_SHORTCUT_TOOLS`, `BOT_NETWORK_TOOLS`) and the memory tools every run
+/// `BOT_SCHEDULE_TOOLS`, `BOT_ACTIVITY_TOOLS`, `BOT_SHORTCUT_TOOLS`, `BOT_NETWORK_TOOLS`) and the memory tools every run
 /// gets (`crate::MEMORY_TOOLS`), by what they do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BotToolKind {
@@ -119,6 +119,7 @@ pub enum BotToolKind {
     ProposePlan,
     ListWork,
     GetWork,
+    StopWork,
     CreateWorktree,
     StartSession,
     WaitForSession,
@@ -129,7 +130,10 @@ pub enum BotToolKind {
     FinishWork,
     ListRoutines,
     SaveRoutine,
+    RunRoutine,
+    DeleteRoutine,
     SaveProjectTask,
+    ListActivity,
     ListShortcuts,
     SaveShortcut,
     DeleteShortcut,
@@ -164,6 +168,7 @@ impl BotToolKind {
                 | Self::ListWork
                 | Self::GetWork
                 | Self::ListRoutines
+                | Self::ListActivity
                 | Self::ListShortcuts
                 | Self::ListConnections
                 | Self::ReadMemory
@@ -190,6 +195,7 @@ pub fn bot_tool_kind(call: &crate::ToolCall) -> Option<BotToolKind> {
         "propose_plan" => BotToolKind::ProposePlan,
         "list_work" => BotToolKind::ListWork,
         "get_work" => BotToolKind::GetWork,
+        "stop_work" => BotToolKind::StopWork,
         "create_worktree" => BotToolKind::CreateWorktree,
         "start_session" => BotToolKind::StartSession,
         "wait_for_session" => BotToolKind::WaitForSession,
@@ -201,6 +207,9 @@ pub fn bot_tool_kind(call: &crate::ToolCall) -> Option<BotToolKind> {
         // `list_schedule` is its name before routines were one kind.
         "list_routines" | "list_schedule" => BotToolKind::ListRoutines,
         "save_routine" => BotToolKind::SaveRoutine,
+        "run_routine" => BotToolKind::RunRoutine,
+        "delete_routine" => BotToolKind::DeleteRoutine,
+        "list_activity" => BotToolKind::ListActivity,
         "save_project_task" => BotToolKind::SaveProjectTask,
         "list_shortcuts" => BotToolKind::ListShortcuts,
         "save_shortcut" => BotToolKind::SaveShortcut,
@@ -296,6 +305,7 @@ fn bot_chip_content(
         BotToolKind::ProposePlan => ("Proposed a plan", arg("title").unwrap_or_default()),
         BotToolKind::ListWork => ("Checked its tasks", String::new()),
         BotToolKind::GetWork => ("Read task", arg("work_id").unwrap_or_default()),
+        BotToolKind::StopWork => ("Stopped task", String::new()),
         BotToolKind::CreateWorktree => (
             "Created worktree",
             in_project(arg("branch").unwrap_or_default()),
@@ -312,6 +322,9 @@ fn bot_chip_content(
         BotToolKind::FinishWork => ("Finished task", arg("outcome").unwrap_or_default()),
         BotToolKind::ListRoutines => ("Checked routines", String::new()),
         BotToolKind::SaveRoutine => ("Saved routine", arg("name").unwrap_or_default()),
+        BotToolKind::RunRoutine => ("Ran routine", String::new()),
+        BotToolKind::DeleteRoutine => ("Deleted routine", String::new()),
+        BotToolKind::ListActivity => ("Checked activity", String::new()),
         BotToolKind::SaveProjectTask => (
             "Saved project task",
             in_project(arg("name").unwrap_or_default()),
@@ -352,6 +365,9 @@ enum BotAction {
     Finish,
     Memory,
     Routine,
+    RunRoutine,
+    DeleteRoutine,
+    StopWork,
     Task,
     Shortcut,
     Unshortcut,
@@ -371,6 +387,9 @@ impl BotAction {
             Self::Finish => ("finished the task", "finished {n} tasks"),
             Self::Memory => ("updated memory", "updated memory {n} times"),
             Self::Routine => ("saved a routine", "saved {n} routines"),
+            Self::RunRoutine => ("ran a routine", "ran {n} routines"),
+            Self::DeleteRoutine => ("deleted a routine", "deleted {n} routines"),
+            Self::StopWork => ("stopped work", "stopped {n} pieces of work"),
             Self::Task => ("saved a project task", "saved {n} project tasks"),
             Self::Shortcut => ("saved a shortcut", "saved {n} shortcuts"),
             Self::Unshortcut => ("removed a shortcut", "removed {n} shortcuts"),
@@ -399,6 +418,9 @@ fn bot_action(kind: BotToolKind) -> Option<BotAction> {
         | BotToolKind::DeleteMemory
         | BotToolKind::RenameMemory => BotAction::Memory,
         BotToolKind::SaveRoutine => BotAction::Routine,
+        BotToolKind::RunRoutine => BotAction::RunRoutine,
+        BotToolKind::DeleteRoutine => BotAction::DeleteRoutine,
+        BotToolKind::StopWork => BotAction::StopWork,
         BotToolKind::SaveProjectTask => BotAction::Task,
         BotToolKind::SaveShortcut => BotAction::Shortcut,
         BotToolKind::DeleteShortcut => BotAction::Unshortcut,
@@ -564,6 +586,7 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
                 BotToolKind::ListWork
                 | BotToolKind::GetWork
                 | BotToolKind::ListRoutines
+                | BotToolKind::ListActivity
                 | BotToolKind::ListShortcuts
                 | BotToolKind::ListConnections => listings += 1,
                 kind => match bot_action(kind) {

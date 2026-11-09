@@ -169,6 +169,15 @@ const TOOLS: ToolDef[] = [
     }),
   },
   {
+    name: "stop_work",
+    label: "Stopped task",
+    description:
+      "Stop running work when your owner asks, like the work page's Stop: its sessions stop and it ends as stopped. Pass the id from list_work. A plan still awaiting approval is your owner's to cancel.",
+    parameters: Type.Object({
+      work_id: Type.String({ description: "The work's id, from list_work" }),
+    }),
+  },
+  {
     name: "create_worktree",
     label: "Create worktree",
     description:
@@ -294,7 +303,41 @@ const TOOLS: ToolDef[] = [
       model: Type.Optional(Type.String({ description: "The model its runs use, e.g. claude-bridge/claude-haiku-5-5 (default: the workspace chat's)" })),
     }),
   },
+  {
+    name: "run_routine",
+    label: "Ran routine",
+    description:
+      "Run one of your routines now, when your owner asks: a fresh run, like the routine page's Run now; its result is posted in this chat when it ends. Pass the id from list_routines.",
+    parameters: Type.Object({
+      id: Type.String({ description: "The routine's id, from list_routines" }),
+    }),
+  },
+  {
+    name: "delete_routine",
+    label: "Deleted routine",
+    description: "Delete one of your routines, when your owner asks. Its sessions go with it.",
+    parameters: Type.Object({
+      id: Type.String({ description: "The routine's id, from list_routines" }),
+    }),
+  },
   // ── end routines ──
+
+  // ── your own activity log ──
+  {
+    name: "list_activity",
+    label: "Checked activity",
+    description:
+      "Read your own activity log, newest first: plans proposed and decided, sessions you started or stopped, routines run, memory changed, questions to and from other workspaces. For \"what did you do while I was away\".",
+    parameters: Type.Object({
+      since_hours: Type.Optional(Type.Number({ minimum: 0.25, maximum: 336, description: "Window in hours (default 24)" })),
+      kind: Type.Optional(
+        Type.Union(
+          [Type.Literal("plans"), Type.Literal("sessions"), Type.Literal("routines"), Type.Literal("memory"), Type.Literal("network")],
+          { description: "Only this kind" },
+        ),
+      ),
+    }),
+  },
 
   // ── shortcuts: buttons in the owner's sidebar, made by asking ──
   {

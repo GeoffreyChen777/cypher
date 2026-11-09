@@ -39,7 +39,7 @@ const ALLOW: &str = "allow";
 
 /// The coordination tools of the bot chat (the rest need an orchestration
 /// thread).
-const MAIN_TOOLS: [&str; 3] = ["propose_plan", "list_work", "get_work"];
+const MAIN_TOOLS: [&str; 4] = ["propose_plan", "list_work", "get_work", "stop_work"];
 
 /// How long an action waits for the owner's approval (§4.3).
 const APPROVAL_WAIT: Duration = Duration::from_secs(10 * 60);
@@ -112,10 +112,12 @@ pub(super) fn work_tools(marker: &BotChat, bot: Option<&Bot>) -> Vec<&'static st
     if caps.coordinate {
         match role {
             Role::Main => tools.extend(MAIN_TOOLS),
+            // Proposing and stopping work are the workspace chat's; a
+            // work thread ends its own work with finish_work.
             Role::Work(_) => tools.extend(
                 p::BOT_WORK_TOOLS
                     .into_iter()
-                    .filter(|tool| *tool != "propose_plan"),
+                    .filter(|tool| !matches!(*tool, "propose_plan" | "stop_work")),
             ),
             Role::Other => {}
         }
@@ -595,11 +597,11 @@ mod tests {
         );
         assert_eq!(
             work_tools(&main, Some(&bot(caps(false, true)))),
-            ["propose_plan", "list_work", "get_work"]
+            ["propose_plan", "list_work", "get_work", "stop_work"]
         );
         let worker_tools = work_tools(&thread, Some(&bot(caps(false, true))));
-        assert!(!worker_tools.contains(&"propose_plan"));
-        assert_eq!(worker_tools.len(), p::BOT_WORK_TOOLS.len() - 1);
+        assert!(!worker_tools.contains(&"propose_plan") && !worker_tools.contains(&"stop_work"));
+        assert_eq!(worker_tools.len(), p::BOT_WORK_TOOLS.len() - 2);
         let both = work_tools(&thread, Some(&bot(caps(true, true))));
         assert!(both.contains(&"bash") && both.contains(&"start_session"));
         for origin in [BotOrigin::Routine, BotOrigin::Peer] {

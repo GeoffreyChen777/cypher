@@ -276,6 +276,9 @@ impl Bots {
             if let Some(answer) = self.shortcut_tool(&chat, &marker, tool, &arguments) {
                 return answer;
             }
+            if let Some(answer) = self.activity_tool(&chat, &marker, tool, &arguments) {
+                return answer;
+            }
         }
         let view = self.view(chat_id)?;
         match tool {

@@ -995,3 +995,176 @@ async fn a_reminder_is_a_routine_that_runs_once() {
         .timestamp_millis();
     assert_eq!(routines[0].next_run_at, Some(at));
 }
+
+/// What the owner can do from a routine's or a work item's page, the agent
+/// can do when asked in the workspace chat: run a routine now, delete one,
+/// stop running work; and read back its own activity. Other threads can't,
+/// and after another workspace's answer each waits for the owner.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_workspace_chat_runs_deletes_and_stops_what_the_owner_could() {
+    let Rig {
+        core, dir: _dir, ..
+    } = rig().await;
+    let bot = create_bot(&core, true).await;
+    save_routine(
+        &core,
+        &routine_def("r1", &bot, "Tell me what's stuck.", Schedule::Manual),
+    )
+    .await;
+
+    // Run now: a fresh run whose post lands in the bot chat.
+    let ran = tool(
+        &core,
+        &bot.chat_id,
+        "run_routine",
+        serde_json::json!({ "id": "r1" }),
+    )
+    .await;
+    assert!(ran.starts_with("Started \"Morning brief\""), "{ran}");
+    assert!(routine(&core, "r1").run_requested_at.is_some());
+    core.bots.schedule_now().await;
+    wait_for(
+        || !posts(&core, &bot.chat_id).is_empty(),
+        "the routine's post",
+    )
+    .await;
+
+    // Only the workspace chat; a routine's own thread can't.
+    let thread = routine(&core, "r1")
+        .manual_chat_id
+        .expect("its run's session");
+    let refused = tool(
+        &core,
+        &thread,
+        "run_routine",
+        serde_json::json!({ "id": "r1" }),
+    )
+    .await;
+    assert!(refused.contains("in the workspace chat"), "{refused}");
+    let missing = tool(
+        &core,
+        &bot.chat_id,
+        "run_routine",
+        serde_json::json!({ "id": "nope" }),
+    )
+    .await;
+    assert!(missing.contains("No routine nope"), "{missing}");
+
+    // Activity: what the workspace did, for the owner's threads.
+    let activity = tool(&core, &bot.chat_id, "list_activity", serde_json::json!({})).await;
+    assert!(
+        activity.contains("routines · Ran \"Morning brief\""),
+        "{activity}"
+    );
+
+    // Stop running work.
+    let now = p::now_ms();
+    let work = p::BotWork {
+        id: "w1".into(),
+        bot_id: bot.id.clone(),
+        title: "Fix the build".into(),
+        instruction: "Fix it".into(),
+        summary: None,
+        steps: Vec::new(),
+        state: p::WorkState::Running,
+        chat_id: bot.chat_id.clone(),
+        tool_call_id: None,
+        thread_chat_id: None,
+        created_at: now,
+        started_at: Some(now),
+        ended_at: None,
+        result: None,
+        decision: Some(p::PlanDecision {
+            approve: true,
+            at: now,
+        }),
+        stop_requested_at: None,
+    };
+    core.workspace
+        .put_record(
+            p::KIND_BOT_WORK,
+            "w1",
+            &work,
+            cypher_engine::RecordFields::All,
+        )
+        .unwrap();
+    let stopped = tool(
+        &core,
+        &bot.chat_id,
+        "stop_work",
+        serde_json::json!({ "work_id": "w1" }),
+    )
+    .await;
+    assert!(
+        stopped.starts_with("Stopping \"Fix the build\""),
+        "{stopped}"
+    );
+    let row: p::BotWork = core.workspace.record(p::KIND_BOT_WORK, "w1").unwrap();
+    assert!(row.stop_requested_at.is_some());
+
+    // After another workspace's answer, deleting waits for the owner;
+    // declined (or unanswered), nothing is deleted.
+    core.bots
+        .set_approval_wait(std::time::Duration::from_millis(400));
+    core.bots
+        .taint_thread(&bot.chat_id, "Ada's workspace answered in this chat");
+    let held = tool(
+        &core,
+        &bot.chat_id,
+        "delete_routine",
+        serde_json::json!({ "id": "r1" }),
+    )
+    .await;
+    assert!(!held.starts_with("Deleted"), "{held}");
+    let asked = core.workspace.read_bot_records().approvals;
+    assert!(
+        asked
+            .iter()
+            .any(|a| a.action == "Delete the routine \"Morning brief\""),
+        "{asked:?}"
+    );
+    assert!(
+        core.workspace
+            .record::<BotRoutine>(p::KIND_BOT_ROUTINES, "r1")
+            .is_some()
+    );
+}
+
+/// Without taint the routine goes, with its sessions.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_routine_removes_it_and_its_sessions() {
+    let Rig {
+        core, dir: _dir, ..
+    } = rig().await;
+    let bot = create_bot(&core, false).await;
+    save_routine(
+        &core,
+        &routine_def("r1", &bot, "Tell me what's stuck.", Schedule::Manual),
+    )
+    .await;
+    tool(
+        &core,
+        &bot.chat_id,
+        "run_routine",
+        serde_json::json!({ "id": "r1" }),
+    )
+    .await;
+    core.bots.schedule_now().await;
+    let session = routine(&core, "r1")
+        .manual_chat_id
+        .expect("its run's session");
+    let deleted = tool(
+        &core,
+        &bot.chat_id,
+        "delete_routine",
+        serde_json::json!({ "id": "r1" }),
+    )
+    .await;
+    assert_eq!(deleted, "Deleted the routine \"Morning brief\".");
+    assert!(
+        core.workspace
+            .record::<BotRoutine>(p::KIND_BOT_ROUTINES, "r1")
+            .is_none()
+    );
+    assert!(core.workspace.chat(&session).unwrap().is_none());
+}

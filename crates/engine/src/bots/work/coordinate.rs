@@ -479,6 +479,11 @@ impl Bots {
             (Role::Main, "propose_plan") => self.propose_plan(chat, &view, parse(args)?).await,
             (_, "list_work") => Ok(self.list_work(&view)),
             (_, "get_work") => self.get_work(&view, parse(args)?),
+            (Role::Main, "stop_work") => self.request_stop(chat, &view, parse(args)?).await,
+            (Role::Work(_), "stop_work") => Err(refuse(
+                "You carry out this work; end it with finish_work. stop_work is for your owner's \
+                 requests in the workspace chat.",
+            )),
             (Role::Work(_), "propose_plan") => Err(refuse(
                 "propose_plan only works in the workspace chat; you are already carrying out an \
                  approved plan.",
@@ -760,6 +765,49 @@ impl Bots {
             out.push(line);
         }
         out.join("\n")
+    }
+
+    /// Stop running work at the owner's word, like the work page's Stop:
+    /// the host stops its sessions and settles it as stopped. A plan still
+    /// awaiting approval is the owner's to cancel.
+    async fn request_stop(
+        &self,
+        chat: &Chat,
+        view: &View,
+        args: GetWork,
+    ) -> Result<String, EngineError> {
+        let id = args.work_id.trim();
+        let work = self
+            .inner
+            .workspace
+            .record::<BotWork>(p::KIND_BOT_WORK, id)
+            .filter(|w| w.bot_id == view.bot.id)
+            .ok_or_else(|| refuse(format!("No plan \"{id}\". Use list_work.")))?;
+        if work.awaiting_approval() {
+            return Err(refuse(format!(
+                "\"{}\" hasn't started: it waits for your owner's approval, and they cancel it \
+                 from its card.",
+                work.title
+            )));
+        }
+        if !work.is_live() {
+            return Ok(format!(
+                "\"{}\" already ended ({}).",
+                work.title,
+                state_word(&work)
+            ));
+        }
+        self.gate_owner(&view.bot, chat, format!("Stop \"{}\"", work.title))
+            .await?;
+        let mut fields = serde_json::Map::new();
+        fields.insert("stopRequestedAt".into(), p::now_ms().into());
+        self.inner
+            .workspace
+            .update_record(p::KIND_BOT_WORK, &work.id, fields)?;
+        Ok(format!(
+            "Stopping \"{}\": its sessions stop and it ends as stopped; list_work shows when it has.",
+            work.title
+        ))
     }
 
     fn get_work(&self, view: &View, args: GetWork) -> Result<String, EngineError> {

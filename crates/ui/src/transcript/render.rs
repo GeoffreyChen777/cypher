@@ -1777,9 +1777,10 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
             BotToolKind::SearchSessions => crate::kit::icons::MAGNIFER,
             BotToolKind::ReadSession => crate::kit::icons::CHAT_ROUND_LINE,
             BotToolKind::ProjectGit | BotToolKind::CreateWorktree => crate::kit::icons::GIT_BRANCH,
-            BotToolKind::ProposePlan | BotToolKind::ListWork | BotToolKind::GetWork => {
-                crate::kit::icons::CHECKLIST
-            }
+            BotToolKind::ProposePlan
+            | BotToolKind::ListWork
+            | BotToolKind::GetWork
+            | BotToolKind::StopWork => crate::kit::icons::CHECKLIST,
             BotToolKind::UpdateStep | BotToolKind::FinishWork => crate::kit::icons::CHECKLIST,
             BotToolKind::StartSession
             | BotToolKind::WaitForSession
@@ -1793,13 +1794,16 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
             | BotToolKind::RenameMemory => crate::kit::icons::PEN,
             BotToolKind::SearchMemory | BotToolKind::SearchHistory => crate::kit::icons::MAGNIFER,
             BotToolKind::ReadHistory => crate::kit::icons::CHAT_ROUND_LINE,
-            BotToolKind::ListRoutines | BotToolKind::SaveRoutine | BotToolKind::SaveProjectTask => {
-                crate::kit::icons::PULSE
-            }
+            BotToolKind::ListRoutines
+            | BotToolKind::SaveRoutine
+            | BotToolKind::RunRoutine
+            | BotToolKind::DeleteRoutine
+            | BotToolKind::SaveProjectTask => crate::kit::icons::PULSE,
             BotToolKind::ListShortcuts
             | BotToolKind::SaveShortcut
             | BotToolKind::DeleteShortcut => crate::kit::icons::BOLT,
             BotToolKind::ListConnections | BotToolKind::AskBot => crate::kit::icons::BOT,
+            BotToolKind::ListActivity => crate::kit::icons::PULSE,
         };
     }
     match call {

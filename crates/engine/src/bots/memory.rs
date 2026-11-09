@@ -51,12 +51,13 @@ pub(super) fn run_progress(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct Access {
     pub list_routines: bool,
+    /// Saving, running now and deleting: the owner's say, so the bot chat's.
     pub save_routine: bool,
 }
 
-/// Owner and routine threads list routines; routines are made in the bot
-/// chat only (one that runs in a project also needs *Coordinate*,
-/// [`Bots::save_routine`]); peer threads get nothing.
+/// Owner and routine threads list routines; routines are made, run by hand
+/// and deleted in the bot chat only (one that runs in a project also needs
+/// *Coordinate*, [`Bots::save_routine`]); peer threads get nothing.
 pub(super) fn access(marker: &BotChat) -> Access {
     match (marker.origin, &marker.thread) {
         (BotOrigin::Owner, BotThread::Main) => Access {
@@ -76,7 +77,7 @@ impl Access {
     fn allows(self, tool: &str) -> bool {
         match tool {
             "list_routines" => self.list_routines,
-            "save_routine" => self.save_routine,
+            "save_routine" | "run_routine" | "delete_routine" => self.save_routine,
             _ => false,
         }
     }
@@ -114,6 +115,11 @@ struct SaveRoutine {
     model: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RoutineId {
+    id: String,
+}
+
 fn args<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Result<T, EngineError> {
     serde_json::from_value(value.clone())
         .map_err(|err| EngineError::Other(format!("Invalid arguments: {err}")))
@@ -121,7 +127,11 @@ fn args<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Result<T, 
 
 fn refuse(tool: &str) -> EngineError {
     EngineError::Other(match tool {
-        "save_routine" => "Routines are made in the workspace chat, when your owner asks.".into(),
+        "save_routine" | "run_routine" | "delete_routine" => {
+            "Routines are made, run by hand and deleted in the workspace chat, when your owner \
+             asks."
+                .into()
+        }
         _ => format!("{tool} isn't available in this session."),
     })
 }
@@ -147,10 +157,10 @@ impl Bots {
         if !p::BOT_SCHEDULE_TOOLS.contains(&tool) {
             return None;
         }
-        Some(self.schedule_tool_call(chat, marker, tool, args))
+        Some(self.schedule_tool_call(chat, marker, tool, args).await)
     }
 
-    fn schedule_tool_call(
+    async fn schedule_tool_call(
         &self,
         chat: &p::Chat,
         marker: &BotChat,
@@ -170,8 +180,110 @@ impl Bots {
         match tool {
             "list_routines" => self.list_routines(&chat.id),
             "save_routine" => self.save_routine(&bot, &chat.id, args::<SaveRoutine>(raw)?),
+            "run_routine" => {
+                let routine = self.own_routine(&bot, args::<RoutineId>(raw)?)?;
+                self.gate_owner(
+                    &bot,
+                    chat,
+                    format!("Run the routine \"{}\" now", routine.name),
+                )
+                .await?;
+                self.run_routine_now(&bot, &routine)
+            }
+            "delete_routine" => {
+                let routine = self.own_routine(&bot, args::<RoutineId>(raw)?)?;
+                self.gate_owner(
+                    &bot,
+                    chat,
+                    format!("Delete the routine \"{}\"", routine.name),
+                )
+                .await?;
+                self.delete_routine(&bot, chat, &routine)
+            }
             _ => Err(refuse(tool)),
         }
+    }
+
+    /// One of `bot`'s routines, by id.
+    fn own_routine(&self, bot: &Bot, args: RoutineId) -> Result<BotRoutine, EngineError> {
+        let id = args.id.trim();
+        self.inner
+            .workspace
+            .record::<BotRoutine>(p::KIND_BOT_ROUTINES, id)
+            .filter(|r| r.bot_id == bot.id)
+            .ok_or_else(|| {
+                EngineError::Other(format!("No routine {id}. list_routines shows their ids."))
+            })
+    }
+
+    /// The taint rule for an acting call in the bot chat (§4.3): after
+    /// another workspace's answer, the owner approves it first.
+    pub(super) async fn gate_owner(
+        &self,
+        bot: &Bot,
+        chat: &p::Chat,
+        action: String,
+    ) -> Result<(), EngineError> {
+        match self.inner.taint.reason(&chat.id) {
+            Some(reason) => self.ask_owner(bot, chat, None, action, reason).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Run Now: a fresh run the scheduler starts on its next pass, like the
+    /// routine page's button; its result posts in this chat.
+    fn run_routine_now(&self, bot: &Bot, routine: &BotRoutine) -> Result<String, EngineError> {
+        let now = p::now_ms();
+        let mut fields = serde_json::Map::new();
+        fields.insert("runRequestedAt".into(), now.into());
+        self.inner
+            .workspace
+            .update_record(p::KIND_BOT_ROUTINES, &routine.id, fields)?;
+        self.wake_schedule();
+        let mut out = vec![format!(
+            "Started \"{}\": a fresh run; its result will be posted in this chat when it ends.",
+            routine.name
+        )];
+        if schedule::is_running(routine.last_run.as_ref()) {
+            out.push("A run is going now; this one starts when it ends.".into());
+        }
+        if let Some(reason) = schedule::skip_reason(bot.paused).or_else(|| {
+            routine.target.space_id().and_then(|id| {
+                schedule::project_skip(bot.capabilities.coordinate, bot.scope.sees_space(id))
+            })
+        }) {
+            out.push(format!("It won't run, though. {reason}"));
+        }
+        Ok(out.join(" "))
+    }
+
+    /// Delete a routine, like the routine page's Delete: its sessions go
+    /// with it; a worktree it made stays on disk.
+    fn delete_routine(
+        &self,
+        bot: &Bot,
+        chat: &p::Chat,
+        routine: &BotRoutine,
+    ) -> Result<String, EngineError> {
+        let workspace = &self.inner.workspace;
+        workspace.delete_records(p::KIND_BOT_ROUTINES, std::slice::from_ref(&routine.id));
+        for session in [&routine.thread_chat_id, &routine.manual_chat_id]
+            .into_iter()
+            .flatten()
+        {
+            if let Err(err) = workspace.delete_chat(session) {
+                tracing::warn!(chat = %session, error = %err, "routine session not deleted");
+            }
+        }
+        record_activity(
+            workspace,
+            &bot.id,
+            ActivityKind::RoutineRan,
+            &format!("Deleted the routine \"{}\"", routine.name),
+            Some(&chat.id),
+            None,
+        );
+        Ok(format!("Deleted the routine \"{}\".", routine.name))
     }
 
     fn list_routines(&self, chat_id: &str) -> Result<String, EngineError> {
@@ -439,7 +551,8 @@ pub(super) const ROUTINES_LINE: &str = "Routines:\n- Routines run by hand or on 
      morning, tell me what's stuck\"), or as an ordinary session in one of your projects \
      (\"every night, run the tests and fix anything flaky\"). When your owner asks for \
      something recurring, save it with save_routine; list_routines shows your routines with \
-     their last results.\n- Reminders are routines too. When your owner asks to be reminded \
+     their last results. run_routine runs one now (a fresh run that posts here when it \
+     ends) and delete_routine removes one, when your owner asks.\n- Reminders are routines too. When your owner asks to be reminded \
      (\"remind me tomorrow morning to review the code in invoice-demo\"), save a routine as \
      you with a once schedule at that local time (morning is 09:00 unless they say; \
      list_routines shows the time now) and a prompt that tells you to remind them and add \
