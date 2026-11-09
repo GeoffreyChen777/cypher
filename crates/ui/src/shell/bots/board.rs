@@ -532,8 +532,10 @@ impl Shell {
 
 /// The header row both full and empty cards start from: glyph and title on
 /// the project header's grid.
-/// Where a card's title starts: in line with its rows' icons.
-const CARD_TITLE_INSET: f32 = 26.0;
+/// Where a card's title starts: under the workspace switcher's icon (19px
+/// from the window edge; the card itself starts at 8), its rows indented
+/// below it.
+const CARD_TITLE_INSET: f32 = 11.0;
 
 pub(super) fn header_frame(
     key: &'static str,
@@ -545,8 +547,8 @@ pub(super) fn header_frame(
         .id(key)
         .h(px(GROUP_CARD_HEADER_HEIGHT))
         .flex_none()
-        // Text only: the title starts on the rows' icon column (their 6px
-        // margin and 20px inset), the icons kept for the rows.
+        // Text only (the icons stay on the rows): a heading flush with the
+        // switcher's icon, its rows indented below it.
         .pl(px(CARD_TITLE_INSET))
         .pr(px(10.0))
         .flex()
@@ -556,7 +558,7 @@ pub(super) fn header_frame(
         .child(
             div()
                 .flex_none()
-                .text_size(px(13.5))
+                .text_size(px(12.5))
                 .line_height(px(18.0))
                 .font_weight(if focused {
                     gpui::FontWeight::SEMIBOLD
