@@ -960,7 +960,7 @@ the sidebar. One switcher, the sidebar's logo, picks the view:
 
 | | Sessions view (Projects mode) | A workspace (Workspaces mode) |
 |---|---|---|
-| Logo | **Cypher** ⇅ | **Cypher** `Atlas` ⇅ (the workspace as an inverted tag) |
+| Logo | **Cypher** ⇅ | **Cypher** `Atlas` ⇅ (the workspace as a soft tag in its colour) |
 | Sidebar | Project and session cards, as today | The workspace's cards |
 | Middle | Session tabs | The workspace's chat |
 | Right | The session dock | The detail panel |
@@ -984,8 +984,8 @@ default) first, then every workspace by name with what it is doing (a Needs-you 
 spinner while it works, "paused", an offline host), a check on what shows now, then New
 workspace; past five rows it leads with a search field. Type to filter, ↑↓ and Enter to
 pick, Esc to close; a right-click on the tag or a workspace row opens its Open /
-Settings… / Delete… menu. The chosen workspace follows "Cypher" as a tag in inverted
-colours (the primary button's). An amber count beside it says what needs the owner in
+Settings… / Delete… menu. The chosen workspace follows "Cypher" as a soft tag: its face
+and name in its colour on a faint wash of it. An amber count beside it says what needs the owner in
 workspaces not shown: all of them from the Sessions view, the others from a workspace.
 Each view keeps its own state: the workspace that was open, the session tabs and their
 layout. Sessions a workspace started stay in their projects, marked "by <workspace>".

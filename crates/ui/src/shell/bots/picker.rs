@@ -1,5 +1,5 @@
 //! The view switcher in the sidebar header: the "Cypher" wordmark, followed
-//! on the Botboard by the current workspace as an inverted tag. A click
+//! on the Botboard by the current workspace as a soft tag in its colour. A click
 //! opens one list: Sessions (the projects view, the default), every
 //! workspace by name with what it is doing, then New workspace. Past a
 //! handful it leads with a search field. The keyboard drives it like the
@@ -211,7 +211,7 @@ impl Shell {
     }
 
     /// The wordmark as the view switcher: "Cypher", the current workspace
-    /// as an inverted tag on the Botboard, an amber count of what needs the
+    /// as a soft tag in its colour on the Botboard, an amber count of what needs the
     /// owner in views not shown, and ⇅. A click opens the list below it.
     pub(in crate::shell) fn render_view_switch(
         &mut self,
@@ -236,20 +236,34 @@ impl Shell {
         };
         let key = "sidebar-logo";
         let open = self.menus.bot_switcher.get().is_some();
+        // The workspace as a soft tag in its own colour: its face and name
+        // on a faint wash of that colour (a plain wash without one).
         let tag = current.as_ref().map(|line| {
             let menu_id = line.bot.id.clone();
+            let tint =
+                crate::appearance::space_style::space_color(line.bot.color.as_deref(), theme);
+            let ink = tint.unwrap_or(theme.text);
             div()
                 .id("sidebar-logo-tag")
                 .min_w_0()
                 .h(px(20.0))
-                .px(px(7.0))
+                .pl(px(5.0))
+                .pr(px(7.0))
                 .rounded(px(6.0))
                 .flex()
                 .items_center()
-                .bg(theme.solid)
+                .gap(px(4.0))
+                .bg(tint.map_or(crate::kit::theme::ink(0.07), |t| t.opacity(0.14)))
                 .text_size(px(12.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.on_solid)
+                .text_color(ink)
+                .child(crate::appearance::bot_style::bot_glyph(
+                    &line.bot.name,
+                    line.bot.icon.as_deref(),
+                    line.bot.color.as_deref(),
+                    12.0,
+                    theme,
+                ))
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
