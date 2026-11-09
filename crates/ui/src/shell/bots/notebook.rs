@@ -243,10 +243,12 @@ impl Shell {
         }
         if notes.is_empty() {
             if !self.board.notebook.adding {
-                body = body.child(parts::quiet_line(
+                self.board.panel_empty = Some(parts::panel_empty(
                     theme,
-                    "No notes yet. Press + to add one, like \u{201C}The release waits on \
-                     the migration\u{201D} or \u{201C}Alice owns auth\u{201D}.",
+                    icons::BOOK,
+                    "No notes yet",
+                    "Press + to add one, like \u{201C}The release waits on the migration\u{201D} \
+                     or \u{201C}Alice owns auth\u{201D}.",
                 ));
             }
             return Some((head, body));

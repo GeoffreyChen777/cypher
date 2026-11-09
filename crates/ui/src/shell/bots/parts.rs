@@ -84,6 +84,44 @@ pub(super) fn section_label(theme: &Theme, text: &str) -> gpui::Div {
         .child(SharedString::from(text.to_uppercase()))
 }
 
+/// An empty panel's message, for the card to centre: a quiet glyph, a
+/// short line, and a hint under it.
+pub(super) fn panel_empty(
+    theme: &Theme,
+    glyph: &'static str,
+    title: &'static str,
+    hint: impl Into<SharedString>,
+) -> gpui::AnyElement {
+    div()
+        .max_w(px(280.0))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(6.0))
+        .text_center()
+        .child(
+            icon(glyph)
+                .size(px(22.0))
+                .mb(px(4.0))
+                .text_color(theme.text_muted.opacity(0.5)),
+        )
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text_muted)
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .line_height(px(17.0))
+                .text_color(theme.text_faint)
+                .child(hint.into()),
+        )
+        .into_any_element()
+}
+
 /// A quiet line of panel copy (an empty list, a hint).
 pub(super) fn quiet_line(theme: &Theme, text: impl Into<SharedString>) -> gpui::Div {
     div()

@@ -145,6 +145,7 @@ impl Shell {
         self.board.panel_actions = None;
         self.board.panel_mark = None;
         self.board.panel_title_note = None;
+        self.board.panel_empty = None;
         let (head, body) = match item {
             PanelItem::Projects => self.render_projects_panel(&bot, &theme, cx),
             PanelItem::Project(space_id) => {
@@ -259,7 +260,18 @@ impl Shell {
         // Replacing the content fades the new item in. A thread's
         // transcript scrolls itself, so its body fills the card unscrolled.
         let content_key = SharedString::from(format!("bot-panel-{item:?}"));
-        let body = if matches!(item, PanelItem::Thread(_)) {
+        let body = if let Some(empty) = self.board.panel_empty.take() {
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .px(px(32.0))
+                .pb(px(56.0))
+                .child(motion::fade_quick(content_key, div().child(empty)))
+                .into_any_element()
+        } else if matches!(item, PanelItem::Thread(_)) {
             div()
                 .flex_1()
                 .min_h_0()

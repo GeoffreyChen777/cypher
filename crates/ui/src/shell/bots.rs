@@ -96,6 +96,9 @@ pub(super) struct BoardUi {
     /// A quiet note after the item's title (a project's device), set and
     /// taken likewise.
     panel_title_note: Option<AnyElement>,
+    /// An empty item's message, centred in the card under the header in
+    /// place of its body; set and taken likewise.
+    panel_empty: Option<AnyElement>,
     /// Work steps folded to their title in the work panel, by (work id,
     /// step index); local to this window like the cards' folds.
     work_folded: std::collections::HashSet<(String, usize)>,
