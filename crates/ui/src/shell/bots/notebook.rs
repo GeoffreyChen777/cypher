@@ -187,7 +187,8 @@ impl Shell {
                 card_item(
                     &format!("bot-note-{}", note.id),
                     Some(note_mark(&note.source, bot, theme)),
-                    transcript::single_line(&note.text),
+                    // Its words, not its markdown.
+                    transcript::single_line(&super::items::plain_markdown(&note.text)),
                     Some(card_corner(
                         super::items::ago(note.updated_at.max(note.created_at), Utc::now()),
                         None,
