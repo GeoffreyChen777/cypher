@@ -45,6 +45,9 @@ pub(in crate::shell) enum PanelItem {
     Connection(String),
     /// Create an invite or redeem one.
     Invite,
+    /// The new-shortcut form, and one shortcut's (its id).
+    NewShortcut,
+    Shortcut(String),
 }
 
 /// The panel header's glyph and title. Item actions join it through
@@ -163,6 +166,9 @@ impl Shell {
             PanelItem::Activity => self.render_activity_panel(&bot, item, &theme, cx)?,
             PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => {
                 self.render_network_panel(&bot, item, &theme, cx)?
+            }
+            PanelItem::NewShortcut | PanelItem::Shortcut(_) => {
+                self.render_shortcut_panel(&bot, item, &theme, cx)?
             }
         };
         let card_bg = crate::appearance::chat_style::panel_background(

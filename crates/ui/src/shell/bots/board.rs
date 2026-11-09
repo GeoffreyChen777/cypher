@@ -146,6 +146,8 @@ pub(super) fn card_of(
         // The log opens from the Work panel and the chat header.
         PanelItem::Activity => "work",
         PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => "network",
+        // Pinned under the cards, so nothing floats for them.
+        PanelItem::NewShortcut | PanelItem::Shortcut(_) => "shortcuts",
         PanelItem::Thread(chat_id) => match thread_kind(chat_id) {
             Some(
                 cypher_proto::BotThread::Routine { .. }
@@ -531,8 +533,8 @@ impl Shell {
 /// the project header's grid.
 /// A card row's margin inside the card, and where its mark starts inside
 /// the row: together the card title's inset, 11px.
-const ROW_MARGIN: f32 = 4.0;
-const ROW_MARK_INSET: f32 = CARD_TITLE_INSET - ROW_MARGIN;
+pub(super) const ROW_MARGIN: f32 = 4.0;
+pub(super) const ROW_MARK_INSET: f32 = CARD_TITLE_INSET - ROW_MARGIN;
 /// The gap between a row's mark and its title: the title then starts where
 /// the switcher's workspace name does.
 const ROW_MARK_GAP: f32 = 9.0;
@@ -540,7 +542,7 @@ const ROW_MARK_GAP: f32 = 9.0;
 /// Where a card's title starts: under the workspace switcher's icon (19px
 /// from the window edge; the card itself starts at 8), its rows indented
 /// below it.
-const CARD_TITLE_INSET: f32 = 11.0;
+pub(super) const CARD_TITLE_INSET: f32 = 11.0;
 
 pub(super) fn header_frame(
     key: &'static str,

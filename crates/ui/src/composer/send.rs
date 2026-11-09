@@ -315,6 +315,14 @@ impl Composer {
         self.send_with("/compact".into(), false, SendDraft::Keep, cx);
     }
 
+    /// Send `text` beside the draft (a sidebar shortcut's message): the
+    /// draft, its attachments and comments stay put, and a live run is
+    /// steered as a typed send would be.
+    pub fn send_aside(&mut self, text: &str, cx: &mut Context<Self>) {
+        let steer = self.run_live(cx);
+        self.send_with(text.to_string(), steer, SendDraft::Keep, cx);
+    }
+
     /// The checks that block a send before anything is staged or cleared:
     /// on `Err` the draft, comments and attachments all stay put.
     fn validate_send(&self, text: &str, take_draft: bool, cx: &App) -> Result<(), SharedString> {

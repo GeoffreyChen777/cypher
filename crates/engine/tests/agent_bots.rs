@@ -988,3 +988,72 @@ async fn owner_turns_learn_where_their_plans_stand() {
         "the transcript keeps the owner's words"
     );
 }
+
+/// Sidebar shortcuts are owner-written rows: saved and validated through
+/// Mutate, reordered by id, deleted, and gone with their workspace.
+#[tokio::test(flavor = "multi_thread")]
+async fn shortcuts_are_saved_ordered_and_go_with_their_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let core = common::assemble_mock(&tmp.path().join("data"));
+    seed(&core, tmp.path());
+    let bot = create_bot(&core, billing_only()).await;
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    let save = |id: &str, label: &str| {
+        serde_json::json!({
+            "op": "saveBotShortcut",
+            "shortcut": {
+                "id": id, "botId": bot.id, "label": label, "createdAt": 0, "updatedAt": 0,
+                "steps": [{ "kind": "ask", "text": "What's stuck?" }],
+            },
+        })
+    };
+    for (id, label) in [("s1", "Stuck?"), ("s2", "Standup")] {
+        client
+            .call(cypher_rpc::methods::MUTATE, save(id, label))
+            .await
+            .expect("saveBotShortcut");
+    }
+    let empty = client
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "saveBotShortcut",
+                "shortcut": { "id": "s3", "botId": bot.id, "label": "x", "createdAt": 0,
+                              "updatedAt": 0, "steps": [] },
+            }),
+        )
+        .await;
+    assert!(empty.is_err(), "a shortcut needs a step");
+    client
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "orderBotShortcuts", "botId": bot.id, "shortcutIds": ["s2", "s1"] }),
+        )
+        .await
+        .expect("orderBotShortcuts");
+    let records = core.workspace.read_bot_records();
+    let ids: Vec<&str> = records
+        .shortcuts_of(&bot.id)
+        .iter()
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(ids, ["s2", "s1"]);
+    assert!(records.shortcuts.iter().all(|s| s.created_at > 0));
+
+    client
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "deleteBotShortcut", "shortcutId": "s2" }),
+        )
+        .await
+        .expect("deleteBotShortcut");
+    assert_eq!(core.workspace.read_bot_records().shortcuts.len(), 1);
+    client
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "deleteBot", "botId": bot.id }),
+        )
+        .await
+        .expect("deleteBot");
+    assert!(core.workspace.read_bot_records().shortcuts.is_empty());
+}

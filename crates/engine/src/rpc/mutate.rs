@@ -319,6 +319,9 @@ impl EngineRpc {
             | MutateParams::SaveBotRoutine { .. }
             | MutateParams::DeleteBotRoutine { .. }
             | MutateParams::RunBotRoutine { .. }
+            | MutateParams::SaveBotShortcut { .. }
+            | MutateParams::DeleteBotShortcut { .. }
+            | MutateParams::OrderBotShortcuts { .. }
             | MutateParams::UpdateBotConnection { .. }
             | MutateParams::RevokeBotConnection { .. }
             | MutateParams::RevokeBotInvite { .. }

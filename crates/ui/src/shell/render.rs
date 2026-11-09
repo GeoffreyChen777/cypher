@@ -879,6 +879,13 @@ impl Shell {
             self.render_project_list(theme, cx)
         };
         let top_chrome = SIDEBAR_TITLEBAR_BAND + SIDEBAR_HEADER_HEIGHT;
+        // On the Botboard the workspace's shortcuts stay pinned under the
+        // cards, which scroll above them.
+        let shortcuts = if self.botboard() {
+            self.render_board_shortcuts(theme, cx)
+        } else {
+            None
+        };
         // Update strips — app-wide chrome, the main window's alone — sit
         // under the list with the sidebar's bottom gutter.
         let update_strips: Vec<AnyElement> = [
@@ -926,6 +933,7 @@ impl Shell {
                         ),
                     )),
             )
+            .children(shortcuts)
             .when(!update_strips.is_empty(), |el| {
                 el.child(
                     div()

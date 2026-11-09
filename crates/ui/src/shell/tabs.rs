@@ -614,6 +614,44 @@ impl Shell {
         self.schedule_save(cx);
         self.workspace_changed(cx);
     }
+
+    /// A new session in `space_id`'s checkout with `text` as its first
+    /// message (a sidebar shortcut): a fresh new-session tab in the focused
+    /// tile, so a canvas already open keeps its draft. `false` when no tab
+    /// could be made.
+    pub(super) fn start_session_with(
+        &mut self,
+        space_id: String,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.set_window_mode(crate::prefs::WindowMode::Projects, cx);
+        self.route = Route::Chat;
+        let tab = self.workspace.new_session_tab();
+        self.workspace.open(tab.clone());
+        self.tiles.focus_pending = true;
+        self.sync_slots(cx);
+        let Some(composer) = self
+            .slot_for_tab(&tab)
+            .and_then(|sid| self.tiles.slots.get(&sid))
+            .map(|slot| slot.composer.clone())
+        else {
+            return false;
+        };
+        self.settings.last_space_id = Some(space_id.clone());
+        composer.update(cx, |composer, cx| {
+            composer.target_checkout(
+                space_id,
+                crate::pickers::CheckoutPlan::CurrentCheckout { branch: None },
+                cx,
+            );
+            composer.send_text(text, window, cx);
+        });
+        self.schedule_save(cx);
+        self.workspace_changed(cx);
+        true
+    }
 }
 
 #[cfg(test)]

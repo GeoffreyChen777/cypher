@@ -996,6 +996,17 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 | **Projects** | Each granted project with device, running and waiting sessions, and "works directly" or "via sessions" | The list groups projects by device (sessions, what runs or asks, last activity). A project's page: its device beside the title (the folder on hover, a click copies it), its sessions in scope with status, the bot's work there and its routines there |
 | **Network** (P4) | Just its header: how many workspaces are connected, or "N to review" in amber when answers wait in Needs you (a click opens the review) | The Network panel lists connections, invites and recent questions; a connection opens its own page (scope, reply mode, exchanges, revoke) with a back arrow to Network |
 
+**Shortcuts** sit pinned at the bottom of the sidebar, below the cards, which scroll above
+them: buttons the owner adds, each an icon and a short label, wrapping. A click replays a
+workflow, its steps in order, each started once the one before it has (no waiting for
+answers): ask the workspace's agent something, start a session in a project with a first
+message, run a routine now, or open a project, a session or a web page. A step's text may
+hold `{input}`; a shortcut with one asks for that text when clicked. The + opens the
+shortcut form in the detail panel; a chip's menu edits, moves or deletes it. Shortcuts are
+`botShortcuts` registry rows (`BotShortcut`), per workspace and synced, written only by
+owner devices (`Mutate saveBotShortcut`, `deleteBotShortcut`, `orderBotShortcuts`) and
+deleted with their workspace; the app runs them, so nothing runs on a device nobody uses.
+
 There is no Activity card: it mostly repeated Work, Routines and Network. The full audit
 log, filterable as Plans, Sessions, Routines, Notes or Network, opens from the chat header's activity button and from "View all
 activity" in the Work panel. A card with nothing to show is not drawn. **Needs you** always comes first, so attention

@@ -426,6 +426,17 @@ pub(super) enum MutateParams {
     /// Run a routine once now.
     #[serde(rename_all = "camelCase")]
     RunBotRoutine { routine_id: String },
+    /// Create or edit a sidebar shortcut.
+    #[serde(rename_all = "camelCase")]
+    SaveBotShortcut { shortcut: cypher_proto::BotShortcut },
+    #[serde(rename_all = "camelCase")]
+    DeleteBotShortcut { shortcut_id: String },
+    /// Put a workspace's shortcuts in this order (ids, first to last).
+    #[serde(rename_all = "camelCase")]
+    OrderBotShortcuts {
+        bot_id: String,
+        shortcut_ids: Vec<String>,
+    },
     /// A connection's reply mode and narrowed scope.
     #[serde(rename_all = "camelCase")]
     UpdateBotConnection {

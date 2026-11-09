@@ -1365,6 +1365,13 @@ impl RegistryDoc {
         );
         records_of.extend(
             records
+                .shortcuts
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_SHORTCUTS, r.id.clone())),
+        );
+        records_of.extend(
+            records
                 .activity
                 .iter()
                 .filter(|r| r.bot_id == bot_id)
@@ -1462,6 +1469,7 @@ impl RegistryDoc {
             invites: self.read_records(p::KIND_BOT_INVITES),
             exchanges: self.read_records(p::KIND_BOT_EXCHANGES),
             memory_stores: self.read_records(p::KIND_MEMORY_STORES),
+            shortcuts: self.read_records(p::KIND_BOT_SHORTCUTS),
         };
         records.memory_stores.sort_by(|a, b| a.id.cmp(&b.id));
         // Stable orders: newest first for logs, oldest first for the rest.

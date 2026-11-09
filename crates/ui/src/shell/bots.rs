@@ -1,7 +1,7 @@
 //! Agent bots (docs/design/agent-bots.md §13.1): the main window's Botboard
 //! mode, the other half of the sidebar logo's switch. In Botboard the
 //! sidebar shows the bot picker ([`picker`]) and the current bot's cards
-//! ([`board`]); the workspace column shows the bot's conversation as one
+//! ([`board`]), its shortcuts pinned under them ([`shortcuts`]); the workspace column shows the bot's conversation as one
 //! card outside the tile tree, with the detail panel beside it
 //! ([`column`], [`panel`]). Bot chats never open as session tabs: whatever
 //! would open one switches to the Botboard instead. Also here: a bot's
@@ -28,6 +28,7 @@ mod parts;
 mod picker;
 mod projects;
 mod schedule;
+mod shortcuts;
 mod work;
 
 pub(super) use dialog::BotDialog;
@@ -81,6 +82,8 @@ pub(super) struct BoardUi {
     /// The Schedule and Network panels' forms and drafts.
     schedule: schedule::ScheduleUi,
     network: network::NetworkUi,
+    /// The shortcuts under the cards: their runs, menu and form.
+    shortcuts: shortcuts::ShortcutsUi,
     /// A delete or revoke waiting on the owner's yes.
     confirm: Option<parts::Confirm>,
     /// A form's buttons, pinned under the panel's scrolling body; set by
@@ -415,6 +418,7 @@ impl Shell {
             self.render_bot_dialog(viewport, &theme, window, cx),
             self.render_delete_bot_dialog(viewport, &theme, cx),
             self.render_board_confirm(viewport, &theme, cx),
+            self.render_shortcut_menu(&theme, cx),
         ]
         .into_iter()
         .flatten()

@@ -462,7 +462,7 @@ impl Shell {
     }
 
     /// The bot's projects a routine may run in, in sidebar order.
-    fn routine_projects(&self, bot: &Bot, cx: &App) -> Vec<(Space, String)> {
+    pub(super) fn routine_projects(&self, bot: &Bot, cx: &App) -> Vec<(Space, String)> {
         let state = self.state.read(cx);
         state
             .spaces_sorted()
