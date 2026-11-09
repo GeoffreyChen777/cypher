@@ -133,8 +133,8 @@ mattering into it. It never edits transcripts.
   store with none is skipped, so an idle project costs nothing. Each store's setting can
   turn it off or change the time.
 - **Workspace store:** a built-in routine, "Consolidate memory", run as the workspace with
-  memory writes only. It may move a project fact from its own file into neither store: the
-  project's base memory stays the project sessions' to write.
+  memory writes only. It never moves anything into a project's base memory: that stays
+  the project sessions' to write.
 - **Project store:** run on the project's host device over that project's sessions since
   the last pass.
 - **You store:** run over all sessions since the last pass, keeping only what holds across
