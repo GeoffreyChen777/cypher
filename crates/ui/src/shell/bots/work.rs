@@ -1130,22 +1130,15 @@ impl Shell {
         )
     }
 
-    /// A work item's status as the panel's title tile: its mark on the
-    /// phase's tint; hovering it shows what state it is in and when.
+    /// A work item's status as the mark left of the panel's title, bare
+    /// (no tile); hovering it shows what state it is in and when.
     fn status_tile(&self, work: &BotWork, phase: PlanPhase, theme: &Theme) -> AnyElement {
         let key = format!("bot-work-status-{}", work.id);
-        let tint =
-            (!matches!(phase, PlanPhase::Running | PlanPhase::Starting)).then(|| phase.tint(theme));
-        let rest = tint.map_or(crate::kit::theme::ink(0.06), |t| t.opacity(0.14));
-        let hover = tint.map_or(crate::kit::theme::ink(0.1), |t| t.opacity(0.22));
         let tip = WorkStatusTip::of(work, phase, theme);
         div()
-            .id(SharedString::from(key.clone()))
+            .id(SharedString::from(key))
             .flex_none()
-            .size(px(30.0))
-            .rounded(px(8.0))
-            .bg(motion::hover_blend(&key, rest, hover))
-            .on_hover(motion::hover_listener(key.clone()))
+            .size(px(20.0))
             .flex()
             .items_center()
             .justify_center()
