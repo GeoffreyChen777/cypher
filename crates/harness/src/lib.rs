@@ -58,6 +58,31 @@ pub struct RunHostContext {
     /// leak into a probe.
     pub chat_id: Option<String>,
     pub profile: RunProfile,
+    /// The run's memory section (docs/design/memory.md §4): the
+    /// `MEMORY.md` of each store it sees, appended after the profile's
+    /// prompt. `Some` also turns on the memory tools (`CYPHER_MEMORY`);
+    /// `None` for runs without memory (peer threads, discovery).
+    pub memory_prompt: Option<String>,
+}
+
+impl RunHostContext {
+    /// Everything the run appends to its system prompt, with a name for the
+    /// temp file: the profile's prompt, then the memory section.
+    pub fn appended_prompt(&self) -> Option<(String, String)> {
+        let profile = self.profile.appended_prompt();
+        let memory = self
+            .memory_prompt
+            .as_deref()
+            .filter(|prompt| !prompt.trim().is_empty());
+        let name = profile.map_or("memory", |(name, _)| name).to_string();
+        let prompt = match (profile.map(|(_, prompt)| prompt), memory) {
+            (None, None) => return None,
+            (Some(profile), None) => profile.to_string(),
+            (None, Some(memory)) => memory.to_string(),
+            (Some(profile), Some(memory)) => format!("{profile}\n\n{memory}"),
+        };
+        Some((name, prompt))
+    }
 }
 
 /// The role a run spawns in, which fixes its tool allowlist, extensions,
@@ -72,6 +97,8 @@ pub enum RunProfile {
     Child(ChildRunEnv),
     /// One of an agent bot's threads.
     Bot(BotRunEnv),
+    /// A memory consolidation pass (docs/design/memory.md §6).
+    Memory(MemoryRunEnv),
 }
 
 impl RunProfile {
@@ -96,6 +123,7 @@ impl RunProfile {
             Self::Root => return None,
             Self::Child(child) => (child.agent.as_str(), child.system_prompt.as_str()),
             Self::Bot(bot) => ("bot", bot.system_prompt.as_str()),
+            Self::Memory(pass) => ("memory-pass", pass.system_prompt.as_str()),
         };
         (!prompt.trim().is_empty()).then_some((name, prompt))
     }
@@ -116,6 +144,15 @@ pub struct BotRunEnv {
     /// directly*): the permission extension's extra workspace roots for the
     /// chat, passed as `CYPHER_BOT_WORKSPACE_ROOTS`.
     pub workspace_roots: Vec<String>,
+}
+
+/// A consolidation pass's env: only the memory tools, and the pass's
+/// instructions.
+#[derive(Debug, Clone)]
+pub struct MemoryRunEnv {
+    /// The run's whole tool allowlist (`--tools`).
+    pub tools: Vec<String>,
+    pub system_prompt: String,
 }
 
 /// The child-subagent runtime env the engine derives from the chat row's

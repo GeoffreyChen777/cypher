@@ -411,6 +411,7 @@ mod tests {
             room_gen: None,
             child: None,
             bot: None,
+            memory: None,
         }
     }
 

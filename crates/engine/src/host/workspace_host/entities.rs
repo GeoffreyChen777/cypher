@@ -65,6 +65,7 @@ impl WorkspaceHost {
                 last_seen_at: None,
                 child: None,
                 bot: None,
+                memory: None,
             })
         })?;
         Ok(())
@@ -301,6 +302,7 @@ impl WorkspaceHost {
                 last_seen_at: None,
                 child: None,
                 bot: None,
+                memory: None,
             })
         })?;
         Ok(true)
@@ -358,6 +360,7 @@ impl WorkspaceHost {
                 last_seen_at: Some(now),
                 child: None,
                 bot: None,
+                memory: None,
             })
         })?;
         Ok(())
@@ -425,6 +428,7 @@ impl WorkspaceHost {
                 harness_session_cwd: None,
                 space_id: parent.space_id.clone(),
                 last_seen_at: None,
+                memory: None,
                 room_gen: Some(2),
                 child: Some(ChildChat {
                     parent_chat_id: parent.id.clone(),

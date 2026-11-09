@@ -906,6 +906,13 @@ impl RegistryDoc {
                     .map(|b| serde_json::to_value(b).unwrap_or(Value::Null))
                     .unwrap_or(Value::Null),
             ),
+            (
+                "memory",
+                chat.memory
+                    .as_ref()
+                    .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+                    .unwrap_or(Value::Null),
+            ),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1444,7 +1451,9 @@ impl RegistryDoc {
             connections: self.read_records(p::KIND_BOT_CONNECTIONS),
             invites: self.read_records(p::KIND_BOT_INVITES),
             exchanges: self.read_records(p::KIND_BOT_EXCHANGES),
+            memory_stores: self.read_records(p::KIND_MEMORY_STORES),
         };
+        records.memory_stores.sort_by(|a, b| a.id.cmp(&b.id));
         // Stable orders: newest first for logs, oldest first for the rest.
         records
             .work

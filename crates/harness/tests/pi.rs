@@ -246,6 +246,7 @@ fn run_profiles_spawn_exact_args() {
 
     let child = RunHostContext {
         chat_id: Some("child-chat".into()),
+        memory_prompt: None,
         profile: RunProfile::Child(ChildRunEnv {
             system_prompt: "You review code.".into(),
             tools: vec!["read".into(), "send_message".into()],
@@ -290,6 +291,7 @@ fn run_profiles_spawn_exact_args() {
     for origin in [BotOrigin::Owner, BotOrigin::Routine, BotOrigin::Peer] {
         let bot = RunHostContext {
             chat_id: Some("bot-chat".into()),
+            memory_prompt: None,
             profile: RunProfile::Bot(BotRunEnv {
                 bot_id: "bot-1".into(),
                 origin,
@@ -344,6 +346,7 @@ fn run_profiles_spawn_exact_args() {
                 None,
                 &RunHostContext {
                     chat_id: Some("bot-chat".into()),
+                    memory_prompt: None,
                     profile: RunProfile::Bot(BotRunEnv {
                         bot_id: "bot-1".into(),
                         origin: BotOrigin::Owner,
@@ -373,6 +376,7 @@ fn run_profiles_spawn_exact_args() {
     // would hand the run every tool.
     let empty = RunHostContext {
         chat_id: Some("bot-chat".into()),
+        memory_prompt: None,
         profile: RunProfile::Bot(BotRunEnv {
             bot_id: "bot-1".into(),
             origin: BotOrigin::Peer,
@@ -474,6 +478,7 @@ fn subagents_with_file_tools_can_request_permission() {
     let tools_arg = |tools: &[&str]| {
         let host = RunHostContext {
             chat_id: Some("child-chat".into()),
+            memory_prompt: None,
             profile: cypher_harness::RunProfile::Child(cypher_harness::ChildRunEnv {
                 system_prompt: String::new(),
                 tools: tools.iter().map(|tool| tool.to_string()).collect(),
@@ -2490,6 +2495,7 @@ fn a_bot_working_directly_gets_its_roots_and_level() {
     tools.extend(cypher_proto::BOT_DIRECT_TOOLS.map(String::from));
     let host = RunHostContext {
         chat_id: Some("bot-chat".into()),
+        memory_prompt: None,
         profile: RunProfile::Bot(BotRunEnv {
             bot_id: "bot-1".into(),
             origin: BotOrigin::Owner,

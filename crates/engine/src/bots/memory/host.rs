@@ -815,6 +815,7 @@ fn hidden_chat(
         room_gen: Some(2),
         child: None,
         bot: Some(marker),
+        memory: None,
     }
 }
 

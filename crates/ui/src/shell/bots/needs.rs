@@ -68,6 +68,8 @@ fn need_rows(
                     at: chat.last_message_at,
                 })
             }
+            // Drawn by the Memory panel work (memory.md §8).
+            Need::Record(NeedsYou::Memory(_)) => None,
             Need::Record(NeedsYou::Plan(id)) => {
                 let work = records.work.iter().find(|w| w.id == id)?;
                 let steps = work.steps.len();

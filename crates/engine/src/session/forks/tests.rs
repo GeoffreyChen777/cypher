@@ -250,6 +250,7 @@ fn fork_title_appends_and_bounds() {
         room_gen: None,
         child: None,
         bot: None,
+        memory: None,
     };
     assert_eq!(fork_title(&chat), "My chat — Fork");
     chat.title = None;

@@ -1739,6 +1739,7 @@ impl Inner {
         RunHostContext {
             chat_id: Some(chat_id.to_string()),
             profile,
+            memory_prompt: None,
         }
     }
 

@@ -43,6 +43,7 @@ pub fn chat(id: &str, device_id: &str) -> Chat {
         room_gen: None,
         child: None,
         bot: None,
+        memory: None,
     }
 }
 

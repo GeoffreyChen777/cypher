@@ -165,6 +165,8 @@ pub(crate) struct RawChat {
     #[serde(default)]
     bot: Option<BotChat>,
     #[serde(default)]
+    memory: Option<cypher_proto::MemoryChat>,
+    #[serde(default)]
     pinned: bool,
 }
 
@@ -190,6 +192,7 @@ impl From<RawChat> for Chat {
             room_gen: raw.room_gen,
             child: raw.child,
             bot: raw.bot,
+            memory: raw.memory,
         }
     }
 }

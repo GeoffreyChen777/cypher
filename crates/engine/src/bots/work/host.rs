@@ -358,6 +358,7 @@ impl Bots {
             last_seen_at: Some(now),
             room_gen: Some(2),
             child: None,
+            memory: None,
             bot: Some(BotChat::thread(
                 &bot.id,
                 BotOrigin::Owner,

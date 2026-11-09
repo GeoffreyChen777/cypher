@@ -32,7 +32,7 @@ pub const KIND_BOT_INVITES: &str = "botInvites";
 pub const KIND_BOT_EXCHANGES: &str = "botExchanges";
 
 /// Every record kind, in [`BotRecords`] order.
-pub const BOT_RECORD_KINDS: [&str; 8] = [
+pub const BOT_RECORD_KINDS: [&str; 9] = [
     KIND_BOT_WORK,
     KIND_BOT_NOTES,
     KIND_BOT_ROUTINES,
@@ -41,6 +41,7 @@ pub const BOT_RECORD_KINDS: [&str; 8] = [
     KIND_BOT_CONNECTIONS,
     KIND_BOT_INVITES,
     KIND_BOT_EXCHANGES,
+    crate::KIND_MEMORY_STORES,
 ];
 
 // ── caps ────────────────────────────────────────────────────────────────────
@@ -944,6 +945,9 @@ pub struct BotRecords {
     pub connections: Vec<BotConnection>,
     pub invites: Vec<BotInvite>,
     pub exchanges: Vec<BotExchange>,
+    /// Every memory store's row (docs/design/memory.md); not only
+    /// workspaces' — the app lists all of them from this frame.
+    pub memory_stores: Vec<crate::MemoryStore>,
 }
 
 /// One item on a bot's **Needs you** card.
@@ -957,6 +961,8 @@ pub enum NeedsYou {
     Asking { chat_id: String, work_id: String },
     /// A peer's answer drafted in Review mode (exchange id).
     Review(String),
+    /// Memory writes held for review in the workspace's store (store id).
+    Memory(String),
 }
 
 impl BotRecords {
@@ -1008,7 +1014,21 @@ impl BotRecords {
             .collect();
         reviews.sort_by_key(|e| e.asked_at);
         items.extend(reviews.into_iter().map(|e| NeedsYou::Review(e.id.clone())));
+        items.extend(
+            self.memory_stores
+                .iter()
+                .filter(|s| {
+                    s.pending > 0
+                        && matches!(&s.scope, crate::MemoryScope::Workspace { bot_id: b } if b == bot_id)
+                })
+                .map(|s| NeedsYou::Memory(s.id.clone())),
+        );
         items
+    }
+
+    /// The row of the store for `scope`, when it has one.
+    pub fn memory_store(&self, scope: &crate::MemoryScope) -> Option<&crate::MemoryStore> {
+        self.memory_stores.iter().find(|s| &s.scope == scope)
     }
 
     pub fn work_of<'a>(&'a self, bot_id: &'a str) -> impl Iterator<Item = &'a BotWork> + 'a {

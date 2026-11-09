@@ -188,6 +188,7 @@ mod tests {
             room_gen: None,
             child: None,
             bot,
+            memory: None,
         }
     }
 

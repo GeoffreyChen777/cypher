@@ -256,6 +256,7 @@ impl Bots {
             room_gen: Some(2),
             child: None,
             bot: Some(BotChat::owner(&bot.id)),
+            memory: None,
         };
         self.inner.workspace.create_bot(&bot, &chat)?;
         tracing::info!(bot = %bot.id, chat = %bot.chat_id, "bot created");

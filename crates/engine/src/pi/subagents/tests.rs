@@ -23,6 +23,7 @@ fn sample() -> PiSubagent {
         read_only: true,
         builtin: false,
         overrides_builtin: false,
+        memory: None,
     }
 }
 
@@ -285,4 +286,19 @@ fn a_saved_profile_is_owner_only() {
 fn a_missing_runtime_lists_nothing() {
     let temp = tempfile::tempdir().unwrap();
     assert!(list(&paths(temp.path())).is_empty());
+}
+
+#[test]
+fn memory_round_trips_through_the_frontmatter() {
+    let mut agent = sample();
+    agent.memory = Some(cypher_proto::RoleMemory::Project);
+    let text = render(&agent, &[]);
+    assert!(text.contains("memory: project\n"), "{text}");
+    let parsed = parse(&text).expect("parses");
+    assert_eq!(parsed.agent.memory, Some(cypher_proto::RoleMemory::Project));
+    // Off: no line, and an unknown value reads as off.
+    agent.memory = None;
+    assert!(!render(&agent, &[]).contains("memory:"));
+    let odd = "---\nname: planner\ndescription: Plan\nmemory: always\n---\nBody\n";
+    assert_eq!(parse(odd).unwrap().agent.memory, None);
 }

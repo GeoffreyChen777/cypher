@@ -409,8 +409,8 @@ impl Harness for PiHarness {
         // the run task so it is cleaned up when the run ends (even on early
         // error).
         let mut temp_prompt: Option<PathBuf> = None;
-        if let Some((name, prompt)) = controls.host.profile.appended_prompt() {
-            temp_prompt = Some(match write_temp_prompt(name, prompt) {
+        if let Some((name, prompt)) = controls.host.appended_prompt() {
+            temp_prompt = Some(match write_temp_prompt(&name, &prompt) {
                 Ok(path) => path,
                 Err(err) => {
                     return Err(HarnessError::Io(err));

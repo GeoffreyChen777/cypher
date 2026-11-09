@@ -43,6 +43,11 @@ const ENV_CYPHER_BOT_ID: &str = "CYPHER_BOT_ID";
 const ENV_CYPHER_BOT_WORKSPACE_ROOTS: &str = "CYPHER_BOT_WORKSPACE_ROOTS";
 /// The bot tools extension, written beside the engine client.
 const BOT_TOOLS_EXTENSION: &str = "cypher-bot-tools.ts";
+/// The memory tools extension (`memory.ts`), loaded into every run; it
+/// registers its tools only when this is set (the engine gave the run
+/// memory).
+const ENV_CYPHER_MEMORY: &str = "CYPHER_MEMORY";
+const MEMORY_EXTENSION: &str = "cypher-memory.ts";
 
 /// The messaging tools every child gets regardless of its allowlist (the
 /// extension's `spawn.ts` appends the same trio).
@@ -68,7 +73,8 @@ fn with_permission_tool(mut tools: Vec<String>) -> Vec<String> {
 }
 
 /// Every env var a [`RunProfile`] sets; each spawn clears them all first.
-const PROFILE_ENV: [&str; 7] = [
+const PROFILE_ENV: [&str; 8] = [
+    ENV_CYPHER_MEMORY,
     ENV_ROLE,
     ENV_CHANNEL_ROOT,
     ENV_RUN_ID,
@@ -88,11 +94,16 @@ struct ProfileLaunch {
 /// allowlist, extra extensions and the appended prompt. `append_prompt` is
 /// the temp file holding [`RunProfile::appended_prompt`].
 fn profile_launch(
-    profile: &RunProfile,
+    host: &RunHostContext,
     append_prompt: Option<&PathBuf>,
 ) -> std::io::Result<ProfileLaunch> {
+    let profile = &host.profile;
+    let memory = host.memory_prompt.is_some();
     let mut args = Vec::new();
     let mut env = Vec::new();
+    if memory {
+        env.push((ENV_CYPHER_MEMORY, "1".to_string()));
+    }
     match profile {
         RunProfile::Root => {}
         // Child-subagent semantics (Cypher-hosted child chats): the persisted
@@ -101,7 +112,12 @@ fn profile_launch(
         // keys on.
         RunProfile::Child(child) => {
             let mut tools = child.tools.clone();
-            for tool in MESSAGING_TOOLS {
+            let extra = MESSAGING_TOOLS.iter().chain(
+                cypher_proto::MEMORY_TOOLS
+                    .iter()
+                    .filter(|_| memory && !child.tools.is_empty()),
+            );
+            for tool in extra {
                 if !tools.iter().any(|t| t == tool) {
                     tools.push(tool.to_string());
                 }
@@ -145,9 +161,14 @@ fn profile_launch(
                 serde_json::to_string(&bot.workspace_roots).unwrap_or_else(|_| "[]".to_string()),
             ));
         }
+        // A pass sees only its allowlist (the memory tools), like a bot.
+        RunProfile::Memory(pass) => {
+            args.push("--tools".into());
+            args.push(pass.tools.join(","));
+        }
     }
     if let Some(path) = append_prompt
-        && profile.appended_prompt().is_some()
+        && host.appended_prompt().is_some()
     {
         args.push("--append-system-prompt".into());
         args.push(path.display().to_string());
@@ -199,6 +220,7 @@ fn private_support_dir() -> std::io::Result<&'static std::path::Path> {
             (BOT_TOOLS_EXTENSION, include_str!("bot-tools.ts")),
             (CHAT_RENDERING_EXTENSION, include_str!("chat-rendering.ts")),
             (EXPLAIN_EXTENSION, include_str!("explain.ts")),
+            (MEMORY_EXTENSION, include_str!("memory.ts")),
         ] {
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
@@ -320,11 +342,15 @@ impl PiHarness {
         sandbox: Option<SandboxLevel>,
     ) -> Result<Command, HarnessError> {
         let (exe, mut args) = self.resolve_program()?;
-        for extension in [CHAT_RENDERING_EXTENSION, EXPLAIN_EXTENSION] {
+        for extension in [
+            CHAT_RENDERING_EXTENSION,
+            EXPLAIN_EXTENSION,
+            MEMORY_EXTENSION,
+        ] {
             args.push("--extension".into());
             args.push(private_support_dir()?.join(extension).display().to_string());
         }
-        let profile = profile_launch(&host.profile, append_prompt)?;
+        let profile = profile_launch(host, append_prompt)?;
         args.extend(profile.args);
         // A child profile is authoritative for model/thinking when it
         // supplies either launch value; otherwise the RunRequest value is

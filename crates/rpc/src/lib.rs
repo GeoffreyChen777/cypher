@@ -317,6 +317,16 @@ pub mod methods {
     /// `{chatId, tool, args}` → `{text}`. The engine resolves the bot from
     /// `chatId` and enforces its scope.
     pub const BOT_TOOL: &str = "BotTool";
+    // Memory (docs/design/memory.md). Every engine holds every store (they
+    // sync like chats), so none of these is forwarded.
+    /// One memory tool call from a run's memory extension (unary,
+    /// host-local): `{chatId, tool, args}` → `{text}`. The engine resolves
+    /// which stores the chat sees and whether its writes are held.
+    pub const MEMORY_TOOL: &str = "MemoryTool";
+    /// One store as `MemoryView` frames (stream): `{scope}`.
+    pub const WATCH_MEMORY: &str = "WatchMemory";
+    /// One edit from the app (unary): `{scope, edit: MemoryEdit}` → `{text}`.
+    pub const EDIT_MEMORY: &str = "EditMemory";
     /// Move root chats (with their child chats) to another project, on this
     /// or another device (stream of `ChatMigrationEvent`s). Answered by the
     /// chats' current host, which drives the destination with the calls
@@ -590,6 +600,9 @@ pub mod methods {
         MethodSpec::unary(CREATE_BOT_INVITE).forwardable(),
         MethodSpec::unary(REDEEM_BOT_INVITE).forwardable(),
         MethodSpec::unary(BOT_TOOL),
+        MethodSpec::unary(MEMORY_TOOL),
+        MethodSpec::stream(WATCH_MEMORY),
+        MethodSpec::unary(EDIT_MEMORY),
         // A migration runs on the chats' current host; the staging calls
         // land on the destination project's device.
         MethodSpec::stream(MIGRATE_CHATS).forwardable(),

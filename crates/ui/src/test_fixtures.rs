@@ -29,6 +29,7 @@ pub fn chat() -> Chat {
         room_gen: None,
         child: None,
         bot: None,
+        memory: None,
     }
 }
 
