@@ -457,6 +457,34 @@ fn two_line(title: String, detail: String, theme: &Theme) -> gpui::Div {
 const FOLDER_TIP_ICON: f32 = 12.0;
 const FOLDER_TIP_GAP: f32 = 6.0;
 
+/// The most characters on one line of the folder card's path (12px mono
+/// is about 7.2px a character: some 330px).
+const FOLDER_TIP_CHARS: usize = 46;
+
+/// `path` in lines of at most `max` characters, broken after a slash where
+/// one falls in reach (a longer name is cut where it must).
+fn path_lines(path: &str, max: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    // Its pieces, each ending in its slash.
+    let pieces = path.split_inclusive('/');
+    for piece in pieces {
+        if !line.is_empty() && line.chars().count() + piece.chars().count() > max {
+            lines.push(std::mem::take(&mut line));
+        }
+        line.push_str(piece);
+        while line.chars().count() > max {
+            let cut: String = line.chars().take(max).collect();
+            line = line.chars().skip(max).collect();
+            lines.push(cut);
+        }
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
 /// The hover card of a project's device: the folder it lives in, and that
 /// a click copies it.
 struct FolderTip {
@@ -470,7 +498,6 @@ impl Render for FolderTip {
         motion::fade_quick(
             "bot-project-folder-tip",
             div()
-                .max_w(px(360.0))
                 // The work status card's padding.
                 .px(px(12.0))
                 .py(px(10.0))
@@ -496,14 +523,26 @@ impl Render for FolderTip {
                                 .flex_none()
                                 .text_color(theme.text_muted),
                         )
+                        // Broken into lines here, at its slashes: a tooltip
+                        // sizes itself before its width is capped, so text
+                        // left to wrap overflowed the card.
                         .child(
                             div()
-                                .min_w_0()
+                                .flex()
+                                .flex_col()
                                 .text_size(px(12.0))
                                 .line_height(px(17.0))
                                 .font_family(theme.font_mono.clone())
                                 .text_color(theme.text)
-                                .child(SharedString::from(self.path.clone())),
+                                .children(
+                                    path_lines(&self.path, FOLDER_TIP_CHARS).into_iter().map(
+                                        |line| {
+                                            div()
+                                                .whitespace_nowrap()
+                                                .child(SharedString::from(line))
+                                        },
+                                    ),
+                                ),
                         ),
                 )
                 // Under the path, not the folder glyph.
@@ -523,5 +562,31 @@ impl Render for FolderTip {
                         }),
                 ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_lines;
+
+    #[test]
+    fn a_short_path_is_one_line() {
+        assert_eq!(path_lines("/Users/me/demo", 46), ["/Users/me/demo"]);
+    }
+
+    #[test]
+    fn long_paths_break_after_a_slash() {
+        let path = "/Users/administrator/.cypher/worktrees/cypher/4a8247ff-7a86-478e-bc0a-1af73c26-6dfa1f50";
+        let lines = path_lines(path, 46);
+        assert_eq!(lines.concat(), path);
+        assert!(lines.iter().all(|l| l.chars().count() <= 46), "{lines:?}");
+        assert_eq!(lines[0], "/Users/administrator/.cypher/worktrees/cypher/");
+    }
+
+    #[test]
+    fn a_name_longer_than_a_line_is_cut() {
+        let lines = path_lines(&format!("/a/{}", "x".repeat(10)), 6);
+        assert_eq!(lines.concat(), format!("/a/{}", "x".repeat(10)));
+        assert!(lines.iter().all(|l| l.chars().count() <= 6), "{lines:?}");
     }
 }
