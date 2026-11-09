@@ -426,9 +426,7 @@ pub(super) enum MutateParams {
     /// Run a routine once now.
     #[serde(rename_all = "camelCase")]
     RunBotRoutine { routine_id: String },
-    /// Create or edit a sidebar shortcut.
-    #[serde(rename_all = "camelCase")]
-    SaveBotShortcut { shortcut: cypher_proto::BotShortcut },
+    /// Remove a sidebar shortcut (the agent makes them, docs §13.1).
     #[serde(rename_all = "camelCase")]
     DeleteBotShortcut { shortcut_id: String },
     /// Put a workspace's shortcuts in this order (ids, first to last).

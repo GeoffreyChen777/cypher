@@ -45,9 +45,6 @@ pub(in crate::shell) enum PanelItem {
     Connection(String),
     /// Create an invite or redeem one.
     Invite,
-    /// The new-shortcut form, and one shortcut's (its id).
-    NewShortcut,
-    Shortcut(String),
 }
 
 /// The panel header's glyph and title. Item actions join it through
@@ -102,8 +99,12 @@ impl Shell {
     }
 
     /// Esc anywhere in the window closes an open panel, unless a bot dialog
-    /// over it takes the key. Returns whether it did.
+    /// over it takes the key (or a shortcut's menu, which it closes
+    /// instead). Returns whether it did.
     pub(in crate::shell) fn close_panel_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.close_shortcut_menu_on_escape(cx) {
+            return true;
+        }
         let shown = self.botboard() && matches!(self.route, Route::Chat);
         // A confirm over the panel takes the key first.
         if shown && self.board.confirm.take().is_some() {
@@ -166,9 +167,6 @@ impl Shell {
             PanelItem::Activity => self.render_activity_panel(&bot, item, &theme, cx)?,
             PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => {
                 self.render_network_panel(&bot, item, &theme, cx)?
-            }
-            PanelItem::NewShortcut | PanelItem::Shortcut(_) => {
-                self.render_shortcut_panel(&bot, item, &theme, cx)?
             }
         };
         let card_bg = crate::appearance::chat_style::panel_background(

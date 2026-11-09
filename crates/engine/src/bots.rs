@@ -40,6 +40,7 @@ mod memory;
 mod network;
 pub mod profile;
 mod prompt;
+mod shortcuts;
 mod taint;
 #[cfg(test)]
 mod tests;

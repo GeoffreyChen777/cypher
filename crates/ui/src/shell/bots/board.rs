@@ -146,8 +146,6 @@ pub(super) fn card_of(
         // The log opens from the Work panel and the chat header.
         PanelItem::Activity => "work",
         PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => "network",
-        // Pinned under the cards, so nothing floats for them.
-        PanelItem::NewShortcut | PanelItem::Shortcut(_) => "shortcuts",
         PanelItem::Thread(chat_id) => match thread_kind(chat_id) {
             Some(
                 cypher_proto::BotThread::Routine { .. }

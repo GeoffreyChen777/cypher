@@ -671,26 +671,45 @@ fn yes() -> bool {
 
 // ── shortcuts ───────────────────────────────────────────────────────────────
 
-/// Most steps one shortcut runs.
-pub const SHORTCUT_STEPS_MAX: usize = 8;
 /// A shortcut's label, as its chip shows it.
 pub const SHORTCUT_LABEL_MAX: usize = 32;
-/// The blank a step's text may hold: the shortcut asks for it on click.
+/// The blank a request may hold: the shortcut asks for it on click.
 pub const SHORTCUT_INPUT: &str = "{input}";
+/// The icons a shortcut may name (the app draws each).
+pub const SHORTCUT_ICONS: [&str; 16] = [
+    "bolt",
+    "star",
+    "rocket",
+    "play",
+    "chat",
+    "checklist",
+    "code",
+    "terminal",
+    "bug",
+    "test-tube",
+    "document",
+    "global",
+    "calendar",
+    "cup-hot",
+    "magic-stick",
+    "flag",
+];
 
-/// A button at the bottom of a workspace's sidebar that replays a
-/// workflow: its steps, in order. Written by owner devices only; the app
-/// runs it (each step starts once the one before it has).
+/// A button at the bottom of a workspace's sidebar: a request the owner
+/// makes often, sent to the workspace's agent again on each click. Only
+/// the agent makes and changes shortcuts, when the owner asks in the
+/// workspace chat; the owner's devices only order and delete them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotShortcut {
     pub id: String,
     pub bot_id: String,
     pub label: String,
-    /// An icon name from the app's set; the app picks one when absent.
+    /// One of [`SHORTCUT_ICONS`]; the app picks one when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    pub steps: Vec<ShortcutStep>,
+    /// What a click sends to the agent; may hold [`SHORTCUT_INPUT`].
+    pub request: String,
     /// Position among the workspace's shortcuts, lowest first.
     #[serde(default)]
     pub order: i64,
@@ -698,99 +717,37 @@ pub struct BotShortcut {
     pub updated_at: i64,
 }
 
-/// One step of a shortcut. Text may hold [`SHORTCUT_INPUT`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum ShortcutStep {
-    /// Send a message to the workspace's agent, in its chat.
-    #[serde(rename_all = "camelCase")]
-    Ask { text: String },
-    /// Start a new session in a project with a first message.
-    #[serde(rename_all = "camelCase")]
-    Session { space_id: String, text: String },
-    /// Run one of the workspace's routines now.
-    #[serde(rename_all = "camelCase")]
-    Routine { routine_id: String },
-    /// Open a project's page, a session, or a web page.
-    #[serde(rename_all = "camelCase")]
-    Open { target: OpenTarget },
-    /// A step kind from a newer app: skipped.
-    #[serde(other)]
-    Unknown,
-}
-
-/// What an Open step opens.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum OpenTarget {
-    #[serde(rename_all = "camelCase")]
-    Project {
-        space_id: String,
-    },
-    #[serde(rename_all = "camelCase")]
-    Session {
-        chat_id: String,
-    },
-    Url {
-        url: String,
-    },
-}
-
-impl ShortcutStep {
-    /// Whether running it asks for the shortcut's input.
-    pub fn wants_input(&self) -> bool {
-        match self {
-            Self::Ask { text } | Self::Session { text, .. } => text.contains(SHORTCUT_INPUT),
-            _ => false,
-        }
-    }
-}
-
 impl BotShortcut {
     pub fn clamp(&mut self) {
         self.label = clip(&self.label, SHORTCUT_LABEL_MAX);
-        self.steps.truncate(SHORTCUT_STEPS_MAX);
-        for step in &mut self.steps {
-            match step {
-                ShortcutStep::Ask { text } | ShortcutStep::Session { text, .. } => {
-                    *text = clip(text, PROMPT_MAX);
-                }
-                ShortcutStep::Open {
-                    target: OpenTarget::Url { url },
-                } => *url = clip(url, LINE_MAX),
-                _ => {}
-            }
+        self.request = clip(&self.request, PROMPT_MAX);
+        if self
+            .icon
+            .as_deref()
+            .is_some_and(|icon| !SHORTCUT_ICONS.contains(&icon))
+        {
+            self.icon = None;
         }
     }
 
     pub fn validate(&self) -> Result<(), String> {
         if self.label.trim().is_empty() {
-            return Err("Give the shortcut a name.".into());
+            return Err("Give the shortcut a short label.".into());
         }
-        if self.steps.is_empty() {
-            return Err("Add at least one step.".into());
-        }
-        for step in &self.steps {
-            match step {
-                ShortcutStep::Ask { text } | ShortcutStep::Session { text, .. }
-                    if text.trim().is_empty() =>
-                {
-                    return Err("A message step needs some text.".into());
-                }
-                ShortcutStep::Open {
-                    target: OpenTarget::Url { url },
-                } if !(url.starts_with("https://") || url.starts_with("http://")) => {
-                    return Err("A web page opens by its http(s) address.".into());
-                }
-                _ => {}
-            }
+        if self.request.trim().is_empty() {
+            return Err("Give the shortcut the request it sends.".into());
         }
         Ok(())
     }
 
     /// Whether a click asks for text first.
     pub fn wants_input(&self) -> bool {
-        self.steps.iter().any(ShortcutStep::wants_input)
+        self.request.contains(SHORTCUT_INPUT)
+    }
+
+    /// The request a click sends, with `input` in every blank.
+    pub fn request_with(&self, input: &str) -> String {
+        self.request.replace(SHORTCUT_INPUT, input.trim())
     }
 }
 
@@ -1388,36 +1345,25 @@ mod tests {
     }
 
     #[test]
-    fn shortcuts_read_back_in_order_and_validate_their_steps() {
+    fn shortcuts_read_back_in_order_and_fill_their_blank() {
         let shortcut: BotShortcut = serde_json::from_value(serde_json::json!({
-            "id": "s1", "botId": "b1", "label": "Morning", "createdAt": 1, "updatedAt": 1,
-            "steps": [
-                { "kind": "ask", "text": "What's stuck? {input}" },
-                { "kind": "session", "spaceId": "sp", "text": "Run the tests" },
-                { "kind": "routine", "routineId": "r1" },
-                { "kind": "open", "target": { "kind": "url", "url": "https://ci.example" } },
-                { "kind": "teleport" }
-            ]
+            "id": "s1", "botId": "b1", "label": "Fix tests", "icon": "test-tube",
+            "request": "Start a session in invoice-demo to fix the tests. {input}",
+            "createdAt": 1, "updatedAt": 1,
         }))
         .unwrap();
-        assert_eq!(shortcut.steps.len(), 5);
-        assert_eq!(
-            shortcut.steps[4],
-            ShortcutStep::Unknown,
-            "newer kinds are skipped"
-        );
-        assert!(shortcut.wants_input());
         assert!(shortcut.validate().is_ok());
-
-        let mut bad = shortcut.clone();
-        bad.steps = vec![ShortcutStep::Open {
-            target: OpenTarget::Url {
-                url: "file:///etc/passwd".into(),
-            },
-        }];
-        assert!(bad.validate().is_err());
-        bad.steps.clear();
-        assert_eq!(bad.validate().unwrap_err(), "Add at least one step.");
+        assert!(shortcut.wants_input());
+        assert_eq!(
+            shortcut.request_with("  Focus on tax. "),
+            "Start a session in invoice-demo to fix the tests. Focus on tax."
+        );
+        let mut odd = shortcut.clone();
+        odd.icon = Some("unicorn".into());
+        odd.clamp();
+        assert_eq!(odd.icon, None, "only the app's icons");
+        odd.request = " ".into();
+        assert!(odd.validate().is_err());
 
         let mut records = BotRecords::default();
         for (id, order, bot) in [

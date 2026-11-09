@@ -204,31 +204,6 @@ impl EngineRpc {
                     }
                 }
             }
-            MutateParams::SaveBotShortcut { mut shortcut } => {
-                shortcut.clamp();
-                shortcut.validate().map_err(RpcError::BadParams)?;
-                ws.bot(&shortcut.bot_id)
-                    .map_err(failed)?
-                    .ok_or_else(|| missing("workspace"))?;
-                if let Some(existing) =
-                    ws.record::<p::BotShortcut>(p::KIND_BOT_SHORTCUTS, &shortcut.id)
-                {
-                    if existing.bot_id != shortcut.bot_id {
-                        return Err(missing("shortcut"));
-                    }
-                    shortcut.created_at = existing.created_at;
-                } else {
-                    shortcut.created_at = now;
-                }
-                shortcut.updated_at = now;
-                ws.put_record(
-                    p::KIND_BOT_SHORTCUTS,
-                    &shortcut.id.clone(),
-                    &shortcut,
-                    Fields::All,
-                )
-                .map_err(failed)?;
-            }
             MutateParams::DeleteBotShortcut { shortcut_id } => {
                 ws.delete_records(p::KIND_BOT_SHORTCUTS, &[shortcut_id]);
             }

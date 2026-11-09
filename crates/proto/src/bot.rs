@@ -66,6 +66,9 @@ pub const BOT_DIRECT_TOOLS: [&str; 8] = [
 /// memory is every run's `memory` tool ([`crate::MEMORY_TOOLS`]).
 pub const BOT_SCHEDULE_TOOLS: [&str; 2] = ["list_routines", "save_routine"];
 
+/// Shortcut tools: the workspace chat's only (shortcuts are made by asking).
+pub const BOT_SHORTCUT_TOOLS: [&str; 3] = ["list_shortcuts", "save_shortcut", "delete_shortcut"];
+
 /// Network tools (P4), owner threads only.
 pub const BOT_NETWORK_TOOLS: [&str; 2] = ["list_connections", "ask_bot"];
 

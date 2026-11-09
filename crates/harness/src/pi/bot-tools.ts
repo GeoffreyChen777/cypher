@@ -296,6 +296,40 @@ const TOOLS: ToolDef[] = [
   },
   // ── end routines ──
 
+  // ── shortcuts: buttons in the owner's sidebar, made by asking ──
+  {
+    name: "list_shortcuts",
+    label: "Checked shortcuts",
+    description: "List the shortcut buttons in your owner's sidebar: label, id, icon and the request each click sends you.",
+    parameters: Type.Object({}),
+  },
+  {
+    name: "save_shortcut",
+    label: "Saved shortcut",
+    description:
+      "Add a shortcut button to your owner's sidebar, or change one (pass its id). A click sends `request` to you in this chat as if your owner typed it, so write it in their words. Put {input} where each click should ask them for the part that changes (\"Start a session in invoice-demo to fix: {input}\"). Only when your owner asks for a button, or agrees to one you offered.",
+    parameters: Type.Object({
+      id: Type.Optional(Type.String({ description: "The shortcut to change; leave out to add one" })),
+      label: Type.String({ description: "A short label, at most 32 characters, e.g. What's stuck?" }),
+      icon: Type.Optional(
+        Type.Union(
+          ["bolt", "star", "rocket", "play", "chat", "checklist", "code", "terminal", "bug", "test-tube", "document", "global", "calendar", "cup-hot", "magic-stick", "flag"].map((icon) => Type.Literal(icon)),
+          { description: "The icon on the button" },
+        ),
+      ),
+      request: Type.String({ description: "What a click sends you; may hold {input}" }),
+    }),
+  },
+  {
+    name: "delete_shortcut",
+    label: "Removed shortcut",
+    description: "Remove a shortcut button from your owner's sidebar, when they ask.",
+    parameters: Type.Object({
+      id: Type.String({ description: "The shortcut's id, from list_shortcuts" }),
+    }),
+  },
+  // ── end shortcuts ──
+
   // ── network (P4): connections, ask_bot ──
   {
     name: "list_connections",

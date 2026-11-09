@@ -82,7 +82,7 @@ pub(super) struct BoardUi {
     /// The Schedule and Network panels' forms and drafts.
     schedule: schedule::ScheduleUi,
     network: network::NetworkUi,
-    /// The shortcuts under the cards: their runs, menu and form.
+    /// The shortcuts under the cards: their clicks and menu.
     shortcuts: shortcuts::ShortcutsUi,
     /// A delete or revoke waiting on the owner's yes.
     confirm: Option<parts::Confirm>,

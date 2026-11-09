@@ -1796,6 +1796,9 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
             BotToolKind::ListRoutines | BotToolKind::SaveRoutine | BotToolKind::SaveProjectTask => {
                 crate::kit::icons::PULSE
             }
+            BotToolKind::ListShortcuts
+            | BotToolKind::SaveShortcut
+            | BotToolKind::DeleteShortcut => crate::kit::icons::BOLT,
             BotToolKind::ListConnections | BotToolKind::AskBot => crate::kit::icons::BOT,
         };
     }

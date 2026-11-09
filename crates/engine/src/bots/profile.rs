@@ -11,7 +11,7 @@ use cypher_proto::{
     Bot, BotOrigin, BotThread, Chat, PermissionPromptKind, SandboxLevel, UserInputQuestion,
 };
 
-use super::{memory, network, prompt, work};
+use super::{memory, network, prompt, shortcuts, work};
 use crate::host::workspace_host::WorkspaceHost;
 
 /// The run env for a bot thread; `None` for every other chat, a project
@@ -46,6 +46,7 @@ pub fn bot_env(workspace: &WorkspaceHost, chat: &Chat) -> Option<BotRunEnv> {
         for section in [
             work::work_prompt(workspace, bot, marker),
             memory::memory_prompt(marker),
+            shortcuts::shortcuts_prompt(marker),
             network::network_prompt(workspace, bot, marker),
         ]
         .into_iter()
@@ -95,6 +96,7 @@ pub fn tools_for(marker: &cypher_proto::BotChat, bot: Option<&Bot>) -> Vec<Strin
         for tool in work::work_tools(marker, bot)
             .into_iter()
             .chain(memory::memory_tools(marker, bot))
+            .chain(shortcuts::shortcut_tools(marker))
             .chain(network::network_tools(marker, bot))
         {
             if !tools.iter().any(|t| t == tool) {
