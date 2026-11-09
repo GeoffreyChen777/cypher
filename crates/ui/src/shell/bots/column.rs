@@ -7,11 +7,13 @@
 use super::super::workspace_view::TILE_HEADER_HEIGHT;
 use super::*;
 
-/// The detail panel's width, the gap between it and the chat card, and the
-/// width the two take from the column.
-const PANEL_W: f32 = 420.0;
+/// The gap between the detail panel and the chat card (the panel's resize
+/// handle sits in it), and the narrowest the chat gets beside the panel.
 const PANEL_GAP: f32 = 8.0;
-pub(super) const PANEL_SPAN: f32 = PANEL_W + PANEL_GAP;
+const CHAT_MIN_W: f32 = 380.0;
+
+/// The drag payload of the panel's resize handle.
+pub(in crate::shell) struct BotPanelResize;
 
 impl Shell {
     /// The workspace column on the Botboard (see the module docs).
@@ -239,12 +241,13 @@ impl Shell {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let span = self.panel_span_in(window);
         let target = if self.board.panel.is_some() {
-            PANEL_SPAN
+            span
         } else {
             0.0
         };
-        let width = self.eval_tween(self.board.panel_tween, target);
+        let width = self.eval_tween(self.board.panel_tween, target).min(span);
         if width < 0.5 && self.board.panel.is_none() {
             self.board.panel_last = None;
             self.board.panel_tween = None;
@@ -277,6 +280,37 @@ impl Shell {
                     .into_any_element()
             }
         };
+        // The handle rides the gap: a hairline shows on hover, a drag
+        // resizes, a double click resets.
+        let handle = self
+            .resize_handle(
+                "bot-panel-resize",
+                || BotPanelResize,
+                |shell, _| {
+                    shell.settings.bot_panel_width = crate::prefs::BOT_PANEL_DEFAULT;
+                    shell.board.panel_tween = None;
+                },
+                cx,
+            )
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px((PANEL_GAP - 5.0) / 2.0))
+            .flex()
+            .justify_center()
+            .on_hover(motion::hover_listener("bot-panel-resize"))
+            .child(
+                div()
+                    .w(px(2.0))
+                    .h_full()
+                    .my(px(12.0))
+                    .rounded_full()
+                    .bg(motion::hover_blend(
+                        "bot-panel-resize",
+                        crate::kit::theme::hairline(0.0),
+                        crate::kit::theme::hairline(0.3),
+                    )),
+            );
         Some(
             div()
                 .h_full()
@@ -285,12 +319,52 @@ impl Shell {
                 .w(px(width))
                 .child(
                     div()
-                        .w(px(PANEL_SPAN))
+                        .relative()
+                        .w(px(span))
                         .h_full()
                         .pl(px(PANEL_GAP))
-                        .child(card),
+                        .child(card)
+                        .when(self.board.panel.is_some(), |el| el.child(handle)),
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The panel and its gap as stored, for the open and close tweens.
+    pub(super) fn panel_span(&self) -> f32 {
+        self.settings.bot_panel_width + PANEL_GAP
+    }
+
+    /// The panel and its gap as drawn: the stored width, less what the chat
+    /// needs to keep its minimum in this window.
+    fn panel_span_in(&self, window: &Window) -> f32 {
+        let sidebar = if self.settings.sidebar_collapsed {
+            0.0
+        } else {
+            self.settings.sidebar_width
+        };
+        let room = f32::from(window.viewport_size().width)
+            - sidebar
+            - self.workspace_left_inset()
+            - PANEL_EDGE_INSET
+            - CHAT_MIN_W;
+        self.panel_span()
+            .min(room.max(crate::prefs::BOT_PANEL_MIN + PANEL_GAP))
+    }
+
+    /// Dragging the handle: the panel's left edge follows the pointer.
+    pub(in crate::shell) fn on_bot_panel_drag(
+        &mut self,
+        event: &gpui::DragMoveEvent<BotPanelResize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let right = f32::from(window.viewport_size().width) - PANEL_EDGE_INSET;
+        let width = right - f32::from(event.event.position.x) - PANEL_GAP / 2.0;
+        self.settings.bot_panel_width =
+            width.clamp(crate::prefs::BOT_PANEL_MIN, crate::prefs::BOT_PANEL_MAX);
+        self.board.panel_tween = None;
+        self.schedule_save(cx);
+        cx.notify();
     }
 }

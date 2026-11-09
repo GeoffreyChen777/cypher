@@ -23,6 +23,12 @@ pub const SIDEBAR_MIN: f32 = 208.0;
 pub const SIDEBAR_MAX: f32 = 400.0;
 pub const SIDEBAR_DEFAULT: f32 = 256.0;
 
+/// The Workspaces detail panel's drag-resize bounds (px); the chat beside
+/// it keeps its own minimum at render time.
+pub const BOT_PANEL_MIN: f32 = 340.0;
+pub const BOT_PANEL_MAX: f32 = 760.0;
+pub const BOT_PANEL_DEFAULT: f32 = 420.0;
+
 /// Right ("Changes") pane drag-resize bounds (px).
 pub const RIGHT_PANE_MIN: f32 = 360.0;
 pub const RIGHT_PANE_MAX: f32 = 1368.0;
@@ -148,6 +154,8 @@ pub struct UiSettings {
     /// The bot the Botboard shows, while it still exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub botboard_bot: Option<String>,
+    /// The Workspaces detail panel's width.
+    pub bot_panel_width: f32,
 }
 
 /// The main window's two modes, switched from the sidebar logo.
@@ -306,6 +314,7 @@ impl Default for UiSettings {
             session_docks: HashMap::new(),
             window_mode: WindowMode::Projects,
             botboard_bot: None,
+            bot_panel_width: BOT_PANEL_DEFAULT,
         }
     }
 }
@@ -645,6 +654,12 @@ impl UiSettings {
             SIDEBAR_MIN,
             SIDEBAR_MAX,
             SIDEBAR_DEFAULT,
+        );
+        self.bot_panel_width = clamp_or(
+            self.bot_panel_width,
+            BOT_PANEL_MIN,
+            BOT_PANEL_MAX,
+            BOT_PANEL_DEFAULT,
         );
         self.right_pane_width = clamp_or(
             self.right_pane_width,

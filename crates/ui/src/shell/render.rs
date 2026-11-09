@@ -1674,6 +1674,7 @@ impl Shell {
         ));
         root.on_drag_move(cx.listener(Self::on_sidebar_drag))
             .on_drag_move(cx.listener(Self::on_dock_drag))
+            .on_drag_move(cx.listener(Self::on_bot_panel_drag))
             .on_drag_move(cx.listener(Self::on_terminal_drag))
             .on_drag_move(cx.listener(Self::on_split_drag))
             // The panel shortcuts are chat-scoped chrome: in Settings they are

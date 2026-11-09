@@ -67,7 +67,7 @@ impl Shell {
         }
         if self.board.panel.is_none() {
             let from = self.eval_tween(self.board.panel_tween, 0.0);
-            self.board.panel_tween = Some(WidthTween::new(from, super::column::PANEL_SPAN));
+            self.board.panel_tween = Some(WidthTween::new(from, self.panel_span()));
         }
         self.board.panel = Some(item);
         self.drop_panel_extras();
@@ -95,7 +95,7 @@ impl Shell {
         let Some(item) = self.board.panel.take() else {
             return;
         };
-        let from = self.eval_tween(self.board.panel_tween, super::column::PANEL_SPAN);
+        let from = self.eval_tween(self.board.panel_tween, self.panel_span());
         self.board.panel_tween = Some(WidthTween::new(from, 0.0));
         self.board.panel_last = Some(item);
         cx.notify();

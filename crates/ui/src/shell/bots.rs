@@ -49,7 +49,7 @@ pub(super) struct BoardUi {
     pub(super) panel: Option<PanelItem>,
     /// What it showed as it slides shut (rendered until the tween ends).
     panel_last: Option<PanelItem>,
-    /// The panel's width tween (0 ↔ [`column::PANEL_SPAN`]).
+    /// The panel's width tween (0 ↔ its width and gap).
     panel_tween: Option<WidthTween>,
     /// A session the panel looks into (an asking worker, an orchestration
     /// thread): a session context watching its transcript, and for a thread

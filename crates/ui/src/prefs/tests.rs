@@ -12,6 +12,7 @@ fn round_trip() {
         notifications_background_only: false,
         dock_badge_enabled: false,
         right_pane_width: 700.0,
+        bot_panel_width: 520.0,
         terminal_height: 320.0,
         keymap: KeymapConfig {
             toggle_sidebar: "mod-shift-s".into(),
@@ -266,12 +267,13 @@ fn loaded_values_are_clamped() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         UiSettings::path(dir.path()),
-        r#"{"sidebarWidth": 10000, "rightPaneWidth": 1}"#,
+        r#"{"sidebarWidth": 10000, "rightPaneWidth": 1, "botPanelWidth": 5000}"#,
     )
     .unwrap();
     let loaded = UiSettings::load(dir.path());
     assert_eq!(loaded.sidebar_width, SIDEBAR_MAX);
     assert_eq!(loaded.right_pane_width, RIGHT_PANE_MIN);
+    assert_eq!(loaded.bot_panel_width, BOT_PANEL_MAX);
 }
 
 #[test]

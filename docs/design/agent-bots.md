@@ -1022,7 +1022,8 @@ plan, progress and result cards appear inline. Its access note over the composer
 the bot's settings. It has no terminal and no session dock.
 
 **The detail panel** slides in from the window's right edge and the chat narrows to make
-room. It shows one item in full with its actions, closes with × or Esc, and opening
+room. Its left edge drags to resize it (340 to 760px, never squeezing the chat below
+380px); a double click restores 420px, and the width is saved with the UI settings. It shows one item in full with its actions, closes with × or Esc, and opening
 another row replaces its content; the opened row stays highlighted in the sidebar.
 
 Every panel page shares one layout, so a page says each thing once:
