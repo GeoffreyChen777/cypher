@@ -92,6 +92,10 @@ fn session_word(status: ChatIndicator, theme: &Theme) -> Option<(&'static str, g
     }
 }
 
+/// A step's fold chevron, and the gap before it in the title row.
+const CHEVRON_W: f32 = 10.0;
+const TITLE_GAP: f32 = 8.0;
+
 /// The rail's 18px cell a node's mark sits centred in.
 fn flow_cell() -> gpui::Div {
     div()
@@ -777,7 +781,7 @@ impl Shell {
                 .flex()
                 .flex_row()
                 .items_start()
-                .gap(px(8.0))
+                .gap(px(TITLE_GAP))
                 .when(foldable, |el| {
                     el.cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -824,19 +828,26 @@ impl Shell {
                         })
                         .child(trailing(span, theme.text_faint))
                 }))
-                .when(foldable, |el| {
-                    el.child(
-                        div().flex_none().pt(px(4.0)).child(
-                            icon(if folded {
-                                icons::ALT_ARROW_RIGHT
-                            } else {
-                                icons::ALT_ARROW_DOWN
-                            })
-                            .size(px(10.0))
-                            .text_color(theme.text_faint.opacity(motion::hover_t(&key))),
-                        ),
-                    )
-                });
+                // The chevron's slot is kept on every step, so the times
+                // line up in one column (and the result's right edge with
+                // them).
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(CHEVRON_W))
+                        .pt(px(4.0))
+                        .when(foldable, |el| {
+                            el.child(
+                                icon(if folded {
+                                    icons::ALT_ARROW_RIGHT
+                                } else {
+                                    icons::ALT_ARROW_DOWN
+                                })
+                                .size(px(CHEVRON_W))
+                                .text_color(theme.text_faint.opacity(motion::hover_t(&key))),
+                            )
+                        }),
+                );
             let mut content = div().flex_1().min_w_0().flex().flex_col().child(title);
             if !folded {
                 let mut details = div().flex().flex_col().gap(px(2.0)).pt(px(2.0));
@@ -948,6 +959,8 @@ impl Shell {
                         .id(SharedString::from(copy_key.clone()))
                         .flex_none()
                         .h(px(20.0))
+                        // Its label, not its padding, meets the times.
+                        .mr(px(-6.0))
                         .px(px(6.0))
                         .rounded(px(6.0))
                         .flex()
@@ -999,7 +1012,17 @@ impl Shell {
                     })),
             ),
         };
-        flow.child(node(&key, mark, None).child(content.flex_1().min_w_0().pb(px(4.0))))
+        // Its right edge meets the steps' times, past which they keep the
+        // chevron's slot.
+        flow.child(
+            node(&key, mark, None).child(
+                content
+                    .flex_1()
+                    .min_w_0()
+                    .pr(px(CHEVRON_W + TITLE_GAP))
+                    .pb(px(4.0)),
+            ),
+        )
     }
 
     /// Copy a work item's result; the button says Copied for a moment.
