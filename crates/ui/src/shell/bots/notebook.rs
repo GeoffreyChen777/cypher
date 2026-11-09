@@ -341,7 +341,10 @@ impl Shell {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.edit_note(&edit_note, window, cx)
                             }))
-                            .child(SharedString::from(note.text.clone())),
+                            .child(crate::markdown::justified::JustifiedText::new(
+                                note.text.clone(),
+                                None,
+                            )),
                     )
                     .child(
                         source

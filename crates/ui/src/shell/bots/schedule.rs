@@ -794,7 +794,7 @@ impl Shell {
         body = body.child(parts::fact(
             theme,
             "Prompt",
-            SharedString::from(routine.prompt.clone()),
+            super::items::text_value(&routine.prompt),
         ));
         if routine.last_run.is_some() {
             body = body.child(parts::fact(
@@ -976,7 +976,7 @@ impl Shell {
                         .text_size(px(12.0))
                         .line_height(px(17.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(super::items::plain_markdown(&summary))),
+                        .child(super::items::text_value(&summary)),
                 )
             })
             .into_any_element()

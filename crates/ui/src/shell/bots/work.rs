@@ -908,18 +908,14 @@ impl Shell {
             .as_ref()
             .filter(|r| !r.trim().is_empty() && done);
         let key = format!("bot-work-node-{}-result", work.id);
-        let mark = div()
-            .size(px(18.0))
-            .rounded_full()
-            .bg(motion::mix(
-                tone.opacity(if done { 0.14 } else { 0.08 }),
-                tone.opacity(if done { 0.24 } else { 0.12 }),
+        // The flag alone, in the outcome's tone; it deepens on hover.
+        let mark = icon(icons::FLAG)
+            .size(px(12.0))
+            .text_color(motion::mix(
+                tone.opacity(if done { 0.85 } else { 0.7 }),
+                tone,
                 motion::hover_t(&key),
             ))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(icon(icons::FLAG).size(px(10.5)).text_color(tone))
             .into_any_element();
         let copied = self.board.work_copied.as_deref() == Some(work.id.as_str());
         let title = div()

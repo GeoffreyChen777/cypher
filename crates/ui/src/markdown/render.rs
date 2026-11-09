@@ -105,6 +105,10 @@ pub struct RenderOptions {
     /// The row is still streaming: an artifact whose fence hasn't closed
     /// is still being written.
     pub live: bool,
+    /// Paragraph rows fill the width, their slack shared between words
+    /// ([`super::justified`]). Only where nothing needs the ordinary text
+    /// layout: no selection, veil, formulas or file chips.
+    pub justify: bool,
 }
 
 /// A link click's destination, offered to the surface: `true` when handled.
@@ -189,6 +193,7 @@ impl RenderOptions {
             artifact: None,
             artifact_patches: None,
             live: false,
+            justify: false,
         }
     }
 }
@@ -1315,10 +1320,33 @@ fn flat_text_element(
         }
         None => flat.runs.clone(),
     };
-    let styled = StyledText::new(flat.text.clone()).with_runs(text_runs);
-    let layout = styled.layout().clone();
     let sel_key: std::sync::Arc<str> = format!("{}-t{ix}", opts.row_key).into();
     let chip_ui = opts.code_refs.clone().filter(|_| !flat.refs.is_empty());
+    if opts.justify
+        && opts.veil.is_none()
+        && opts.selection.is_none()
+        && flat.math.is_empty()
+        && chip_ui.is_none()
+    {
+        let handler = opts.link.clone();
+        let on_link: super::justified::LinkClick = Rc::new(move |url, window, cx| {
+            if !handler.as_ref().is_some_and(|take| take(url, window, cx)) {
+                crate::markdown::session_link::open_link(url, window, cx);
+            }
+        });
+        return super::justified::JustifiedText::new(flat.text.clone(), Some(text_runs))
+            .code(super::justified::CodeWash {
+                ranges: flat.code_ranges.clone(),
+                color: inline_code_wash(theme),
+                radius: INLINE_CODE_RADIUS,
+                pad_x: INLINE_CODE_PAD_X,
+                height_em: INLINE_CODE_HEIGHT_EM,
+            })
+            .links(flat.links.clone(), on_link)
+            .into_any_element();
+    }
+    let styled = StyledText::new(flat.text.clone()).with_runs(text_runs);
+    let layout = styled.layout().clone();
     let text_el: AnyElement = if flat.links.is_empty() && chip_ui.is_none() {
         styled.into_any_element()
     } else {

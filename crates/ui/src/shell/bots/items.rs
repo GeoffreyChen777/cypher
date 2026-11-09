@@ -107,9 +107,11 @@ pub(super) fn panel_markdown(
         block_gap: 6.0,
     };
     compact.text = tone;
+    let mut opts = crate::markdown::render::RenderOptions::settled(key.into());
+    opts.justify = true;
     crate::markdown::render::render_tree(
         &crate::markdown::parser::parse_full(text),
-        &crate::markdown::render::RenderOptions::settled(key.into()),
+        &opts,
         &compact,
         window,
         &|_| None,
@@ -344,9 +346,9 @@ pub(super) fn outcome_value(text: &str, ok: bool, theme: &Theme) -> gpui::Div {
 }
 
 /// A long fact (a request, a prompt, a result): the text an agent or the
-/// owner wrote, read as plain text.
-pub(super) fn text_value(text: &str) -> SharedString {
-    plain_markdown(text).into()
+/// owner wrote, read as plain text, justified like the panel's prose.
+pub(super) fn text_value(text: &str) -> crate::markdown::justified::JustifiedText {
+    crate::markdown::justified::JustifiedText::new(plain_markdown(text), None)
 }
 
 /// The pinned footer of a panel that asks for a decision: a quiet note on
