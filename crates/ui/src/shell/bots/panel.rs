@@ -221,8 +221,11 @@ impl Shell {
             .items_center()
             .gap(px(10.0))
             .px(px(16.0))
-            .pt(px(14.0))
-            .pb(px(12.0))
+            // One height for every item, whatever sits left of its title
+            // (a tile or a bare status mark), with more air above it than
+            // under it: about 21px over a 30px tile, 15px under.
+            .h(px(66.0))
+            .pt(px(6.0))
             .border_b_1()
             .border_color(theme.border)
             .child(match self.board.panel_mark.take() {
