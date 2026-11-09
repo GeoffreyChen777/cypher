@@ -416,10 +416,10 @@ impl Shell {
 
     /// Whether `card` is the one floating: the open panel item's card
     /// ([`focused_card`]).
-    /// A full card's header, the project card header's twin: 36px tall, the
-    /// glyph on the card's 10px edge, the title at 13.5 (semibold only on
-    /// the focused card, medium elsewhere, as the project sidebar weighs its
-    /// projects) and a quiet count. A click folds the card to this row and
+    /// A full card's header, the project card header's twin: 36px tall, its
+    /// title in text (semibold only on the focused card, medium elsewhere,
+    /// as the project sidebar weighs its projects), and a count only when
+    /// `count_tint` gives it one (Needs you). A click folds the card to this row and
     /// back, as a project header does; the arrow at its end, shown on hover
     /// and while the list is open, opens the whole list.
     #[allow(clippy::too_many_arguments)]
@@ -474,16 +474,16 @@ impl Shell {
             .cursor_pointer()
             .on_hover(motion::hover_listener(key))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_card(card, cx)))
-            .child(
+            // Only a count that asks for attention (Needs you's amber); the
+            // rows already show how many there are.
+            .children(count_tint.map(|tint| {
                 div()
                     .flex_none()
                     .text_size(px(11.5))
-                    .when(count_tint.is_some(), |el| {
-                        el.font_weight(gpui::FontWeight::MEDIUM)
-                    })
-                    .text_color(count_tint.unwrap_or(theme.text_muted.opacity(0.6)))
-                    .child(SharedString::from(count.to_string())),
-            )
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(tint)
+                    .child(SharedString::from(count.to_string()))
+            }))
             .child(div().flex_1())
             .child(arrow)
     }
