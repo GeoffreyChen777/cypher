@@ -97,8 +97,8 @@ fn session_word(status: ChatIndicator, theme: &Theme) -> Option<(&'static str, g
 fn work_heading(label: &str, first: bool, theme: &Theme) -> gpui::Div {
     div()
         .px(px(8.0))
-        .pt(px(if first { 4.0 } else { 16.0 }))
-        .pb(px(5.0))
+        .pt(px(if first { 4.0 } else { 14.0 }))
+        .pb(px(8.0))
         .min_h(px(20.0))
         .flex()
         .flex_row()
@@ -107,11 +107,21 @@ fn work_heading(label: &str, first: bool, theme: &Theme) -> gpui::Div {
         .child(
             div()
                 .flex_none()
-                .text_size(px(10.5))
+                .text_size(px(11.0))
+                .line_height(px(14.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text_muted.opacity(0.75))
+                .text_color(theme.text_muted)
                 .child(SharedString::from(label.to_uppercase())),
         )
+}
+
+/// The hairline that closes one section of the work page before the next.
+fn work_rule() -> gpui::Div {
+    div()
+        .mx(px(8.0))
+        .mt(px(16.0))
+        .h(px(1.0))
+        .bg(crate::kit::theme::hairline(0.08))
 }
 
 /// A step's fold chevron, and the gap before it in the title row.
@@ -547,7 +557,7 @@ impl Shell {
             .child(
                 div()
                     .px(px(8.0))
-                    .text_size(px(12.5))
+                    .text_size(px(13.0))
                     .line_height(px(18.0))
                     .child(status),
             );
@@ -557,16 +567,17 @@ impl Shell {
             norm(a) == norm(b)
         };
         if !work.instruction.trim().is_empty() && !same(&work.instruction, &work.title) {
-            body =
-                body.child(work_heading("Request", false, theme))
-                    .child(div().px(px(8.0)).child(super::items::panel_markdown(
-                        &work.instruction,
-                        format!("bot-work-request-{}", work.id),
-                        12.5,
-                        theme.text,
-                        theme,
-                        window,
-                    )));
+            body = body
+                .child(work_rule())
+                .child(work_heading("Request", false, theme))
+                .child(div().px(px(8.0)).child(super::items::panel_markdown(
+                    &work.instruction,
+                    format!("bot-work-request-{}", work.id),
+                    13.0,
+                    theme.text,
+                    theme,
+                    window,
+                )));
         }
         if !work.steps.is_empty() {
             body = body.child(self.work_flow(&work, steps, phase, theme, window, cx));
@@ -650,7 +661,7 @@ impl Shell {
             });
 
         // ── its heading (where it works on the right), then the summary ──
-        let mut flow = div().flex().flex_col().child(
+        let mut flow = div().flex().flex_col().child(work_rule()).child(
             work_heading("Plan", false, theme)
                 .child(div().flex_1())
                 .when_some(common.clone(), |el, (glyph, tint, place)| {
