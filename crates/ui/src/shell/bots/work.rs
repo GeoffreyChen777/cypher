@@ -838,29 +838,7 @@ impl Shell {
                     )
                 });
             let mut content = div().flex_1().min_w_0().flex().flex_col().child(title);
-            if folded {
-                // Folded: what is tucked away, in a word.
-                let mut hidden = Vec::new();
-                if detail.is_some() {
-                    hidden.push("note".to_string());
-                }
-                if sessions_n > 0 {
-                    hidden.push(format!(
-                        "{sessions_n} session{}",
-                        if sessions_n == 1 { "" } else { "s" }
-                    ));
-                }
-                if hidden.is_empty() {
-                    hidden.push("project".to_string());
-                }
-                content = content.child(
-                    div()
-                        .text_size(px(11.5))
-                        .line_height(px(16.0))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(hidden.join(" · "))),
-                );
-            } else {
+            if !folded {
                 let mut details = div().flex().flex_col().gap(px(2.0)).pt(px(2.0));
                 if let Some(project) = project {
                     details = details.child(
@@ -1001,44 +979,30 @@ impl Shell {
                         .child(if copied { "Copied" } else { "Copy" }),
                 )
             });
-        let content =
-            match result {
-                // What it produced, set off by a slim rule in the outcome's
-                // tone that firms up on hover.
-                Some(result) => {
-                    div().flex().flex_col().gap(px(6.0)).child(title).child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_stretch()
-                            .gap(px(10.0))
-                            .child(div().flex_none().w(px(2.0)).rounded_full().bg(
-                                motion::hover_blend(&key, tone.opacity(0.35), tone.opacity(0.8)),
-                            ))
-                            .child(div().flex_1().min_w_0().py(px(1.0)).child(md(
-                                result,
-                                format!("bot-work-result-{}", work.id),
-                                12.5,
-                                theme.text,
-                            ))),
-                    )
-                }
-                None => div().flex().flex_col().gap(px(2.0)).child(title).child(
-                    div()
-                        .text_size(px(12.0))
-                        .line_height(px(17.0))
-                        .text_color(if done {
-                            theme.text_muted
-                        } else {
-                            theme.text_faint
-                        })
-                        .child(SharedString::from(if done {
-                            phase_line(work, now_ms)
-                        } else {
-                            "Reported when the last step ends".to_string()
-                        })),
-                ),
-            };
+        let content = match result {
+            // What it produced, under its title; the flag carries the tone.
+            Some(result) => div().flex().flex_col().gap(px(4.0)).child(title).child(md(
+                result,
+                format!("bot-work-result-{}", work.id),
+                12.5,
+                theme.text,
+            )),
+            None => div().flex().flex_col().gap(px(2.0)).child(title).child(
+                div()
+                    .text_size(px(12.0))
+                    .line_height(px(17.0))
+                    .text_color(if done {
+                        theme.text_muted
+                    } else {
+                        theme.text_faint
+                    })
+                    .child(SharedString::from(if done {
+                        phase_line(work, now_ms)
+                    } else {
+                        "Reported when the last step ends".to_string()
+                    })),
+            ),
+        };
         flow.child(node(&key, mark, None).child(content.flex_1().min_w_0().pb(px(4.0))))
     }
 
