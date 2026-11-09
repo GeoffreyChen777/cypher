@@ -144,6 +144,7 @@ impl Shell {
         }?;
         self.board.panel_footer = None;
         self.board.panel_actions = None;
+        self.board.panel_mark = None;
         let (head, body) = match item {
             PanelItem::Projects => self.render_projects_panel(&bot, &theme, cx),
             PanelItem::Project(space_id) => {
@@ -224,7 +225,10 @@ impl Shell {
             .pb(px(12.0))
             .border_b_1()
             .border_color(theme.border)
-            .child(glyph)
+            .child(match self.board.panel_mark.take() {
+                Some(mark) => mark,
+                None => glyph.into_any_element(),
+            })
             .child(
                 div()
                     .flex_1()

@@ -89,6 +89,9 @@ pub(super) struct BoardUi {
     /// An item's own buttons, in the panel header before the close button;
     /// set and taken like `panel_footer`.
     panel_actions: Option<AnyElement>,
+    /// The item's own tile left of its title (a work item's status, with
+    /// details on hover), in place of the glyph; set and taken likewise.
+    panel_mark: Option<AnyElement>,
     /// Work steps folded to their title in the work panel, by (work id,
     /// step index); local to this window like the cards' folds.
     work_folded: std::collections::HashSet<(String, usize)>,

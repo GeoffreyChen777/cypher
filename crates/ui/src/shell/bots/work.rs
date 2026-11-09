@@ -8,7 +8,7 @@
 use super::board::{card_corner, card_item, two_lines};
 use super::items::{
     ago, decision_bar, item_row, mark_cell, progress_bar, project_label, prose, section_label,
-    session_mark, status_value, step_mark, trailing, work_mark,
+    session_mark, step_mark, trailing, work_mark,
 };
 use super::panel::{PanelHead, PanelItem};
 use super::*;
@@ -89,6 +89,128 @@ fn session_word(status: ChatIndicator, theme: &Theme) -> Option<(&'static str, g
         ChatIndicator::Errored => Some(("Failed", theme.danger)),
         ChatIndicator::Completed => Some(("Done", theme.text_faint)),
         ChatIndicator::Idle => None,
+    }
+}
+
+/// Whether the page shows the request: there is one, and it says more
+/// than the title.
+fn shows_request(work: &BotWork) -> bool {
+    let norm = |t: &str| t.trim().trim_end_matches('.').to_lowercase();
+    !work.instruction.trim().is_empty() && norm(&work.instruction) != norm(&work.title)
+}
+
+/// The hover card of a work item's status tile: its state in its tone,
+/// its progress while it runs, then when it was proposed, approved,
+/// started and ended, and how long it took.
+#[derive(Clone)]
+struct WorkStatusTip {
+    status: String,
+    tone: gpui::Hsla,
+    progress: Option<(usize, usize)>,
+    times: Vec<(&'static str, String)>,
+}
+
+impl WorkStatusTip {
+    fn of(work: &BotWork, phase: PlanPhase, theme: &Theme) -> Self {
+        let now = Utc::now().timestamp_millis();
+        let when = parts::past_full_ms;
+        let mut times = vec![("Proposed", when(work.created_at))];
+        if let Some(decision) = &work.decision {
+            times.push((
+                if decision.approve {
+                    "Approved"
+                } else {
+                    "Cancelled"
+                },
+                when(decision.at),
+            ));
+        }
+        if let Some(start) = work.started_at {
+            times.push(("Started", when(start)));
+        }
+        if let Some(end) = work.ended_at {
+            times.push(("Ended", when(end)));
+        }
+        if let Some(start) = work.started_at {
+            let (label, until) = match work.ended_at {
+                Some(end) => ("Took", end),
+                None => ("Running", now),
+            };
+            times.push((label, format_span(until - start)));
+        }
+        Self {
+            status: phase_line(work, now),
+            tone: match phase {
+                PlanPhase::Running | PlanPhase::Starting => theme.text,
+                _ => phase.tint(theme),
+            },
+            progress: matches!(phase, PlanPhase::Running | PlanPhase::Stopping)
+                .then(|| work.progress()),
+            times,
+        }
+    }
+}
+
+impl Render for WorkStatusTip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        let rows = self.times.iter().map(|(label, value)| {
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .w(px(64.0))
+                        .flex_none()
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(*label)),
+                )
+                .child(
+                    div()
+                        .text_color(theme.text)
+                        .child(SharedString::from(value.clone())),
+                )
+        });
+        motion::fade_quick(
+            "bot-work-status-tip",
+            div()
+                .w(px(240.0))
+                .px(px(12.0))
+                .py(px(10.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .bg(theme.surface_raised)
+                .shadow_md()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .line_height(px(17.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(self.tone)
+                        .child(SharedString::from(self.status.clone())),
+                )
+                .children(
+                    self.progress
+                        .map(|(done, total)| progress_bar(done, total, theme)),
+                )
+                .child(
+                    div()
+                        .pt(px(6.0))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .text_size(px(11.5))
+                        .line_height(px(16.0))
+                        .children(rows),
+                ),
+        )
     }
 }
 
@@ -433,7 +555,6 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         let now = Utc::now();
-        let now_ms = now.timestamp_millis();
         let (work, steps, thread_listed) = {
             let state = self.state.read(cx);
             let work = state
@@ -479,7 +600,6 @@ impl Shell {
             (work, steps, thread_listed)
         };
         let phase = plan_phase(&work);
-        let ticker = self.pulse_ticker.entity_id();
         let head = PanelHead {
             glyph: icons::HIERARCHY,
             tint: (!matches!(phase, PlanPhase::Running | PlanPhase::Starting))
@@ -519,57 +639,14 @@ impl Shell {
         }
         self.set_panel_actions(buttons);
 
-        // ── facts ──
-        let status = status_value(
-            work_mark(&work, ticker, theme),
-            phase_line(&work, now_ms),
-            phase.tint(theme),
-        );
-        // When it was proposed, started and ended, under the status.
-        let when = |ms: i64| parts::past_full_ms(ms);
-        let timing = match (work.started_at, work.ended_at) {
-            (Some(start), Some(end)) => format!("Started {} · ended {}", when(start), when(end)),
-            (None, Some(end)) => {
-                format!("Proposed {} · closed {}", when(work.created_at), when(end))
-            }
-            (Some(start), None) => format!("Started {}", when(start)),
-            (None, None) => format!("Proposed {}", when(work.created_at)),
-        };
-        let mut status = div().flex().flex_col().gap(px(3.0)).child(status);
-        if matches!(phase, PlanPhase::Running | PlanPhase::Stopping) {
-            let (done, total) = work.progress();
-            status = status.child(div().py(px(3.0)).child(progress_bar(done, total, theme)));
-        }
-        let status = status.child(
-            div()
-                .text_size(px(11.0))
-                .line_height(px(15.0))
-                .text_color(theme.text_faint)
-                .child(SharedString::from(timing)),
-        );
-        // Status, Request and Plan: three sections under one kind of
-        // heading, each with its content below.
-        let mut body = div()
-            .p(px(8.0))
-            .flex()
-            .flex_col()
-            .child(work_heading("Status", true, theme))
-            .child(
-                div()
-                    .px(px(8.0))
-                    .text_size(px(13.0))
-                    .line_height(px(18.0))
-                    .child(status),
-            );
-        // The request, unless it only repeats the title.
-        let same = |a: &str, b: &str| {
-            let norm = |t: &str| t.trim().trim_end_matches('.').to_lowercase();
-            norm(a) == norm(b)
-        };
-        if !work.instruction.trim().is_empty() && !same(&work.instruction, &work.title) {
+        // ── its status: the tile left of the title, details on hover ──
+        self.board.panel_mark = Some(self.status_tile(&work, phase, theme));
+
+        // Request and Plan: sections under one kind of heading.
+        let mut body = div().p(px(8.0)).flex().flex_col();
+        if shows_request(&work) {
             body = body
-                .child(work_rule())
-                .child(work_heading("Request", false, theme))
+                .child(work_heading("Request", true, theme))
                 .child(div().px(px(8.0)).child(super::items::panel_markdown(
                     &work.instruction,
                     format!("bot-work-request-{}", work.id),
@@ -661,54 +738,61 @@ impl Shell {
             });
 
         // ── its heading (where it works on the right), then the summary ──
-        let mut flow = div().flex().flex_col().child(work_rule()).child(
-            work_heading("Plan", false, theme)
-                .child(div().flex_1())
-                .when_some(common.clone(), |el, (glyph, tint, place)| {
-                    // The shared project, a link to its page.
-                    let key = format!("bot-work-place-{}", work.id);
-                    let space = work.steps.first().and_then(|s| s.project.clone());
-                    el.child(
-                        div()
-                            .id(SharedString::from(key.clone()))
-                            .min_w_0()
-                            .mr(px(-6.0))
-                            .px(px(6.0))
-                            .h(px(20.0))
-                            .rounded(px(6.0))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(5.0))
-                            .cursor_pointer()
-                            .bg(motion::hover_blend(
-                                &key,
-                                crate::kit::theme::wash(0.0),
-                                crate::kit::theme::wash(0.07),
-                            ))
-                            .on_hover(motion::hover_listener(key.clone()))
-                            .tooltip(|_, cx| {
-                                cx.new(|_| {
-                                    super::super::session::FindTooltip("Open the project".into())
+        let first = !shows_request(work);
+        let mut flow = div()
+            .flex()
+            .flex_col()
+            .when(!first, |el| el.child(work_rule()))
+            .child(
+                work_heading("Plan", first, theme)
+                    .child(div().flex_1())
+                    .when_some(common.clone(), |el, (glyph, tint, place)| {
+                        // The shared project, a link to its page.
+                        let key = format!("bot-work-place-{}", work.id);
+                        let space = work.steps.first().and_then(|s| s.project.clone());
+                        el.child(
+                            div()
+                                .id(SharedString::from(key.clone()))
+                                .min_w_0()
+                                .mr(px(-6.0))
+                                .px(px(6.0))
+                                .h(px(20.0))
+                                .rounded(px(6.0))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(5.0))
+                                .cursor_pointer()
+                                .bg(motion::hover_blend(
+                                    &key,
+                                    crate::kit::theme::wash(0.0),
+                                    crate::kit::theme::wash(0.07),
+                                ))
+                                .on_hover(motion::hover_listener(key.clone()))
+                                .tooltip(|_, cx| {
+                                    cx.new(|_| {
+                                        super::super::session::FindTooltip(
+                                            "Open the project".into(),
+                                        )
+                                    })
+                                    .into()
                                 })
-                                .into()
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(space) = space.clone() {
-                                    this.open_panel(PanelItem::Project(space), cx);
-                                }
-                            }))
-                            .text_size(px(11.0))
-                            .text_color(motion::hover_blend(
-                                &key,
-                                theme.text_muted.opacity(0.85),
-                                theme.text,
-                            ))
-                            .child(icon(glyph).size(px(11.0)).flex_none().text_color(tint))
-                            .child(div().min_w_0().truncate().child(SharedString::from(place))),
-                    )
-                }),
-        );
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(space) = space.clone() {
+                                        this.open_panel(PanelItem::Project(space), cx);
+                                    }
+                                }))
+                                .text_size(px(11.0))
+                                .text_color(motion::hover_blend(
+                                    &key,
+                                    theme.text_muted.opacity(0.85),
+                                    theme.text,
+                                ))
+                                .child(icon(glyph).size(px(11.0)).flex_none().text_color(tint))
+                                .child(div().min_w_0().truncate().child(SharedString::from(place))),
+                        )
+                    }),
+            );
         if let Some(summary) = work.summary.as_ref().filter(|s| !s.trim().is_empty()) {
             flow = flow.child(div().px(px(8.0)).pb(px(6.0)).child(md(
                 summary,
@@ -1044,6 +1128,30 @@ impl Shell {
                     .pb(px(4.0)),
             ),
         )
+    }
+
+    /// A work item's status as the panel's title tile: its mark on the
+    /// phase's tint; hovering it shows what state it is in and when.
+    fn status_tile(&self, work: &BotWork, phase: PlanPhase, theme: &Theme) -> AnyElement {
+        let key = format!("bot-work-status-{}", work.id);
+        let tint =
+            (!matches!(phase, PlanPhase::Running | PlanPhase::Starting)).then(|| phase.tint(theme));
+        let rest = tint.map_or(crate::kit::theme::ink(0.06), |t| t.opacity(0.14));
+        let hover = tint.map_or(crate::kit::theme::ink(0.1), |t| t.opacity(0.22));
+        let tip = WorkStatusTip::of(work, phase, theme);
+        div()
+            .id(SharedString::from(key.clone()))
+            .flex_none()
+            .size(px(30.0))
+            .rounded(px(8.0))
+            .bg(motion::hover_blend(&key, rest, hover))
+            .on_hover(motion::hover_listener(key.clone()))
+            .flex()
+            .items_center()
+            .justify_center()
+            .tooltip(move |_, cx| cx.new(|_| tip.clone()).into())
+            .child(work_mark(work, self.pulse_ticker.entity_id(), theme))
+            .into_any_element()
     }
 
     /// Copy a work item's result; the button says Copied for a moment.
