@@ -39,23 +39,39 @@ enum DocDisk {
         return directory.appendingPathComponent("c2_\(safe).loro")
     }
 
-    /// Import the chat2 snapshot; returns its cursor, or nil when absent or
-    /// unreadable (caller starts fresh at cursor 0 — the room re-serves).
-    static func loadChat2(into doc: LoroDoc, id: String) -> UInt64? {
-        guard let data = try? Data(contentsOf: chat2URL(for: id)),
+    /// `c2_<id>.honest` = the UInt64 LE cursor of the snapshot beside it,
+    /// written when that cursor covers no row whose operations the doc
+    /// parked (`ImportStatus.parks`). It vouches only for the cursor it
+    /// names, so a snapshot written without it is never taken as honest.
+    static func honestURL(for snapshot: URL) -> URL {
+        snapshot.deletingPathExtension().appendingPathExtension("honest")
+    }
+
+    /// Import the chat2 snapshot; returns its cursor and whether the
+    /// `.honest` sidecar vouches for it, or nil when absent or unreadable
+    /// (caller starts fresh at cursor 0 — the room re-serves).
+    static func loadChat2(into doc: LoroDoc, id: String) -> (cursor: UInt64, honest: Bool)? {
+        let url = chat2URL(for: id)
+        guard let data = try? Data(contentsOf: url),
             data.count >= 16, data.prefix(8) == chat2Magic
         else { return nil }
-        var cursor: UInt64 = 0
-        for (ix, byte) in data.subdata(in: 8..<16).enumerated() {
-            cursor |= UInt64(byte) << (8 * ix)
-        }
-        guard data.count > 16 else { return cursor }
+        let cursor = littleEndian(data.subdata(in: 8..<16))
+        let vouched = (try? Data(contentsOf: honestURL(for: url))).map { $0.count == 8 && littleEndian($0) == cursor }
+        guard data.count > 16 else { return (cursor, vouched ?? false) }
         guard
-            (try? doc.importWith(
+            let status = try? doc.importWith(
                 bytes: data.subdata(in: 16..<data.count),
-                origin: "disk")) != nil
+                origin: "disk")
         else { return nil }
-        return cursor
+        return (cursor, (vouched ?? false) && !status.parks)
+    }
+
+    private static func littleEndian(_ bytes: Data) -> UInt64 {
+        var value: UInt64 = 0
+        for (ix, byte) in bytes.enumerated() {
+            value |= UInt64(byte) << (8 * ix)
+        }
+        return value
     }
 
     /// Chat snapshot writes, in the order they were asked for. Exporting a
@@ -67,8 +83,8 @@ enum DocDisk {
     /// `saveChat2` on the writer queue. Read `cursor` before the export runs:
     /// the doc can only gain rows meanwhile, and content ahead of its cursor
     /// costs a re-fetch, never a gap.
-    static func saveChat2Later(doc: LoroDoc, id: String, cursor: UInt64) {
-        writer.async { saveChat2(doc: doc, id: id, cursor: cursor) }
+    static func saveChat2Later(doc: LoroDoc, id: String, cursor: UInt64, honest: Bool) {
+        writer.async { saveChat2(doc: doc, id: id, cursor: cursor, honest: honest) }
     }
 
     /// Waits out every queued write (backgrounding: the app may be
@@ -77,14 +93,22 @@ enum DocDisk {
         writer.sync {}
     }
 
-    /// Atomically persist the chat2 doc snapshot + its room cursor.
-    static func saveChat2(doc: LoroDoc, id: String, cursor: UInt64) {
+    /// Atomically persist the chat2 doc snapshot + its room cursor, and
+    /// whether that cursor is `honest`. The sidecar goes BEFORE a dishonest
+    /// snapshot and comes AFTER an honest one, so a write cut short can only
+    /// leave a snapshot unvouched for, never one vouched for wrongly.
+    static func saveChat2(doc: LoroDoc, id: String, cursor: UInt64, honest: Bool = false) {
         guard let snapshot = try? doc.export(mode: .snapshot) else { return }
-        var data = chat2Magic
+        let url = chat2URL(for: id)
+        let honestURL = honestURL(for: url)
         var le = cursor.littleEndian
-        withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+        let cursorBytes = withUnsafeBytes(of: &le) { Data($0) }
+        if !honest { try? FileManager.default.removeItem(at: honestURL) }
+        var data = chat2Magic
+        data.append(cursorBytes)
         data.append(snapshot)
-        try? data.write(to: chat2URL(for: id), options: .atomic)
+        guard (try? data.write(to: url, options: .atomic)) != nil else { return }
+        if honest { try? cursorBytes.write(to: honestURL, options: .atomic) }
     }
 
     /// LRU-prune session snapshots (the workspace registry blob is always
@@ -96,8 +120,10 @@ enum DocDisk {
                 at: directory,
                 includingPropertiesForKeys: [.contentModificationDateKey])
         else { return }
+        // A snapshot's `.honest` sidecar goes with it, and counts for nothing.
         let sessions = files.filter {
             !$0.lastPathComponent.hasPrefix("ws3_") && !$0.lastPathComponent.hasPrefix("registry1_")
+                && $0.pathExtension != "honest"
         }
         guard sessions.count > keep else { return }
         let sorted = sessions.sorted {
@@ -108,6 +134,7 @@ enum DocDisk {
             return a > b
         }
         for stale in sorted.dropFirst(keep) {
+            try? fm.removeItem(at: honestURL(for: stale))
             try? fm.removeItem(at: stale)
         }
     }
@@ -119,6 +146,13 @@ enum DocDisk {
             try? FileManager.default.removeItem(at: directory)
         }
     }
+}
+
+extension ImportStatus {
+    /// Some imported operations wait on ones this doc lacks. Loro parks
+    /// them, and a snapshot export leaves them out, so a cursor advanced
+    /// over them claims rows the saved doc doesn't hold.
+    var parks: Bool { !(pending?.isEmpty ?? true) }
 }
 
 /// Debounced snapshot persistence shared by the doc stores: poke on every

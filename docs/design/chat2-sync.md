@@ -99,7 +99,18 @@ working-tree diffs through the device relay. Measuring the Edge's cost:
 
 **C4. iOS** (`apps/ios/Cypher/Sync/ChatRoomClient.swift`): the same protocol, with the
 framing vectors shared across Rust, TypeScript and Swift
-([`protocol/vectors/chat-frames-v1.json`](../../protocol/README.md)).
+([`protocol/vectors/chat-frames-v1.json`](../../protocol/README.md)). It differs where a
+phone on a slow link needs it to:
+- The checkpoint load (fetch + import) belongs to the client, not to a socket. A redial
+  while it runs joins it, the HTTPS pull shares it, and a download cut off for good keeps
+  its bytes so the next one resumes by Range.
+- The catch-up deadline counts from the last progress (rows, checkpoint bytes), not from
+  the state answer, and checkpoint bytes renew the socket's silence lease while the receive
+  loop waits on the load.
+- The cursor amnesty is skipped when a `c2_<id>.honest` sidecar vouches for the snapshot's
+  cursor: no import since the last amnesty parked operations (`ImportStatus.pending`).
+- Snapshots and checkpoints import off the main thread, and a catch-up's rows are shown
+  at most once a second instead of one projection per row.
 
 ## M. Doc lineage
 

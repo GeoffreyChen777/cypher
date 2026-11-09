@@ -96,6 +96,21 @@ final class SessionStore {
     /// Persisted WITH the snapshot in one atomic file (DocDisk.saveChat2, the
     /// C2 rule), so content and cursor can never diverge.
     @ObservationIgnored private var cursor: UInt64 = 0
+    /// `cursor` covers no row whose operations the doc parked (DocDisk's
+    /// `.honest` sidecar): the room's cursor amnesty can skip refetching
+    /// every row since the checkpoint. A fresh doc's cursor 0 claims nothing.
+    @ObservationIgnored private var cursorHonest = true
+    /// The disk snapshot has been read (`start`); the room waits for it.
+    @ObservationIgnored private var hydrated = false
+    @ObservationIgnored private var stopped = false
+    /// Local updates committed before the room client existed (while the
+    /// snapshot hydrated), handed to it when it starts.
+    @ObservationIgnored private var unsentLocalUpdates: [Data] = []
+    /// The room is catching up: its rows land in a burst, shown at most
+    /// every `catchUpProjectionInterval` rather than one projection each.
+    @ObservationIgnored private var catchingUp = false
+    @ObservationIgnored private var catchUpProjection: Task<Void, Never>?
+    nonisolated static let catchUpProjectionInterval = Duration.seconds(1)
     private var chatRoom: ChatRoomClient?
     private var subscriptions: [Subscription] = []
     private let config: AppConfig
@@ -255,40 +270,58 @@ final class SessionStore {
     func start() {
         guard !started, !offline else { return }
         started = true
-        // Local-first: the last-synced chat2 snapshot renders instantly (even
-        // when the host device is offline); the join backfills incrementally
-        // from its cursor.
-        if let saved = DocDisk.loadChat2(into: doc, id: chatId) {
-            cursor = saved
-            project()
-        }
-        saver = DocSaver { [weak self] in
-            guard let self else { return }
-            DocDisk.saveChat2Later(doc: self.doc, id: self.chatId, cursor: self.cursor)
-        }
         // Subscription BEFORE any connect: every local commit lands in the
-        // client when it exists; commits made earlier are covered by the
-        // first-contact full-log push below (cursor 0 whenever no client has
-        // ever acked — see connectIfReady).
+        // client when it exists, or waits for it in `unsentLocalUpdates`;
+        // commits made before this are covered by the first-contact full-log
+        // push (cursor 0 whenever no client has ever acked — see
+        // connectIfReady).
         let localSub = doc.subscribeLocalUpdate { [weak self] update in
             let bytes = Data(update)
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if let room = self.chatRoom {
                     Task { await room.enqueue(update: bytes) }
+                } else {
+                    self.unsentLocalUpdates.append(bytes)
                 }
                 self.saver?.poke()
             }
         }
         subscriptions.append(localSub)
-        connectIfReady()
-        project()
+        // Local-first: the last-synced chat2 snapshot renders as soon as it
+        // is read (even when the host device is offline); the join backfills
+        // incrementally from its cursor. Read off the main thread: a long
+        // session's snapshot is megabytes, and this runs as its screen opens.
+        let doc = self.doc
+        let chatId = self.chatId
+        Task { @MainActor [weak self] in
+            let saved = await Task.detached(priority: .userInitiated) {
+                DocDisk.loadChat2(into: doc, id: chatId)
+            }.value
+            guard let self, !self.stopped else { return }
+            if let saved {
+                self.cursor = saved.cursor
+                self.cursorHonest = saved.honest
+            }
+            self.hydrated = true
+            // Created only now: a save before the read would write a doc
+            // missing its own history.
+            self.saver = DocSaver { [weak self] in
+                guard let self else { return }
+                DocDisk.saveChat2Later(
+                    doc: self.doc, id: self.chatId, cursor: self.cursor, honest: self.cursorHonest)
+            }
+            if !self.unsentLocalUpdates.isEmpty { self.saver?.poke() }
+            self.connectIfReady()
+            self.project()
+        }
     }
 
     private func connectIfReady() {
-        guard started, !offline, chatRoom == nil else { return }
+        guard started, hydrated, !stopped, !offline, chatRoom == nil else { return }
         let delegate = ChatRoomClient.Delegate(
             cursor: { [weak self] in self?.cursor ?? 0 },
+            cursorHonest: { [weak self] in self?.cursorHonest ?? false },
             containsFrontier: { [weak self] frontier in
                 // Empty or encoded-empty frontiers are not proof of
                 // containment. A present checkpoint may carry either form,
@@ -301,11 +334,14 @@ final class SessionStore {
                 return self.doc.oplogVv().includesVv(other: vv)
             },
             applyCheckpoint: { [weak self] bytes, seq in
-                guard let self,
-                    (try? self.doc.importWith(bytes: bytes, origin: "remote")) != nil
-                else {
-                    return false
-                }
+                guard let doc = self?.doc else { return false }
+                // Off the main thread: a long session's checkpoint is
+                // megabytes, and importing it there froze the transcript.
+                let parks = await Task.detached(priority: .userInitiated) {
+                    (try? doc.importWith(bytes: bytes, origin: "remote"))?.parks
+                }.value
+                guard let self, let parks else { return false }
+                if parks { self.cursorHonest = false }
                 self.cursor = max(self.cursor, seq)
                 self.project()
                 self.saver?.poke()
@@ -316,11 +352,14 @@ final class SessionStore {
                 // Malformed remote bytes cost the row, never the doc. The
                 // cursor still advances: replaying a poison row forever is
                 // the wedge class chat2 replaces.
-                if (try? self.doc.importWith(bytes: bytes, origin: "remote")) == nil {
+                switch Result(catching: { try self.doc.importWith(bytes: bytes, origin: "remote") }) {
+                case .success(let status):
+                    if status.parks { self.cursorHonest = false }
+                case .failure:
                     roomLog.warning("chat2 \(self.chatId, privacy: .public): row import failed; skipping row \(seq)")
                 }
                 self.cursor = max(self.cursor, seq)
-                self.project()
+                self.projectRow()
                 self.saver?.poke()
             },
             advanceCursor: { [weak self] seq in
@@ -329,7 +368,10 @@ final class SessionStore {
                 self.saver?.poke()
             },
             clampCursor: { [weak self] seq in
-                guard let self, self.cursor != seq else { return }
+                guard let self else { return }
+                // Back at the checkpoint, every row after it is fetched again.
+                self.cursorHonest = true
+                guard self.cursor != seq else { return }
                 self.cursor = seq
                 self.saver?.poke()
             },
@@ -377,6 +419,8 @@ final class SessionStore {
             },
             delegate: delegate, previewEnabled: config.streamPreviewEnabled)
         chatRoom = client
+        let unsent = unsentLocalUpdates
+        unsentLocalUpdates = []
         // First contact with the room (cursor 0): everything committed
         // BEFORE the local-update subscription saw a client — an adopt's
         // requeued commands, sends queued while offline — is invisible to
@@ -389,6 +433,10 @@ final class SessionStore {
             let all = try? doc.export(mode: .updates(from: VersionVector())), !all.isEmpty
         {
             Task { await client.enqueue(update: all) }
+        } else if !unsent.isEmpty {
+            Task {
+                for update in unsent { await client.enqueue(update: update) }
+            }
         }
         Task { await client.start() }
     }
@@ -411,14 +459,17 @@ final class SessionStore {
     /// unmaterialized sends) — stopping now would strand them, since the push
     /// queue doesn't survive the client.
     func hasUnpushedUpdates() async -> Bool {
-        if !pendingSends.isEmpty { return true }
+        if !pendingSends.isEmpty || !unsentLocalUpdates.isEmpty { return true }
         guard let chatRoom else { return false }
         return await chatRoom.hasPendingPushes
     }
 
     func stop() {
+        stopped = true
         subscriptions.removeAll()
         saver?.flush()
+        catchUpProjection?.cancel()
+        catchUpProjection = nil
         if let chatRoom {
             Task { await chatRoom.stop() }
         }
@@ -435,6 +486,32 @@ final class SessionStore {
             project()
         case .disconnected:
             connected = false
+        case .catchingUp(let value):
+            catchingUp = value
+            // Whatever landed since the last catch-up projection shows now.
+            if !value, let pending = catchUpProjection {
+                pending.cancel()
+                catchUpProjection = nil
+                project()
+            }
+        }
+    }
+
+    /// A remote row landed. Live, it shows at once. During a catch-up the
+    /// rows land in a burst — hundreds when a long session reopens — and a
+    /// projection each replayed the chat on screen row by row, with a
+    /// re-layout and scroll per row: they show at most once an interval.
+    private func projectRow() {
+        guard catchingUp else {
+            project()
+            return
+        }
+        guard catchUpProjection == nil else { return }
+        catchUpProjection = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.catchUpProjectionInterval)
+            guard let self, !Task.isCancelled else { return }
+            self.catchUpProjection = nil
+            self.project()
         }
     }
 
