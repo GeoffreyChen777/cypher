@@ -49,12 +49,13 @@ use doc::StoreDoc;
 const FIRST_OPEN_CATCH_UP: Duration = Duration::from_secs(5);
 
 /// The row fields any engine that changes a store's doc rewrites.
-const COUNT_FIELDS: [&str; 7] = [
+const COUNT_FIELDS: [&str; 8] = [
     "id",
     "scope",
     "files",
     "bytes",
     "pending",
+    "held",
     "preview",
     "updatedAt",
 ];
@@ -205,7 +206,7 @@ impl Memory {
     /// Rewrite the row's counts from the doc, creating the row if needed.
     fn sync_row(&self, scope: &MemoryScope, store_id: &str, store: &StoreDoc) {
         let files = store.files_list();
-        let pending = store.pending().len();
+        let pending = store.pending();
         let now = p::now_ms();
         let existing = self.row(store_id);
         let fresh = existing.is_none();
@@ -219,7 +220,21 @@ impl Memory {
         });
         row.files = files.len() as u32;
         row.bytes = files.iter().map(|f| f.text.len() as u64).sum();
-        row.pending = pending as u32;
+        row.pending = pending.len() as u32;
+        row.held = pending
+            .iter()
+            .filter_map(|p| {
+                Some(p::HeldWrite {
+                    id: p.id.clone(),
+                    chat_id: p.author.chat_id()?.to_string(),
+                    tool_call_id: p.tool_call_id.clone(),
+                    path: p.path.clone(),
+                    preview: p.preview.clone(),
+                    reason: p.reason.clone(),
+                    at: p.at,
+                })
+            })
+            .collect();
         row.preview = files
             .iter()
             .find(|f| f.path == MEMORY_INDEX)
@@ -333,6 +348,7 @@ impl Memory {
                 args,
                 reason: reason.clone(),
                 preview: planned.text.clone(),
+                tool_call_id: reader.tool_call_id.clone(),
             };
             store.hold(&pending)?;
             store.commit();
@@ -343,8 +359,9 @@ impl Memory {
                 reader,
             );
             return Ok(Written::Held(format!(
-                "Held for review: this run {reason}, so its memory writes wait for the owner's \
-                 approval and stay out of later prompts until then. Nothing else to do."
+                "Held for review: this run {reason}, so the user is asked in the chat whether to \
+                 save it; until they do, it is not saved and stays out of later prompts. \
+                 Nothing else to do."
             )));
         }
         let summary = apply(store, &planned, &reader.author)?;
@@ -517,9 +534,15 @@ impl Memory {
                         "That write is no longer waiting.".into(),
                     ));
                 }
+                let call = store
+                    .pending()
+                    .into_iter()
+                    .find(|p| p.id == id)
+                    .and_then(|p| p.tool_call_id);
                 store.release(&id)?;
                 store.commit();
                 self.sync_row(&scope, &store_id, &store);
+                self.decide(&scope, &id, call, false);
                 Ok("Discarded.".into())
             }
             MemoryEdit::Undo { change_id } => self.undo_change(&scope, &change_id).await,
@@ -592,6 +615,7 @@ impl Memory {
         store.commit();
         self.sync_row(scope, &store_id, &store);
         self.inner.doc_host.flush_chat_sync(&store_id);
+        self.decide(scope, id, pending.tool_call_id.clone(), result.is_ok());
         match result {
             Ok(_) => Ok(format!(
                 "Accepted: {}.",
@@ -600,6 +624,22 @@ impl Memory {
             Err(err) => Err(EngineError::Other(format!(
                 "It can't be applied any more ({err}), so it was dropped."
             ))),
+        }
+    }
+
+    /// Remember on the row how a held write was decided, for its card.
+    fn decide(&self, scope: &MemoryScope, id: &str, tool_call_id: Option<String>, saved: bool) {
+        let Some(mut row) = self.row(&self.store_id(scope)) else {
+            return;
+        };
+        row.decided.push(p::HeldDecision {
+            id: id.to_string(),
+            tool_call_id,
+            saved,
+            at: p::now_ms(),
+        });
+        if let Err(err) = self.put_row_fields(&row, &["decided"]) {
+            tracing::warn!(error = %err, "memory decision not recorded");
         }
     }
 

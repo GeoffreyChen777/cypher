@@ -17,11 +17,16 @@ const LISTED_FILES: usize = 40;
 const GUIDANCE: &str = "You have persistent memory: folders of markdown files you keep across \
 sessions with the `memory` tool. Each folder's MEMORY.md is shown below; read its other files \
 with `memory view` when they matter to the task.
+- When the user asks you to remember something, save it now, before you answer. What is about \
+the user (their preferences, their life, how they like to work) goes in /you, which every \
+session reads: a lasting fact in /you/MEMORY.md (\"Likes hazelnut coffee\"), a dated event in \
+a topic file such as /you/journal.md (\"2026-11-09: had a hazelnut coffee\").
 - Save what you or a later session will need again. Keep MEMORY.md a short index (under 200 \
 lines): put detail in topic files and link to them from it.
 - Correct or delete memory that turns out wrong or stale, so it stays true. Never save secrets \
 (keys, tokens, passwords).
-- search_history and read_history find what was said in past conversations.";
+- When asked what was said or decided before, look in memory first, then search_history and \
+read_history, which find it in past conversations.";
 
 /// The start of `text` within `lines` and `bytes`, and whether it was cut.
 pub(super) fn budgeted(text: &str, lines: usize, bytes: usize) -> (String, bool) {
@@ -39,12 +44,21 @@ pub(super) fn budgeted(text: &str, lines: usize, bytes: usize) -> (String, bool)
 }
 
 /// The section for `roots` with their files, or `None` when there are no
-/// roots.
-pub(super) fn section(roots: &[(&Root, Vec<MemoryFile>)], extra: &[String]) -> Option<String> {
+/// roots. `today` dates what gets saved ("Monday, November 9, 2026"); a
+/// day, not a time, so the prompt stays the same all day.
+pub(super) fn section(
+    roots: &[(&Root, Vec<MemoryFile>)],
+    extra: &[String],
+    today: &str,
+) -> Option<String> {
     if roots.is_empty() {
         return None;
     }
-    let mut out = vec!["<memory>".to_string(), GUIDANCE.to_string()];
+    let mut out = vec![
+        "<memory>".to_string(),
+        GUIDANCE.to_string(),
+        format!("- Today is {today} (local time); date what you save with it."),
+    ];
     out.extend(extra.iter().cloned());
     let mut budget = MEMORY_PROMPT_BYTES;
     for (root, files) in roots {
@@ -116,7 +130,8 @@ impl Memory {
                     .to_string(),
             );
         }
-        section(&roots, &extra)
+        let today = chrono::Local::now().format("%A, %B %-d, %Y").to_string();
+        section(&roots, &extra, &today)
     }
 
     /// The roots a prompt shows: all of them, but a workspace's read-only
@@ -177,6 +192,8 @@ mod tests {
         }
     }
 
+    const TODAY: &str = "Monday, November 9, 2026";
+
     fn root(path: &str, write: bool) -> Root {
         Root {
             path: path.into(),
@@ -193,7 +210,7 @@ mod tests {
         assert!(cut);
         assert_eq!(shown.lines().count(), MEMORY_INDEX_LINES);
         let you = root("/you", true);
-        let text = section(&[(&you, vec![file(MEMORY_INDEX, &long)])], &[]).unwrap();
+        let text = section(&[(&you, vec![file(MEMORY_INDEX, &long)])], &[], TODAY).unwrap();
         assert!(text.contains("MEMORY.md continues: 250 lines"), "{text}");
         assert!(text.contains("- line 199") && !text.contains("- line 200\n"));
     }
@@ -211,15 +228,18 @@ mod tests {
                 ),
             ],
             &[],
+            TODAY,
         )
         .unwrap();
         assert!(text.starts_with("<memory>\nYou have persistent memory"));
+        assert!(text.contains("When the user asks you to remember something, save it now"));
+        assert!(text.contains("- Today is Monday, November 9, 2026 (local time)"));
         assert!(text.contains("## /you — your memory\n- answer in English"));
         assert!(text.contains("## /projects/api — your memory (read-only)"));
         assert!(text.contains("Other files: /projects/api/testing.md\n"));
         assert!(text.ends_with("</memory>"));
-        let empty = section(&[(&you, Vec::new())], &[]).unwrap();
+        let empty = section(&[(&you, Vec::new())], &[], TODAY).unwrap();
         assert!(empty.contains("start one with `memory create /you/MEMORY.md`"));
-        assert!(section(&[], &[]).is_none());
+        assert!(section(&[], &[], TODAY).is_none());
     }
 }

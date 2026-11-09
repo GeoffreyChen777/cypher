@@ -54,6 +54,9 @@ pub(super) struct Reader {
     pub bot: Option<Bot>,
     /// What `search_history` reads.
     pub history: History,
+    /// The `memory` tool call being answered: a held write's card is drawn
+    /// there.
+    pub tool_call_id: Option<String>,
 }
 
 /// Which past conversations a reader may search and read.
@@ -87,6 +90,7 @@ impl Reader {
             author,
             bot: None,
             history: History::None,
+            tool_call_id: None,
         }
     }
 
@@ -252,6 +256,7 @@ impl Memory {
                 chat,
                 bot,
                 history,
+                tool_call_id: None,
             });
         }
 
@@ -300,6 +305,7 @@ impl Memory {
                 history: History::Workspace(bot.id.clone()),
                 bot: Some(bot),
                 chat,
+                tool_call_id: None,
             });
         }
 
@@ -349,6 +355,7 @@ impl Memory {
             history,
             bot: None,
             chat,
+            tool_call_id: None,
         })
     }
 

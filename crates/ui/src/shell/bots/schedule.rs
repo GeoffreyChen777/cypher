@@ -1,18 +1,19 @@
 //! The **Routines** card (§13.1): the bot's routines by next run, their
 //! panels and the routine form.
 //!
-//! A routine runs by hand or on a schedule, either in the workspace (the
-//! bot's own agent, in a hidden thread) or as an ordinary session in one of
-//! its projects (§8). Scheduled runs continue one standing session; each Run
-//! now gets a fresh one, kept until the next. The definition fields are the
-//! owner's and go out whole in one Mutate; the run state (last run, next
-//! run, runs today, its sessions) is the host's and only read here.
+//! A routine runs by hand, on a schedule or once at a set time (a reminder),
+//! either in the workspace (the bot's own agent, in a hidden thread) or as
+//! an ordinary session in one of its projects (§8). Scheduled runs continue
+//! one standing session; each Run now gets a fresh one, kept until the
+//! next. The definition fields are the owner's and go out whole in one
+//! Mutate; the run state (last run, next run, runs today, its sessions) is
+//! the host's and only read here.
 
 use super::board::{card_corner, card_glyph, card_item, two_lines};
 use super::panel::{PanelHead, PanelItem};
 use super::parts::{self, CallError};
 use super::*;
-use chrono::{DateTime, Local, TimeZone};
+use chrono::{DateTime, Local, NaiveDate, TimeZone};
 use cypher_proto::{BotRoutine, RoutineTarget, RunOutcome, RunRecord, Schedule, Space};
 
 /// Each kind of routine wears its own mark, apart from the card's clock: one
@@ -39,7 +40,7 @@ pub(super) struct Job {
     pub name: String,
     pub schedule: Schedule,
     pub enabled: bool,
-    /// The next run (epoch ms): `None` while off, manual or unplanned.
+    /// The next run (epoch ms): `None` while off, manual, done or unplanned.
     pub next: Option<i64>,
     pub last: Option<RunRecord>,
     pub run_requested_at: Option<i64>,
@@ -53,6 +54,8 @@ pub(super) enum JobState {
     Starting,
     Next(i64),
     Manual,
+    /// A once-only routine that has had its run.
+    Done,
     /// On a schedule, but no next run is known.
     Unplanned,
     Off,
@@ -108,6 +111,15 @@ impl Job {
         )
     }
 
+    /// Drawn faded: switched off, or a reminder that has come.
+    fn dim(&self) -> bool {
+        match self.state() {
+            JobState::Running | JobState::Starting => false,
+            JobState::Done => true,
+            _ => !self.enabled,
+        }
+    }
+
     fn failed(&self) -> bool {
         self.last
             .as_ref()
@@ -128,6 +140,9 @@ fn job_state(
     if run_requested_at.is_some_and(|at| last.is_none_or(|run| run.at < at)) {
         return JobState::Starting;
     }
+    if matches!(schedule, Schedule::Once { .. }) && next.is_none() && last.is_some() {
+        return JobState::Done;
+    }
     if !enabled {
         return JobState::Off;
     }
@@ -138,8 +153,8 @@ fn job_state(
     }
 }
 
-/// Running work first, then by next run, then the manual ones, the
-/// switched-off ones last; names break ties.
+/// Running work first, then by next run, then the manual ones, then the
+/// done and the switched-off ones; names break ties.
 pub(super) fn order_jobs(jobs: &mut [Job]) {
     jobs.sort_by_cached_key(|job| {
         let (rank, at) = match job.state() {
@@ -147,7 +162,8 @@ pub(super) fn order_jobs(jobs: &mut [Job]) {
             JobState::Starting => (1, 0),
             JobState::Next(at) => (2, at),
             JobState::Manual | JobState::Unplanned => (3, 0),
-            JobState::Off => (4, 0),
+            JobState::Done => (4, 0),
+            JobState::Off => (5, 0),
         };
         (rank, at, job.name.to_lowercase())
     });
@@ -173,6 +189,7 @@ pub(super) fn state_note<Tz: TimeZone>(state: JobState, now: &DateTime<Tz>) -> S
             None => String::new(),
         },
         JobState::Manual => "manual".into(),
+        JobState::Done => "done".into(),
         JobState::Unplanned => "—".into(),
         JobState::Off => "off".into(),
     }
@@ -184,6 +201,7 @@ pub(super) fn state_note<Tz: TimeZone>(state: JobState, now: &DateTime<Tz>) -> S
 pub(super) enum ScheduleKind {
     Daily,
     Every,
+    Once,
     Manual,
 }
 
@@ -193,8 +211,7 @@ pub(super) enum Unit {
     Minutes,
 }
 
-/// The editor's choices besides its two text fields (the time, and the
-/// interval's count).
+/// The editor's choices besides its text fields ([`ScheduleTexts`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ScheduleDraft {
     pub kind: ScheduleKind,
@@ -203,18 +220,36 @@ pub(super) struct ScheduleDraft {
     pub unit: Unit,
 }
 
+/// The editor's text fields as typed: the time (daily and once), the
+/// interval's count, and the date of a once-only run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ScheduleTexts {
+    pub time: String,
+    pub every: String,
+    pub date: String,
+}
+
 impl ScheduleDraft {
-    /// The editor for `schedule`, with its time and count texts.
-    pub(super) fn from_schedule(schedule: &Schedule) -> (Self, String, String) {
+    /// The editor for `schedule`, with its texts. A once-only run starts
+    /// out tomorrow (after `today`) at 09:00.
+    pub(super) fn from_schedule(schedule: &Schedule, today: NaiveDate) -> (Self, ScheduleTexts) {
         let mut draft = Self {
             kind: ScheduleKind::Daily,
             days: Vec::new(),
             unit: Unit::Hours,
         };
-        let (mut time, mut every) = ("09:00".to_string(), "1".to_string());
+        let mut texts = ScheduleTexts {
+            time: "09:00".into(),
+            every: "1".into(),
+            date: today
+                .succ_opt()
+                .unwrap_or(today)
+                .format("%Y-%m-%d")
+                .to_string(),
+        };
         match schedule {
             Schedule::Daily { time: at, days } => {
-                time = at.clone();
+                texts.time = at.clone();
                 draft.days = days.clone();
                 draft.days.sort_unstable();
                 draft.days.dedup();
@@ -225,19 +260,26 @@ impl ScheduleDraft {
             Schedule::Interval { minutes } => {
                 draft.kind = ScheduleKind::Every;
                 if minutes % 60 == 0 {
-                    every = (minutes / 60).to_string();
+                    texts.every = (minutes / 60).to_string();
                 } else {
                     draft.unit = Unit::Minutes;
-                    every = minutes.to_string();
+                    texts.every = minutes.to_string();
+                }
+            }
+            Schedule::Once { at } => {
+                draft.kind = ScheduleKind::Once;
+                if let Some((date, time)) = at.split_once('T') {
+                    texts.date = date.to_string();
+                    texts.time = time.to_string();
                 }
             }
             Schedule::Manual => draft.kind = ScheduleKind::Manual,
         }
-        (draft, time, every)
+        (draft, texts)
     }
 
     /// The schedule the editor describes, or what to fix.
-    pub(super) fn build(&self, time: &str, every: &str) -> Result<Schedule, String> {
+    pub(super) fn build(&self, texts: &ScheduleTexts) -> Result<Schedule, String> {
         let schedule = match self.kind {
             ScheduleKind::Daily => {
                 let mut days = self.days.clone();
@@ -247,12 +289,13 @@ impl ScheduleDraft {
                     days.clear();
                 }
                 Schedule::Daily {
-                    time: normalize_time(time),
+                    time: normalize_time(&texts.time),
                     days,
                 }
             }
             ScheduleKind::Every => {
-                let count: u32 = every
+                let count: u32 = texts
+                    .every
                     .trim()
                     .parse()
                     .ok()
@@ -263,6 +306,17 @@ impl ScheduleDraft {
                         Unit::Hours => count.saturating_mul(60),
                         Unit::Minutes => count,
                     },
+                }
+            }
+            ScheduleKind::Once => {
+                let date = NaiveDate::parse_from_str(texts.date.trim(), "%Y-%m-%d")
+                    .map_err(|_| "Pick a date like 2026-11-10.".to_string())?;
+                let time = normalize_time(&texts.time);
+                if chrono::NaiveTime::parse_from_str(&time, "%H:%M").is_err() {
+                    return Err("Pick a time like 09:00.".into());
+                }
+                Schedule::Once {
+                    at: format!("{}T{time}", date.format("%Y-%m-%d")),
                 }
             }
             ScheduleKind::Manual => Schedule::Manual,
@@ -293,6 +347,11 @@ impl ScheduleDraft {
             }
         }
     }
+}
+
+/// A once-only schedule whose time is behind `now`: it would never run.
+pub(super) fn once_passed<Tz: TimeZone>(schedule: &Schedule, now: &DateTime<Tz>) -> bool {
+    matches!(schedule, Schedule::Once { .. }) && schedule.next_after(now).is_none()
 }
 
 /// "9:00" → "09:00", "9" → "09:00", "1830" → "18:30"; anything else as
@@ -327,6 +386,7 @@ pub(super) struct JobForm {
     prompt: Entity<TextInput>,
     time: Entity<TextInput>,
     every: Entity<TextInput>,
+    date: Entity<TextInput>,
     draft: ScheduleDraft,
     write_notes: bool,
     work_directly: bool,
@@ -345,6 +405,16 @@ pub(super) struct JobForm {
     error: Option<SharedString>,
     busy: bool,
     _events: Vec<Subscription>,
+}
+
+impl JobForm {
+    fn texts(&self, cx: &App) -> ScheduleTexts {
+        ScheduleTexts {
+            time: self.time.read(cx).text().to_string(),
+            every: self.every.read(cx).text().to_string(),
+            date: self.date.read(cx).text().to_string(),
+        }
+    }
 }
 
 /// A device's model catalogue, as the form loads it.
@@ -426,7 +496,9 @@ impl Shell {
         let note_color = match state {
             JobState::Running => theme.text,
             JobState::Starting | JobState::Next(_) => theme.text_muted,
-            JobState::Manual | JobState::Unplanned | JobState::Off => theme.text_faint,
+            JobState::Manual | JobState::Done | JobState::Unplanned | JobState::Off => {
+                theme.text_faint
+            }
         };
         let mark = match state {
             JobState::Running => super::super::render::status_mark(
@@ -444,7 +516,7 @@ impl Shell {
             _ => None,
         };
         let item = job.item();
-        let dim = !job.enabled && !matches!(state, JobState::Running | JobState::Starting);
+        let dim = job.dim();
         div()
             .id(SharedString::from(key.clone()))
             .px(px(8.0))
@@ -523,7 +595,7 @@ impl Shell {
                 theme,
             ),
         };
-        let dim = !job.enabled && !matches!(state, JobState::Running | JobState::Starting);
+        let dim = job.dim();
         let item = job.item();
         card_item(
             &format!("bot-job-{}", job.id),
@@ -877,8 +949,10 @@ impl Shell {
             let (id, name) = (delete_id.clone(), name.clone());
             this.ask_confirm(parts::Confirm::DeleteRoutine { id, name }, cx);
         }));
-        // A manual routine has no schedule to switch off.
-        let enabled = (routine.schedule != Schedule::Manual).then(|| {
+        // A manual routine has no schedule to switch off, nor one that ran
+        // its once.
+        let switchable = routine.schedule != Schedule::Manual && state != JobState::Done;
+        let enabled = switchable.then(|| {
             let flip = routine.clone();
             div()
                 .id("bot-routine-enabled")
@@ -1080,11 +1154,14 @@ impl Shell {
         let time = cx.new(|cx| TextInput::settings_field("09:00", false, cx));
         let model_search = cx.new(|cx| TextInput::settings_field("Search models…", false, cx));
         let every = cx.new(|cx| TextInput::settings_field("2", false, cx));
-        let (draft, time_text, every_text) = ScheduleDraft::from_schedule(&seed.schedule);
+        let date = cx.new(|cx| TextInput::settings_field("2026-11-10", false, cx));
+        let (draft, texts) =
+            ScheduleDraft::from_schedule(&seed.schedule, Local::now().date_naive());
         name.update(cx, |input, cx| input.set_text(seed.name, cx));
         prompt.update(cx, |input, cx| input.set_text(seed.prompt, cx));
-        time.update(cx, |input, cx| input.set_text(time_text, cx));
-        every.update(cx, |input, cx| input.set_text(every_text, cx));
+        time.update(cx, |input, cx| input.set_text(texts.time, cx));
+        every.update(cx, |input, cx| input.set_text(texts.every, cx));
+        date.update(cx, |input, cx| input.set_text(texts.date, cx));
         let submit = |this: &mut Shell,
                       _: Entity<TextInput>,
                       event: &TextInputEvent,
@@ -1097,6 +1174,7 @@ impl Shell {
             cx.subscribe(&name, submit),
             cx.subscribe(&time, submit),
             cx.subscribe(&every, submit),
+            cx.subscribe(&date, submit),
         ];
         Some(JobForm {
             target,
@@ -1105,6 +1183,7 @@ impl Shell {
             prompt,
             time,
             every,
+            date,
             draft,
             write_notes: seed.write_notes,
             work_directly: seed.work_directly,
@@ -1142,9 +1221,7 @@ impl Shell {
         }
         let name = form.name.read(cx).text().trim().to_string();
         let prompt = form.prompt.read(cx).text().trim().to_string();
-        let built = form
-            .draft
-            .build(form.time.read(cx).text(), form.every.read(cx).text());
+        let built = form.draft.build(&form.texts(cx));
         let now = cypher_proto::now_ms();
         let records = self.state.read(cx).bot_records.clone();
         let coordinate = {
@@ -1160,6 +1237,13 @@ impl Shell {
                 FormTarget::Routine(id) => records.routines.iter().find(|r| r.id == *id),
                 FormTarget::NewRoutine => None,
             };
+            // A reminder set for a time gone by would never come; one that
+            // has run keeps its time through other edits.
+            if once_passed(&schedule, &Local::now())
+                && existing.is_none_or(|r| r.schedule != schedule)
+            {
+                return Err("That time has passed; pick a later one.".to_string());
+            }
             let routine = BotRoutine {
                 id: existing.map_or_else(|| uuid::Uuid::new_v4().to_string(), |r| r.id.clone()),
                 bot_id: form.bot_id.clone(),
@@ -1258,9 +1342,7 @@ impl Shell {
         let Some(form) = self.board.schedule.form.as_ref() else {
             return (head, div());
         };
-        let time_text = form.time.read(cx).text().to_string();
-        let every_text = form.every.read(cx).text().to_string();
-        let preview = form.draft.build(&time_text, &every_text);
+        let preview = form.draft.build(&form.texts(cx));
         let mut body = div()
             .p(px(8.0))
             .flex()
@@ -1303,12 +1385,13 @@ impl Shell {
                 .text_size(px(12.5))
                 .child(input.clone().into_any_element())
         };
-        let mut when = parts::group_box().child(row("Repeats", true).child(
-            div().w(px(216.0)).flex_none().child(parts::segmented(
+        let mut when = parts::group_box().child(row("Runs", true).child(
+            div().w(px(272.0)).flex_none().child(parts::segmented(
                 "bot-form-kind",
                 &[
                     (ScheduleKind::Daily, "Daily"),
                     (ScheduleKind::Every, "Interval"),
+                    (ScheduleKind::Once, "Once"),
                     (ScheduleKind::Manual, "Manual"),
                 ],
                 form.draft.kind,
@@ -1387,17 +1470,33 @@ impl Shell {
                     )),
                 ));
             }
+            ScheduleKind::Once => {
+                when = when
+                    .child(row("Date", false).child(compact(&form.date, 96.0)))
+                    .child(row("Time", false).child(compact(&form.time, 64.0)));
+            }
             ScheduleKind::Manual => {}
         }
         // One line at the box's foot, always there so nothing jumps: when
         // it next runs, or what to fix.
+        let now = Local::now();
         let (hint, hint_color) = match &preview {
             Ok(Schedule::Manual) => (
                 "Runs only when you press Run now.".to_string(),
                 theme.text_muted,
             ),
+            Ok(schedule) if once_passed(schedule, &now) => (
+                format!("{} · that time has passed", schedule.describe()),
+                theme.danger.opacity(0.85),
+            ),
+            Ok(schedule @ Schedule::Once { .. }) => {
+                let soon = schedule
+                    .next_after(&now)
+                    .map(|at| format!(" · {}", in_words(&at, &now)))
+                    .unwrap_or_default();
+                (format!("{}{soon}", schedule.describe()), theme.text_muted)
+            }
             Ok(schedule) => {
-                let now = Local::now();
                 let next = schedule
                     .next_after(&now)
                     .map(|at| format!(" · next run {}", lower_first(&parts::next_full(&at, &now))))
@@ -1912,13 +2011,16 @@ impl Shell {
 }
 
 /// A routine's Schedule fact: when it repeats, and how soon it next runs
-/// ("Weekdays 08:30 · next in 9h"), "off" while disabled; a manual one
-/// runs only when asked.
+/// ("Weekdays 08:30 · next in 9h"), "off" while disabled, "done" once a
+/// once-only one ran; a manual one runs only when asked.
 fn schedule_value(job: &Job, now: &DateTime<Local>) -> String {
     if job.schedule == Schedule::Manual {
         return "Only when you press Run now".into();
     }
     let when = job.schedule.describe();
+    if job.state() == JobState::Done {
+        return format!("{when} · done");
+    }
     if !job.enabled {
         return format!("{when} · off");
     }
@@ -2013,6 +2115,18 @@ mod tests {
             time: time.into(),
             days,
         }
+    }
+
+    fn typed(time: &str, every: &str) -> ScheduleTexts {
+        ScheduleTexts {
+            time: time.into(),
+            every: every.into(),
+            date: "2026-11-10".into(),
+        }
+    }
+
+    fn today() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 11, 9).unwrap()
     }
 
     fn job(id: &str, schedule: Schedule, enabled: bool, next: Option<i64>) -> Job {
@@ -2114,19 +2228,23 @@ mod tests {
             Schedule::Interval { minutes: 120 },
             Schedule::Interval { minutes: 45 },
             Schedule::Manual,
+            Schedule::Once {
+                at: "2026-12-24T18:00".into(),
+            },
         ] {
-            let (draft, time, every) = ScheduleDraft::from_schedule(&schedule);
-            assert_eq!(draft.build(&time, &every), Ok(schedule.clone()));
+            let (draft, texts) = ScheduleDraft::from_schedule(&schedule, today());
+            assert_eq!(draft.build(&texts), Ok(schedule.clone()));
         }
-        let (draft, _, every) = ScheduleDraft::from_schedule(&Schedule::Interval { minutes: 45 });
-        assert_eq!((draft.unit, every.as_str()), (Unit::Minutes, "45"));
+        let (draft, texts) =
+            ScheduleDraft::from_schedule(&Schedule::Interval { minutes: 45 }, today());
+        assert_eq!((draft.unit, texts.every.as_str()), (Unit::Minutes, "45"));
         // Every day picked is the same as none picked.
         let all = ScheduleDraft {
             kind: ScheduleKind::Daily,
             days: (1..=7).collect(),
             unit: Unit::Hours,
         };
-        assert_eq!(all.build("9:30", ""), Ok(daily("09:30", vec![])));
+        assert_eq!(all.build(&typed("9:30", "")), Ok(daily("09:30", vec![])));
     }
 
     #[test]
@@ -2143,7 +2261,7 @@ mod tests {
         draft.toggle_day(6);
         draft.toggle_day(7);
         assert_eq!(
-            draft.build("08:30", ""),
+            draft.build(&typed("08:30", "")),
             Ok(daily("08:30", vec![1, 2, 3, 4, 5]))
         );
         for day in 1..=5 {
@@ -2164,15 +2282,15 @@ mod tests {
             unit,
         };
         assert_eq!(
-            draft(ScheduleKind::Daily, Unit::Hours).build("25:00", ""),
+            draft(ScheduleKind::Daily, Unit::Hours).build(&typed("25:00", "")),
             Err("Pick a time like 09:00.".into())
         );
         assert_eq!(
-            draft(ScheduleKind::Every, Unit::Minutes).build("", "5"),
+            draft(ScheduleKind::Every, Unit::Minutes).build(&typed("", "5")),
             Err("Run at most every 15 minutes.".into())
         );
         assert_eq!(
-            draft(ScheduleKind::Every, Unit::Hours).build("", "often"),
+            draft(ScheduleKind::Every, Unit::Hours).build(&typed("", "often")),
             Err("Say how often, like every 2 hours.".into())
         );
         assert_eq!(normalize_time("9"), "09:00");
@@ -2180,6 +2298,93 @@ mod tests {
         assert_eq!(normalize_time("1830"), "18:30");
         assert_eq!(normalize_time(" 07:00 "), "07:00");
         assert_eq!(normalize_time("noon"), "noon");
+    }
+
+    #[test]
+    fn a_once_run_starts_tomorrow_morning_and_reads_its_fields() {
+        let (draft, texts) = ScheduleDraft::from_schedule(&Schedule::default(), today());
+        assert_eq!(
+            (texts.date.as_str(), texts.time.as_str()),
+            ("2026-11-10", "09:00")
+        );
+        let once = ScheduleDraft {
+            kind: ScheduleKind::Once,
+            ..draft
+        };
+        let build = |date: &str, time: &str| {
+            once.build(&ScheduleTexts {
+                time: time.into(),
+                every: String::new(),
+                date: date.into(),
+            })
+        };
+        assert_eq!(
+            build("2026-11-10", "9"),
+            Ok(Schedule::Once {
+                at: "2026-11-10T09:00".into()
+            })
+        );
+        assert_eq!(
+            build(" 2026-11-1 ", "1830"),
+            Ok(Schedule::Once {
+                at: "2026-11-01T18:30".into()
+            }),
+            "a short day still reads"
+        );
+        assert_eq!(
+            build("tomorrow", "09:00"),
+            Err("Pick a date like 2026-11-10.".into())
+        );
+        assert_eq!(
+            build("2026-02-30", "09:00"),
+            Err("Pick a date like 2026-11-10.".into())
+        );
+        assert_eq!(
+            build("2026-11-10", "25:00"),
+            Err("Pick a time like 09:00.".into())
+        );
+        let once = Schedule::Once {
+            at: "2026-11-10T09:00".into(),
+        };
+        assert!(!once_passed(&once, &at("2026-11-10T08:59:00+01:00")));
+        assert!(once_passed(&once, &at("2026-11-10T09:00:00+01:00")));
+        assert!(!once_passed(
+            &daily("09:00", vec![]),
+            &at("2027-01-01T00:00:00+01:00")
+        ));
+    }
+
+    #[test]
+    fn a_once_routine_is_done_after_its_run() {
+        let once = Schedule::Once {
+            at: "2026-11-10T09:00".into(),
+        };
+        let ahead = job("ahead", once.clone(), true, Some(900));
+        assert_eq!(ahead.state(), JobState::Next(900));
+        let mut done = job("done", once.clone(), true, None);
+        done.last = Some(run(5, RunOutcome::Done));
+        assert_eq!(done.state(), JobState::Done);
+        assert!(done.dim());
+        // Switched off after it ran: still done, not off.
+        done.enabled = false;
+        assert_eq!(done.state(), JobState::Done);
+        let now = at("2026-11-10T10:00:00+01:00");
+        assert_eq!(state_note(JobState::Done, &now), "done");
+        assert_eq!(
+            schedule_value(&done, &Local::now()),
+            "Once, Tue Nov 10 09:00 · done"
+        );
+        // Not run, its time gone: no next run to show.
+        assert_eq!(job("missed", once, true, None).state(), JobState::Unplanned);
+        let mut jobs = vec![
+            done,
+            job("off", daily("01:00", vec![]), false, None),
+            job("manual", Schedule::Manual, true, None),
+            ahead,
+        ];
+        order_jobs(&mut jobs);
+        let ids: Vec<&str> = jobs.iter().map(|j| j.id.as_str()).collect();
+        assert_eq!(ids, ["ahead", "manual", "done", "off"]);
     }
 
     #[test]

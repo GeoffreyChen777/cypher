@@ -34,13 +34,13 @@ pub(super) async fn memory_tool(
     params: serde_json::Value,
 ) -> Result<RpcReply, RpcError> {
     let p: MemoryToolParams = parse_params(params)?;
-    let _ = p.tool_call_id;
     let args = if p.args.is_null() {
         serde_json::json!({})
     } else {
         p.args
     };
-    let text = match rpc.memory()?.tool(&p.chat_id, &p.tool, args).await {
+    let call = p.tool_call_id.filter(|id| !id.is_empty());
+    let text = match rpc.memory()?.tool(&p.chat_id, &p.tool, args, call).await {
         Ok(text) => text,
         Err(err) => err.to_string(),
     };

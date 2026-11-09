@@ -1,9 +1,10 @@
 //! Settings → Memory (docs/design/memory.md §8): what agents keep between
-//! sessions. Yours first — read by every session and workspace — then each
-//! project's, kept by the sessions in it. A store opens on the page the
-//! Botboard's Memory panel draws ([`crate::shell::MemoryPane`]), so both
-//! read and edit memory the same way; `/memory` in a session lands here on
-//! its project's store.
+//! sessions, and the one place to read and change it. Yours first — read by
+//! every session and workspace — then each project's, kept by the sessions
+//! in it, then each workspace's own. A store opens on the page
+//! [`crate::shell::MemoryPane`] draws; `/memory` in a session lands here on
+//! its project's store. Writes held for review ask in the chat that made
+//! them ([`crate::transcript`]) and wait on the store's page too.
 
 use gpui::{AnyElement, Context, Entity, SharedString, Subscription, Window, div, prelude::*, px};
 
@@ -23,27 +24,45 @@ pub struct MemorySettingsPage {
     _observe: Subscription,
 }
 
-/// The project stores the page lists, by project name: (space id, name,
-/// row). A store whose project is gone is left out.
-fn project_stores(state: &AppState) -> Vec<(String, String, MemoryStore)> {
-    let mut stores: Vec<(String, String, MemoryStore)> = state
-        .bot_records
-        .memory_stores
-        .iter()
-        .filter_map(|store| match &store.scope {
+/// A store on one of the page's lists.
+struct Listed {
+    name: String,
+    glyph: &'static str,
+    store: MemoryStore,
+}
+
+/// The stores the page lists, each by name: the projects', then the
+/// workspaces'. A store whose project or workspace is gone is left out.
+fn listed_stores(state: &AppState) -> (Vec<Listed>, Vec<Listed>) {
+    let (mut projects, mut workspaces) = (Vec::new(), Vec::new());
+    for store in &state.bot_records.memory_stores {
+        match &store.scope {
             MemoryScope::Project { space_id } => {
-                let space = state.space_row(space_id)?;
-                Some((
-                    space_id.clone(),
-                    space.display_name().to_string(),
-                    store.clone(),
-                ))
+                if let Some(space) = state.space_row(space_id) {
+                    projects.push(Listed {
+                        name: space.display_name().to_string(),
+                        glyph: crate::appearance::space_style::space_icon(space.icon.as_deref()),
+                        store: store.clone(),
+                    });
+                }
             }
-            _ => None,
-        })
-        .collect();
-    stores.sort_by_key(|(_, name, _)| name.to_lowercase());
-    stores
+            MemoryScope::Workspace { bot_id } => {
+                if let Some(bot) = state.bots.iter().find(|b| b.id == *bot_id) {
+                    workspaces.push(Listed {
+                        name: bot.name.clone(),
+                        glyph: crate::appearance::bot_style::bot_icon(bot.icon.as_deref())
+                            .unwrap_or(icons::BOT),
+                        store: store.clone(),
+                    });
+                }
+            }
+            MemoryScope::You | MemoryScope::Role { .. } => {}
+        }
+    }
+    for list in [&mut projects, &mut workspaces] {
+        list.sort_by_key(|listed| listed.name.to_lowercase());
+    }
+    (projects, workspaces)
 }
 
 impl MemorySettingsPage {
@@ -89,23 +108,38 @@ impl MemorySettingsPage {
         cx.notify();
     }
 
-    /// A project's name, for its store's title.
-    fn project_name(&self, scope: &MemoryScope, cx: &Context<Self>) -> Option<String> {
-        let MemoryScope::Project { space_id } = scope else {
-            return None;
-        };
-        Some(
-            self.state
-                .read(cx)
-                .space_row(space_id)
-                .map_or("A removed project", |s| s.display_name())
-                .to_string(),
-        )
+    /// A project's or workspace's name, for its store's title.
+    fn store_name(&self, scope: &MemoryScope, cx: &Context<Self>) -> Option<String> {
+        let state = self.state.read(cx);
+        match scope {
+            MemoryScope::Project { space_id } => Some(
+                state
+                    .space_row(space_id)
+                    .map_or("A removed project", |s| s.display_name())
+                    .to_string(),
+            ),
+            MemoryScope::Workspace { bot_id } => Some(
+                state
+                    .bots
+                    .iter()
+                    .find(|b| b.id == *bot_id)
+                    .map_or("A removed workspace", |b| b.name.as_str())
+                    .to_string(),
+            ),
+            MemoryScope::You | MemoryScope::Role { .. } => None,
+        }
     }
 
-    /// Every project's store, a row each; a click opens it.
-    fn projects_card(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let stores = project_stores(self.state.read(cx));
+    /// One list's stores, a row each; a click opens it. An empty list
+    /// says `empty`.
+    fn stores_card(
+        &self,
+        key: &'static str,
+        stores: Vec<Listed>,
+        empty: &'static str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if stores.is_empty() {
             return widgets::section_card(theme)
                 .mt(px(8.0))
@@ -113,16 +147,14 @@ impl MemorySettingsPage {
                 .py(px(16.0))
                 .text_size(px(13.0))
                 .text_color(theme.text_muted)
-                .child(SharedString::from(
-                    "None yet. Sessions keep what they learn about their project here.",
-                ))
+                .child(SharedString::from(empty))
                 .into_any_element();
         }
         let now = chrono::Utc::now();
         let rows = stores
             .into_iter()
             .enumerate()
-            .map(|(ix, (space_id, name, store))| {
+            .map(|(ix, Listed { name, glyph, store })| {
                 let mut facts: Vec<AnyElement> = vec![
                     div()
                         .child(SharedString::from(match store.files {
@@ -149,15 +181,9 @@ impl MemorySettingsPage {
                             .into_any_element(),
                     );
                 }
-                let glyph = {
-                    let state = self.state.read(cx);
-                    crate::appearance::space_style::space_icon(
-                        state.space_row(&space_id).and_then(|s| s.icon.as_deref()),
-                    )
-                };
-                let scope = MemoryScope::Project { space_id };
+                let scope = store.scope.clone();
                 widgets::card_row(theme, ix == 0)
-                    .id(("memory-project", ix))
+                    .id((key, ix))
                     .cursor_pointer()
                     .on_click(cx.listener(move |page, _, _, cx| page.open(scope.clone(), cx)))
                     .child(widgets::row_tile(theme, glyph))
@@ -214,8 +240,8 @@ impl Render for MemorySettingsPage {
         let parts = self
             .pane
             .update(cx, |pane, cx| pane.render_page(&page, window, cx));
-        let project = self.project_name(&scope, cx);
-        let store_title = project.clone().unwrap_or_else(|| "Memory".to_string());
+        let named = self.store_name(&scope, cx);
+        let store_title = named.clone().unwrap_or_else(|| "Memory".to_string());
 
         // Where the page sits: the store's top (yours is the page's own),
         // or a file of it, one step back from either.
@@ -272,6 +298,7 @@ impl Render for MemorySettingsPage {
 
         let mut column = widgets::page_column().children(back);
         if root {
+            let (projects, workspaces) = listed_stores(self.state.read(cx));
             column = column
                 .child(widgets::page_header(&theme, "Memory", None))
                 .child(widgets::page_subtitle(
@@ -293,7 +320,23 @@ impl Render for MemorySettingsPage {
                     "Each read by the sessions in its project",
                     Vec::new(),
                 ))
-                .child(self.projects_card(&theme, cx));
+                .child(self.stores_card(
+                    "memory-project",
+                    projects,
+                    "None yet. Sessions keep what they learn about their project here.",
+                    &theme,
+                    cx,
+                ));
+            if !workspaces.is_empty() {
+                column = column
+                    .child(card_heading(
+                        &theme,
+                        "Workspaces",
+                        "Each kept and read by its workspace",
+                        Vec::new(),
+                    ))
+                    .child(self.stores_card("memory-workspace", workspaces, "", &theme, cx));
+            }
         } else {
             column = column
                 .child(
@@ -310,13 +353,20 @@ impl Render for MemorySettingsPage {
                                 .children(parts.actions),
                         ),
                 )
-                .when(page == MemoryPage::Index && project.is_some(), |el| {
-                    el.child(widgets::page_subtitle(
-                        &theme,
-                        "What sessions in this project learned. Every one of them reads it, \
-                         and so do the workspaces that read the project.",
-                    ))
-                })
+                .when_some(
+                    match (&page, &scope) {
+                        (MemoryPage::Index, MemoryScope::Project { .. }) => Some(
+                            "What sessions in this project learned. Every one of them reads \
+                             it, and so do the workspaces that read the project.",
+                        ),
+                        (MemoryPage::Index, MemoryScope::Workspace { .. }) => Some(
+                            "What this workspace learned coordinating your work. Its chat \
+                             and sessions read it; your other sessions don't.",
+                        ),
+                        _ => None,
+                    },
+                    |el, subtitle| el.child(widgets::page_subtitle(&theme, subtitle)),
+                )
                 .child(card)
                 .children(footer);
         }

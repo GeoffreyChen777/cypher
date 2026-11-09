@@ -295,6 +295,15 @@ impl Bots {
         };
         routine.clamp();
         routine.validate().map_err(EngineError::Other)?;
+        if matches!(routine.schedule, Schedule::Once { .. })
+            && routine.schedule.next_after(&Local::now()).is_none()
+        {
+            return Err(EngineError::Other(
+                "That time has already passed; pick a later one (list_routines shows the time \
+                 now)."
+                    .into(),
+            ));
+        }
         workspace.put_record(
             p::KIND_BOT_ROUTINES,
             &routine.id,
@@ -430,7 +439,13 @@ pub(super) const ROUTINES_LINE: &str = "Routines:\n- Routines run by hand or on 
      morning, tell me what's stuck\"), or as an ordinary session in one of your projects \
      (\"every night, run the tests and fix anything flaky\"). When your owner asks for \
      something recurring, save it with save_routine; list_routines shows your routines with \
-     their last results.";
+     their last results.\n- Reminders are routines too. When your owner asks to be reminded \
+     (\"remind me tomorrow morning to review the code in invoice-demo\"), save a routine as \
+     you with a once schedule at that local time (morning is 09:00 unless they say; \
+     list_routines shows the time now) and a prompt that tells you to remind them and add \
+     what helps, like what changed in the project since. Say when it will come: \"I'll remind \
+     you tomorrow, Tue Nov 10, at 9:00.\" Don't put reminders in memory: memory is read when \
+     a run starts, and nothing would start one.";
 
 /// The `list_routines` answer: this bot's routines, each with where it
 /// runs, its schedule, next run and last result.

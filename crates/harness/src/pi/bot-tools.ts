@@ -271,17 +271,18 @@ const TOOLS: ToolDef[] = [
     name: "save_routine",
     label: "Save routine",
     description:
-      "Create or change a routine: a job run by hand or on a schedule, unattended; its result is posted in this chat. It runs either as you, in its own session, reading everything you read (\"every morning, tell me what's stuck\"), or, with `project`, as an ordinary session in that project that can change its code (\"every night, run the tests and fix anything flaky\"; needs the Coordinate permission). Scheduled runs continue one session; each run by hand starts a fresh one. Pass `id` to change an existing routine (list_routines shows ids). The schedule is one of {\"kind\":\"daily\",\"time\":\"09:00\",\"days\":[1,2,3,4,5]} (days 1 = Monday … 7 = Sunday; leave out for every day), {\"kind\":\"interval\",\"minutes\":60} (at least 15) or {\"kind\":\"manual\"} (only when run by hand), in the host device's local time. Returns what was saved and the next run.",
+      "Create or change a routine: a job run by hand or on a schedule, unattended; its result is posted in this chat. It runs either as you, in its own session, reading everything you read (\"every morning, tell me what's stuck\"), or, with `project`, as an ordinary session in that project that can change its code (\"every night, run the tests and fix anything flaky\"; needs the Coordinate permission). Scheduled runs continue one session; each run by hand starts a fresh one. Pass `id` to change an existing routine (list_routines shows ids). The schedule is one of {\"kind\":\"daily\",\"time\":\"09:00\",\"days\":[1,2,3,4,5]} (days 1 = Monday … 7 = Sunday; leave out for every day), {\"kind\":\"interval\",\"minutes\":60} (at least 15), {\"kind\":\"once\",\"at\":\"2026-11-10T09:00\"} (one run: a reminder) or {\"kind\":\"manual\"} (only when run by hand), in the host device's local time. Returns what was saved and the next run.",
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: "The routine to change; leave out to create one" })),
       name: Type.String({ description: "A short name, e.g. Morning brief" }),
       prompt: Type.String({ description: "What each run should do and report, written as an instruction to yourself" }),
       schedule: Type.Object(
         {
-          kind: Type.Union([Type.Literal("daily"), Type.Literal("interval"), Type.Literal("manual")]),
+          kind: Type.Union([Type.Literal("daily"), Type.Literal("interval"), Type.Literal("once"), Type.Literal("manual")]),
           time: Type.Optional(Type.String({ description: "daily: HH:MM, 24-hour" })),
           days: Type.Optional(Type.Array(Type.Integer({ minimum: 1, maximum: 7 }), { description: "daily: 1 = Monday … 7 = Sunday" })),
           minutes: Type.Optional(Type.Integer({ minimum: 15, description: "interval: minutes between runs" })),
+          at: Type.Optional(Type.String({ description: "once: local date and time, YYYY-MM-DDTHH:MM" })),
         },
         { description: "When it runs" },
       ),

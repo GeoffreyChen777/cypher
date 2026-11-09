@@ -66,6 +66,7 @@ mod artifacts;
 mod attachments;
 pub mod bot_plan;
 mod find;
+mod memory_card;
 pub mod rail;
 mod render;
 mod scroll;
@@ -135,8 +136,9 @@ pub const ATT_STRIP_H: f32 = ATT_THUMB_H + 10.0;
 
 /// What [`Transcript::sync`] last built rows from: the state's transcript
 /// revision, the selected chat, the attachment devices, the tool call cap,
-/// and the chat's plans ([`bot_plan::plans_key`]).
-type SyncedRevision = (u64, Option<String>, Vec<String>, u32, u64);
+/// the chat's plans ([`bot_plan::plans_key`]) and the memory cards
+/// ([`memory_card::MemoryCards`]).
+type SyncedRevision = (u64, Option<String>, Vec<String>, u32, u64, u64);
 
 struct CachedRows {
     fingerprint: u64,
@@ -382,6 +384,12 @@ pub struct Transcript {
     bot_plan_armed: Option<String>,
     /// Disarms [`Self::bot_plan_armed`] after the window elapses.
     bot_plan_disarm: Option<Task<()>>,
+    /// The memory cards' calls ([`memory_card`]), as rows were built, and
+    /// the held writes answered from them (on their way, or failed with
+    /// what to say), by held write id.
+    memory_cards: memory_card::MemoryCards,
+    memory_busy: std::collections::HashSet<String>,
+    memory_errors: HashMap<String, SharedString>,
     /// In-chat find (⌘F). `None` while the find bar is closed — the shell
     /// renders the bar from this, so the two can never disagree about
     /// whether find is open.
@@ -610,6 +618,9 @@ impl Transcript {
             rewind_disarm: None,
             bot_plan_armed: None,
             bot_plan_disarm: None,
+            memory_cards: Default::default(),
+            memory_busy: Default::default(),
+            memory_errors: HashMap::new(),
             find: None,
             live: None,
             trailer_tick: None,

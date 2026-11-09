@@ -1,8 +1,7 @@
 //! **Memory** (docs/design/memory.md §8): what agents learn and keep
 //! between sessions, as a store of markdown files. One pane draws a store
-//! wherever it opens: a workspace's own (its sidebar card and panel), a
-//! project's (from the project's page), and yours and every project's in
-//! Settings → Memory ([`crate::settings::memory`]).
+//! on its page in Settings → Memory ([`crate::settings::memory`]), built
+//! from the pieces the Botboard's panels use.
 //!
 //! A store's page reads top to bottom: writes held for review, `MEMORY.md`
 //! rendered, the other files, consolidation, then the recent changes, each
@@ -13,7 +12,6 @@
 //! pages it asks for ([`MemoryPaneEvent`]).
 
 use super::items::{arrow_in, head_note, hover_row, panel_markdown, section_head, section_rule};
-use super::panel::{PanelHead, PanelItem};
 use super::parts::{self, CallError};
 use super::*;
 use cypher_proto::{
@@ -1318,168 +1316,6 @@ impl MemoryPane {
             .ok();
         })
         .detach();
-    }
-}
-
-// ── on the Botboard ─────────────────────────────────────────────────────────
-
-/// The panel item for `page` of the store at `scope`.
-pub(super) fn panel_item(scope: MemoryScope, page: MemoryPage) -> PanelItem {
-    match page {
-        MemoryPage::Index => PanelItem::Memory(scope),
-        MemoryPage::File(path) => PanelItem::MemoryFile { scope, path },
-        MemoryPage::New => PanelItem::NewMemoryFile(scope),
-    }
-}
-
-impl Shell {
-    /// The sidebar card: its header alone, saying how many files the
-    /// workspace keeps or, in the amber of Needs you, how many writes wait
-    /// on the owner.
-    pub(super) fn render_memory_card(
-        &self,
-        bot: &Bot,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let scope = MemoryScope::Workspace {
-            bot_id: bot.id.clone(),
-        };
-        let store = self
-            .state
-            .read(cx)
-            .bot_records
-            .memory_store(&scope)
-            .cloned();
-        let (hint, color) = match store {
-            Some(store) if store.pending > 0 => {
-                (format!("{} to review", store.pending), Some(theme.warning))
-            }
-            Some(store) if store.files > 0 => (count(store.files as usize, "file", "files"), None),
-            _ => ("No memory yet".to_string(), None),
-        };
-        Some(parts::header_card(
-            "bot-memory-card",
-            "Memory",
-            hint,
-            color,
-            PanelItem::Memory(scope),
-            self.card_focused("memory", cx),
-            theme,
-            cx,
-        ))
-    }
-
-    /// The pane for `scope`, made (and watching) on first use; another
-    /// store's pane goes.
-    fn board_memory_pane(
-        &mut self,
-        scope: &MemoryScope,
-        cx: &mut Context<Self>,
-    ) -> Entity<MemoryPane> {
-        if let Some((open, pane, _)) = &self.board.memory
-            && open == scope
-        {
-            return pane.clone();
-        }
-        let state = self.state.clone();
-        let pane = cx.new(|cx| MemoryPane::new(state, scope.clone(), cx));
-        // Its pages draw in the panel, so a change in it redraws the shell.
-        let subscriptions = vec![
-            cx.observe(&pane, |_, _, cx| cx.notify()),
-            cx.subscribe(
-                &pane,
-                |this: &mut Shell, pane, event: &MemoryPaneEvent, cx| {
-                    let MemoryPaneEvent::Show(page) = event;
-                    let scope = pane.read(cx).scope().clone();
-                    this.show_panel(panel_item(scope, page.clone()), cx);
-                },
-            ),
-        ];
-        self.board.memory = Some((scope.clone(), pane.clone(), subscriptions));
-        pane
-    }
-
-    /// A store's page in the detail panel: the workspace's own, or a
-    /// project's it reads (reached from the project's page, and back).
-    pub(super) fn render_memory_panel(
-        &mut self,
-        bot: &Bot,
-        item: &PanelItem,
-        theme: &Theme,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<(PanelHead, gpui::Div)> {
-        let (scope, page) = match item {
-            PanelItem::Memory(scope) => (scope, MemoryPage::Index),
-            PanelItem::MemoryFile { scope, path } => (scope, MemoryPage::File(path.clone())),
-            PanelItem::NewMemoryFile(scope) => (scope, MemoryPage::New),
-            _ => return None,
-        };
-        let project = match scope {
-            MemoryScope::Workspace { bot_id } if *bot_id == bot.id => None,
-            MemoryScope::Project { space_id } if bot.scope.sees_space(space_id) => Some(
-                self.state
-                    .read(cx)
-                    .space_row(space_id)?
-                    .display_name()
-                    .to_string(),
-            ),
-            _ => return None,
-        };
-        let pane = self.board_memory_pane(scope, cx);
-        let parts = pane.update(cx, |pane, cx| pane.render_page(&page, window, cx));
-        self.set_panel_actions(parts.actions);
-        self.board.panel_footer = parts.footer;
-        self.board.panel_empty = parts.empty;
-        let title = match &page {
-            MemoryPage::Index => {
-                // A project's store names its project after the title and
-                // goes back to its page.
-                if let (Some(name), MemoryScope::Project { space_id }) = (&project, scope) {
-                    self.board.panel_title_note = Some(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12.5))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(name.clone()))
-                            .into_any_element(),
-                    );
-                    self.set_panel_back(
-                        "bot-memory-back",
-                        "Back to the project",
-                        PanelItem::Project(space_id.clone()),
-                        cx,
-                    );
-                }
-                "Memory".to_string()
-            }
-            MemoryPage::File(path) => {
-                self.set_panel_back(
-                    "bot-memory-back",
-                    "Back to memory",
-                    PanelItem::Memory(scope.clone()),
-                    cx,
-                );
-                file_name(path)
-            }
-            MemoryPage::New => {
-                self.set_panel_back(
-                    "bot-memory-back",
-                    "Back to memory",
-                    PanelItem::Memory(scope.clone()),
-                    cx,
-                );
-                "New file".to_string()
-            }
-        };
-        let head = PanelHead {
-            glyph: icons::BOOK,
-            tint: None,
-            title,
-        };
-        Some((head, parts.body))
     }
 }
 

@@ -949,3 +949,49 @@ async fn a_routine_granted_work_directly_runs_with_pi_tools() {
     assert!(!env.tools.iter().any(|t| t == "bash"), "{:?}", env.tools);
     assert!(env.workspace_roots.is_empty());
 }
+
+/// "Remind me tomorrow morning…" is a once routine: saved for that time,
+/// refused for a time already past, and listed as running once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reminder_is_a_routine_that_runs_once() {
+    let Rig {
+        core, dir: _dir, ..
+    } = rig().await;
+    let bot = create_bot(&core, false).await;
+    let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
+        .format("%Y-%m-%dT09:00")
+        .to_string();
+    let saved = tool(
+        &core,
+        &bot.chat_id,
+        "save_routine",
+        serde_json::json!({
+            "name": "Review reminder",
+            "prompt": "Remind your owner to review the code in web.",
+            "schedule": { "kind": "once", "at": tomorrow },
+        }),
+    )
+    .await;
+    assert!(saved.contains("Once, "), "{saved}");
+    assert!(saved.contains("next run"), "{saved}");
+    let past = tool(
+        &core,
+        &bot.chat_id,
+        "save_routine",
+        serde_json::json!({
+            "name": "Too late",
+            "prompt": "x",
+            "schedule": { "kind": "once", "at": "2020-01-01T09:00" },
+        }),
+    )
+    .await;
+    assert!(past.contains("already passed"), "{past}");
+    core.bots.schedule_now().await;
+    let routines = core.workspace.read_bot_records().routines;
+    assert_eq!(routines.len(), 1);
+    let at = cypher_proto::Schedule::Once { at: tomorrow }
+        .once_at(&chrono::Local)
+        .unwrap()
+        .timestamp_millis();
+    assert_eq!(routines[0].next_run_at, Some(at));
+}

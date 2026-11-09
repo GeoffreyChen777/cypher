@@ -115,7 +115,7 @@ impl Composer {
     /// `/memory` typed in full: the store it opens — the session's project
     /// (or the project picked on the new-session canvas), else yours. Never
     /// sent to the agent; `None` for anything else, and in a side chat or a
-    /// workspace's conversation (its memory is on the Botboard).
+    /// workspace's conversation (its memory is in Settings → Memory).
     pub(super) fn typed_memory(&self, text: &str, cx: &App) -> Option<cypher_proto::MemoryScope> {
         if text.trim() != "/memory"
             || !matches!(self.transport, ComposerTransport::Main)

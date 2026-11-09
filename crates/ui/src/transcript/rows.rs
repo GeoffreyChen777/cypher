@@ -116,6 +116,13 @@ pub enum RowKind {
         title: SharedString,
         resolved: bool,
     },
+    /// A `memory` call whose write was held: its card, drawn from the
+    /// store's row ([`super::memory_card`]), named by the file it wrote.
+    /// The row's version carries the cards' key, like a plan's.
+    MemoryWrite {
+        call_id: SharedString,
+        file: SharedString,
+    },
     /// The attribution over a routine's output posted into a bot chat (§8):
     /// the routine's name, when it ran, a failed mark, and its thread. The
     /// output itself follows as ordinary text rows.
@@ -313,6 +320,7 @@ pub(super) fn row_match_count(row: &Row, query: &str) -> u32 {
         | RowKind::InputChip { .. }
         | RowKind::ErrorChip { .. }
         | RowKind::BotPlan { .. }
+        | RowKind::MemoryWrite { .. }
         | RowKind::BotPost { .. }
         | RowKind::PeerAnswer { .. }
         | RowKind::Thought { .. }
@@ -655,14 +663,26 @@ pub(super) fn user_entry_is_slash_command(entry: &SessionMessageEntry) -> bool {
     crate::composer::slash_command_label(&text).is_some()
 }
 
+/// [`entry_rows`] with no memory cards.
+#[cfg(test)]
+pub fn rows_for_entry(
+    entry: &SessionMessageEntry,
+    pending: bool,
+    parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
+) -> Vec<Row> {
+    entry_rows(entry, pending, &Default::default(), parse)
+}
+
 /// Build the block rows of one (already continuation-joined) entry.
 ///
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
 /// incremental parsers for live parts and a cache for complete ones; tests pass
-/// a plain `parse_full`.
-pub fn rows_for_entry(
+/// a plain `parse_full`. `memory_cards` names the `memory` calls drawn as
+/// cards rather than chips.
+pub(super) fn entry_rows(
     entry: &SessionMessageEntry,
     pending: bool,
+    memory_cards: &super::memory_card::MemoryCards,
     parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
 ) -> Vec<Row> {
     if entry.role == MessageRole::User {
@@ -699,10 +719,11 @@ pub fn rows_for_entry(
             MessagePart::Input { request_id, .. } if fold.filed.contains(request_id) => continue,
             _ => {}
         }
-        // A plan is a card of its own, not a chip in a group.
-        if !super::bot_plan::is_plan_call(part)
-            && let Some((part_id, item)) = tool_item(part, &fold)
-        {
+        // A plan is a card of its own, not a chip in a group, and so is a
+        // held memory write.
+        let card = super::bot_plan::is_plan_call(part)
+            || super::memory_card::is_card_call(part, memory_cards);
+        if !card && let Some((part_id, item)) = tool_item(part, &fold) {
             // Nothing is pushed until the group flushes, so the run's
             // rows start here.
             run.get_or_insert_with(|| (rows.len(), part_id.clone()));
@@ -797,7 +818,20 @@ pub fn rows_for_entry(
                     message: single_line(message).into(),
                 },
             )),
-            // Tools are grouped above; only a plan reaches here.
+            // Tools are grouped above; only the cards reach here.
+            MessagePart::Tool {
+                id: part_id, call, ..
+            } if super::memory_card::is_card_call(part, memory_cards) => {
+                let file = super::memory_card::call_file(call);
+                rows.push(cx.row(
+                    format!("{}#{}", entry.id, part_id),
+                    fnv1a(part_id.as_bytes()) ^ fnv1a(file.as_bytes()).rotate_left(7),
+                    RowKind::MemoryWrite {
+                        call_id: part_id.clone().into(),
+                        file: file.into(),
+                    },
+                ))
+            }
             MessagePart::Tool {
                 id: part_id,
                 call,

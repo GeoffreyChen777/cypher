@@ -15,7 +15,7 @@ use cypher_engine::EngineCore;
 use cypher_harness::RunProfile;
 use cypher_proto::{
     AgentEvent, Bot, BotChat, BotOrigin, BotScope, BotThread, HarnessId, MemoryScope, MemoryView,
-    NeedsYou, PassOutcome, ProjectGrant, ToolCall,
+    PassOutcome, ProjectGrant, ToolCall,
 };
 use cypher_rpc::RpcClient;
 
@@ -534,23 +534,73 @@ async fn writes_after_untrusted_content_wait_for_review() {
         .collect();
     assert_eq!(paths, ["/changelog.md"]);
 
-    // A workspace's held write needs its owner on the Needs you card.
+    // A held write is asked about in its chat: the row carries what the
+    // card at its tool call shows, then how it was decided.
     let bot = create_bot(&rig).await;
     rig.run(&bot.chat_id, "FETCH the news").await;
+    let reply = rig
+        .client()
+        .call(
+            cypher_rpc::methods::MEMORY_TOOL,
+            serde_json::json!({
+                "chatId": bot.chat_id, "tool": "memory", "toolCallId": "call-7",
+                "args": { "command": "create", "path": "/workspace/MEMORY.md", "file_text": "- x\n" },
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        reply["text"]
+            .as_str()
+            .unwrap()
+            .contains("the user is asked in the chat")
+    );
+    let scope = MemoryScope::Workspace {
+        bot_id: bot.id.clone(),
+    };
+    let row = rig.rows().into_iter().find(|r| r.scope == scope).unwrap();
+    let held = row.held_for_call("call-7").expect("the card's write");
+    assert_eq!(held.chat_id, bot.chat_id);
+    assert_eq!(held.preview.as_deref(), Some("- x"), "clipped and trimmed");
+    assert!(held.reason.contains("fetched a web page"));
+    let id = held.id.clone();
+    rig.edit(&scope, serde_json::json!({ "op": "discard", "id": id }))
+        .await
+        .unwrap();
+    let row = rig.rows().into_iter().find(|r| r.scope == scope).unwrap();
+    assert!(row.held_for_call("call-7").is_none());
+    assert!(!row.decided_for_call("call-7").expect("decided").saved);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_you_ask_a_workspace_to_remember_every_session_knows() {
+    let rig = rig();
+    let bot = create_bot(&rig).await;
+    // "Remember that I had a hazelnut coffee today. I like hazelnut coffee."
     rig.tool(
         &bot.chat_id,
-        serde_json::json!({ "command": "create", "path": "/workspace/MEMORY.md", "file_text": "- x\n" }),
+        serde_json::json!({ "command": "create", "path": "/you/MEMORY.md", "file_text": "- Likes hazelnut coffee\n" }),
     )
     .await;
-    let records = rig.core.workspace.read_bot_records();
-    assert!(
-        records
-            .needs_you(&bot.id, |_| false)
-            .iter()
-            .any(|n| matches!(n, NeedsYou::Memory(_))),
-        "{:?}",
-        records.needs_you(&bot.id, |_| false)
-    );
+    rig.tool(
+        &bot.chat_id,
+        serde_json::json!({ "command": "create", "path": "/you/journal.md", "file_text": "- 2026-11-09: had a hazelnut coffee\n" }),
+    )
+    .await;
+    // Days later, in the workspace or any session: it starts every run.
+    for chat in [bot.chat_id.as_str(), "c-api"] {
+        let memory = rig
+            .run(chat, "What coffee did I say I liked?")
+            .await
+            .memory
+            .unwrap();
+        assert!(
+            memory.contains("- Likes hazelnut coffee"),
+            "{chat}: {memory}"
+        );
+        assert!(memory.contains("/you/journal.md"), "{memory}");
+        assert!(memory.contains("When the user asks you to remember something"));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

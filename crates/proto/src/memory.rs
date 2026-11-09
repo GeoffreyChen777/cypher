@@ -36,6 +36,13 @@ pub const MEMORY_PREVIEW_MAX: usize = 1_200;
 /// The longest path, root excluded.
 pub const MEMORY_PATH_MAX: usize = 160;
 
+/// Held writes a store's row carries for chat cards (newest), and the
+/// characters of each one's text.
+pub const MEMORY_HELD_IN_ROW: usize = 10;
+pub const MEMORY_HELD_PREVIEW: usize = 400;
+/// Decisions on held writes a row remembers (so a card shows its outcome).
+pub const MEMORY_DECIDED_IN_ROW: usize = 30;
+
 /// The memory tools every run but a peer's gets (one Pi extension).
 pub const MEMORY_TOOLS: [&str; 3] = ["memory", "search_history", "read_history"];
 
@@ -222,6 +229,59 @@ pub struct MemoryStore {
     /// A pass was asked for ("Run now") at this time; the host runs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass_requested_at: Option<i64>,
+    /// The newest held writes, for the approval card drawn at the tool call
+    /// that made each (in the chat it was made in).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<HeldWrite>,
+    /// Recent decisions on held writes, newest last: a decided card shows
+    /// its outcome.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decided: Vec<HeldDecision>,
+}
+
+/// A held write as a chat card shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeldWrite {
+    pub id: String,
+    pub chat_id: String,
+    /// The `memory` tool call that made it: where the card is drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    pub path: String,
+    /// The file as the write would leave it, clipped (`None`: deleted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    pub reason: String,
+    pub at: i64,
+}
+
+/// What the owner decided about one held write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeldDecision {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    pub saved: bool,
+    pub at: i64,
+}
+
+impl MemoryStore {
+    /// The held write a `memory` tool call made, still waiting.
+    pub fn held_for_call(&self, tool_call_id: &str) -> Option<&HeldWrite> {
+        self.held
+            .iter()
+            .find(|h| h.tool_call_id.as_deref() == Some(tool_call_id))
+    }
+
+    /// The decision on the write a `memory` tool call made.
+    pub fn decided_for_call(&self, tool_call_id: &str) -> Option<&HeldDecision> {
+        self.decided
+            .iter()
+            .rev()
+            .find(|d| d.tool_call_id.as_deref() == Some(tool_call_id))
+    }
 }
 
 impl MemoryStore {
@@ -240,11 +300,24 @@ impl MemoryStore {
             last_pass: None,
             month: None,
             pass_requested_at: None,
+            held: Vec::new(),
+            decided: Vec::new(),
         }
     }
 
     pub fn clamp(&mut self) {
         self.preview = clip(&self.preview, MEMORY_PREVIEW_MAX);
+        let over = self.held.len().saturating_sub(MEMORY_HELD_IN_ROW);
+        self.held.drain(..over);
+        for held in &mut self.held {
+            held.preview = held
+                .preview
+                .as_deref()
+                .map(|p| clip(p, MEMORY_HELD_PREVIEW));
+            held.reason = clip(&held.reason, crate::bot_records::LINE_MAX);
+        }
+        let over = self.decided.len().saturating_sub(MEMORY_DECIDED_IN_ROW);
+        self.decided.drain(..over);
         self.consolidation.hour = self.consolidation.hour.min(23);
         if let Some(pass) = &mut self.last_pass {
             pass.summary = pass
@@ -387,6 +460,9 @@ pub struct MemoryPending {
     /// The file as the write would leave it (`None`: deleted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// The `memory` tool call that made it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 /// Everything the app shows of one store (`WatchMemory`).

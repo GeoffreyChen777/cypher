@@ -374,7 +374,8 @@ its own `/workspace/projects/<name>.md`. Peer threads see no memory at all. A ro
 writes the workspace's memory only when its routine's `writeNotes` is set (shown as "May
 write memory"). Every change is logged with its author and can be undone, and the
 workspace's changes also land in its Activity. Writes from a thread tainted by a peer's
-answer, or that read the web, are held for the owner in Needs you.
+answer, or that read the web, are held: the chat asks the owner with a Save / Don't save
+card. The workspace board shows no memory; it is managed in Settings › Memory.
 
 The notebook this replaced (`botNotes` rows and the `read_notes`…`delete_note` tools) is
 gone: at start, each workspace's host folds its notes into the store's `MEMORY.md` under
@@ -397,8 +398,15 @@ routines apart is where they run and what they can reach:
 - **Sessions:** scheduled runs continue one standing session per routine, so each run sees
   the ones before it. Each Run now starts a fresh session, kept until the next Run now
   replaces (and deletes) it. Both can be opened from the routine to watch a run.
-- **Triggers:** a schedule, and later events ("a session errors", "a session waits on you
-  for 10 minutes", "CI failed on main").
+- **Triggers:** a schedule (daily, every N minutes, by hand, or **once** at a local date
+  and time), and later events ("a session errors", "a session waits on you for 10
+  minutes", "CI failed on main").
+- **Reminders** are once routines: "remind me tomorrow morning to review the code in
+  invoice-demo" becomes a workspace routine scheduled once for 09:00 tomorrow, whose prompt
+  tells the agent to remind the owner and add what helps (what changed in the project). Its
+  post in the bot chat is the reminder. A time already past is refused; a once routine that
+  ran keeps its last result and has no next run. Reminders are not memory: memory is read
+  only when a run starts.
 - **Unattended:** a routine run never waits for approval. Permission prompts
   are denied automatically and the run settles as failed, with a notification.
 - **Limits:** the 15-minute minimum interval and the bot's `paused` flag as a kill switch
@@ -986,7 +994,6 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 | **Work** | Running orchestrations with their current step, a step bar and elapsed time; the last few finished ones with a one-line result | The orchestration: its status as the title's tile (state, progress and times on hover), its request, then one flow on one rail: each step with its state, duration, note and sessions, ending in the result; Stop. Agent-written text (request, summary, notes, result) renders as markdown. A step's title folds its details; hovering a node washes it and firms up its rail segment, a duration shows its exact times, the result offers Copy, and the shared project opens its page |
 | **Routines** | Its routines in order of next run: name, where and when it runs, next run, last result | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
 | **Projects** | Each granted project with device, running and waiting sessions, and "works directly" or "via sessions" | The list groups projects by device (sessions, what runs or asks, last activity). A project's page: its device beside the title (the folder on hover, a click copies it), its sessions in scope with status, the bot's work there and its routines there |
-| **Memory** | Just its header: how many files, or "N to review" in amber when held writes wait | The store ([memory.md](memory.md) §8): held writes to accept or discard, `MEMORY.md` rendered, the files (each opens its page: copy, edit, delete), consolidation (on/off, hour, last pass, Run now, Undo), and the change log with Undo |
 | **Network** (P4) | Just its header: how many workspaces are connected, or "N to review" in amber when answers wait in Needs you (a click opens the review) | The Network panel lists connections, invites and recent questions; a connection opens its own page (scope, reply mode, exchanges, revoke) with a back arrow to Network |
 
 There is no Activity card: it mostly repeated Work, Routines and Network. The full audit
@@ -1019,7 +1026,7 @@ Every panel page shares one layout, so a page says each thing once:
 - **Empty:** a panel with nothing to list says so in the middle of the space under its
   header (a quiet glyph, a short line, a hint, and an action where one helps); what it
   still shows above, like Activity's filter, stays on top. A list's own "add" is the
-  header's **+** (Memory, Routines).
+  header's **+** (Routines).
 
 Behaviour:
 
@@ -1048,7 +1055,7 @@ As built, beyond the table:
   read-only with a way back to its work item, routine or connection.
 - **A routine** can be granted *Work directly* ("May run commands"), only while the bot
   has it; unattended, anything that needs approval fails the run.
-- **Empty cards** for Routines, Memory and Network show only their header with a quiet
+- **Empty cards** for Routines and Network show only their header with a quiet
   hint; the header opens the panel, whose own button adds the first routine, note or
   connection. No card carries a `+`.
 - **Signed out**, the Network card says "Sign in to connect"; records stay visible.
@@ -1095,7 +1102,7 @@ As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is n
 | **P0: local bot** (built) | `bots` rows, the bot chat, the bot spawn mode with tool allowlist, four read tools (bounded scan), scope enforcement, palette and conversation UI, use from other owner devices. |
 | **P1: foundation** (built) | Role-aware run profiles with engine-stamped origins; the untrusted-data prompt; the non-interactive run mode; the FTS index, `session_activity` and `project_git`. |
 | **P2: coordinator** (built) | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; plan, progress and result cards; Stop; limits including a 4-hour time budget; audit log; approvals for tainted threads. Not built: per-worker turn budgets. |
-| **P3: memory and routines** (built) | The notebook, since replaced by [Memory](memory.md); the scheduler; routines in the workspace (optionally working directly) or as sessions in a project; their posts in the bot chat; the Routines and Memory cards; Needs you. Not built: event triggers. |
+| **P3: memory and routines** (built) | The notebook, since replaced by [Memory](memory.md); the scheduler; routines in the workspace (optionally working directly) or as sessions in a project; their posts in the bot chat; the Routines card; Needs you. Not built: event triggers. |
 | **P4: network** (built) | `BotRoom`, publish, invites, connections, peer threads, `ask_bot`, exchange states, late answers, the Network card and panels. |
 | **P5: review and control** (built but notifications) | Review mode and the outgoing scrub, reviews in Needs you; *Coordinate: steer* with a per-action approval. Not built: push notifications for reviews, plans and connections. |
 | **P6: groups, iPhone, E2E** | Owner groups, then shared groups; the iOS bot surfaces; end-to-end encrypted exchanges. |

@@ -28,12 +28,23 @@ pub(super) fn planned_next<Tz: TimeZone>(
     if !enabled {
         return None;
     }
+    // A once-only job: its time while it is ahead, and after it only while
+    // still held (a run the device slept through happens once on wake;
+    // starting the run clears it).
+    if let Some(at) = schedule.once_at(&now.timezone()) {
+        let at = at.timestamp_millis();
+        return if at > now.timestamp_millis() {
+            Some(at)
+        } else {
+            held.filter(|held| *held == at)
+        };
+    }
     let next = schedule.next_after(now)?.timestamp_millis();
     let Some(held) = held else {
         return Some(next);
     };
     let is_slot = match schedule {
-        Schedule::Manual => false,
+        Schedule::Manual | Schedule::Once { .. } => false,
         Schedule::Interval { .. } => true,
         Schedule::Daily { .. } => now
             .timezone()
@@ -190,6 +201,35 @@ mod tests {
         assert_eq!(
             planned_next(&Schedule::Manual, true, Some(nine), &now),
             None
+        );
+    }
+
+    #[test]
+    fn a_once_routine_runs_once_even_after_a_sleep() {
+        let once = Schedule::Once {
+            at: "2026-10-20T09:00".into(),
+        };
+        let nine = ms("2026-10-20T09:00:00+01:00");
+        let before = at("2026-10-19T22:00:00+01:00");
+        assert_eq!(planned_next(&once, true, None, &before), Some(nine));
+        // Asleep through it: still held, so it runs on wake…
+        let after = at("2026-10-20T11:00:00+01:00");
+        assert_eq!(planned_next(&once, true, Some(nine), &after), Some(nine));
+        assert_eq!(
+            due(Some(nine), None, None, after.timestamp_millis()),
+            Some(Due::Scheduled)
+        );
+        // …and once started (the host clears it), never again.
+        assert_eq!(planned_next(&once, true, None, &after), None);
+        assert_eq!(once.next_after(&after), None);
+        assert_eq!(once.describe(), "Once, Tue Oct 20 09:00");
+        assert!(once.validate().is_ok());
+        assert!(
+            Schedule::Once {
+                at: "tomorrow".into()
+            }
+            .validate()
+            .is_err()
         );
     }
 

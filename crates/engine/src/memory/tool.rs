@@ -277,10 +277,12 @@ impl Memory {
         chat_id: &str,
         tool: &str,
         arguments: serde_json::Value,
+        tool_call_id: Option<String>,
     ) -> Result<String, EngineError> {
-        let reader = self
+        let mut reader = self
             .reader(chat_id)
             .ok_or_else(|| err("Memory isn't available in this session."))?;
+        reader.tool_call_id = tool_call_id;
         let answer = match tool {
             "memory" => self.memory_command(&reader, &arguments).await,
             "search_history" => {

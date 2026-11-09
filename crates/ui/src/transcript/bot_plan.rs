@@ -213,7 +213,7 @@ const PLAN_RADIUS: f32 = 14.0;
 
 /// The card's glass, the composer pill's like a routine's result card: its
 /// fill, border and frost, with its soft lift drawn only outside the shape.
-fn plan_surface(theme: &Theme, body: gpui::Div) -> AnyElement {
+pub(super) fn plan_surface(theme: &Theme, body: gpui::Div) -> AnyElement {
     let reach = crate::kit::soft_shadow::Reach {
         top: 3.0,
         side: 8.0,
@@ -404,7 +404,7 @@ fn place_shown(common: &Option<String>, project: &Option<StepProject>) -> bool {
 }
 
 /// A hairline between the card's sections.
-fn plan_rule() -> gpui::Div {
+pub(super) fn plan_rule() -> gpui::Div {
     div()
         .mx(px(16.0))
         .h(px(1.0))

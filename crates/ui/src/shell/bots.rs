@@ -81,13 +81,6 @@ pub(super) struct BoardUi {
     /// The Schedule and Network panels' forms and drafts.
     schedule: schedule::ScheduleUi,
     network: network::NetworkUi,
-    /// The open memory store's pane (its watch, editor and drafts), while
-    /// the panel shows one of its pages.
-    memory: Option<(
-        cypher_proto::MemoryScope,
-        Entity<memory::MemoryPane>,
-        Vec<Subscription>,
-    )>,
     /// A delete or revoke waiting on the owner's yes.
     confirm: Option<parts::Confirm>,
     /// A form's buttons, pinned under the panel's scrolling body; set by

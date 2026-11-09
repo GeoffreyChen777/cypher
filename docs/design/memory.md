@@ -141,7 +141,7 @@ mattering into it. It never edits transcripts.
 - **You store:** run over all sessions since the last pass, keeping only what holds across
   projects.
 - **Inputs:** sessions and threads since the last pass, at most 100; never peer threads.
-- **Output:** applied in place. The run's short summary shows in the store's memory view
+- **Output:** applied in place. The run's short summary shows in Settings › Memory
   (and a workspace's Activity), every change is in the change log, and "Undo" restores the
   store from the doc history before the pass.
 - **Cost:** real model runs; the setting shows the last pass's token use and the month's
@@ -153,8 +153,8 @@ Memory is injected into every later run, so a bad write persists. The rules:
 
 - **Tainted runs don't write memory freely.** A run that read untrusted content (a web
   page, another workspace's answer; the permission system already tracks this) may still
-  call `memory`, but its writes land as **pending**: kept, shown in the memory view and in
-  Needs you, and left out of injection until you accept them. Consolidation never accepts
+  call `memory`, but its writes land as **pending**: kept, asked about in the chat with a
+  Save / Don't save card (§8), and left out of injection until you save them. Consolidation never accepts
   pending writes on its own.
 - **Your text can be corrected, never silently.** Agents may edit or remove lines you
   wrote; each such change is logged in Activity with the old text and can be undone.
@@ -164,27 +164,34 @@ Memory is injected into every later run, so a bad write persists. The rules:
 
 ## 8. UI
 
-- **Memory panel** (replaces the Notebook): the store's `MEMORY.md` rendered first, its
-  files below as a list; open a file to read or edit it as markdown; pending writes on top
-  with Accept / Discard; each file shows who last changed it and when.
-- **Where it opens:** a workspace's sidebar card "Memory"; a project's page (Memory
-  section); Settings › Memory for the You store; the subagent editor gets a Memory switch
-  (user or project scope).
-- **In a session:** `/memory` opens the session's stores; tool chips name the file
-  ("Updated memory · build-and-test.md").
+Memory works quietly: nothing in a session or workspace makes people manage it.
+
+- **Settings › Memory** is the one place to see and adjust it: your store, then each
+  project's and each workspace's; a store shows `MEMORY.md` rendered, its files (read, edit, delete, add),
+  consolidation (on/off, hour, last pass, Run now, Undo) and the change log with Undo.
+  `/memory` in a session opens it. The subagent editor has a Memory choice (off, across
+  projects, per project).
+- **Approval in the chat:** a held write (§7) is asked about where it was made, as a card
+  at its `memory` tool call: "Save to memory?" with the file, the proposed text and why it
+  was held; Save / Don't save. Decided, the card says "Saved to memory" or "Not saved".
+  The store's row carries its newest held writes and recent decisions for the card.
+- **In the transcript** a memory tool call is a quiet chip ("Saved to memory ·
+  testing.md").
+- **Not shown:** no memory card or panel in a workspace, no Memory section on project pages,
+  nothing in Needs you.
 
 ## 9. Migration
 
 The workspace notebook becomes the workspace store: notes become lines in `/MEMORY.md`,
 newest first, each keeping its author and date as metadata, and the notebook tools are
 removed in the same release (the agent's prompt and tools change together, so nothing
-calls them). The Notebook card and panel become Memory.
+calls them). The Notebook card and panel are gone.
 
 ## 10. Phases
 
 | Phase | Ships |
 |---|---|
-| M1 | Stores (doc + relay), the `memory` tool, injection; the workspace store replaces the notebook; the Memory panel |
+| M1 | Stores (doc + relay), the `memory` tool, injection; the workspace store replaces the notebook; the memory UI (§8) |
 | M2 | You and Project stores for sessions; Settings › Memory and the project Memory section; pending writes for tainted runs |
 | M3 | `search_history` for sessions and workspaces |
 | M4 | Consolidation, workspace first, then projects |

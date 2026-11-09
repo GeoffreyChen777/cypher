@@ -718,6 +718,7 @@ impl Transcript {
             } => input_chip(header.clone(), *resolved, *permission, theme),
             RowKind::ErrorChip { message } => error_chip(message.clone(), theme),
             RowKind::BotPlan { .. } => self.render_bot_plan(&row.id, &row.kind, theme, window, cx),
+            RowKind::MemoryWrite { .. } => self.render_memory_card(&row.id, &row.kind, theme, cx),
             RowKind::BotPost {
                 name,
                 failed,

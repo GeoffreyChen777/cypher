@@ -16,7 +16,7 @@
 //! writing; `cypher_doc` refuses an oversized row outright as a backstop.
 //! Times are epoch milliseconds.
 
-use chrono::{DateTime, Datelike, Duration, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::BotScope;
@@ -366,6 +366,9 @@ pub enum Schedule {
     Interval { minutes: u32 },
     /// Only when run by hand.
     Manual,
+    /// Once, at `at` ("YYYY-MM-DDTHH:MM", local time): a reminder.
+    #[serde(rename_all = "camelCase")]
+    Once { at: String },
 }
 
 impl Default for Schedule {
@@ -394,13 +397,26 @@ impl Schedule {
                 Err(format!("Run at most every {} minutes.", Self::MIN_INTERVAL))
             }
             Self::Interval { .. } | Self::Manual => Ok(()),
+            Self::Once { at } => NaiveDateTime::parse_from_str(at, ONCE_FORMAT)
+                .map(drop)
+                .map_err(|_| "Pick a date and time like 2026-11-10T09:00.".to_string()),
         }
+    }
+
+    /// When a once-only schedule runs, in `tz`.
+    pub fn once_at<Tz: TimeZone>(&self, tz: &Tz) -> Option<DateTime<Tz>> {
+        let Self::Once { at } = self else {
+            return None;
+        };
+        let at = NaiveDateTime::parse_from_str(at, ONCE_FORMAT).ok()?;
+        tz.from_local_datetime(&at).earliest()
     }
 
     /// The first run strictly after `after`, in `after`'s time zone.
     pub fn next_after<Tz: TimeZone>(&self, after: &DateTime<Tz>) -> Option<DateTime<Tz>> {
         match self {
             Self::Manual => None,
+            Self::Once { .. } => self.once_at(&after.timezone()).filter(|at| at > after),
             Self::Interval { minutes } => {
                 Some(after.clone() + Duration::minutes((*minutes).max(Self::MIN_INTERVAL) as i64))
             }
@@ -425,6 +441,10 @@ impl Schedule {
     pub fn describe(&self) -> String {
         match self {
             Self::Manual => "Manual".into(),
+            Self::Once { at } => match NaiveDateTime::parse_from_str(at, ONCE_FORMAT) {
+                Ok(at) => format!("Once, {}", at.format("%a %b %-d %H:%M")),
+                Err(_) => "Once".into(),
+            },
             Self::Interval { minutes } if minutes % 60 == 0 => match minutes / 60 {
                 1 => "Every hour".into(),
                 h => format!("Every {h} h"),
@@ -452,6 +472,9 @@ impl Schedule {
         }
     }
 }
+
+/// The local date and time a once-only schedule names.
+pub const ONCE_FORMAT: &str = "%Y-%m-%dT%H:%M";
 
 /// One run of a routine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -961,8 +984,6 @@ pub enum NeedsYou {
     Asking { chat_id: String, work_id: String },
     /// A peer's answer drafted in Review mode (exchange id).
     Review(String),
-    /// Memory writes held for review in the workspace's store (store id).
-    Memory(String),
 }
 
 impl BotRecords {
@@ -1014,15 +1035,6 @@ impl BotRecords {
             .collect();
         reviews.sort_by_key(|e| e.asked_at);
         items.extend(reviews.into_iter().map(|e| NeedsYou::Review(e.id.clone())));
-        items.extend(
-            self.memory_stores
-                .iter()
-                .filter(|s| {
-                    s.pending > 0
-                        && matches!(&s.scope, crate::MemoryScope::Workspace { bot_id: b } if b == bot_id)
-                })
-                .map(|s| NeedsYou::Memory(s.id.clone())),
-        );
         items
     }
 
