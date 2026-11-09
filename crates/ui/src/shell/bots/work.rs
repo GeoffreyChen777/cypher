@@ -640,15 +640,45 @@ impl Shell {
                 )
                 .child(div().flex_1())
                 .when_some(common.clone(), |el, (glyph, tint, place)| {
+                    // The shared project, a link to its page.
+                    let key = format!("bot-work-place-{}", work.id);
+                    let space = work.steps.first().and_then(|s| s.project.clone());
                     el.child(
                         div()
+                            .id(SharedString::from(key.clone()))
                             .min_w_0()
+                            .mr(px(-6.0))
+                            .px(px(6.0))
+                            .h(px(20.0))
+                            .rounded(px(6.0))
                             .flex()
                             .flex_row()
                             .items_center()
                             .gap(px(5.0))
+                            .cursor_pointer()
+                            .bg(motion::hover_blend(
+                                &key,
+                                crate::kit::theme::wash(0.0),
+                                crate::kit::theme::wash(0.07),
+                            ))
+                            .on_hover(motion::hover_listener(key.clone()))
+                            .tooltip(|_, cx| {
+                                cx.new(|_| {
+                                    super::super::session::FindTooltip("Open the project".into())
+                                })
+                                .into()
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(space) = space.clone() {
+                                    this.open_panel(PanelItem::Project(space), cx);
+                                }
+                            }))
                             .text_size(px(11.0))
-                            .text_color(theme.text_muted.opacity(0.85))
+                            .text_color(motion::hover_blend(
+                                &key,
+                                theme.text_muted.opacity(0.85),
+                                theme.text,
+                            ))
                             .child(icon(glyph).size(px(11.0)).flex_none().text_color(tint))
                             .child(div().min_w_0().truncate().child(SharedString::from(place))),
                     )
@@ -664,7 +694,9 @@ impl Shell {
         }
 
         // ── the rail: steps, then the result ──
-        let node = |mark: AnyElement, joined: Option<gpui::Hsla>, content: gpui::Div| {
+        // One node: its mark over the segment to the next node, beside its
+        // content. Hovering a node washes it and firms up its segment.
+        let node = |key: &str, mark: AnyElement, joined: Option<(gpui::Hsla, gpui::Hsla)>| {
             let rail = div()
                 .flex_none()
                 .w(px(18.0))
@@ -672,35 +704,50 @@ impl Shell {
                 .flex_col()
                 .items_center()
                 .child(flow_cell().child(mark))
-                .when_some(joined, |el, color| {
+                .when_some(joined, |el, (rest, hover)| {
                     el.child(
                         div()
                             .flex_1()
                             .w(px(1.5))
-                            .my(px(3.0))
+                            .mt(px(3.0))
+                            // Reaches into the next node's top padding.
+                            .mb(px(-3.0))
                             .rounded_full()
-                            .bg(color),
+                            .bg(motion::hover_blend(key, rest, hover)),
                     )
                 });
             div()
-                .px(px(8.0))
+                .id(SharedString::from(key.to_string()))
+                .mx(px(2.0))
+                .px(px(6.0))
+                .py(px(6.0))
+                .rounded(px(10.0))
                 .flex()
                 .flex_row()
                 .items_stretch()
                 .gap(px(12.0))
+                .bg(motion::hover_blend(
+                    key,
+                    crate::kit::theme::wash(0.0),
+                    crate::kit::theme::wash(0.035),
+                ))
+                .on_hover(motion::hover_listener(key.to_string()))
                 .child(rail)
-                .child(content.flex_1().min_w_0())
         };
         // A segment past a finished step is filled; the rest stay a hairline.
         let segment = |state: StepState| {
             if state == StepState::Done {
-                theme.success.opacity(0.45)
+                (theme.success.opacity(0.45), theme.success.opacity(0.8))
             } else {
-                crate::kit::theme::hairline(0.12)
+                (
+                    crate::kit::theme::hairline(0.12),
+                    crate::kit::theme::hairline(0.3),
+                )
             }
         };
-        flow = flow.child(div().h(px(6.0)));
+        flow = flow.child(div().h(px(2.0)));
         for (ix, (step, (project, sessions))) in work.steps.iter().zip(steps).enumerate() {
+            let key = format!("bot-work-node-{}-{ix}", work.id);
             let mark = if numbered {
                 flow_number(ix + 1, theme)
             } else {
@@ -717,40 +764,106 @@ impl Shell {
             }
             .filter(|d| !d.trim().is_empty());
             let asking = step.state == StepState::Asking;
-            let mut content = div()
-                .pb(px(16.0))
+            let sessions_n = sessions.len();
+            let foldable = project.is_some() || detail.is_some() || sessions_n > 0;
+            let folded = foldable && self.board.work_folded.contains(&(work.id.clone(), ix));
+            // Its title line folds the details away and back; a chevron
+            // shows on hover.
+            let toggle = (work.id.clone(), ix);
+            let title_key = format!("{key}-title");
+            let title = div()
+                .id(SharedString::from(title_key.clone()))
+                .min_h(px(18.0))
                 .flex()
-                .flex_col()
-                .gap(px(2.0))
+                .flex_row()
+                .items_start()
+                .gap(px(8.0))
+                .when(foldable, |el| {
+                    el.cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.board.work_folded.remove(&toggle) {
+                                this.board.work_folded.insert(toggle.clone());
+                            }
+                            cx.notify();
+                        }))
+                })
                 .child(
                     div()
-                        .min_h(px(18.0))
-                        .flex()
-                        .flex_row()
-                        .items_start()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(px(13.0))
-                                .line_height(px(18.0))
-                                .text_color(if step.state == StepState::Skipped {
-                                    theme.text_muted
-                                } else {
-                                    theme.text
-                                })
-                                .child(SharedString::from(step.title.clone())),
-                        )
-                        .children(span.map(|span| {
-                            div()
-                                .flex_none()
-                                .pt(px(2.0))
-                                .child(trailing(span, theme.text_faint))
-                        })),
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(13.0))
+                        .line_height(px(18.0))
+                        .text_color(if step.state == StepState::Skipped {
+                            theme.text_muted
+                        } else {
+                            theme.text
+                        })
+                        .child(SharedString::from(step.title.clone())),
                 )
-                .when_some(project, |el, project| {
+                .children(span.map(|span| {
+                    // Its exact times on hover.
+                    let tip = match (step.started_at, step.ended_at) {
+                        (Some(start), Some(end)) => format!(
+                            "{} → {}",
+                            parts::past_full_ms(start),
+                            parts::past_full_ms(end)
+                        ),
+                        (Some(start), None) => format!("Since {}", parts::past_full_ms(start)),
+                        _ => String::new(),
+                    };
+                    div()
+                        .id(SharedString::from(format!("{key}-span")))
+                        .flex_none()
+                        .pt(px(2.0))
+                        .when(!tip.is_empty(), |el| {
+                            el.tooltip(move |_, cx| {
+                                let tip = tip.clone();
+                                cx.new(|_| super::super::session::FindTooltip(tip.into()))
+                                    .into()
+                            })
+                        })
+                        .child(trailing(span, theme.text_faint))
+                }))
+                .when(foldable, |el| {
                     el.child(
+                        div().flex_none().pt(px(4.0)).child(
+                            icon(if folded {
+                                icons::ALT_ARROW_RIGHT
+                            } else {
+                                icons::ALT_ARROW_DOWN
+                            })
+                            .size(px(10.0))
+                            .text_color(theme.text_faint.opacity(motion::hover_t(&key))),
+                        ),
+                    )
+                });
+            let mut content = div().flex_1().min_w_0().flex().flex_col().child(title);
+            if folded {
+                // Folded: what is tucked away, in a word.
+                let mut hidden = Vec::new();
+                if detail.is_some() {
+                    hidden.push("note".to_string());
+                }
+                if sessions_n > 0 {
+                    hidden.push(format!(
+                        "{sessions_n} session{}",
+                        if sessions_n == 1 { "" } else { "s" }
+                    ));
+                }
+                if hidden.is_empty() {
+                    hidden.push("project".to_string());
+                }
+                content = content.child(
+                    div()
+                        .text_size(px(11.5))
+                        .line_height(px(16.0))
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(hidden.join(" · "))),
+                );
+            } else {
+                let mut details = div().flex().flex_col().gap(px(2.0)).pt(px(2.0));
+                if let Some(project) = project {
+                    details = details.child(
                         div()
                             .min_w_0()
                             .flex()
@@ -770,11 +883,11 @@ impl Shell {
                                 "{} · {}",
                                 project.name, project.device
                             )))),
-                    )
-                })
-                .when_some(detail, |el, detail| {
-                    el.child(md(
-                        &detail,
+                    );
+                }
+                if let Some(detail) = &detail {
+                    details = details.child(md(
+                        detail,
                         format!("bot-work-step-{}-{ix}", work.id),
                         12.0,
                         if asking {
@@ -782,18 +895,27 @@ impl Shell {
                         } else {
                             theme.text_muted
                         },
+                    ));
+                }
+                if sessions_n > 0 {
+                    details = details.child(
+                        div().pt(px(4.0)).flex().flex_col().gap(px(1.0)).children(
+                            sessions
+                                .into_iter()
+                                .map(|(chat_id, chat)| self.flow_session(chat_id, chat, theme, cx)),
+                        ),
+                    );
+                }
+                // Unfolding fades the details in.
+                content = content.when(foldable, |el| {
+                    el.child(motion::fade_quick(
+                        SharedString::from(format!("{key}-details")),
+                        details,
                     ))
                 });
-            if !sessions.is_empty() {
-                content = content.child(
-                    div().pt(px(4.0)).flex().flex_col().gap(px(1.0)).children(
-                        sessions
-                            .into_iter()
-                            .map(|(chat_id, chat)| self.flow_session(chat_id, chat, theme, cx)),
-                    ),
-                );
             }
-            flow = flow.child(node(mark, Some(segment(step.state)), content));
+            flow =
+                flow.child(node(&key, mark, Some(segment(step.state))).child(content.pb(px(6.0))));
         }
 
         // ── the result: where the last step leads ──
@@ -807,56 +929,135 @@ impl Shell {
             .result
             .as_ref()
             .filter(|r| !r.trim().is_empty() && done);
+        let key = format!("bot-work-node-{}-result", work.id);
         let mark = div()
             .size(px(18.0))
             .rounded_full()
-            .bg(tone.opacity(if done { 0.14 } else { 0.08 }))
+            .bg(motion::mix(
+                tone.opacity(if done { 0.14 } else { 0.08 }),
+                tone.opacity(if done { 0.24 } else { 0.12 }),
+                motion::hover_t(&key),
+            ))
             .flex()
             .items_center()
             .justify_center()
             .child(icon(icons::FLAG).size(px(10.5)).text_color(tone))
             .into_any_element();
+        let copied = self.board.work_copied.as_deref() == Some(work.id.as_str());
         let title = div()
-            .text_size(px(13.0))
-            .line_height(px(18.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(if done { theme.text } else { theme.text_muted })
-            .child("Result");
-        let content = match result {
-            // What it produced, on a quiet card: the flag carries the
-            // outcome's tone, so code and links keep their own colours.
-            Some(result) => div().flex().flex_col().gap(px(6.0)).child(title).child(
+            .min_h(px(18.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(
                 div()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .rounded(px(10.0))
-                    .bg(crate::kit::theme::ink(0.035))
-                    .border_1()
-                    .border_color(crate::kit::theme::hairline(0.08))
-                    .child(md(
-                        result,
-                        format!("bot-work-result-{}", work.id),
-                        12.5,
-                        theme.text,
-                    )),
-            ),
-            None => div().flex().flex_col().gap(px(2.0)).child(title).child(
-                div()
-                    .text_size(px(12.0))
-                    .line_height(px(17.0))
-                    .text_color(if done {
-                        theme.text_muted
-                    } else {
-                        theme.text_faint
-                    })
-                    .child(SharedString::from(if done {
-                        phase_line(work, now_ms)
-                    } else {
-                        "Reported when the last step ends".to_string()
-                    })),
-            ),
-        };
-        flow.child(node(mark, None, content))
+                    .flex_1()
+                    .text_size(px(13.0))
+                    .line_height(px(18.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(if done { theme.text } else { theme.text_muted })
+                    .child("Result"),
+            )
+            .when_some(result.cloned(), |el, text| {
+                // Copy, shown on hover (and while it says Copied).
+                let copy_key = format!("{key}-copy");
+                let id = work.id.clone();
+                let shown = if copied { 1.0 } else { motion::hover_t(&key) };
+                let ink = if copied {
+                    theme.success
+                } else {
+                    motion::hover_blend(&copy_key, theme.text_muted, theme.text)
+                };
+                el.child(
+                    div()
+                        .id(SharedString::from(copy_key.clone()))
+                        .flex_none()
+                        .h(px(20.0))
+                        .px(px(6.0))
+                        .rounded(px(6.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .cursor_pointer()
+                        .opacity(shown)
+                        .bg(motion::hover_blend(
+                            &copy_key,
+                            crate::kit::theme::wash(0.0),
+                            crate::kit::theme::wash(0.08),
+                        ))
+                        .on_hover(motion::hover_listener(copy_key.clone()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.copy_work_result(id.clone(), text.clone(), cx)
+                        }))
+                        .text_size(px(11.0))
+                        .text_color(ink)
+                        .child(
+                            icon(if copied { icons::CHECK } else { icons::COPY })
+                                .size(px(11.0))
+                                .text_color(ink),
+                        )
+                        .child(if copied { "Copied" } else { "Copy" }),
+                )
+            });
+        let content =
+            match result {
+                // What it produced, set off by a slim rule in the outcome's
+                // tone that firms up on hover.
+                Some(result) => {
+                    div().flex().flex_col().gap(px(6.0)).child(title).child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_stretch()
+                            .gap(px(10.0))
+                            .child(div().flex_none().w(px(2.0)).rounded_full().bg(
+                                motion::hover_blend(&key, tone.opacity(0.35), tone.opacity(0.8)),
+                            ))
+                            .child(div().flex_1().min_w_0().py(px(1.0)).child(md(
+                                result,
+                                format!("bot-work-result-{}", work.id),
+                                12.5,
+                                theme.text,
+                            ))),
+                    )
+                }
+                None => div().flex().flex_col().gap(px(2.0)).child(title).child(
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(17.0))
+                        .text_color(if done {
+                            theme.text_muted
+                        } else {
+                            theme.text_faint
+                        })
+                        .child(SharedString::from(if done {
+                            phase_line(work, now_ms)
+                        } else {
+                            "Reported when the last step ends".to_string()
+                        })),
+                ),
+            };
+        flow.child(node(&key, mark, None).child(content.flex_1().min_w_0().pb(px(4.0))))
+    }
+
+    /// Copy a work item's result; the button says Copied for a moment.
+    fn copy_work_result(&mut self, work_id: String, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.board.work_copied = Some(work_id.clone());
+        self.board.work_copied_reset = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1600))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.board.work_copied.as_deref() == Some(work_id.as_str()) {
+                    this.board.work_copied = None;
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
     }
 
     /// A session a step started, under the step: its status, title, and a
@@ -908,10 +1109,15 @@ impl Shell {
                         .child(word)
                 }))
                 .child(
-                    icon(icons::ALT_ARROW_RIGHT)
-                        .size(px(10.0))
+                    // Slides in from the left as it fades in.
+                    div()
                         .flex_none()
-                        .text_color(theme.text_faint.opacity(motion::hover_t(&key))),
+                        .ml(px(-4.0 * (1.0 - motion::hover_t(&key))))
+                        .child(
+                            icon(icons::ALT_ARROW_RIGHT)
+                                .size(px(10.0))
+                                .text_color(theme.text_faint.opacity(motion::hover_t(&key))),
+                        ),
                 ),
             None => row
                 .child(mark_cell(session_mark(ChatIndicator::Idle, ticker, theme)))

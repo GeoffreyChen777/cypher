@@ -89,6 +89,13 @@ pub(super) struct BoardUi {
     /// An item's own buttons, in the panel header before the close button;
     /// set and taken like `panel_footer`.
     panel_actions: Option<AnyElement>,
+    /// Work steps folded to their title in the work panel, by (work id,
+    /// step index); local to this window like the cards' folds.
+    work_folded: std::collections::HashSet<(String, usize)>,
+    /// The work item whose result was just copied, and the task that turns
+    /// its check back into Copy.
+    work_copied: Option<String>,
+    work_copied_reset: Option<Task<()>>,
 }
 
 /// One item on a bot's **Needs you** card: its conversation waiting on an
