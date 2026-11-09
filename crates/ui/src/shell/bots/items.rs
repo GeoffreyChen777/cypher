@@ -651,6 +651,46 @@ impl Shell {
             .child(if copied { "Copied" } else { "Copy" })
     }
 
+    /// A page reached from another panel (a connection from Network):
+    /// a back arrow in its icon's place, returning to `to`.
+    pub(super) fn set_panel_back(
+        &mut self,
+        key: &'static str,
+        tip: &'static str,
+        to: PanelItem,
+        cx: &mut Context<Self>,
+    ) {
+        let theme = Theme::of(cx).clone();
+        self.board.panel_mark = Some(
+            div()
+                .id(key)
+                .flex_none()
+                .size(px(30.0))
+                .rounded(px(8.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .bg(motion::hover_blend(
+                    key,
+                    crate::kit::theme::ink(0.06),
+                    crate::kit::theme::ink(0.11),
+                ))
+                .on_hover(motion::hover_listener(key))
+                .tooltip(move |_, cx| {
+                    cx.new(|_| super::super::session::FindTooltip(tip.into()))
+                        .into()
+                })
+                .on_click(cx.listener(move |this, _, _, cx| this.open_panel(to.clone(), cx)))
+                .child(
+                    icon(icons::ARROW_LEFT)
+                        .size(px(15.0))
+                        .text_color(motion::hover_blend(key, theme.text_muted, theme.text)),
+                )
+                .into_any_element(),
+        );
+    }
+
     /// Put `text` on the clipboard; the button `key` says Copied for a
     /// moment.
     pub(super) fn copy_text(&mut self, key: String, text: String, cx: &mut Context<Self>) {

@@ -26,7 +26,7 @@ pub(super) fn empty_card(
     key: &'static str,
     glyph: &'static str,
     title: &'static str,
-    hint: &'static str,
+    hint: impl Into<SharedString>,
     open: PanelItem,
     focused: bool,
     theme: &Theme,
@@ -43,7 +43,7 @@ pub(super) fn empty_card(
                 .truncate()
                 .text_size(px(11.5))
                 .text_color(theme.text_muted.opacity(0.6))
-                .child(SharedString::from(hint)),
+                .child(hint.into()),
         );
     super::board::card(theme).child(header).into_any_element()
 }

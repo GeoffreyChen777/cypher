@@ -6,7 +6,7 @@
 //! RPCs on the bot's host; an engine that does not have them yet answers
 //! an unknown method, and the panel says so instead of failing.
 
-use super::board::{card_corner, card_glyph, card_item};
+use super::board::{card_corner, card_item};
 use super::panel::{PanelHead, PanelItem};
 use super::parts::{self, CallError};
 use super::*;
@@ -263,8 +263,9 @@ impl Shell {
         );
     }
 
-    /// The sidebar card: live connections and open invites, or the
-    /// one-line way to connect the first.
+    /// The sidebar card. Rows only for what waits on the owner: answers
+    /// to review before they go back. Otherwise just its header, saying
+    /// how many workspaces are connected; it opens the Network panel.
     pub(super) fn render_network_card(
         &self,
         bot: &Bot,
@@ -272,31 +273,52 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let now = cypher_proto::now_ms();
-        let (connections, invites): (Vec<BotConnection>, Vec<BotInvite>) = {
+        let (connections, invites, reviews) = {
             let state = self.state.read(cx);
             let records = &state.bot_records;
+            let mut reviews: Vec<(BotExchange, String)> = records
+                .exchanges
+                .iter()
+                .filter(|e| e.bot_id == bot.id && e.awaiting_review())
+                .map(|e| {
+                    let peer = records
+                        .connections
+                        .iter()
+                        .find(|c| c.id == e.connection_id)
+                        .map(|c| c.peer.name.clone())
+                        .unwrap_or_default();
+                    (e.clone(), peer)
+                })
+                .collect();
+            reviews.sort_by_key(|(e, _)| std::cmp::Reverse(e.asked_at));
             (
-                live_connections(&records.connections, &bot.id)
-                    .into_iter()
-                    .cloned()
-                    .collect(),
-                open_invites(&records.invites, &bot.id, now)
-                    .into_iter()
-                    .cloned()
-                    .collect(),
+                live_connections(&records.connections, &bot.id).len(),
+                open_invites(&records.invites, &bot.id, now).len(),
+                reviews,
             )
         };
-        if connections.is_empty() && invites.is_empty() {
-            let ready = self.network_ready(cx);
+        if reviews.is_empty() {
+            let hint = if !self.network_ready(cx) {
+                "Sign in to connect".to_string()
+            } else {
+                let mut parts = vec![match connections {
+                    0 => "No connections".to_string(),
+                    1 => "1 connection".to_string(),
+                    n => format!("{n} connections"),
+                }];
+                if invites > 0 {
+                    parts.push(format!(
+                        "{invites} open invite{}",
+                        if invites == 1 { "" } else { "s" }
+                    ));
+                }
+                parts.join(" · ")
+            };
             return Some(parts::empty_card(
                 "bot-network-empty",
                 icons::GLOBAL,
                 "Network",
-                if ready {
-                    "No connections"
-                } else {
-                    "Sign in to connect"
-                },
+                hint,
                 PanelItem::Network,
                 self.card_focused("network", cx),
                 theme,
@@ -309,43 +331,30 @@ impl Shell {
             "bot-network-header",
             icons::GLOBAL,
             "Network",
-            connections.len(),
+            reviews.len(),
             PanelItem::Network,
             None,
             theme,
             cx,
         );
-        let mut rows: Vec<AnyElement> = connections
-            .iter()
+        let rows: Vec<AnyElement> = reviews
+            .into_iter()
             .take(parts::CARD_ROWS)
-            .map(|conn| {
-                let selected = open.as_ref() == Some(&PanelItem::Connection(conn.id.clone()));
-                self.connection_row(conn, selected, false, theme, cx)
-                    .into_any_element()
-            })
-            .collect();
-        if !invites.is_empty() {
-            let soonest = invites.iter().map(|i| i.expires_at).min().unwrap_or(now);
-            rows.push(
+            .map(|(exchange, peer)| {
+                let item = PanelItem::Review(exchange.id.clone());
+                let selected = open.as_ref() == Some(&item);
                 card_item(
-                    "bot-network-invites",
-                    Some(card_glyph(icons::LINK, theme.text_muted.opacity(0.7))),
-                    match invites.len() {
-                        1 => "1 open invite".to_string(),
-                        n => format!("{n} open invites"),
-                    },
-                    Some(card_corner(
-                        format!("expires {}", expiry_words(soonest)),
-                        None,
-                        theme,
-                    )),
-                    false,
+                    &format!("bot-network-review-{}", exchange.id),
+                    Some(peer_avatar(&peer, 14.0, theme).into_any_element()),
+                    transcript::single_line(&exchange.question),
+                    Some(card_corner("review", Some(theme.warning), theme)),
+                    selected,
                     theme,
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.show_panel(PanelItem::Network, cx)))
-                .into_any_element(),
-            );
-        }
+                .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
+                .into_any_element()
+            })
+            .collect();
         Some(self.fold_card("network", header, rows, theme))
     }
 
@@ -354,62 +363,29 @@ impl Shell {
     fn connection_row(
         &self,
         conn: &BotConnection,
-        selected: bool,
-        panel: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let key = format!(
-            "bot-{}connection-{}",
-            if panel { "panel-" } else { "" },
-            conn.id
-        );
+        let key = format!("bot-panel-connection-{}", conn.id);
         let item = PanelItem::Connection(conn.id.clone());
         let last = conn.last_exchange_at.map(parts::ago_ms);
         let revoking = conn.revoke_requested_at.is_some();
-        if !panel {
-            // On the card: the peer and how it is answered; Auto, the
-            // usual, says when it last asked instead.
-            let corner = if revoking {
-                "revoking".to_string()
-            } else {
-                match conn.reply_mode {
-                    ReplyMode::Review => "review".to_string(),
-                    ReplyMode::Off => "off".to_string(),
-                    ReplyMode::Auto => last.clone().unwrap_or_default(),
-                }
-            };
-            return card_item(
-                &key,
-                Some(peer_avatar(&conn.peer.name, 14.0, theme).into_any_element()),
-                transcript::single_line(&conn.peer.name),
-                (!corner.is_empty()).then(|| card_corner(corner, None, theme)),
-                selected,
-                theme,
-            )
-            .when(revoking, |el| el.opacity(0.6))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)));
-        }
         div()
             .id(SharedString::from(key.clone()))
             .pl(px(6.0))
             .pr(px(8.0))
-            .py(px(if panel { 8.0 } else { 6.0 }))
+            .py(px(8.0))
             .rounded(px(8.0))
             .flex()
             .flex_row()
             .items_center()
             .gap(px(8.0))
             .cursor_pointer()
-            .bg(if selected {
-                crate::kit::theme::wash(0.08)
-            } else {
-                motion::hover_blend(
-                    &key,
-                    crate::kit::theme::wash(0.0),
-                    crate::kit::theme::wash(0.05),
-                )
-            })
+            .bg(motion::hover_blend(
+                &key,
+                crate::kit::theme::wash(0.0),
+                crate::kit::theme::wash(0.05),
+            ))
             .on_hover(motion::hover_listener(key.clone()))
             .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
             .when(revoking, |el| el.opacity(0.6))
@@ -572,7 +548,7 @@ impl Shell {
             ));
         }
         for conn in &connections {
-            body = body.child(self.connection_row(conn, false, true, theme, cx));
+            body = body.child(self.connection_row(conn, theme, cx));
         }
         if !invites.is_empty() {
             body = body.child(parts::section_label(theme, "Open invites"));
@@ -649,6 +625,7 @@ impl Shell {
             tint: None,
             title: "Connect a workspace".into(),
         };
+        self.set_panel_back("bot-invite-back", "Back to Network", PanelItem::Network, cx);
         if !self.network_ready(cx) {
             return (
                 head,
@@ -863,6 +840,12 @@ impl Shell {
             tint: None,
             title: conn.peer.name.clone(),
         };
+        self.set_panel_back(
+            "bot-connection-back",
+            "Back to Network",
+            PanelItem::Network,
+            cx,
+        );
         let revoked = conn.revoked_at.is_some();
         let revoking = conn.revoke_requested_at.is_some();
         let editable = ready && !revoked && !revoking;

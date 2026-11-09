@@ -1009,7 +1009,7 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 | **Routines** | Its routines in order of next run: name, where and when it runs, next run, last result | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
 | **Projects** | Each granted project with device, running and waiting sessions, and "works directly" or "via sessions" | The list groups projects by device (sessions, what runs or asks, last activity). A project's page: its device beside the title (the folder on hover, a click copies it), its sessions in scope with status, the bot's work there and its routines there |
 | **Notebook** | The latest few entries, bot-written ones marked | A + in the header opens a new note at the top; then all entries with their sources, filtered All / You / the bot; text renders as markdown; on hover Copy, Edit, Delete |
-| **Network** (P4) | Connections with reply mode and last exchange; pending invites | A connection: its scope, reply mode, rate limits, exchanges, revoke |
+| **Network** (P4) | Only answers awaiting the owner's review, one row each (opening its review); otherwise just the header, saying how many workspaces are connected | The Network panel lists connections, invites and recent questions; a connection opens its own page (scope, reply mode, exchanges, revoke) with a back arrow to Network |
 
 There is no Activity card: it mostly repeated Work, Routines and Network. The full audit
 log, filterable as Plans, Sessions, Routines, Notes or Network, opens from the chat header's activity button and from "View all
