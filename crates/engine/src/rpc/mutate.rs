@@ -316,8 +316,6 @@ impl EngineRpc {
             | MutateParams::StopBotWork { .. }
             | MutateParams::DeleteBotWork { .. }
             | MutateParams::ResolveBotApproval { .. }
-            | MutateParams::SaveBotNote { .. }
-            | MutateParams::DeleteBotNote { .. }
             | MutateParams::SaveBotRoutine { .. }
             | MutateParams::DeleteBotRoutine { .. }
             | MutateParams::RunBotRoutine { .. }

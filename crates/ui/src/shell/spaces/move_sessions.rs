@@ -656,7 +656,7 @@ impl Shell {
 fn movable_sessions(chats: &[Chat], space_id: &str) -> usize {
     chats
         .iter()
-        .filter(|c| c.space_id.as_deref() == Some(space_id) && !c.is_child())
+        .filter(|c| c.space_id.as_deref() == Some(space_id) && !c.is_child() && !c.is_memory_pass())
         .count()
 }
 

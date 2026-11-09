@@ -72,7 +72,10 @@ pub(super) fn scoped_sessions<'a>(
 }
 
 fn in_project(chat: &Chat, space_id: &str) -> bool {
-    !chat.archived && !chat.is_child() && chat.space_id.as_deref() == Some(space_id)
+    !chat.archived
+        && !chat.is_child()
+        && !chat.is_memory_pass()
+        && chat.space_id.as_deref() == Some(space_id)
 }
 
 /// Something off about the bot, said once at the top of the board: it is
@@ -140,7 +143,13 @@ pub(super) fn card_of(
         | PanelItem::Review(_) => "needs",
         PanelItem::Work | PanelItem::WorkItem(_) => "work",
         PanelItem::Schedule | PanelItem::Routine(_) | PanelItem::NewRoutine => "schedule",
-        PanelItem::Notebook => "notebook",
+        // A project's memory opens from its page.
+        PanelItem::Memory(scope)
+        | PanelItem::MemoryFile { scope, .. }
+        | PanelItem::NewMemoryFile(scope) => match scope {
+            cypher_proto::MemoryScope::Project { .. } => "projects",
+            _ => "memory",
+        },
         // The log opens from the Work panel and the chat header.
         PanelItem::Activity => "work",
         PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => "network",
@@ -201,7 +210,7 @@ impl Shell {
                 ("work", self.render_work_card(&bot, theme, cx)),
                 ("schedule", self.render_schedule_card(&bot, theme, cx)),
                 ("projects", self.render_projects_card(&bot, theme, cx)),
-                ("notebook", self.render_notebook_card(&bot, theme, cx)),
+                ("memory", self.render_memory_card(&bot, theme, cx)),
                 ("network", self.render_network_card(&bot, theme, cx)),
             ]
             .into_iter()
@@ -813,6 +822,26 @@ mod tests {
         };
         assert_eq!(card_of(&PanelItem::Thread("t".into()), session), "schedule");
         assert_eq!(card_of(&PanelItem::Thread("t".into()), none), "work");
+        let own = cypher_proto::MemoryScope::Workspace { bot_id: "b".into() };
+        let project = cypher_proto::MemoryScope::Project {
+            space_id: "a".into(),
+        };
+        assert_eq!(card_of(&PanelItem::Memory(own.clone()), none), "memory");
+        assert_eq!(
+            card_of(
+                &PanelItem::MemoryFile {
+                    scope: own,
+                    path: "/MEMORY.md".into()
+                },
+                none
+            ),
+            "memory"
+        );
+        assert_eq!(
+            card_of(&PanelItem::Memory(project), none),
+            "projects",
+            "a project's memory opens from its page"
+        );
         let drawn = ["needs", "work", "projects"];
         assert_eq!(focused_card(None, &drawn), None, "nothing floats");
         assert_eq!(focused_card(Some("work"), &drawn), Some("work"));

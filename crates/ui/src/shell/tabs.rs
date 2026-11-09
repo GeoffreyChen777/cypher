@@ -103,7 +103,12 @@ pub(super) fn session_fate(
     awaited: bool,
 ) -> SessionFate {
     match chats.iter().find(|c| c.id == chat_id) {
-        Some(chat) if chat.archived || chat.is_bot() || !scope.chat_visible(chat) => {
+        Some(chat)
+            if chat.archived
+                || chat.is_bot()
+                || chat.is_memory_pass()
+                || !scope.chat_visible(chat) =>
+        {
             SessionFate::Hidden
         }
         Some(_) => SessionFate::Stays,
@@ -212,7 +217,9 @@ impl Shell {
                 state
                     .chats
                     .iter()
-                    .filter(|c| !c.archived && !c.is_bot() && scope.chat_visible(c))
+                    .filter(|c| {
+                        !c.archived && !c.is_bot() && !c.is_memory_pass() && scope.chat_visible(c)
+                    })
                     .map(|c| c.id.clone())
                     .collect()
             };

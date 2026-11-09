@@ -65,6 +65,9 @@ use crate::transcript::{self, Transcript};
 use crate::widgets::text_input::{TextInput, TextInputEvent};
 
 mod bots;
+pub(crate) use bots::memory::{
+    MemoryPage, MemoryPane, MemoryPaneEvent, file_name as memory_file_name,
+};
 #[cfg(feature = "dev-capture")]
 mod dev_capture;
 mod dock;
@@ -360,6 +363,8 @@ pub enum SettingsSection {
     Appearance,
     Notifications,
     Shortcuts,
+    /// What agents remember: yours and every project's (memory.md §8).
+    Memory,
     Archived,
 }
 
@@ -376,7 +381,7 @@ impl SettingsSection {
     pub const CLIENT_SETTINGS: [Self; 3] = [Self::Appearance, Self::Notifications, Self::Shortcuts];
     // Registry and archived conversations span the workspace, not the selected
     // host. Keep them separate from both host configuration and UI preferences.
-    pub const WORKSPACE_SETTINGS: [Self; 2] = [Self::Devices, Self::Archived];
+    pub const WORKSPACE_SETTINGS: [Self; 3] = [Self::Devices, Self::Memory, Self::Archived];
     pub const NAV_GROUPS: [(&'static str, &'static [Self]); 3] = [
         ("Device settings", &Self::DEVICE_SETTINGS),
         ("Client settings", &Self::CLIENT_SETTINGS),
@@ -384,7 +389,7 @@ impl SettingsSection {
     ];
 
     #[cfg(test)]
-    pub const ALL: [SettingsSection; 12] = [
+    pub const ALL: [SettingsSection; 13] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Providers,
@@ -396,6 +401,7 @@ impl SettingsSection {
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Shortcuts,
+        SettingsSection::Memory,
         SettingsSection::Archived,
     ];
 
@@ -415,6 +421,7 @@ impl SettingsSection {
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Shortcuts => "Shortcuts",
+            SettingsSection::Memory => "Memory",
             SettingsSection::Archived => "Archived sessions",
         }
     }
@@ -1121,6 +1128,7 @@ struct SettingsPages {
     permissions: Option<Entity<crate::settings::permissions::PermissionsPage>>,
     subagents: Option<Entity<SubagentsPage>>,
     github: Option<Entity<crate::settings::github::GithubPage>>,
+    memory: Option<Entity<crate::settings::memory::MemorySettingsPage>>,
     setup: Option<Entity<SetupPage>>,
     setup_sub: Option<Subscription>,
     /// Continue/Skip dismissed the overlay for this process.
@@ -1601,6 +1609,7 @@ impl Shell {
                 permissions: None,
                 subagents: None,
                 github: None,
+                memory: None,
                 setup: None,
                 setup_sub: None,
                 setup_dismissed: false,
@@ -1801,6 +1810,7 @@ impl Shell {
             Some("settings/appearance") => Route::Settings(SettingsSection::Appearance),
             Some("settings/notifications") => Route::Settings(SettingsSection::Notifications),
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
+            Some("settings/memory") => Route::Settings(SettingsSection::Memory),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
             // `new` pins the new-chat canvas (suppresses boot auto-select).
             Some("new") => {

@@ -418,15 +418,6 @@ pub(super) enum MutateParams {
     /// Approve or decline an action a bot thread is waiting on.
     #[serde(rename_all = "camelCase")]
     ResolveBotApproval { approval_id: String, approve: bool },
-    /// Create or edit a notebook entry (an owner edit makes it the owner's).
-    #[serde(rename_all = "camelCase")]
-    SaveBotNote {
-        note_id: String,
-        bot_id: String,
-        text: String,
-    },
-    #[serde(rename_all = "camelCase")]
-    DeleteBotNote { note_id: String },
     /// Create or edit a routine's definition (its run state is the host's).
     #[serde(rename_all = "camelCase")]
     SaveBotRoutine { routine: cypher_proto::BotRoutine },

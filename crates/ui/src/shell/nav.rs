@@ -100,6 +100,29 @@ impl Shell {
         self.pages.providers = Some(cx.new(|cx| ProvidersPage::new(state, target, intent, cx)));
     }
 
+    /// Settings → Memory on `scope`'s store (`/memory` in a session).
+    pub(super) fn open_memory_settings(
+        &mut self,
+        scope: cypher_proto::MemoryScope,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_project_window() {
+            self.forward_to_main(cx, move |main, cx| main.open_memory_settings(scope, cx));
+            return;
+        }
+        self.open_settings(SettingsSection::Memory, cx);
+        match &self.pages.memory {
+            Some(page) => page.update(cx, |page, cx| page.open(scope, cx)),
+            None => {
+                let state = self.state.clone();
+                self.pages.memory =
+                    Some(cx.new(|cx| {
+                        crate::settings::memory::MemorySettingsPage::new(state, scope, cx)
+                    }));
+            }
+        }
+    }
+
     pub(super) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         // Settings are app-wide: a project window opens them in the main
         // window, carrying over the device its composer aimed them at.
@@ -434,6 +457,24 @@ impl Shell {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
+            }
+            SettingsSection::Memory => {
+                let page = match &self.pages.memory {
+                    Some(page) => page.clone(),
+                    None => {
+                        let state = self.state.clone();
+                        let page = cx.new(|cx| {
+                            crate::settings::memory::MemorySettingsPage::new(
+                                state,
+                                cypher_proto::MemoryScope::You,
+                                cx,
+                            )
+                        });
+                        self.pages.memory = Some(page.clone());
+                        page
+                    }
+                };
+                page.into_any_element()
             }
             SettingsSection::Archived => {
                 if self.pages.archived.is_none() {

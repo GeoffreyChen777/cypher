@@ -51,6 +51,7 @@ mod files;
 mod github;
 mod harnesses;
 mod mcp;
+mod memory;
 mod migrations;
 mod mutate;
 mod params;
@@ -103,6 +104,7 @@ pub struct EngineRpc {
     migrations: Option<crate::session::migrations::ChatMigrations>,
     github: Option<crate::git::github::Github>,
     bots: Option<crate::bots::Bots>,
+    memory: Option<crate::memory::Memory>,
     trust: Option<crate::device_trust::DeviceTrust>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
@@ -164,6 +166,7 @@ impl EngineRpc {
             migrations: None,
             github: None,
             bots: None,
+            memory: None,
             trust: None,
             engine_info,
             start_subagent_lock: Mutex::new(()),
@@ -214,6 +217,18 @@ impl EngineRpc {
     pub fn with_bots(mut self, bots: crate::bots::Bots) -> Self {
         self.bots = Some(bots);
         self
+    }
+
+    /// Memory (docs/design/memory.md).
+    pub fn with_memory(mut self, memory: crate::memory::Memory) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    fn memory(&self) -> Result<&crate::memory::Memory, RpcError> {
+        self.memory
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("Memory isn't available on this engine".into()))
     }
 
     fn bots(&self) -> Result<&crate::bots::Bots, RpcError> {
@@ -935,6 +950,9 @@ impl RpcService for EngineRpc {
             // Boxed: `project_git` awaits three relay calls at once, and its
             // future inlined here overflowed a default worker stack.
             methods::BOT_TOOL => Box::pin(bots::bot_tool(self, params)).await,
+            methods::MEMORY_TOOL => Box::pin(memory::memory_tool(self, params)).await,
+            methods::WATCH_MEMORY => memory::watch_memory(self, params),
+            methods::EDIT_MEMORY => Box::pin(memory::edit_memory(self, params)).await,
             methods::CREATE_BOT_INVITE => Box::pin(bots::create_bot_invite(self, params)).await,
             methods::REDEEM_BOT_INVITE => Box::pin(bots::redeem_bot_invite(self, params)).await,
             methods::WATCH_DEVICE_TRUST => trust::watch(self),

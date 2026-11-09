@@ -643,7 +643,7 @@ impl Shell {
             tint: None,
             title: "Routines".into(),
         };
-        // The header's one button, like the Notebook's: + adds a routine.
+        // The header's one button, like Memory's: + adds a routine.
         self.set_panel_actions(vec![
             super::items::icon_button(
                 "bot-schedule-new-routine",
@@ -1532,14 +1532,14 @@ impl Shell {
                         .child(parts::grant_row(
                             theme,
                             "Reads what the workspace reads",
-                            "Its projects, and the notebook.",
+                            "Its projects, and its memory.",
                             true,
                         ))
                         .child(
                             parts::switch_row(
                                 "bot-form-notes",
-                                "May write notes",
-                                "Lets runs add to the notebook.",
+                                "May write memory",
+                                "Lets runs add to what the workspace remembers.",
                                 form.write_notes,
                                 false,
                                 theme,

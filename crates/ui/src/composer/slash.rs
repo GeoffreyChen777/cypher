@@ -104,8 +104,38 @@ impl Composer {
         }
         Action::ALL
             .into_iter()
-            .filter(|action| *action != Action::Permissions || self.offers_permissions(harness))
+            .filter(|action| match action {
+                Action::Attach => true,
+                Action::Permissions => self.offers_permissions(harness),
+                Action::Memory => matches!(self.transport, ComposerTransport::Main),
+            })
             .collect()
+    }
+
+    /// `/memory` typed in full: the store it opens — the session's project
+    /// (or the project picked on the new-session canvas), else yours. Never
+    /// sent to the agent; `None` for anything else, and in a side chat or a
+    /// workspace's conversation (its memory is on the Botboard).
+    pub(super) fn typed_memory(&self, text: &str, cx: &App) -> Option<cypher_proto::MemoryScope> {
+        if text.trim() != "/memory"
+            || !matches!(self.transport, ComposerTransport::Main)
+            || self.in_bot_chat(cx)
+        {
+            return None;
+        }
+        Some(self.memory_scope(cx))
+    }
+
+    fn memory_scope(&self, cx: &App) -> cypher_proto::MemoryScope {
+        let state = self.state.read(cx);
+        let space = match state.selected_chat_row() {
+            Some(chat) => chat.space_id.clone(),
+            None => state.selected_space_row().map(|space| space.id.clone()),
+        };
+        match space {
+            Some(space_id) => cypher_proto::MemoryScope::Project { space_id },
+            None => cypher_proto::MemoryScope::You,
+        }
     }
 
     /// Whether this composer writes into a bot's conversation.
@@ -440,6 +470,16 @@ impl Composer {
             Row::Action(crate::composer::slash_menu::Action::Permissions) => {
                 // Types `/permissions`; the space after it opens the choices.
                 format!("/{}", crate::composer::slash_menu::PERMISSIONS)
+            }
+            Row::Action(crate::composer::slash_menu::Action::Memory) => {
+                // Like Attach: opens, types nothing.
+                self.input
+                    .update(cx, |input, cx| input.remove_plain_token(token.range, cx));
+                self.reset_slash(None, cx);
+                let scope = self.memory_scope(cx);
+                cx.emit(ComposerEvent::OpenMemory { scope });
+                cx.notify();
+                return;
             }
             Row::Action(crate::composer::slash_menu::Action::Attach) => {
                 // The action types nothing: drop the `/…` that summoned it.

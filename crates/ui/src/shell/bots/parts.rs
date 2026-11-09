@@ -1,4 +1,4 @@
-//! Pieces the Schedule, Notebook and Network cards and panels share: the
+//! Pieces the Schedule, Memory and Network cards and panels share: the
 //! one-line card a section draws while it is empty, panel sections and
 //! key/value lines, form fields, switch rows and segmented choices, the
 //! confirm dialog, engine calls with an error path, and the time labels.

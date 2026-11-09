@@ -1,18 +1,15 @@
-//! The notebook's permissions by origin, the prompt section and the
+//! The routine tools' permissions by origin, the prompt section and the
 //! schedule listing. The scheduler runs against a real engine in
 //! `tests/bot_schedule.rs`.
 
 use chrono::{DateTime, Local, TimeZone, Utc};
 
 use cypher_proto::{
-    Bot, BotCapabilities, BotChat, BotNote, BotOrigin, BotRecords, BotRoutine, BotScope, BotThread,
-    NoteSource, ProjectGrant, RoutineTarget, RunOutcome, RunRecord, Schedule, Space,
+    Bot, BotCapabilities, BotChat, BotOrigin, BotRecords, BotRoutine, BotScope, BotThread,
+    ProjectGrant, RoutineTarget, RunOutcome, RunRecord, Schedule, Space,
 };
 
-use super::{
-    Access, access, find_note, memory_tools, note_score, notebook_section, render_routines,
-    search_words,
-};
+use super::{Access, access, memory_prompt, memory_tools, render_routines};
 
 fn bot(coordinate: bool) -> Bot {
     Bot {
@@ -59,9 +56,9 @@ fn peer_thread() -> BotChat {
 }
 
 #[test]
-fn owner_threads_keep_the_notebook_and_peers_never_see_it() {
-    let main = access(&BotChat::owner("b1"), &bot(false), false);
-    assert!(main.read_notes && main.write_notes && main.list_routines && main.save_routine);
+fn owner_and_routine_threads_list_routines_and_peers_get_nothing() {
+    let main = access(&BotChat::owner("b1"));
+    assert!(main.list_routines && main.save_routine);
 
     let work = BotChat::thread(
         "b1",
@@ -70,126 +67,40 @@ fn owner_threads_keep_the_notebook_and_peers_never_see_it() {
             work_id: "w1".into(),
         },
     );
-    let orchestration = access(&work, &bot(true), false);
-    assert!(orchestration.read_notes && orchestration.write_notes);
+    let orchestration = access(&work);
+    assert!(orchestration.list_routines);
     assert!(!orchestration.save_routine, "the workspace chat only");
 
-    let routine = access(&routine_thread(), &bot(true), false);
-    assert!(routine.read_notes && routine.list_routines);
-    assert!(!routine.write_notes, "only when the routine says so");
-    assert!(access(&routine_thread(), &bot(true), true).write_notes);
-    assert!(!routine.save_routine);
+    let routine = access(&routine_thread());
+    assert!(routine.list_routines && !routine.save_routine);
 
     // Peers get nothing, whatever a row claims.
-    assert_eq!(access(&peer_thread(), &bot(true), true), Access::default());
+    assert_eq!(access(&peer_thread()), Access::default());
     assert!(memory_tools(&peer_thread(), Some(&bot(true))).is_empty());
     let odd = BotChat::thread("b1", BotOrigin::Peer, BotThread::Main);
-    assert_eq!(access(&odd, &bot(true), true), Access::default());
+    assert_eq!(access(&odd), Access::default());
     let unknown = BotChat::thread("b1", BotOrigin::Owner, BotThread::Unknown);
-    assert_eq!(access(&unknown, &bot(true), true), Access::default());
+    assert_eq!(access(&unknown), Access::default());
 }
 
 #[test]
 fn allowlists_follow_the_access() {
     assert_eq!(
         memory_tools(&BotChat::owner("b1"), Some(&bot(true))),
-        cypher_proto::BOT_MEMORY_TOOLS
+        cypher_proto::BOT_SCHEDULE_TOOLS
     );
-    assert_eq!(
-        memory_tools(&BotChat::owner("b1"), Some(&bot(false))),
-        [
-            "read_notes",
-            "search_notes",
-            "write_note",
-            "update_note",
-            "delete_note",
-            "list_routines",
-            "save_routine"
-        ]
-    );
-    // The call checks the routine's write_notes; the allowlist can't.
     assert_eq!(
         memory_tools(&routine_thread(), Some(&bot(true))),
-        [
-            "read_notes",
-            "search_notes",
-            "write_note",
-            "update_note",
-            "delete_note",
-            "list_routines"
-        ]
+        ["list_routines"]
     );
     assert!(memory_tools(&BotChat::owner("b1"), None).is_empty());
 }
 
-fn note(id: &str, text: &str, at: i64, source: NoteSource) -> BotNote {
-    BotNote {
-        id: id.into(),
-        bot_id: "b1".into(),
-        text: text.into(),
-        source,
-        created_at: at,
-        updated_at: at,
-    }
-}
-
 #[test]
-fn the_prompt_carries_the_newest_notes() {
-    let owner = note("n1", "Alice owns auth", 2_000, NoteSource::Owner);
-    let bot_note = note(
-        "n2",
-        "The release is\nblocked on the migration",
-        1_000,
-        NoteSource::Bot {
-            chat_id: Some("bot-chat".into()),
-            title: Some("Bob".into()),
-        },
-    );
-    let main = access(&BotChat::owner("b1"), &bot(false), false);
-    let section = notebook_section(&[&owner, &bot_note], main, true);
-    assert!(section.starts_with("Your notebook:"), "{section}");
-    assert!(section.contains("write_note"), "{section}");
-    assert!(section.contains("update_note"), "{section}");
-    assert!(section.contains("delete_note"), "{section}");
-    assert!(section.contains("save_routine"), "{section}");
-    let alice = section
-        .find("- [n1] Alice owns auth (from your owner, ")
-        .unwrap();
-    let release = section
-        .find("- [n2] The release is blocked on the migration (you, in \"Bob\", ")
-        .unwrap();
-    assert!(alice < release, "newest first: {section}");
-
-    let reader = access(&routine_thread(), &bot(false), false);
-    let section = notebook_section(&[], reader, false);
-    assert!(section.contains("may read them but not write"), "{section}");
-    assert!(section.contains("(Your notebook is empty.)"), "{section}");
-    assert!(
-        !section.contains("save_routine"),
-        "only the workspace chat: {section}"
-    );
-
-    let many: Vec<BotNote> = (0..cypher_proto::NOTES_IN_PROMPT + 5)
-        .map(|i| {
-            note(
-                &format!("n{i}"),
-                &format!("fact {i}"),
-                i as i64,
-                NoteSource::Owner,
-            )
-        })
-        .collect();
-    let refs: Vec<&BotNote> = many.iter().collect();
-    let section = notebook_section(&refs, main, true);
-    assert!(section.contains(&format!(
-        "The newest {} of {} notes are below; search_notes finds older ones about something.",
-        cypher_proto::NOTES_IN_PROMPT,
-        many.len()
-    )));
-    assert_eq!(
-        section.lines().filter(|l| l.contains("] fact")).count(),
-        cypher_proto::NOTES_IN_PROMPT
-    );
+fn only_the_workspace_chat_is_told_how_routines_work() {
+    let section = memory_prompt(&BotChat::owner("b1")).unwrap();
+    assert!(section.contains("save_routine") && section.contains("list_routines"));
+    assert!(memory_prompt(&routine_thread()).is_none());
 }
 
 fn local(ms: i64) -> DateTime<Local> {
@@ -267,7 +178,7 @@ fn the_schedule_lists_routines_and_where_they_run() {
         text.contains(
             "- \"Morning brief\" (id r1) · Weekdays 09:00 · next Mon Oct 19 09:00 · last run \
              Fri Oct 16 09:00 failed: This run is unattended, so it couldn't ask. · runs as you · \
-             writes notes"
+             writes memory"
         ),
         "{text}"
     );
@@ -290,55 +201,4 @@ fn the_schedule_lists_routines_and_where_they_run() {
     );
     assert!(empty.contains("This workspace is paused"), "{empty}");
     assert!(empty.contains("No routines yet."), "{empty}");
-}
-
-#[test]
-fn notes_are_found_by_id_or_a_unique_start_of_it() {
-    let a = note("abc12345-x", "a", 1, NoteSource::Owner);
-    let b = note("abc19999-x", "b", 2, NoteSource::Owner);
-    let notes = [&a, &b];
-    assert_eq!(find_note(&notes, "abc12345-x").unwrap().id, a.id);
-    assert_eq!(find_note(&notes, "[abc1999]").unwrap().id, b.id);
-    let err = |id: &str| find_note(&notes, id).unwrap_err().to_string();
-    assert!(err("abc1").contains("More than one"), "{}", err("abc1"));
-    assert!(err("ab").contains("at least 4"), "{}", err("ab"));
-    assert!(
-        err("zzzz").contains("No note has the id"),
-        "{}",
-        err("zzzz")
-    );
-}
-
-#[test]
-fn search_matches_forms_inside_words_and_ranks_by_coverage() {
-    let migrating = note(
-        "n1",
-        "Migrating the invoice tables to v2",
-        1,
-        NoteSource::Owner,
-    );
-    let auth = note("n2", "Alice owns authentication", 2, NoteSource::Owner);
-    let total = note("n3", "invoice_total rounds once", 3, NoteSource::Owner);
-    let from = note(
-        "n4",
-        "Keep the header in English",
-        4,
-        NoteSource::Bot {
-            chat_id: None,
-            title: Some("Export CSV".into()),
-        },
-    );
-    let score = |n: &BotNote, q: &str| {
-        let words = search_words(q);
-        note_score(n, &words, &words.join(" "))
-    };
-    assert!(score(&migrating, "migration").is_some(), "same stem");
-    assert!(score(&auth, "auth").is_some(), "a start of the word");
-    assert!(score(&total, "total").is_some(), "inside an identifier");
-    assert!(score(&from, "csv").is_some(), "the title it came from");
-    assert!(score(&auth, "billing").is_none());
-    // Both words outrank one; the phrase outranks the words apart.
-    let both = score(&migrating, "invoice tables").unwrap();
-    let one = score(&total, "invoice tables").unwrap();
-    assert!(both > one, "{both} > {one}");
 }

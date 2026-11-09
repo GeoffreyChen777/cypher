@@ -389,6 +389,7 @@ impl Engine {
         };
         core.set_auth(auth.clone());
         // Bots' shell and file tools run only under permission control.
+        core.memory.set_pi_runtime(Some(pi_runtime_paths.clone()));
         core.bots.set_pi_runtime(pi_runtime_paths);
         if synced_scope {
             let mut evicted = core.workspace.watch_evicted();

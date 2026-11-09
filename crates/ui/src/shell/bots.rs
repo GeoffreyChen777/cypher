@@ -20,9 +20,9 @@ mod chat;
 mod column;
 mod dialog;
 mod items;
+pub(super) mod memory;
 mod needs;
 mod network;
-mod notebook;
 mod panel;
 mod parts;
 mod picker;
@@ -78,10 +78,16 @@ pub(super) struct BoardUi {
     /// collapse, local to this window and never saved.
     collapsed: std::collections::HashSet<&'static str>,
     focus_tween: Option<WidthTween>,
-    /// The Schedule, Notebook and Network panels' forms and drafts.
+    /// The Schedule and Network panels' forms and drafts.
     schedule: schedule::ScheduleUi,
-    notebook: notebook::NotebookUi,
     network: network::NetworkUi,
+    /// The open memory store's pane (its watch, editor and drafts), while
+    /// the panel shows one of its pages.
+    memory: Option<(
+        cypher_proto::MemoryScope,
+        Entity<memory::MemoryPane>,
+        Vec<Subscription>,
+    )>,
     /// A delete or revoke waiting on the owner's yes.
     confirm: Option<parts::Confirm>,
     /// A form's buttons, pinned under the panel's scrolling body; set by

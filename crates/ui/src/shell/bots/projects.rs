@@ -4,7 +4,8 @@
 //!
 //! The list groups the projects the bot reads by device. A project's page
 //! names its device beside the title (the folder on hover), then lists its
-//! sessions, the work that ran there and the routines that run there.
+//! sessions, the work that ran there, the routines that run there and the
+//! memory its sessions keep.
 
 use super::board::{ProjectLoad, project_loads, scoped_sessions};
 use super::items::{
@@ -13,7 +14,7 @@ use super::items::{
 };
 use super::panel::{PanelHead, PanelItem};
 use super::*;
-use cypher_proto::{BotRoutine, BotWork, WorkState};
+use cypher_proto::{BotRoutine, BotWork, MemoryScope, WorkState};
 
 /// Work items the project page lists, newest first.
 const PROJECT_WORK: usize = 5;
@@ -202,7 +203,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         let now = Utc::now();
-        let (space, device, sessions, work, routines) = {
+        let (space, device, sessions, work, routines, memory) = {
             let state = self.state.read(cx);
             if !bot.scope.sees_space(space_id) {
                 return None;
@@ -248,7 +249,12 @@ impl Shell {
                 .cloned()
                 .collect();
             routines.sort_by_key(|r| r.name.to_lowercase());
-            (space, device, sessions, work, routines)
+            let memory = records
+                .memory_store(&MemoryScope::Project {
+                    space_id: space_id.to_string(),
+                })
+                .cloned();
+            (space, device, sessions, work, routines, memory)
         };
         let head = PanelHead {
             glyph: crate::appearance::space_style::space_icon(space.icon.as_deref()),
@@ -429,6 +435,57 @@ impl Shell {
                 );
             }
         }
+
+        // ── its memory: the project's own, which the workspace reads ──
+        let preview = memory
+            .as_ref()
+            .map(|m| transcript::single_line(&super::items::plain_markdown(&m.preview)))
+            .filter(|line| !line.is_empty());
+        let files = memory.as_ref().map_or(0, |m| m.files as usize);
+        let key = format!("bot-project-memory-{}", space.id);
+        let item = PanelItem::Memory(MemoryScope::Project {
+            space_id: space.id.clone(),
+        });
+        body = body
+            .child(section_rule())
+            .child(
+                section_head("Memory", false, theme)
+                    .child(div().flex_1())
+                    .child(head_note(
+                        "Read-only here; sessions in this project write it",
+                        theme,
+                    )),
+            )
+            .child(
+                hover_row(&key)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
+                    .child(
+                        div()
+                            .pt(px(3.0))
+                            .flex_none()
+                            .w(px(14.0))
+                            .flex()
+                            .justify_center()
+                            .child(
+                                icon(icons::BOOK)
+                                    .size(px(12.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    )
+                    .child(two_line(
+                        match files {
+                            0 => "No memory yet".to_string(),
+                            1 => "1 file".to_string(),
+                            n => format!("{n} files"),
+                        },
+                        preview.unwrap_or_else(|| {
+                            "Sessions here keep what they learn about the project.".to_string()
+                        }),
+                        theme,
+                    ))
+                    .child(div().pt(px(5.0)).child(arrow_in(&key, theme))),
+            );
         Some((head, body))
     }
 }

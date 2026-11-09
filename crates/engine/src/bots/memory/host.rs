@@ -685,6 +685,17 @@ impl Bots {
         settled
     }
 
+    /// The last answer and the last error of the run in `chat_id` that
+    /// started at `run_at`.
+    pub(in crate::bots) fn run_text(
+        &self,
+        chat_id: &str,
+        run_at: i64,
+    ) -> (Option<String>, Option<String>) {
+        let result = self.run_result(chat_id, run_at);
+        (result.text.filter(|_| !result.aborted), result.error)
+    }
+
     /// The last answer and error of the run that started at `run_at`.
     fn run_result(&self, chat_id: &str, run_at: i64) -> RunResult {
         let entries = match self.inner.doc_host.read_transcript(chat_id) {

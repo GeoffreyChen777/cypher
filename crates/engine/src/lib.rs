@@ -19,6 +19,7 @@ mod headless;
 pub mod host;
 mod instance_lock;
 pub mod mcp;
+pub mod memory;
 pub mod pi;
 mod profile;
 pub mod registry;

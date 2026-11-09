@@ -1,10 +1,10 @@
 //! The **Needs you** card (§13.1): what waits on the owner, most pressing
 //! first, right under Status in the amber the sidebar gives a session
 //! awaiting input. Its rows are the bot's own question, actions and plans
-//! awaiting approval, sessions the bot started that are asking, and review
-//! drafts: decisions only, each listed here and nowhere else in the sidebar
-//! (a failed routine is state, marked on its routine). The header opens the
-//! whole list.
+//! awaiting approval, sessions the bot started that are asking, review
+//! drafts and memory writes held for review: decisions only, each listed
+//! here and nowhere else in the sidebar (a failed routine is state, marked
+//! on its routine). The header opens the whole list.
 //!
 //! Each item opens in the detail panel with its context and its actions:
 //! the plan to approve, the action and why it needs approval, the worker's
@@ -68,8 +68,24 @@ fn need_rows(
                     at: chat.last_message_at,
                 })
             }
-            // Drawn by the Memory panel work (memory.md §8).
-            Need::Record(NeedsYou::Memory(_)) => None,
+            Need::Record(NeedsYou::Memory(store_id)) => {
+                let store = records.memory_stores.iter().find(|s| s.id == store_id)?;
+                Some(NeedRow {
+                    item: Some(PanelItem::Memory(store.scope.clone())),
+                    glyph: icons::BOOK,
+                    tint: theme.warning,
+                    title: "Memory to review".into(),
+                    sub: format!(
+                        "{} held · read untrusted content",
+                        if store.pending == 1 {
+                            "1 write".to_string()
+                        } else {
+                            format!("{} writes", store.pending)
+                        }
+                    ),
+                    at: Some(super::items::at(store.updated_at)),
+                })
+            }
             Need::Record(NeedsYou::Plan(id)) => {
                 let work = records.work.iter().find(|w| w.id == id)?;
                 let steps = work.steps.len();

@@ -382,9 +382,10 @@ async fn a_bot_chat_runs_locked_down() {
         env.tools[..cypher_proto::BOT_TOOLS.len()],
         cypher_proto::BOT_TOOLS
     );
-    // The notebook and routines are every owner bot chat's; tasks need
+    // Memory and routines are every owner bot chat's; tasks need
     // Coordinate, which a new bot lacks.
-    assert!(env.tools.iter().any(|t| t == "write_note"));
+    assert!(env.tools.iter().any(|t| t == "memory"));
+    assert!(env.tools.iter().any(|t| t == "save_routine"));
     assert!(!env.tools.iter().any(|t| t == "save_project_task"));
     for tool in cypher_proto::BOT_NETWORK_TOOLS {
         assert!(env.tools.iter().any(|t| t == tool), "{tool}");
@@ -837,10 +838,11 @@ async fn search_reads_the_index_and_filters_scope_at_query_time() {
         .cwd
         .unwrap();
 
-    // The background indexer picks up the new bot's scope, and only it.
+    // The background indexer holds every session (memory's
+    // search_history reads them too); who reads what is decided per query.
     wait_for(
-        || indexed_chats(&folder) == ["chat-billing"],
-        "the billing chat indexed",
+        || indexed_chats(&folder) == ["chat-billing", "chat-secret"],
+        "the sessions indexed",
     )
     .await;
     let found = tool(
@@ -856,7 +858,7 @@ async fn search_reads_the_index_and_filters_scope_at_query_time() {
     );
     assert!(!found.contains("not indexed"), "{found}");
 
-    // Scope applies at query time, before the index catches up.
+    // Scope applies at query time.
     let client = cypher_rpc::memory_client(core.rpc_service());
     client
         .call(
@@ -882,22 +884,19 @@ async fn search_reads_the_index_and_filters_scope_at_query_time() {
     assert!(!found.contains("Migrate"), "{found}");
     assert!(found.contains("Rotate the invoice signing key"), "{found}");
 
-    // The index follows: the excluded chat leaves, the newly granted one joins.
-    wait_for(
-        || indexed_chats(&folder) == ["chat-secret"],
-        "the index follows the scope",
-    )
-    .await;
-
-    // A deleted bot leaves nothing indexed.
+    // A deleted session leaves the index.
     client
         .call(
             cypher_rpc::methods::MUTATE,
-            serde_json::json!({ "op": "deleteBot", "botId": bot.id }),
+            serde_json::json!({ "op": "deleteChat", "chatId": "chat-billing" }),
         )
         .await
-        .expect("deleteBot");
-    wait_for(|| indexed_chats(&folder).is_empty(), "the index emptied").await;
+        .expect("deleteChat");
+    wait_for(
+        || indexed_chats(&folder) == ["chat-secret"],
+        "the deleted chat dropped",
+    )
+    .await;
     core.shutdown().await;
 }
 

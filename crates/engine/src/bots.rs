@@ -29,9 +29,12 @@ use crate::host::doc_host::DocHost;
 use crate::host::workspace_host::WorkspaceHost;
 use crate::util::{lock, new_id};
 
+pub(crate) use network::scrub_secrets;
 pub use network::{BotEdge, HttpBotEdge, InviteReply, NetError, OwnerName, SIGNED_OUT};
+pub(crate) use prompt::space_name as prompt_space_name;
 
 mod git;
+mod history;
 mod index;
 mod memory;
 mod network;
@@ -275,6 +278,11 @@ impl Bots {
             tracing::warn!(bot = %bot_id, error = %err, "could not remove the bot folder");
         }
     }
+}
+
+/// A private folder (memory passes run in one too).
+pub(crate) fn make_private_dir(path: &Path) -> Result<(), EngineError> {
+    create_private_dir(path)
 }
 
 fn create_private_dir(path: &Path) -> Result<(), EngineError> {

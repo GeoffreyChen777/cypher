@@ -206,7 +206,7 @@ pub(super) fn orphan_prompt() -> String {
 }
 
 /// A space's display name: its rename, else its folder's name.
-pub(super) fn space_name(space: &Space) -> String {
+pub(crate) fn space_name(space: &Space) -> String {
     space.name.clone().unwrap_or_else(|| {
         std::path::Path::new(&space.path)
             .file_name()

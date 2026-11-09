@@ -209,7 +209,7 @@ fn reading_pages_from_the_tail_and_summarizes_tools() {
         .map(|i| message(i, &format!("message {i}")))
         .collect();
 
-    let tail = render_session(&view, &chat, &entries, None, Some(5));
+    let tail = render_session(&view, &chat, &entries, None, Some(5), "read_session");
     assert!(tail.contains("showing #25–#29"), "{tail}");
     assert!(tail.contains("Earlier messages: read_session with from=20."));
     assert!(tail.contains("[#29] agent"));
@@ -220,11 +220,11 @@ fn reading_pages_from_the_tail_and_summarizes_tools() {
     assert!(!tail.contains("private thoughts"), "reasoning stays out");
     assert!(!tail.contains("[#24]"));
 
-    let head = render_session(&view, &chat, &entries, Some(0), Some(3));
+    let head = render_session(&view, &chat, &entries, Some(0), Some(3), "read_session");
     assert!(head.contains("[#0] user") && head.contains("[#2]"));
     assert!(head.contains("More messages: read_session with from=3."));
 
-    let empty = render_session(&view, &chat, &[], None, None);
+    let empty = render_session(&view, &chat, &[], None, None, "read_session");
     assert!(empty.contains("0 message(s)"), "{empty}");
 }
 
@@ -233,7 +233,14 @@ fn a_long_message_is_clipped() {
     let view = view(billing());
     let chat = view.chats[0].clone();
     let long = "x".repeat(10_000);
-    let page = render_session(&view, &chat, &[message(0, &long)], None, None);
+    let page = render_session(
+        &view,
+        &chat,
+        &[message(0, &long)],
+        None,
+        None,
+        "read_session",
+    );
     assert!(page.contains("more characters]"), "clipped");
     assert!(page.chars().count() < 8_000);
 }
@@ -666,12 +673,30 @@ fn index_targets_are_the_union_of_this_devices_reading_bots() {
     };
     let mut bot_chat = chat("b1-chat", "s1", 9_000);
     bot_chat.bot = Some(cypher_proto::BotChat::owner("b1"));
+    let mut elsewhere = chat("b3-chat", "s3", 8_000);
+    elsewhere.bot = Some(cypher_proto::BotChat::owner("b3"));
+    let mut peer = chat("peer", "s1", 7_000);
+    peer.bot = Some(cypher_proto::BotChat::new(
+        "b1",
+        cypher_proto::BotOrigin::Peer,
+    ));
+    let mut pass = chat("pass", "s1", 6_000);
+    pass.memory = Some(cypher_proto::MemoryChat {
+        store_id: "mem-p-s1".into(),
+        scope: cypher_proto::MemoryScope::Project {
+            space_id: "s1".into(),
+        },
+        pass_id: "p1".into(),
+    });
     let chats = vec![
         chat("one", "s1", 1_000),
         chat("two", "s2", 2_000),
         chat("three", "s3", 3_000),
         chat("four", "s4", 4_000),
         bot_chat,
+        elsewhere,
+        peer,
+        pass,
     ];
     let bots = vec![
         bot("b1", "dev", grant("s1")),
@@ -692,8 +717,9 @@ fn index_targets_are_the_union_of_this_devices_reading_bots() {
         .collect();
     assert_eq!(
         ids,
-        ["two", "one"],
-        "newest first; no bot chats, other hosts or title-only bots"
+        ["b1-chat", "four", "three", "two", "one"],
+        "newest first: every session and this device's workspaces' own chats; never \
+         another host's workspace chats, peer threads or memory passes"
     );
 }
 

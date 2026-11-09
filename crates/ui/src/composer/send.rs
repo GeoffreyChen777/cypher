@@ -185,6 +185,9 @@ impl Composer {
     /// A quick chat is the deliberate exception (its folder is minted on
     /// send). Existing chats carry their own project, so they always send.
     pub(super) fn send_blocked(&self, cx: &App) -> bool {
+        if self.typed_memory(self.input.read(cx).text(), cx).is_some() {
+            return false;
+        }
         if matches!(self.transport, ComposerTransport::Main)
             && self
                 .pickers
@@ -227,6 +230,12 @@ impl Composer {
             return;
         }
         let text = self.input.read(cx).text().trim().to_string();
+        if let Some(scope) = self.typed_memory(&text, cx) {
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+            self.slash = SlashState::default();
+            cx.emit(ComposerEvent::OpenMemory { scope });
+            return;
+        }
         if matches!(self.transport, ComposerTransport::Main)
             && self
                 .pickers

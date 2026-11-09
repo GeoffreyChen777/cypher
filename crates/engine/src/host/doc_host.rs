@@ -631,6 +631,11 @@ impl DocHost {
         self.inner.workspace.get()
     }
 
+    /// Whether docs sync through the Edge (else they stay on this device).
+    pub fn syncs(&self) -> bool {
+        self.inner.config.edge.is_some()
+    }
+
     pub fn device_id(&self) -> &str {
         &self.inner.config.device_id
     }

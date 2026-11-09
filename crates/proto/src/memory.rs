@@ -163,6 +163,9 @@ pub struct MemoryPass {
     pub sources: u32,
     /// Asked for with "Run now".
     pub manual: bool,
+    /// The store's version before the pass (hex): "Undo" restores it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub undo: Option<String>,
 }
 
 impl MemoryPass {
@@ -485,7 +488,9 @@ pub fn valid_memory_path(path: &str) -> bool {
         && path[1..]
             .split('/')
             .all(|seg| !seg.is_empty() && seg != "." && seg != ".." && !seg.starts_with('.'))
-        && path.chars().all(|c| !c.is_control() && c != '\\')
+        && path
+            .chars()
+            .all(|c| !c.is_control() && c != '\\' && c != '|')
 }
 
 #[cfg(test)]
@@ -540,6 +545,7 @@ mod tests {
             "/a//b.md",
             "/.hidden.md",
             "/a\\b.md",
+            "/a|b.md",
         ] {
             assert!(!valid_memory_path(bad), "{bad}");
         }

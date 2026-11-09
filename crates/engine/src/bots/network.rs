@@ -37,6 +37,8 @@ pub mod edge;
 mod host;
 mod scrub;
 
+pub(crate) use scrub::scrub as scrub_secrets;
+
 pub use edge::{BotEdge, HttpBotEdge, NetError, SIGNED_OUT};
 
 /// `ask_bot`'s wait, in seconds.

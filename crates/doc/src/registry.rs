@@ -1346,6 +1346,16 @@ impl RegistryDoc {
                 .filter(|r| r.bot_id == bot_id)
                 .map(|r| (p::KIND_BOT_NOTES, r.id.clone())),
         );
+        // The workspace's memory row goes with it (its doc stays unread).
+        records_of.extend(
+            records
+                .memory_stores
+                .iter()
+                .filter(
+                    |r| matches!(&r.scope, p::MemoryScope::Workspace { bot_id: b } if b == bot_id),
+                )
+                .map(|r| (p::KIND_MEMORY_STORES, r.id.clone())),
+        );
         records_of.extend(
             records
                 .routines

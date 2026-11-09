@@ -196,6 +196,9 @@ struct Inner {
     /// checkout tree for the Changes pane's "Latest turn" scope and records
     /// each round's changed files. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Memory (docs/design/memory.md): each run's memory section and a
+    /// consolidation pass's profile. Absent in bare tests.
+    memory: OnceLock<crate::memory::Memory>,
     /// Hear every unattended run the engine stopped for asking for input:
     /// the bot scheduler settles the routine or task run as failed.
     unattended_listeners: Mutex<Vec<UnattendedListener>>,
@@ -364,6 +367,7 @@ impl SessionsEngine {
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                memory: OnceLock::new(),
                 unattended_listeners: Mutex::new(Vec::new()),
                 ephemeral: Mutex::new(HashSet::new()),
                 ephemeral_tx: Mutex::new(HashMap::new()),
@@ -399,6 +403,11 @@ impl SessionsEngine {
     /// Test seam: fix the watchdog windows instead of reading the env per run.
     pub fn set_quiesce_windows(&self, windows: QuiesceWindows) {
         let _ = self.inner.quiesce.set(windows);
+    }
+
+    /// Wire the memory service (called once at engine assembly).
+    pub fn set_memory(&self, memory: crate::memory::Memory) {
+        let _ = self.inner.memory.set(memory);
     }
 
     /// Wire the turn listener (called once at engine assembly).
@@ -1260,10 +1269,10 @@ impl Inner {
     /// ([`crate::bots::profile::is_unattended`]).
     fn is_unattended(&self, chat_id: &str) -> bool {
         self.workspace().is_some_and(|ws| {
-            ws.chat(chat_id)
-                .ok()
-                .flatten()
-                .is_some_and(|chat| crate::bots::profile::is_unattended(&ws, &chat))
+            ws.chat(chat_id).ok().flatten().is_some_and(|chat| {
+                // A consolidation pass runs where nobody watches, too.
+                chat.is_memory_pass() || crate::bots::profile::is_unattended(&ws, &chat)
+            })
         })
     }
 
@@ -1727,10 +1736,13 @@ impl Inner {
     /// (messaging tools then honestly report unavailable).
     fn host_context(&self, chat_id: &str) -> RunHostContext {
         let mut profile = RunProfile::Root;
+        let memory = self.memory.get();
         if let Some(ws) = self.workspace()
             && let Ok(Some(chat)) = ws.chat(chat_id)
         {
-            if let Some(bot) = crate::bots::profile::bot_env(&ws, &chat) {
+            if let Some(pass) = memory.and_then(|m| m.run_env(chat_id)) {
+                profile = RunProfile::Memory(pass);
+            } else if let Some(bot) = crate::bots::profile::bot_env(&ws, &chat) {
                 profile = RunProfile::Bot(bot);
             } else if let Some(child) = chat.child {
                 profile = RunProfile::Child(self.child_env(chat_id, child));
@@ -1739,7 +1751,7 @@ impl Inner {
         RunHostContext {
             chat_id: Some(chat_id.to_string()),
             profile,
-            memory_prompt: None,
+            memory_prompt: memory.and_then(|m| m.prompt_for(chat_id)),
         }
     }
 

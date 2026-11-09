@@ -43,6 +43,21 @@ impl AgentRpc {
         }
     }
 
+    /// `MemoryTool` speaks for a chat whose run is on this device (its
+    /// handler resolves which stores the chat sees, peers none).
+    fn require_local_chat(&self, params: &Value) -> Result<(), RpcError> {
+        let chat_id = params
+            .get("chatId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::BadParams("chatId required".into()))?;
+        match self.inner.workspace.chat(chat_id).map_err(failed)? {
+            Some(chat) if chat.device_id == self.inner.doc_host.device_id() => Ok(()),
+            _ => Err(RpcError::Failed(
+                "Memory answers only runs on this device.".into(),
+            )),
+        }
+    }
+
     /// `BotTool` speaks for a workspace's chat hosted on this device (its
     /// handler resolves the workspace and enforces its scope).
     fn require_local_bot_chat(&self, params: &Value) -> Result<(), RpcError> {
@@ -78,6 +93,7 @@ impl RpcService for AgentRpc {
                 self.require_local_child(&params)?
             }
             methods::BOT_TOOL => self.require_local_bot_chat(&params)?,
+            methods::MEMORY_TOOL => self.require_local_chat(&params)?,
             other => return Err(RpcError::UnknownMethod(other.to_string())),
         }
         self.inner.handle(method, params).await

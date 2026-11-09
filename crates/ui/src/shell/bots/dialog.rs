@@ -292,7 +292,7 @@ impl Shell {
                 let sessions = scope
                     .visible_chats(&state.chats)
                     .iter()
-                    .filter(|c| !c.is_child())
+                    .filter(|c| !c.is_child() && !c.is_memory_pass())
                     .count();
                 let spaces = state
                     .spaces

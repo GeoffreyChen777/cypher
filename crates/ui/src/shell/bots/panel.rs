@@ -38,8 +38,16 @@ pub(in crate::shell) enum PanelItem {
     Routine(String),
     /// The new-routine form.
     NewRoutine,
-    /// Every note, editable.
-    Notebook,
+    /// A memory store's page: the workspace's own, or a project's it reads
+    /// (from the project's page).
+    Memory(cypher_proto::MemoryScope),
+    /// One file of a store (a store-relative path).
+    MemoryFile {
+        scope: cypher_proto::MemoryScope,
+        path: String,
+    },
+    /// The new-file form.
+    NewMemoryFile(cypher_proto::MemoryScope),
     /// The full audit log.
     Activity,
     /// Connections and invites.
@@ -86,6 +94,24 @@ impl Shell {
         }
         if !matches!(self.board.panel, Some(PanelItem::Review(_))) {
             self.board.review = None;
+        }
+        // The open store's pane stays while the panel moves between its
+        // pages; anything else ends its watch.
+        let memory = match self.board.panel.as_ref() {
+            Some(
+                PanelItem::Memory(scope)
+                | PanelItem::MemoryFile { scope, .. }
+                | PanelItem::NewMemoryFile(scope),
+            ) => Some(scope),
+            _ => None,
+        };
+        if self
+            .board
+            .memory
+            .as_ref()
+            .is_some_and(|(scope, ..)| memory != Some(scope))
+        {
+            self.board.memory = None;
         }
     }
 
@@ -162,7 +188,9 @@ impl Shell {
             PanelItem::Schedule | PanelItem::Routine(_) | PanelItem::NewRoutine => {
                 self.render_schedule_panel(&bot, item, &theme, cx)?
             }
-            PanelItem::Notebook => self.render_notebook_panel(&bot, item, &theme, window, cx)?,
+            PanelItem::Memory(_) | PanelItem::MemoryFile { .. } | PanelItem::NewMemoryFile(_) => {
+                self.render_memory_panel(&bot, item, &theme, window, cx)?
+            }
             PanelItem::Activity => self.render_activity_panel(&bot, item, &theme, cx)?,
             PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => {
                 self.render_network_panel(&bot, item, &theme, cx)?

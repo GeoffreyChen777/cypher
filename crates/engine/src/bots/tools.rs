@@ -164,7 +164,7 @@ impl View {
         }
     }
 
-    fn header(&self, chat: &Chat) -> String {
+    pub(super) fn header(&self, chat: &Chat) -> String {
         format!(
             "{} · \"{}\" · {} · {} · {}",
             chat.id,
@@ -434,13 +434,17 @@ impl Bots {
             &entries,
             request.from,
             request.limit,
+            "read_session",
         ))
     }
 
     /// A chat's transcript, as fresh as this device can make it. A chat
     /// another device hosts is opened (joining its room) and given a moment
     /// to catch up; a local one is read from its stored doc.
-    async fn transcript(&self, chat: &Chat) -> Result<Vec<SessionMessageEntry>, EngineError> {
+    pub(super) async fn transcript(
+        &self,
+        chat: &Chat,
+    ) -> Result<Vec<SessionMessageEntry>, EngineError> {
         let docs = self.inner.doc_host.clone();
         let hosted_here = chat.device_id == docs.device_id();
         if !hosted_here {
@@ -965,12 +969,15 @@ fn render_entry(index: usize, entry: &SessionMessageEntry, now: DateTime<Utc>) -
     lines.join("\n")
 }
 
+/// `read_tool` names the tool that pages on (`read_session`, or the
+/// memory tools' `read_history`).
 pub(super) fn render_session(
     view: &View,
     chat: &Chat,
     entries: &[SessionMessageEntry],
     from: Option<usize>,
     limit: Option<usize>,
+    read_tool: &str,
 ) -> String {
     let total = entries.len();
     let limit = limit.unwrap_or(READ_DEFAULT).clamp(1, READ_MAX);
@@ -989,7 +996,7 @@ pub(super) fn render_session(
     )];
     if start > 0 {
         out.push(format!(
-            "Earlier messages: read_session with from={}.",
+            "Earlier messages: {read_tool} with from={}.",
             start.saturating_sub(limit)
         ));
     }
@@ -1008,7 +1015,7 @@ pub(super) fn render_session(
     }
     if shown_to < total {
         out.push(String::new());
-        out.push(format!("More messages: read_session with from={shown_to}."));
+        out.push(format!("More messages: {read_tool} with from={shown_to}."));
     }
     out.join("\n")
 }

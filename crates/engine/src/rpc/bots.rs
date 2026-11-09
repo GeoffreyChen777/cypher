@@ -161,32 +161,6 @@ impl EngineRpc {
                     return Err(missing("approval"));
                 }
             }
-            MutateParams::SaveBotNote {
-                note_id,
-                bot_id,
-                text,
-            } => {
-                let created_at = ws
-                    .record::<p::BotNote>(p::KIND_BOT_NOTES, &note_id)
-                    .map_or(now, |n| n.created_at);
-                let mut note = p::BotNote {
-                    id: note_id.clone(),
-                    bot_id,
-                    text,
-                    source: p::NoteSource::Owner,
-                    created_at,
-                    updated_at: now,
-                };
-                note.clamp();
-                if note.text.is_empty() {
-                    return Err(RpcError::BadParams("A note needs some text.".into()));
-                }
-                ws.put_record(p::KIND_BOT_NOTES, &note_id, &note, Fields::All)
-                    .map_err(failed)?;
-            }
-            MutateParams::DeleteBotNote { note_id } => {
-                ws.delete_records(p::KIND_BOT_NOTES, &[note_id]);
-            }
             MutateParams::SaveBotRoutine { mut routine } => {
                 routine.clamp();
                 routine.validate().map_err(RpcError::BadParams)?;

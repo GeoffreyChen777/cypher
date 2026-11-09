@@ -41,7 +41,7 @@ pub(super) fn group_label(group: Option<ActivityGroup>) -> &'static str {
         Some(ActivityGroup::Plans) => "Plans",
         Some(ActivityGroup::Sessions) => "Sessions",
         Some(ActivityGroup::Routines) => "Routines",
-        Some(ActivityGroup::Notes) => "Notes",
+        Some(ActivityGroup::Notes) => "Memory",
         Some(ActivityGroup::Network) => "Network",
     }
 }
@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(ids(Some(ActivityGroup::Routines)), ["routine"]);
         assert_eq!(ids(Some(ActivityGroup::Network)), ["peer"]);
         assert_eq!(group_label(Some(ActivityGroup::Routines)), "Routines");
-        assert_eq!(group_label(Some(ActivityGroup::Notes)), "Notes");
+        assert_eq!(group_label(Some(ActivityGroup::Notes)), "Memory");
     }
 
     #[test]

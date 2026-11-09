@@ -1,17 +1,18 @@
-//! Memory and routines (docs/design/agent-bots.md §7–§8, P3): the
-//! notebook, the scheduler and routines.
+//! Routines (docs/design/agent-bots.md §8, P3): the scheduler and the
+//! routine tools. A workspace's memory, which replaced its notebook, is
+//! `crate::memory` (docs/design/memory.md).
 //!
-//! Notes and routines are registry rows (`cypher_proto::bot_records`). The
-//! tools here read and write them for a bot's threads; what a thread may do
-//! follows its origin and thread kind ([`access`]), checked on every call.
-//! The scheduler that runs routines is [`host`].
+//! Routines are registry rows (`cypher_proto::bot_records`). The tools here
+//! read and write them for a bot's threads; what a thread may do follows its
+//! origin and thread kind ([`access`]), checked on every call. The scheduler
+//! that runs routines is [`host`].
 
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
 
 use cypher_proto::{
-    self as p, ActivityKind, Bot, BotActivity, BotChat, BotNote, BotOrigin, BotRoutine, BotThread,
-    Chat, NoteSource, RoutineTarget, Schedule,
+    self as p, ActivityKind, Bot, BotActivity, BotChat, BotOrigin, BotRoutine, BotThread,
+    RoutineTarget, Schedule,
 };
 
 use super::Bots;
@@ -26,44 +27,46 @@ mod tests;
 
 pub(super) use host::ScheduleState;
 
-/// Most notes `read_notes` lists.
-const READ_NOTES_MAX: usize = 200;
-/// One answer, like the read tools'.
-const ANSWER_MAX_CHARS: usize = 48_000;
+/// How far a hidden run started at `run_at` has got, from its latest Run
+/// command and session status: `None` while it runs, else `(failed,
+/// reason)`. The memory service settles consolidation passes with it.
+pub(super) fn run_progress(
+    run_at: i64,
+    now_ms: i64,
+    command: Option<&cypher_doc::SessionCommandEntry>,
+    status: Option<p::SessionStatus>,
+) -> Option<(bool, Option<String>)> {
+    match schedule::progress(
+        run_at,
+        now_ms,
+        command.map(|c| (c.status, c.resolution.as_deref())),
+        status,
+    ) {
+        schedule::Progress::Waiting => None,
+        schedule::Progress::Ended { failed, reason } => Some((failed, reason)),
+    }
+}
 
-/// What one thread may do with the notebook and the schedule (§7, §8).
+/// What one thread may do with routines (§8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct Access {
-    pub read_notes: bool,
-    pub write_notes: bool,
     pub list_routines: bool,
     pub save_routine: bool,
 }
 
-/// Owner threads (the bot chat and orchestration threads) read and write the
-/// notebook; routine threads read it and write only when their routine says
-/// so; peer threads get nothing, so a peer can neither read the owner's notes
-/// nor plant one. Routines are made in the bot chat only; one that runs in a
-/// project also needs *Coordinate* ([`Bots::save_routine`]).
-pub(super) fn access(marker: &BotChat, _bot: &Bot, routine_writes_notes: bool) -> Access {
+/// Owner and routine threads list routines; routines are made in the bot
+/// chat only (one that runs in a project also needs *Coordinate*,
+/// [`Bots::save_routine`]); peer threads get nothing.
+pub(super) fn access(marker: &BotChat) -> Access {
     match (marker.origin, &marker.thread) {
         (BotOrigin::Owner, BotThread::Main) => Access {
-            read_notes: true,
-            write_notes: true,
             list_routines: true,
             save_routine: true,
         },
-        (BotOrigin::Owner, BotThread::Work { .. }) => Access {
-            read_notes: true,
-            write_notes: true,
+        (BotOrigin::Owner, BotThread::Work { .. })
+        | (BotOrigin::Routine, BotThread::Routine { .. }) => Access {
             list_routines: true,
-            ..Access::default()
-        },
-        (BotOrigin::Routine, BotThread::Routine { .. }) => Access {
-            read_notes: true,
-            write_notes: routine_writes_notes,
-            list_routines: true,
-            ..Access::default()
+            save_routine: false,
         },
         _ => Access::default(),
     }
@@ -72,9 +75,6 @@ pub(super) fn access(marker: &BotChat, _bot: &Bot, routine_writes_notes: bool) -
 impl Access {
     fn allows(self, tool: &str) -> bool {
         match tool {
-            "read_notes" | "search_notes" => self.read_notes,
-            // Changing or removing a note is writing to the notebook.
-            "write_note" | "update_note" | "delete_note" => self.write_notes,
             "list_routines" => self.list_routines,
             "save_routine" => self.save_routine,
             _ => false,
@@ -82,134 +82,10 @@ impl Access {
     }
 
     fn tools(self) -> Vec<&'static str> {
-        p::BOT_MEMORY_TOOLS
+        p::BOT_SCHEDULE_TOOLS
             .into_iter()
             .filter(|tool| self.allows(tool))
             .collect()
-    }
-}
-
-/// The routine a routine thread runs, when it is this bot's.
-fn thread_routine(workspace: &WorkspaceHost, marker: &BotChat) -> Option<BotRoutine> {
-    let BotThread::Routine { routine_id } = &marker.thread else {
-        return None;
-    };
-    workspace
-        .record::<BotRoutine>(p::KIND_BOT_ROUTINES, routine_id)
-        .filter(|routine| routine.bot_id == marker.bot_id)
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct ReadNotes {
-    query: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct SearchNotes {
-    query: String,
-}
-
-/// Most notes `search_notes` answers with.
-const SEARCH_NOTES_MAX: usize = 20;
-
-/// The words of `text` for search: lower case, split at anything but
-/// letters, digits and `_`.
-fn search_words(text: &str) -> Vec<String> {
-    text.to_lowercase()
-        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .filter(|w| !w.is_empty())
-        .map(String::from)
-        .collect()
-}
-
-/// Whether query word `q` finds note word `w`: inside it ("total" in
-/// "invoice_total"), or the same stem: one starts the other ("auth",
-/// "authentication"), or they share their first five letters ("migration",
-/// "migrating").
-fn word_matches(q: &str, w: &str) -> bool {
-    if q.chars().count() >= 3 && w.contains(q) {
-        return true;
-    }
-    if w.starts_with(q) || q.starts_with(w) && w.chars().count() >= 3 {
-        return true;
-    }
-    let shared = q.chars().zip(w.chars()).take_while(|(a, b)| a == b).count();
-    shared >= 5
-}
-
-/// How well `note` matches `query`'s words: the share of them it matches
-/// (in its text or the title it came from), with the whole query as a
-/// phrase a little higher. `None` when no word matches.
-fn note_score(note: &BotNote, query: &[String], phrase: &str) -> Option<f32> {
-    let mut haystack = note.text.clone();
-    if let NoteSource::Bot { title: Some(t), .. } = &note.source {
-        haystack.push(' ');
-        haystack.push_str(t);
-    }
-    let words = search_words(&haystack);
-    let hits = query
-        .iter()
-        .filter(|q| words.iter().any(|w| word_matches(q, w)))
-        .count();
-    if hits == 0 {
-        return None;
-    }
-    let mut score = hits as f32 / query.len() as f32;
-    if query.len() > 1 && haystack.to_lowercase().contains(phrase) {
-        score += 0.5;
-    }
-    Some(score)
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct WriteNote {
-    text: String,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct UpdateNote {
-    id: String,
-    text: String,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct DeleteNote {
-    id: String,
-}
-
-/// How many characters of a note's id the prompt and `read_notes` show;
-/// any unique start of an id names it.
-const NOTE_ID_SHOWN: usize = 8;
-/// The shortest id start `update_note` and `delete_note` accept.
-const NOTE_ID_MIN: usize = 4;
-
-/// The note of `bot` that `id` names: its whole id, or a start of it no
-/// other note shares.
-fn find_note<'a>(notes: &[&'a BotNote], id: &str) -> Result<&'a BotNote, EngineError> {
-    let id = id.trim().trim_start_matches('[').trim_end_matches(']');
-    if let Some(note) = notes.iter().find(|n| n.id == id) {
-        return Ok(note);
-    }
-    if id.chars().count() < NOTE_ID_MIN {
-        return Err(EngineError::Other(format!(
-            "Name the note by the id in brackets your notebook shows (at least {NOTE_ID_MIN} \
-             characters)."
-        )));
-    }
-    let mut matches = notes.iter().filter(|n| n.id.starts_with(id));
-    match (matches.next(), matches.next()) {
-        (Some(note), None) => Ok(note),
-        (Some(_), Some(_)) => Err(EngineError::Other(format!(
-            "More than one note starts with \"{id}\"; give more of its id."
-        ))),
-        (None, _) => Err(EngineError::Other(format!(
-            "No note has the id \"{id}\". read_notes lists them with their ids."
-        ))),
     }
 }
 
@@ -220,7 +96,9 @@ struct SaveRoutine {
     name: String,
     prompt: String,
     schedule: Schedule,
-    #[serde(default)]
+    /// May write the workspace's memory (named for the notebook it
+    /// replaced; `write_memory` reads the same).
+    #[serde(default, alias = "write_memory")]
     write_notes: Option<bool>,
     #[serde(default)]
     work_directly: Option<bool>,
@@ -243,9 +121,6 @@ fn args<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Result<T, 
 
 fn refuse(tool: &str) -> EngineError {
     EngineError::Other(match tool {
-        "write_note" | "update_note" | "delete_note" => {
-            "This session may read the notebook but not write to it.".into()
-        }
         "save_routine" => "Routines are made in the workspace chat, when your owner asks.".into(),
         _ => format!("{tool} isn't available in this session."),
     })
@@ -264,20 +139,20 @@ impl Bots {
     /// Answer `tool` when it is one of this track's; `None` otherwise.
     pub(super) async fn memory_tool(
         &self,
-        chat: &Chat,
+        chat: &p::Chat,
         marker: &BotChat,
         tool: &str,
         args: &serde_json::Value,
     ) -> Option<Result<String, EngineError>> {
-        if !p::BOT_MEMORY_TOOLS.contains(&tool) {
+        if !p::BOT_SCHEDULE_TOOLS.contains(&tool) {
             return None;
         }
-        Some(self.memory_tool_call(chat, marker, tool, args))
+        Some(self.schedule_tool_call(chat, marker, tool, args))
     }
 
-    fn memory_tool_call(
+    fn schedule_tool_call(
         &self,
-        chat: &Chat,
+        chat: &p::Chat,
         marker: &BotChat,
         tool: &str,
         raw: &serde_json::Value,
@@ -289,224 +164,14 @@ impl Bots {
             .bot(&marker.bot_id)?
             .filter(|bot| bot.chat_id == chat.id || !marker.is_main())
             .ok_or_else(|| EngineError::Other("This workspace has been deleted.".into()))?;
-        let routine = thread_routine(workspace, marker);
-        let access = access(
-            marker,
-            &bot,
-            routine.as_ref().is_some_and(|r| r.write_notes),
-        );
-        if !access.allows(tool) {
+        if !access(marker).allows(tool) {
             return Err(refuse(tool));
         }
         match tool {
-            "read_notes" => Ok(self.read_notes(&bot, args::<ReadNotes>(raw)?)),
-            "search_notes" => self.search_notes(&bot, args::<SearchNotes>(raw)?),
-            "write_note" => self.write_note(&bot, chat, args::<WriteNote>(raw)?),
-            "update_note" => self.update_note(&bot, chat, args::<UpdateNote>(raw)?),
-            "delete_note" => self.delete_note(&bot, chat, args::<DeleteNote>(raw)?),
             "list_routines" => self.list_routines(&chat.id),
             "save_routine" => self.save_routine(&bot, &chat.id, args::<SaveRoutine>(raw)?),
             _ => Err(refuse(tool)),
         }
-    }
-
-    fn read_notes(&self, bot: &Bot, args: ReadNotes) -> String {
-        let records = self.inner.workspace.read_bot_records();
-        let notes = notes_of(&records.notes, &bot.id);
-        let words: Vec<String> = args
-            .query
-            .as_deref()
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(str::to_lowercase)
-            .collect();
-        let found: Vec<&BotNote> = notes
-            .into_iter()
-            .filter(|note| {
-                let text = note.text.to_lowercase();
-                words.iter().all(|word| text.contains(word))
-            })
-            .collect();
-        if found.is_empty() {
-            return if words.is_empty() {
-                "Your notebook is empty.".into()
-            } else {
-                format!("No notes contain \"{}\".", words.join(" "))
-            };
-        }
-        let mut out = vec![if words.is_empty() {
-            format!("Your notebook ({} notes, newest first):", found.len())
-        } else {
-            format!(
-                "Notes containing \"{}\" ({}, newest first):",
-                words.join(" "),
-                found.len()
-            )
-        }];
-        let mut size = out[0].len();
-        for (shown, note) in found.iter().enumerate() {
-            let line = note_line(note);
-            if shown == READ_NOTES_MAX || size + line.len() > ANSWER_MAX_CHARS {
-                out.push(format!(
-                    "{} older notes not shown; narrow with `query`.",
-                    found.len() - shown
-                ));
-                break;
-            }
-            size += line.len() + 1;
-            out.push(line);
-        }
-        out.join("\n")
-    }
-
-    /// The notes about `query`, best match first, then newest.
-    fn search_notes(&self, bot: &Bot, args: SearchNotes) -> Result<String, EngineError> {
-        let query = search_words(&args.query);
-        if query.is_empty() {
-            return Err(EngineError::Other(
-                "Give search_notes a few words to look for; read_notes lists every note.".into(),
-            ));
-        }
-        let phrase = query.join(" ");
-        let records = self.inner.workspace.read_bot_records();
-        // Newest first, so a stable sort by score keeps newer notes ahead
-        // among equals.
-        let mut found: Vec<(f32, &BotNote)> = notes_of(&records.notes, &bot.id)
-            .into_iter()
-            .filter_map(|note| note_score(note, &query, &phrase).map(|s| (s, note)))
-            .collect();
-        if found.is_empty() {
-            return Ok(format!("No notes match \"{}\".", args.query.trim()));
-        }
-        found.sort_by(|a, b| b.0.total_cmp(&a.0));
-        let total = found.len();
-        let mut out = vec![format!(
-            "{total} note{} match \"{}\", best first:",
-            if total == 1 { "" } else { "s" },
-            args.query.trim()
-        )];
-        out.extend(
-            found
-                .iter()
-                .take(SEARCH_NOTES_MAX)
-                .map(|(_, note)| note_line(note)),
-        );
-        if total > SEARCH_NOTES_MAX {
-            out.push(format!(
-                "{} weaker matches not shown; add words to narrow it.",
-                total - SEARCH_NOTES_MAX
-            ));
-        }
-        Ok(out.join("\n"))
-    }
-
-    fn write_note(&self, bot: &Bot, chat: &Chat, args: WriteNote) -> Result<String, EngineError> {
-        let text = args.text.trim();
-        if text.is_empty() {
-            return Err(EngineError::Other("Give write_note some text.".into()));
-        }
-        let now = p::now_ms();
-        let mut note = BotNote {
-            id: new_id(),
-            bot_id: bot.id.clone(),
-            text: text.to_string(),
-            source: NoteSource::Bot {
-                chat_id: Some(chat.id.clone()),
-                title: chat.title.clone().filter(|t| !t.trim().is_empty()),
-            },
-            created_at: now,
-            updated_at: now,
-        };
-        note.clamp();
-        let cut = note.text.chars().count() < text.chars().count();
-        self.inner
-            .workspace
-            .put_record(p::KIND_BOT_NOTES, &note.id, &note, Fields::All)?;
-        record_activity(
-            &self.inner.workspace,
-            &bot.id,
-            ActivityKind::NoteWritten,
-            &format!("Noted: {}", note.text),
-            Some(&chat.id),
-            None,
-        );
-        Ok(if cut {
-            format!(
-                "Saved to your notebook, cut to {} characters (note {}).",
-                p::NOTE_MAX,
-                short_id(&note.id)
-            )
-        } else {
-            format!("Saved to your notebook (note {}).", short_id(&note.id))
-        })
-    }
-
-    /// Rewrite one note: its text, and it becomes this thread's, as the
-    /// owner's edit makes a note the owner's.
-    fn update_note(&self, bot: &Bot, chat: &Chat, args: UpdateNote) -> Result<String, EngineError> {
-        let text = args.text.trim();
-        if text.is_empty() {
-            return Err(EngineError::Other(
-                "Give update_note the note's new text; delete_note removes a note.".into(),
-            ));
-        }
-        let records = self.inner.workspace.read_bot_records();
-        let notes = notes_of(&records.notes, &bot.id);
-        let mut note = find_note(&notes, &args.id)?.clone();
-        if note.text == text {
-            return Ok(format!("Note {} already says that.", short_id(&note.id)));
-        }
-        note.text = text.to_string();
-        note.source = NoteSource::Bot {
-            chat_id: Some(chat.id.clone()),
-            title: chat.title.clone().filter(|t| !t.trim().is_empty()),
-        };
-        note.updated_at = p::now_ms();
-        note.clamp();
-        let cut = note.text.chars().count() < text.chars().count();
-        self.inner
-            .workspace
-            .put_record(p::KIND_BOT_NOTES, &note.id, &note, Fields::All)?;
-        record_activity(
-            &self.inner.workspace,
-            &bot.id,
-            ActivityKind::NoteWritten,
-            &format!("Updated a note: {}", note.text),
-            Some(&chat.id),
-            None,
-        );
-        Ok(if cut {
-            format!(
-                "Updated note {}, cut to {} characters.",
-                short_id(&note.id),
-                p::NOTE_MAX
-            )
-        } else {
-            format!("Updated note {}.", short_id(&note.id))
-        })
-    }
-
-    /// Remove one note; the activity log keeps what it said.
-    fn delete_note(&self, bot: &Bot, chat: &Chat, args: DeleteNote) -> Result<String, EngineError> {
-        let records = self.inner.workspace.read_bot_records();
-        let notes = notes_of(&records.notes, &bot.id);
-        let note = find_note(&notes, &args.id)?.clone();
-        self.inner
-            .workspace
-            .delete_records(p::KIND_BOT_NOTES, std::slice::from_ref(&note.id));
-        record_activity(
-            &self.inner.workspace,
-            &bot.id,
-            ActivityKind::NoteWritten,
-            &format!("Deleted a note: {}", note.text),
-            Some(&chat.id),
-            None,
-        );
-        Ok(format!(
-            "Deleted note {} (\"{}\").",
-            short_id(&note.id),
-            transcript_line(&note.text)
-        ))
     }
 
     fn list_routines(&self, chat_id: &str) -> Result<String, EngineError> {
@@ -669,7 +334,7 @@ impl Bots {
             }
         });
         if routine.write_notes {
-            out.push("It may write to your notebook.".into());
+            out.push("It may write to your memory.".into());
         }
         if routine.work_directly {
             out.push(if bot.capabilities.work_directly {
@@ -700,44 +365,6 @@ fn next_words(schedule: &Schedule, enabled: bool, now: DateTime<Local>) -> Strin
         Some(next) => format!(", next run {}", next.format("%a %b %-d %H:%M")),
         None => String::new(),
     }
-}
-
-/// This bot's notes, newest first.
-fn notes_of<'a>(notes: &'a [BotNote], bot_id: &str) -> Vec<&'a BotNote> {
-    let mut mine: Vec<&BotNote> = notes.iter().filter(|n| n.bot_id == bot_id).collect();
-    mine.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then_with(|| b.id.cmp(&a.id))
-    });
-    mine
-}
-
-/// `- Alice owns auth (owner, 2026-10-14)`.
-fn note_line(note: &BotNote) -> String {
-    let source = match &note.source {
-        NoteSource::Owner => "from your owner".to_string(),
-        NoteSource::Bot { title: Some(t), .. } => format!("you, in \"{t}\""),
-        NoteSource::Bot { .. } => "you".to_string(),
-    };
-    let date = DateTime::<Utc>::from_timestamp_millis(note.updated_at)
-        .map(|at| at.with_timezone(&Local).format("%Y-%m-%d").to_string())
-        .unwrap_or_default();
-    format!(
-        "- [{}] {} ({source}, {date})",
-        short_id(&note.id),
-        transcript_line(&note.text)
-    )
-}
-
-/// A note's id as the notebook shows it: its first characters.
-fn short_id(id: &str) -> String {
-    id.chars().take(NOTE_ID_SHOWN).collect()
-}
-
-/// A note's text on one line.
-fn transcript_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Write one entry of the bot's activity log, pruning its oldest beyond
@@ -783,75 +410,27 @@ pub(super) fn record_activity(
 /// This track's tools a thread may call, beyond the read tools. A routine
 /// thread is offered `write_note` whatever its routine says; the call checks
 /// the routine (the allowlist is fixed before the routine row is read).
+/// This track's tools a thread may call, beyond the read tools.
 pub(super) fn memory_tools(marker: &BotChat, bot: Option<&Bot>) -> Vec<&'static str> {
     match bot {
-        Some(bot) => access(marker, bot, true).tools(),
+        Some(_) => access(marker).tools(),
         None => Vec::new(),
     }
 }
 
-/// This track's section of the thread's system prompt, if any: the newest
-/// notes for owner and routine threads, nothing for peers.
-pub(super) fn memory_prompt(
-    workspace: &WorkspaceHost,
-    bot: &Bot,
-    marker: &BotChat,
-) -> Option<String> {
-    let routine = thread_routine(workspace, marker);
-    let access = access(marker, bot, routine.as_ref().is_some_and(|r| r.write_notes));
-    if !access.read_notes {
-        return None;
-    }
-    let records = workspace.read_bot_records();
-    Some(notebook_section(
-        &notes_of(&records.notes, &bot.id),
-        access,
-        marker.is_main(),
-    ))
+/// This track's section of the thread's system prompt: how routines work,
+/// in the bot chat (where they are made).
+pub(super) fn memory_prompt(marker: &BotChat) -> Option<String> {
+    (marker.origin == BotOrigin::Owner && marker.is_main()).then(|| ROUTINES_LINE.to_string())
 }
 
-/// The prompt's notebook section: the newest [`p::NOTES_IN_PROMPT`] notes
-/// and how to use the tools.
-pub(super) fn notebook_section(notes: &[&BotNote], access: Access, bot_chat: bool) -> String {
-    let mut lines = vec!["Your notebook:".to_string()];
-    lines.push(if access.write_notes {
-        "- Notes are your memory across conversations: short facts and decisions about your \
-         owner's work. Add one with write_note when you learn something worth keeping \
-         (\"remember that…\", a decision, who owns what); keep each to one fact. When a fact \
-         changes, rewrite its note with update_note instead of adding one that contradicts \
-         it, and remove a wrong or stale one with delete_note; both name a note by the id \
-         in brackets."
-            .to_string()
-    } else {
-        "- Notes are your memory across conversations. This session may read them but not \
-         write new ones."
-            .to_string()
-    });
-    if notes.len() > p::NOTES_IN_PROMPT {
-        lines.push(format!(
-            "- The newest {} of {} notes are below; search_notes finds older ones about \
-             something.",
-            p::NOTES_IN_PROMPT,
-            notes.len()
-        ));
-    }
-    if bot_chat {
-        lines.push(
-            "- Routines run by hand or on a schedule and post their results in this chat. One \
-             runs either as you, in its own thread (\"every morning, tell me what's stuck\"), or \
-             as an ordinary session in one of your projects (\"every night, run the tests and \
-             fix anything flaky\"). When your owner asks for something recurring, save it with \
-             save_routine; list_routines shows your routines with their last results."
-                .to_string(),
-        );
-    }
-    if notes.is_empty() {
-        lines.push("(Your notebook is empty.)".to_string());
-    } else {
-        lines.extend(notes.iter().take(p::NOTES_IN_PROMPT).map(|n| note_line(n)));
-    }
-    lines.join("\n")
-}
+/// What the bot chat is told about routines.
+pub(super) const ROUTINES_LINE: &str = "Routines:\n- Routines run by hand or on a schedule and \
+     post their results in this chat. One runs either as you, in its own thread (\"every \
+     morning, tell me what's stuck\"), or as an ordinary session in one of your projects \
+     (\"every night, run the tests and fix anything flaky\"). When your owner asks for \
+     something recurring, save it with save_routine; list_routines shows your routines with \
+     their last results.";
 
 /// The `list_routines` answer: this bot's routines, each with where it
 /// runs, its schedule, next run and last result.
@@ -951,7 +530,7 @@ pub(super) fn render_routines(
                 line.push_str(&format!(" · model {model}"));
             }
             if r.write_notes {
-                line.push_str(" · writes notes");
+                line.push_str(" · writes memory");
             }
             out.push(line);
         }

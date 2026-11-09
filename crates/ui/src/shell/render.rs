@@ -413,6 +413,7 @@ impl Shell {
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Notifications => icons::BELL,
             SettingsSection::Shortcuts => icons::KEYBOARD,
+            SettingsSection::Memory => icons::BOOK,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
         let mut groups = div()

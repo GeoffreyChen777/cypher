@@ -71,6 +71,10 @@ pub enum ComposerEvent {
         intent: crate::prefs::slash_commands::ProviderIntent,
         target_device: Option<String>,
     },
+    /// `/memory`: Settings → Memory on this store.
+    OpenMemory {
+        scope: cypher_proto::MemoryScope,
+    },
     /// A prompt was sent optimistically — give the transcript its exact row
     /// identity so it can anchor the prompt at the top with the reply's
     /// reserved space below it.
@@ -531,7 +535,11 @@ fn session_candidates(
     let query = query.trim().to_lowercase();
     let mut candidates: Vec<(&Chat, String)> = Vec::new();
     for chat in chats {
-        if chat.is_child() || chat.is_bot() || current_chat == Some(chat.id.as_str()) {
+        if chat.is_child()
+            || chat.is_bot()
+            || chat.is_memory_pass()
+            || current_chat == Some(chat.id.as_str())
+        {
             continue;
         }
         if chat.archived && query.is_empty() {

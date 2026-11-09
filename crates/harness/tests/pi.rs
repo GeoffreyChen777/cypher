@@ -220,6 +220,7 @@ fn run_profiles_spawn_exact_args() {
         "PI_SUBAGENT_CHILD_INDEX",
         "CYPHER_BOT_ID",
         "CYPHER_BOT_WORKSPACE_ROOTS",
+        "CYPHER_MEMORY",
     ];
 
     let root = harness
@@ -228,21 +229,70 @@ fn run_profiles_spawn_exact_args() {
     // Every run loads the app's own extensions after the base flags.
     let mut base = base;
     let loaded = args_of(&root)[base.len()..].to_vec();
-    assert_eq!(loaded.len(), 4, "{loaded:?}");
+    assert_eq!(loaded.len(), 6, "{loaded:?}");
     assert_eq!(
-        (loaded[0].as_str(), loaded[2].as_str()),
-        ("--extension", "--extension")
+        (loaded[0].as_str(), loaded[2].as_str(), loaded[4].as_str()),
+        ("--extension", "--extension", "--extension")
     );
     assert!(
         loaded[1].ends_with("cypher-chat-rendering.ts"),
         "{loaded:?}"
     );
     assert!(loaded[3].ends_with("cypher-explain.ts"), "{loaded:?}");
+    assert!(loaded[5].ends_with("cypher-memory.ts"), "{loaded:?}");
     base.extend(loaded);
     assert_eq!(args_of(&root), base);
     for key in profile_env {
         assert_eq!(env_of(&root, key), Some(None), "root clears {key}");
     }
+
+    // A session with memory appends its memory section and turns the
+    // memory tools on; a child with an allowlist gets them added.
+    let remembering = RunHostContext {
+        chat_id: Some("session".into()),
+        memory_prompt: Some("<memory>…</memory>".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        remembering.appended_prompt(),
+        Some(("memory".to_string(), "<memory>…</memory>".to_string()))
+    );
+    let cmd = harness
+        .spawn_command(None, &remembering, Some(&prompt))
+        .expect("command builds");
+    let mut expected = base.clone();
+    expected.extend(["--append-system-prompt", &prompt_arg].map(String::from));
+    assert_eq!(args_of(&cmd), expected);
+    assert_eq!(env_of(&cmd, "CYPHER_MEMORY"), Some(Some("1".into())));
+    let remembering_child = RunHostContext {
+        chat_id: Some("child-chat".into()),
+        memory_prompt: Some("<memory>…</memory>".into()),
+        profile: RunProfile::Child(ChildRunEnv {
+            system_prompt: "You review code.".into(),
+            tools: vec!["read".into()],
+            model: None,
+            thinking: None,
+            channel_root: None,
+            run_id: "run-1".into(),
+            agent: "reviewer".into(),
+            child_index: 0,
+        }),
+    };
+    let (_, both) = remembering_child.appended_prompt().unwrap();
+    assert_eq!(both, "You review code.\n\n<memory>…</memory>");
+    let cmd = harness
+        .spawn_command(None, &remembering_child, Some(&prompt))
+        .expect("command builds");
+    let tools = args_of(&cmd)
+        .iter()
+        .skip_while(|a| *a != "--tools")
+        .nth(1)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        tools,
+        "read,send_message,read_inbox,reply_message,memory,search_history,read_history,request_permission"
+    );
 
     let child = RunHostContext {
         chat_id: Some("child-chat".into()),
@@ -550,9 +600,12 @@ fn every_pi_loads_the_app_extensions() {
             .filter(|(_, arg)| *arg == "--extension")
             .map(|(at, _)| std::path::Path::new(&args[at + 1]))
             .collect();
-        let [rendering, explain] = extensions[..] else {
-            panic!("two --extension: {args:?}");
+        let [rendering, explain, memory] = extensions[..] else {
+            panic!("three --extension: {args:?}");
         };
+        assert!(memory.ends_with("cypher-memory.ts"), "{args:?}");
+        let source = std::fs::read_to_string(memory).expect("extension written");
+        assert!(source.contains("CYPHER_MEMORY") && source.contains("MemoryTool"));
         assert!(rendering.ends_with("cypher-chat-rendering.ts"), "{args:?}");
         let source = std::fs::read_to_string(rendering).expect("extension written");
         assert!(source.contains("before_agent_start"));

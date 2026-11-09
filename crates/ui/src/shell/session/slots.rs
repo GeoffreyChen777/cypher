@@ -588,6 +588,7 @@ impl Shell {
                     }
                 }
             }
+            ComposerEvent::OpenMemory { scope } => self.open_memory_settings(scope.clone(), cx),
             // Every send glides the prompt to the viewport top and reserves
             // the reply's space below it (notes-app parity).
             ComposerEvent::Sent {

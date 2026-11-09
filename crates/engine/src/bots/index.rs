@@ -1,8 +1,10 @@
 //! The bot search index: SQLite FTS5 over message text, one file per
 //! profile (`<store>/bots-index.sqlite`).
 //!
-//! It holds the chats some bot hosted on this device may read message text
-//! from (the union of their scopes; bot chats never). A background task keeps
+//! It holds the chats some reader on this device may search: every session
+//! (memory's `search_history` reads a project's sessions, workspaces read
+//! their scopes) and the workspaces' own chats and threads (their own
+//! history); never peer threads or memory passes. A background task keeps
 //! it current: at startup, after chat or bot row changes (debounced) and on a
 //! slow tick, it re-reads only the chats whose activity or stored snapshot
 //! moved since they were indexed, through [`DocHost::read_transcript`] (no
@@ -402,21 +404,27 @@ pub(super) fn match_query(words: &[String]) -> Option<MatchQuery> {
     })
 }
 
-/// The chats worth indexing: what the bots hosted on `device_id` that may
-/// read message text can see, newest activity first.
+/// The chats worth indexing, newest activity first: every session, and the
+/// own chats and threads of the bots hosted on `device_id`. Who may read
+/// which is decided at query time.
 pub(super) fn targets(device_id: &str, bots: &[Bot], chats: &[Chat]) -> Vec<Chat> {
-    let mut seen = HashSet::new();
-    let mut out: Vec<Chat> = Vec::new();
-    for bot in bots
+    let hosted: HashSet<&str> = bots
         .iter()
-        .filter(|b| b.host_device_id == device_id && b.scope.transcripts)
-    {
-        for chat in bot.scope.visible_chats(chats) {
-            if seen.insert(chat.id.as_str()) {
-                out.push(chat.clone());
+        .filter(|b| b.host_device_id == device_id)
+        .map(|b| b.id.as_str())
+        .collect();
+    let mut out: Vec<Chat> = chats
+        .iter()
+        .filter(|chat| chat.memory.is_none())
+        .filter(|chat| match &chat.bot {
+            None => true,
+            Some(marker) => {
+                marker.origin != cypher_proto::BotOrigin::Peer
+                    && (!marker.is_bot_thread() || hosted.contains(marker.bot_id.as_str()))
             }
-        }
-    }
+        })
+        .cloned()
+        .collect();
     out.sort_by_key(|c| std::cmp::Reverse(activity_ms(c)));
     out
 }

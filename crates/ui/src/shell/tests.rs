@@ -1574,7 +1574,11 @@ fn settings_navigation_groups_are_disjoint_and_complete() {
     );
     assert_eq!(
         SettingsSection::WORKSPACE_SETTINGS,
-        [SettingsSection::Devices, SettingsSection::Archived,]
+        [
+            SettingsSection::Devices,
+            SettingsSection::Memory,
+            SettingsSection::Archived,
+        ]
     );
 }
 

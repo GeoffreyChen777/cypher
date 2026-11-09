@@ -47,6 +47,7 @@ pub struct EngineCore {
     pub session_forks: SessionForks,
     /// Agent bots hosted here: creation and the bot tool surface.
     pub bots: crate::bots::Bots,
+    pub memory: crate::memory::Memory,
     /// Session migration: moves chats to another project, on this device or
     /// another one.
     pub migrations: session::migrations::ChatMigrations,
@@ -198,6 +199,13 @@ impl EngineCore {
         );
         // A routine or task run stopped for asking settles as failed.
         sessions.add_unattended_listener(bots.unattended_listener());
+        let memory = crate::memory::Memory::new(
+            workspace.clone(),
+            doc_host.clone(),
+            bots.clone(),
+            profile.store_root().join("memory"),
+        );
+        sessions.set_memory(memory.clone());
         // The bot network needs the Edge: a signed-in (or dev-bearer)
         // profile. Without one its tools and RPCs say so.
         if let Some(edge) = bots_edge {
@@ -297,6 +305,7 @@ impl EngineCore {
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         bots.start_indexer();
         bots.start_hosts();
+        memory.start();
         Ok(Self {
             sessions,
             doc_host,
@@ -314,6 +323,7 @@ impl EngineCore {
             side_chats,
             session_forks,
             bots,
+            memory,
             migrations,
             context_recovery,
             device_id,
@@ -488,7 +498,8 @@ impl EngineCore {
         .with_context_recovery(self.context_recovery.clone())
         .with_migrations(self.migrations.clone())
         .with_github(self.github.clone())
-        .with_bots(self.bots.clone());
+        .with_bots(self.bots.clone())
+        .with_memory(self.memory.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -560,6 +571,7 @@ impl EngineCore {
         self.diff_sync.shutdown().await;
         self.spaces_sync.shutdown().await;
         self.bots.shutdown().await;
+        self.memory.shutdown().await;
         self.doc_host.shutdown_workers().await;
         self.doc_host.flush_all();
         self.workspace.shutdown();

@@ -45,7 +45,7 @@ pub fn bot_env(workspace: &WorkspaceHost, chat: &Chat) -> Option<BotRunEnv> {
     if let Some(bot) = &bot {
         for section in [
             work::work_prompt(workspace, bot, marker),
-            memory::memory_prompt(workspace, bot, marker),
+            memory::memory_prompt(marker),
             network::network_prompt(workspace, bot, marker),
         ]
         .into_iter()
@@ -86,6 +86,11 @@ pub fn tools_for(marker: &cypher_proto::BotChat, bot: Option<&Bot>) -> Vec<Strin
         .iter()
         .map(|tool| tool.to_string())
         .collect();
+    // Memory (docs/design/memory.md): every thread but a peer's; the
+    // memory service decides per call what each one may read and write.
+    if marker.origin != BotOrigin::Peer {
+        tools.extend(cypher_proto::MEMORY_TOOLS.iter().map(|t| t.to_string()));
+    }
     if bot.is_some() {
         for tool in work::work_tools(marker, bot)
             .into_iter()
@@ -230,13 +235,22 @@ mod tests {
     }
 
     #[test]
-    fn every_origin_gets_the_read_tools() {
-        for origin in [BotOrigin::Owner, BotOrigin::Routine, BotOrigin::Peer] {
+    fn every_origin_gets_the_read_tools_and_all_but_peers_memory() {
+        for origin in [BotOrigin::Owner, BotOrigin::Routine] {
+            let tools = tools_for(&BotChat::new("b1", origin), None);
             assert_eq!(
-                tools_for(&BotChat::new("b1", origin), None),
+                tools[..cypher_proto::BOT_TOOLS.len()],
                 cypher_proto::BOT_TOOLS
             );
+            assert_eq!(
+                tools[cypher_proto::BOT_TOOLS.len()..],
+                cypher_proto::MEMORY_TOOLS
+            );
         }
+        assert_eq!(
+            tools_for(&BotChat::new("b1", BotOrigin::Peer), None),
+            cypher_proto::BOT_TOOLS
+        );
     }
 
     #[tokio::test]

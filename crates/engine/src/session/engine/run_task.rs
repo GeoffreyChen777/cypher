@@ -1186,7 +1186,14 @@ impl<'r> RunLoop<'r> {
 /// treated as run activity. Returns true when `event` was consumed.
 fn apply_projection(scope: &RunScope<'_>, doc: &SessionDoc, event: &AgentEvent) -> bool {
     let (inner, chat_id) = (scope.inner, scope.chat_id);
+    // What the run read decides whether its memory writes are held, and a
+    // consolidation pass's token use is counted (docs/design/memory.md).
+    if let Some(memory) = inner.memory.get() {
+        memory.observe(chat_id, event);
+    }
     match event {
+        // A passthrough: counted above, never run activity.
+        AgentEvent::Usage { .. } => {}
         // SubagentStatus is a LIVE PROJECTION, not run activity: mirror it
         // onto the chat's session row and stop — no journal append, no doc
         // fold, no status transition, no session freshness touch, and no

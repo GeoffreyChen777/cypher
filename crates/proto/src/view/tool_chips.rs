@@ -106,7 +106,8 @@ fn script_summary(code: &str) -> String {
 }
 
 /// An agent bot's own tools (`crate::BOT_TOOLS`, `BOT_WORK_TOOLS`,
-/// `BOT_MEMORY_TOOLS`, `BOT_NETWORK_TOOLS`), by what they do.
+/// `BOT_SCHEDULE_TOOLS`, `BOT_NETWORK_TOOLS`) and the memory tools every run
+/// gets (`crate::MEMORY_TOOLS`), by what they do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BotToolKind {
     ListProjects,
@@ -126,16 +127,23 @@ pub enum BotToolKind {
     StopSession,
     UpdateStep,
     FinishWork,
-    ReadNotes,
-    SearchNotes,
-    WriteNote,
-    UpdateNote,
-    DeleteNote,
     ListRoutines,
     SaveRoutine,
     SaveProjectTask,
     ListConnections,
     AskBot,
+    /// `memory` by its command: `view`, `search`, `create`, `str_replace`
+    /// and `insert`, `delete`, `rename`; `Memory` while the command is not
+    /// known yet (still streaming) or is one this build does not name.
+    ReadMemory,
+    SearchMemory,
+    CreateMemory,
+    UpdateMemory,
+    DeleteMemory,
+    RenameMemory,
+    Memory,
+    SearchHistory,
+    ReadHistory,
 }
 
 impl BotToolKind {
@@ -152,17 +160,20 @@ impl BotToolKind {
                 | Self::ProjectGit
                 | Self::ListWork
                 | Self::GetWork
-                | Self::ReadNotes
-                | Self::SearchNotes
                 | Self::ListRoutines
                 | Self::ListConnections
+                | Self::ReadMemory
+                | Self::SearchMemory
+                | Self::Memory
+                | Self::SearchHistory
+                | Self::ReadHistory
         )
     }
 }
 
 /// The bot tool a call is, when it is one.
 pub fn bot_tool_kind(call: &crate::ToolCall) -> Option<BotToolKind> {
-    let crate::ToolCall::Unknown { name, .. } = call else {
+    let crate::ToolCall::Unknown { name, input } = call else {
         return None;
     };
     Some(match name.as_str() {
@@ -183,17 +194,27 @@ pub fn bot_tool_kind(call: &crate::ToolCall) -> Option<BotToolKind> {
         "stop_session" => BotToolKind::StopSession,
         "update_step" => BotToolKind::UpdateStep,
         "finish_work" => BotToolKind::FinishWork,
-        "read_notes" => BotToolKind::ReadNotes,
-        "search_notes" => BotToolKind::SearchNotes,
-        "write_note" => BotToolKind::WriteNote,
-        "update_note" => BotToolKind::UpdateNote,
-        "delete_note" => BotToolKind::DeleteNote,
         // `list_schedule` is its name before routines were one kind.
         "list_routines" | "list_schedule" => BotToolKind::ListRoutines,
         "save_routine" => BotToolKind::SaveRoutine,
         "save_project_task" => BotToolKind::SaveProjectTask,
         "list_connections" => BotToolKind::ListConnections,
         "ask_bot" => BotToolKind::AskBot,
+        "memory" => match input
+            .as_ref()
+            .and_then(|input| input.get("command"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("view") => BotToolKind::ReadMemory,
+            Some("search") => BotToolKind::SearchMemory,
+            Some("create") => BotToolKind::CreateMemory,
+            Some("str_replace" | "insert") => BotToolKind::UpdateMemory,
+            Some("delete") => BotToolKind::DeleteMemory,
+            Some("rename") => BotToolKind::RenameMemory,
+            _ => BotToolKind::Memory,
+        },
+        "search_history" => BotToolKind::SearchHistory,
+        "read_history" => BotToolKind::ReadHistory,
         _ => return None,
     })
 }
@@ -217,6 +238,17 @@ fn bot_chip_content(
         Some(project) if text.is_empty() => format!("in {project}"),
         Some(project) => format!("{text} in {project}"),
         None => text,
+    };
+    let quoted = |key: &str| arg(key).map(|q| format!("\"{q}\"")).unwrap_or_default();
+    // A memory path names its file: `/project/testing.md` reads as
+    // `testing.md`.
+    let file = |key: &str| {
+        arg(key)
+            .map(|path| {
+                let path = path.trim_end_matches('/');
+                path.rsplit('/').next().unwrap_or(path).to_string()
+            })
+            .unwrap_or_default()
     };
     let since_hours = input
         .and_then(|input| input.get("since_hours"))
@@ -246,14 +278,7 @@ fn bot_chip_content(
             };
             ("List sessions", in_project(filters))
         }
-        BotToolKind::SearchSessions => (
-            "Search sessions",
-            in_project(
-                arg("query")
-                    .map(|query| format!("\"{query}\""))
-                    .unwrap_or_default(),
-            ),
-        ),
+        BotToolKind::SearchSessions => ("Search sessions", in_project(quoted("query"))),
         BotToolKind::SessionActivity => (
             "Checked recent activity",
             // The tool's default window is a day.
@@ -278,11 +303,6 @@ fn bot_chip_content(
         BotToolKind::StopSession => ("Stopped session", arg("session_id").unwrap_or_default()),
         BotToolKind::UpdateStep => ("Updated step", arg("step").unwrap_or_default()),
         BotToolKind::FinishWork => ("Finished task", arg("outcome").unwrap_or_default()),
-        BotToolKind::ReadNotes => ("Read notes", String::new()),
-        BotToolKind::SearchNotes => ("Searched notes", arg("query").unwrap_or_default()),
-        BotToolKind::WriteNote => ("Wrote a note", arg("text").unwrap_or_default()),
-        BotToolKind::UpdateNote => ("Updated a note", arg("text").unwrap_or_default()),
-        BotToolKind::DeleteNote => ("Deleted a note", String::new()),
         BotToolKind::ListRoutines => ("Checked routines", String::new()),
         BotToolKind::SaveRoutine => ("Saved routine", arg("name").unwrap_or_default()),
         BotToolKind::SaveProjectTask => (
@@ -291,6 +311,21 @@ fn bot_chip_content(
         ),
         BotToolKind::ListConnections => ("Checked connections", String::new()),
         BotToolKind::AskBot => ("Asked workspace", arg("bot").unwrap_or_default()),
+        BotToolKind::ReadMemory => ("Read memory", file("path")),
+        BotToolKind::SearchMemory => ("Searched memory", quoted("query")),
+        BotToolKind::CreateMemory => ("Created memory", file("path")),
+        BotToolKind::UpdateMemory => ("Updated memory", file("path")),
+        BotToolKind::DeleteMemory => ("Deleted memory", file("path")),
+        BotToolKind::RenameMemory => (
+            "Renamed memory",
+            match (file("old_path"), file("new_path")) {
+                (old, new) if old.is_empty() || new.is_empty() => format!("{old}{new}"),
+                (old, new) => format!("{old} → {new}"),
+            },
+        ),
+        BotToolKind::Memory => ("Memory", file("path")),
+        BotToolKind::SearchHistory => ("Searched history", quoted("query")),
+        BotToolKind::ReadHistory => ("Read a past session", String::new()),
     }
 }
 
@@ -305,7 +340,7 @@ enum BotAction {
     Stop,
     Step,
     Finish,
-    Note,
+    Memory,
     Routine,
     Task,
     Ask,
@@ -322,7 +357,7 @@ impl BotAction {
             Self::Stop => ("stopped a session", "stopped {n} sessions"),
             Self::Step => ("updated a step", "updated {n} steps"),
             Self::Finish => ("finished the task", "finished {n} tasks"),
-            Self::Note => ("wrote a note", "wrote {n} notes"),
+            Self::Memory => ("updated memory", "updated memory {n} times"),
             Self::Routine => ("saved a routine", "saved {n} routines"),
             Self::Task => ("saved a project task", "saved {n} project tasks"),
             Self::Ask => ("asked a workspace", "asked workspaces {n} times"),
@@ -345,9 +380,10 @@ fn bot_action(kind: BotToolKind) -> Option<BotAction> {
         BotToolKind::StopSession => BotAction::Stop,
         BotToolKind::UpdateStep => BotAction::Step,
         BotToolKind::FinishWork => BotAction::Finish,
-        BotToolKind::WriteNote | BotToolKind::UpdateNote | BotToolKind::DeleteNote => {
-            BotAction::Note
-        }
+        BotToolKind::CreateMemory
+        | BotToolKind::UpdateMemory
+        | BotToolKind::DeleteMemory
+        | BotToolKind::RenameMemory => BotAction::Memory,
         BotToolKind::SaveRoutine => BotAction::Routine,
         BotToolKind::SaveProjectTask => BotAction::Task,
         BotToolKind::AskBot => BotAction::Ask,
@@ -469,6 +505,7 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
     let mut scripts = 0usize;
     let mut listings = 0usize;
     let mut sessions_read = 0usize;
+    let mut memory_reads = 0usize;
     let mut git_reads = 0usize;
     let mut other = 0usize;
     let mut acted: std::collections::BTreeMap<BotAction, usize> = Default::default();
@@ -499,16 +536,17 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
             ToolCall::Unknown { name, .. } if name == CODEMODE_TOOL => scripts += 1,
             ToolCall::Unknown { name, .. } if name == TOOL_SEARCH_TOOL => searches += 1,
             ToolCall::Unknown { .. } if let Some(kind) = bot_tool_kind(call) => match kind {
-                BotToolKind::SearchSessions => searches += 1,
-                BotToolKind::ReadSession => sessions_read += 1,
+                BotToolKind::SearchSessions
+                | BotToolKind::SearchMemory
+                | BotToolKind::SearchHistory => searches += 1,
+                BotToolKind::ReadSession | BotToolKind::ReadHistory => sessions_read += 1,
+                BotToolKind::ReadMemory | BotToolKind::Memory => memory_reads += 1,
                 BotToolKind::ListProjects
                 | BotToolKind::ListSessions
                 | BotToolKind::SessionActivity => listings += 1,
                 BotToolKind::ProjectGit => git_reads += 1,
                 BotToolKind::ListWork
                 | BotToolKind::GetWork
-                | BotToolKind::ReadNotes
-                | BotToolKind::SearchNotes
                 | BotToolKind::ListRoutines
                 | BotToolKind::ListConnections => listings += 1,
                 kind => match bot_action(kind) {
@@ -544,6 +582,9 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
     }
     if reads > 0 {
         segments.push(format!("read {}", plural(reads, "file", "files")));
+    }
+    if memory_reads > 0 {
+        segments.push("read memory".to_string());
     }
     if sessions_read > 0 {
         segments.push(format!(
@@ -614,13 +655,117 @@ mod tests {
             work_summary(&[call("propose_plan"), call("read_session")], 0),
             "Proposed a plan · read 1 session"
         );
+        let memory = |command: &str| {
+            (
+                bot_call(
+                    "memory",
+                    serde_json::json!({"command": command, "path": "/project/testing.md"}),
+                ),
+                false,
+            )
+        };
         assert_eq!(
             work_summary(
-                &[call("write_note"), call("write_note"), call("save_routine")],
+                &[
+                    memory("create"),
+                    memory("str_replace"),
+                    call("save_routine")
+                ],
                 1
             ),
-            "Wrote 2 notes · saved a routine · 1 thought"
+            "Updated memory 2 times · saved a routine · 1 thought"
         );
+        assert_eq!(
+            work_summary(
+                &[
+                    memory("view"),
+                    memory("view"),
+                    memory("search"),
+                    call("read_history")
+                ],
+                0
+            ),
+            "Read memory · read 1 session · searched 1 time"
+        );
+    }
+
+    #[test]
+    fn memory_tools_name_the_file() {
+        let chip = |name, input| tool_chip_content(&bot_call(name, input));
+        let memory = |command: &str, path: &str| {
+            chip(
+                "memory",
+                serde_json::json!({"command": command, "path": path}),
+            )
+        };
+        assert_eq!(
+            memory("view", "/you/MEMORY.md"),
+            ("Read memory", "MEMORY.md".to_string())
+        );
+        assert_eq!(
+            memory("str_replace", "/project/testing.md"),
+            ("Updated memory", "testing.md".to_string())
+        );
+        assert_eq!(
+            memory("insert", "/workspace/projects/invoice-demo.md"),
+            ("Updated memory", "invoice-demo.md".to_string())
+        );
+        assert_eq!(
+            memory("create", "/project/build.md"),
+            ("Created memory", "build.md".to_string())
+        );
+        assert_eq!(
+            memory("delete", "/project/old.md"),
+            ("Deleted memory", "old.md".to_string())
+        );
+        assert_eq!(
+            memory("view", "/project/"),
+            ("Read memory", "project".to_string())
+        );
+        assert_eq!(
+            chip(
+                "memory",
+                serde_json::json!({
+                    "command": "rename",
+                    "old_path": "/you/a.md",
+                    "new_path": "/you/notes/b.md",
+                })
+            ),
+            ("Renamed memory", "a.md → b.md".to_string())
+        );
+        assert_eq!(
+            chip(
+                "memory",
+                serde_json::json!({"command": "search", "query": " rounding "})
+            ),
+            ("Searched memory", "\"rounding\"".to_string())
+        );
+        assert_eq!(
+            chip("memory", serde_json::json!({})),
+            ("Memory", String::new()),
+            "a call still streaming its arguments"
+        );
+        assert_eq!(
+            chip("search_history", serde_json::json!({"query": "flaky test"})),
+            ("Searched history", "\"flaky test\"".to_string())
+        );
+        assert_eq!(
+            chip("read_history", serde_json::json!({"session_id": "c1"})),
+            ("Read a past session", String::new())
+        );
+        let acts = |command: &str| {
+            bot_tool_kind(&bot_call("memory", serde_json::json!({"command": command})))
+                .is_some_and(BotToolKind::acts)
+        };
+        assert!(acts("create") && acts("str_replace") && acts("rename"));
+        assert!(!acts("view") && !acts("search"));
+        for retired in ["read_notes", "write_note", "delete_note"] {
+            assert_eq!(
+                bot_tool_kind(&bot_call(retired, serde_json::json!({}))),
+                None,
+                "{retired}"
+            );
+        }
     }
 
     #[test]
