@@ -7,9 +7,8 @@
 
 use super::board::{card_corner, card_item, two_lines};
 use super::items::{
-    ago, arrow_in, decision_bar, item_row, mark_cell, progress_bar, project_label, prose,
-    section_head, section_label, section_rule, session_mark, session_word, step_mark, trailing,
-    work_mark,
+    ago, arrow_in, decision_bar, item_row, mark_cell, progress_bar, project_label, section_head,
+    section_label, section_rule, session_mark, session_word, step_mark, trailing, work_mark,
 };
 use super::panel::{PanelHead, PanelItem};
 use super::*;
@@ -449,7 +448,7 @@ impl Shell {
     }
 
     fn render_work_list(
-        &self,
+        &mut self,
         bot: &Bot,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -488,10 +487,24 @@ impl Shell {
                     }));
         }
         if running.is_empty() && proposed.is_empty() && finished.is_empty() {
-            body = body.child(div().py(px(10.0)).child(prose(
-                "No work yet. Ask it for something that takes a few steps.".into(),
-                theme.text_muted,
-            )));
+            self.board.panel_empty = Some(
+                parts::panel_empty(
+                    theme,
+                    icons::HIERARCHY,
+                    "No work yet",
+                    "Ask it for something that takes a few steps; it proposes a plan first.",
+                )
+                .child(
+                    div().pt(px(6.0)).text_size(px(12.0)).child(
+                        super::parts::link("bot-work-empty-activity", "View all activity", theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.open_panel(PanelItem::Activity, cx)
+                            })),
+                    ),
+                )
+                .into_any_element(),
+            );
+            return (head, div());
         }
         // The full log lives here, not in a card of its own.
         body =

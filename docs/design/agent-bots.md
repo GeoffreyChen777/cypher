@@ -1035,6 +1035,10 @@ Every panel page shares one layout, so a page says each thing once:
 - **Decisions** (Approve, Send, Stop, Save) sit in a footer pinned to the panel's foot,
   the primary button last, with at most one short note.
 - Editable fields alone keep a grey well; read-only text is a fact.
+- **Empty:** a panel with nothing to list says so in the middle of the space under its
+  header (a quiet glyph, a short line, a hint, and an action where one helps); what it
+  still shows above, like Activity's filter, stays on top. A list's own "add" is the
+  header's **+** (Notebook, Routines).
 
 Behaviour:
 

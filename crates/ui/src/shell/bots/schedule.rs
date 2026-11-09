@@ -643,23 +643,32 @@ impl Shell {
             tint: None,
             title: "Routines".into(),
         };
-        let actions = div().px(px(4.0)).pt(px(2.0)).flex().flex_row().child(
-            parts::action(
+        // The header's one button, like the Notebook's: + adds a routine.
+        self.set_panel_actions(vec![
+            super::items::icon_button(
                 "bot-schedule-new-routine",
                 icons::PLUS,
                 "New routine",
-                theme.text,
+                theme,
             )
             .on_click(cx.listener(|this, _, window, cx| {
                 this.open_job_form(FormTarget::NewRoutine, Some(window), cx)
-            })),
-        );
-        let mut body = div()
-            .p(px(8.0))
-            .flex()
-            .flex_col()
-            .gap(px(1.0))
-            .child(actions);
+            }))
+            .into_any_element(),
+        ]);
+        if jobs.is_empty() {
+            self.board.panel_empty = Some(
+                parts::panel_empty(
+                    theme,
+                    icons::CLOCK,
+                    "No routines yet",
+                    "Press + to run a prompt on a schedule, like a morning brief or a nightly \
+                     test run.",
+                )
+                .into_any_element(),
+            );
+        }
+        let mut body = div().p(px(8.0)).flex().flex_col().gap(px(1.0));
         for (job, space) in &jobs {
             let row = self.job_row(
                 format!("bot-panel-job-{}", job.id),

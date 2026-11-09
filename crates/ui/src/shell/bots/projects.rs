@@ -29,7 +29,7 @@ impl Shell {
     /// Every project the bot reads, grouped by the device it lives on; a
     /// row opens the project.
     pub(super) fn render_projects_panel(
-        &self,
+        &mut self,
         bot: &Bot,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -70,13 +70,26 @@ impl Shell {
         };
         let mut body = div().p(px(8.0)).flex().flex_col();
         if groups.is_empty() {
-            return (
-                head,
-                body.child(parts::quiet_line(
+            let bot_id = bot.id.clone();
+            self.board.panel_empty = Some(
+                parts::panel_empty(
                     theme,
-                    "It reads no projects yet. Choose some in its settings.",
-                )),
+                    icons::WIDGET,
+                    "No projects yet",
+                    format!("Choose which projects {} may read.", bot.name),
+                )
+                .child(
+                    div().pt(px(8.0)).child(
+                        popover::btn_ghost(theme, "Choose projects", "bot-projects-choose")
+                            .id("bot-projects-choose")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_bot_dialog(Some(bot_id.clone()), cx)
+                            })),
+                    ),
+                )
+                .into_any_element(),
             );
+            return (head, body);
         }
         for (ix, (device, entries)) in groups.into_iter().enumerate() {
             let n = entries.len();

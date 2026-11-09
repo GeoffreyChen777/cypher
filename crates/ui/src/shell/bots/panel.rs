@@ -260,16 +260,26 @@ impl Shell {
         // Replacing the content fades the new item in. A thread's
         // transcript scrolls itself, so its body fills the card unscrolled.
         let content_key = SharedString::from(format!("bot-panel-{item:?}"));
+        // An empty item: what its body still shows (a filter, say) on top,
+        // the message centred in the rest.
         let body = if let Some(empty) = self.board.panel_empty.take() {
             div()
                 .flex_1()
                 .min_h_0()
                 .flex()
-                .items_center()
-                .justify_center()
-                .px(px(32.0))
-                .pb(px(56.0))
-                .child(motion::fade_quick(content_key, div().child(empty)))
+                .flex_col()
+                .child(div().flex_none().child(body))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px(px(32.0))
+                        .pb(px(56.0))
+                        .child(motion::fade_quick(content_key, div().child(empty))),
+                )
                 .into_any_element()
         } else if matches!(item, PanelItem::Thread(_)) {
             div()

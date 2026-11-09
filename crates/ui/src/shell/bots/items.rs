@@ -76,16 +76,6 @@ pub(super) fn section_label(text: &str, theme: &Theme) -> gpui::Div {
     super::parts::section_label(theme, text)
 }
 
-/// Prose in a panel: a paragraph at the panel's reading size.
-pub(super) fn prose(text: String, color: gpui::Hsla) -> gpui::Div {
-    div()
-        .px(px(8.0))
-        .text_size(px(13.0))
-        .line_height(px(19.0))
-        .text_color(color)
-        .child(SharedString::from(text))
-}
-
 /// Agent-written text in a panel (a request, a note, a result) as markdown
 /// at the panel's reading size: code, emphasis, lists and session links
 /// drawn as the chat draws them. `size` is the body size (the line height

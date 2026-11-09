@@ -269,14 +269,16 @@ impl Shell {
         };
         let body = div().p(px(8.0)).flex().flex_col().gap(px(2.0));
         let body = if rows.is_empty() {
-            body.child(
-                div()
-                    .px(px(8.0))
-                    .py(px(10.0))
-                    .text_size(px(12.5))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from("You're all caught up.")),
-            )
+            self.board.panel_empty = Some(
+                parts::panel_empty(
+                    theme,
+                    icons::CHECK,
+                    "You're all caught up",
+                    "Plans, approvals, questions and answers to review land here.",
+                )
+                .into_any_element(),
+            );
+            body
         } else {
             body.children(rows.into_iter().enumerate().map(|(ix, row)| {
                 self.need_row(format!("bot-panel-need-{ix}"), row, true, theme, cx)

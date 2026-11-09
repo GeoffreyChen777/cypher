@@ -468,6 +468,61 @@ impl Shell {
             tint: None,
             title: "Network".into(),
         };
+        // Nothing yet: one centred message, with the way in.
+        if connections.is_empty() && invites.is_empty() && exchanges.is_empty() {
+            let empty = if ready {
+                parts::panel_empty(
+                    theme,
+                    icons::GLOBAL,
+                    "No connections yet",
+                    format!(
+                        "Connected workspaces can ask {} questions, read-only, within what \
+                         you allow.",
+                        bot.name
+                    ),
+                )
+                .child(
+                    div()
+                        .pt(px(8.0))
+                        .flex()
+                        .flex_row()
+                        .gap(px(4.0))
+                        .child(
+                            parts::action(
+                                "bot-network-invite",
+                                icons::PLUS,
+                                "Invite a workspace",
+                                theme.text,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.create_invite(cx))),
+                        )
+                        .child(
+                            parts::action(
+                                "bot-network-redeem",
+                                icons::LINK,
+                                "Connect with a code",
+                                theme.text,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    let input = this.redeem_input(cx);
+                                    window.focus(&input.focus_handle(cx), cx);
+                                    this.show_panel(PanelItem::Invite, cx);
+                                },
+                            )),
+                        ),
+                )
+            } else {
+                parts::panel_empty(
+                    theme,
+                    icons::CLOUD_OFF,
+                    "Sign in to connect workspaces",
+                    "Use the account menu. Connections go through your Cypher account.",
+                )
+            };
+            self.board.panel_empty = Some(empty.into_any_element());
+            return (head, div());
+        }
         let mut body = div().p(px(8.0)).flex().flex_col();
         body = if ready {
             body.child(
@@ -507,18 +562,9 @@ impl Shell {
             .iter()
             .map(|c| (c.id.clone(), c.peer.name.clone()))
             .collect();
-        if !ready && connections.is_empty() && invites.is_empty() && exchanges.is_empty() {
-            return (head, body);
-        }
         body = body.child(parts::section_label(theme, "Connections"));
         if connections.is_empty() {
-            body = body.child(parts::quiet_line(
-                theme,
-                format!(
-                    "Connected workspaces can ask {} questions, read-only, within what you allow.",
-                    bot.name
-                ),
-            ));
+            body = body.child(parts::quiet_line(theme, "None yet."));
         }
         for conn in &connections {
             body = body.child(self.connection_row(conn, theme, cx));

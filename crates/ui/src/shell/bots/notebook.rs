@@ -249,7 +249,7 @@ impl Shell {
                     "No notes yet",
                     "Press + to add one, like \u{201C}The release waits on the migration\u{201D} \
                      or \u{201C}Alice owns auth\u{201D}.",
-                ));
+                ).into_any_element());
             }
             return Some((head, body));
         }

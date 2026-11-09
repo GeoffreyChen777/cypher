@@ -85,13 +85,13 @@ pub(super) fn section_label(theme: &Theme, text: &str) -> gpui::Div {
 }
 
 /// An empty panel's message, for the card to centre: a quiet glyph, a
-/// short line, and a hint under it.
+/// short line, and a hint under it; a caller can add an action below.
 pub(super) fn panel_empty(
     theme: &Theme,
     glyph: &'static str,
-    title: &'static str,
+    title: impl Into<SharedString>,
     hint: impl Into<SharedString>,
-) -> gpui::AnyElement {
+) -> gpui::Div {
     div()
         .max_w(px(280.0))
         .flex()
@@ -110,7 +110,7 @@ pub(super) fn panel_empty(
                 .text_size(px(13.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text_muted)
-                .child(title),
+                .child(title.into()),
         )
         .child(
             div()
@@ -119,7 +119,6 @@ pub(super) fn panel_empty(
                 .text_color(theme.text_faint)
                 .child(hint.into()),
         )
-        .into_any_element()
 }
 
 /// A quiet line of panel copy (an empty list, a hint).

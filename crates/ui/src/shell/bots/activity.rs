@@ -209,13 +209,19 @@ impl Shell {
             }));
         let mut body = div().p(px(8.0)).flex().flex_col().gap(px(1.0)).child(chips);
         if entries.is_empty() {
-            body = body.child(
-                div()
-                    .px(px(8.0))
-                    .py(px(10.0))
-                    .text_size(px(12.5))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from("Nothing here yet.")),
+            // Under the filter, so another can be picked.
+            self.board.panel_empty = Some(
+                parts::panel_empty(
+                    theme,
+                    icons::PULSE,
+                    if filter.is_some() {
+                        "Nothing of this kind yet"
+                    } else {
+                        "No activity yet"
+                    },
+                    "What the workspace plans, starts, notes and runs is logged here.",
+                )
+                .into_any_element(),
             );
         }
         for (entry, link) in entries {
