@@ -144,6 +144,7 @@ impl Shell {
         self.board.panel_footer = None;
         self.board.panel_actions = None;
         self.board.panel_mark = None;
+        self.board.panel_title_note = None;
         let (head, body) = match item {
             PanelItem::Projects => self.render_projects_panel(&bot, &theme, cx),
             PanelItem::Project(space_id) => {
@@ -237,12 +238,21 @@ impl Shell {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_size(px(15.0))
-                    .line_height(px(20.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(SharedString::from(head.title)),
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(15.0))
+                            .line_height(px(20.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child(SharedString::from(head.title)),
+                    )
+                    .children(self.board.panel_title_note.take()),
             )
             .children(self.board.panel_actions.take())
             .child(close);

@@ -3,8 +3,8 @@
 //! hover and open what they name.
 //!
 //! The list groups the projects the bot reads by device. A project's page
-//! says where it lives (its folder, to copy), then its sessions, the work
-//! that ran there and the routines that run there.
+//! names its device beside the title (the folder on hover), then lists its
+//! sessions, the work that ran there and the routines that run there.
 
 use super::board::{ProjectLoad, project_loads, scoped_sessions};
 use super::items::{
@@ -177,10 +177,11 @@ impl Shell {
             .child(div().pt(px(5.0)).child(arrow_in(&key, theme)))
     }
 
-    /// One project: where it lives (its folder, to copy), its sessions in
-    /// the bot's scope, the bot's work there and its routines there.
+    /// One project: its device after the title (the folder on hover, a
+    /// click copies it), then its sessions in the bot's scope, the bot's
+    /// work there and its routines there.
     pub(super) fn render_project_panel(
-        &self,
+        &mut self,
         bot: &Bot,
         space_id: &str,
         theme: &Theme,
@@ -243,73 +244,56 @@ impl Shell {
         };
         let ticker = self.pulse_ticker.entity_id();
 
-        // ── where it lives: its device, and its folder to copy ──
-        let folder_key = format!("bot-project-folder-{}", space.id);
-        let mut body = div()
-            .p(px(8.0))
-            .flex()
-            .flex_col()
-            .child(
-                section_head("Folder", true, theme)
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(5.0))
-                            .child(
-                                icon(icons::LAPTOP)
-                                    .size(px(11.0))
-                                    .flex_none()
-                                    .text_color(theme.text_muted.opacity(0.85)),
-                            )
-                            .child(head_note(device, theme)),
-                    ),
-            )
-            .child(
-                hover_row(&folder_key)
-                    .items_center()
-                    .py(px(5.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(12.0))
-                            .line_height(px(17.0))
-                            .font_family(theme.font_mono.clone())
-                            .text_color(theme.text)
-                            .child(SharedString::from(space.path.clone())),
-                    )
-                    .child(self.copy_button(
-                        format!("{folder_key}-copy"),
-                        space.path.clone(),
-                        motion::hover_t(&folder_key),
-                        theme,
-                        cx,
-                    )),
-            );
+        // ── where it lives: its device after the title; hovering it shows
+        // the folder, and a click copies the folder's path ──
+        let device_key = format!("bot-project-device-{}", space.id);
+        let copied = self.board.copied.as_deref() == Some(device_key.as_str());
+        let (path, tip_path) = (space.path.clone(), space.path.clone());
+        let click_key = device_key.clone();
+        self.board.panel_title_note = Some(
+            div()
+                .id(SharedString::from(device_key.clone()))
+                .min_w_0()
+                .flex_shrink(1.0)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .cursor_pointer()
+                .on_hover(motion::hover_listener(device_key.clone()))
+                .tooltip(move |_, cx| {
+                    let tip = FolderTip {
+                        path: tip_path.clone(),
+                        copied,
+                    };
+                    cx.new(|_| tip).into()
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.copy_text(click_key.clone(), path.clone(), cx)
+                }))
+                .text_size(px(12.5))
+                .text_color(if copied {
+                    theme.success
+                } else {
+                    motion::hover_blend(&device_key, theme.text_muted, theme.text)
+                })
+                .child(
+                    icon(if copied { icons::CHECK } else { icons::LAPTOP })
+                        .size(px(12.0))
+                        .flex_none()
+                        .text_color(if copied {
+                            theme.success
+                        } else {
+                            motion::hover_blend(&device_key, theme.text_muted, theme.text)
+                        }),
+                )
+                .child(div().min_w_0().truncate().child(SharedString::from(device)))
+                .into_any_element(),
+        );
+        let mut body = div().p(px(8.0)).flex().flex_col();
 
         // ── its sessions ──
-        let live = sessions
-            .iter()
-            .filter(|(_, _, s, _)| {
-                matches!(s, ChatIndicator::Working | ChatIndicator::AwaitingInput)
-            })
-            .count();
-        body = body.child(section_rule()).child(
-            section_head("Sessions", false, theme)
-                .child(div().flex_1())
-                .child(head_note(
-                    match (sessions.len(), live) {
-                        (0, _) => String::new(),
-                        (n, 0) => n.to_string(),
-                        (n, l) => format!("{n} · {l} active"),
-                    },
-                    theme,
-                )),
-        );
+        body = body.child(section_head("Sessions", true, theme));
         if sessions.is_empty() {
             body = body.child(parts::quiet_line(theme, "No sessions here yet."));
         }
@@ -467,4 +451,68 @@ fn two_line(title: String, detail: String, theme: &Theme) -> gpui::Div {
                 .text_color(theme.text_muted.opacity(0.85))
                 .child(SharedString::from(detail)),
         )
+}
+
+/// The hover card of a project's device: the folder it lives in, and that
+/// a click copies it.
+struct FolderTip {
+    path: String,
+    copied: bool,
+}
+
+impl Render for FolderTip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        motion::fade_quick(
+            "bot-project-folder-tip",
+            div()
+                .max_w(px(360.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .bg(theme.surface_raised)
+                .shadow_md()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            icon(icons::FOLDER)
+                                .size(px(12.0))
+                                .flex_none()
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(12.0))
+                                .line_height(px(17.0))
+                                .font_family(theme.font_mono.clone())
+                                .text_color(theme.text)
+                                .child(SharedString::from(self.path.clone())),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(if self.copied {
+                            theme.success
+                        } else {
+                            theme.text_faint
+                        })
+                        .child(if self.copied {
+                            "Copied"
+                        } else {
+                            "Click to copy the path"
+                        }),
+                ),
+        )
+    }
 }
