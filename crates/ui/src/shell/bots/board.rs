@@ -186,10 +186,6 @@ impl Shell {
             .flex_col()
             .gap(px(GROUP_CARD_GAP))
             .pb(px(Theme::SPACE_SM));
-        if let Some(picker) = self.render_bot_picker(bot.as_ref().map(|b| b.id.as_str()), theme, cx)
-        {
-            column = column.child(picker);
-        }
         if let Some(notice) = bot
             .as_ref()
             .and_then(|bot| self.render_board_notice(bot, theme, cx))

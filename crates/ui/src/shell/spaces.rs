@@ -256,7 +256,6 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let buttons = header_buttons(self.is_project_window(), self.settings.window_mode);
-        let botboard = self.botboard();
         // One resting/hover tint for every header icon button, applied to the
         // GLYPH: gpui SVGs take no colour from their parent, so a tint on the
         // button alone left the + and quick-chat glyphs stuck at full text
@@ -328,7 +327,7 @@ impl Shell {
                         .text_color(tint("sidebar-quick-chat")),
                 )
         });
-        let logo = self.render_logo(botboard, theme, cx);
+        let logo = self.render_logo(theme, cx);
         div()
             .flex_none()
             .flex()
@@ -356,101 +355,22 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The wordmark. In the main window it is the mode switch: "Cypher ⇅"
-    /// in Projects mode, with a badge counting what the bots need from you;
-    /// "Cypher · Workspaces ⇅" on the Workspaces board, the mode a quiet
-    /// label beside the wordmark. A project window's is the plain wordmark.
-    fn render_logo(&self, botboard: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let word = |text: &'static str, color: gpui::Hsla| {
-            div()
-                .flex_none()
-                .font_family("Oxanium")
-                .text_size(px(16.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(color)
-                .child(SharedString::from(text))
-        };
+    /// The wordmark. In the main window it is the view switcher (see
+    /// `bots::picker`): "Cypher", the workspace shown as a tag after it,
+    /// and a list of Sessions and every workspace. A project window's is
+    /// the plain wordmark.
+    fn render_logo(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let word = div()
+            .flex_none()
+            .font_family("Oxanium")
+            .text_size(px(16.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme.text)
+            .child(SharedString::from("Cypher"));
         if self.is_project_window() {
-            return word("Cypher", theme.text).into_any_element();
+            return word.into_any_element();
         }
-        let needs_you = super::bots::needs_you_count(self.state.read(cx), Utc::now());
-        let key = "sidebar-logo";
-        let tip = if botboard {
-            "Switch to Projects"
-        } else {
-            "Switch to Workspaces"
-        };
-        let badge = (!botboard && needs_you > 0).then(|| {
-            div()
-                .flex_none()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(3.0))
-                .h(px(18.0))
-                .px(px(5.0))
-                .rounded(px(6.0))
-                .bg(theme.warning.opacity(0.14))
-                .child(icon(icons::BOT).size(px(12.0)).text_color(theme.warning))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.warning)
-                        .child(SharedString::from(needs_you.to_string())),
-                )
-        });
-        div()
-            .id(key)
-            .min_w_0()
-            .h(px(28.0))
-            // The wash pads past the wordmark without moving it off the
-            // cards' glyph column.
-            .ml(px(-6.0))
-            .px(px(6.0))
-            .rounded(px(8.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(5.0))
-            .cursor_pointer()
-            .bg(motion::hover_blend(
-                key,
-                crate::kit::theme::wash(0.0),
-                crate::kit::theme::wash(0.14),
-            ))
-            .on_hover(motion::hover_listener(key))
-            .tooltip(move |_, cx| cx.new(|_| super::session::FindTooltip(tip.into())).into())
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let next = if botboard {
-                    crate::prefs::WindowMode::Projects
-                } else {
-                    crate::prefs::WindowMode::Botboard
-                };
-                this.set_window_mode(next, cx);
-            }))
-            .child(word("Cypher", theme.text))
-            .when(botboard, |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(13.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from("· Workspaces")),
-                )
-            })
-            .children(badge)
-            .child(
-                icon(icons::ALT_ARROW_UP_DOWN)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(motion::hover_blend(
-                        key,
-                        theme.text_muted.opacity(0.6),
-                        theme.text_muted,
-                    )),
-            )
-            .into_any_element()
+        self.render_view_switch(word, theme, cx)
     }
 }
 

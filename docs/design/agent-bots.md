@@ -956,47 +956,44 @@ Planned:
 ### 13.1 Workspaces
 
 Bots and projects are two modes of the window, so project work and bot work never share
-the sidebar. The mode switch is the sidebar's logo:
+the sidebar. One switcher, the sidebar's logo, picks the view:
 
-| | Projects mode | Workspaces mode |
+| | Sessions view (Projects mode) | A workspace (Workspaces mode) |
 |---|---|---|
-| Logo | **Cypher** ⇅ | **Cypher Workspaces** ⇅ (the second word in the bot's accent) |
-| Sidebar | Project and session cards, as today; no bot strip | The bot switcher, then the current bot's cards |
-| Middle | Session tabs | The bot's chat |
+| Logo | **Cypher** ⇅ | **Cypher** `Atlas` ⇅ (the workspace as an inverted tag) |
+| Sidebar | Project and session cards, as today | The workspace's cards |
+| Middle | Session tabs | The workspace's chat |
 | Right | The session dock | The detail panel |
-| Header `+` | New project | New bot |
+| Header `+` | New project | New workspace |
 
 ```
-Workspaces mode
+A workspace
 ┌ sidebar ───────────┐┌──────── chat ─────────┐┌── detail ──┐
-│ Cypher Workspaces ⇅  ││                       ││ Fix invoice│
-│ [Bob][Rel][Team][+]││  conversation with    ││ rounding   │
-│ ⏸ Bob is paused    ││  the bot; plan,       ││ steps,     │
-│ ┌ Needs you (2) ─┐ ││  progress and result  ││ sessions,  │
-│ ┌ Work ──────────┐ ││  cards inline         ││ Stop       │
-│ ┌ Routines ──────┐ ││                       ││            │
-│ ┌ Projects … ────┐ ││  [ Ask Bob…         ] ││        [×] │
+│ Cypher [Atlas] ⇅   ││                       ││ Fix invoice│
+│ ⏸ Atlas is paused  ││  conversation with    ││ rounding   │
+│ Needs you  2       ││  the workspace; plan, ││ steps,     │
+│   …                ││  progress and result  ││ sessions,  │
+│ Work  3            ││  cards inline         ││ Stop       │
+│ Routines  3        ││                       ││            │
+│ Projects  2        ││  [ Ask Atlas…       ] ││        [×] │
 └────────────────────┘└───────────────────────┘└────────────┘
 ```
 
-**Switching.** A click on the logo switches mode; its tooltip names the other one. Each
-mode keeps its own state: the bot that was open, the session tabs and their layout. In
-Projects mode the logo carries a small bot badge with the number of items that need the
-owner across all bots, so attention is visible without bringing bot content back into
-the project sidebar. Sessions a bot started stay in their projects, marked "by <bot>".
-Project windows have no Workspaces.
+**Switching.** A click on the logo opens one list: **Sessions** (the projects view, the
+default) first, then every workspace by name with what it is doing (a Needs-you count, a
+spinner while it works, "paused", an offline host), a check on what shows now, then New
+workspace; past five rows it leads with a search field. Type to filter, ↑↓ and Enter to
+pick, Esc to close; a right-click on the tag or a workspace row opens its Open /
+Settings… / Delete… menu. The chosen workspace follows "Cypher" as a tag in inverted
+colours (the primary button's). An amber count beside it says what needs the owner in
+workspaces not shown: all of them from the Sessions view, the others from a workspace.
+Each view keeps its own state: the workspace that was open, the session tabs and their
+layout. Sessions a workspace started stay in their projects, marked "by <workspace>".
+Project windows have only the plain wordmark.
 
-**The bot switcher** heads the Workspaces board sidebar: the current bot as a row (its avatar
-and name on the cards' header grid, ⇅) with an amber count when other bots need the
-owner. A click opens a list of every bot by name, each with what it is doing (a
-Needs-you count, a spinner while it works, "paused", an offline host) and a check on the
-current one, then New bot; past five bots it leads with a search field. Type to filter,
-↑↓ and Enter to switch, Esc to close; a right-click on the row or a list row opens that
-bot's Open / Settings… / Delete… menu.
-
-**No status card.** Who the bot is reads from the switcher and the chat header, what it
+**No status card.** Who the bot is reads from the logo's tag and the chat header, what it
 may do from the access note over the composer, and its pause and settings buttons sit
-in the chat header where a tile keeps its actions. Under the switcher a single quiet line
+in the chat header where a tile keeps its actions. Under the header a single quiet line
 appears only when something is off, the way the project sidebar marks only an offline
 host: "Bob is paused" (with Resume), "<device> is offline", or "The last run failed".
 
@@ -1043,7 +1040,7 @@ Behaviour:
 
 - Cards update live from the engine (`WatchBotRecords`: work, routines, notes, the
   audit log); they hold no state of their own. Resolving an item anywhere updates every
-  count: the card, the switcher and the Projects-mode logo badge.
+  count: the card, the switcher list and the logo's amber count.
 - Settings stay in the palette; no card edits permissions itself.
 - Usage meters and embedded transcripts are left out: rows link to the thread or session
   instead.

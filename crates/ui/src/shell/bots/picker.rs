@@ -1,22 +1,23 @@
-//! The bot switcher heading the Botboard sidebar: the current bot as a row
-//! (its avatar and name, on the cards' header grid) that opens a list of
-//! every bot by name. Avatars alone stopped telling bots apart past a few,
-//! so the list names each one and says what it is doing; past a handful it
-//! leads with a search field. The keyboard drives it like the composer's
-//! pickers: type to filter, ↑↓ to move, Enter to switch, Esc to close.
+//! The view switcher in the sidebar header: the "Cypher" wordmark, followed
+//! on the Botboard by the current workspace as an inverted tag. A click
+//! opens one list: Sessions (the projects view, the default), every
+//! workspace by name with what it is doing, then New workspace. Past a
+//! handful it leads with a search field. The keyboard drives it like the
+//! composer's pickers: type to filter, ↑↓ to move, Enter to pick, Esc to
+//! close.
 //!
-//! A right-click on the row opens the current bot's menu (Open /
-//! Settings… / Delete…); a right-click on a list row opens that bot's.
+//! A right-click on the tag opens the current workspace's menu (Open /
+//! Settings… / Delete…); a right-click on a list row opens that one's.
 
 use super::*;
 use crate::widgets::text_input;
 use gpui::{FocusHandle, KeyDownEvent};
 
-/// The row's bot face, and the list rows' one (bare glyphs: the row's own
-/// fill sets it apart).
-const AVATAR: f32 = 16.0;
+/// The list rows' bot face (a bare glyph).
 const LIST_AVATAR: f32 = 15.0;
-/// Bots before the list leads with a search field.
+/// The Sessions row's label, which the filter matches too.
+const SESSIONS: &str = "Sessions";
+/// Rows before the list leads with a search field.
 const SEARCH_FROM: usize = 6;
 /// The list's height before it scrolls.
 const LIST_MAX_H: f32 = 360.0;
@@ -48,6 +49,24 @@ fn filtered<'a>(lines: &'a [BotLine], query: &str) -> Vec<&'a BotLine> {
         .collect();
     ranked.sort_by_key(|(rank, ix, _)| (*rank, *ix));
     ranked.into_iter().map(|(_, _, line)| line).collect()
+}
+
+/// One row of the list: the projects view, or a workspace.
+#[derive(Clone, Copy)]
+enum Pick<'a> {
+    Sessions,
+    Bot(&'a BotLine),
+}
+
+/// The rows `query` shows: Sessions first while it matches, then the
+/// workspaces it matches.
+fn picks<'a>(lines: &'a [BotLine], query: &str) -> Vec<Pick<'a>> {
+    let sessions = popover::match_rank(query, SESSIONS).is_some();
+    sessions
+        .then_some(Pick::Sessions)
+        .into_iter()
+        .chain(filtered(lines, query).into_iter().map(Pick::Bot))
+        .collect()
 }
 
 /// What needs the owner in bots other than `current`.
@@ -100,13 +119,19 @@ impl Shell {
             },
         );
         let lines = self.bot_lines(cx);
-        let current = self.settings.botboard_bot.clone();
-        let highlight = lines
-            .iter()
-            .position(|line| Some(&line.bot.id) == current.as_ref())
-            .unwrap_or(0);
+        // The cursor on what shows now: Sessions (row 0) in the projects
+        // view, else the current workspace.
+        let highlight = if self.botboard() {
+            let current = self.settings.botboard_bot.clone();
+            lines
+                .iter()
+                .position(|line| Some(&line.bot.id) == current.as_ref())
+                .map_or(0, |ix| ix + 1)
+        } else {
+            0
+        };
         let focus = cx.focus_handle();
-        if lines.len() >= SEARCH_FROM {
+        if lines.len() + 1 >= SEARCH_FROM {
             window.focus(&search.read(cx).focus_handle(cx), cx);
         } else {
             window.focus(&focus, cx);
@@ -141,7 +166,7 @@ impl Shell {
             return;
         };
         let query = switcher.search.read(cx).text().to_string();
-        let count = filtered(&lines, &query).len() as isize;
+        let count = picks(&lines, &query).len() as isize;
         if count > 0 {
             switcher.highlight = (switcher.highlight as isize + step).rem_euclid(count) as usize;
             cx.notify();
@@ -155,11 +180,21 @@ impl Shell {
             return;
         };
         let query = switcher.search.read(cx).text().to_string();
-        let shown = filtered(&lines, &query);
-        if let Some(line) = shown.get(switcher.highlight.min(shown.len().saturating_sub(1))) {
-            let id = line.bot.id.clone();
-            self.switch_to(&id, cx);
+        let shown = picks(&lines, &query);
+        match shown.get(switcher.highlight.min(shown.len().saturating_sub(1))) {
+            Some(Pick::Sessions) => self.show_sessions(cx),
+            Some(Pick::Bot(line)) => {
+                let id = line.bot.id.clone();
+                self.switch_to(&id, cx);
+            }
+            None => {}
         }
+    }
+
+    /// Back to the projects view, the default.
+    fn show_sessions(&mut self, cx: &mut Context<Self>) {
+        self.close_switcher(cx);
+        self.set_window_mode(crate::prefs::WindowMode::Projects, cx);
     }
 
     /// The list's keys that reach it as keys: arrows and Enter while the
@@ -175,53 +210,117 @@ impl Shell {
         cx.stop_propagation();
     }
 
-    /// The switcher row; `None` before the first bots frame and with no bots
-    /// (the empty card offers the first one).
-    pub(in crate::shell) fn render_bot_picker(
+    /// The wordmark as the view switcher: "Cypher", the current workspace
+    /// as an inverted tag on the Botboard, an amber count of what needs the
+    /// owner in views not shown, and ⇅. A click opens the list below it.
+    pub(in crate::shell) fn render_view_switch(
         &mut self,
-        current: Option<&str>,
+        word: gpui::Div,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if !self.state.read(cx).bots_synced {
-            return None;
-        }
+    ) -> AnyElement {
+        let botboard = self.botboard();
         let lines = self.bot_lines(cx);
-        let current = lines
-            .iter()
-            .find(|line| Some(line.bot.id.as_str()) == current)?;
-        let elsewhere = needs_elsewhere(&lines, &current.bot.id);
-        let bot = current.bot.clone();
-        let key = "bot-switcher";
+        let current = botboard
+            .then(|| {
+                let id = self.settings.botboard_bot.clone();
+                lines.iter().find(|line| Some(&line.bot.id) == id.as_ref())
+            })
+            .flatten()
+            .cloned();
+        // What waits elsewhere: every workspace from the projects view, the
+        // others from a workspace.
+        let waiting = match &current {
+            Some(line) => needs_elsewhere(&lines, &line.bot.id),
+            None => lines.iter().map(|line| line.needs).sum(),
+        };
+        let key = "sidebar-logo";
         let open = self.menus.bot_switcher.get().is_some();
-        let avatar = crate::appearance::bot_style::bot_glyph(
-            &bot.name,
-            bot.icon.as_deref(),
-            bot.color.as_deref(),
-            AVATAR,
-            theme,
-        );
-        let menu_id = bot.id.clone();
-        let mut row = div()
+        let tag = current.as_ref().map(|line| {
+            let menu_id = line.bot.id.clone();
+            div()
+                .id("sidebar-logo-tag")
+                .min_w_0()
+                .h(px(20.0))
+                .px(px(7.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .bg(theme.solid)
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.on_solid)
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.menus.bot.open((menu_id.clone(), event.position));
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(transcript::single_line(&line.bot.name))),
+                )
+        });
+        let badge = (waiting > 0).then(|| {
+            let tip: SharedString = format!(
+                "{waiting} {} you {}",
+                if waiting == 1 { "needs" } else { "need" },
+                if current.is_some() {
+                    "in your other workspaces"
+                } else {
+                    "in your workspaces"
+                }
+            )
+            .into();
+            div()
+                .id("sidebar-logo-waiting")
+                .flex_none()
+                .min_w(px(16.0))
+                .h(px(16.0))
+                .px(px(4.0))
+                .rounded_full()
+                .bg(theme.warning.opacity(0.16))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(10.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.warning)
+                .tooltip(move |_, cx| {
+                    cx.new(|_| super::super::session::FindTooltip(tip.clone()))
+                        .into()
+                })
+                .child(SharedString::from(if waiting > 9 {
+                    "9+".to_string()
+                } else {
+                    waiting.to_string()
+                }))
+        });
+        let mut trigger = div()
             .id(key)
             .relative()
-            .h(px(GROUP_CARD_HEADER_HEIGHT))
-            .px(px(10.0))
+            .min_w_0()
+            .h(px(28.0))
+            // The wash pads past the wordmark without moving it off the
+            // cards' column.
+            .ml(px(-6.0))
+            .px(px(6.0))
             .rounded(px(8.0))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(7.0))
+            .gap(px(6.0))
             .cursor_pointer()
-            // Always filled, so the switcher reads as a control above the
-            // cards; deeper on hover and while its list is open.
             .bg(if open {
-                crate::kit::theme::wash(0.12)
+                crate::kit::theme::wash(0.14)
             } else {
                 motion::hover_blend(
                     key,
-                    crate::kit::theme::wash(0.07),
-                    crate::kit::theme::wash(0.10),
+                    crate::kit::theme::wash(0.0),
+                    crate::kit::theme::wash(0.14),
                 )
             })
             .on_hover(motion::hover_listener(key))
@@ -236,108 +335,93 @@ impl Shell {
                     this.open_switcher(window, cx);
                 }
             }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.menus.bot.open((menu_id.clone(), event.position));
-                    cx.notify();
-                }),
-            )
-            // The face sits in the cards' 20px glyph box, so the name
-            // shares the card titles' column below.
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(20.0))
-                    .ml(px(-3.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(avatar),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(14.0))
-                    .line_height(px(18.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(SharedString::from(transcript::single_line(&bot.name))),
-            )
-            .child(div().flex_1())
-            // Other bots' attention, which the row would otherwise hide.
-            .when(elsewhere > 0, |el| {
-                let tip: SharedString = format!(
-                    "{elsewhere} {} you in your other workspaces",
-                    if elsewhere == 1 { "needs" } else { "need" }
-                )
-                .into();
-                el.child(
-                    div()
-                        .id("bot-switcher-elsewhere")
-                        .flex_none()
-                        .min_w(px(16.0))
-                        .h(px(16.0))
-                        .px(px(4.0))
-                        .rounded_full()
-                        .bg(theme.warning.opacity(0.16))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(10.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.warning)
-                        .tooltip(move |_, cx| {
-                            cx.new(|_| super::super::session::FindTooltip(tip.clone()))
-                                .into()
-                        })
-                        .child(SharedString::from(if elsewhere > 9 {
-                            "9+".to_string()
-                        } else {
-                            elsewhere.to_string()
-                        })),
-                )
-            })
+            .child(word)
+            .children(tag)
+            .children(badge)
             .child(
                 icon(icons::ALT_ARROW_UP_DOWN)
                     .size(px(12.0))
                     .flex_none()
-                    .text_color(theme.text_muted.opacity(0.7)),
+                    .text_color(motion::hover_blend(
+                        key,
+                        theme.text_muted.opacity(0.6),
+                        theme.text_muted,
+                    )),
             );
-        if let Some(list) = self.render_switcher_list(&lines, &bot.id, theme, cx) {
-            row = row.child(popover::anchored_menu_below_gap(
+        let current_id = current.map(|line| line.bot.id);
+        if let Some(list) = self.render_switcher_list(&lines, current_id.as_deref(), theme, cx) {
+            trigger = trigger.child(popover::anchored_menu_below_gap(
                 "bot-switcher-menu",
                 list,
                 self.menus.bot_switcher.closing_since(),
                 4.0,
             ));
         }
-        Some(row.into_any_element())
+        trigger.into_any_element()
     }
 
-    /// The open list: every bot by name with what it is doing, filtered by
-    /// the search field once there are enough, and New bot at the foot.
+    /// The open list: Sessions, then every workspace by name with what it
+    /// is doing, filtered by the search field once there are enough, and
+    /// New workspace at the foot. `current` is the workspace shown, `None`
+    /// in the projects view.
     fn render_switcher_list(
         &self,
         lines: &[BotLine],
-        current: &str,
+        current: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         self.menus.bot_switcher.get()?;
         let switcher = self.board.switcher.as_ref()?;
         let query = switcher.search.read(cx).text().to_string();
-        let shown = filtered(lines, &query);
+        let shown = picks(lines, &query);
         let highlight = switcher.highlight.min(shown.len().saturating_sub(1));
         let ticker = self.pulse_ticker.entity_id();
+        let check = |selected: bool| {
+            div().flex_none().w(px(14.0)).when(selected, |el| {
+                el.child(
+                    icon(icons::CHECK)
+                        .size(px(13.0))
+                        .text_color(theme.text_muted),
+                )
+            })
+        };
         let rows: Vec<AnyElement> = shown
             .iter()
             .enumerate()
-            .map(|(ix, line)| {
+            .map(|(ix, pick)| {
+                let line = match pick {
+                    Pick::Bot(line) => *line,
+                    Pick::Sessions => {
+                        let selected = current.is_none();
+                        let key = "bot-switcher-sessions";
+                        return popover::menu_row_nav(theme, selected, ix == highlight, key)
+                            .id(key)
+                            .gap(px(8.0))
+                            .on_click(cx.listener(|this, _, _, cx| this.show_sessions(cx)))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .size(px(LIST_AVATAR))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        icon(icons::CHAT_ROUND_LINE)
+                                            .size(px(14.0))
+                                            .text_color(theme.text_muted),
+                                    ),
+                            )
+                            .child(div().flex_1().min_w_0().truncate().child(SESSIONS))
+                            .child(check(selected))
+                            // The workspaces below it, a section of their own.
+                            .when(shown.len() > 1, |el| el.mb(px(4.0)))
+                            .into_any_element();
+                    }
+                };
                 let bot = &line.bot;
                 let key = format!("bot-switcher-{}", bot.id);
-                let selected = bot.id == current;
+                let selected = Some(bot.id.as_str()) == current;
                 let (pick, menu_id) = (bot.id.clone(), bot.id.clone());
                 // What it is doing, most pressing first: what needs the
                 // owner, a run, a pause, an offline host.
@@ -408,23 +492,28 @@ impl Shell {
                             .child(SharedString::from(transcript::single_line(&bot.name))),
                     )
                     .children(state)
-                    .child(div().flex_none().w(px(14.0)).when(selected, |el| {
-                        el.child(
-                            icon(icons::CHECK)
-                                .size(px(13.0))
-                                .text_color(theme.text_muted),
-                        )
-                    }))
+                    .child(check(selected))
                     .into_any_element()
             })
             .collect();
+        let mut rows = rows;
+        if matches!(shown.first(), Some(Pick::Sessions)) && shown.len() > 1 {
+            rows.insert(
+                1,
+                div()
+                    .mb(px(4.0))
+                    .h(px(1.0))
+                    .bg(crate::kit::theme::hairline(0.06))
+                    .into_any_element(),
+            );
+        }
         let empty = rows.is_empty().then(|| {
             div()
                 .px(px(8.0))
                 .py(px(8.0))
                 .text_size(px(12.5))
                 .text_color(theme.text_muted)
-                .child(SharedString::from("No workspace by that name"))
+                .child(SharedString::from("Nothing by that name"))
         });
         let new_bot = popover::menu_row(theme, false, "bot-switcher-new")
             .id("bot-switcher-new")
@@ -466,7 +555,7 @@ impl Shell {
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_switcher(cx)))
                 .flex()
                 .flex_col()
-                .when(lines.len() >= SEARCH_FROM, |el| {
+                .when(lines.len() + 1 >= SEARCH_FROM, |el| {
                     el.child(popover::search_input_frame(
                         theme,
                         switcher.search.clone().into_any_element(),
@@ -521,5 +610,22 @@ mod tests {
         assert!(names("zzz").is_empty());
         assert_eq!(needs_elsewhere(&lines, "bob"), 0);
         assert_eq!(needs_elsewhere(&lines, "release"), 2);
+    }
+
+    #[test]
+    fn sessions_leads_the_list_while_it_matches() {
+        let lines = [line("Atlas", 0), line("Scout", 0)];
+        let names = |q: &str| -> Vec<String> {
+            picks(&lines, q)
+                .into_iter()
+                .map(|p| match p {
+                    Pick::Sessions => SESSIONS.to_string(),
+                    Pick::Bot(l) => l.bot.name.clone(),
+                })
+                .collect()
+        };
+        assert_eq!(names(""), ["Sessions", "Atlas", "Scout"]);
+        assert_eq!(names("s"), ["Sessions", "Scout", "Atlas"]);
+        assert_eq!(names("at"), ["Atlas"]);
     }
 }
