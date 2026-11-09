@@ -7,6 +7,7 @@
 //! source).
 
 use super::board::{card_corner, card_item};
+use super::items::{hover_row, section_head, section_rule};
 use super::panel::{PanelHead, PanelItem};
 use super::parts;
 use super::*;
@@ -28,11 +29,32 @@ struct NoteEdit {
     _events: Subscription,
 }
 
-/// The notebook panel's inputs: the add field and the note being edited.
+/// Whose notes the panel lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum NoteFilter {
+    #[default]
+    All,
+    Owner,
+    Bot,
+}
+
+impl NoteFilter {
+    fn keeps(self, note: &BotNote) -> bool {
+        match self {
+            Self::All => true,
+            Self::Owner => note.source == NoteSource::Owner,
+            Self::Bot => matches!(note.source, NoteSource::Bot { .. }),
+        }
+    }
+}
+
+/// The notebook panel's inputs: the add field, the note being edited and
+/// whose notes it lists.
 #[derive(Default)]
 pub(super) struct NotebookUi {
     add: Option<(Entity<TextInput>, Subscription)>,
     editing: Option<NoteEdit>,
+    filter: NoteFilter,
 }
 
 impl Shell {
@@ -180,12 +202,14 @@ impl Shell {
         Some(self.fold_card("notebook", header, rows, theme))
     }
 
-    /// The detail panel: the add field, then every note newest first.
+    /// The detail panel: the add field, then the notes newest first under
+    /// a heading that filters them by who wrote them.
     pub(super) fn render_notebook_panel(
         &mut self,
         bot: &Bot,
         item: &PanelItem,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         if *item != PanelItem::Notebook {
@@ -205,25 +229,22 @@ impl Shell {
         };
         let add = self.note_add_input(cx);
         let add_row = div()
+            .px(px(2.0))
+            .pt(px(4.0))
             .flex()
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            .child(parts::field(&add).flex_1().min_w_0().mr(px(0.0)))
+            .child(parts::field(&add).flex_1().min_w_0().mx(px(0.0)))
             .child(
                 popover::btn_primary(theme, "Add")
                     .id("bot-note-add")
-                    .mr(px(8.0))
                     .h(px(32.0))
                     .flex()
                     .items_center()
                     .on_click(cx.listener(|this, _, _, cx| this.add_note(cx))),
             );
-        let mut body = div()
-            .p(px(8.0))
-            .flex()
-            .flex_col()
-            .child(div().pt(px(4.0)).pb(px(6.0)).child(add_row));
+        let mut body = div().p(px(8.0)).flex().flex_col().child(add_row);
         if notes.is_empty() {
             body = body.child(parts::quiet_line(
                 theme,
@@ -232,32 +253,107 @@ impl Shell {
             ));
             return Some((head, body));
         }
+
+        // ── the notes, under a heading that filters them ──
+        let filter = self.board.notebook.filter;
+        let count = |f: NoteFilter| notes.iter().filter(|n| f.keeps(n)).count();
+        let chips = [
+            (NoteFilter::All, "All".to_string()),
+            (NoteFilter::Owner, "You".to_string()),
+            (NoteFilter::Bot, bot.name.clone()),
+        ]
+        .into_iter()
+        .map(|(f, label)| {
+            let key = format!("bot-notes-filter-{f:?}");
+            let on = f == filter;
+            div()
+                .id(SharedString::from(key.clone()))
+                .flex_none()
+                .h(px(20.0))
+                .px(px(7.0))
+                .rounded(px(6.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .cursor_pointer()
+                .text_size(px(11.0))
+                .bg(if on {
+                    crate::kit::theme::wash(0.08)
+                } else {
+                    motion::hover_blend(
+                        &key,
+                        crate::kit::theme::wash(0.0),
+                        crate::kit::theme::wash(0.05),
+                    )
+                })
+                .on_hover(motion::hover_listener(key.clone()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.board.notebook.filter = f;
+                    cx.notify();
+                }))
+                .text_color(if on {
+                    theme.text
+                } else {
+                    motion::hover_blend(&key, theme.text_muted, theme.text)
+                })
+                .child(SharedString::from(label))
+                .child(
+                    div()
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(count(f).to_string())),
+                )
+        });
+        body = body.child(section_rule()).child(
+            section_head("Notes", false, theme)
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .mr(px(-7.0))
+                        .flex()
+                        .flex_row()
+                        .gap(px(2.0))
+                        .children(chips),
+                ),
+        );
+        let shown: Vec<BotNote> = notes.into_iter().filter(|n| filter.keeps(n)).collect();
+        if shown.is_empty() {
+            body = body.child(parts::quiet_line(
+                theme,
+                match filter {
+                    NoteFilter::Owner => "No notes from you yet.".to_string(),
+                    _ => format!("No notes from {} yet.", bot.name),
+                },
+            ));
+        }
         let editing = self
             .board
             .notebook
             .editing
             .as_ref()
             .map(|e| (e.note_id.clone(), e.input.clone()));
-        for note in notes {
+        for note in shown {
             let row = match &editing {
                 Some((id, input)) if *id == note.id => {
                     let by_bot = matches!(note.source, NoteSource::Bot { .. });
                     self.note_editor(input, by_bot, theme, cx)
                 }
-                _ => self.note_row(&note, bot, theme, cx),
+                _ => self.note_row(&note, bot, theme, window, cx),
             };
             body = body.child(row);
         }
         Some((head, body))
     }
 
-    /// One note in the panel: its text, its source and time, and on hover
-    /// Edit and Delete. A click on the text edits it.
+    /// One note in the panel: who wrote it, its text (markdown, justified),
+    /// where it came from and when; on hover Copy, Edit and Delete. A
+    /// click on the text edits it.
     fn note_row(
         &self,
         note: &BotNote,
         bot: &Bot,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = format!("bot-panel-note-{}", note.id);
@@ -286,6 +382,8 @@ impl Shell {
         };
         let reveal = motion::hover_t(&key);
         let (edit_note, pen_note, delete_id) = (note.clone(), note.clone(), note.id.clone());
+        let copy_key = format!("{key}-copy");
+        let copied = self.board.copied.as_deref() == Some(copy_key.as_str());
         let tool = |id: String, glyph: &'static str, tip: &'static str, color: gpui::Hsla| {
             div()
                 .id(SharedString::from(id.clone()))
@@ -306,85 +404,102 @@ impl Shell {
                     cx.new(|_| super::super::session::FindTooltip(tip.into()))
                         .into()
                 })
-                .child(icon(glyph).size(px(13.0)).text_color(color))
+                .child(
+                    icon(glyph)
+                        .size(px(13.0))
+                        .text_color(motion::hover_blend(&id, color, theme.text)),
+                )
         };
-        div()
-            .id(SharedString::from(key.clone()))
-            .px(px(8.0))
-            .py(px(8.0))
-            .rounded(px(8.0))
+        let text = note.text.clone();
+        let tools = div()
+            .flex_none()
+            .my(px(-5.0))
             .flex()
             .flex_row()
-            .items_start()
-            .gap(px(10.0))
-            .bg(motion::hover_blend(
-                &key,
-                crate::kit::theme::wash(0.0),
-                crate::kit::theme::wash(0.04),
-            ))
-            .on_hover(motion::hover_listener(key.clone()))
-            .child(div().pt(px(1.0)).child(note_mark(&note.source, bot, theme)))
+            .child(
+                tool(
+                    copy_key.clone(),
+                    if copied { icons::CHECK } else { icons::COPY },
+                    "Copy note",
+                    if copied {
+                        theme.success
+                    } else {
+                        theme.text_muted
+                    },
+                )
+                .when(copied, |el| el.opacity(1.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.copy_text(copy_key.clone(), text.clone(), cx)
+                })),
+            )
+            .child(
+                tool(
+                    format!("{key}-edit"),
+                    icons::PEN,
+                    "Edit note",
+                    theme.text_muted,
+                )
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.edit_note(&pen_note, window, cx)),
+                ),
+            )
+            .child(
+                tool(
+                    format!("{key}-delete"),
+                    icons::TRASH_BIN_MINIMALISTIC,
+                    "Delete note",
+                    theme.text_muted,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.board_mutate(
+                        serde_json::json!({ "op": "deleteBotNote", "noteId": delete_id }),
+                        cx,
+                    );
+                })),
+            );
+        // The tools ride the source line's end, so the text keeps the
+        // row's whole width.
+        hover_row(&key)
+            .py(px(8.0))
+            .child(div().pt(px(2.0)).child(note_mark(&note.source, bot, theme)))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .gap(px(3.0))
+                    .gap(px(4.0))
                     .child(
                         div()
                             .id(SharedString::from(format!("{key}-text")))
                             .cursor_text()
-                            .text_size(px(13.0))
-                            .line_height(px(19.0))
-                            .text_color(theme.text)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.edit_note(&edit_note, window, cx)
                             }))
-                            .child(crate::markdown::justified::JustifiedText::new(
-                                note.text.clone(),
-                                None,
+                            .child(super::items::panel_markdown(
+                                &note.text,
+                                format!("{key}-md"),
+                                13.0,
+                                theme.text,
+                                theme,
+                                window,
                             )),
                     )
                     .child(
-                        source
-                            .text_size(px(11.0))
-                            .line_height(px(15.0))
-                            .text_color(theme.text_muted.opacity(0.85)),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .child(
-                        tool(
-                            format!("{key}-edit"),
-                            icons::PEN,
-                            "Edit note",
-                            theme.text_muted,
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| this.edit_note(&pen_note, window, cx),
-                        )),
-                    )
-                    .child(
-                        tool(
-                            format!("{key}-delete"),
-                            icons::TRASH_BIN_MINIMALISTIC,
-                            "Delete note",
-                            theme.text_muted,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.board_mutate(
-                                serde_json::json!({
-                                    "op": "deleteBotNote",
-                                    "noteId": delete_id,
-                                }),
-                                cx,
-                            );
-                        })),
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                source
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(11.0))
+                                    .line_height(px(15.0))
+                                    .text_color(theme.text_muted.opacity(0.85)),
+                            )
+                            .child(tools),
                     ),
             )
             .into_any_element()

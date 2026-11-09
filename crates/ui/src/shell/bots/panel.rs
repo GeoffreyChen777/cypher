@@ -3,7 +3,6 @@
 //! ([`super::column`]), closes with × or Esc, and opening another row
 //! replaces its content; the opened row stays highlighted in the sidebar.
 
-use super::board::{load_note, project_loads, project_row, scoped_sessions, two_lines};
 use super::*;
 
 /// What the panel shows: a card's whole list (its header) or one item (a
@@ -148,7 +147,7 @@ impl Shell {
         let (head, body) = match item {
             PanelItem::Projects => self.render_projects_panel(&bot, &theme, cx),
             PanelItem::Project(space_id) => {
-                self.render_project_panel(&bot, space_id, &theme, cx)?
+                self.render_project_panel(&bot, space_id, &theme, window, cx)?
             }
             PanelItem::NeedsYou
             | PanelItem::Plan(_)
@@ -161,7 +160,7 @@ impl Shell {
             PanelItem::Schedule | PanelItem::Routine(_) | PanelItem::NewRoutine => {
                 self.render_schedule_panel(&bot, item, &theme, cx)?
             }
-            PanelItem::Notebook => self.render_notebook_panel(&bot, item, &theme, cx)?,
+            PanelItem::Notebook => self.render_notebook_panel(&bot, item, &theme, window, cx)?,
             PanelItem::Activity => self.render_activity_panel(&bot, item, &theme, cx)?,
             PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => {
                 self.render_network_panel(&bot, item, &theme, cx)?
@@ -289,199 +288,5 @@ impl Shell {
                 .children(footer)
                 .into_any_element(),
         )
-    }
-
-    /// Every project the bot reads, with what is running and asking there;
-    /// a row opens the project.
-    fn render_projects_panel(
-        &self,
-        bot: &Bot,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> (PanelHead, gpui::Div) {
-        let now = Utc::now();
-        let rows: Vec<(super::board::ProjectLoad, cypher_proto::Space, String)> = {
-            let state = self.state.read(cx);
-            let spaces = state.spaces_sorted();
-            project_loads(&bot.scope, &spaces, &state.chats, |chat| {
-                state.display_status_for(chat, now)
-            })
-            .into_iter()
-            .filter_map(|load| {
-                let space = state.space_row(&load.space_id)?.clone();
-                let device = state
-                    .device_name(&space.device_id)
-                    .unwrap_or("Unknown device")
-                    .to_string();
-                Some((load, space, device))
-            })
-            .collect()
-        };
-        let head = PanelHead {
-            glyph: icons::WIDGET,
-            tint: None,
-            title: "Projects".into(),
-        };
-        let list = rows.into_iter().map(|(load, space, device)| {
-            let key = format!("bot-panel-project-{}", space.id);
-            let item = PanelItem::Project(space.id.clone());
-            let sessions = load.sessions;
-            // What runs or asks there; the sub-line already counts sessions.
-            let note = if load.asking > 0 || load.running > 0 {
-                load_note(&load)
-            } else {
-                String::new()
-            };
-            let note_color = if load.asking > 0 {
-                theme.warning
-            } else if load.running > 0 {
-                theme.text
-            } else {
-                theme.text_faint
-            };
-            project_row(&key, &space, false, theme)
-                .py(px(8.0))
-                .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
-                .child(two_lines(
-                    space.display_name().to_string(),
-                    device,
-                    format!(
-                        "· {sessions} session{}",
-                        if sessions == 1 { "" } else { "s" }
-                    ),
-                    theme,
-                ))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(11.5))
-                        .text_color(note_color)
-                        .child(SharedString::from(note)),
-                )
-        });
-        let body = div()
-            .p(px(8.0))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .children(list);
-        (head, body)
-    }
-
-    /// One project's sessions in the bot's scope, newest first; a click
-    /// opens the session in Projects mode.
-    fn render_project_panel(
-        &self,
-        bot: &Bot,
-        space_id: &str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<(PanelHead, gpui::Div)> {
-        let now = Utc::now();
-        let (space, device, sessions) = {
-            let state = self.state.read(cx);
-            if !bot.scope.sees_space(space_id) {
-                return None;
-            }
-            let space = state.space_row(space_id)?.clone();
-            let device = state
-                .device_name(&space.device_id)
-                .unwrap_or("Unknown device")
-                .to_string();
-            let sessions: Vec<(String, String, ChatIndicator, String)> =
-                scoped_sessions(&bot.scope, &state.chats, space_id)
-                    .into_iter()
-                    .map(|chat| {
-                        (
-                            chat.id.clone(),
-                            transcript::single_line(chat.title.as_deref().unwrap_or("New session")),
-                            state.display_status_for(chat, now),
-                            format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now),
-                        )
-                    })
-                    .collect();
-            (space, device, sessions)
-        };
-        let head = PanelHead {
-            glyph: crate::appearance::space_style::space_icon(space.icon.as_deref()),
-            tint: crate::appearance::space_style::space_color(space.color.as_deref(), theme),
-            title: space.display_name().to_string(),
-        };
-        let ticker = self.pulse_ticker.entity_id();
-        let rows = sessions
-            .into_iter()
-            .map(|(chat_id, title, status, ago)| {
-                let key = format!("bot-panel-session-{chat_id}");
-                let mark =
-                    super::super::render::status_mark(status, ticker, theme).unwrap_or_else(|| {
-                        div()
-                            .flex_none()
-                            .size(px(5.0))
-                            .rounded_full()
-                            .bg(if status == ChatIndicator::Errored {
-                                theme.danger
-                            } else {
-                                theme.text_faint.opacity(0.6)
-                            })
-                            .into_any_element()
-                    });
-                div()
-                    .id(SharedString::from(key.clone()))
-                    .px(px(8.0))
-                    .h(px(34.0))
-                    .rounded(px(8.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.0))
-                    .cursor_pointer()
-                    .bg(motion::hover_blend(
-                        &key,
-                        crate::kit::theme::wash(0.0),
-                        crate::kit::theme::wash(0.05),
-                    ))
-                    .on_hover(motion::hover_listener(key.clone()))
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(14.0))
-                            .flex()
-                            .justify_center()
-                            .child(mark),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.0))
-                            .text_color(theme.text)
-                            .child(SharedString::from(title)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted.opacity(0.8))
-                            .child(SharedString::from(ago)),
-                    )
-            })
-            .collect::<Vec<_>>();
-        let body = div()
-            .p(px(8.0))
-            .flex()
-            .flex_col()
-            .gap(px(1.0))
-            .child(parts::fact(theme, "Device", SharedString::from(device)))
-            .child(parts::section_label(theme, "Sessions"));
-        let body = if rows.is_empty() {
-            body.child(parts::quiet_line(theme, "No sessions here yet."))
-        } else {
-            body.children(rows)
-        };
-        Some((head, body))
     }
 }

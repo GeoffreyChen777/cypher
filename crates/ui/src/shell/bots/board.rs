@@ -700,40 +700,6 @@ pub(super) fn card_with_rows(
         .into_any_element()
 }
 
-/// A project row (the Projects card and the panel's list): the project's
-/// own glyph in its colour, then whatever the caller adds.
-pub(super) fn project_row(
-    key: &str,
-    space: &Space,
-    selected: bool,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    let glyph = crate::appearance::space_style::space_icon(space.icon.as_deref());
-    let tint = crate::appearance::space_style::space_color(space.color.as_deref(), theme)
-        .unwrap_or(theme.text_muted);
-    div()
-        .id(SharedString::from(key.to_string()))
-        .px(px(8.0))
-        .py(px(6.0))
-        .rounded(px(8.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(10.0))
-        .cursor_pointer()
-        .bg(if selected {
-            crate::kit::theme::wash(0.08)
-        } else {
-            motion::hover_blend(
-                key,
-                crate::kit::theme::wash(0.0),
-                crate::kit::theme::wash(0.05),
-            )
-        })
-        .on_hover(motion::hover_listener(key.to_string()))
-        .child(icon(glyph).size(px(14.0)).flex_none().text_color(tint))
-}
-
 /// A row's title over its muted sub-line, taking the row's free width. The
 /// sub-line's lead (a device name) truncates before its `tail` does.
 pub(super) fn two_lines(title: String, sub: String, tail: String, theme: &Theme) -> gpui::Div {

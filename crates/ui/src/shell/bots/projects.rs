@@ -1,0 +1,470 @@
+//! The **Projects** panels (§13.1), in the work page's layout: sections
+//! under small-caps headings, hairlines between them, rows that wash on
+//! hover and open what they name.
+//!
+//! The list groups the projects the bot reads by device. A project's page
+//! says where it lives (its folder, to copy), then its sessions, the work
+//! that ran there and the routines that run there.
+
+use super::board::{ProjectLoad, project_loads, scoped_sessions};
+use super::items::{
+    arrow_in, head_note, hover_row, section_head, section_rule, session_mark, session_word,
+    trailing, work_mark,
+};
+use super::panel::{PanelHead, PanelItem};
+use super::*;
+use cypher_proto::{BotRoutine, BotWork, WorkState};
+
+/// Work items the project page lists, newest first.
+const PROJECT_WORK: usize = 5;
+
+/// One project on the list: its load and last activity.
+struct ProjectEntry {
+    space: cypher_proto::Space,
+    load: ProjectLoad,
+    last: Option<i64>,
+}
+
+impl Shell {
+    /// Every project the bot reads, grouped by the device it lives on; a
+    /// row opens the project.
+    pub(super) fn render_projects_panel(
+        &self,
+        bot: &Bot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> (PanelHead, gpui::Div) {
+        let now = Utc::now();
+        // (device name, its projects), devices in the order their first
+        // project comes.
+        let groups: Vec<(String, Vec<ProjectEntry>)> = {
+            let state = self.state.read(cx);
+            let spaces = state.spaces_sorted();
+            let mut groups: Vec<(String, Vec<ProjectEntry>)> = Vec::new();
+            let loads = project_loads(&bot.scope, &spaces, &state.chats, |chat| {
+                state.display_status_for(chat, now)
+            });
+            for load in loads {
+                let Some(space) = state.space_row(&load.space_id).cloned() else {
+                    continue;
+                };
+                let device = state
+                    .device_name(&space.device_id)
+                    .unwrap_or("Unknown device")
+                    .to_string();
+                let last = scoped_sessions(&bot.scope, &state.chats, &space.id)
+                    .first()
+                    .map(|c| c.last_message_at.unwrap_or(c.created_at).timestamp_millis());
+                let entry = ProjectEntry { space, load, last };
+                match groups.iter_mut().find(|(d, _)| *d == device) {
+                    Some((_, list)) => list.push(entry),
+                    None => groups.push((device, vec![entry])),
+                }
+            }
+            groups
+        };
+        let head = PanelHead {
+            glyph: icons::WIDGET,
+            tint: None,
+            title: "Projects".into(),
+        };
+        let mut body = div().p(px(8.0)).flex().flex_col();
+        if groups.is_empty() {
+            return (
+                head,
+                body.child(parts::quiet_line(
+                    theme,
+                    "It reads no projects yet. Choose some in its settings.",
+                )),
+            );
+        }
+        for (ix, (device, entries)) in groups.into_iter().enumerate() {
+            let n = entries.len();
+            body = body
+                .when(ix > 0, |el| el.child(section_rule()))
+                .child(
+                    section_head(&device, ix == 0, theme)
+                        .child(div().flex_1())
+                        .child(head_note(
+                            format!("{n} project{}", if n == 1 { "" } else { "s" }),
+                            theme,
+                        )),
+                )
+                .children(
+                    entries
+                        .into_iter()
+                        .map(|entry| self.project_entry_row(entry, now, theme, cx)),
+                );
+        }
+        (head, body)
+    }
+
+    /// A project on the list: its glyph in its colour, its name, how many
+    /// sessions it has and what runs or asks there, when it was last
+    /// active, and an arrow that slides in on hover.
+    fn project_entry_row(
+        &self,
+        entry: ProjectEntry,
+        now: chrono::DateTime<Utc>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let ProjectEntry { space, load, last } = entry;
+        let key = format!("bot-panel-project-{}", space.id);
+        let item = PanelItem::Project(space.id.clone());
+        let glyph = crate::appearance::space_style::space_icon(space.icon.as_deref());
+        let tint = crate::appearance::space_style::space_color(space.color.as_deref(), theme)
+            .unwrap_or(theme.text_muted);
+        // "4 sessions · 1 asking · 2 running", the live counts in their tone.
+        let mut line = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap(px(4.0))
+            .text_size(px(11.5))
+            .line_height(px(16.0))
+            .text_color(theme.text_muted.opacity(0.85))
+            .child(SharedString::from(match load.sessions {
+                0 => "No sessions yet".to_string(),
+                1 => "1 session".to_string(),
+                n => format!("{n} sessions"),
+            }));
+        if load.asking > 0 {
+            line = line.child("·").child(
+                div()
+                    .text_color(theme.warning)
+                    .child(SharedString::from(format!("{} asking", load.asking))),
+            );
+        }
+        if load.running > 0 {
+            line = line.child("·").child(
+                div()
+                    .text_color(theme.text)
+                    .child(SharedString::from(format!("{} running", load.running))),
+            );
+        }
+        hover_row(&key)
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
+            .child(
+                div()
+                    .pt(px(2.0))
+                    .child(icon(glyph).size(px(14.0)).flex_none().text_color(tint)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .line_height(px(18.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from(space.display_name().to_string())),
+                    )
+                    .child(line),
+            )
+            .children(last.map(|at| {
+                div()
+                    .pt(px(2.0))
+                    .child(trailing(super::items::ago(at, now), theme.text_faint))
+            }))
+            .child(div().pt(px(5.0)).child(arrow_in(&key, theme)))
+    }
+
+    /// One project: where it lives (its folder, to copy), its sessions in
+    /// the bot's scope, the bot's work there and its routines there.
+    pub(super) fn render_project_panel(
+        &self,
+        bot: &Bot,
+        space_id: &str,
+        theme: &Theme,
+        _window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(PanelHead, gpui::Div)> {
+        let now = Utc::now();
+        let (space, device, sessions, work, routines) = {
+            let state = self.state.read(cx);
+            if !bot.scope.sees_space(space_id) {
+                return None;
+            }
+            let space = state.space_row(space_id)?.clone();
+            let device = state
+                .device_name(&space.device_id)
+                .unwrap_or("Unknown device")
+                .to_string();
+            let sessions: Vec<(String, String, ChatIndicator, i64)> =
+                scoped_sessions(&bot.scope, &state.chats, space_id)
+                    .into_iter()
+                    .map(|chat| {
+                        (
+                            chat.id.clone(),
+                            transcript::single_line(&super::items::plain_markdown(
+                                chat.title.as_deref().unwrap_or("New session"),
+                            )),
+                            state.display_status_for(chat, now),
+                            chat.last_message_at
+                                .unwrap_or(chat.created_at)
+                                .timestamp_millis(),
+                        )
+                    })
+                    .collect();
+            let records = &state.bot_records;
+            let mut work: Vec<BotWork> = records
+                .work_of(&bot.id)
+                .filter(|w| w.state != WorkState::Cancelled)
+                .filter(|w| {
+                    w.steps
+                        .iter()
+                        .any(|s| s.project.as_deref() == Some(space_id))
+                })
+                .cloned()
+                .collect();
+            work.sort_by_key(|w| std::cmp::Reverse(work_at(w)));
+            work.truncate(PROJECT_WORK);
+            let mut routines: Vec<BotRoutine> = records
+                .routines
+                .iter()
+                .filter(|r| r.bot_id == bot.id && r.target.space_id() == Some(space_id))
+                .cloned()
+                .collect();
+            routines.sort_by_key(|r| r.name.to_lowercase());
+            (space, device, sessions, work, routines)
+        };
+        let head = PanelHead {
+            glyph: crate::appearance::space_style::space_icon(space.icon.as_deref()),
+            tint: crate::appearance::space_style::space_color(space.color.as_deref(), theme),
+            title: space.display_name().to_string(),
+        };
+        let ticker = self.pulse_ticker.entity_id();
+
+        // ── where it lives: its device, and its folder to copy ──
+        let folder_key = format!("bot-project-folder-{}", space.id);
+        let mut body = div()
+            .p(px(8.0))
+            .flex()
+            .flex_col()
+            .child(
+                section_head("Folder", true, theme)
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(5.0))
+                            .child(
+                                icon(icons::LAPTOP)
+                                    .size(px(11.0))
+                                    .flex_none()
+                                    .text_color(theme.text_muted.opacity(0.85)),
+                            )
+                            .child(head_note(device, theme)),
+                    ),
+            )
+            .child(
+                hover_row(&folder_key)
+                    .items_center()
+                    .py(px(5.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.0))
+                            .line_height(px(17.0))
+                            .font_family(theme.font_mono.clone())
+                            .text_color(theme.text)
+                            .child(SharedString::from(space.path.clone())),
+                    )
+                    .child(self.copy_button(
+                        format!("{folder_key}-copy"),
+                        space.path.clone(),
+                        motion::hover_t(&folder_key),
+                        theme,
+                        cx,
+                    )),
+            );
+
+        // ── its sessions ──
+        let live = sessions
+            .iter()
+            .filter(|(_, _, s, _)| {
+                matches!(s, ChatIndicator::Working | ChatIndicator::AwaitingInput)
+            })
+            .count();
+        body = body.child(section_rule()).child(
+            section_head("Sessions", false, theme)
+                .child(div().flex_1())
+                .child(head_note(
+                    match (sessions.len(), live) {
+                        (0, _) => String::new(),
+                        (n, 0) => n.to_string(),
+                        (n, l) => format!("{n} · {l} active"),
+                    },
+                    theme,
+                )),
+        );
+        if sessions.is_empty() {
+            body = body.child(parts::quiet_line(theme, "No sessions here yet."));
+        }
+        for (chat_id, title, status, at) in sessions {
+            let key = format!("bot-panel-session-{chat_id}");
+            body = body.child(
+                hover_row(&key)
+                    .items_center()
+                    .py(px(6.0))
+                    .cursor_pointer()
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(14.0))
+                            .flex()
+                            .justify_center()
+                            .child(session_mark(status, ticker, theme)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from(title)),
+                    )
+                    .children(session_word(status, theme).map(|(word, color)| {
+                        div()
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(color)
+                            .child(word)
+                    }))
+                    .child(trailing(super::items::ago(at, now), theme.text_faint))
+                    .child(arrow_in(&key, theme)),
+            );
+        }
+
+        // ── the bot's work there ──
+        if !work.is_empty() {
+            body = body
+                .child(section_rule())
+                .child(section_head("Work", false, theme));
+            for w in work {
+                let key = format!("bot-project-work-{}", w.id);
+                let item = if w.awaiting_approval() {
+                    PanelItem::Plan(w.id.clone())
+                } else {
+                    PanelItem::WorkItem(w.id.clone())
+                };
+                let sub = if w.state == WorkState::Running {
+                    super::work::current_step_line(&w)
+                } else if w.state == WorkState::Proposed {
+                    crate::transcript::bot_plan::phase_line(&w, now.timestamp_millis())
+                } else {
+                    super::work::result_line(&w)
+                };
+                body = body.child(
+                    hover_row(&key)
+                        .cursor_pointer()
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)),
+                        )
+                        .child(
+                            div()
+                                .pt(px(3.0))
+                                .flex_none()
+                                .w(px(14.0))
+                                .flex()
+                                .justify_center()
+                                .child(work_mark(&w, ticker, theme)),
+                        )
+                        .child(two_line(transcript::single_line(&w.title), sub, theme))
+                        .child(div().pt(px(2.0)).child(trailing(
+                            super::items::ago(work_at(&w), now),
+                            theme.text_faint,
+                        )))
+                        .child(div().pt(px(5.0)).child(arrow_in(&key, theme))),
+                );
+            }
+        }
+
+        // ── its routines ──
+        if !routines.is_empty() {
+            body = body
+                .child(section_rule())
+                .child(section_head("Routines", false, theme));
+            for r in routines {
+                let key = format!("bot-project-routine-{}", r.id);
+                let item = PanelItem::Routine(r.id.clone());
+                let (glyph, when) = super::schedule::routine_brief(&r);
+                let tint =
+                    crate::appearance::space_style::space_color(space.color.as_deref(), theme)
+                        .unwrap_or(theme.text_muted);
+                body = body.child(
+                    hover_row(&key)
+                        .cursor_pointer()
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)),
+                        )
+                        .child(
+                            div()
+                                .pt(px(3.0))
+                                .flex_none()
+                                .w(px(14.0))
+                                .flex()
+                                .justify_center()
+                                .child(icon(glyph).size(px(12.0)).text_color(if r.enabled {
+                                    tint
+                                } else {
+                                    theme.text_faint
+                                })),
+                        )
+                        .child(two_line(r.name.clone(), when, theme))
+                        .child(div().pt(px(5.0)).child(arrow_in(&key, theme))),
+                );
+            }
+        }
+        Some((head, body))
+    }
+}
+
+/// When a work item last moved: its end, else its start, else its proposal.
+fn work_at(work: &BotWork) -> i64 {
+    work.ended_at.or(work.started_at).unwrap_or(work.created_at)
+}
+
+/// A row's title over its one-line detail.
+fn two_line(title: String, detail: String, theme: &Theme) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(13.0))
+                .line_height(px(18.0))
+                .text_color(theme.text)
+                .child(SharedString::from(title)),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(11.5))
+                .line_height(px(16.0))
+                .text_color(theme.text_muted.opacity(0.85))
+                .child(SharedString::from(detail)),
+        )
+}

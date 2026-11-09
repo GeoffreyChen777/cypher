@@ -511,6 +511,166 @@ impl Shell {
     }
 }
 
+/// A section heading on a panel page (Request, Plan, Sessions…): small
+/// caps, its content below; a row, so a section can add a note on the
+/// right. `first` takes less air above it.
+pub(super) fn section_head(label: &str, first: bool, theme: &Theme) -> gpui::Div {
+    div()
+        .px(px(8.0))
+        .pt(px(if first { 4.0 } else { 14.0 }))
+        .pb(px(8.0))
+        .min_h(px(20.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(11.0))
+                .line_height(px(14.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text_muted)
+                .child(SharedString::from(label.to_uppercase())),
+        )
+}
+
+/// A section heading's note on its right (a count, a place).
+pub(super) fn head_note(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
+    div()
+        .min_w_0()
+        .truncate()
+        .text_size(px(11.0))
+        .text_color(theme.text_muted.opacity(0.85))
+        .child(text.into())
+}
+
+/// The hairline that closes one section of a panel page before the next.
+pub(super) fn section_rule() -> gpui::Div {
+    div()
+        .mx(px(8.0))
+        .mt(px(16.0))
+        .h(px(1.0))
+        .bg(crate::kit::theme::hairline(0.08))
+}
+
+/// A row of a panel list that washes on hover: rounded, its content in a
+/// line. Rows sit 2px in from the section's edge, so text inside meets
+/// the headings' 8px.
+pub(super) fn hover_row(key: &str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(key.to_string()))
+        .mx(px(2.0))
+        .px(px(6.0))
+        .py(px(7.0))
+        .rounded(px(10.0))
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(12.0))
+        .bg(motion::hover_blend(
+            key,
+            crate::kit::theme::wash(0.0),
+            crate::kit::theme::wash(0.04),
+        ))
+        .on_hover(motion::hover_listener(key.to_string()))
+}
+
+/// The arrow at the end of a row that opens something: it fades in and
+/// slides in from the left while `key` is hovered.
+pub(super) fn arrow_in(key: &str, theme: &Theme) -> gpui::Div {
+    let t = motion::hover_t(key);
+    div().flex_none().ml(px(-4.0 * (1.0 - t))).child(
+        icon(icons::ALT_ARROW_RIGHT)
+            .size(px(10.0))
+            .text_color(theme.text_faint.opacity(t)),
+    )
+}
+
+/// A session's state in a word, beside its row; none while it sits idle.
+pub(super) fn session_word(
+    status: ChatIndicator,
+    theme: &Theme,
+) -> Option<(&'static str, gpui::Hsla)> {
+    match status {
+        ChatIndicator::Working => Some(("Working", theme.text_muted)),
+        ChatIndicator::AwaitingInput => Some(("Needs input", theme.warning)),
+        ChatIndicator::Errored => Some(("Failed", theme.danger)),
+        ChatIndicator::Completed => Some(("Done", theme.text_faint)),
+        ChatIndicator::Idle => None,
+    }
+}
+
+impl Shell {
+    /// A Copy button that copies `text`, then says Copied for a moment.
+    /// `reveal` (0..1) is how shown it is at rest: a row's hover, so it
+    /// appears with its row; it stays shown while it says Copied.
+    pub(super) fn copy_button(
+        &self,
+        key: String,
+        text: String,
+        reveal: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let copied = self.board.copied.as_deref() == Some(key.as_str());
+        let ink = if copied {
+            theme.success
+        } else {
+            motion::hover_blend(&key, theme.text_muted, theme.text)
+        };
+        let id = key.clone();
+        div()
+            .id(SharedString::from(key.clone()))
+            .flex_none()
+            .h(px(20.0))
+            .px(px(6.0))
+            .rounded(px(6.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .cursor_pointer()
+            .opacity(if copied { 1.0 } else { reveal })
+            .bg(motion::hover_blend(
+                &key,
+                crate::kit::theme::wash(0.0),
+                crate::kit::theme::wash(0.08),
+            ))
+            .on_hover(motion::hover_listener(key.clone()))
+            .on_click(
+                cx.listener(move |this, _, _, cx| this.copy_text(id.clone(), text.clone(), cx)),
+            )
+            .text_size(px(11.0))
+            .text_color(ink)
+            .child(
+                icon(if copied { icons::CHECK } else { icons::COPY })
+                    .size(px(11.0))
+                    .text_color(ink),
+            )
+            .child(if copied { "Copied" } else { "Copy" })
+    }
+
+    /// Put `text` on the clipboard; the button `key` says Copied for a
+    /// moment.
+    pub(super) fn copy_text(&mut self, key: String, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.board.copied = Some(key.clone());
+        self.board.copied_reset = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1600))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.board.copied.as_deref() == Some(key.as_str()) {
+                    this.board.copied = None;
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

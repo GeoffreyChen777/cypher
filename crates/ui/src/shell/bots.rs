@@ -26,6 +26,7 @@ mod notebook;
 mod panel;
 mod parts;
 mod picker;
+mod projects;
 mod schedule;
 mod work;
 
@@ -95,10 +96,10 @@ pub(super) struct BoardUi {
     /// Work steps folded to their title in the work panel, by (work id,
     /// step index); local to this window like the cards' folds.
     work_folded: std::collections::HashSet<(String, usize)>,
-    /// The work item whose result was just copied, and the task that turns
-    /// its check back into Copy.
-    work_copied: Option<String>,
-    work_copied_reset: Option<Task<()>>,
+    /// The Copy button just pressed (its key), and the task that turns its
+    /// check back into Copy.
+    copied: Option<String>,
+    copied_reset: Option<Task<()>>,
 }
 
 /// One item on a bot's **Needs you** card: its conversation waiting on an

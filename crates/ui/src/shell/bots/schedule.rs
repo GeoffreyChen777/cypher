@@ -1921,6 +1921,18 @@ fn schedule_value(job: &Job, now: &DateTime<Local>) -> String {
     }
 }
 
+/// A routine as another page lists it: its glyph, and when it runs
+/// ("Wed 08:30 · next in 2 days", "Only when you press Run now").
+pub(super) fn routine_brief(routine: &BotRoutine) -> (&'static str, String) {
+    let now = Local::now();
+    let job = Job::routine(routine, &now);
+    let glyph = match job.kind {
+        JobKind::Workspace => ROUTINE_GLYPH,
+        JobKind::Project { .. } => TASK_GLYPH,
+    };
+    (glyph, schedule_value(&job, &now))
+}
+
 /// How soon `at` comes: "in 25m", "in 9h", "in 3 days".
 fn in_words(at: &DateTime<Local>, now: &DateTime<Local>) -> String {
     let minutes = (*at - *now).num_minutes().max(0);

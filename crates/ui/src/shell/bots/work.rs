@@ -7,8 +7,9 @@
 
 use super::board::{card_corner, card_item, two_lines};
 use super::items::{
-    ago, decision_bar, item_row, mark_cell, progress_bar, project_label, prose, section_label,
-    session_mark, step_mark, trailing, work_mark,
+    ago, arrow_in, decision_bar, item_row, mark_cell, progress_bar, project_label, prose,
+    section_head, section_label, section_rule, session_mark, session_word, step_mark, trailing,
+    work_mark,
 };
 use super::panel::{PanelHead, PanelItem};
 use super::*;
@@ -65,10 +66,13 @@ pub(super) fn current_step_line(work: &BotWork) -> String {
     }
 }
 
-/// A finished item's one line: its result, else how it ended.
+/// A finished item's one line: its result's first paragraph, else how it
+/// ended.
 pub(super) fn result_line(work: &BotWork) -> String {
+    // Its first paragraph: a list or detail after it would run on.
     work.result
         .as_deref()
+        .and_then(|r| r.split("\n\n").map(str::trim).find(|p| !p.is_empty()))
         .map(|r| transcript::single_line(&super::items::plain_markdown(r)))
         .filter(|r| !r.is_empty())
         .unwrap_or_else(|| phase_line(work, 0))
@@ -80,17 +84,6 @@ type FlowStep = (
     Option<super::items::ProjectLabel>,
     Vec<(String, Option<(String, ChatIndicator)>)>,
 );
-
-/// A session's state in a word, beside its row; none while it sits idle.
-fn session_word(status: ChatIndicator, theme: &Theme) -> Option<(&'static str, gpui::Hsla)> {
-    match status {
-        ChatIndicator::Working => Some(("Working", theme.text_muted)),
-        ChatIndicator::AwaitingInput => Some(("Needs input", theme.warning)),
-        ChatIndicator::Errored => Some(("Failed", theme.danger)),
-        ChatIndicator::Completed => Some(("Done", theme.text_faint)),
-        ChatIndicator::Idle => None,
-    }
-}
 
 /// Whether the page shows the request: there is one, and it says more
 /// than the title.
@@ -212,38 +205,6 @@ impl Render for WorkStatusTip {
                 ),
         )
     }
-}
-
-/// A section heading on the work page (Status, Request, Plan): small caps,
-/// its content below; a row, so a section can add a note on the right.
-fn work_heading(label: &str, first: bool, theme: &Theme) -> gpui::Div {
-    div()
-        .px(px(8.0))
-        .pt(px(if first { 4.0 } else { 14.0 }))
-        .pb(px(8.0))
-        .min_h(px(20.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(11.0))
-                .line_height(px(14.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text_muted)
-                .child(SharedString::from(label.to_uppercase())),
-        )
-}
-
-/// The hairline that closes one section of the work page before the next.
-fn work_rule() -> gpui::Div {
-    div()
-        .mx(px(8.0))
-        .mt(px(16.0))
-        .h(px(1.0))
-        .bg(crate::kit::theme::hairline(0.08))
 }
 
 /// A step's fold chevron, and the gap before it in the title row.
@@ -646,7 +607,7 @@ impl Shell {
         let mut body = div().p(px(8.0)).flex().flex_col();
         if shows_request(&work) {
             body = body
-                .child(work_heading("Request", true, theme))
+                .child(section_head("Request", true, theme))
                 .child(div().px(px(8.0)).child(super::items::panel_markdown(
                     &work.instruction,
                     format!("bot-work-request-{}", work.id),
@@ -742,9 +703,9 @@ impl Shell {
         let mut flow = div()
             .flex()
             .flex_col()
-            .when(!first, |el| el.child(work_rule()))
+            .when(!first, |el| el.child(section_rule()))
             .child(
-                work_heading("Plan", first, theme)
+                section_head("Plan", first, theme)
                     .child(div().flex_1())
                     .when_some(common.clone(), |el, (glyph, tint, place)| {
                         // The shared project, a link to its page.
@@ -1033,7 +994,6 @@ impl Shell {
                 motion::hover_t(&key),
             ))
             .into_any_element();
-        let copied = self.board.work_copied.as_deref() == Some(work.id.as_str());
         let title = div()
             .min_h(px(18.0))
             .flex()
@@ -1050,47 +1010,17 @@ impl Shell {
                     .child("Result"),
             )
             .when_some(result.cloned(), |el, text| {
-                // Copy, shown on hover (and while it says Copied).
-                let copy_key = format!("{key}-copy");
-                let id = work.id.clone();
-                let shown = if copied { 1.0 } else { motion::hover_t(&key) };
-                let ink = if copied {
-                    theme.success
-                } else {
-                    motion::hover_blend(&copy_key, theme.text_muted, theme.text)
-                };
+                // Copy, shown on hover; its label (not its padding) meets
+                // the times.
                 el.child(
-                    div()
-                        .id(SharedString::from(copy_key.clone()))
-                        .flex_none()
-                        .h(px(20.0))
-                        // Its label, not its padding, meets the times.
-                        .mr(px(-6.0))
-                        .px(px(6.0))
-                        .rounded(px(6.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .cursor_pointer()
-                        .opacity(shown)
-                        .bg(motion::hover_blend(
-                            &copy_key,
-                            crate::kit::theme::wash(0.0),
-                            crate::kit::theme::wash(0.08),
-                        ))
-                        .on_hover(motion::hover_listener(copy_key.clone()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.copy_work_result(id.clone(), text.clone(), cx)
-                        }))
-                        .text_size(px(11.0))
-                        .text_color(ink)
-                        .child(
-                            icon(if copied { icons::CHECK } else { icons::COPY })
-                                .size(px(11.0))
-                                .text_color(ink),
-                        )
-                        .child(if copied { "Copied" } else { "Copy" }),
+                    self.copy_button(
+                        format!("{key}-copy"),
+                        text,
+                        motion::hover_t(&key),
+                        theme,
+                        cx,
+                    )
+                    .mr(px(-6.0)),
                 )
             });
         let content = match result {
@@ -1147,24 +1077,6 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Copy a work item's result; the button says Copied for a moment.
-    fn copy_work_result(&mut self, work_id: String, text: String, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-        self.board.work_copied = Some(work_id.clone());
-        self.board.work_copied_reset = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(1600))
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.board.work_copied.as_deref() == Some(work_id.as_str()) {
-                    this.board.work_copied = None;
-                    cx.notify();
-                }
-            });
-        }));
-        cx.notify();
-    }
-
     /// A session a step started, under the step: its status, title, and a
     /// click that opens it.
     fn flow_session(
@@ -1213,17 +1125,7 @@ impl Shell {
                         .text_color(color)
                         .child(word)
                 }))
-                .child(
-                    // Slides in from the left as it fades in.
-                    div()
-                        .flex_none()
-                        .ml(px(-4.0 * (1.0 - motion::hover_t(&key))))
-                        .child(
-                            icon(icons::ALT_ARROW_RIGHT)
-                                .size(px(10.0))
-                                .text_color(theme.text_faint.opacity(motion::hover_t(&key))),
-                        ),
-                ),
+                .child(arrow_in(&key, theme)),
             None => row
                 .child(mark_cell(session_mark(ChatIndicator::Idle, ticker, theme)))
                 .child(
