@@ -11,7 +11,6 @@
 //!   file empties its text and drops its entry; recreating it reuses both.
 //! - `memoryPending`: id → a held write (JSON [`MemoryPending`]).
 //! - `memoryChanges`: the change log, oldest first (JSON [`MemoryChange`]).
-//! - `memoryMeta`: small flags (`notesMigrated`).
 //!
 //! The chat schema's own `meta` map, written when the doc host first makes
 //! the doc, is never read here.
@@ -28,7 +27,6 @@ use crate::EngineError;
 const FILES: &str = "memoryFiles";
 const PENDING: &str = "memoryPending";
 const CHANGES: &str = "memoryChanges";
-const META: &str = "memoryMeta";
 const TEXT_PREFIX: &str = "mem:";
 
 /// A file's metadata entry.
@@ -247,21 +245,6 @@ impl<'a> StoreDoc<'a> {
                 list.insert(i, json(&change)?).map_err(loro_err)?;
             }
         }
-        Ok(())
-    }
-
-    pub(super) fn flag(&self, key: &str) -> bool {
-        matches!(
-            self.doc
-                .get_map(META)
-                .get(key)
-                .and_then(|v| v.into_value().ok()),
-            Some(LoroValue::Bool(true))
-        )
-    }
-
-    pub(super) fn set_flag(&self, key: &str) -> Result<(), EngineError> {
-        self.doc.get_map(META).insert(key, true).map_err(loro_err)?;
         Ok(())
     }
 

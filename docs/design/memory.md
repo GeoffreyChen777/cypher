@@ -225,12 +225,17 @@ calls them). The Notebook card and panel become Memory.
   thread, when its plan names the project.
 - **History**: the search index now holds every session and the workspaces' own threads
   hosted here (never peer threads or passes); who may read which is decided per query.
-- **Untrusted content**: a run is tainted by a web fetch or search, an MCP tool call, or a
-  shell command that fetches from the network (curl, wget, a URL), and, in a workspace,
-  by another workspace's answer; the taint lasts until the chat's next run.
+- **Untrusted content**: a run is tainted by a web fetch or search, an MCP tool call, a
+  shell command that fetches from the network (curl, wget, a URL), a tool named like it
+  browses or fetches, and, in a workspace, by another workspace's answer; the taint lasts
+  until the chat's next run. It crosses subagents both ways: a subagent of a tainted
+  session writes held, and a subagent that reads the web taints the sessions above it.
+  Accepting a held write re-applies it to the file as it is then, once.
 - **Consolidation** runs where its sources live (a project's device, a workspace's host;
   user-level stores on the device that made them). A pass is a hidden chat (`Chat.memory`)
   run unattended with only the memory tools; its token use comes from Pi's session stats.
-  "Run now" sets the row's `passRequestedAt`, which the host picks up.
+  "Run now" sets the row's `passRequestedAt`, which the host picks up. Undoing a pass
+  (once it has ended) puts back only the files it changed. Before any device has made the
+  You store, the user's device with the lowest id runs its pass.
 - **Migration**: at start, each workspace host folds its notebook into `/MEMORY.md` under
   "From the notebook" (newest first, source and date per line), once, and drops the rows.

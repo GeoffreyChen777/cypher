@@ -510,6 +510,30 @@ async fn writes_after_untrusted_content_wait_for_review() {
         view.files[0].author
     );
 
+    // A held rename (still tainted: same run) moves the file when accepted.
+    let held = rig
+        .tool(
+            "c-web-1",
+            serde_json::json!({ "command": "rename", "old_path": "/project/notes.md", "new_path": "/project/changelog.md" }),
+        )
+        .await;
+    assert!(held.starts_with("Held for review"), "{held}");
+    let pending = rig.view(&project("sp-web")).await.pending;
+    rig.edit(
+        &project("sp-web"),
+        serde_json::json!({ "op": "accept", "id": pending[0].id }),
+    )
+    .await
+    .unwrap();
+    let paths: Vec<String> = rig
+        .view(&project("sp-web"))
+        .await
+        .files
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    assert_eq!(paths, ["/changelog.md"]);
+
     // A workspace's held write needs its owner on the Needs you card.
     let bot = create_bot(&rig).await;
     rig.run(&bot.chat_id, "FETCH the news").await;
@@ -748,4 +772,92 @@ async fn a_consolidation_pass_runs_with_only_memory_tools_and_can_be_undone() {
     let row = rig.rows().into_iter().find(|r| r.scope == scope).unwrap();
     assert!(!row.consolidation.enabled);
     assert_eq!(row.consolidation.hour, 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn untrusted_content_reaches_across_subagents() {
+    let rig = rig();
+    let parent = rig.core.workspace.chat("c-web-1").unwrap().unwrap();
+    rig.core
+        .workspace
+        .create_child_chat(
+            &parent,
+            "run-1",
+            "researcher",
+            "look it up",
+            cypher_proto::SubagentRunMode::Sync,
+            None,
+            cypher_proto::ChildAgentProfile {
+                system_prompt: "You research.".into(),
+                tools: Vec::new(),
+                model: None,
+                thinking: None,
+            },
+            "Research",
+            None,
+        )
+        .unwrap();
+    let child = rig
+        .core
+        .workspace
+        .read_chats()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.parent_chat_id() == Some("c-web-1"))
+        .expect("the child")
+        .id;
+    let write = |chat: &str, path: &str| {
+        let chat = chat.to_string();
+        let path = path.to_string();
+        let rig = &rig;
+        async move {
+            rig.tool(
+                &chat,
+                serde_json::json!({ "command": "create", "path": path, "file_text": "- a fact\n" }),
+            )
+            .await
+        }
+    };
+
+    // A parent that read the web: what its subagent writes waits too.
+    rig.run("c-web-1", "FETCH the docs").await;
+    let held = write(&child, "/project/a.md").await;
+    assert!(
+        held.contains("was started by a session that fetched a web page"),
+        "{held}"
+    );
+    // The parent's next run clears it for both.
+    rig.run("c-web-1", "carry on").await;
+    assert!(write(&child, "/project/b.md").await.starts_with("Created"));
+
+    // A subagent that read the web: its parent's writes wait.
+    rig.run(&child, "FETCH more").await;
+    let held = write("c-web-1", "/project/c.md").await;
+    assert!(
+        held.contains("used a subagent that fetched a web page"),
+        "{held}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_write_applies_once_however_often_it_is_accepted() {
+    let rig = rig();
+    let scope = project("sp-web");
+    rig.edit(
+        &scope,
+        serde_json::json!({ "op": "write", "path": "/MEMORY.md", "text": "one\n" }),
+    )
+    .await
+    .unwrap();
+    rig.run("c-web-1", "FETCH it").await;
+    rig.tool(
+        "c-web-1",
+        serde_json::json!({ "command": "insert", "path": "/project/MEMORY.md", "insert_line": 1, "insert_text": "two" }),
+    )
+    .await;
+    let id = rig.view(&scope).await.pending[0].id.clone();
+    let accept = || rig.edit(&scope, serde_json::json!({ "op": "accept", "id": id }));
+    let (a, b) = tokio::join!(accept(), accept());
+    assert!(a.is_ok() != b.is_ok(), "exactly one applies: {a:?} {b:?}");
+    assert_eq!(rig.view(&scope).await.files[0].text, "one\ntwo\n");
 }

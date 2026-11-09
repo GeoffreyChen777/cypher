@@ -146,7 +146,18 @@ impl Memory {
     /// Every event of every run on this engine (the run task calls it):
     /// what the run read decides whether its memory writes are held.
     pub fn observe(&self, chat_id: &str, event: &cypher_proto::AgentEvent) {
-        self.inner.taint.observe(chat_id, event);
+        let Some(reason) = self.inner.taint.observe(chat_id, event) else {
+            return;
+        };
+        // What a subagent read comes back in its answer: its parents' writes
+        // wait too, until their own next run.
+        if let Ok(Some(chat)) = self.inner.workspace.chat(chat_id) {
+            for parent in self.ancestors(&chat) {
+                self.inner
+                    .taint
+                    .mark(&parent, &format!("used a subagent that {reason}"));
+            }
+        }
     }
 
     pub(crate) fn store_id(&self, scope: &MemoryScope) -> String {
@@ -276,8 +287,24 @@ impl Memory {
         let _held = guard.lock().await;
         let handle = self.open_for_write(&store_id).await?;
         let store = StoreDoc::new(handle.doc().doc());
-        let planned = plan(&store)?;
-        check_limits(&store, &planned)?;
+        let written = self.write_in(reader, root, &store, command, args, plan)?;
+        self.inner.doc_host.flush_chat_sync(&store_id);
+        Ok(written)
+    }
+
+    /// [`Memory::write`] on a store the caller holds the lock of.
+    fn write_in(
+        &self,
+        reader: &Reader,
+        root: &Root,
+        store: &StoreDoc,
+        command: &str,
+        args: &serde_json::Value,
+        plan: impl FnOnce(&StoreDoc) -> Result<Planned, EngineError>,
+    ) -> Result<Written, EngineError> {
+        let store_id = self.store_id(&root.scope);
+        let planned = plan(store)?;
+        check_limits(store, &planned)?;
         if let Some(text) = &planned.text {
             let (_, secrets) = crate::bots::scrub_secrets(text);
             if secrets > 0 {
@@ -290,19 +317,26 @@ impl Memory {
         }
         let shown = format!("{}{}", root.path, planned.path);
         if let Some(reason) = self.taint_reason(reader) {
+            // A rename keeps its source in store terms; the other commands
+            // keep their arguments, so accepting one re-applies it to the
+            // file as it is then.
+            let args = match &planned.from {
+                Some(from) => serde_json::json!({ "from": from }),
+                None => args.clone(),
+            };
             let pending = MemoryPending {
                 id: new_id(),
                 at: p::now_ms(),
                 author: reader.author.clone(),
                 path: planned.path.clone(),
                 command: command.to_string(),
-                args: args.clone(),
+                args,
                 reason: reason.clone(),
                 preview: planned.text.clone(),
             };
             store.hold(&pending)?;
             store.commit();
-            self.sync_row(&root.scope, &store_id, &store);
+            self.sync_row(&root.scope, &store_id, store);
             self.note_activity(
                 root,
                 &format!("Memory write held for review: {shown}"),
@@ -313,22 +347,48 @@ impl Memory {
                  approval and stay out of later prompts until then. Nothing else to do."
             )));
         }
-        let summary = apply(&store, &planned, &reader.author)?;
+        let summary = apply(store, &planned, &reader.author)?;
         store.commit();
-        self.sync_row(&root.scope, &store_id, &store);
-        self.inner.doc_host.flush_chat_sync(&store_id);
+        self.sync_row(&root.scope, &store_id, store);
         self.note_activity(root, &format!("{summary}: {shown}"), reader);
         Ok(Written::Applied(format!("{summary}: {shown}.")))
     }
 
-    /// Why `reader`'s writes are held: it read untrusted content this run.
+    /// Why `reader`'s writes are held: it, or a parent it was spawned
+    /// from, read untrusted content this run (a child's own taint reaches
+    /// its parents when it happens, [`Memory::observe`]).
     fn taint_reason(&self, reader: &Reader) -> Option<String> {
-        self.inner.taint.reason(&reader.chat.id).or_else(|| {
+        let own = self.inner.taint.reason(&reader.chat.id).or_else(|| {
             self.inner
                 .bots
                 .peer_taint(&reader.chat.id)
                 .map(|reason| format!("received another workspace's answer ({reason})"))
+        });
+        own.or_else(|| {
+            self.ancestors(&reader.chat).into_iter().find_map(|parent| {
+                self.inner
+                    .taint
+                    .reason(&parent)
+                    .map(|reason| format!("was started by a session that {reason}"))
+            })
         })
+    }
+
+    /// The chats `chat` was spawned from, nearest first.
+    fn ancestors(&self, chat: &cypher_proto::Chat) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut next = chat.parent_chat_id().map(str::to_string);
+        while let Some(id) = next.filter(|id| !out.contains(id) && out.len() < 16) {
+            next = self
+                .inner
+                .workspace
+                .chat(&id)
+                .ok()
+                .flatten()
+                .and_then(|c| c.parent_chat_id().map(str::to_string));
+            out.push(id);
+        }
+        out
     }
 
     /// A workspace store's changes also go to the workspace's Activity.
@@ -490,40 +550,48 @@ impl Memory {
         }
     }
 
-    /// Apply a held write as its author, then drop it.
+    /// Apply a held write as its author, then drop it: one critical
+    /// section, so two accepts of one write apply it once.
     async fn accept(&self, scope: &MemoryScope, id: &str) -> Result<String, EngineError> {
         let store_id = self.store_id(scope);
-        let pending = {
-            let handle = self.open(&store_id)?;
-            StoreDoc::new(handle.doc().doc())
-                .pending()
-                .into_iter()
-                .find(|p| p.id == id)
-                .ok_or_else(|| EngineError::Other("That write is no longer waiting.".into()))?
-        };
-        let root = Root::owner(scope.clone());
-        let reader = Reader::accepting(pending.author.clone());
-        let result = self
-            .write(&reader, &root, &pending.command, &pending.args, |store| {
-                if pending.command == "write" {
-                    return Ok(Planned {
-                        path: pending.path.clone(),
-                        text: pending.preview.clone(),
-                        from: None,
-                    });
-                }
-                tool::plan_command(store, &pending.command, &pending.path, &pending.args)
-            })
-            .await;
-        // Accepted or impossible now (the file changed since): either way it
-        // no longer waits.
         let guard = self.store_lock(&store_id);
         let _held = guard.lock().await;
         let handle = self.open(&store_id)?;
         let store = StoreDoc::new(handle.doc().doc());
+        let pending = store
+            .pending()
+            .into_iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| EngineError::Other("That write is no longer waiting.".into()))?;
+        let root = Root::owner(scope.clone());
+        let reader = Reader::accepting(pending.author.clone());
+        let result = self.write_in(
+            &reader,
+            &root,
+            &store,
+            &pending.command,
+            &pending.args,
+            |store| match pending.command.as_str() {
+                "rename" => {
+                    let from = pending.args["from"].as_str().unwrap_or_default();
+                    tool::plan_rename(store, from, &pending.path)
+                }
+                "str_replace" | "insert" | "delete" => {
+                    tool::plan_command(store, &pending.command, &pending.path, &pending.args)
+                }
+                _ => Ok(Planned {
+                    path: pending.path.clone(),
+                    text: pending.preview.clone(),
+                    from: None,
+                }),
+            },
+        );
+        // Accepted or impossible now (the file changed since): either way it
+        // no longer waits.
         store.release(id)?;
         store.commit();
         self.sync_row(scope, &store_id, &store);
+        self.inner.doc_host.flush_chat_sync(&store_id);
         match result {
             Ok(_) => Ok(format!(
                 "Accepted: {}.",
@@ -581,7 +649,9 @@ impl Memory {
         let undo_id = new_id();
         let undo_version = doc::version_hex(handle.doc().doc());
         for plan in &plans {
-            restore(&store, plan, &MemoryAuthor::Owner)?;
+            // Back as it was, by whoever wrote it then.
+            let author = was(&plan.path).map_or(MemoryAuthor::Owner, |f| f.author);
+            restore(&store, plan, &author)?;
         }
         store.log(&MemoryChange {
             id: undo_id,
@@ -613,6 +683,11 @@ impl Memory {
             .clone()
             .filter(|p| p.id == pass_id)
             .ok_or_else(|| EngineError::Other("Only the latest pass can be undone.".into()))?;
+        if pass.is_running() {
+            return Err(EngineError::Other(
+                "The pass is still running; undo it when it ends.".into(),
+            ));
+        }
         let version = pass
             .undo
             .clone()
@@ -623,31 +698,37 @@ impl Memory {
         let handle = self.open(&store_id)?;
         let store = StoreDoc::new(handle.doc().doc());
         let before = store.files_at(&version)?;
-        let now_files = store.files_list();
-        let undo_version = doc::version_hex(handle.doc().doc());
-        let mut restored = 0;
-        for file in &now_files {
-            if !before.iter().any(|f| f.path == file.path) {
-                store.remove(&file.path)?;
-                restored += 1;
-            }
-        }
-        for file in &before {
-            if now_files
-                .iter()
-                .find(|f| f.path == file.path)
-                .is_none_or(|f| f.text != file.text)
-            {
-                store.put(&file.path, &file.text, &file.author, p::now_ms())?;
-                restored += 1;
-            }
-        }
-        let undone: Vec<String> = store
+        // Only what the pass changed goes back: a session's write that
+        // landed while it ran stays.
+        let mine: Vec<MemoryChange> = store
             .changes()
             .into_iter()
             .filter(|c| matches!(&c.author, MemoryAuthor::Consolidation { pass_id: id } if id == pass_id))
-            .map(|c| c.id)
             .collect();
+        let mut touched: Vec<String> = Vec::new();
+        for change in &mine {
+            touched.push(change.path.clone());
+            if let MemoryAction::Rename { from } = &change.action {
+                touched.push(from.clone());
+            }
+        }
+        touched.sort();
+        touched.dedup();
+        let undo_version = doc::version_hex(handle.doc().doc());
+        let mut restored = 0;
+        for path in &touched {
+            let then = before.iter().find(|f| &f.path == path);
+            let now = store.file(path);
+            match (then, now) {
+                (None, Some(_)) => store.remove(path)?,
+                (Some(then), now) if now.as_ref().is_none_or(|n| n.text != then.text) => {
+                    store.put(path, &then.text, &then.author, p::now_ms())?
+                }
+                _ => continue,
+            }
+            restored += 1;
+        }
+        let undone: Vec<String> = mine.into_iter().map(|c| c.id).collect();
         store.mark_undone(&undone)?;
         store.log(&MemoryChange {
             id: new_id(),
@@ -725,9 +806,8 @@ impl Memory {
         let _held = guard.lock().await;
         let handle = self.open_for_write(&store_id).await?;
         let store = StoreDoc::new(handle.doc().doc());
-        if store.flag("notesMigrated") {
-            return Ok(());
-        }
+        // Notes an older device wrote after an earlier move join the same
+        // section; the rows go once they are in.
         let lines: Vec<String> = notes
             .iter()
             .map(|note| {
@@ -743,6 +823,8 @@ impl Memory {
                         .map(|d| d.format("%Y-%m-%d").to_string())
                         .unwrap_or_default();
                 let text = note.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                // Memory never holds secrets, a note's included.
+                let (text, _) = crate::bots::scrub_secrets(&text);
                 format!("- {text} _({who}, {day})_")
             })
             .collect();
@@ -752,7 +834,9 @@ impl Memory {
             text.push_str(existing.trim_end());
             text.push_str("\n\n");
         }
-        text.push_str("## From the notebook\n\n");
+        if !existing.contains("## From the notebook") {
+            text.push_str("## From the notebook\n\n");
+        }
         text.push_str(&lines.join("\n"));
         text.push('\n');
         let planned = Planned {
@@ -761,7 +845,6 @@ impl Memory {
             from: None,
         };
         apply(&store, &planned, &MemoryAuthor::Notebook)?;
-        store.set_flag("notesMigrated")?;
         store.commit();
         self.sync_row(scope, &store_id, &store);
         Ok(())

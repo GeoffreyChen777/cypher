@@ -135,8 +135,9 @@ impl Memory {
     }
 
     /// The stores whose passes run here: this device's projects and
-    /// workspaces, user-level stores it made, and the You store (made here
-    /// when no device has made it).
+    /// workspaces, user-level stores it made, and the You store (before
+    /// any device made it, the user's device with the lowest id runs it, so
+    /// two never race to).
     fn candidates(&self) -> Vec<Candidate> {
         let workspace = &self.inner.workspace;
         let me = workspace.device_id();
@@ -166,7 +167,17 @@ impl Memory {
             });
         }
         let you = row(&MemoryScope::You);
-        if you.as_ref().is_none_or(|r| r.host_device_id == me) {
+        let first_device = workspace
+            .read_devices()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| d.id)
+            .min();
+        let you_here = match &you {
+            Some(r) => r.host_device_id == me,
+            None => first_device.as_deref().is_none_or(|first| first == me),
+        };
+        if you_here {
             out.push(Candidate {
                 scope: MemoryScope::You,
                 row: you,

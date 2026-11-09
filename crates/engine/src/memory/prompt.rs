@@ -8,8 +8,8 @@ use cypher_proto::{
     MEMORY_INDEX, MEMORY_INDEX_BYTES, MEMORY_INDEX_LINES, MEMORY_PROMPT_BYTES, MemoryFile,
 };
 
+use super::Memory;
 use super::access::{Reader, Root};
-use super::{Memory, size_label};
 
 /// Other files named per store before "and N more".
 const LISTED_FILES: usize = 40;
@@ -82,10 +82,12 @@ pub(super) fn section(roots: &[(&Root, Vec<MemoryFile>)], extra: &[String]) -> O
         }
         let others: Vec<&MemoryFile> = files.iter().filter(|f| f.path != MEMORY_INDEX).collect();
         if !others.is_empty() {
+            // Names only: a size would change the prompt (and spend its
+            // cache) on every edit of any file.
             let mut names: Vec<String> = others
                 .iter()
                 .take(LISTED_FILES)
-                .map(|f| format!("{}{} ({})", root.path, f.path, size_label(f)))
+                .map(|f| format!("{}{}", root.path, f.path))
                 .collect();
             if others.len() > LISTED_FILES {
                 names.push(format!("and {} more", others.len() - LISTED_FILES));
@@ -214,7 +216,7 @@ mod tests {
         assert!(text.starts_with("<memory>\nYou have persistent memory"));
         assert!(text.contains("## /you — your memory\n- answer in English"));
         assert!(text.contains("## /projects/api — your memory (read-only)"));
-        assert!(text.contains("Other files: /projects/api/testing.md (1 B)"));
+        assert!(text.contains("Other files: /projects/api/testing.md\n"));
         assert!(text.ends_with("</memory>"));
         let empty = section(&[(&you, Vec::new())], &[]).unwrap();
         assert!(empty.contains("start one with `memory create /you/MEMORY.md`"));

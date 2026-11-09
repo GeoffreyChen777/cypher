@@ -32,8 +32,20 @@ fn untrusted(call: &ToolCall) -> Option<String> {
         ToolCall::Exec { command } if fetches(command) => {
             Some("ran a command that fetches from the network".into())
         }
+        // A tool Cypher has no kind for, named like it reads the web.
+        ToolCall::Unknown { name, .. } if web_named(name) => Some(format!("used {name}")),
         _ => None,
     }
+}
+
+/// Whether a tool's name says it reads from the network.
+fn web_named(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    [
+        "fetch", "http", "url", "browse", "browser", "web", "crawl", "scrape",
+    ]
+    .iter()
+    .any(|word| lower.contains(word))
 }
 
 /// Whether a shell command reads from the network.
@@ -46,15 +58,18 @@ fn fetches(command: &str) -> bool {
 }
 
 impl Taint {
-    /// Called for every event of a run in `chat_id`.
-    pub(super) fn observe(&self, chat_id: &str, event: &AgentEvent) {
+    /// Called for every event of a run in `chat_id`; the reason when this
+    /// event is what first made the run untrusted.
+    pub(super) fn observe(&self, chat_id: &str, event: &AgentEvent) -> Option<String> {
         match event {
             AgentEvent::ToolCall { call, .. } => {
-                if let Some(reason) = untrusted(call) {
-                    lock(&self.tainted)
-                        .entry(chat_id.to_string())
-                        .or_insert(reason);
+                let reason = untrusted(call)?;
+                let mut tainted = lock(&self.tainted);
+                if tainted.contains_key(chat_id) {
+                    return None;
                 }
+                tainted.insert(chat_id.to_string(), reason.clone());
+                return Some(reason);
             }
             AgentEvent::Usage {
                 input_tokens,
@@ -67,6 +82,15 @@ impl Taint {
             }
             _ => {}
         }
+        None
+    }
+
+    /// Mark `chat_id` untrusted for `reason` (a subagent's taint reaching
+    /// its parent), unless it already is.
+    pub(super) fn mark(&self, chat_id: &str, reason: &str) {
+        lock(&self.tainted)
+            .entry(chat_id.to_string())
+            .or_insert_with(|| reason.to_string());
     }
 
     pub(super) fn reason(&self, chat_id: &str) -> Option<String> {
@@ -129,6 +153,19 @@ mod tests {
         assert!(taint.reason(chat).unwrap().contains("example.com"));
         taint.clear(chat);
         assert!(taint.reason(chat).is_none());
+        let unknown = |name: &str| {
+            call(ToolCall::Unknown {
+                name: name.into(),
+                input: None,
+            })
+        };
+        assert!(taint.observe(chat, &unknown("todo_write")).is_none());
+        assert_eq!(
+            taint.observe(chat, &unknown("browser_navigate")).as_deref(),
+            Some("used browser_navigate")
+        );
+        // Only the first reason is news.
+        assert!(taint.observe(chat, &unknown("url_reader")).is_none());
     }
 
     #[test]
