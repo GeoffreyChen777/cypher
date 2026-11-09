@@ -756,6 +756,160 @@ async fn project_routines_need_coordinate_and_run_unattended() {
     .await;
 }
 
+/// The agent keeps its notebook current: it rewrites a note whose fact
+/// changed and deletes a stale one, naming each by the id its notebook
+/// shows (a unique start of it is enough); a routine that may not write
+/// notes may not change them either, and every change is in the log.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_updates_and_deletes_notes_by_id() {
+    let Rig {
+        core, dir: _dir, ..
+    } = rig().await;
+    let bot = create_bot(&core, false).await;
+    for (id, text) in [
+        ("abc12345-0000", "The release is blocked on the migration"),
+        ("abc19999-0000", "Alice owns auth"),
+        ("fff00000-0000", "Standup is at 09:00"),
+    ] {
+        mutate(
+            &core,
+            serde_json::json!({ "op": "saveBotNote", "noteId": id, "botId": bot.id, "text": text }),
+        )
+        .await;
+    }
+    let read = tool(&core, &bot.chat_id, "read_notes", serde_json::json!({})).await;
+    assert!(
+        read.contains("- [abc12345] The release is blocked"),
+        "{read}"
+    );
+    let found = tool(
+        &core,
+        &bot.chat_id,
+        "search_notes",
+        serde_json::json!({ "query": "migrating release" }),
+    )
+    .await;
+    assert!(
+        found.starts_with("1 note match \"migrating release\", best first:"),
+        "{found}"
+    );
+    assert!(found.contains("[abc12345]"), "{found}");
+    let none = tool(
+        &core,
+        &bot.chat_id,
+        "search_notes",
+        serde_json::json!({ "query": "billing" }),
+    )
+    .await;
+    assert_eq!(none, "No notes match \"billing\".");
+
+    let ambiguous = tool(
+        &core,
+        &bot.chat_id,
+        "update_note",
+        serde_json::json!({ "id": "abc1", "text": "x" }),
+    )
+    .await;
+    assert!(
+        ambiguous.starts_with("More than one note starts with"),
+        "{ambiguous}"
+    );
+    let missing = tool(
+        &core,
+        &bot.chat_id,
+        "delete_note",
+        serde_json::json!({ "id": "zzzz" }),
+    )
+    .await;
+    assert!(missing.starts_with("No note has the id"), "{missing}");
+    let empty = tool(
+        &core,
+        &bot.chat_id,
+        "update_note",
+        serde_json::json!({ "id": "abc12345", "text": " " }),
+    )
+    .await;
+    assert!(empty.starts_with("Give update_note"), "{empty}");
+
+    let updated = tool(
+        &core,
+        &bot.chat_id,
+        "update_note",
+        serde_json::json!({ "id": "[abc12345]", "text": "The release is no longer blocked" }),
+    )
+    .await;
+    assert_eq!(updated, "Updated note abc12345.");
+    let deleted = tool(
+        &core,
+        &bot.chat_id,
+        "delete_note",
+        serde_json::json!({ "id": "fff0" }),
+    )
+    .await;
+    assert_eq!(deleted, "Deleted note fff00000 (\"Standup is at 09:00\").");
+
+    let records = core.workspace.read_bot_records();
+    let mut notes: Vec<_> = records.notes.iter().map(|n| (n.id.as_str(), n)).collect();
+    notes.sort_by_key(|(id, _)| *id);
+    assert_eq!(notes.len(), 2, "one deleted");
+    let (_, changed) = notes[0];
+    assert_eq!(changed.text, "The release is no longer blocked");
+    assert_eq!(
+        changed.source,
+        p::NoteSource::Bot {
+            chat_id: Some(bot.chat_id.clone()),
+            title: Some("Bob".into())
+        },
+        "the rewrite is the agent's"
+    );
+    let log: Vec<String> = records.activity.iter().map(|a| a.text.clone()).collect();
+    assert!(
+        log.iter()
+            .any(|l| l == "Updated a note: The release is no longer blocked"),
+        "{log:?}"
+    );
+    assert!(
+        log.iter()
+            .any(|l| l == "Deleted a note: Standup is at 09:00"),
+        "{log:?}"
+    );
+
+    // A routine that may not write notes may not change them.
+    let def = routine_def("r-ro", &bot, "Check in", Schedule::Manual);
+    save_routine(&core, &def).await;
+    let mut thread = core.workspace.chat(&bot.chat_id).unwrap().unwrap();
+    thread.id = "routine-ro".into();
+    thread.bot = Some(BotChat::thread(
+        &bot.id,
+        BotOrigin::Routine,
+        BotThread::Routine {
+            routine_id: "r-ro".into(),
+        },
+    ));
+    core.workspace.import_chat_row(&thread).unwrap();
+    for (name, args) in [
+        (
+            "update_note",
+            serde_json::json!({ "id": "abc19999", "text": "y" }),
+        ),
+        ("delete_note", serde_json::json!({ "id": "abc19999" })),
+    ] {
+        let refused = tool(&core, "routine-ro", name, args).await;
+        assert_eq!(
+            refused, "This session may read the notebook but not write to it.",
+            "{name}"
+        );
+    }
+    assert!(
+        core.workspace
+            .read_bot_records()
+            .notes
+            .iter()
+            .any(|n| n.text == "Alice owns auth"),
+        "untouched"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn notes_follow_the_thread_that_writes_them() {
     let Rig {
@@ -812,7 +966,7 @@ async fn notes_follow_the_thread_that_writes_them() {
     )
     .await;
     assert!(
-        read.contains("- The release is blocked on the migration (from your owner"),
+        read.contains("- [n-owner] The release is blocked on the migration (from your owner"),
         "{read}"
     );
     assert!(!read.contains("Alice"), "{read}");
@@ -878,7 +1032,14 @@ async fn notes_follow_the_thread_that_writes_them() {
         },
     ));
     core.workspace.import_chat_row(&peer).unwrap();
-    for name in ["read_notes", "write_note", "list_routines"] {
+    for name in [
+        "read_notes",
+        "search_notes",
+        "write_note",
+        "update_note",
+        "delete_note",
+        "list_routines",
+    ] {
         let refused = tool(
             &core,
             "peer-thread",

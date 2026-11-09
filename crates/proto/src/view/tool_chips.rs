@@ -127,7 +127,10 @@ pub enum BotToolKind {
     UpdateStep,
     FinishWork,
     ReadNotes,
+    SearchNotes,
     WriteNote,
+    UpdateNote,
+    DeleteNote,
     ListRoutines,
     SaveRoutine,
     SaveProjectTask,
@@ -150,6 +153,7 @@ impl BotToolKind {
                 | Self::ListWork
                 | Self::GetWork
                 | Self::ReadNotes
+                | Self::SearchNotes
                 | Self::ListRoutines
                 | Self::ListConnections
         )
@@ -180,7 +184,10 @@ pub fn bot_tool_kind(call: &crate::ToolCall) -> Option<BotToolKind> {
         "update_step" => BotToolKind::UpdateStep,
         "finish_work" => BotToolKind::FinishWork,
         "read_notes" => BotToolKind::ReadNotes,
+        "search_notes" => BotToolKind::SearchNotes,
         "write_note" => BotToolKind::WriteNote,
+        "update_note" => BotToolKind::UpdateNote,
+        "delete_note" => BotToolKind::DeleteNote,
         // `list_schedule` is its name before routines were one kind.
         "list_routines" | "list_schedule" => BotToolKind::ListRoutines,
         "save_routine" => BotToolKind::SaveRoutine,
@@ -272,7 +279,10 @@ fn bot_chip_content(
         BotToolKind::UpdateStep => ("Updated step", arg("step").unwrap_or_default()),
         BotToolKind::FinishWork => ("Finished task", arg("outcome").unwrap_or_default()),
         BotToolKind::ReadNotes => ("Read notes", String::new()),
+        BotToolKind::SearchNotes => ("Searched notes", arg("query").unwrap_or_default()),
         BotToolKind::WriteNote => ("Wrote a note", arg("text").unwrap_or_default()),
+        BotToolKind::UpdateNote => ("Updated a note", arg("text").unwrap_or_default()),
+        BotToolKind::DeleteNote => ("Deleted a note", String::new()),
         BotToolKind::ListRoutines => ("Checked routines", String::new()),
         BotToolKind::SaveRoutine => ("Saved routine", arg("name").unwrap_or_default()),
         BotToolKind::SaveProjectTask => (
@@ -335,7 +345,9 @@ fn bot_action(kind: BotToolKind) -> Option<BotAction> {
         BotToolKind::StopSession => BotAction::Stop,
         BotToolKind::UpdateStep => BotAction::Step,
         BotToolKind::FinishWork => BotAction::Finish,
-        BotToolKind::WriteNote => BotAction::Note,
+        BotToolKind::WriteNote | BotToolKind::UpdateNote | BotToolKind::DeleteNote => {
+            BotAction::Note
+        }
         BotToolKind::SaveRoutine => BotAction::Routine,
         BotToolKind::SaveProjectTask => BotAction::Task,
         BotToolKind::AskBot => BotAction::Ask,
@@ -496,6 +508,7 @@ pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> Strin
                 BotToolKind::ListWork
                 | BotToolKind::GetWork
                 | BotToolKind::ReadNotes
+                | BotToolKind::SearchNotes
                 | BotToolKind::ListRoutines
                 | BotToolKind::ListConnections => listings += 1,
                 kind => match bot_action(kind) {

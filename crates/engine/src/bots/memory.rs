@@ -72,8 +72,9 @@ pub(super) fn access(marker: &BotChat, _bot: &Bot, routine_writes_notes: bool) -
 impl Access {
     fn allows(self, tool: &str) -> bool {
         match tool {
-            "read_notes" => self.read_notes,
-            "write_note" => self.write_notes,
+            "read_notes" | "search_notes" => self.read_notes,
+            // Changing or removing a note is writing to the notebook.
+            "write_note" | "update_note" | "delete_note" => self.write_notes,
             "list_routines" => self.list_routines,
             "save_routine" => self.save_routine,
             _ => false,
@@ -106,8 +107,110 @@ struct ReadNotes {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
+struct SearchNotes {
+    query: String,
+}
+
+/// Most notes `search_notes` answers with.
+const SEARCH_NOTES_MAX: usize = 20;
+
+/// The words of `text` for search: lower case, split at anything but
+/// letters, digits and `_`.
+fn search_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Whether query word `q` finds note word `w`: inside it ("total" in
+/// "invoice_total"), or the same stem: one starts the other ("auth",
+/// "authentication"), or they share their first five letters ("migration",
+/// "migrating").
+fn word_matches(q: &str, w: &str) -> bool {
+    if q.chars().count() >= 3 && w.contains(q) {
+        return true;
+    }
+    if w.starts_with(q) || q.starts_with(w) && w.chars().count() >= 3 {
+        return true;
+    }
+    let shared = q.chars().zip(w.chars()).take_while(|(a, b)| a == b).count();
+    shared >= 5
+}
+
+/// How well `note` matches `query`'s words: the share of them it matches
+/// (in its text or the title it came from), with the whole query as a
+/// phrase a little higher. `None` when no word matches.
+fn note_score(note: &BotNote, query: &[String], phrase: &str) -> Option<f32> {
+    let mut haystack = note.text.clone();
+    if let NoteSource::Bot { title: Some(t), .. } = &note.source {
+        haystack.push(' ');
+        haystack.push_str(t);
+    }
+    let words = search_words(&haystack);
+    let hits = query
+        .iter()
+        .filter(|q| words.iter().any(|w| word_matches(q, w)))
+        .count();
+    if hits == 0 {
+        return None;
+    }
+    let mut score = hits as f32 / query.len() as f32;
+    if query.len() > 1 && haystack.to_lowercase().contains(phrase) {
+        score += 0.5;
+    }
+    Some(score)
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 struct WriteNote {
     text: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct UpdateNote {
+    id: String,
+    text: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DeleteNote {
+    id: String,
+}
+
+/// How many characters of a note's id the prompt and `read_notes` show;
+/// any unique start of an id names it.
+const NOTE_ID_SHOWN: usize = 8;
+/// The shortest id start `update_note` and `delete_note` accept.
+const NOTE_ID_MIN: usize = 4;
+
+/// The note of `bot` that `id` names: its whole id, or a start of it no
+/// other note shares.
+fn find_note<'a>(notes: &[&'a BotNote], id: &str) -> Result<&'a BotNote, EngineError> {
+    let id = id.trim().trim_start_matches('[').trim_end_matches(']');
+    if let Some(note) = notes.iter().find(|n| n.id == id) {
+        return Ok(note);
+    }
+    if id.chars().count() < NOTE_ID_MIN {
+        return Err(EngineError::Other(format!(
+            "Name the note by the id in brackets your notebook shows (at least {NOTE_ID_MIN} \
+             characters)."
+        )));
+    }
+    let mut matches = notes.iter().filter(|n| n.id.starts_with(id));
+    match (matches.next(), matches.next()) {
+        (Some(note), None) => Ok(note),
+        (Some(_), Some(_)) => Err(EngineError::Other(format!(
+            "More than one note starts with \"{id}\"; give more of its id."
+        ))),
+        (None, _) => Err(EngineError::Other(format!(
+            "No note has the id \"{id}\". read_notes lists them with their ids."
+        ))),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,7 +243,9 @@ fn args<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Result<T, 
 
 fn refuse(tool: &str) -> EngineError {
     EngineError::Other(match tool {
-        "write_note" => "This session may read the notebook but not write to it.".into(),
+        "write_note" | "update_note" | "delete_note" => {
+            "This session may read the notebook but not write to it.".into()
+        }
         "save_routine" => "Routines are made in the workspace chat, when your owner asks.".into(),
         _ => format!("{tool} isn't available in this session."),
     })
@@ -195,7 +300,10 @@ impl Bots {
         }
         match tool {
             "read_notes" => Ok(self.read_notes(&bot, args::<ReadNotes>(raw)?)),
+            "search_notes" => self.search_notes(&bot, args::<SearchNotes>(raw)?),
             "write_note" => self.write_note(&bot, chat, args::<WriteNote>(raw)?),
+            "update_note" => self.update_note(&bot, chat, args::<UpdateNote>(raw)?),
+            "delete_note" => self.delete_note(&bot, chat, args::<DeleteNote>(raw)?),
             "list_routines" => self.list_routines(&chat.id),
             "save_routine" => self.save_routine(&bot, &chat.id, args::<SaveRoutine>(raw)?),
             _ => Err(refuse(tool)),
@@ -251,6 +359,47 @@ impl Bots {
         out.join("\n")
     }
 
+    /// The notes about `query`, best match first, then newest.
+    fn search_notes(&self, bot: &Bot, args: SearchNotes) -> Result<String, EngineError> {
+        let query = search_words(&args.query);
+        if query.is_empty() {
+            return Err(EngineError::Other(
+                "Give search_notes a few words to look for; read_notes lists every note.".into(),
+            ));
+        }
+        let phrase = query.join(" ");
+        let records = self.inner.workspace.read_bot_records();
+        // Newest first, so a stable sort by score keeps newer notes ahead
+        // among equals.
+        let mut found: Vec<(f32, &BotNote)> = notes_of(&records.notes, &bot.id)
+            .into_iter()
+            .filter_map(|note| note_score(note, &query, &phrase).map(|s| (s, note)))
+            .collect();
+        if found.is_empty() {
+            return Ok(format!("No notes match \"{}\".", args.query.trim()));
+        }
+        found.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let total = found.len();
+        let mut out = vec![format!(
+            "{total} note{} match \"{}\", best first:",
+            if total == 1 { "" } else { "s" },
+            args.query.trim()
+        )];
+        out.extend(
+            found
+                .iter()
+                .take(SEARCH_NOTES_MAX)
+                .map(|(_, note)| note_line(note)),
+        );
+        if total > SEARCH_NOTES_MAX {
+            out.push(format!(
+                "{} weaker matches not shown; add words to narrow it.",
+                total - SEARCH_NOTES_MAX
+            ));
+        }
+        Ok(out.join("\n"))
+    }
+
     fn write_note(&self, bot: &Bot, chat: &Chat, args: WriteNote) -> Result<String, EngineError> {
         let text = args.text.trim();
         if text.is_empty() {
@@ -285,11 +434,79 @@ impl Bots {
             format!(
                 "Saved to your notebook, cut to {} characters (note {}).",
                 p::NOTE_MAX,
-                note.id
+                short_id(&note.id)
             )
         } else {
-            format!("Saved to your notebook (note {}).", note.id)
+            format!("Saved to your notebook (note {}).", short_id(&note.id))
         })
+    }
+
+    /// Rewrite one note: its text, and it becomes this thread's, as the
+    /// owner's edit makes a note the owner's.
+    fn update_note(&self, bot: &Bot, chat: &Chat, args: UpdateNote) -> Result<String, EngineError> {
+        let text = args.text.trim();
+        if text.is_empty() {
+            return Err(EngineError::Other(
+                "Give update_note the note's new text; delete_note removes a note.".into(),
+            ));
+        }
+        let records = self.inner.workspace.read_bot_records();
+        let notes = notes_of(&records.notes, &bot.id);
+        let mut note = find_note(&notes, &args.id)?.clone();
+        if note.text == text {
+            return Ok(format!("Note {} already says that.", short_id(&note.id)));
+        }
+        note.text = text.to_string();
+        note.source = NoteSource::Bot {
+            chat_id: Some(chat.id.clone()),
+            title: chat.title.clone().filter(|t| !t.trim().is_empty()),
+        };
+        note.updated_at = p::now_ms();
+        note.clamp();
+        let cut = note.text.chars().count() < text.chars().count();
+        self.inner
+            .workspace
+            .put_record(p::KIND_BOT_NOTES, &note.id, &note, Fields::All)?;
+        record_activity(
+            &self.inner.workspace,
+            &bot.id,
+            ActivityKind::NoteWritten,
+            &format!("Updated a note: {}", note.text),
+            Some(&chat.id),
+            None,
+        );
+        Ok(if cut {
+            format!(
+                "Updated note {}, cut to {} characters.",
+                short_id(&note.id),
+                p::NOTE_MAX
+            )
+        } else {
+            format!("Updated note {}.", short_id(&note.id))
+        })
+    }
+
+    /// Remove one note; the activity log keeps what it said.
+    fn delete_note(&self, bot: &Bot, chat: &Chat, args: DeleteNote) -> Result<String, EngineError> {
+        let records = self.inner.workspace.read_bot_records();
+        let notes = notes_of(&records.notes, &bot.id);
+        let note = find_note(&notes, &args.id)?.clone();
+        self.inner
+            .workspace
+            .delete_records(p::KIND_BOT_NOTES, std::slice::from_ref(&note.id));
+        record_activity(
+            &self.inner.workspace,
+            &bot.id,
+            ActivityKind::NoteWritten,
+            &format!("Deleted a note: {}", note.text),
+            Some(&chat.id),
+            None,
+        );
+        Ok(format!(
+            "Deleted note {} (\"{}\").",
+            short_id(&note.id),
+            transcript_line(&note.text)
+        ))
     }
 
     fn list_routines(&self, chat_id: &str) -> Result<String, EngineError> {
@@ -507,9 +724,20 @@ fn note_line(note: &BotNote) -> String {
         .map(|at| at.with_timezone(&Local).format("%Y-%m-%d").to_string())
         .unwrap_or_default();
     format!(
-        "- {} ({source}, {date})",
-        note.text.split_whitespace().collect::<Vec<_>>().join(" ")
+        "- [{}] {} ({source}, {date})",
+        short_id(&note.id),
+        transcript_line(&note.text)
     )
+}
+
+/// A note's id as the notebook shows it: its first characters.
+fn short_id(id: &str) -> String {
+    id.chars().take(NOTE_ID_SHOWN).collect()
+}
+
+/// A note's text on one line.
+fn transcript_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Write one entry of the bot's activity log, pruning its oldest beyond
@@ -589,7 +817,10 @@ pub(super) fn notebook_section(notes: &[&BotNote], access: Access, bot_chat: boo
     lines.push(if access.write_notes {
         "- Notes are your memory across conversations: short facts and decisions about your \
          owner's work. Add one with write_note when you learn something worth keeping \
-         (\"remember that…\", a decision, who owns what); keep each to one fact."
+         (\"remember that…\", a decision, who owns what); keep each to one fact. When a fact \
+         changes, rewrite its note with update_note instead of adding one that contradicts \
+         it, and remove a wrong or stale one with delete_note; both name a note by the id \
+         in brackets."
             .to_string()
     } else {
         "- Notes are your memory across conversations. This session may read them but not \
@@ -598,7 +829,8 @@ pub(super) fn notebook_section(notes: &[&BotNote], access: Access, bot_chat: boo
     });
     if notes.len() > p::NOTES_IN_PROMPT {
         lines.push(format!(
-            "- The newest {} of {} notes are below; read_notes finds the rest.",
+            "- The newest {} of {} notes are below; search_notes finds older ones about \
+             something.",
             p::NOTES_IN_PROMPT,
             notes.len()
         ));

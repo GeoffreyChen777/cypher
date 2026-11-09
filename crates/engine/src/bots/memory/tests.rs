@@ -9,7 +9,10 @@ use cypher_proto::{
     NoteSource, ProjectGrant, RoutineTarget, RunOutcome, RunRecord, Schedule, Space,
 };
 
-use super::{Access, access, memory_tools, notebook_section, render_routines};
+use super::{
+    Access, access, find_note, memory_tools, note_score, notebook_section, render_routines,
+    search_words,
+};
 
 fn bot(coordinate: bool) -> Bot {
     Bot {
@@ -94,12 +97,27 @@ fn allowlists_follow_the_access() {
     );
     assert_eq!(
         memory_tools(&BotChat::owner("b1"), Some(&bot(false))),
-        ["read_notes", "write_note", "list_routines", "save_routine"]
+        [
+            "read_notes",
+            "search_notes",
+            "write_note",
+            "update_note",
+            "delete_note",
+            "list_routines",
+            "save_routine"
+        ]
     );
     // The call checks the routine's write_notes; the allowlist can't.
     assert_eq!(
         memory_tools(&routine_thread(), Some(&bot(true))),
-        ["read_notes", "write_note", "list_routines"]
+        [
+            "read_notes",
+            "search_notes",
+            "write_note",
+            "update_note",
+            "delete_note",
+            "list_routines"
+        ]
     );
     assert!(memory_tools(&BotChat::owner("b1"), None).is_empty());
 }
@@ -131,12 +149,14 @@ fn the_prompt_carries_the_newest_notes() {
     let section = notebook_section(&[&owner, &bot_note], main, true);
     assert!(section.starts_with("Your notebook:"), "{section}");
     assert!(section.contains("write_note"), "{section}");
+    assert!(section.contains("update_note"), "{section}");
+    assert!(section.contains("delete_note"), "{section}");
     assert!(section.contains("save_routine"), "{section}");
     let alice = section
-        .find("- Alice owns auth (from your owner, ")
+        .find("- [n1] Alice owns auth (from your owner, ")
         .unwrap();
     let release = section
-        .find("- The release is blocked on the migration (you, in \"Bob\", ")
+        .find("- [n2] The release is blocked on the migration (you, in \"Bob\", ")
         .unwrap();
     assert!(alice < release, "newest first: {section}");
 
@@ -162,12 +182,12 @@ fn the_prompt_carries_the_newest_notes() {
     let refs: Vec<&BotNote> = many.iter().collect();
     let section = notebook_section(&refs, main, true);
     assert!(section.contains(&format!(
-        "The newest {} of {} notes are below; read_notes finds the rest.",
+        "The newest {} of {} notes are below; search_notes finds older ones about something.",
         cypher_proto::NOTES_IN_PROMPT,
         many.len()
     )));
     assert_eq!(
-        section.lines().filter(|l| l.starts_with("- fact")).count(),
+        section.lines().filter(|l| l.contains("] fact")).count(),
         cypher_proto::NOTES_IN_PROMPT
     );
 }
@@ -270,4 +290,55 @@ fn the_schedule_lists_routines_and_where_they_run() {
     );
     assert!(empty.contains("This workspace is paused"), "{empty}");
     assert!(empty.contains("No routines yet."), "{empty}");
+}
+
+#[test]
+fn notes_are_found_by_id_or_a_unique_start_of_it() {
+    let a = note("abc12345-x", "a", 1, NoteSource::Owner);
+    let b = note("abc19999-x", "b", 2, NoteSource::Owner);
+    let notes = [&a, &b];
+    assert_eq!(find_note(&notes, "abc12345-x").unwrap().id, a.id);
+    assert_eq!(find_note(&notes, "[abc1999]").unwrap().id, b.id);
+    let err = |id: &str| find_note(&notes, id).unwrap_err().to_string();
+    assert!(err("abc1").contains("More than one"), "{}", err("abc1"));
+    assert!(err("ab").contains("at least 4"), "{}", err("ab"));
+    assert!(
+        err("zzzz").contains("No note has the id"),
+        "{}",
+        err("zzzz")
+    );
+}
+
+#[test]
+fn search_matches_forms_inside_words_and_ranks_by_coverage() {
+    let migrating = note(
+        "n1",
+        "Migrating the invoice tables to v2",
+        1,
+        NoteSource::Owner,
+    );
+    let auth = note("n2", "Alice owns authentication", 2, NoteSource::Owner);
+    let total = note("n3", "invoice_total rounds once", 3, NoteSource::Owner);
+    let from = note(
+        "n4",
+        "Keep the header in English",
+        4,
+        NoteSource::Bot {
+            chat_id: None,
+            title: Some("Export CSV".into()),
+        },
+    );
+    let score = |n: &BotNote, q: &str| {
+        let words = search_words(q);
+        note_score(n, &words, &words.join(" "))
+    };
+    assert!(score(&migrating, "migration").is_some(), "same stem");
+    assert!(score(&auth, "auth").is_some(), "a start of the word");
+    assert!(score(&total, "total").is_some(), "inside an identifier");
+    assert!(score(&from, "csv").is_some(), "the title it came from");
+    assert!(score(&auth, "billing").is_none());
+    // Both words outrank one; the phrase outranks the words apart.
+    let both = score(&migrating, "invoice tables").unwrap();
+    let one = score(&total, "invoice tables").unwrap();
+    assert!(both > one, "{both} > {one}");
 }

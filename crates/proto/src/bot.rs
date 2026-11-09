@@ -62,9 +62,17 @@ pub const BOT_DIRECT_TOOLS: [&str; 8] = [
     "request_permission",
 ];
 
-/// Notebook and schedule tools (P3).
-pub const BOT_MEMORY_TOOLS: [&str; 4] =
-    ["read_notes", "write_note", "list_routines", "save_routine"];
+/// Notebook and schedule tools (P3): read, search, write, update and delete
+/// notes, then the routines.
+pub const BOT_MEMORY_TOOLS: [&str; 7] = [
+    "read_notes",
+    "search_notes",
+    "write_note",
+    "update_note",
+    "delete_note",
+    "list_routines",
+    "save_routine",
+];
 
 /// Network tools (P4), owner threads only.
 pub const BOT_NETWORK_TOOLS: [&str; 2] = ["list_connections", "ask_bot"];

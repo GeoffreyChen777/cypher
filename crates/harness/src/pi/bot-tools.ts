@@ -264,9 +264,18 @@ const TOOLS: ToolDef[] = [
     name: "read_notes",
     label: "Read notes",
     description:
-      "Read your notebook: short notes you or your owner kept across conversations, newest first, each with where it came from. Your prompt already shows the newest notes; use this to search older ones.",
+      "List your notebook: short notes you or your owner kept across conversations, newest first, each with its id and where it came from. Your prompt already shows the newest notes; to find notes about something, use search_notes.",
     parameters: Type.Object({
       query: Type.Optional(Type.String({ description: "Words a note must contain (any case)" })),
+    }),
+  },
+  {
+    name: "search_notes",
+    label: "Search notes",
+    description:
+      "Search your notebook for notes about something, best match first, each with its id. Words match inside longer ones and across forms (\"migration\" finds \"migrating\", \"auth\" finds \"authentication\"); notes matching more of the words rank higher. Also matches the title of the session a note came from.",
+    parameters: Type.Object({
+      query: Type.String({ description: "What to look for, in a few words" }),
     }),
   },
   {
@@ -276,6 +285,25 @@ const TOOLS: ToolDef[] = [
       "Add one note to your notebook: a short fact or decision worth remembering in later conversations (\"the release is blocked on the migration\", \"Alice owns auth\"). One fact per note, at most 1000 characters. The note records which session wrote it.",
     parameters: Type.Object({
       text: Type.String({ description: "The note" }),
+    }),
+  },
+  {
+    name: "update_note",
+    label: "Update note",
+    description:
+      "Rewrite one note when the fact it holds has changed (\"the release is no longer blocked\"), instead of adding a note that contradicts it. Name it by the id in brackets your notebook shows (its first characters are enough). The note becomes yours, from this session.",
+    parameters: Type.Object({
+      id: Type.String({ description: "The note's id, as your notebook shows it" }),
+      text: Type.String({ description: "The note's new text" }),
+    }),
+  },
+  {
+    name: "delete_note",
+    label: "Delete note",
+    description:
+      "Remove one note that is wrong or no longer matters. Name it by the id in brackets your notebook shows. Your owner sees the deletion in the activity log.",
+    parameters: Type.Object({
+      id: Type.String({ description: "The note's id, as your notebook shows it" }),
     }),
   },
   {

@@ -146,7 +146,8 @@ pub(super) fn bot_needs(
         .collect()
 }
 
-/// What needs the owner across every bot, for the Projects-mode logo badge.
+/// What needs the owner across every bot: the logo's count in the Sessions
+/// view.
 pub(super) fn needs_you_count(state: &crate::state::AppState, now: chrono::DateTime<Utc>) -> usize {
     state
         .bots

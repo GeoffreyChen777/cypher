@@ -232,7 +232,7 @@ impl Shell {
         // others from a workspace.
         let waiting = match &current {
             Some(line) => needs_elsewhere(&lines, &line.bot.id),
-            None => lines.iter().map(|line| line.needs).sum(),
+            None => needs_you_count(self.state.read(cx), Utc::now()),
         };
         let key = "sidebar-logo";
         let open = self.menus.bot_switcher.get().is_some();

@@ -367,7 +367,8 @@ owner. Nothing stalls silently.
 ## 7. Memory
 
 - **The notebook** is a small file in the bot's private folder, read at the start of each
-  owner turn and edited with two tools (`read_notes`, `write_note`). Entries are short
+  owner turn and kept with five tools (`read_notes`, `search_notes`, `write_note`,
+  `update_note`, `delete_note`). Entries are short
   facts and decisions: "the release is blocked on the migration", "Alice owns auth".
 - **Owner threads only.** Peer threads can neither read nor write the notebook, so it can
   never bypass a connection's scope or carry a peer's injected text into an owner thread.
@@ -382,20 +383,29 @@ As built (P3, engine): a note is a `botNotes` registry row (`BotNote`), not a fi
 syncs to every owner device like the bot row. The owner writes with `Mutate saveBotNote`
 (source `owner`) and deletes with `deleteBotNote`; the bot writes with `write_note`, which
 stamps `source: {kind: "bot", chatId, title}` naming the thread it was written in (the bot
-chat, an orchestration thread or a routine thread). Who may do what is one function,
-`bots::memory::access`, checked on every call:
+chat, an orchestration thread or a routine thread). It rewrites a note whose fact changed
+with `update_note` (the note becomes the bot's, from that thread, as an owner's edit makes
+it the owner's) and removes a stale one with `delete_note`, rather than piling up
+contradictions; both name a note by the 8-character id the prompt and the read tools show
+in brackets, or any unique start of it (at least 4 characters). `search_notes` ranks notes
+by how many of the query's words they match, in their text or the title they came from,
+where a word matches inside a longer one or by stem ("migration" finds "migrating").
+Who may do what is one function, `bots::memory::access`, checked on every call; reading
+covers `read_notes` and `search_notes`, writing covers `write_note`, `update_note` and
+`delete_note`:
 
-| Thread | `read_notes` | `write_note` |
+| Thread | read | write |
 |---|---|---|
 | Bot chat, orchestration thread (owner) | yes | yes |
 | Routine thread | yes | only when its routine's `writeNotes` is set |
 | Peer thread | no | no |
 
 A note is at most 1,000 characters (longer ones are cut, and the answer says so); an
-empty one is refused. Each write adds a `noteWritten` activity entry. The prompt of owner
+empty one is refused. Each write, update and delete adds a `noteWritten` activity entry
+("Noted: …", "Updated a note: …", "Deleted a note: …"), so the owner can see and undo. The prompt of owner
 and routine threads carries a "Your notebook:" section with the newest 40 notes
-(`NOTES_IN_PROMPT`), each with its source and date, and says that `read_notes {query?}`
-finds the rest; peer threads get no section. A routine thread's section says whether it
+(`NOTES_IN_PROMPT`), each with its id, source and date, and says that `search_notes`
+finds older ones; peer threads get no section. A routine thread's section says whether it
 may write.
 
 ## 8. Routines
@@ -644,8 +654,11 @@ thread gets the rest (§6.7).
 
 | Tool | Threads | Does |
 |---|---|---|
-| `read_notes {query?}` | owner, routine | The bot's notes, newest first, each with its source and date; `query` keeps notes containing every word (any case). |
+| `read_notes {query?}` | owner, routine | The bot's notes, newest first, each with its id, source and date; `query` keeps notes containing every word (any case). |
+| `search_notes {query}` | owner, routine | Notes about the query, best match first (at most 20): words match inside longer ones and by stem; more matched words rank higher (§7). |
 | `write_note {text}` | owner, routine (if its routine allows) | Adds one note with the thread as its source (§7). |
+| `update_note {id, text}` | owner, routine (if its routine allows) | Rewrites a note, which becomes the thread's; `id` as shown or a unique start of it. |
+| `delete_note {id}` | owner, routine (if its routine allows) | Removes a note; the activity log keeps what it said. |
 | `list_routines` | owner, routine | The bot's routines: name, id, where each runs, schedule in words, next run, last result. |
 | `save_routine {id?, name, prompt, schedule, write_notes?, work_directly?, enabled?, project?, worktree?, model?}` | bot chat | Creates or changes a routine; with `project` (a project in scope, and *Coordinate*) it runs as a session there. Validates it and answers with what was saved and its next run. |
 | `list_connections` | owner | Connected bots: name, owner, connection id, how this bot replies to them, last question. |

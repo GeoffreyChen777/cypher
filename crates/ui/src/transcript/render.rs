@@ -1785,7 +1785,11 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
             | BotToolKind::AnswerSession
             | BotToolKind::SteerSession
             | BotToolKind::StopSession => crate::kit::icons::CHAT_ROUND_LINE,
-            BotToolKind::ReadNotes | BotToolKind::WriteNote => crate::kit::icons::PEN,
+            BotToolKind::ReadNotes
+            | BotToolKind::SearchNotes
+            | BotToolKind::WriteNote
+            | BotToolKind::UpdateNote
+            | BotToolKind::DeleteNote => crate::kit::icons::PEN,
             BotToolKind::ListRoutines | BotToolKind::SaveRoutine | BotToolKind::SaveProjectTask => {
                 crate::kit::icons::PULSE
             }
