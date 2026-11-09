@@ -997,7 +997,8 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 | **Network** (P4) | Just its header: how many workspaces are connected, or "N to review" in amber when answers wait in Needs you (a click opens the review) | The Network panel lists connections, invites and recent questions; a connection opens its own page (scope, reply mode, exchanges, revoke) with a back arrow to Network |
 
 **Shortcuts** sit pinned at the bottom of the sidebar, below the cards, which scroll above
-them: buttons, each an icon and a short label, wrapping. A shortcut is a request the owner
+them: buttons, each an icon and a short label, wrapping; with none, the area isn't drawn. A
+shortcut is a request the owner
 makes often; a click sends it into the workspace chat as if they had typed it (their draft
 stays). A request may hold `{input}`, and a click then asks for that text first. Nobody
 builds shortcuts by hand: the owner asks the agent in the workspace chat ("make this a

@@ -8,7 +8,7 @@
 //! its own tools. Right-click a chip to move or delete it. Shortcuts are
 //! registry rows, synced like routines; only the clicks live here.
 
-use super::board::{CARD_TITLE_INSET, ROW_MARGIN, ROW_MARK_INSET, header_frame};
+use super::board::{ROW_MARGIN, ROW_MARK_INSET, header_frame};
 use super::*;
 use cypher_proto::BotShortcut;
 
@@ -144,15 +144,15 @@ impl Shell {
     // ── the area ────────────────────────────────────────────────────────────
 
     /// The shortcuts pinned under the workspace's cards: a quiet head, then
-    /// the chips (or a line saying how to get one), the field a chip asks
-    /// for its input in, and what a failed click said. `None` with no
-    /// workspace.
+    /// the chips, the field a chip asks for its input in, and what a failed
+    /// click said. `None` with no workspace or no shortcuts: the area shows
+    /// only once the agent has made one.
     pub(in crate::shell) fn render_board_shortcuts(
         &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (bot, shortcuts) = self.board_shortcuts(cx)?;
+        let (_, shortcuts) = self.board_shortcuts(cx)?;
         if self
             .board
             .shortcuts
@@ -162,79 +162,65 @@ impl Shell {
         {
             self.board.shortcuts.asking = None;
         }
+        if shortcuts.is_empty() {
+            return None;
+        }
         let header = header_frame("bot-shortcuts-header", "Shortcuts", false, theme);
         let mut card = super::board::card(theme).child(header);
-        if shortcuts.is_empty() {
-            card = card.child(
+        let asking = self.board.shortcuts.asking.as_ref().map(|a| a.id.clone());
+        let chips: Vec<_> = shortcuts
+            .iter()
+            .map(|shortcut| {
+                let selected = asking.as_deref() == Some(shortcut.id.as_str());
+                self.shortcut_chip(shortcut, selected, theme, cx)
+            })
+            .collect();
+        let failures: Vec<_> = shortcuts
+            .iter()
+            .filter_map(
+                |shortcut| match self.board.shortcuts.sent.get(&shortcut.id) {
+                    Some((_, Sent::Failed(line))) => Some((shortcut.id.clone(), line.clone())),
+                    _ => None,
+                },
+            )
+            .map(|(id, line)| {
                 div()
-                    .pl(px(CARD_TITLE_INSET))
-                    .pr(px(10.0))
-                    .pb(px(GROUP_CARD_BODY_PADDING + 6.0))
-                    .mt(px(-4.0))
+                    .id(SharedString::from(format!("bot-shortcut-failed-{id}")))
+                    .mx(px(ROW_MARGIN))
+                    .px(px(ROW_MARK_INSET))
+                    .pt(px(4.0))
                     .text_size(px(11.5))
                     .line_height(px(16.0))
-                    .text_color(theme.text_muted.opacity(0.6))
-                    .child(SharedString::from(format!(
-                        "Ask {} to make a button for something you do often.",
-                        transcript::single_line(&bot.name)
-                    ))),
-            );
-        } else {
-            let asking = self.board.shortcuts.asking.as_ref().map(|a| a.id.clone());
-            let chips: Vec<_> = shortcuts
-                .iter()
-                .map(|shortcut| {
-                    let selected = asking.as_deref() == Some(shortcut.id.as_str());
-                    self.shortcut_chip(shortcut, selected, theme, cx)
-                })
-                .collect();
-            let failures: Vec<_> = shortcuts
-                .iter()
-                .filter_map(
-                    |shortcut| match self.board.shortcuts.sent.get(&shortcut.id) {
-                        Some((_, Sent::Failed(line))) => Some((shortcut.id.clone(), line.clone())),
-                        _ => None,
-                    },
-                )
-                .map(|(id, line)| {
+                    .text_color(theme.danger.opacity(0.9))
+                    .cursor_pointer()
+                    .tooltip(|_, cx| {
+                        cx.new(|_| super::super::session::FindTooltip("Dismiss".into()))
+                            .into()
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.board.shortcuts.sent.remove(&id);
+                        cx.notify();
+                    }))
+                    .child(SharedString::from(line))
+            })
+            .collect();
+        card = card.child(
+            div()
+                .pb(px(GROUP_CARD_BODY_PADDING + 4.0))
+                .flex()
+                .flex_col()
+                .child(
                     div()
-                        .id(SharedString::from(format!("bot-shortcut-failed-{id}")))
                         .mx(px(ROW_MARGIN))
-                        .px(px(ROW_MARK_INSET))
-                        .pt(px(4.0))
-                        .text_size(px(11.5))
-                        .line_height(px(16.0))
-                        .text_color(theme.danger.opacity(0.9))
-                        .cursor_pointer()
-                        .tooltip(|_, cx| {
-                            cx.new(|_| super::super::session::FindTooltip("Dismiss".into()))
-                                .into()
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.board.shortcuts.sent.remove(&id);
-                            cx.notify();
-                        }))
-                        .child(SharedString::from(line))
-                })
-                .collect();
-            card = card.child(
-                div()
-                    .pb(px(GROUP_CARD_BODY_PADDING + 4.0))
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .mx(px(ROW_MARGIN))
-                            .flex()
-                            .flex_row()
-                            .flex_wrap()
-                            .gap(px(4.0))
-                            .children(chips),
-                    )
-                    .children(self.render_shortcut_input(theme, cx))
-                    .children(failures),
-            );
-        }
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(4.0))
+                        .children(chips),
+                )
+                .children(self.render_shortcut_input(theme, cx))
+                .children(failures),
+        );
         Some(
             div()
                 .flex_none()

@@ -540,7 +540,7 @@ const ROW_MARK_GAP: f32 = 9.0;
 /// Where a card's title starts: under the workspace switcher's icon (19px
 /// from the window edge; the card itself starts at 8), its rows indented
 /// below it.
-pub(super) const CARD_TITLE_INSET: f32 = 11.0;
+const CARD_TITLE_INSET: f32 = 11.0;
 
 pub(super) fn header_frame(
     key: &'static str,
