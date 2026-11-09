@@ -1,6 +1,6 @@
 # Memory
 
-Status: **proposal**, not built. It replaces the workspace notebook ([Agent bots](agent-bots.md)
+Status: **proposal, decisions taken** (§11), not built. It replaces the workspace notebook ([Agent bots](agent-bots.md)
 §7) and gives sessions memory of their own.
 
 Memory is what an agent learns from working with you and keeps between sessions, as text
@@ -37,10 +37,16 @@ one memory, Cypher's.
 | **Workspace** | That workspace's agent (chat, work and routine threads) | What it coordinates: who owns what, what is blocked, standing decisions | (the notebook today) |
 | **Agent role** | One subagent profile (`reviewer`, `planner`…) | What that role learned, e.g. a reviewer's list of a codebase's pitfalls | `memory:` in a subagent's frontmatter |
 
-A session sees You + its Project (+ its role's store, for a child subagent). A workspace
-sees You + its own store; its project knowledge comes from reading sessions, not from
-project stores, which keeps a workspace's scope rules (§4 of Agent bots) the only gate.
-Peer threads (another person's workspace asking) see no store at all.
+A session sees You + its Project (+ its role's store, for a child subagent).
+
+A workspace sees You + its own store, and **reads, never writes,** the Project store of
+each project in its scope: that is the project's base memory, what its sessions learned.
+What the workspace learns about a project goes into **its own store**, one file per
+project (`/workspace/projects/<project>.md`), because a workspace carries context the
+project's sessions don't (plans, owners, other projects) and that must not leak into the
+project's memory. A project's sessions never see a workspace's project files, including
+sessions the workspace started. Peer threads (another person's workspace asking) see no
+store at all.
 
 A project store is keyed by the project (space), not the folder, so worktrees and every
 device of the same project share it, as Claude Code keys memory by repository.
@@ -78,7 +84,9 @@ silently cut).
 One tool, `memory`, with the commands of Claude's memory tool, so models already trained
 on it use it well: `view` (a file, or a folder listing with sizes), `create`, `str_replace`,
 `insert`, `delete`, `rename`, plus `search` (§5). Paths are virtual: `/you/…`, `/project/…`,
-`/workspace/…`, `/role/…`, one root per store the run can see. It is a Pi extension tool
+`/workspace/…`, `/role/…`, one root per store the run can see. A workspace sees the
+projects in its scope read-only, as `/projects/<project>/…`; a write there is refused with
+a pointer to `/workspace/projects/<project>.md`. It is a Pi extension tool
 (like the bot tools) answered by the engine, so it works on every model and provider, needs
 no filesystem access and never touches the sandbox.
 
@@ -89,7 +97,9 @@ Activity log of the store's owner.
 ## 4. Injected context
 
 Each store the run sees contributes its `/MEMORY.md` to the system prompt, under a heading
-naming the store, then a one-line listing of its other files. Budget: the first 200 lines
+naming the store, then a one-line listing of its other files. A workspace's chat gets You
+and its own store, and a listing of the project stores it may read; a work thread also gets
+the `MEMORY.md` of the projects its plan names, and the workspace's file on each. Budget: the first 200 lines
 or 16 KB per store, at most 32 KB in all (You first, then Project or Workspace, then role);
 past the budget the prompt says so and where the rest is.
 
@@ -119,15 +129,22 @@ against the transcripts they came from, merges duplicates, removes what is stale
 detail out of `MEMORY.md` into topic files (leaving a link), and promotes what keeps
 mattering into it. It never edits transcripts.
 
-- **Workspace store:** a built-in routine, "Consolidate memory", off by default; nightly
-  when on. It runs as the workspace with memory writes only.
-- **Project store:** a project setting with the same choice, run on the project's host
-  device over that project's sessions since the last pass.
+- **On by default, nightly**, for every store with new activity since its last pass; a
+  store with none is skipped, so an idle project costs nothing. Each store's setting can
+  turn it off or change the time.
+- **Workspace store:** a built-in routine, "Consolidate memory", run as the workspace with
+  memory writes only. It may move a project fact from its own file into neither store: the
+  project's base memory stays the project sessions' to write.
+- **Project store:** run on the project's host device over that project's sessions since
+  the last pass.
+- **You store:** run over all sessions since the last pass, keeping only what holds across
+  projects.
 - **Inputs:** sessions and threads since the last pass, at most 100; never peer threads.
 - **Output:** applied in place, as one change set. The run posts a short summary (in the
   workspace chat, or the project's memory view), every change is in Activity, and "Undo"
   restores the store from the doc history before the pass.
-- **Cost:** real model runs; the setting shows the last pass's token use.
+- **Cost:** real model runs; the setting shows the last pass's token use and the month's
+  total.
 
 ## 7. Trust
 
@@ -138,8 +155,8 @@ Memory is injected into every later run, so a bad write persists. The rules:
   call `memory`, but its writes land as **pending**: kept, shown in the memory view and in
   Needs you, and left out of injection until you accept them. Consolidation never accepts
   pending writes on its own.
-- **Your text wins.** A file or line you wrote keeps your authorship until an agent changes
-  it; an agent edit is logged and undoable, never silent.
+- **Your text can be corrected, never silently.** Agents may edit or remove lines you
+  wrote; each such change is logged in Activity with the old text and can be undone.
 - **No secrets.** Writes are scanned like peer answers (Agent bots §11.6) and a match is
   refused with the reason.
 - **Peers never.** Peer threads get no `memory` tool and no injected memory.
@@ -172,11 +189,12 @@ calls them). The Notebook card and panel become Memory.
 | M4 | Consolidation, workspace first, then projects |
 | M5 | Agent-role stores (`memory:` on subagent profiles) |
 
-## 11. Open questions
+## 11. Decisions
 
-1. Storage: a Loro doc per store over the chat2 relay (proposed), or registry rows, or
-   host files.
-2. Whether workspaces should also read the Project stores of projects in their scope.
-3. Consolidation defaults: off (proposed) or on, and how often.
-4. Whether agents may edit text you wrote, or only add beside it.
-5. Pending writes: held for review (proposed), or written and flagged.
+1. **Storage:** one Loro doc per store over the chat2 relay.
+2. **Workspaces and projects:** a workspace reads a project's base memory and never writes
+   it; it keeps what it learns about a project in its own store, one file per project, which
+   the project's sessions never see.
+3. **Consolidation:** on by default, nightly, skipping stores with no new activity.
+4. **Your text:** agents may edit it; every change is logged and undoable.
+5. **Untrusted writes:** held as pending, out of prompts until you accept them.
