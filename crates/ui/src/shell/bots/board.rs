@@ -532,6 +532,14 @@ impl Shell {
 
 /// The header row both full and empty cards start from: glyph and title on
 /// the project header's grid.
+/// A card row's margin inside the card, and where its mark starts inside
+/// the row: together the card title's inset, 11px.
+const ROW_MARGIN: f32 = 4.0;
+const ROW_MARK_INSET: f32 = CARD_TITLE_INSET - ROW_MARGIN;
+/// The gap between a row's mark and its title: the title then starts where
+/// the switcher's workspace name does.
+const ROW_MARK_GAP: f32 = 9.0;
+
 /// Where a card's title starts: under the workspace switcher's icon (19px
 /// from the window edge; the card itself starts at 8), its rows indented
 /// below it.
@@ -571,8 +579,8 @@ pub(super) fn header_frame(
 }
 
 /// One item on a card, drawn like a session row under its project: a
-/// single line inset under the header, its small mark beneath the header
-/// title (or, without one, the title itself on that column), the title at
+/// single line, its small mark under the card's title and the switcher's
+/// icon (or, without one, its title on the titles' column), the title at
 /// the session rows' 12.5 and 80% ink until hovered or open, and a quiet
 /// corner for its time or state. Detail lives in the panel, not here.
 pub(super) fn card_item(
@@ -604,9 +612,16 @@ pub(super) fn card_item(
         .items_center()
         .gap(px(8.0))
         .rounded(px(8.0))
-        .mx(px(6.0))
+        .mx(px(ROW_MARGIN))
         .mb(px(2.0))
-        .pl(px(if has_mark { 20.0 } else { 27.0 }))
+        // The mark under the switcher's icon (and the card's title), the
+        // title under the workspace's name; a row without a mark keeps its
+        // title on that column.
+        .pl(px(if has_mark {
+            ROW_MARK_INSET
+        } else {
+            ROW_MARK_INSET + 14.0 + ROW_MARK_GAP
+        }))
         .pr(px(8.0))
         .py(px(6.0))
         .cursor_pointer()
@@ -620,7 +635,7 @@ pub(super) fn card_item(
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(ROW_MARK_GAP))
                 .when_some(mark, |el, mark| {
                     el.child(
                         div()
