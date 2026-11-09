@@ -220,12 +220,14 @@ impl Shell {
             .flex_row()
             .items_center()
             .gap(px(10.0))
-            .px(px(16.0))
+            // Inset from the card's sides, so the divider under the title
+            // stops where the content does instead of running edge to edge.
+            .mx(px(16.0))
             // One height for every item, whatever sits left of its title
-            // (a tile or a bare status mark), with more air above it than
-            // under it: about 21px over a 30px tile, 15px under.
-            .h(px(66.0))
-            .pt(px(6.0))
+            // (a 30px tile or a bare status mark): 14px over a tile, 12px
+            // under.
+            .h(px(56.0))
+            .pt(px(2.0))
             .border_b_1()
             .border_color(theme.border)
             .child(match self.board.panel_mark.take() {
