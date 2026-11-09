@@ -92,6 +92,28 @@ fn session_word(status: ChatIndicator, theme: &Theme) -> Option<(&'static str, g
     }
 }
 
+/// A section heading on the work page (Status, Request, Plan): small caps,
+/// its content below; a row, so a section can add a note on the right.
+fn work_heading(label: &str, first: bool, theme: &Theme) -> gpui::Div {
+    div()
+        .px(px(8.0))
+        .pt(px(if first { 4.0 } else { 16.0 }))
+        .pb(px(5.0))
+        .min_h(px(20.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(10.5))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text_muted.opacity(0.75))
+                .child(SharedString::from(label.to_uppercase())),
+        )
+}
+
 /// A step's fold chevron, and the gap before it in the title row.
 const CHEVRON_W: f32 = 10.0;
 const TITLE_GAP: f32 = 8.0;
@@ -515,29 +537,36 @@ impl Shell {
                 .text_color(theme.text_faint)
                 .child(SharedString::from(timing)),
         );
+        // Status, Request and Plan: three sections under one kind of
+        // heading, each with its content below.
         let mut body = div()
             .p(px(8.0))
             .flex()
             .flex_col()
-            .child(parts::fact(theme, "Status", status));
+            .child(work_heading("Status", true, theme))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .text_size(px(12.5))
+                    .line_height(px(18.0))
+                    .child(status),
+            );
         // The request, unless it only repeats the title.
         let same = |a: &str, b: &str| {
             let norm = |t: &str| t.trim().trim_end_matches('.').to_lowercase();
             norm(a) == norm(b)
         };
         if !work.instruction.trim().is_empty() && !same(&work.instruction, &work.title) {
-            body = body.child(parts::fact(
-                theme,
-                "Request",
-                super::items::panel_markdown(
-                    &work.instruction,
-                    format!("bot-work-request-{}", work.id),
-                    12.5,
-                    theme.text,
-                    theme,
-                    window,
-                ),
-            ));
+            body =
+                body.child(work_heading("Request", false, theme))
+                    .child(div().px(px(8.0)).child(super::items::panel_markdown(
+                        &work.instruction,
+                        format!("bot-work-request-{}", work.id),
+                        12.5,
+                        theme.text,
+                        theme,
+                        window,
+                    )));
         }
         if !work.steps.is_empty() {
             body = body.child(self.work_flow(&work, steps, phase, theme, window, cx));
@@ -620,28 +649,9 @@ impl Shell {
                     .all(|(p, _)| p.as_ref().map(place).as_deref() == Some(first.as_str()))
             });
 
-        // ── its heading: "PLAN", where it works, and the plan's summary ──
+        // ── its heading (where it works on the right), then the summary ──
         let mut flow = div().flex().flex_col().child(
-            div()
-                .px(px(8.0))
-                .pt(px(14.0))
-                .pb(px(4.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(10.5))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text_muted.opacity(0.75))
-                        .child(SharedString::from(format!(
-                            "PLAN · {} STEP{}",
-                            work.steps.len(),
-                            if work.steps.len() == 1 { "" } else { "S" }
-                        ))),
-                )
+            work_heading("Plan", false, theme)
                 .child(div().flex_1())
                 .when_some(common.clone(), |el, (glyph, tint, place)| {
                     // The shared project, a link to its page.
