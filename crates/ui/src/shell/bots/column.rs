@@ -280,8 +280,10 @@ impl Shell {
                     .into_any_element()
             }
         };
-        // The handle rides the gap: a hairline shows on hover, a drag
-        // resizes, a double click resets.
+        // The handle is the gap itself, drawn like the gap between split
+        // tiles: a faint wash on hover. A drag resizes, a double click
+        // resets.
+        let wash = Theme::of(cx).border_strong.opacity(0.5);
         let handle = self
             .resize_handle(
                 "bot-panel-resize",
@@ -295,21 +297,13 @@ impl Shell {
             .absolute()
             .top_0()
             .bottom_0()
-            .left(px((PANEL_GAP - 5.0) / 2.0))
-            .flex()
-            .justify_center()
-            .on_hover(motion::hover_listener("bot-panel-resize"))
+            .left_0()
+            .w(px(PANEL_GAP))
             .child(
                 div()
-                    .w(px(2.0))
-                    .h_full()
-                    .my(px(12.0))
-                    .rounded_full()
-                    .bg(motion::hover_blend(
-                        "bot-panel-resize",
-                        crate::kit::theme::hairline(0.0),
-                        crate::kit::theme::hairline(0.3),
-                    )),
+                    .size_full()
+                    .rounded(px(2.0))
+                    .hover(move |s| s.bg(wash)),
             );
         Some(
             div()
