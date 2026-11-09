@@ -29,7 +29,7 @@ how it works. Everything else is grouped here by who reads it.
 - [Pi RPC harness](design/pi-rpc.md) — how the engine drives Pi over its native RPC protocol.
 - [Permission control](design/permission-control.md) — zones, the Landstrip bash sandbox and elevation approval.
 - [Agent bots](design/agent-bots.md) — coordinator bots over a user's projects: permissions by origin, orchestration, memory, routines and the cross-user network (local read-only bots built).
-- [Memory](design/memory.md) — proposal: what agents learn and keep, as synced markdown stores (You, Project, Workspace, role), injected `MEMORY.md`, a memory tool and consolidation.
+- [Memory](design/memory.md) — what agents learn and keep, as synced markdown stores (You, Project, Workspace, role): injected `MEMORY.md`, the memory tool, history search, held writes after untrusted content, and nightly consolidation.
 
 ## Development — working on the code
 

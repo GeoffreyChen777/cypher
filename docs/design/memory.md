@@ -1,7 +1,7 @@
 # Memory
 
-Status: **proposal, decisions taken** (§11), not built. It replaces the workspace notebook ([Agent bots](agent-bots.md)
-§7) and gives sessions memory of their own.
+Status: **built** (M1–M5; decisions in §11, implementation notes in §12). It replaced the
+workspace notebook ([Agent bots](agent-bots.md) §7) and gives sessions memory of their own.
 
 Memory is what an agent learns from working with you and keeps between sessions, as text
 you can read and edit. It follows the shape Anthropic describes in
@@ -62,13 +62,14 @@ store:
 /decisions/rounding.md
 ```
 
-**Storage: one Loro doc per store, synced through the chat2 relay.** The doc maps path to
-text (a `LoroText` per file, for character-level merges), with per-file metadata:
-`{author, updatedAt}`. It syncs through a room like a chat (`mem1/{storeId}`, the same
-append-only ChatRoom protocol), so a store syncs to every device, works offline and in
-local mode, and is loaded only by the engine that runs something reading it. The registry
-holds one small row per store (`memoryStores`: id, scope, owner key, size, updatedAt) so
-devices can list stores without loading them. Loro's history gives undo for free (§6).
+**Storage: one Loro doc per store, synced through the chat2 relay.** Each file's text is a
+`LoroText` (character-level merges) with per-file metadata (author, times). The engine opens
+a store through its doc host like a chat, so it persists on the device and syncs through a
+chat2 room of its own (`chat2/{storeId}`, the same append-only ChatRoom protocol): a store
+syncs to every device, works offline and in local mode, and is loaded only by an engine that
+runs something reading it. The registry holds one small row per store (`memoryStores`: id,
+scope, counts, a preview of `MEMORY.md`, consolidation settings and the last pass) so devices
+can list stores without loading them. Loro's history gives undo for free (§6).
 
 Why not the alternatives:
 - Registry rows (what notes are today) sync, but every device holds every row, and the
@@ -132,17 +133,17 @@ mattering into it. It never edits transcripts.
 - **On by default, nightly**, for every store with new activity since its last pass; a
   store with none is skipped, so an idle project costs nothing. Each store's setting can
   turn it off or change the time.
-- **Workspace store:** a built-in routine, "Consolidate memory", run as the workspace with
-  memory writes only. It never moves anything into a project's base memory: that stays
+- **Workspace store:** run on the workspace's host over its own chat and threads and the
+  sessions it may read, writing only its own store. It never moves anything into a project's base memory: that stays
   the project sessions' to write.
 - **Project store:** run on the project's host device over that project's sessions since
   the last pass.
 - **You store:** run over all sessions since the last pass, keeping only what holds across
   projects.
 - **Inputs:** sessions and threads since the last pass, at most 100; never peer threads.
-- **Output:** applied in place, as one change set. The run posts a short summary (in the
-  workspace chat, or the project's memory view), every change is in Activity, and "Undo"
-  restores the store from the doc history before the pass.
+- **Output:** applied in place. The run's short summary shows in the store's memory view
+  (and a workspace's Activity), every change is in the change log, and "Undo" restores the
+  store from the doc history before the pass.
 - **Cost:** real model runs; the setting shows the last pass's token use and the month's
   total.
 
@@ -198,3 +199,38 @@ calls them). The Notebook card and panel become Memory.
 3. **Consolidation:** on by default, nightly, skipping stores with no new activity.
 4. **Your text:** agents may edit it; every change is logged and undoable.
 5. **Untrusted writes:** held as pending, out of prompts until you accept them.
+
+## 12. As built
+
+- **Engine** (`crates/engine/src/memory*`). A store's id is its room id: `mem-u-<user key>`
+  (a hash of org and user), `mem-p-<space>`, `mem-w-<workspace>`, `mem-r-…` for roles. Its
+  doc uses root containers only (`memoryFiles` for metadata, one `mem:<path>` text per file,
+  `memoryPending`, `memoryChanges`, `memoryMeta`), so two devices that create the same file
+  merge its text instead of keeping one side. Writes are serialized per store; a device
+  opening a store for the first time waits briefly for its room to catch up before writing.
+  Each change logs its author, a one-line summary, the text before (clipped) and the doc
+  version before it, so Undo restores exactly; the log keeps 300 entries.
+- **Who sees what** is resolved per call from the chat row (`memory/access.rs`), like the
+  workspace tools: sessions `/you` and `/project`; subagents also `/role` when their profile
+  says `memory: user|project`; workspace threads `/you`, `/workspace` and read-only
+  `/projects/<name>` (a write there is refused with a pointer to
+  `/workspace/projects/<name>.md`); a routine thread writes `/workspace` only when its
+  routine's `writeNotes` is set; a consolidation pass sees only its store; peer threads
+  nothing (no tool, no prompt).
+- **Tools**: one Pi extension (`memory.ts`) loaded into every run and switched on by the
+  engine (`CYPHER_MEMORY`) when the run has memory; calls go to `MemoryTool` on the agent
+  socket. A child subagent with an allowlist gets the three memory tools added.
+- **Injection**: the memory section is appended to every run's prompt when it spawns. A
+  workspace's read-only project stores appear when they hold something, or, for a work
+  thread, when its plan names the project.
+- **History**: the search index now holds every session and the workspaces' own threads
+  hosted here (never peer threads or passes); who may read which is decided per query.
+- **Untrusted content**: a run is tainted by a web fetch or search, an MCP tool call, or a
+  shell command that fetches from the network (curl, wget, a URL), and, in a workspace,
+  by another workspace's answer; the taint lasts until the chat's next run.
+- **Consolidation** runs where its sources live (a project's device, a workspace's host;
+  user-level stores on the device that made them). A pass is a hidden chat (`Chat.memory`)
+  run unattended with only the memory tools; its token use comes from Pi's session stats.
+  "Run now" sets the row's `passRequestedAt`, which the host picks up.
+- **Migration**: at start, each workspace host folds its notebook into `/MEMORY.md` under
+  "From the notebook" (newest first, source and date per line), once, and drops the rows.

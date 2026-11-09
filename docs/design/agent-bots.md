@@ -3,7 +3,7 @@
 Status: **P0–P4 built, with Review mode, the outgoing scrub and *Coordinate: steer*
 from P5, and the whole Workspaces (§13.1).** A bot reads its projects (P0, P1), works in
 them directly, plans work that runs in orchestration threads and worker sessions on any
-owner device (P2), keeps a notebook and runs routines (P3),
+owner device (P2), keeps a memory ([memory.md](memory.md)) and runs routines (P3),
 and answers other users' bots by invite (P4). Not built: event triggers for routines,
 groups (§11.7), the iPhone surfaces and end-to-end encrypted exchanges (P6). Where the
 built code differs from the design below, the section says so.
@@ -80,7 +80,7 @@ tree); coordination between sessions goes through the bot.
 | **Peer thread** | A hidden chat per connection where a peer's questions run (origin *peer*), §11. |
 | **Scope** | Which projects and sessions the bot may read (§5). |
 | **Capabilities** | Independent switches for what the bot may do beyond reading (§4.2). |
-| **Notebook** | The bot's durable memory: notes it reads at the start of each owner turn (§7). |
+| **Memory** | The workspace's durable memory: markdown files whose `MEMORY.md` starts every run (§7, [memory.md](memory.md)). |
 | **Routine** | A scheduled or event-triggered bot job whose output is a message (§8). |
 | **Connection** | A mutual link between two bots of different users, created by invite (§11). |
 | **Exchange** | One question from a peer bot and its answer. Audited on the answering side. |
@@ -114,7 +114,7 @@ nothing about the others.
 | **Report** | Run routines (§8) | Per routine |
 | **Represent** | Answer connected peers (§11) | Per connection |
 
-Memory (§7) is not a capability: every bot has a notebook.
+Memory (§7) is not a capability: every bot has one.
 
 ### 4.3 The taint rule
 
@@ -264,7 +264,7 @@ Owner: "Fix bug X in A, then check B against A's fix"
 
 The orchestration thread does not inherit the bot chat's history. It starts from a brief
 the engine assembles: the approved plan, the owner's instruction verbatim, the relevant
-notebook entries, and its permissions in plain words. Its context stays small, and nothing
+its memory's `MEMORY.md`, and its permissions in plain words. Its context stays small, and nothing
 from unrelated conversations leaks into the work.
 
 ### 6.3 Direct work or a session
@@ -347,7 +347,7 @@ owner. Nothing stalls silently.
   only the owner approves a session's commands.
 - **The brief** (`bots/work/text.rs`) carries the plan with step ids, projects and
   devices, the instruction verbatim in quotes, and what the thread may do in plain words.
-  Notebook entries join it with the memory track.
+  Its memory joins it with the memory track.
 - **Sessions.** Everything a thread does to a session is a durable command
   (`DocHost::queue_command`: Run, Steer, Interrupt, RespondInput), the same for a session
   on this device and one on another owner device. A worker is an ordinary chat in its
@@ -366,47 +366,19 @@ owner. Nothing stalls silently.
 
 ## 7. Memory
 
-- **The notebook** is a small file in the bot's private folder, read at the start of each
-  owner turn and kept with five tools (`read_notes`, `search_notes`, `write_note`,
-  `update_note`, `delete_note`). Entries are short
-  facts and decisions: "the release is blocked on the migration", "Alice owns auth".
-- **Owner threads only.** Peer threads can neither read nor write the notebook, so it can
-  never bypass a connection's scope or carry a peer's injected text into an owner thread.
-  Routine threads read it, and write to it only when the routine says so.
-- **Provenance.** Every entry records where it came from: the owner, or the session or
-  thread whose content produced it. The notebook view shows the source and lets the owner
-  delete any entry.
-- **Phasing.** First the owner writes notes ("remember that…"); bot-written notes follow
-  once provenance and the notebook view exist.
+A workspace's memory is its store in [Memory](memory.md): markdown files under
+`/workspace` (an always-loaded `MEMORY.md` and topic files), kept with the `memory` tool
+every run but a peer's carries. Its threads also read the user's `/you` store and, read-only,
+each project in scope (`/projects/<name>`); what the workspace learns about a project goes in
+its own `/workspace/projects/<name>.md`. Peer threads see no memory at all. A routine thread
+writes the workspace's memory only when its routine's `writeNotes` is set (shown as "May
+write memory"). Every change is logged with its author and can be undone, and the
+workspace's changes also land in its Activity. Writes from a thread tainted by a peer's
+answer, or that read the web, are held for the owner in Needs you.
 
-As built (P3, engine): a note is a `botNotes` registry row (`BotNote`), not a file, so it
-syncs to every owner device like the bot row. The owner writes with `Mutate saveBotNote`
-(source `owner`) and deletes with `deleteBotNote`; the bot writes with `write_note`, which
-stamps `source: {kind: "bot", chatId, title}` naming the thread it was written in (the bot
-chat, an orchestration thread or a routine thread). It rewrites a note whose fact changed
-with `update_note` (the note becomes the bot's, from that thread, as an owner's edit makes
-it the owner's) and removes a stale one with `delete_note`, rather than piling up
-contradictions; both name a note by the 8-character id the prompt and the read tools show
-in brackets, or any unique start of it (at least 4 characters). `search_notes` ranks notes
-by how many of the query's words they match, in their text or the title they came from,
-where a word matches inside a longer one or by stem ("migration" finds "migrating").
-Who may do what is one function, `bots::memory::access`, checked on every call; reading
-covers `read_notes` and `search_notes`, writing covers `write_note`, `update_note` and
-`delete_note`:
-
-| Thread | read | write |
-|---|---|---|
-| Bot chat, orchestration thread (owner) | yes | yes |
-| Routine thread | yes | only when its routine's `writeNotes` is set |
-| Peer thread | no | no |
-
-A note is at most 1,000 characters (longer ones are cut, and the answer says so); an
-empty one is refused. Each write, update and delete adds a `noteWritten` activity entry
-("Noted: …", "Updated a note: …", "Deleted a note: …"), so the owner can see and undo. The prompt of owner
-and routine threads carries a "Your notebook:" section with the newest 40 notes
-(`NOTES_IN_PROMPT`), each with its id, source and date, and says that `search_notes`
-finds older ones; peer threads get no section. A routine thread's section says whether it
-may write.
+The notebook this replaced (`botNotes` rows and the `read_notes`…`delete_note` tools) is
+gone: at start, each workspace's host folds its notes into the store's `MEMORY.md` under
+"From the notebook" (newest first, each with its source and date) and drops the rows.
 
 ## 8. Routines
 
@@ -418,7 +390,7 @@ routines apart is where they run and what they can reach:
 |---|---|---|
 | Example | "Every morning: what moved, what's stuck, what needs me" | "Every night: run the tests and fix anything flaky" |
 | Runs as | The bot's own agent, in a hidden thread | An ordinary coding session in that project, hidden and opened from the routine |
-| Reaches | Everything the bot reads, the notebook; commands in its local projects if allowed | That project's checkout, or its own worktree |
+| Reaches | Everything the bot reads, its memory; commands in its local projects if allowed | That project's checkout, or its own worktree |
 | Output | A post in the bot chat | Changes in the checkout or worktree, and a post in the bot chat |
 | Needs | Nothing beyond the bot | *Coordinate*, and the project in the bot's scope |
 
@@ -654,11 +626,7 @@ thread gets the rest (§6.7).
 
 | Tool | Threads | Does |
 |---|---|---|
-| `read_notes {query?}` | owner, routine | The bot's notes, newest first, each with its id, source and date; `query` keeps notes containing every word (any case). |
-| `search_notes {query}` | owner, routine | Notes about the query, best match first (at most 20): words match inside longer ones and by stem; more matched words rank higher (§7). |
-| `write_note {text}` | owner, routine (if its routine allows) | Adds one note with the thread as its source (§7). |
-| `update_note {id, text}` | owner, routine (if its routine allows) | Rewrites a note, which becomes the thread's; `id` as shown or a unique start of it. |
-| `delete_note {id}` | owner, routine (if its routine allows) | Removes a note; the activity log keeps what it said. |
+| `memory`, `search_history`, `read_history` | owner, routine | Memory ([memory.md](memory.md) §3, §5): the workspace's and the user's files, project stores read-only, and its own past threads. |
 | `list_routines` | owner, routine | The bot's routines: name, id, where each runs, schedule in words, next run, last result. |
 | `save_routine {id?, name, prompt, schedule, write_notes?, work_directly?, enabled?, project?, worktree?, model?}` | bot chat | Creates or changes a routine; with `project` (a project in scope, and *Coordinate*) it runs as a session there. Validates it and answers with what was saved and its next run. |
 | `list_connections` | owner | Connected bots: name, owner, connection id, how this bot replies to them, last question. |
@@ -1018,7 +986,7 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 | **Work** | Running orchestrations with their current step, a step bar and elapsed time; the last few finished ones with a one-line result | The orchestration: its status as the title's tile (state, progress and times on hover), its request, then one flow on one rail: each step with its state, duration, note and sessions, ending in the result; Stop. Agent-written text (request, summary, notes, result) renders as markdown. A step's title folds its details; hovering a node washes it and firms up its rail segment, a duration shows its exact times, the result offers Copy, and the shared project opens its page |
 | **Routines** | Its routines in order of next run: name, where and when it runs, next run, last result | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
 | **Projects** | Each granted project with device, running and waiting sessions, and "works directly" or "via sessions" | The list groups projects by device (sessions, what runs or asks, last activity). A project's page: its device beside the title (the folder on hover, a click copies it), its sessions in scope with status, the bot's work there and its routines there |
-| **Notebook** | The latest few entries, bot-written ones marked | A + in the header opens a new note at the top; then all entries with their sources, filtered All / You / the bot; text renders as markdown; on hover Copy, Edit, Delete |
+| **Memory** | Just its header: how many files, or "N to review" in amber when held writes wait | The store ([memory.md](memory.md) §8): held writes to accept or discard, `MEMORY.md` rendered, the files (each opens its page: copy, edit, delete), consolidation (on/off, hour, last pass, Run now, Undo), and the change log with Undo |
 | **Network** (P4) | Just its header: how many workspaces are connected, or "N to review" in amber when answers wait in Needs you (a click opens the review) | The Network panel lists connections, invites and recent questions; a connection opens its own page (scope, reply mode, exchanges, revoke) with a back arrow to Network |
 
 There is no Activity card: it mostly repeated Work, Routines and Network. The full audit
@@ -1051,7 +1019,7 @@ Every panel page shares one layout, so a page says each thing once:
 - **Empty:** a panel with nothing to list says so in the middle of the space under its
   header (a quiet glyph, a short line, a hint, and an action where one helps); what it
   still shows above, like Activity's filter, stays on top. A list's own "add" is the
-  header's **+** (Notebook, Routines).
+  header's **+** (Memory, Routines).
 
 Behaviour:
 
@@ -1080,7 +1048,7 @@ As built, beyond the table:
   read-only with a way back to its work item, routine or connection.
 - **A routine** can be granted *Work directly* ("May run commands"), only while the bot
   has it; unattended, anything that needs approval fails the run.
-- **Empty cards** for Routines, Notebook and Network show only their header with a quiet
+- **Empty cards** for Routines, Memory and Network show only their header with a quiet
   hint; the header opens the panel, whose own button adds the first routine, note or
   connection. No card carries a `+`.
 - **Signed out**, the Network card says "Sign in to connect"; records stay visible.
@@ -1116,8 +1084,8 @@ As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is n
 | *Work directly* | Owner threads only; permission control on with the bot's local checkouts as workspace roots; the taint rule. |
 | *Coordinate* | Capabilities checked per call; an audit log of every coordination call; worker sessions limited to the read scope; plan approval; Stop that reaches every started session; limits. |
 | Routines | A non-interactive run mode that denies approvals and settles as failed; the `paused` kill switch; no `ask_bot` from routines. |
-| Bot-written notes | Provenance on every entry and a notebook view to delete them. |
-| *Represent* | Peer threads read-only with no notebook, no network tools and no slash commands; scope ∩ connection scope; the outgoing scrub; rate limits. |
+| Agent-written memory | Provenance on every file and change, undo, and writes after untrusted content held for review ([memory.md](memory.md) §7). |
+| *Represent* | Peer threads read-only with no memory, no network tools and no slash commands; scope ∩ connection scope; the outgoing scrub; rate limits. |
 | *Coordinate: steer* | The same as *Coordinate*, plus per-session confirmation for sessions the bot did not start. |
 
 ## 16. Phases
@@ -1127,7 +1095,7 @@ As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is n
 | **P0: local bot** (built) | `bots` rows, the bot chat, the bot spawn mode with tool allowlist, four read tools (bounded scan), scope enforcement, palette and conversation UI, use from other owner devices. |
 | **P1: foundation** (built) | Role-aware run profiles with engine-stamped origins; the untrusted-data prompt; the non-interactive run mode; the FTS index, `session_activity` and `project_git`. |
 | **P2: coordinator** (built) | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; plan, progress and result cards; Stop; limits including a 4-hour time budget; audit log; approvals for tainted threads. Not built: per-worker turn budgets. |
-| **P3: memory and routines** (built) | The notebook (owner and bot notes with provenance); the scheduler; routines in the workspace (optionally working directly) or as sessions in a project; their posts in the bot chat; the Routines and Notebook cards; Needs you. Not built: event triggers. |
+| **P3: memory and routines** (built) | The notebook, since replaced by [Memory](memory.md); the scheduler; routines in the workspace (optionally working directly) or as sessions in a project; their posts in the bot chat; the Routines and Memory cards; Needs you. Not built: event triggers. |
 | **P4: network** (built) | `BotRoom`, publish, invites, connections, peer threads, `ask_bot`, exchange states, late answers, the Network card and panels. |
 | **P5: review and control** (built but notifications) | Review mode and the outgoing scrub, reviews in Needs you; *Coordinate: steer* with a per-action approval. Not built: push notifications for reviews, plans and connections. |
 | **P6: groups, iPhone, E2E** | Owner groups, then shared groups; the iOS bot surfaces; end-to-end encrypted exchanges. |
