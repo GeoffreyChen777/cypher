@@ -45,10 +45,12 @@ final class CheckpointStub: URLProtocol, @unchecked Sendable {
 
     /// Sends the last of the held reply's body and finishes it.
     static func finish(_ rest: Data = Data()) {
-        guard let stub = lock.withLock({ () -> CheckpointStub? in
-            defer { held = nil }
-            return held
-        }) else { return }
+        guard
+            let stub = lock.withLock({ () -> CheckpointStub? in
+                defer { held = nil }
+                return held
+            })
+        else { return }
         stub.onLoadingThread {
             $0.client?.urlProtocol($0, didLoad: rest)
             $0.client?.urlProtocolDidFinishLoading($0)
@@ -57,10 +59,12 @@ final class CheckpointStub: URLProtocol, @unchecked Sendable {
 
     /// The held reply's connection drops.
     static func drop() {
-        guard let stub = lock.withLock({ () -> CheckpointStub? in
-            defer { held = nil }
-            return held
-        }) else { return }
+        guard
+            let stub = lock.withLock({ () -> CheckpointStub? in
+                defer { held = nil }
+                return held
+            })
+        else { return }
         stub.onLoadingThread { $0.client?.urlProtocol($0, didFailWithError: URLError(.networkConnectionLost)) }
     }
 

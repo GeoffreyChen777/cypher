@@ -43,7 +43,8 @@ final class DocDiskTests: XCTestCase {
         let saved = try XCTUnwrap(load())
         XCTAssertEqual(saved.cursor, 43)
         XCTAssertFalse(saved.honest)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: DocDisk.honestURL(for: DocDisk.chat2URL(for: chatId)).path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: DocDisk.honestURL(for: DocDisk.chat2URL(for: chatId)).path))
     }
 
     func testASidecarNamingAnotherCursorVouchesForNothing() throws {
