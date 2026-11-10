@@ -395,9 +395,11 @@ struct MemoryPage: View {
             ) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Nightly pass")
-                    Text("Rereads recent sessions to merge, correct and prune what's here. Skipped when nothing new happened.")
-                        .font(Theme.sans(13, relativeTo: .footnote))
-                        .foregroundStyle(Theme.textMuted)
+                    Text(
+                        "Rereads recent sessions to merge, correct and prune what's here. Skipped when nothing new happened."
+                    )
+                    .font(Theme.sans(13, relativeTo: .footnote))
+                    .foregroundStyle(Theme.textMuted)
                 }
             }
             .disabled(state.busy.contains("consolidation"))
@@ -428,7 +430,8 @@ struct MemoryPage: View {
             if let month = store.month, month.passes > 0 {
                 BotFact(
                     label: "This month",
-                    value: "\(MemoryFormat.tokens(month.tokens)) · \(MemoryFormat.count(month.passes, "pass", "passes"))"
+                    value:
+                        "\(MemoryFormat.tokens(month.tokens)) · \(MemoryFormat.count(month.passes, "pass", "passes"))"
                 )
                 .groupedRowStyle()
             }
@@ -626,8 +629,9 @@ struct MemoryFilePage: View {
             } else if state.view != nil {
                 ContentUnavailableView(
                     "This file is gone", systemImage: "doc.questionmark",
-                    description: Text("It was deleted or renamed."))
-                    .listRowBackground(Color.clear)
+                    description: Text("It was deleted or renamed.")
+                )
+                .listRowBackground(Color.clear)
             } else if let error = state.error {
                 ContentUnavailableView {
                     Label("Memory isn't available", systemImage: "icloud.slash")
@@ -872,7 +876,8 @@ struct MemoryEditorSheet: View {
         Task {
             defer { busy = false }
             do {
-                let reply = try await model.workspaceData().editMemory(scope: scope, edit: .write(path: path, text: text))
+                let reply = try await model.workspaceData().editMemory(
+                    scope: scope, edit: .write(path: path, text: text))
                 onSaved(path, reply)
                 dismiss()
             } catch {

@@ -84,6 +84,15 @@ extension WorkspaceStore {
     /// deleted elsewhere says so instead.
     private func updateRecord(_ kind: String, _ id: String, what: String, _ set: [String: JSONValue]) throws {
         guard doc.rowExists(kind: kind, id: id) else { throw BotActionError.missing(what) }
+        // The engine's backstop (`check_record`): the Edge refuses an op
+        // over 16 KiB and a refused batch wedges sync, so a write this big
+        // never leaves the phone. `clip` counts characters; this counts what
+        // the engine counts, UTF-16 units of the encoded fields.
+        if let data = try? JSONEncoder().encode(set),
+            (String(data: data, encoding: .utf8)?.utf16.count ?? 0) > BotLimits.recordUnits
+        {
+            throw BotActionError("That's too long to send. Shorten it and try again.")
+        }
         doc.write(kind: kind, id: id, op: .update, set: set)
         afterLocalWrite()
     }
@@ -172,24 +181,33 @@ extension WorkspaceStore {
         AsyncThrowingStream { continuation in
             let task = Task { @MainActor [weak self] in
                 guard let self else { return continuation.finish() }
-                guard let device = self.memoryDevices(scope).first else {
-                    return continuation.finish(throwing: BotActionError.devicesOffline)
-                }
-                do {
-                    let params: [String: Any] = ["scope": try jsonObject(scope)]
-                    let decoder = JSONDecoder()
-                    for try await item in self.relayClient(for: device).subscribe(method: "WatchMemory", params: params)
-                    {
-                        // A frame this app can't read is skipped; the next
-                        // change sends the whole view again.
-                        if let view = try? decoder.decode(MemoryView.self, from: item) {
-                            continuation.yield(view)
+                // Like `reach`: a device presence calls online that the
+                // relay can't reach moves on to the next one; once a device
+                // has answered, its stream's end or failure is the answer.
+                let decoder = JSONDecoder()
+                for device in self.memoryDevices(scope) {
+                    var answered = false
+                    do {
+                        let params: [String: Any] = ["scope": try jsonObject(scope)]
+                        for try await item in self.relayClient(for: device).subscribe(
+                            method: "WatchMemory", params: params)
+                        {
+                            answered = true
+                            // A frame this app can't read is skipped; the
+                            // next change sends the whole view again.
+                            if let view = try? decoder.decode(MemoryView.self, from: item) {
+                                continuation.yield(view)
+                            }
                         }
+                        return continuation.finish()
+                    } catch RelayError.hostOffline where !answered, RelayError.notConnected where !answered {
+                        continue
+                    } catch {
+                        return continuation.finish(
+                            throwing: BotActionError.from(error, device: self.botDeviceName(device)))
                     }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: BotActionError.from(error, device: self.botDeviceName(device)))
                 }
+                continuation.finish(throwing: BotActionError.devicesOffline)
             }
             continuation.onTermination = { _ in task.cancel() }
         }

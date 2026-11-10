@@ -25,7 +25,8 @@ final class WorkspaceChatUITests: XCTestCase {
         let window = app.windows.firstMatch
         for _ in 0..<8 where !approve.isHittable {
             window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
-                .press(forDuration: 0.05, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)))
+                .press(
+                    forDuration: 0.05, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)))
         }
         XCTAssertTrue(approve.isHittable)
         capture(app, "plan-awaiting")

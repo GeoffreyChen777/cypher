@@ -28,7 +28,9 @@ enum SessionLink {
         var id = Substring(url.dropFirst(prefix.count))
         while id.hasSuffix("/") { id = id.dropLast() }
         guard !id.isEmpty, id.count <= 128,
-            id.unicodeScalars.allSatisfy({ ($0.isASCII && CharacterSet.alphanumerics.contains($0)) || $0 == "-" || $0 == "_" })
+            id.unicodeScalars.allSatisfy({
+                ($0.isASCII && CharacterSet.alphanumerics.contains($0)) || $0 == "-" || $0 == "_"
+            })
         else { return nil }
         return String(id)
     }

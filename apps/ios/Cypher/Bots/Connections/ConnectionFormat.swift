@@ -17,7 +17,9 @@ func splitInviteCode(_ code: String) -> (room: String, secret: String)? {
     guard parts.count == 2 else { return nil }
     func idOK(_ part: Substring) -> Bool {
         !part.isEmpty && part.utf8.count <= 128
-            && part.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_") }
+            && part.unicodeScalars.allSatisfy {
+                $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_")
+            }
     }
     guard idOK(parts[0]), idOK(parts[1]) else { return nil }
     return (String(parts[0]), String(parts[1]))

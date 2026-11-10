@@ -26,7 +26,8 @@ final class WorkspaceTranscriptTests: XCTestCase {
         XCTAssertEqual(call("session_activity").chipDetail, "last 24h", "a day by default")
         XCTAssertEqual(call("session_activity", ["since_hours": Int64(72)]).chipDetail, "last 3d")
         XCTAssertEqual(call("session_activity", ["since_hours": 1000.0]).chipDetail, "last 14d", "capped at two weeks")
-        XCTAssertEqual(call("search_sessions", ["query": "flaky", "project": "cypher"]).chipDetail, "\"flaky\" in cypher")
+        XCTAssertEqual(
+            call("search_sessions", ["query": "flaky", "project": "cypher"]).chipDetail, "\"flaky\" in cypher")
         XCTAssertEqual(call("start_session", ["title": "Fix it"]).chipLabel, "Started session")
         XCTAssertEqual(call("list_schedule").chipLabel, "Checked routines", "the old name")
         XCTAssertEqual(call("ask_bot", ["bot": "Ledger"]).chipLabel, "Asked workspace")
@@ -234,7 +235,9 @@ final class WorkspaceTranscriptTests: XCTestCase {
     func testHiddenChatsNameWhatTheyBelongTo() throws {
         let demo = DemoDataset.standard()
         func chat(_ id: String) throws -> Chat { try XCTUnwrap(demo.chats.first { $0.id == id }) }
-        XCTAssertEqual(ThreadOrigin.of(try chat("chat-atlas-thread-flaky"), in: demo)?.text, "Plan · Stabilise the flaky sync tests")
+        XCTAssertEqual(
+            ThreadOrigin.of(try chat("chat-atlas-thread-flaky"), in: demo)?.text,
+            "Plan · Stabilise the flaky sync tests")
         XCTAssertEqual(ThreadOrigin.of(try chat("chat-atlas-thread-flaky"), in: demo)?.page, .workItem("work-flaky"))
         XCTAssertEqual(ThreadOrigin.of(try chat("chat-atlas-routine-brief"), in: demo)?.text, "Routine · Morning brief")
         XCTAssertEqual(ThreadOrigin.of(try chat("chat-atlas-peer-ledger"), in: demo)?.text, "Question from Ledger")

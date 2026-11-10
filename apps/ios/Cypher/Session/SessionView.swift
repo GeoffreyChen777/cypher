@@ -342,9 +342,10 @@ struct SessionView: View {
             boardSheet = nil
             return
         }
-        let target = model.chat(id: id).flatMap { chat in
-            chat.isWorkspaceChat ? chat.bot.map { Route.bot($0.botId) } : nil
-        } ?? .chat(id)
+        let target =
+            model.chat(id: id).flatMap { chat in
+                chat.isWorkspaceChat ? chat.bot.map { Route.bot($0.botId) } : nil
+            } ?? .chat(id)
         openRoute(target)
     }
 
@@ -425,7 +426,8 @@ struct SessionView: View {
     /// sheet presented mid-transition is dropped).
     private func applyWorkspaceLaunchSheet() async {
         guard model.demo != nil, let bot = workspaceBot, let sheet = model.launchSheet else { return }
-        let spec = sheet == "board" ? "board:overview" : sheet.replacingOccurrences(of: "board:needsYou", with: "board:needs")
+        let spec =
+            sheet == "board" ? "board:overview" : sheet.replacingOccurrences(of: "board:needsYou", with: "board:needs")
         if sheet == "bot-settings" {
             model.launchSheet = nil
             try? await Task.sleep(for: .milliseconds(700))

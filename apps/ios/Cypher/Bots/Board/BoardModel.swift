@@ -168,7 +168,8 @@ enum BoardRoutineState: Equatable {
 
     init(_ routine: BotRoutine, now: Int64 = nowMs()) {
         let last = routine.lastRun
-        let next = routine.enabled && routine.schedule != .manual ? routine.nextRunAt.flatMap { $0 > now ? $0 : nil } : nil
+        let next =
+            routine.enabled && routine.schedule != .manual ? routine.nextRunAt.flatMap { $0 > now ? $0 : nil } : nil
         if last?.outcome == .running {
             self = .running
         } else if let asked = routine.runRequestedAt, last.map({ $0.at < asked }) ?? true {
@@ -279,7 +280,7 @@ struct ActivityParts: Equatable {
         let text = singleLine(text).replacingOccurrences(of: "`", with: "")
             .trimmingCharacters(in: .whitespaces)
         // `"Morning brief" failed: why`, `"Ledger" (Dana's workspace) disconnected`
-        if case let (subject, rest)? = Self.quoted(text[...]) {
+        if case (let subject, let rest)? = Self.quoted(text[...]) {
             let rest = rest.trimmingCharacters(in: .whitespaces)
             let (word, more) = rest.firstIndex(of: " ").map { (rest[..<$0], rest[$0...]) } ?? (rest[...], ""[...])
             self.init(
@@ -290,7 +291,7 @@ struct ActivityParts: Equatable {
         let quote = text.firstIndex { $0 == "\"" || $0 == "“" }
         let colon = text.range(of: ": ")?.lowerBound
         // `Ran "Nightly tests"`, `Started "Fix it" in web on Mac mini`
-        if let quote, colon.map({ quote < $0 }) ?? true, case let (subject, rest)? = Self.quoted(text[quote...]) {
+        if let quote, colon.map({ quote < $0 }) ?? true, case (let subject, let rest)? = Self.quoted(text[quote...]) {
             let verb = text[..<quote].trimmingCharacters(in: .whitespaces)
             self.init(
                 verb: verb.hasSuffix(":") ? String(verb.dropLast()) : verb, subject: subject,
@@ -301,7 +302,7 @@ struct ActivityParts: Equatable {
             let verb = text[..<colon].trimmingCharacters(in: .whitespaces)
             let rest = text[text.index(colon, offsetBy: 2)...].trimmingCharacters(in: .whitespaces)
             // `Declined after review: "Ledger" (…) asked …`
-            if case let (subject, more)? = Self.quoted(rest[...]) {
+            if case (let subject, let more)? = Self.quoted(rest[...]) {
                 self.init(verb: verb, subject: subject, detail: Self.tail(more))
                 return
             }

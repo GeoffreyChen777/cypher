@@ -215,7 +215,8 @@ struct BotOverviewPage: View {
                 MiniSpinner(cellSize: 2.0).foregroundStyle(Theme.statusWorking)
             } else {
                 BoardGlyph(
-                    symbol: routine.target == .workspace ? "arrow.clockwise" : "chevron.left.forwardslash.chevron.right",
+                    symbol: routine.target == .workspace
+                        ? "arrow.clockwise" : "chevron.left.forwardslash.chevron.right",
                     color: routine.target == .workspace ? tint : Theme.textMuted)
             }
         } extra: {
@@ -237,7 +238,8 @@ struct BotOverviewPage: View {
                     NavigationLink(value: BotPage.project(load.space.id)) {
                         BoardRow(
                             title: load.space.displayName,
-                            sub: "\(data.botDeviceName(load.space.deviceId)) · \(data.boardProjectMode(bot, space: load.space))",
+                            sub:
+                                "\(data.botDeviceName(load.space.deviceId)) · \(data.boardProjectMode(bot, space: load.space))",
                             trailing: load.note,
                             trailingColor: load.asking > 0 ? Theme.warning : Theme.textFaint
                         ) {

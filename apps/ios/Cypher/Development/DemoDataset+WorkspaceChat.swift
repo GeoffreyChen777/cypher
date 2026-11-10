@@ -49,7 +49,9 @@ extension DemoDataset {
         return [
             MessageEntry(
                 id: "pass-u", role: .user,
-                parts: [.text(id: "pass-u-t", text: "Consolidate cypher's memory: merge duplicates, drop what's stale.")],
+                parts: [
+                    .text(id: "pass-u-t", text: "Consolidate cypher's memory: merge duplicates, drop what's stale.")
+                ],
                 createdAt: start, deviceId: "dev-mac", status: .complete),
             MessageEntry(
                 id: "pass-a", role: .assistant,
@@ -58,7 +60,9 @@ extension DemoDataset {
                     tool("pass-delete", "delete"),
                     .text(
                         id: "pass-a-t",
-                        text: "Merged 3 notes into `build-and-test.md` and removed `old-ci.md`, which described the CI before the move to GitHub Actions."),
+                        text:
+                            "Merged 3 notes into `build-and-test.md` and removed `old-ci.md`, which described the CI before the move to GitHub Actions."
+                    ),
                 ], createdAt: start + 4 * 60_000, deviceId: "dev-mac", status: .complete),
         ]
     }

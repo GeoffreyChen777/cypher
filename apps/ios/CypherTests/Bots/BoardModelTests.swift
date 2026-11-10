@@ -93,7 +93,7 @@ final class BoardModelTests: XCTestCase {
                 .plan("work-rounding"), .review("ex-review"),
             ])
         XCTAssertEqual(rows[0].title, "Start a session in webapp: run the e2e suite against staging")
-        XCTAssertEqual(rows[0].sub, "This thread read an answer from Harbor (Sam Ortiz's workspace).")
+        XCTAssertEqual(rows[0].sub, "This session read an answer from Harbor (Sam Ortiz's workspace).")
         XCTAssertEqual(rows[1].title, "Re-run the webapp e2e suite")
         XCTAssertEqual(rows[1].sub, "Asking · in webapp")
         XCTAssertEqual(rows[2].sub, "Plan to approve · 3 steps")
@@ -121,7 +121,9 @@ final class BoardModelTests: XCTestCase {
         }
         XCTAssertEqual(BoardRoutineState(routine(last: .running), now: now), .running)
         XCTAssertEqual(BoardRoutineState(routine(last: .done, lastAt: 5, asked: 9), now: now), .starting)
-        XCTAssertEqual(BoardRoutineState(routine(next: now + 60_000, last: .done, lastAt: 9, asked: 5), now: now), .next(now + 60_000))
+        XCTAssertEqual(
+            BoardRoutineState(routine(next: now + 60_000, last: .done, lastAt: 9, asked: 5), now: now),
+            .next(now + 60_000))
         XCTAssertEqual(BoardRoutineState(routine(.once(at: "2026-01-01T09:00"), last: .done), now: now), .done)
         XCTAssertEqual(BoardRoutineState(routine(enabled: false, next: now + 1), now: now), .off)
         XCTAssertEqual(BoardRoutineState(routine(.manual), now: now), .manual)
@@ -166,7 +168,8 @@ final class BoardModelTests: XCTestCase {
 
         XCTAssertEqual(BoardProjectLoad(space: webapp.space, sessions: 3).note, "3 sessions")
         XCTAssertEqual(BoardProjectLoad(space: webapp.space, sessions: 1).note, "1 session")
-        XCTAssertEqual(BoardProjectLoad(space: webapp.space, sessions: 3, running: 2, asking: 1).note, "1 asking · 2 running")
+        XCTAssertEqual(
+            BoardProjectLoad(space: webapp.space, sessions: 3, running: 2, asking: 1).note, "1 asking · 2 running")
     }
 
     func testConnectionsSayWhatWaitsForReviewElseHowManyThereAre() async throws {
@@ -206,17 +209,27 @@ final class BoardModelTests: XCTestCase {
                 "The plan failed: Add currency support to invoices",
                 ActivityParts(verb: "The plan failed", subject: "Add currency support to invoices")
             ),
-            ("Connected with \"Ledger\" (Dana's workspace)", ActivityParts(verb: "Connected with", subject: "Ledger · Dana")),
-            ("\"Ledger\" (Dana's workspace) disconnected", ActivityParts(verb: "Disconnected", subject: "Ledger · Dana")),
+            (
+                "Connected with \"Ledger\" (Dana's workspace)",
+                ActivityParts(verb: "Connected with", subject: "Ledger · Dana")
+            ),
+            (
+                "\"Ledger\" (Dana's workspace) disconnected",
+                ActivityParts(verb: "Disconnected", subject: "Ledger · Dana")
+            ),
             (
                 "Asked \"Ledger\" (Dana's workspace): Is the fix out?",
                 ActivityParts(verb: "Asked", subject: "Ledger · Dana", detail: "Is the fix out?")
             ),
             (
                 "Declined after review: \"Ledger\" (Dana's workspace) asked Can you share it?",
-                ActivityParts(verb: "Declined after review", subject: "Ledger · Dana", detail: "asked Can you share it?")
+                ActivityParts(
+                    verb: "Declined after review", subject: "Ledger · Dana", detail: "asked Can you share it?")
             ),
-            ("Created: /workspace/routines.md", ActivityParts(verb: "Created", subject: "routines.md", detail: "/workspace")),
+            (
+                "Created: /workspace/routines.md",
+                ActivityParts(verb: "Created", subject: "routines.md", detail: "/workspace")
+            ),
             (
                 "Added 15 lines, removed 12: /workspace/MEMORY.md",
                 ActivityParts(verb: "Edited", subject: "MEMORY.md", detail: "Added 15 lines, removed 12 · /workspace")
@@ -285,7 +298,8 @@ final class BoardModelTests: XCTestCase {
     func testActivityGroupsByDayNewestFirst() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
-        let now = Int64(Date(timeIntervalSince1970: 1_794_312_000).timeIntervalSince1970 * 1000)  // Tue Nov 10 2026 12:00 UTC
+        // Tue Nov 10 2026 12:00 UTC.
+        let now = Int64(Date(timeIntervalSince1970: 1_794_312_000).timeIntervalSince1970 * 1000)
         let hour: Int64 = 3_600_000
         func entry(_ id: String, _ ago: Int64) -> BotActivity {
             BotActivity(id: id, botId: "b", at: now - ago, kind: .planProposed, text: id)

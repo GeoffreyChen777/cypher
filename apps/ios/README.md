@@ -512,9 +512,10 @@ the desktop sources cited in each file header.
   device), `archived`/`title`/`lastSeenAt` LWW sets, presence heartbeats.
   For workspaces, only the owner fields the engine's `mutate_bot_record`
   writes (a plan's `decision`, `stopRequestedAt`, `runRequestedAt`, a
-  routine's `enabled`, a connection's `replyMode`/`scope`/
+  connection's `replyMode`/`scope`/
   `revokeRequestedAt`, a review, `paused`, shortcut `order`/deletion); the
-  host watches the rows and acts.
+  host watches the rows and acts. A routine's on/off switch writes its
+  `enabled` and `updatedAt`, owner fields its saves write too.
   The phone does not claim to be an execution device.
 - Session docs: command ledger appends only (`run`/`steer`/`interrupt`/
   `respondInput`), with client-minted message ids for optimistic echo. The

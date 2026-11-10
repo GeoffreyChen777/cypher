@@ -16,7 +16,9 @@ struct BotProjectListPage: View {
                 Section {
                     ForEach(group.projects) { entry in
                         NavigationLink(value: BotPage.project(entry.id)) {
-                            ProjectRow(entry: entry, mode: bot.flatMap { model.data?.boardProjectMode($0, space: entry.space) })
+                            ProjectRow(
+                                entry: entry, mode: bot.flatMap { model.data?.boardProjectMode($0, space: entry.space) }
+                            )
                         }
                         .accessibilityIdentifier("project-row-\(entry.id)")
                     }
@@ -119,10 +121,11 @@ struct BotProjectPage: View {
         } else {
             BotEmptyState(
                 symbol: "folder", title: "Not in this workspace",
-                hint: "The workspace no longer sees this project.")
-                .background(Theme.surface.ignoresSafeArea())
-                .navigationTitle("Project")
-                .navigationBarTitleDisplayMode(.inline)
+                hint: "The workspace no longer sees this project."
+            )
+            .background(Theme.surface.ignoresSafeArea())
+            .navigationTitle("Project")
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 

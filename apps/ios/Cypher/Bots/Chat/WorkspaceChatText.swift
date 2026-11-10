@@ -133,7 +133,8 @@ struct ThreadOrigin: Equatable {
             return nil
         case .work(let workId):
             let title = data.work(id: workId)?.title ?? "A removed plan"
-            return ThreadOrigin(symbol: "checklist", text: "Plan · \(oneLine(title))", botId: marker.botId, page: .workItem(workId))
+            return ThreadOrigin(
+                symbol: "checklist", text: "Plan · \(oneLine(title))", botId: marker.botId, page: .workItem(workId))
         case .routine(let routineId), .routineSession(let routineId):
             let name = data.routine(id: routineId)?.name ?? "A removed routine"
             return ThreadOrigin(

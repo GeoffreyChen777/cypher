@@ -195,9 +195,9 @@ struct ExchangeRow: View {
                 Text(
                     "\(exchange.who(peer: peer, bot: botName)) · \(Text(exchange.stateWords).foregroundStyle(stateColor)) · \(BotTime.ago(exchange.askedAt))"
                 )
-                    .font(Theme.sans(13, relativeTo: .footnote))
-                    .foregroundStyle(Theme.textMuted)
-                    .lineLimit(1)
+                .font(Theme.sans(13, relativeTo: .footnote))
+                .foregroundStyle(Theme.textMuted)
+                .lineLimit(1)
             }
         }
         .padding(.vertical, 2)
@@ -327,7 +327,8 @@ struct ConnectionPage: View {
                     selection: Binding(
                         get: { reach.sameProjects },
                         set: { same in
-                            write(ConnectionReach(sameProjects: same, spaceIds: granted, transcripts: reach.transcripts))
+                            write(
+                                ConnectionReach(sameProjects: same, spaceIds: granted, transcripts: reach.transcripts))
                         })
                 ) {
                     Text("Same as \(bot.name)").tag(true)

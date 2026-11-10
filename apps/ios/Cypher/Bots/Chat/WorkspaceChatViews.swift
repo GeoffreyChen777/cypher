@@ -243,7 +243,10 @@ struct WorkspaceStartView: View {
                                 }
                                 .frame(maxWidth: .infinity, minHeight: 84, alignment: .topLeading)
                                 .padding(12)
-                                .background(Theme.text.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .background(
+                                    Theme.text.opacity(0.045),
+                                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                )
                                 .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                             }
                             .buttonStyle(PressWashButtonStyle(cornerRadius: 14))

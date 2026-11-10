@@ -24,6 +24,9 @@ struct ComposerView: View {
     var slashMenuMaxHeight = SlashMenuView.defaultMaxHeight
 
     @State private var draftState = ComposerDraft()
+    /// Bumped when a draft is handed back to keep writing (ComposerShell
+    /// takes focus).
+    @State private var focusRequests = 0
     private var text: String { draftState.text }
     @State private var attachments: [StagedAttachment] = []
     @State private var pickerItems: [PhotosPickerItem] = []
@@ -225,6 +228,7 @@ struct ComposerView: View {
                 onAttach: { showPicker = true },
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
                 autoFocus: model.launchFocusComposer,
+                focusRequests: focusRequests,
                 contextGauge: sideChat
                     ? nil
                     : sessionRow?.contextUsage.map {
@@ -312,9 +316,12 @@ struct ComposerView: View {
         .onChange(of: model.draftOffers) {
             // A restart hands its prompt back while this composer is open;
             // a draft in progress is never clobbered.
-            if let seeded = model.takePendingDraft(chatId: chat.id), draftState.text.isEmpty {
+            guard let seeded = model.takePendingDraft(chatId: chat.id) else { return }
+            if draftState.text.isEmpty {
                 draftState.replace(with: seeded)
             }
+            // Either way the reply is the next thing to write.
+            focusRequests += 1
         }
     }
 

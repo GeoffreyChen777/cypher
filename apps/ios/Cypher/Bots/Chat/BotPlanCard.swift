@@ -85,7 +85,8 @@ struct BotPlanCard: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("plan-card")
-        .confirmationDialog("Stop the work and its sessions?", isPresented: $confirmingStop, titleVisibility: .visible) {
+        .confirmationDialog("Stop the work and its sessions?", isPresented: $confirmingStop, titleVisibility: .visible)
+        {
             Button("Stop", role: .destructive) { act { try await $0.stopWork(workId: work.id) } }
         } message: {
             Text("Stop ends the work and every session it started.")
@@ -187,10 +188,14 @@ struct BotPlanCard: View {
 
     private func actions(_ work: BotWork, phase: PlanPhase) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(error ?? (phase.awaiting ? "Nothing runs until you approve." : "Stop ends the work and every session it started."))
-                .font(Theme.sans(12.5, relativeTo: .footnote))
-                .foregroundStyle(error == nil ? Theme.textMuted : Theme.danger)
-                .fixedSize(horizontal: false, vertical: true)
+            Text(
+                error
+                    ?? (phase.awaiting
+                        ? "Nothing runs until you approve." : "Stop ends the work and every session it started.")
+            )
+            .font(Theme.sans(12.5, relativeTo: .footnote))
+            .foregroundStyle(error == nil ? Theme.textMuted : Theme.danger)
+            .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
                 Spacer(minLength: 0)
                 if phase.awaiting {

@@ -14,6 +14,9 @@ enum BotLimits {
     static let instructionsMaxChars = 8 * 1024
     /// Projects or session ids one scope may list.
     static let scopeMaxSessions = 2_000
+    /// Largest field set one record write may carry, in UTF-16 units of its
+    /// JSON (registry.rs `RECORD_MAX_BYTES`, under the Edge's 16 KiB op cap).
+    static let recordUnits = 14 * 1024
 }
 
 extension KeyedDecodingContainer {

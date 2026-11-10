@@ -164,10 +164,14 @@ struct ApprovalPage: View {
                 BotDecisionBar(
                     decisions: [
                         BotDecision(title: "Decline", role: .destructive) {
-                            actions.run { try await model.workspaceData().resolveApproval(approvalId: approval.id, approve: false) }
+                            actions.run {
+                                try await model.workspaceData().resolveApproval(approvalId: approval.id, approve: false)
+                            }
                         },
                         BotDecision(title: "Approve", role: .primary) {
-                            actions.run { try await model.workspaceData().resolveApproval(approvalId: approval.id, approve: true) }
+                            actions.run {
+                                try await model.workspaceData().resolveApproval(approvalId: approval.id, approve: true)
+                            }
                         },
                     ], busy: actions.busy)
             }

@@ -79,7 +79,8 @@ struct BotActivityPage: View {
                 .frame(minHeight: 36)
                 .background(
                     selected ? Theme.text : Theme.groupedRow,
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                )
                 .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -89,11 +90,12 @@ struct BotActivityPage: View {
 
     @ViewBuilder
     private func row(_ entry: BotActivity) -> some View {
-        let link = model.data.map { data in
-            ActivityLink.of(
-                entry, chat: { data.activityChatLink($0) },
-                hasProject: { id in data.spaces.contains { $0.id == id } })
-        } ?? .none
+        let link =
+            model.data.map { data in
+                ActivityLink.of(
+                    entry, chat: { data.activityChatLink($0) },
+                    hasProject: { id in data.spaces.contains { $0.id == id } })
+            } ?? .none
         let label = ActivityRow(entry: entry)
         switch link {
         case .work(let id): NavigationLink(value: BotPage.workItem(id)) { label }

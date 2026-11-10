@@ -97,7 +97,10 @@ struct MemoryWriteCard: View {
                 .background(Theme.text.opacity(0.04), in: RoundedRectangle(cornerRadius: 9))
                 .mask {
                     LinearGradient(
-                        stops: [.init(color: .black, location: more ? 0.7 : 1), .init(color: .black.opacity(more ? 0.25 : 1), location: 1)],
+                        stops: [
+                            .init(color: .black, location: more ? 0.7 : 1),
+                            .init(color: .black.opacity(more ? 0.25 : 1), location: 1),
+                        ],
                         startPoint: .top, endPoint: .bottom)
                 }
         } else {

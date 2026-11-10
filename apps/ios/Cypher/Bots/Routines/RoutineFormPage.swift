@@ -402,7 +402,8 @@ private struct DayChips: View {
                             .padding(.horizontal, 12)
                             .frame(minHeight: 30)
                             .background(
-                                selected ? Theme.text.opacity(0.14) : Theme.text.opacity(0.05), in: Capsule())
+                                selected ? Theme.text.opacity(0.14) : Theme.text.opacity(0.05), in: Capsule()
+                            )
                             .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)

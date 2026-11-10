@@ -32,6 +32,8 @@ struct HomeView: View {
     /// A workspace the settings sheet created: opened once it's gone.
     @State private var createdBot: String?
     @State private var deletingBot: Bot?
+    /// Why a workspace delete from its row didn't go through.
+    @State private var botError: String?
     @State private var actions = SessionActions()
     /// The in-flight notification navigation (see `scheduleNotificationNavigation`).
     @State private var notificationTask: Task<Void, Never>?
@@ -392,8 +394,24 @@ struct HomeView: View {
                 BotSettingsSheet(botId: target.botId, onCreated: { createdBot = $0 })
             }
             .botDeletePrompt($deletingBot) { bot in
-                if let ix = path.firstIndex(of: .bot(bot.id)) { path = Array(path.prefix(ix)) }
-                Task { try? await model.workspaceData().deleteBot(botId: bot.id) }
+                Task { @MainActor in
+                    do {
+                        try await model.workspaceData().deleteBot(botId: bot.id)
+                        // Leave its screen only once it's gone (iPad keeps
+                        // it open as the detail).
+                        if let ix = path.firstIndex(of: .bot(bot.id)) { path = Array(path.prefix(ix)) }
+                    } catch {
+                        botError = error.localizedDescription
+                    }
+                }
+            }
+            .alert(
+                "Couldn't delete the workspace",
+                isPresented: Binding(get: { botError != nil }, set: { if !$0 { botError = nil } })
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(botError ?? "")
             }
     }
 

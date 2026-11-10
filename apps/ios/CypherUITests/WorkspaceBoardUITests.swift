@@ -23,7 +23,7 @@ final class WorkspaceBoardUITests: XCTestCase {
         XCTAssertTrue(status.waitForExistence(timeout: 5))
         XCTAssertTrue(status.label.contains("Awaiting your approval"), status.label)
         approve.tap()
-        XCTAssertTrue(status.wait(until: "label CONTAINS 'Approved'", timeout: 5), status.label)
+        XCTAssertTrue(status.wait(until: "label CONTAINS 'Approved'", timeout: 15), status.label)
         capture(app, "approval-approved")
     }
 

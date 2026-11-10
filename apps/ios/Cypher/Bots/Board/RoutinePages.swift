@@ -228,10 +228,11 @@ struct RoutinePage: View {
         } else {
             BotEmptyState(
                 symbol: "clock.arrow.circlepath", title: "Routine deleted",
-                hint: "It may have been deleted on another device.")
-                .background(Theme.surface.ignoresSafeArea())
-                .navigationTitle("Routine")
-                .navigationBarTitleDisplayMode(.inline)
+                hint: "It may have been deleted on another device."
+            )
+            .background(Theme.surface.ignoresSafeArea())
+            .navigationTitle("Routine")
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 

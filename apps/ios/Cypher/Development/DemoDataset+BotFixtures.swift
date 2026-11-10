@@ -168,7 +168,7 @@ extension DemoDataset {
                 state: .stopped, chatId: "chat-atlas", toolCallId: "call-plan-docs",
                 threadChatId: "chat-atlas-thread-docs", createdAt: now - 2 * day - hour,
                 startedAt: now - 2 * day - 50 * minute, endedAt: now - 2 * day,
-                result: "Stopped before the rewrite finished. The outline is in the thread.",
+                result: "Stopped before the rewrite finished. The outline is in its session.",
                 decision: PlanDecision(approve: true, at: now - 2 * day - 52 * minute),
                 stopRequestedAt: now - 2 * day - minute),
             BotWork(
@@ -261,7 +261,7 @@ extension DemoDataset {
             BotApproval(
                 id: "approval-staging", botId: Self.atlasId, threadChatId: "chat-atlas-thread-flaky",
                 workId: "work-flaky", action: "Start a session in webapp: run the e2e suite against staging",
-                reason: "This thread read an answer from Harbor (Sam Ortiz's workspace).",
+                reason: "This session read an answer from Harbor (Sam Ortiz's workspace).",
                 createdAt: now - 4 * minute),
             BotApproval(
                 id: "approval-old", botId: Self.atlasId, threadChatId: "chat-atlas-thread-loro",
@@ -661,7 +661,8 @@ extension DemoDataset {
                     action: .create, summary: "Created the file", undo: "v-atlas-2"),
                 MemoryChange(
                     id: "atlas-1", at: now - day, author: atlasThread, path: "/MEMORY.md", action: .edit,
-                    summary: "Added 1 line", before: "# Atlas\n- The owner reviews plans on their phone.", undo: "v-atlas-1"),
+                    summary: "Added 1 line", before: "# Atlas\n- The owner reviews plans on their phone.",
+                    undo: "v-atlas-1"),
             ],
             held: [
                 HeldWrite(
