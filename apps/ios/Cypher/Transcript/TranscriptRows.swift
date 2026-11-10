@@ -45,6 +45,16 @@ enum RowKind {
     /// a card listing them, each opening the round's diff at that file
     /// (transcript.rs `TurnChanges`).
     case turnChanges(TurnChanges)
+    /// A workspace's `propose_plan` call: the plan card, drawn from the
+    /// plan's record (transcript/bot_plan.rs). `resolved`: the call ended,
+    /// so a missing record is gone rather than still being written.
+    case botPlan(callId: String, resolved: Bool)
+    /// A `memory` call whose write was held for the owner: Save / Don't
+    /// save, then the decision (transcript/memory_card.rs).
+    case memoryWrite(callId: String)
+    /// What posted a message outside any turn (a routine, when it ran):
+    /// the line over the post's text.
+    case postHeader(BotPost)
 }
 
 /// What an append-mode translation puts between the agent's answer and its
@@ -251,11 +261,14 @@ enum TranscriptRowBuilder {
     /// Split entries into rows. `parsers` caches one incremental parser per
     /// "{entryId}#{partId}" so the streaming tail re-parses O(delta + tail);
     /// `completed` memoizes settled parts so they parse exactly once.
+    /// `memoryCards`: the `memory` calls (tool part ids) a held write was
+    /// made by, drawn as cards rather than chips.
     static func rows(
         entries: [MessageEntry],
         pendingSends: [PendingSend],
         parsers: inout [String: IncrementalMarkdownParser],
-        completed: inout [String: CompletedParse]
+        completed: inout [String: CompletedParse],
+        memoryCards: Set<String> = []
     ) -> [TranscriptRow] {
         var rows: [TranscriptRow] = []
         var live = Set<String>()
@@ -263,7 +276,7 @@ enum TranscriptRowBuilder {
             let first = rows.count
             rowsForEntry(
                 entry, into: &rows, parsers: &parsers,
-                completed: &completed, live: &live)
+                completed: &completed, live: &live, memoryCards: memoryCards)
             let settled = entry.role == .user || entry.status != .streaming
             for ix in first..<rows.count {
                 rows[ix].role = entry.role
@@ -338,7 +351,8 @@ enum TranscriptRowBuilder {
         into rows: inout [TranscriptRow],
         parsers: inout [String: IncrementalMarkdownParser],
         completed: inout [String: CompletedParse],
-        live: inout Set<String>
+        live: inout Set<String>,
+        memoryCards: Set<String>
     ) {
         let streaming = entry.status == .streaming
 
@@ -457,7 +471,26 @@ enum TranscriptRowBuilder {
             }
         }
 
+        /// A card of its own between the entry's other rows: it ends the
+        /// tool group and the work run before it.
+        func appendCard(id: String, version: UInt64, kind: RowKind, before ix: Int) {
+            flushTools(lastIx: ix - 1)
+            closeRun(autoOpen: false)
+            rows.append(
+                TranscriptRow(
+                    id: id, version: version, turnStart: first, kind: kind,
+                    entryId: entry.id, timestamp: nil, partKey: nil))
+            first = false
+        }
+
         for (ix, part) in entry.parts.enumerated() {
+            // A routine's post reads as an answer under a line naming the
+            // routine; a source this app doesn't know is plain text.
+            if case .post(let partId, _, let from) = part, case .routine = from {
+                appendCard(
+                    id: "\(entry.id)#\(partId).from", version: UInt64(truncatingIfNeeded: from.hashValue) << 1,
+                    kind: .postHeader(from), before: ix)
+            }
             switch part.transcriptShape {
             case .tool(let partId, let call, let isError, let resolved):
                 // A blocked attempt folded into its retry renders nothing and
@@ -465,6 +498,22 @@ enum TranscriptRowBuilder {
                 if fold.folded.contains(partId) {
                     if ix == lastPartIx { flushTools(lastIx: ix) }
                     continue
+                }
+                // A workspace's plan and a held memory write are cards. A
+                // refused plan call stays a chip.
+                if let kind = call.botToolKind {
+                    if kind == .proposePlan, !isError {
+                        appendCard(
+                            id: "\(entry.id)#\(partId)", version: fnv1a(partId) | (resolved ? 1 : 0),
+                            kind: .botPlan(callId: partId, resolved: resolved), before: ix)
+                        continue
+                    }
+                    if kind.isMemory, memoryCards.contains(partId) {
+                        appendCard(
+                            id: "\(entry.id)#\(partId)", version: fnv1a(partId),
+                            kind: .memoryWrite(callId: partId), before: ix)
+                        continue
+                    }
                 }
                 // Nothing is appended until the group flushes, so the run's
                 // rows start here.
@@ -845,7 +894,10 @@ enum TranscriptRowBuilder {
 /// tool_group_summary). A work run counts its thoughts before any failures
 /// (view.rs `work_summary`).
 func toolGroupSummary(_ tools: [ToolItem], thoughts: Int = 0) -> String {
-    var segments: [String] = []
+    // A workspace's acts lead, reading as what it did ("Proposed a plan ·
+    // read 2 sessions"; view.rs `work_summary`).
+    let bot = BotToolSummary(tools.map(\.call))
+    var segments: [String] = bot.acts
     let runs = tools.filter { $0.call.tag == "exec" }.count
     let scripts = tools.filter(\.call.isScript).count
     // Commands and scripts share one verb: "ran 2 commands and 1 script".
@@ -857,11 +909,13 @@ func toolGroupSummary(_ tools: [ToolItem], thoughts: Int = 0) -> String {
     if edits > 0 { segments.append(edits == 1 ? "edited 1 file" : "edited \(edits) files") }
     let reads = tools.filter { $0.call.tag == "readFile" }.count
     if reads > 0 { segments.append(reads == 1 ? "read 1 file" : "read \(reads) files") }
-    let searches = tools.filter {
+    segments += bot.reads
+    let toolSearches = tools.filter {
         ["search", "glob", "webSearch", "webFetch"].contains($0.call.tag) || $0.call.isToolSearch
     }.count
+    let searches = toolSearches + bot.searches
     if searches > 0 { segments.append(searches == 1 ? "1 search" : "\(searches) searches") }
-    let other = tools.count - runs - scripts - edits - reads - searches
+    let other = tools.count - runs - scripts - edits - reads - toolSearches - bot.counted
     if other > 0 { segments.append(other == 1 ? "1 tool" : "\(other) tools") }
     if thoughts > 0 { segments.append(thoughts == 1 ? "1 thought" : "\(thoughts) thoughts") }
     // A call permission control held back is not a failure; calls that ran

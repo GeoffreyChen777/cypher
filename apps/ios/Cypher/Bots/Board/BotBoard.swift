@@ -1,21 +1,64 @@
 // A workspace's board: its own NavigationStack, presented over the
-// workspace chat, whose root is the page it opened on and which pushes
-// `BotPage`s. `BotPageView` maps each page to its screen; every page group
-// lives in a file of its own (Board/, Connections/, Memory/), so this file
-// only changes when a page is added.
+// workspace chat (a sheet on iPhone, an inspector column on iPad), whose
+// root is the page it opened on and which pushes `BotPage`s. `BotPageView`
+// maps each page to its screen; every page group lives in a file of its own
+// (Board/, Connections/, Memory/), so this file only changes when a page is
+// added. Pages open sessions through `\.openBotChat` (the presenter leaves
+// the board and shows the chat); a hidden thread the board names opens
+// read-only inside it (`BotThreadLink`).
 
 import SwiftUI
 
+extension EnvironmentValues {
+    /// `openBotChat`, doing nothing where nothing can be opened.
+    var botOpenChat: (String) -> Void { openBotChat ?? { _ in } }
+}
+
+/// A hidden thread (an orchestration's, a routine's, a connection's) pushed
+/// onto the board, read-only.
+struct BotThreadLink: Hashable {
+    let chatId: String
+}
+
 struct BotBoard: View {
     let botId: String
-    var page: BotPage = .overview
-    @State private var path: [BotPage] = []
+    var initial: BotPage = .overview
+    var openChat: (String) -> Void = { _ in }
+    /// The toolbar's ×; nil dismisses (a sheet).
+    var close: (() -> Void)?
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var path = NavigationPath()
+
+    init(
+        botId: String, initial: BotPage = .overview, openChat: @escaping (String) -> Void = { _ in },
+        close: (() -> Void)? = nil
+    ) {
+        self.botId = botId
+        self.initial = initial
+        self.openChat = openChat
+        self.close = close
+    }
+
+    /// The stub presenter's call.
+    init(botId: String, page: BotPage) {
+        self.init(botId: botId, initial: page)
+    }
 
     var body: some View {
+        let close = close ?? { dismiss() }
         NavigationStack(path: $path) {
-            BotPageView(botId: botId, page: page)
+            BotPageView(botId: botId, page: initial)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Close", systemImage: "xmark", action: close)
+                            .accessibilityIdentifier("board-close")
+                    }
+                }
                 .navigationDestination(for: BotPage.self) { BotPageView(botId: botId, page: $0) }
+                .navigationDestination(for: BotThreadLink.self) { BotThreadPage(chatId: $0.chatId) }
         }
+        .environment(\.openBotChat, openChat)
     }
 }
 
@@ -48,9 +91,8 @@ struct BotPageView: View {
     }
 }
 
-/// A stub page's body until its track builds it: the title and a plain
-/// list of what it will show. (Remove once no page uses it.)
-struct BotStubPage<Content: View>: View {
+/// A board page's list: inset-grouped on the app's surface, its title inline.
+struct BotPageList<Content: View>: View {
     let title: String
     @ViewBuilder var content: Content
 
@@ -63,5 +105,64 @@ struct BotStubPage<Content: View>: View {
         .background(Theme.surface.ignoresSafeArea())
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// A stub page's body until its track builds it: the title and a plain
+/// list of what it will show. (Remove once no page uses it.)
+struct BotStubPage<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        BotPageList(title: title) { content }
+    }
+}
+
+/// A hidden thread's transcript, read-only (work.rs `render_thread`): what
+/// the workspace did there, under what owns it.
+struct BotThreadPage: View {
+    @Environment(AppModel.self) private var model
+    let chatId: String
+    @State private var scroll = ScrollState()
+
+    var body: some View {
+        Group {
+            if let chat = model.chat(id: chatId), let store = model.sessionStore(for: chat) {
+                TranscriptView(store: store, chatId: chatId, scroll: scroll)
+                    .id(chatId)
+                    .onAppear { model.sessionOnScreen(chatId) }
+                    .onDisappear {
+                        model.sessionOffScreen(chatId)
+                        model.releaseSessionStore(chatId: chatId)
+                    }
+            } else {
+                ContentUnavailableView(
+                    "Not on this device yet", systemImage: "bubble.left.and.text.bubble.right",
+                    description: Text("The session syncs from the workspace's device."))
+            }
+        }
+        .background(Theme.bg.ignoresSafeArea())
+        .environment(\.commentDrafts, nil)
+        .environment(\.transcriptSelectionActions, nil)
+        .environment(\.transcriptMessageActions, nil)
+        .environment(\.openWorkspace, nil)
+        .environment(\.fileReferenceContext, nil)
+        .environment(\.fileReferenceSnippet, nil)
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// What owns the thread: its work, its routine, the connection asking.
+    private var title: String {
+        guard let chat = model.chat(id: chatId) else { return "Session" }
+        switch chat.bot?.thread {
+        case .work(let id)?: return model.data?.work(id: id)?.title ?? chat.displayTitle
+        case .routine(let id)?, .routineSession(let id)?:
+            return model.data?.routine(id: id)?.name ?? chat.displayTitle
+        case .peer(let id)?:
+            return model.data?.connection(id: id).map { "Questions from \($0.peer.name)" } ?? chat.displayTitle
+        default: return chat.displayTitle
+        }
     }
 }

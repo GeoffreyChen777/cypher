@@ -436,7 +436,7 @@ extension MemoryView {
         changes.insert(
             MemoryChange(
                 id: "change-\(at)-\(changes.count)", at: at, author: .owner, path: path, action: action,
-                summary: summary, before: before),
+                summary: summary, before: before, undo: "v\(at)"),
             at: 0)
     }
 }

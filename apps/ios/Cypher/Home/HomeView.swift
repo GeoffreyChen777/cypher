@@ -1,5 +1,6 @@
 // Home — the mobile shell, session-first: every session in one inset-grouped
-// list under time headings (Now, Today, Yesterday, …), one tap from launch.
+// list under time headings (Now, Today, Yesterday, …), one tap from launch,
+// with the workspaces in a section above them (WorkspaceRows.swift).
 // Project chips narrow it (a long press opens the project's own page,
 // SpaceView), search finds any session, archived ones included, and the view
 // menu (SessionListMenu) filters by device and time and picks the sort.
@@ -25,6 +26,12 @@ struct HomeView: View {
     @State private var showNotifications = false
     @State private var showPermissions = false
     @State private var showPairing = false
+    @State private var showMemory = false
+    /// A workspace's settings (or a new one's, with a nil id).
+    @State private var botSettings: BotSettingsTarget?
+    /// A workspace the settings sheet created: opened once it's gone.
+    @State private var createdBot: String?
+    @State private var deletingBot: Bot?
     @State private var actions = SessionActions()
     /// The in-flight notification navigation (see `scheduleNotificationNavigation`).
     @State private var notificationTask: Task<Void, Never>?
@@ -216,6 +223,7 @@ struct HomeView: View {
                     model.launchSheet = nil
                     showNewSpace = true
                 }
+                applyWorkspaceLaunchSheet()
             }
     }
 
@@ -244,6 +252,12 @@ struct HomeView: View {
                             .listRowBackground(Color.clear)
                     }
                     .listSectionSpacing(.compact)
+                }
+                if currentScope == .all {
+                    WorkspaceSection(
+                        bots: model.listedBots(matching: query),
+                        settings: { botSettings = BotSettingsTarget(botId: $0.id) },
+                        delete: { deletingBot = $0 })
                 }
                 sessionRows(chats: chats, sections: sections, statusSlot: statusSlot, showLocation: showLocation)
             }
@@ -363,6 +377,24 @@ struct HomeView: View {
             .sheet(isPresented: $showNotifications) { NotificationSettingsView() }
             .sheet(isPresented: $showPermissions) { PermissionSettingsView() }
             .sheet(isPresented: $showPairing) { PairedDevicesView() }
+            .sheet(isPresented: $showMemory) { MemorySettingsView() }
+            .sheet(
+                item: $botSettings,
+                onDismiss: {
+                    // Open a new workspace once its sheet is gone: a path
+                    // change during the dismissal can be dropped.
+                    if let id = createdBot {
+                        createdBot = nil
+                        open(.bot(id))
+                    }
+                }
+            ) { target in
+                BotSettingsSheet(botId: target.botId, onCreated: { createdBot = $0 })
+            }
+            .botDeletePrompt($deletingBot) { bot in
+                if let ix = path.firstIndex(of: .bot(bot.id)) { path = Array(path.prefix(ix)) }
+                Task { try? await model.workspaceData().deleteBot(botId: bot.id) }
+            }
     }
 
     @ToolbarContentBuilder
@@ -456,6 +488,26 @@ struct HomeView: View {
         }
     }
 
+    /// Launch rig: `-sheet memory[:<store>]` opens Memory (the view takes
+    /// the store itself), `-sheet bot-new` a new workspace's settings and
+    /// `-sheet bot-settings:<botId>` a workspace's. (`-sheet bot-settings`
+    /// with `-route bot:<id>` opens on the workspace's screen.)
+    private func applyWorkspaceLaunchSheet() {
+        guard model.demo != nil, let spec = model.launchSheet else { return }
+        if spec == "memory" {
+            model.launchSheet = nil
+            showMemory = true
+        } else if spec.hasPrefix("memory:") {
+            showMemory = true
+        } else if spec == "bot-new" {
+            model.launchSheet = nil
+            botSettings = BotSettingsTarget(botId: nil)
+        } else if spec.hasPrefix("bot-settings:") {
+            model.launchSheet = nil
+            botSettings = BotSettingsTarget(botId: String(spec.dropFirst("bot-settings:".count)))
+        }
+    }
+
     /// Longer than a NavigationStack push/pop animation (~0.35s).
     private static let transitionGrace: TimeInterval = 0.6
 
@@ -479,6 +531,7 @@ struct HomeView: View {
                 .disabled(model.devices.isEmpty)
             Button("Paired devices") { showPairing = true }
                 .disabled(model.config?.trust == nil)
+            Button("Memory") { showMemory = true }
             Button("Sign out", role: .destructive) { model.signOut() }
         } label: {
             if let profile = model.profile {
@@ -531,6 +584,8 @@ struct HomeView: View {
             .disabled(model.devices.isEmpty)
             Divider()
             Button("New Project…", systemImage: "folder.badge.plus") { showNewSpace = true }
+            Button("New Workspace…", systemImage: "square.grid.2x2") { botSettings = BotSettingsTarget(botId: nil) }
+                .disabled(model.devices.isEmpty)
         } label: {
             Image(systemName: "square.and.pencil")
         }
@@ -681,7 +736,9 @@ struct HomeView: View {
             let archivedMatch = model.archivedChats().contains {
                 currentScope.contains($0, liveSpaceIds: liveSpaceIds) && model.matches($0, query: query)
             }
-            if !archivedMatch {
+            // Neither do matching workspaces above.
+            let workspaceMatch = currentScope == .all && !model.listedBots(matching: query).isEmpty
+            if !archivedMatch && !workspaceMatch {
                 Section {
                     ContentUnavailableView.search(text: query)
                         .listRowBackground(Color.clear)

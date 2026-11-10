@@ -198,6 +198,8 @@ struct ChatRow: View {
                             .truncationMode(showLocation ? .tail : .middle)
                         Text(" · \(relativeTime(chat.lastMessageAt ?? chat.createdAt))")
                             .fixedSize()
+                        // A workspace's work started it.
+                        StartedByLabel(chatId: chat.id)
                     }
                 }
                 .font(Theme.sans(13, relativeTo: .subheadline))

@@ -1,6 +1,13 @@
 // Session screen — transcript + status strip + composer (or question panel
 // while input is requested, replacing the composer like the desktop). Reading
 // marks the chat seen (the synced LWW marker behind the green dot everywhere).
+//
+// A workspace's own chat is this screen too (pushed as `Route.bot`): its
+// avatar and name in the title, its board one tap away (a sheet on the
+// phone, the inspector on iPad), what needs you and its shortcuts over the
+// composer, and a start screen while it's empty. A hidden thread (a
+// workspace's work, routine or peer thread; a memory pass) opens read-only
+// under a banner naming what it belongs to (Bots/Chat/).
 
 import SwiftUI
 
@@ -8,6 +15,9 @@ struct SessionView: View {
     @Environment(AppModel.self) private var model
     let chatId: String
     @Binding var path: [Route]
+    /// The route this screen is in `path` as, when not `.chat(chatId)` (a
+    /// workspace's chat is `.bot(id)`).
+    var route: Route? = nil
 
     /// Reserve room around the native title slot for Back and child-session
     /// actions. A bounded title avoids an unbounded custom title-view proposal.
@@ -51,17 +61,27 @@ struct SessionView: View {
     @State private var inspectorPane: SessionInspectorPane = .workspace
     /// The inspector hid the sidebar to make room; closing it brings it back.
     @State private var inspectorHidSidebar = false
+    /// A workspace's board: the phone's sheet, and the page the iPad's
+    /// inspector shows instead of Files and Changes.
+    @State private var boardSheet: BoardTarget?
+    @State private var boardDocked: BoardTarget?
+    /// A session the board asked for, opened once its sheet is gone.
+    @State private var openAfterBoard: Route?
+    @State private var botSettings: BoardTarget?
+    @State private var deletingBot: Bot?
+    @State private var showMemorySettings = false
 
     /// Narrower than this beside the inspector, the chat takes the
     /// sidebar's room instead.
     static let minimumChatWidth: CGFloat = 480
 
     private var chat: Chat? { model.chat(id: chatId) }
+    private var ownRoute: Route { route ?? .chat(chatId) }
     @Environment(\.scenePhase) private var scenePhase
     /// On screen, frontmost and holding activity newer than the synced seen
     /// marker — a run finishing (or asking) while you watch it.
     private var watchingUnseen: Bool {
-        chat?.unseen == true && scenePhase == .active && path.last == .chat(chatId)
+        chat?.unseen == true && scenePhase == .active && path.last == ownRoute
     }
 
     // `body` is split into layers (chrome → sheets → lifecycle) so each
@@ -79,7 +99,7 @@ struct SessionView: View {
             .onChange(of: chat?.cwd) { _, _ in workspaceDestination = nil }
             .onChange(of: chat?.deviceId) { _, _ in workspaceDestination = nil }
             .onChange(of: path) { _, routes in
-                if routes.last != .chat(chatId) {
+                if routes.last != ownRoute {
                     commentDrafts.reset()
                 }
             }
@@ -99,10 +119,10 @@ struct SessionView: View {
                 publishInspector()
             }
             .onDisappear {
-                if path.last != .chat(chatId) { commentDrafts.reset() }
+                if path.last != ownRoute { commentDrafts.reset() }
                 // The side chat belongs to this session's screen: it ends
                 // when the session leaves the path, not under a cover.
-                if !path.contains(.chat(chatId)) { endSideChat() }
+                if !path.contains(ownRoute) { endSideChat() }
                 detailInspector?.withdraw(owner: chatId)
                 model.sessionOffScreen(chatId)
                 model.markSeen(chatId: chatId)
@@ -131,11 +151,17 @@ struct SessionView: View {
                 .background(Theme.bg)
             }
         }
-        .navigationTitle(chat?.displayTitle ?? "Session")  // feeds the back menu
+        .navigationTitle(workspaceBot.map(\.name) ?? chat?.displayTitle ?? "Session")  // feeds the back menu
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
-            if let chat { sessionToolbar(chat) }
+            if let chat {
+                if let bot = workspaceBot {
+                    workspaceToolbar(chat, bot: bot)
+                } else {
+                    sessionToolbar(chat)
+                }
+            }
         }
     }
 
@@ -170,7 +196,7 @@ struct SessionView: View {
         }
         // Bare text on the bar, not a glass capsule.
         .sharedBackgroundVisibility(.hidden)
-        if docked {
+        if docked, !chat.isReadOnlyThread {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     toggleInspector()
@@ -182,33 +208,36 @@ struct SessionView: View {
                 .accessibilityIdentifier("inspector-toggle")
             }
         }
-        ToolbarItem(placement: .topBarTrailing) {
-            Menu {
-                Button("Files", systemImage: "folder") { workspaceDestination = .files }
-                Button("Changes", systemImage: "plus.forwardslash.minus") { workspaceDestination = .changes }
-                OpenInNewWindowItem(chatId: chat.id)
-                if !chat.isChild {
-                    Divider()
-                    Button("Rename…", systemImage: "pencil") { actions.rename(chat) }
-                    if chat.archived {
-                        Button("Unarchive", systemImage: "tray.and.arrow.up") {
-                            model.unarchive(chatId: chat.id)
+        // A hidden thread is the workspace's own: nothing here applies.
+        if !chat.isReadOnlyThread {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("Files", systemImage: "folder") { workspaceDestination = .files }
+                    Button("Changes", systemImage: "plus.forwardslash.minus") { workspaceDestination = .changes }
+                    OpenInNewWindowItem(chatId: chat.id)
+                    if !chat.isChild {
+                        Divider()
+                        Button("Rename…", systemImage: "pencil") { actions.rename(chat) }
+                        if chat.archived {
+                            Button("Unarchive", systemImage: "tray.and.arrow.up") {
+                                model.unarchive(chatId: chat.id)
+                            }
+                        } else {
+                            Button("Archive", systemImage: "archivebox") {
+                                model.archive(chatId: chat.id)
+                                leave()
+                            }
                         }
-                    } else {
-                        Button("Archive", systemImage: "archivebox") {
-                            model.archive(chatId: chat.id)
-                            leave()
+                        Button("Delete…", systemImage: "trash", role: .destructive) {
+                            actions.delete(chat)
                         }
                     }
-                    Button("Delete…", systemImage: "trash", role: .destructive) {
-                        actions.delete(chat)
-                    }
+                } label: {
+                    Image(systemName: "ellipsis")
                 }
-            } label: {
-                Image(systemName: "ellipsis")
+                .accessibilityLabel("Session menu")
+                .accessibilityIdentifier("workspace-browser")
             }
-            .accessibilityLabel("Session menu")
-            .accessibilityIdentifier("workspace-browser")
         }
         if let relation = chat.child,
             let parent = model.chat(id: relation.parentChatId),
@@ -222,6 +251,189 @@ struct SessionView: View {
                 }
                 .accessibilityLabel("Return to parent session")
             }
+        }
+    }
+
+    // MARK: Workspace
+
+    /// The workspace this screen is the chat of; nil in any other session.
+    private var workspaceBot: Bot? {
+        guard let chat, chat.isWorkspaceChat else { return nil }
+        return model.data?.bot(of: chat)
+    }
+
+    @ToolbarContentBuilder
+    private func workspaceToolbar(_ chat: Chat, bot: Bot) -> some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            WorkspaceTitle(bot: bot, device: model.deviceName(bot.hostDeviceId))
+                .clearsHiddenSidebarButton(splitColumns)
+                .frame(width: max(140, viewWidth - Self.headerChromeInset), alignment: .leading)
+        }
+        .sharedBackgroundVisibility(.hidden)
+        let needs = model.data?.needsYouCount(botId: bot.id) ?? 0
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                if docked, boardDocked != nil, inspectorShown {
+                    hideInspector()
+                } else {
+                    openBoard(.overview, botId: bot.id)
+                }
+            } label: {
+                Image(systemName: docked ? "sidebar.trailing" : "square.grid.2x2")
+                    .overlay(alignment: .topTrailing) {
+                        // What needs you, as a small count.
+                        if needs > 0 {
+                            Text("\(needs)")
+                                .font(.system(size: 10, weight: .bold))
+                                .monospacedDigit()
+                                .foregroundStyle(Theme.bg)
+                                .padding(.horizontal, 4)
+                                .frame(minWidth: 15, minHeight: 15)
+                                .background(Theme.warning, in: Capsule())
+                                .offset(x: 9, y: -8)
+                        }
+                    }
+            }
+            .keyboardShortcut("i", modifiers: [.command, .option])
+            .accessibilityLabel("Overview")
+            .accessibilityValue(needs > 0 ? WorkspaceChatText.needsYou(needs) : "")
+            .accessibilityIdentifier("workspace-board")
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                Button("Activity", systemImage: "waveform.path.ecg") { openBoard(.activity, botId: bot.id) }
+                Button("Memory", systemImage: "book.closed") {
+                    openBoard(.memory(.workspace(botId: bot.id)), botId: bot.id)
+                }
+                Divider()
+                Button(bot.paused ? "Resume" : "Pause", systemImage: bot.paused ? "play" : "pause") {
+                    setPaused(bot, !bot.paused)
+                }
+                Button("Settings…", systemImage: "slider.horizontal.3") {
+                    botSettings = BoardTarget(botId: bot.id, page: .overview)
+                }
+                Divider()
+                Button("Delete…", systemImage: "trash", role: .destructive) { deletingBot = bot }
+            } label: {
+                Image(systemName: "ellipsis")
+            }
+            .accessibilityLabel("Workspace menu")
+            .accessibilityIdentifier("workspace-menu")
+        }
+    }
+
+    /// Opens a workspace's board at `page`: the inspector beside the chat
+    /// on iPad, a sheet on the phone.
+    private func openBoard(_ page: BotPage, botId: String) {
+        let target = BoardTarget(botId: botId, page: page)
+        if docked {
+            boardDocked = target
+            showInspector(.workspace)
+        } else {
+            boardSheet = target
+        }
+    }
+
+    /// Opens a session on this screen's path; from the board's sheet, once
+    /// the sheet is gone (a path change during its dismissal can be
+    /// dropped). A workspace's own chat opens as the workspace.
+    private func openChat(_ id: String) {
+        guard id != chatId else {
+            boardSheet = nil
+            return
+        }
+        let target = model.chat(id: id).flatMap { chat in
+            chat.isWorkspaceChat ? chat.bot.map { Route.bot($0.botId) } : nil
+        } ?? .chat(id)
+        openRoute(target)
+    }
+
+    /// Opens a route on this screen's path (a project from the board);
+    /// from the board's sheet, once the sheet is gone.
+    private func openRoute(_ target: Route) {
+        if boardSheet != nil {
+            openAfterBoard = target
+            boardSheet = nil
+            return
+        }
+        guard target != ownRoute else { return }
+        if let ix = path.lastIndex(of: target) {
+            path = Array(path.prefix(ix + 1))
+        } else {
+            path.append(target)
+        }
+    }
+
+    private func setPaused(_ bot: Bot, _ paused: Bool) {
+        Task { @MainActor in
+            do {
+                try await model.workspaceData().setBotPaused(botId: bot.id, paused: paused)
+                controlError = nil
+            } catch {
+                controlError = error.localizedDescription
+            }
+        }
+    }
+
+    /// What tapping a hidden thread's banner opens: its item's board page,
+    /// or Memory settings for a pass outside any workspace.
+    private func originAction(_ origin: ThreadOrigin) -> (() -> Void)? {
+        if let botId = origin.botId, let page = origin.page {
+            return { openBoard(page, botId: botId) }
+        }
+        if origin.memory != nil { return { showMemorySettings = true } }
+        return nil
+    }
+
+    private func workspaceStart(_ bot: Bot, chat: Chat, store: SessionStore) -> some View {
+        let spaces = model.data.map { $0.grantedSpaces(of: bot) } ?? []
+        return WorkspaceStartView(
+            bot: bot, device: model.deviceName(bot.hostDeviceId),
+            access: WorkspaceChatText.accessSummary(bot) { id in
+                model.spaces.first { $0.id == id }?.displayName
+            },
+            suggestions: WorkspaceChatText.suggestions(firstProject: spaces.first?.displayName),
+            ask: { question in
+                controlError = sendRequest(question, chat: chat, store: store) ? nil : "Couldn't send. Please retry."
+            },
+            openSettings: { botSettings = BoardTarget(botId: bot.id, page: .overview) })
+    }
+
+    private func deleteBot(_ bot: Bot) {
+        Task { @MainActor in
+            do {
+                try await model.workspaceData().deleteBot(botId: bot.id)
+                leave()
+            } catch {
+                controlError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Sends a request into the chat as if typed (a shortcut, a suggested
+    /// question); the composer's draft stays. A live run takes it as a
+    /// steer, as the composer would.
+    private func sendRequest(_ text: String, chat: Chat, store: SessionStore) -> Bool {
+        guard canControl(chat) else { return false }
+        return liveStatus(chat: chat) == .working
+            ? store.sendSteer(prompt: text) : store.sendRun(prompt: text, chat: chat)
+    }
+
+    /// Launch rig: `-sheet board[:<spec>]` opens the workspace's board
+    /// there (`BotPage(launchSpec:botId:)`; `needsYou` is `needs`) and
+    /// `-sheet bot-settings` its settings, once the push has settled (a
+    /// sheet presented mid-transition is dropped).
+    private func applyWorkspaceLaunchSheet() async {
+        guard model.demo != nil, let bot = workspaceBot, let sheet = model.launchSheet else { return }
+        let spec = sheet == "board" ? "board:overview" : sheet.replacingOccurrences(of: "board:needsYou", with: "board:needs")
+        if sheet == "bot-settings" {
+            model.launchSheet = nil
+            try? await Task.sleep(for: .milliseconds(700))
+            botSettings = BoardTarget(botId: bot.id, page: .overview)
+        } else if let page = BotPage(launchSpec: spec, botId: bot.id) {
+            model.launchSheet = nil
+            try? await Task.sleep(for: .milliseconds(700))
+            openBoard(page, botId: bot.id)
         }
     }
 
@@ -263,6 +475,7 @@ struct SessionView: View {
                 }
             }
             .sessionActionPrompts(actions) { _ in leave() }
+            .modifier(workspaceSheets)
             .environment(\.transcriptSelectionActions, chat.map(selectionActions))
             .environment(\.transcriptMessageActions, chat.map(messageActions))
             // File chips, file links and a round's changed files open here.
@@ -323,6 +536,27 @@ struct SessionView: View {
             }
     }
 
+    /// The workspace's sheets and prompts, and what its transcript cards
+    /// reach: sessions open on this path, a plan's Edit fills the composer.
+    private var workspaceSheets: WorkspaceChatSheets {
+        WorkspaceChatSheets(
+            boardSheet: $boardSheet, botSettings: $botSettings, deletingBot: $deletingBot,
+            showMemorySettings: $showMemorySettings,
+            memoryCards: chat?.isBotChat == true ? model.botRecords.memoryCardIds : [],
+            openChat: { openChat($0) },
+            openRoute: { openRoute($0) },
+            seedComposer: { [model, chatId] in model.offerDraft($0, chatId: chatId) },
+            boardDismissed: {
+                if let route = openAfterBoard {
+                    openAfterBoard = nil
+                    openRoute(route)
+                }
+            },
+            delete: deleteBot,
+            deleted: leave,
+            launch: applyWorkspaceLaunchSheet)
+    }
+
     // MARK: Inspector (iPad)
 
     private var docked: Bool { sizeClass == .regular }
@@ -332,7 +566,7 @@ struct SessionView: View {
         [
             "\(docked)", "\(inspectorShown)", "\(inspectorPane)",
             sideChat.map { "\(ObjectIdentifier($0))" } ?? "", workspaceDestination?.id ?? "",
-            chat?.deviceId ?? "", chat?.cwd ?? "", chat?.config?.harness ?? "",
+            chat?.deviceId ?? "", chat?.cwd ?? "", chat?.config?.harness ?? "", boardDocked?.id ?? "",
         ].joined(separator: "|")
     }
 
@@ -341,6 +575,17 @@ struct SessionView: View {
         guard let detailInspector else { return }
         guard docked, inspectorShown, let chat else {
             detailInspector.withdraw(owner: chatId)
+            return
+        }
+        // A workspace's board takes the inspector's place.
+        if let board = boardDocked {
+            let panel = BotBoard(
+                botId: board.botId, initial: board.page, openChat: { openChat($0) }, close: hideInspector
+            )
+            .id(board.id)
+            .environment(\.openBotChat, { openChat($0) })
+            .environment(\.openBotRoute, { openRoute($0) })
+            detailInspector.present(owner: chatId, content: AnyView(panel), onHide: hideInspector)
             return
         }
         let panel = SessionInspector(
@@ -372,6 +617,7 @@ struct SessionView: View {
     private func hideInspector() {
         inspectorShown = false
         workspaceDestination = nil
+        boardDocked = nil
         if inspectorHidSidebar {
             inspectorHidSidebar = false
             splitColumns?.wrappedValue = .all
@@ -517,7 +763,7 @@ struct SessionView: View {
             case .created(let forkId):
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 // Only follow it if the reader is still here (shell.rs).
-                if path.last == .chat(chat.id) {
+                if path.last == ownRoute {
                     path = SessionNavigation.opening(forkId, in: path)
                 }
             case .failed(let message):
@@ -528,7 +774,7 @@ struct SessionView: View {
 
     /// Back out of this session (it was archived or deleted from its menu).
     private func leave() {
-        if let ix = path.lastIndex(of: .chat(chatId)) {
+        if let ix = path.lastIndex(of: ownRoute) {
             path = Array(path.prefix(ix))
         }
     }
@@ -570,6 +816,10 @@ struct SessionView: View {
                     {
                         TranscriptSkeleton()
                             .background(Theme.bg)
+                    } else if store.entries.isEmpty, store.pendingSends.isEmpty, let bot = workspaceBot {
+                        // A new workspace opens on its start screen.
+                        workspaceStart(bot, chat: chat, store: store)
+                            .background(Theme.bg)
                     }
                 }
                 .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
@@ -601,6 +851,11 @@ struct SessionView: View {
                 scroll.keyboardTransitioning = false
                 scroll.requestCorrection()
             }
+            .safeAreaBar(edge: .top, spacing: 0) {
+                if chat.isHiddenFromSessions, let data = model.data, let origin = ThreadOrigin.of(chat, in: data) {
+                    ThreadBanner(origin: origin, open: originAction(origin))
+                }
+            }
             .safeAreaBar(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
                     HStack(spacing: 8) {
@@ -608,6 +863,14 @@ struct SessionView: View {
                             // Only the progress bar's strip takes a tap (its card).
                             .allowsHitTesting(status == .working && sessionRow(chat: chat)?.progress != nil)
                             .lineLimit(1)
+                        if let bot = workspaceBot {
+                            WorkspaceStatusAccessory(
+                                bot: bot, needs: model.data?.needsYouCount(botId: bot.id) ?? 0,
+                                hostOnline: model.data?.botHostOnline(bot) ?? false,
+                                device: model.deviceName(bot.hostDeviceId),
+                                openNeeds: { openBoard(.needsYou, botId: bot.id) },
+                                resume: { setPaused(bot, false) })
+                        }
                         SubagentsAccessory(
                             parent: chat, store: store,
                             maxWidth: max(130, viewWidth * 0.5)
@@ -630,8 +893,26 @@ struct SessionView: View {
                         Text(notice).font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
                             .padding(.horizontal, 20)
                     }
+                    if let bot = workspaceBot, store.openInputRequest == nil,
+                        case let shortcuts = model.data?.shortcuts(of: bot.id) ?? [], !shortcuts.isEmpty
+                    {
+                        ShortcutBar(
+                            shortcuts: shortcuts,
+                            send: { sendRequest($0, chat: chat, store: store) },
+                            reorder: { ids in
+                                Task { try? await model.workspaceData().orderShortcuts(botId: bot.id, ids: ids) }
+                            },
+                            delete: { shortcut in
+                                Task { try? await model.workspaceData().deleteShortcut(shortcutId: shortcut.id) }
+                            }
+                        )
+                        .padding(.bottom, 8)
+                    }
                     Group {
-                        if let request = store.openInputRequest, chat.config?.harness == "pi" {
+                        if chat.isReadOnlyThread {
+                            // Only the workspace writes in its threads.
+                            ThreadReadOnlyNote()
+                        } else if let request = store.openInputRequest, chat.config?.harness == "pi" {
                             QuestionPanel(
                                 requestId: request.requestId, questions: request.questions,
                                 maximumHeight: min(560, max(180, viewHeight * 0.72)),

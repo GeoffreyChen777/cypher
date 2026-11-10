@@ -311,6 +311,15 @@ extension DemoDataset {
                 schedule: .once(at: Self.onceSpec(daysAhead: 2, hour: 10, now: now)),
                 createdAt: now - day, updatedAt: now - day,
                 nextRunAt: Self.todayAt(10, 0, now: now) + 2 * day),
+            // Switched off: it only runs when asked.
+            BotRoutine(
+                id: "routine-deps", botId: Self.atlasId, name: "Audit dependencies",
+                prompt: "Check every project for outdated or vulnerable dependencies and list what to upgrade.",
+                schedule: .daily(time: "08:00", days: [1]), enabled: false, workDirectly: true,
+                createdAt: now - 12 * day, updatedAt: now - 3 * day,
+                lastRun: RunRecord(
+                    at: now - 8 * day, endedAt: now - 8 * day + 6 * minute, outcome: .done,
+                    summary: "3 upgrades: `tokio` 1.41, `serde_json` 1.0.133, `loro` 1.6 (breaking).")),
             BotRoutine(
                 id: "routine-scout-logs", botId: Self.scoutId, name: "Check edge deploy logs",
                 prompt: "Read the last two hours of edge deploy logs and flag errors.",
@@ -542,7 +551,8 @@ extension DemoDataset {
             changes: [
                 MemoryChange(
                     id: "you-1", at: now - 3 * day, author: .owner, path: "/MEMORY.md", action: .edit,
-                    summary: "Added 1 line", before: "# About me\n- I work mostly in Swift and Rust.", ownerText: true)
+                    summary: "Added 1 line", before: "# About me\n- I work mostly in Swift and Rust.", ownerText: true,
+                    undo: "v-you-1")
             ],
             lastPass: MemoryPass(
                 id: "pass-you-1", at: now - day - 3 * hour, endedAt: now - day - 3 * hour + 120_000, outcome: .skipped,
@@ -596,11 +606,11 @@ extension DemoDataset {
                     id: "cypher-3", at: now - 3 * hour,
                     author: .workspace(
                         botId: Self.atlasId, chatId: "chat-atlas-thread-notes", title: "Draft the 0.9 release notes"),
-                    path: "/release.md", action: .create, summary: "Created the file"),
+                    path: "/release.md", action: .create, summary: "Created the file", undo: "v-cypher-3"),
                 MemoryChange(
                     id: "cypher-2", at: now - 7 * hour, author: .consolidation(passId: "pass-cypher-1"),
                     path: "/build-and-test.md", action: .edit, summary: "Merged 3 notes",
-                    before: "# Build and test\n- `scripts/check.sh rust` before pushing."),
+                    before: "# Build and test\n- `scripts/check.sh rust` before pushing.", undo: "v-cypher-2"),
                 MemoryChange(
                     id: "cypher-1", at: now - 7 * hour, author: .consolidation(passId: "pass-cypher-1"),
                     path: "/notes.md", action: .delete, summary: "Removed the file",
@@ -648,10 +658,10 @@ extension DemoDataset {
             changes: [
                 MemoryChange(
                     id: "atlas-2", at: now - 22 * 60_000, author: atlasThread, path: "/invoices.md",
-                    action: .create, summary: "Created the file"),
+                    action: .create, summary: "Created the file", undo: "v-atlas-2"),
                 MemoryChange(
                     id: "atlas-1", at: now - day, author: atlasThread, path: "/MEMORY.md", action: .edit,
-                    summary: "Added 1 line", before: "# Atlas\n- The owner reviews plans on their phone."),
+                    summary: "Added 1 line", before: "# Atlas\n- The owner reviews plans on their phone.", undo: "v-atlas-1"),
             ],
             held: [
                 HeldWrite(
