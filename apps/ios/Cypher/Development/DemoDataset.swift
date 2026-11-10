@@ -61,6 +61,13 @@ final class DemoDataset {
     @ObservationIgnored var recoveryTask: Task<Void, Never>?
     /// The run progress replay (DemoDataset+RunProgress.swift).
     @ObservationIgnored var progressTask: Task<Void, Never>?
+    /// Workspaces (DemoDataset+Bots.swift, DemoDataset+BotFixtures.swift).
+    var bots: [Bot] = []
+    var botRecords = BotRecords()
+    /// Each memory store's files, pending writes and changes.
+    var memoryViews: [MemoryScope: MemoryView] = [:]
+    /// Open `watchMemory` streams, fed on every demo memory edit.
+    @ObservationIgnored var memoryWatchers: [UUID: (scope: MemoryScope, continuation: MemoryViewContinuation)] = [:]
 
     static let dummyConfig = AppConfig(
         edgeURL: URL(string: "http://localhost:8787")!, mode: .dev,
@@ -257,9 +264,11 @@ final class DemoDataset {
         let (recoverySpace, recoveryChats, recoverySessions) = recoveryShowcase(now: now, config: claude)
         chats += recoveryChats
         sessions.merge(recoverySessions) { _, new in new }
-        return DemoDataset(
+        let dataset = DemoDataset(
             devices: [mac, vps], spaces: [cypher, edge, webapp, recoverySpace],
             chats: chats, sessions: sessions)
+        dataset.installWorkspaces(now: now)
+        return dataset
     }
 
     /// `-demo-many`: enough devices and projects to scroll Home and overflow
@@ -816,8 +825,9 @@ final class DemoDataset {
         case "chat-permissions-card":
             return permissionCard(now: now)
         default:
-            // The context recovery showcase, or a freshly minted chat (empty).
-            return recoveryTranscript(for: chatId, now: now) ?? []
+            // The context recovery showcase, a workspace's chat or thread,
+            // or a freshly minted chat (empty).
+            return recoveryTranscript(for: chatId, now: now) ?? workspaceTranscript(for: chatId, now: now) ?? []
         }
     }
 

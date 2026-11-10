@@ -322,6 +322,10 @@ final class RegistryDoc {
     private(set) var pending: [RegistryPendingBatch] = []
     /// Bumped on every mutation (local or applied) — feeds save debounces.
     private(set) var generation: UInt64 = 0
+    /// Bumped per kind whenever that kind's overlay rows may have changed,
+    /// so a projection can skip the kinds that didn't (the workspace records
+    /// in `WorkspaceStore.project()`).
+    private var kindGenerations: [String: UInt64] = [:]
 
     init(deviceId: String) {
         self.deviceId = deviceId
@@ -329,6 +333,15 @@ final class RegistryDoc {
 
     /// Sync cursor: the last server seq this replica has fully applied.
     var cursor: UInt64 { serverSeq }
+
+    /// Changes whenever rows of `kind` may have changed on this replica.
+    func generation(of kind: String) -> UInt64 {
+        kindGenerations[kind] ?? 0
+    }
+
+    private func touch(_ kind: String) {
+        kindGenerations[kind, default: 0] &+= 1
+    }
 
     /// The cursor for a hello frame: nil (ask for full state) only when this
     /// replica has never seen or written anything.
@@ -409,6 +422,7 @@ final class RegistryDoc {
                 seed.append(rowToSeedOp(row))
             }
         }
+        for kind in Set(authoritative.keys).union(incoming.keys) { touch(kind) }
         authoritative = incoming
         serverSeq = seq
         self.gcFloor = gcFloor
@@ -430,9 +444,11 @@ final class RegistryDoc {
     /// Retire an acked batch. The ack's seq is this device's row position and
     /// does not prove that interleaved remote rows were received.
     func ackBatch(_ batch: String, seq: UInt64) {
-        let before = pending.count
+        let retired = pending.filter { $0.batch == batch }
+        guard !retired.isEmpty else { return }
         pending.removeAll { $0.batch == batch }
-        if pending.count != before { generation += 1 }
+        generation += 1
+        for kind in Set(retired.flatMap { $0.ops.map(\.kind) }) { touch(kind) }
     }
 
     /// Batches to push: everything not already in flight on this connection.
@@ -454,6 +470,7 @@ final class RegistryDoc {
 
     private func putAuthoritative(_ row: RegistryRow) {
         authoritative[row.kind, default: [:]][row.id] = row
+        touch(row.kind)
     }
 
     // MARK: Local writes
@@ -465,6 +482,7 @@ final class RegistryDoc {
     func enqueue(ops: [RegistryOp]) {
         guard !ops.isEmpty else { return }
         generation += 1
+        for kind in Set(ops.map(\.kind)) { touch(kind) }
         // Batch ids only need device-lifetime uniqueness; the HLC of a fresh
         // tick provides exactly that.
         pending.append(RegistryPendingBatch(batch: "b-\(nextHlc())", ops: ops))
@@ -481,6 +499,12 @@ final class RegistryDoc {
 
     func write(kind: String, id: String, op: RegistryOpType, set: [String: JSONValue]) {
         enqueue(ops: [RegistryOp(kind: kind, id: id, op: op, set: set, hlc: nextHlc(), clocks: nil)])
+    }
+
+    /// Several row writes in ONE batch (a workspace's shortcut order).
+    func write(_ writes: [(kind: String, id: String, op: RegistryOpType, set: [String: JSONValue])]) {
+        let hlc = nextHlc()
+        enqueue(ops: writes.map { RegistryOp(kind: $0.kind, id: $0.id, op: $0.op, set: $0.set, hlc: hlc, clocks: nil) })
     }
 
     /// Tombstone rows in ONE batch (a space delete cascades space + chats +

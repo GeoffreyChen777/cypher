@@ -8,6 +8,8 @@ enum Route: Hashable {
     case newSession(spaceId: String)
     /// A project-less session on a device (its folder is made on send).
     case quickChat(deviceId: String)
+    /// A workspace (bot id): its chat, with its board one tap away.
+    case bot(String)
 }
 
 enum SessionNavigation {

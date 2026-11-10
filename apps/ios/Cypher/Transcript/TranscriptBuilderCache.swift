@@ -87,7 +87,7 @@ final class TranscriptBuilderCache {
                 let partId: String
                 let text: String
                 switch part {
-                case .text(let id, let body, _), .reasoning(let id, let body):
+                case .text(let id, let body, _), .reasoning(let id, let body), .post(let id, let body, _):
                     (partId, text) = (id, body)
                 default:
                     continue

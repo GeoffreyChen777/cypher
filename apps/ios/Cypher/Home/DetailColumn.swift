@@ -21,6 +21,7 @@ struct RouteDestination: View {
         case .newSession(let spaceId): NewSessionView(spaceId: spaceId, path: $path)
         case .quickChat(let deviceId):
             NewSessionView(spaceId: "", path: $path, quickDeviceId: deviceId)
+        case .bot(let id): BotView(botId: id, path: $path).id(id)
         }
     }
 }

@@ -23,6 +23,10 @@ final class WorkspaceStore: WorkspaceData {
     private(set) var sessions: [String: SessionRow] = [:]
     private(set) var presence: [String: Int64] = [:]  // deviceId → last beat ms
     private(set) var connected = false
+    /// Workspaces (registry `bots` rows), oldest first.
+    private(set) var bots: [Bot] = []
+    /// Every workspace record (WorkspaceStore+Bots.swift writes them).
+    private(set) var botRecords = BotRecords()
 
     /// Presence entries older than this are expired (mirrors the Rust
     /// client's 30s TTL, measured from RECEIPT — beats carry the sender's
@@ -32,7 +36,15 @@ final class WorkspaceStore: WorkspaceData {
     /// Chats being deleted: hidden at once while the host is told first
     /// (see `deleteChat`), so the list never waits on the network.
     @ObservationIgnored private var deleting: Set<String> = []
-    @ObservationIgnored private var doc: RegistryDoc
+    /// The replica. Internal so WorkspaceStore+Bots.swift can write record
+    /// rows; every write is followed by `afterLocalWrite()`.
+    @ObservationIgnored private(set) var doc: RegistryDoc {
+        didSet { projectedGenerations = [:] }
+    }
+    /// The kind generations the workspace records were last projected at
+    /// (`projectWorkspaces`), so a frame that touched no record kind costs
+    /// nothing.
+    @ObservationIgnored private var projectedGenerations: [String: UInt64] = [:]
     @ObservationIgnored private var client: RegistryClient?
     @ObservationIgnored private var saver: RegistrySaver?
     @ObservationIgnored private var presenceReceivedAt: [String: Int64] = [:]
@@ -171,7 +183,7 @@ final class WorkspaceStore: WorkspaceData {
 
     /// Every local write: re-project the overlay, schedule the snapshot, and
     /// wake the client to push the fresh batch.
-    private func afterLocalWrite() {
+    func afterLocalWrite() {
         project()
         saver?.poke()
         if let client {
@@ -222,6 +234,12 @@ final class WorkspaceStore: WorkspaceData {
             let child = SubagentProjection.decode(f["child"], as: ChildChat.self)
             // Don't promote a malformed child relation into the root list.
             if let rawChild = f["child"], rawChild != .null, child == nil { return nil }
+            // Nor a workspace thread or memory pass whose marker this app
+            // can't read: hidden, as the marker meant.
+            let bot = SubagentProjection.decode(f["bot"], as: BotChatMarker.self)
+            if let raw = f["bot"], raw != .null, bot == nil { return nil }
+            let memory = SubagentProjection.decode(f["memory"], as: MemoryChatMarker.self)
+            if let raw = f["memory"], raw != .null, memory == nil { return nil }
             var chatConfig: ChatConfig?
             if let c = f["config"]?.objectValue {
                 chatConfig = ChatConfig(
@@ -244,7 +262,7 @@ final class WorkspaceStore: WorkspaceData {
                 createdAt: f["createdAt"]?.int64Value ?? 0,
                 spaceId: f["spaceId"]?.stringValue,
                 lastSeenAt: f["lastSeenAt"]?.int64Value,
-                child: child)
+                child: child, bot: bot, memory: memory)
         }
 
         var rows: [String: SessionRow] = [:]
@@ -265,6 +283,62 @@ final class WorkspaceStore: WorkspaceData {
                 progress: RunProgress(f["progress"]))
         }
         sessions = rows
+        projectWorkspaces()
+    }
+
+    /// The `bots` rows and every record kind, each decoded only when its
+    /// rows changed since the last projection (this runs on every frame).
+    /// A row that doesn't decode is skipped, as `read_records` skips it.
+    private func projectWorkspaces() {
+        if let rows = changedRecords("bots", as: Bot.self) {
+            bots = rows.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
+        }
+        if let rows = changedRecords("botWork", as: BotWork.self) {
+            botRecords.work = rows.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
+        }
+        if let rows = changedRecords("botRoutines", as: BotRoutine.self) {
+            botRecords.routines = rows.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
+        }
+        if let rows = changedRecords("botActivity", as: BotActivity.self) {
+            botRecords.activity = rows.sorted { ($0.at, $0.id) > ($1.at, $1.id) }
+        }
+        if let rows = changedRecords("botApprovals", as: BotApproval.self) {
+            botRecords.approvals = rows.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
+        }
+        if let rows = changedRecords("botConnections", as: BotConnection.self) {
+            botRecords.connections = rows.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
+        }
+        if let rows = changedRecords("botInvites", as: BotInvite.self) {
+            botRecords.invites = rows.sorted {
+                $0.createdAt != $1.createdAt ? $0.createdAt > $1.createdAt : $0.id < $1.id
+            }
+        }
+        if let rows = changedRecords("botExchanges", as: BotExchange.self) {
+            botRecords.exchanges = rows.sorted { $0.askedAt != $1.askedAt ? $0.askedAt > $1.askedAt : $0.id < $1.id }
+        }
+        if let rows = changedRecords("botShortcuts", as: BotShortcut.self) {
+            botRecords.shortcuts = rows.sorted { ($0.order, $0.createdAt, $0.id) < ($1.order, $1.createdAt, $1.id) }
+        }
+        if let rows = changedRecords("memoryStores", as: MemoryStore.self) {
+            botRecords.memoryStores = rows.sorted { $0.id < $1.id }
+        }
+    }
+
+    @ObservationIgnored private let recordEncoder = JSONEncoder()
+    @ObservationIgnored private let recordDecoder = JSONDecoder()
+
+    /// `kind`'s rows decoded as `T`, or nil when they haven't changed since
+    /// the last call. A row's fields are the record's serde JSON.
+    private func changedRecords<T: Decodable>(_ kind: String, as type: T.Type) -> [T]? {
+        let generation = doc.generation(of: kind)
+        guard projectedGenerations[kind] != generation else { return nil }
+        projectedGenerations[kind] = generation
+        return doc.overlayRows(kind: kind).compactMap { row in
+            var fields = row.fields
+            if fields["id"] == nil { fields["id"] = .string(row.id) }
+            guard let data = try? recordEncoder.encode(JSONValue.object(fields)) else { return nil }
+            return try? recordDecoder.decode(T.self, from: data)
+        }
     }
 
     // MARK: Device relay (folder browsing / direct host RPCs; the calls are in

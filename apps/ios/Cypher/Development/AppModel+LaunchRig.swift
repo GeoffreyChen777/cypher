@@ -55,6 +55,11 @@ extension AppModel {
                 }
             } else if spec.hasPrefix("space:") {
                 launchRoute = .space(String(spec.dropFirst("space:".count)))
+            } else if spec.hasPrefix("bot:") {
+                // A workspace (DemoDataset+BotFixtures.swift: bot-atlas,
+                // bot-scout). With `-sheet board:<page>` its board opens on
+                // that page (`BotPage(launchSpec:botId:)`).
+                launchRoute = .bot(String(spec.dropFirst("bot:".count)))
             }
         }
         if let ix = args.firstIndex(of: "-sheet"), ix + 1 < args.count {

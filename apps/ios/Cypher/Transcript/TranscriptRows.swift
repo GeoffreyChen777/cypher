@@ -225,7 +225,7 @@ enum MessageCopy {
     static func text(_ entry: MessageEntry) -> String? {
         let joined = entry.parts.compactMap { part -> String? in
             switch part {
-            case .text(_, let text, _): return text
+            case .text(_, let text, _), .post(_, let text, _): return text
             case .error(_, let message) where entry.role != .user: return message
             default: return nil
             }
@@ -458,7 +458,7 @@ enum TranscriptRowBuilder {
         }
 
         for (ix, part) in entry.parts.enumerated() {
-            switch part {
+            switch part.transcriptShape {
             case .tool(let partId, let call, let isError, let resolved):
                 // A blocked attempt folded into its retry renders nothing and
                 // splits nothing.
@@ -565,6 +565,9 @@ enum TranscriptRowBuilder {
                         kind: .errorChip(message: message),
                         entryId: entry.id, timestamp: nil, partKey: nil))
                 first = false
+
+            case .post:
+                break  // `transcriptShape` draws a post as its text
             }
         }
         flushTools(lastIx: lastPartIx)
@@ -593,7 +596,7 @@ enum TranscriptRowBuilder {
         rows[last].version ^= 1 << 62
         rows[last].copyable = entry.parts.contains { part in
             switch part {
-            case .text(_, let text, _), .error(_, let text):
+            case .text(_, let text, _), .error(_, let text), .post(_, let text, _):
                 return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             default: return false
             }
