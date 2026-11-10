@@ -6,8 +6,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/loro-dev/loro-swift.git",
       "state" : {
-        "revision" : "625f3e696fca4be3ae77de8b3404fa6753554f21",
-        "version" : "1.13.3"
+        "revision" : "e0fb7775fa612130dd5c1c13a573fc3a377b8797",
+        "version" : "1.17.1"
       }
     },
     {

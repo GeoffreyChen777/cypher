@@ -530,7 +530,7 @@
 			repositoryURL = "https://github.com/loro-dev/loro-swift.git";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 1.13.3;
+				minimumVersion = 1.17.1;
 			};
 		};
 		A1000000000000000000P003 /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
