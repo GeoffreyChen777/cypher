@@ -300,10 +300,10 @@ impl Shell {
                 let hint = if !self.network_ready(cx) {
                     "Sign in to connect".to_string()
                 } else {
+                    // The card is named Connections: its hint is the count.
                     let mut parts = vec![match connections {
-                        0 => "No connections".to_string(),
-                        1 => "1 connection".to_string(),
-                        n => format!("{n} connections"),
+                        0 => "None yet".to_string(),
+                        n => n.to_string(),
                     }];
                     if invites > 0 {
                         parts.push(format!(
@@ -328,7 +328,7 @@ impl Shell {
         };
         Some(parts::header_card(
             "bot-network-card",
-            "Network",
+            "Connections",
             hint,
             color,
             open,
@@ -473,7 +473,7 @@ impl Shell {
         let head = PanelHead {
             glyph: icons::GLOBAL,
             tint: None,
-            title: "Network".into(),
+            title: "Connections".into(),
         };
         // The header's one button opens the connect page; a code is made
         // there only when asked for.
@@ -527,7 +527,7 @@ impl Shell {
             .iter()
             .map(|c| (c.id.clone(), c.peer.clone()))
             .collect();
-        body = body.child(parts::section_label(theme, "Connections"));
+        body = body.child(parts::section_label(theme, "Workspaces"));
         if connections.is_empty() {
             body = body.child(parts::quiet_line(theme, "None yet."));
         }
@@ -606,7 +606,12 @@ impl Shell {
             tint: None,
             title: "Connect a workspace".into(),
         };
-        self.set_panel_back("bot-invite-back", "Back to Network", PanelItem::Network, cx);
+        self.set_panel_back(
+            "bot-invite-back",
+            "Back to Connections",
+            PanelItem::Network,
+            cx,
+        );
         if !self.network_ready(cx) {
             return (
                 head,
@@ -842,7 +847,7 @@ impl Shell {
         }
         self.set_panel_back(
             "bot-connection-back",
-            "Back to Network",
+            "Back to Connections",
             PanelItem::Network,
             cx,
         );

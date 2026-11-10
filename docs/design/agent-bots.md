@@ -707,7 +707,7 @@ bracketed first line is what a UI can key on.
 
 Status: **built (P4)** on the Edge and in the engine: `BotRoom`, publish, invites,
 connections, peer threads in Auto, Review and Off, the outgoing scrub, exchange states,
-late answers and revocation. The Network card and its detail panel (§13.1) belong to the
+late answers and revocation. The Connections card and its detail panel (§13.1) belong to the
 UI track. Groups (§11.7) and end-to-end encryption are not built.
 
 ### 11.1 Flow
@@ -1015,7 +1015,7 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 | **Work** | Running orchestrations with their current step, a step bar and elapsed time; the last few finished ones with a one-line result | The orchestration: its status as the title's tile (state, progress and times on hover), its request, then one flow on one rail: each step with its state, duration, note and sessions, ending in the result; Stop. Agent-written text (request, summary, notes, result) renders as markdown. A step's title folds its details; hovering a node washes it and firms up its rail segment, a duration shows its exact times, the result offers Copy, and the shared project opens its page |
 | **Routines** | Its routines in order of next run: name, where and when it runs, next run, last result | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
 | **Projects** | Each granted project with device, running and waiting sessions, and "works directly" or "via sessions" | The list groups projects by device (sessions, what runs or asks, last activity). A project's page: its device beside the title (the folder on hover, a click copies it), its sessions in scope with status, the bot's work there and its routines there |
-| **Network** (P4) | Just its header: how many workspaces are connected, or "N to review" in amber when answers wait in Needs you (a click opens the review) | The Network panel lists connections, invites and recent questions; its header's + opens the connect page (create an invite code, or paste one). A connection opens its own page (scope, reply mode, exchanges, revoke), and a question its own (who asked whom, the question, the answer, how it ended; a waiting one opens as its review), each with a back arrow to Network |
+| **Connections** (P4; "network" in code) | Just its header: how many workspaces are connected ("3 · 1 open invite"), or "N to review" in amber when answers wait in Needs you (a click opens the review) | The Connections panel lists the connected workspaces, invites and recent questions; its header's + opens the connect page (create an invite code, or paste one). A connection opens its own page (scope, reply mode, exchanges, revoke), and a question its own (who asked whom, the question, the answer, how it ended; a waiting one opens as its review), each with a back arrow to Connections |
 
 **Shortcuts** sit pinned at the bottom of the sidebar, below the cards, which scroll above
 them: buttons, each an icon and a short label, wrapping; with none, the area isn't drawn. A
@@ -1030,8 +1030,8 @@ chip's menu only moves or deletes it. Shortcuts are `botShortcuts` registry rows
 deletion (`Mutate orderBotShortcuts`, `deleteBotShortcut`), and they are deleted with their
 workspace.
 
-There is no Activity card: it mostly repeated Work, Routines and Network. The full audit
-log, filterable as Plans, Sessions, Routines, Notes or Network, opens from the chat header's activity button and from "View all
+There is no Activity card: it mostly repeated Work, Routines and Connections. The full audit
+log, filterable as Plans, Sessions, Routines, Memory or Connections, opens from the chat header's activity button and from "View all
 activity" in the Work panel. A card with nothing to show is not drawn. **Needs you** always comes first, so attention
 items are never below the fold. One card floats at a time, the open panel item's; with
 the panel shut none does. A click on a card's header folds the card to that one row and back, as a project card's does (for this window only, like the project cards); the arrow at the header's end, shown on hover, opens its whole list; a row opens that item.
@@ -1089,10 +1089,10 @@ As built, beyond the table:
   read-only with a way back to its work item, routine or connection.
 - **A routine** can be granted *Work directly* ("May run commands"), only while the bot
   has it; unattended, anything that needs approval fails the run.
-- **Empty cards** for Routines and Network show only their header with a quiet
+- **Empty cards** for Routines and Connections show only their header with a quiet
   hint; the header opens the panel, whose own button adds the first routine, note or
   connection. No card carries a `+`.
-- **Signed out**, the Network card says "Sign in to connect"; records stay visible.
+- **Signed out**, the Connections card says "Sign in to connect"; records stay visible.
 
 ## 14. RPC
 
@@ -1137,7 +1137,7 @@ As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is n
 | **P1: foundation** (built) | Role-aware run profiles with engine-stamped origins; the untrusted-data prompt; the non-interactive run mode; the FTS index, `session_activity` and `project_git`. |
 | **P2: coordinator** (built) | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; plan, progress and result cards; Stop; limits including a 4-hour time budget; audit log; approvals for tainted threads. Not built: per-worker turn budgets. |
 | **P3: memory and routines** (built) | The notebook, since replaced by [Memory](memory.md); the scheduler; routines in the workspace (optionally working directly) or as sessions in a project; their posts in the bot chat; the Routines card; Needs you. Not built: event triggers. |
-| **P4: network** (built) | `BotRoom`, publish, invites, connections, peer threads, `ask_bot`, exchange states, late answers, the Network card and panels. |
+| **P4: network** (built) | `BotRoom`, publish, invites, connections, peer threads, `ask_bot`, exchange states, late answers, the Connections card and panels. |
 | **P5: review and control** (built but notifications) | Review mode and the outgoing scrub, reviews in Needs you; *Coordinate: steer* with a per-action approval. Not built: push notifications for reviews, plans and connections. |
 | **P6: groups, iPhone, E2E** | Owner groups, then shared groups; the iOS bot surfaces; end-to-end encrypted exchanges. |
 

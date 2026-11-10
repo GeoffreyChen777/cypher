@@ -42,7 +42,7 @@ pub(super) fn group_label(group: Option<ActivityGroup>) -> &'static str {
         Some(ActivityGroup::Sessions) => "Sessions",
         Some(ActivityGroup::Routines) => "Routines",
         Some(ActivityGroup::Notes) => "Memory",
-        Some(ActivityGroup::Network) => "Network",
+        Some(ActivityGroup::Network) => "Connections",
     }
 }
 
