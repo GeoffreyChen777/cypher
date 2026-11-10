@@ -544,7 +544,7 @@ impl Shell {
             body = body.child(parts::section_label(theme, "Recent questions"));
             for exchange in &exchanges {
                 let peer = peers.get(&exchange.connection_id);
-                body = body.child(exchange_row(exchange, peer, &bot.name, theme));
+                body = body.child(exchange_row(exchange, peer, &bot.name, theme, cx));
             }
         }
         (head, body)
@@ -1019,7 +1019,13 @@ impl Shell {
             body = body.child(parts::quiet_line(theme, "No questions yet."));
         }
         for exchange in &exchanges {
-            body = body.child(exchange_row(exchange, Some(&conn.peer), &bot.name, theme));
+            body = body.child(exchange_row(
+                exchange,
+                Some(&conn.peer),
+                &bot.name,
+                theme,
+                cx,
+            ));
         }
         Some((head, body))
     }
@@ -1195,13 +1201,15 @@ fn check_box(on: bool, theme: &Theme) -> gpui::Div {
 }
 
 /// One question between bots: the other person, who asked whom, the
-/// question, its state. A former connection's shows its direction instead.
+/// question, its state; a click opens it. A former connection's shows its
+/// direction instead.
 fn exchange_row(
     exchange: &BotExchange,
     peer: Option<&PeerBot>,
     bot: &str,
     theme: &Theme,
-) -> gpui::Div {
+    cx: &mut Context<Shell>,
+) -> gpui::Stateful<gpui::Div> {
     let incoming = exchange.direction == ExchangeDirection::Incoming;
     let who = match (incoming, peer) {
         (true, Some(peer)) => format!("{} asked {bot}", peer.name),
@@ -1226,7 +1234,24 @@ fn exchange_row(
         ExchangeState::Declined | ExchangeState::Expired => theme.text_faint,
         _ => theme.text_muted.opacity(0.85),
     };
+    let key = format!("bot-panel-question-{}", exchange.id);
+    // A waiting answer opens where it is reviewed.
+    let item = if exchange.awaiting_review() {
+        PanelItem::Review(exchange.id.clone())
+    } else {
+        PanelItem::Question(exchange.id.clone())
+    };
     div()
+        .id(SharedString::from(key.clone()))
+        .rounded(px(8.0))
+        .cursor_pointer()
+        .bg(motion::hover_blend(
+            &key,
+            crate::kit::theme::wash(0.0),
+            crate::kit::theme::wash(0.05),
+        ))
+        .on_hover(motion::hover_listener(key.clone()))
+        .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
         .pl(px(6.0))
         .pr(px(8.0))
         .py(px(6.0))

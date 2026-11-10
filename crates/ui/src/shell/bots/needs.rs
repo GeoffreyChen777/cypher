@@ -19,7 +19,7 @@ use super::items::{
 };
 use super::panel::{PanelHead, PanelItem};
 use super::*;
-use cypher_proto::{ApprovalState, ExchangeState, NeedsYou};
+use cypher_proto::{ApprovalState, ExchangeDirection, ExchangeState, NeedsYou};
 
 /// Rows the card shows before it points at the full list.
 const CARD_ROWS: usize = 5;
@@ -250,7 +250,7 @@ impl Shell {
             PanelItem::Asking { chat_id, work_id } => {
                 self.render_asking_panel(bot, chat_id, work_id, theme, cx)
             }
-            PanelItem::Review(id) => self.render_review_panel(id, theme, cx),
+            PanelItem::Review(id) => self.render_question_panel(id, theme, cx),
             _ => None,
         }
     }
@@ -636,7 +636,10 @@ impl Shell {
 
     /// A peer's question and the answer the bot drafted, editable, then
     /// Send / Decline.
-    fn render_review_panel(
+    /// One question between workspaces: who asked whom, the question and
+    /// its answer, and how it ended; while its answer waits on the owner,
+    /// the draft to edit and Send / Decline.
+    pub(super) fn render_question_panel(
         &mut self,
         exchange_id: &str,
         theme: &Theme,
@@ -670,6 +673,7 @@ impl Shell {
             (exchange, label, person)
         };
         let awaiting = exchange.awaiting_review();
+        let incoming = exchange.direction == ExchangeDirection::Incoming;
         if awaiting
             && self
                 .board
@@ -686,9 +690,18 @@ impl Shell {
             self.board.review = Some((exchange_id.to_string(), input));
         }
         let head = PanelHead {
-            glyph: icons::USERS,
+            glyph: if awaiting {
+                icons::USERS
+            } else {
+                icons::CHAT_ROUND_LINE
+            },
             tint: awaiting.then_some(theme.warning),
-            title: "Review answer".into(),
+            title: if awaiting {
+                "Review answer"
+            } else {
+                "Question"
+            }
+            .into(),
         };
         // The Network card opens a waiting review straight away; this is
         // the way on to the connections.
@@ -699,7 +712,7 @@ impl Shell {
             .flex_col()
             .child(parts::fact(
                 theme,
-                "From",
+                if incoming { "From" } else { "To" },
                 div()
                     .flex()
                     .flex_row()
@@ -780,11 +793,21 @@ impl Shell {
                 if let Some(answer) = shown.filter(|a| !a.trim().is_empty()) {
                     body = body.child(parts::fact(theme, "Answer", text_value(&answer)));
                 }
-                let (text, ok) = match (exchange.state, sent) {
-                    (ExchangeState::Answered, _) | (_, Some((true, _))) => ("Sent", true),
-                    (ExchangeState::Declined, _) | (_, Some((false, _))) => ("Declined", false),
-                    (ExchangeState::Expired, _) => ("Expired", false),
-                    _ => ("Waiting on its answer", false),
+                let (text, ok) = if incoming {
+                    match (exchange.state, sent) {
+                        (ExchangeState::Answered, _) => ("Sent", true),
+                        (_, Some((true, _))) => ("Sending your answer", true),
+                        (ExchangeState::Declined, _) | (_, Some((false, _))) => ("Declined", false),
+                        (ExchangeState::Expired, _) => ("Expired", false),
+                        _ => ("Working on its answer", false),
+                    }
+                } else {
+                    match exchange.state {
+                        ExchangeState::Answered => ("Answered", true),
+                        ExchangeState::Declined => ("They declined to answer", false),
+                        ExchangeState::Expired => ("No answer came; it expired", false),
+                        _ => ("Waiting for their answer", false),
+                    }
                 };
                 body = body.child(parts::fact(theme, "Status", outcome_value(text, ok, theme)));
             }

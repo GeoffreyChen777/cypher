@@ -26,6 +26,9 @@ pub(in crate::shell) enum PanelItem {
     },
     /// A peer answer drafted in Review mode (exchange id).
     Review(String),
+    /// One question between workspaces, either way, opened from the
+    /// Network panel (exchange id); a waiting review shows as `Review`.
+    Question(String),
     /// Running and recent work.
     Work,
     /// One orchestration (work id).
@@ -82,7 +85,10 @@ impl Shell {
         if self.board.peek.as_ref().map(|p| &p.chat_id) != keep_peek.as_ref() {
             self.board.peek = None;
         }
-        if !matches!(self.board.panel, Some(PanelItem::Review(_))) {
+        if !matches!(
+            self.board.panel,
+            Some(PanelItem::Review(_) | PanelItem::Question(_))
+        ) {
             self.board.review = None;
         }
     }
@@ -168,6 +174,7 @@ impl Shell {
             PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => {
                 self.render_network_panel(&bot, item, &theme, cx)?
             }
+            PanelItem::Question(id) => self.render_question_panel(id, &theme, cx)?,
         };
         let card_bg = crate::appearance::chat_style::panel_background(
             crate::appearance::chat_style::settings(cx),

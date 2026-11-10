@@ -145,7 +145,10 @@ pub(super) fn card_of(
         PanelItem::Schedule | PanelItem::Routine(_) | PanelItem::NewRoutine => "schedule",
         // The log opens from the Work panel and the chat header.
         PanelItem::Activity => "work",
-        PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => "network",
+        PanelItem::Network
+        | PanelItem::Connection(_)
+        | PanelItem::Invite
+        | PanelItem::Question(_) => "network",
         PanelItem::Thread(chat_id) => match thread_kind(chat_id) {
             Some(
                 cypher_proto::BotThread::Routine { .. }
