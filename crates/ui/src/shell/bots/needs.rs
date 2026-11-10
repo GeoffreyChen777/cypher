@@ -687,6 +687,9 @@ impl Shell {
             tint: awaiting.then_some(theme.warning),
             title: "Review answer".into(),
         };
+        // The Network card opens a waiting review straight away; this is
+        // the way on to the connections.
+        self.set_panel_back("bot-review-back", "Back to Network", PanelItem::Network, cx);
         let mut body = div()
             .p(px(8.0))
             .flex()
