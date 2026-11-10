@@ -117,10 +117,11 @@ pub(super) struct NetworkUi {
 impl Shell {
     /// Whether this device can reach the bot network: signed in.
     fn network_ready(&self, cx: &App) -> bool {
-        // The capture driver judges the signed-in panels against a local
-        // engine.
-        #[cfg(feature = "dev-capture")]
-        if cypher_env::var("CAPTURE_SIGNED_IN").is_some() {
+        // Development builds (and the capture driver) can show the
+        // signed-in panels against a local engine with seeded rows:
+        // `CYPHER_DEV_NETWORK_PREVIEW=1`. Calls still fail without an Edge.
+        #[cfg(any(debug_assertions, feature = "dev-capture"))]
+        if cypher_env::var("DEV_NETWORK_PREVIEW").is_some() {
             return true;
         }
         matches!(
