@@ -484,10 +484,19 @@ impl DocHost {
     /// The chat row's current launch settings (model and permission level),
     /// if the row has a config.
     fn chat_launch_config(&self, chat_id: &str) -> Option<crate::session::engine::LaunchConfig> {
-        self.workspace()?
+        let workspace = self.workspace()?;
+        let mut launch = workspace
             .launch_config(chat_id)
             .as_ref()
-            .map(crate::session::engine::LaunchConfig::of_chat)
+            .map(crate::session::engine::LaunchConfig::of_chat)?;
+        // A bot thread runs at the level the engine decides (dispatch does
+        // the same), so a parked bot run is not retired over the row's.
+        if let Some(chat) = workspace.chat(chat_id).ok().flatten()
+            && let Some(level) = crate::bots::profile::run_sandbox(workspace, &chat)
+        {
+            launch.sandbox = level;
+        }
+        Some(launch)
     }
 
     /// A steer-turned-run with no in-process `last_request` (engine restarted

@@ -12,6 +12,7 @@ fn round_trip() {
         notifications_background_only: false,
         dock_badge_enabled: false,
         right_pane_width: 700.0,
+        bot_panel_width: 520.0,
         terminal_height: 320.0,
         keymap: KeymapConfig {
             toggle_sidebar: "mod-shift-s".into(),
@@ -41,6 +42,8 @@ fn round_trip() {
                 used_at: 7,
             },
         )]),
+        window_mode: WindowMode::Botboard,
+        botboard_bot: Some("bot-1".into()),
     };
     settings.save(dir.path()).unwrap();
     assert_eq!(UiSettings::load(dir.path()), settings);
@@ -50,6 +53,8 @@ fn round_trip() {
         "\"projectWorkspaces\"",
         "\"sessionDocks\"",
         "\"rightOpen\"",
+        "\"windowMode\": \"botboard\"",
+        "\"botboardBot\"",
     ] {
         assert!(json.contains(key), "{key} missing: {json}");
     }
@@ -234,6 +239,21 @@ fn settings_without_appearance_default_to_system() {
     );
 }
 
+/// Files from before the Botboard open in Projects mode; an unknown mode
+/// (a newer build's) does too, without resetting anything else.
+#[test]
+fn the_window_mode_defaults_to_projects() {
+    let old: UiSettings = serde_json::from_str(r#"{"sidebarWidth": 300}"#).unwrap();
+    assert_eq!(old.window_mode, WindowMode::Projects);
+    assert_eq!(old.botboard_bot, None);
+    let newer: UiSettings =
+        serde_json::from_str(r#"{"sidebarWidth": 300, "windowMode": "inbox"}"#).unwrap();
+    assert_eq!(newer.window_mode, WindowMode::Projects);
+    assert_eq!(newer.sidebar_width, 300.0);
+    let json = serde_json::to_string(&UiSettings::default()).unwrap();
+    assert!(!json.contains("botboardBot"), "{json}");
+}
+
 #[test]
 fn missing_and_corrupt_files_yield_defaults() {
     let dir = tempfile::tempdir().unwrap();
@@ -247,12 +267,13 @@ fn loaded_values_are_clamped() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         UiSettings::path(dir.path()),
-        r#"{"sidebarWidth": 10000, "rightPaneWidth": 1}"#,
+        r#"{"sidebarWidth": 10000, "rightPaneWidth": 1, "botPanelWidth": 5000}"#,
     )
     .unwrap();
     let loaded = UiSettings::load(dir.path());
     assert_eq!(loaded.sidebar_width, SIDEBAR_MAX);
     assert_eq!(loaded.right_pane_width, RIGHT_PANE_MIN);
+    assert_eq!(loaded.bot_panel_width, BOT_PANEL_MAX);
 }
 
 #[test]

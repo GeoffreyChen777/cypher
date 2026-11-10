@@ -11,7 +11,8 @@
 //! - host → DO: must carry `to = connId`; the DO strips routing keys and delivers;
 //! - relay control frames use kind [`RELAY_KIND`] with payload `{"error": code}` —
 //!   codes `host_offline`, `host_closed`, `client_gone`, `client_closed`;
-//! - nudge frames use kind [`NUDGE_KIND`] with payload `{"chatId": …}`.
+//! - nudge frames use kind [`NUDGE_KIND`] with payload `{"chatId": …}`;
+//! - bot network nudges use kind [`BOTS_NUDGE_KIND`] with payload `{"botRoomId": …}`.
 //!
 //! The RPC path multiplexes NOTHING new: each distinct client `connId` becomes a virtual
 //! string-frame connection feeding the existing [`serve_connection`] seam, so every RPC
@@ -43,6 +44,10 @@ pub const RELAY_KIND: &str = " relay";
 
 /// Durable command nudge frames (§7 cold-chat delivery): payload `{chatId}`.
 pub const NUDGE_KIND: &str = "nudge";
+
+/// Bot network nudges (docs/design/agent-bots.md §11.5): payload `{botRoomId}`,
+/// "this bot's room has entries for you". Sent by the Edge's `BotRoom`.
+pub const BOTS_NUDGE_KIND: &str = "bots";
 
 /// The RPC stream over the relay: both `s` (stream id) and `k` (kind) are `"rpc"`.
 pub(crate) const RPC_KIND: &str = "rpc";

@@ -100,6 +100,29 @@ impl Shell {
         self.pages.providers = Some(cx.new(|cx| ProvidersPage::new(state, target, intent, cx)));
     }
 
+    /// Settings → Memory on `scope`'s store (`/memory` in a session).
+    pub(super) fn open_memory_settings(
+        &mut self,
+        scope: cypher_proto::MemoryScope,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_project_window() {
+            self.forward_to_main(cx, move |main, cx| main.open_memory_settings(scope, cx));
+            return;
+        }
+        self.open_settings(SettingsSection::Memory, cx);
+        match &self.pages.memory {
+            Some(page) => page.update(cx, |page, cx| page.open(scope, cx)),
+            None => {
+                let state = self.state.clone();
+                self.pages.memory =
+                    Some(cx.new(|cx| {
+                        crate::settings::memory::MemorySettingsPage::new(state, scope, cx)
+                    }));
+            }
+        }
+    }
+
     pub(super) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         // Settings are app-wide: a project window opens them in the main
         // window, carrying over the device its composer aimed them at.
@@ -184,16 +207,30 @@ impl Shell {
 
     // ---- back/forward (route history) ----
 
+    /// The Botboard records no history of its own: it sits over the
+    /// current entry, so Back from it lands in Projects mode on that entry.
     pub(super) fn navigate_back(&mut self, cx: &mut Context<Self>) {
+        if self.botboard() && matches!(self.route, Route::Chat) {
+            return self.set_window_mode(crate::prefs::WindowMode::Projects, cx);
+        }
         if let Some(entry) = self.nav.back() {
             self.apply_nav(entry, cx);
         }
     }
 
     pub(super) fn navigate_forward(&mut self, cx: &mut Context<Self>) {
+        if self.nav.can_forward() && matches!(self.route, Route::Chat) {
+            self.set_window_mode(crate::prefs::WindowMode::Projects, cx);
+        }
         if let Some(entry) = self.nav.forward() {
             self.apply_nav(entry, cx);
         }
+    }
+
+    /// Whether Back goes anywhere (the Botboard always has Projects
+    /// behind it).
+    pub(super) fn can_navigate_back(&self) -> bool {
+        self.nav.can_back() || (self.botboard() && matches!(self.route, Route::Chat))
     }
 
     /// Land on a history entry WITHOUT recording a new one: the stack already
@@ -207,8 +244,11 @@ impl Shell {
             NavEntry::Chat(chat_id) => {
                 self.route = Route::Chat;
                 // Land on the entry's tab (reopening it if it was closed);
-                // the follow push then dedups against `current()`.
-                self.open_nav_target(chat_id, cx);
+                // the follow push then dedups against `current()`. Leaving
+                // Settings for a Botboard comes back to the board.
+                if !self.botboard() {
+                    self.open_nav_target(chat_id, cx);
+                }
             }
             NavEntry::Settings(section) => {
                 self.dismiss_comment_popup(cx);
@@ -417,6 +457,24 @@ impl Shell {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
+            }
+            SettingsSection::Memory => {
+                let page = match &self.pages.memory {
+                    Some(page) => page.clone(),
+                    None => {
+                        let state = self.state.clone();
+                        let page = cx.new(|cx| {
+                            crate::settings::memory::MemorySettingsPage::new(
+                                state,
+                                cypher_proto::MemoryScope::You,
+                                cx,
+                            )
+                        });
+                        self.pages.memory = Some(page.clone());
+                        page
+                    }
+                };
+                page.into_any_element()
             }
             SettingsSection::Archived => {
                 if self.pages.archived.is_none() {

@@ -300,6 +300,8 @@ fn chat(id: &str, device_id: &str) -> Chat {
         last_seen_at: None,
         room_gen: None,
         child: None,
+        bot: None,
+        memory: None,
     }
 }
 
@@ -1119,6 +1121,45 @@ fn coalescing_keeps_writes_a_newer_op_does_not_cover() {
 }
 
 #[test]
+fn coalescing_keeps_a_create_a_pending_update_still_needs() {
+    // Create, then a partial update, then an upsert that covers the create
+    // but not the update: dropping the create would leave the update with no
+    // row to apply to, and its fields would vanish.
+    let fields = |pairs: &[(&str, Value)]| {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect::<serde_json::Map<String, Value>>()
+    };
+    let mut row = vec![
+        ("id", json!("cn-1")),
+        ("botId", json!("b")),
+        ("createdAt", json!(1)),
+        (
+            "peer",
+            json!({"roomId": "r", "name": "n", "ownerName": "o"}),
+        ),
+    ];
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.put_record("botConnections", "cn-1", fields(&row))
+        .unwrap();
+    doc.update_record(
+        "botConnections",
+        "cn-1",
+        fields(&[("replyMode", json!("off"))]),
+    )
+    .unwrap();
+    row.push(("lastExchangeAt", json!(5)));
+    doc.put_record("botConnections", "cn-1", fields(&row))
+        .unwrap();
+    let shown = doc.record("botConnections", "cn-1").unwrap();
+    assert_eq!(shown["replyMode"], json!("off"));
+    assert_eq!(shown["lastExchangeAt"], json!(5));
+    assert!(doc.settle_pending_locally());
+    assert_eq!(doc.record("botConnections", "cn-1").unwrap(), shown);
+}
+
+#[test]
 fn settling_locally_folds_pending_into_rows() {
     let mut doc = RegistryDoc::new("dev-a");
     doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
@@ -1256,4 +1297,142 @@ fn pins_survive_overlay_read_all_and_snapshot() {
     assert!(doc.set_space_appearance("s1", None, None).unwrap());
     let plain = doc.space("s1").unwrap().unwrap();
     assert_eq!((plain.icon, plain.color), (None, None));
+}
+
+fn bot(id: &str, chat_id: &str) -> Bot {
+    Bot {
+        id: id.into(),
+        name: "Billing bot".into(),
+        icon: Some("rocket".into()),
+        color: None,
+        host_device_id: "dev-a".into(),
+        chat_id: chat_id.into(),
+        instructions: None,
+        scope: cypher_proto::BotScope {
+            projects: cypher_proto::ProjectGrant::Selected {
+                space_ids: vec!["s1".into()],
+            },
+            ..Default::default()
+        },
+        capabilities: Default::default(),
+        paused: false,
+        created_at: ts(4_000),
+    }
+}
+
+#[test]
+fn bots_round_trip_update_and_survive_a_snapshot() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_bot(&bot("b1", "c1")).unwrap();
+    assert_eq!(doc.read_all().unwrap().bots, vec![bot("b1", "c1")]);
+    let update = BotUpdate {
+        name: Some("Release bot".into()),
+        icon: Some(None),
+        scope: Some(cypher_proto::BotScope {
+            projects: cypher_proto::ProjectGrant::All,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(doc.update_bot("b1", &update).unwrap());
+    assert!(!doc.update_bot("missing", &update).unwrap());
+    let again = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "dev-a").unwrap();
+    let edited = again.bot("b1").unwrap().unwrap();
+    assert_eq!(edited.name, "Release bot");
+    assert_eq!(edited.icon, None);
+    assert_eq!(edited.scope.projects, cypher_proto::ProjectGrant::All);
+    assert_eq!(edited.chat_id, "c1", "untouched fields keep their values");
+}
+
+#[test]
+fn deleting_a_bot_removes_its_chats_and_records() {
+    use cypher_proto as p;
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut own = chat("c1", "dev-a");
+    own.bot = Some(p::BotChat::owner("b1"));
+    doc.upsert_chat(&own).unwrap();
+    let mut thread = chat("t1", "dev-a");
+    thread.bot = Some(p::BotChat::thread(
+        "b1",
+        p::BotOrigin::Routine,
+        p::BotThread::Routine {
+            routine_id: "r1".into(),
+        },
+    ));
+    doc.upsert_chat(&thread).unwrap();
+    doc.upsert_chat(&chat("other", "dev-a")).unwrap();
+    doc.upsert_bot(&bot("b1", "c1")).unwrap();
+    let mut note = serde_json::Map::new();
+    for (k, v) in [
+        ("id", json!("n1")),
+        ("botId", json!("b1")),
+        ("text", json!("x")),
+        ("createdAt", json!(1)),
+        ("updatedAt", json!(1)),
+    ] {
+        note.insert(k.into(), v);
+    }
+    doc.put_record(p::KIND_BOT_NOTES, "n1", note).unwrap();
+    assert_eq!(
+        doc.chat("c1").unwrap().unwrap().bot.unwrap().bot_id,
+        "b1",
+        "the chat marker round-trips"
+    );
+    assert_eq!(
+        doc.delete_bot("b1").unwrap(),
+        Some(vec!["c1".to_string(), "t1".to_string()])
+    );
+    assert_eq!(doc.delete_bot("b1").unwrap(), None);
+    let all = doc.read_all().unwrap();
+    assert!(all.bots.is_empty());
+    assert_eq!(
+        all.chats.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        ["other"]
+    );
+    assert!(doc.read_bot_records().notes.is_empty());
+}
+
+#[test]
+fn an_unreadable_bot_scope_reads_as_empty() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_bot(&bot("b1", "c1")).unwrap();
+    let mut set = BTreeMap::new();
+    set.insert("scope".into(), json!({"projects": {"mode": "everything"}}));
+    doc.write(KIND_BOTS, "b1", OpKind::Update, set);
+    let read = doc.bot("b1").unwrap().unwrap();
+    assert_eq!(read.scope, cypher_proto::BotScope::default());
+}
+
+#[test]
+fn bot_records_write_per_field_and_refuse_oversized_rows() {
+    use cypher_proto as p;
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut work = serde_json::Map::new();
+    work.insert("id".into(), json!("w1"));
+    work.insert("botId".into(), json!("b"));
+    work.insert("title".into(), json!("Fix it"));
+    work.insert("chatId".into(), json!("c"));
+    work.insert("createdAt".into(), json!(1));
+    work.insert("state".into(), json!("proposed"));
+    doc.put_record(p::KIND_BOT_WORK, "w1", work).unwrap();
+    // An owner device decides; the host's fields are untouched.
+    let mut decision = serde_json::Map::new();
+    decision.insert("decision".into(), json!({"approve": true, "at": 2}));
+    assert!(doc.update_record(p::KIND_BOT_WORK, "w1", decision).unwrap());
+    assert!(
+        !doc.update_record(p::KIND_BOT_WORK, "nope", serde_json::Map::new())
+            .unwrap()
+    );
+    let records = doc.read_bot_records();
+    assert_eq!(records.work.len(), 1);
+    assert_eq!(records.work[0].title, "Fix it");
+    assert!(records.work[0].decision.as_ref().is_some_and(|d| d.approve));
+
+    let mut huge = serde_json::Map::new();
+    huge.insert("text".into(), json!("x".repeat(20_000)));
+    assert!(doc.put_record(p::KIND_BOT_NOTES, "n", huge).is_err());
+    assert!(doc.read_bot_records().notes.is_empty());
+
+    doc.delete_records(p::KIND_BOT_WORK, &["w1".to_string()]);
+    assert!(doc.read_bot_records().work.is_empty());
 }

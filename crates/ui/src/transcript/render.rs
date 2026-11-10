@@ -394,6 +394,89 @@ impl Transcript {
         } else {
             (top_gap, inner)
         };
+        // A card's rows each draw their slice of it; the gap between two of
+        // them is drawn inside, so the card is one unbroken box.
+        let (top_gap, inner) = match row.card {
+            Some(slice) => {
+                // The composer pill's glass: its fill and border, frosted,
+                // with its soft lift drawn only outside the shape. Every
+                // slice draws its share; at a seam the shadow's shape runs
+                // on past the slice and is clipped to it, so slices join
+                // without a notch.
+                const RADIUS: f32 = 14.0;
+                const RUN_ON: f32 = 40.0;
+                let reach = crate::kit::soft_shadow::Reach {
+                    top: 3.0,
+                    side: 8.0,
+                    bottom: 14.0,
+                };
+                let (fill, line) = if slice.failed {
+                    (
+                        theme.danger.opacity(0.06),
+                        theme.danger.opacity(if theme.appearance.is_dark() {
+                            0.22
+                        } else {
+                            0.16
+                        }),
+                    )
+                } else {
+                    (theme.input_glass_bg(), theme.border)
+                };
+                let corners = gpui::Corners {
+                    top_left: px(if slice.top { RADIUS } else { 0.0 }),
+                    top_right: px(if slice.top { RADIUS } else { 0.0 }),
+                    bottom_left: px(if slice.bottom { RADIUS } else { 0.0 }),
+                    bottom_right: px(if slice.bottom { RADIUS } else { 0.0 }),
+                };
+                let face = div()
+                    .w_full()
+                    .bg(fill)
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(line)
+                    .px(px(16.0))
+                    .when(slice.top, |el| el.border_t_1().rounded_t(px(RADIUS)))
+                    .when(!slice.top, |el| el.pt(px(top_gap)))
+                    .when(slice.bottom, |el| {
+                        el.border_b_1().rounded_b(px(RADIUS)).pb(px(14.0))
+                    })
+                    .child(inner);
+                let face = crate::kit::frost::frosted_corners(corners, 16.0, face);
+                let run_top = if slice.top { 0.0 } else { RUN_ON };
+                let run_bottom = if slice.bottom { 0.0 } else { RUN_ON };
+                let lift = div()
+                    .absolute()
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .top(px(-run_top))
+                    .bottom(px(-run_bottom))
+                    .child(
+                        crate::kit::soft_shadow::outside_shadow(RADIUS, reach, theme.lift_shadow())
+                            .size_full(),
+                    );
+                let card = div()
+                    .relative()
+                    .overflow_hidden()
+                    .mx(px(-reach.side))
+                    .px(px(reach.side))
+                    .when(slice.top, |el| el.pt(px(reach.top)))
+                    .when(slice.bottom, |el| el.pb(px(reach.bottom)))
+                    // The lift is painted after the frost, so the blur never
+                    // samples it.
+                    .child(face)
+                    .child(lift)
+                    .into_any_element();
+                (
+                    if slice.top {
+                        (top_gap + 6.0 - reach.top).max(0.0)
+                    } else {
+                        0.0
+                    },
+                    card,
+                )
+            }
+            None => (top_gap, inner),
+        };
 
         let strip = self.render_timestamp_strip(&row, &theme, cx);
         let entry_id = row.entry_id.clone();
@@ -634,6 +717,15 @@ impl Transcript {
                 ..
             } => input_chip(header.clone(), *resolved, *permission, theme),
             RowKind::ErrorChip { message } => error_chip(message.clone(), theme),
+            RowKind::BotPlan { .. } => self.render_bot_plan(&row.id, &row.kind, theme, window, cx),
+            RowKind::MemoryWrite { .. } => self.render_memory_card(&row.id, &row.kind, theme, cx),
+            RowKind::BotPost {
+                name,
+                failed,
+                run_at,
+                thread,
+            } => bot_post_header(&row.id, name, *failed, *run_at, thread.clone(), theme),
+            RowKind::PeerAnswer { header } => peer_answer_header(header, theme),
             RowKind::Worked { label } => worked_rule(label.clone(), theme),
             RowKind::TurnChanges { changes } => {
                 self.render_turn_changes(&row.id, changes, theme, cx)
@@ -1031,7 +1123,9 @@ impl Transcript {
                     message_for_copy(&state.transcript, state.pending_echoes(), &row.entry_id)
                         .is_some_and(|entry| {
                             entry.parts.iter().any(|part| match part {
-                                MessagePart::Text { text, .. } => !text.trim().is_empty(),
+                                MessagePart::Text { text, .. } | MessagePart::Post { text, .. } => {
+                                    !text.trim().is_empty()
+                                }
                                 MessagePart::Error { message, .. } => !message.trim().is_empty(),
                                 _ => false,
                             })
@@ -1322,6 +1416,170 @@ fn user_bubble_text(
 /// message WRAPS instead of truncating: startup-crash errors carry the
 /// agent's exit status and stderr, and a one-line ellipsis was exactly what
 /// made zeronsh/comet#95 undiagnosable from the screenshot.
+/// The head of a routine's result card in a bot chat: the routine's mark,
+/// its name over "Routine · <when>", the outcome, and a way into the
+/// thread it ran in (opened in the Workspaces board's panel). The card
+/// itself is drawn around this row and the result's rows ([`Row::card`]).
+fn bot_post_header(
+    row_id: &SharedString,
+    name: &SharedString,
+    failed: bool,
+    run_at: i64,
+    thread: Option<SharedString>,
+    theme: &Theme,
+) -> AnyElement {
+    use crate::kit::icons::{CHECK, CLOCK, DANGER_TRIANGLE, icon};
+    let when = chrono::DateTime::from_timestamp_millis(run_at)
+        .map(|at| {
+            let local = at.with_timezone(&chrono::Local);
+            if local.date_naive() == chrono::Local::now().date_naive() {
+                format!("Today {}", local.format("%H:%M"))
+            } else {
+                local.format("%b %-d, %H:%M").to_string()
+            }
+        })
+        .unwrap_or_default();
+    let tone = if failed { theme.danger } else { theme.accent };
+    let (status_glyph, status_word, status_color) = if failed {
+        (DANGER_TRIANGLE, "Failed", theme.danger)
+    } else {
+        (CHECK, "Done", theme.success)
+    };
+    let link_key: SharedString = format!("{row_id}-thread").into();
+    let open = thread.map(|thread| {
+        let url = format!(
+            "{}{thread}",
+            crate::markdown::session_link::SESSION_LINK_PREFIX
+        );
+        div()
+            .id(link_key.clone())
+            .flex_none()
+            .h(px(26.0))
+            .px(px(9.0))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .text_size(px(12.0))
+            .text_color(crate::kit::motion::hover_blend(
+                &link_key,
+                theme.text_muted,
+                theme.text,
+            ))
+            .bg(crate::kit::motion::hover_blend(
+                &link_key,
+                crate::kit::theme::wash(0.0),
+                crate::kit::theme::wash(0.08),
+            ))
+            .on_hover(crate::kit::motion::hover_listener(link_key.clone()))
+            .on_click(move |_, window, cx| {
+                crate::markdown::session_link::open_link(&url, window, cx)
+            })
+            .child(SharedString::from("Open session"))
+    });
+    div()
+        .pt(px(12.0))
+        .pb(px(10.0))
+        .w_full()
+        .border_b_1()
+        .border_color(if failed {
+            theme.danger.opacity(if theme.appearance.is_dark() {
+                0.16
+            } else {
+                0.1
+            })
+        } else {
+            crate::kit::theme::hairline(if theme.appearance.is_dark() {
+                0.08
+            } else {
+                0.04
+            })
+        })
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .child(
+            div()
+                .flex_none()
+                .size(px(28.0))
+                .rounded(px(8.0))
+                .bg(tone.opacity(0.14))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(CLOCK).size(px(14.0)).text_color(tone)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(13.5))
+                        .line_height(px(18.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(name.clone()),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.5))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(format!("Routine · {when}"))),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .text_size(px(11.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(status_color)
+                .child(icon(status_glyph).size(px(11.0)).text_color(status_color))
+                .child(SharedString::from(status_word)),
+        )
+        .children(open)
+        .into_any_element()
+}
+
+/// The attribution over another user's bot's late answer in a bot chat.
+fn peer_answer_header(header: &SharedString, theme: &Theme) -> AnyElement {
+    use crate::kit::icons::{USERS, icon};
+    div()
+        .pt(px(10.0))
+        .pb(px(2.0))
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(12.0))
+        .child(
+            icon(USERS)
+                .size(px(13.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(theme.text_muted)
+                .child(header.clone()),
+        )
+        .into_any_element()
+}
+
 fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
     let red_300 = theme.danger_muted; // tailwind red-300
     let danger = theme.danger; // red-400
@@ -1510,6 +1768,44 @@ fn input_chip(header: SharedString, resolved: bool, permission: bool, theme: &Th
 /// quiet monochrome character keeps the tile without shipping SVGs).
 /// The glyph for a tool call (zeron tool-chip.tsx `toolIcon`, Solar set).
 fn tool_icon_path(call: &ToolCall) -> &'static str {
+    if let Some(kind) = cypher_proto::view::bot_tool_kind(call) {
+        use cypher_proto::view::BotToolKind;
+        return match kind {
+            BotToolKind::ListProjects => crate::kit::icons::FOLDER,
+            BotToolKind::ListSessions => crate::kit::icons::CHECKLIST,
+            BotToolKind::SessionActivity => crate::kit::icons::PULSE,
+            BotToolKind::SearchSessions => crate::kit::icons::MAGNIFER,
+            BotToolKind::ReadSession => crate::kit::icons::CHAT_ROUND_LINE,
+            BotToolKind::ProjectGit | BotToolKind::CreateWorktree => crate::kit::icons::GIT_BRANCH,
+            BotToolKind::ProposePlan
+            | BotToolKind::ListWork
+            | BotToolKind::GetWork
+            | BotToolKind::StopWork => crate::kit::icons::CHECKLIST,
+            BotToolKind::UpdateStep | BotToolKind::FinishWork => crate::kit::icons::CHECKLIST,
+            BotToolKind::StartSession
+            | BotToolKind::WaitForSession
+            | BotToolKind::AnswerSession
+            | BotToolKind::SteerSession
+            | BotToolKind::StopSession => crate::kit::icons::CHAT_ROUND_LINE,
+            BotToolKind::ReadMemory | BotToolKind::Memory => crate::kit::icons::BOOK,
+            BotToolKind::CreateMemory
+            | BotToolKind::UpdateMemory
+            | BotToolKind::DeleteMemory
+            | BotToolKind::RenameMemory => crate::kit::icons::PEN,
+            BotToolKind::SearchMemory | BotToolKind::SearchHistory => crate::kit::icons::MAGNIFER,
+            BotToolKind::ReadHistory => crate::kit::icons::CHAT_ROUND_LINE,
+            BotToolKind::ListRoutines
+            | BotToolKind::SaveRoutine
+            | BotToolKind::RunRoutine
+            | BotToolKind::DeleteRoutine
+            | BotToolKind::SaveProjectTask => crate::kit::icons::PULSE,
+            BotToolKind::ListShortcuts
+            | BotToolKind::SaveShortcut
+            | BotToolKind::DeleteShortcut => crate::kit::icons::BOLT,
+            BotToolKind::ListConnections | BotToolKind::AskBot => crate::kit::icons::BOT,
+            BotToolKind::ListActivity => crate::kit::icons::PULSE,
+        };
+    }
     match call {
         ToolCall::Exec { .. } => crate::kit::icons::COMMAND,
         ToolCall::ReadFile { .. } | ToolCall::ApplyPatch { .. } => crate::kit::icons::DOCUMENT,
@@ -1768,12 +2064,30 @@ fn chip_header_row(
 /// extension tool has no kind of its own, so its name is the label.
 pub(super) fn tool_row_text(tool: &ToolItem) -> (String, String) {
     let (label, parameter) = tool_chip_content(&tool.call);
-    let parameter = parameter.trim().to_owned();
+    let mut parameter = parameter.trim().to_owned();
+    // A bot's session read names its session by id; its result opens with
+    // the session's title, which reads better.
+    if cypher_proto::view::bot_tool_kind(&tool.call)
+        == Some(cypher_proto::view::BotToolKind::ReadSession)
+        && let Some(ToolDetail::Output { lines, .. }) = tool.detail.as_deref()
+        && let Some(title) = lines.first().and_then(|line| read_session_title(line))
+    {
+        parameter = title;
+    }
     if label == "Tool" {
         (parameter, String::new())
     } else {
         (label.to_owned(), parameter)
     }
+}
+
+/// The title in a bot `read_session` result's first line:
+/// `Session <id> · "<title>" · <place> · …`.
+pub(super) fn read_session_title(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("Session ")?;
+    let (_, after) = rest.split_once(" · \"")?;
+    let (title, _) = after.split_once("\" · ")?;
+    (!title.trim().is_empty()).then(|| title.trim().to_owned())
 }
 
 /// Whether permission control held the call back (the sandbox blocked it,

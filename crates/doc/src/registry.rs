@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use cypher_proto::{Chat, ChatConfig, ChatHome, Device, Session, Space};
+use cypher_proto::{Bot, Chat, ChatConfig, ChatHome, Device, Session, Space};
 
 use crate::schema::DocError;
 
@@ -29,11 +29,33 @@ pub(crate) use core::{HlcClock, row_to_seed_op};
 pub use core::{OpKind, RegistryRow, RowOp, apply_op};
 pub use rows::{DeletedDevice, DeletedSpace, WorkspaceState};
 
-/// Row kinds — the four sidebar tables.
+/// A partial bot edit ([`RegistryDoc::update_bot`]): `None` leaves a field
+/// alone; `Some(None)` clears an optional one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<cypher_proto::BotScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<cypher_proto::BotCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<bool>,
+}
+
+/// Row kinds — the four sidebar tables, plus agent-bot definitions.
 pub(crate) const KIND_DEVICES: &str = "devices";
 pub(crate) const KIND_SPACES: &str = "spaces";
 pub(crate) const KIND_CHATS: &str = "chats";
 pub(crate) const KIND_SESSIONS: &str = "sessions";
+pub(crate) const KIND_BOTS: &str = "bots";
 
 /// Snapshot row id in the local `DocsStore` for the persisted registry state.
 pub const REGISTRY_DOC_ID: &str = "registry1";
@@ -456,13 +478,25 @@ impl RegistryDoc {
         // nothing acks (offline, a stuck room) was kept forever — a session
         // heartbeat every 30s grew `pending` (persisted, and replayed by every
         // overlay read) by thousands of batches a day.
-        self.pending.retain(|batch| {
-            batch.in_flight
-                || !batch
-                    .ops
-                    .iter()
-                    .all(|old| ops.iter().any(|new| op_shadows(new, old)))
-        });
+        // Newest first, so a batch that stays pins its rows: an older write
+        // to a row a kept later op still touches must stay too, or that op
+        // (an update, say) would apply to a row its dropped create never made.
+        let mut pinned: std::collections::HashSet<(String, String)> = Default::default();
+        let mut keep = vec![true; self.pending.len()];
+        for (ix, batch) in self.pending.iter().enumerate().rev() {
+            let shadowed = !batch.in_flight
+                && batch.ops.iter().all(|old| {
+                    ops.iter().any(|new| op_shadows(new, old))
+                        && !pinned.contains(&(old.kind.clone(), old.id.clone()))
+                });
+            if shadowed {
+                keep[ix] = false;
+            } else {
+                pinned.extend(batch.ops.iter().map(|op| (op.kind.clone(), op.id.clone())));
+            }
+        }
+        let mut keep = keep.into_iter();
+        self.pending.retain(|_| keep.next().unwrap_or(true));
         while !ops.is_empty() {
             let tail = if ops.len() > MAX_OPS_PER_BATCH {
                 ops.split_off(MAX_OPS_PER_BATCH)
@@ -865,6 +899,20 @@ impl RegistryDoc {
                     .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
                     .unwrap_or(Value::Null),
             ),
+            (
+                "bot",
+                chat.bot
+                    .as_ref()
+                    .map(|b| serde_json::to_value(b).unwrap_or(Value::Null))
+                    .unwrap_or(Value::Null),
+            ),
+            (
+                "memory",
+                chat.memory
+                    .as_ref()
+                    .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+                    .unwrap_or(Value::Null),
+            ),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1191,6 +1239,267 @@ impl RegistryDoc {
         Ok(sessions)
     }
 
+    // ── bots ────────────────────────────────────────────────────────────────
+
+    /// Upsert a full bot row (creation, on the bot's host device).
+    pub fn upsert_bot(&mut self, bot: &Bot) -> Result<(), DocError> {
+        let set = fields([
+            ("id", json!(bot.id)),
+            ("name", json!(bot.name)),
+            ("icon", opt_str(bot.icon.as_deref())),
+            ("color", opt_str(bot.color.as_deref())),
+            ("hostDeviceId", json!(bot.host_device_id)),
+            ("chatId", json!(bot.chat_id)),
+            ("instructions", opt_str(bot.instructions.as_deref())),
+            ("scope", serde_json::to_value(&bot.scope)?),
+            ("capabilities", serde_json::to_value(bot.capabilities)?),
+            ("paused", json!(bot.paused)),
+            ("createdAt", json!(bot.created_at.timestamp_millis())),
+        ]);
+        self.write(KIND_BOTS, &bot.id.clone(), OpKind::Upsert, set);
+        Ok(())
+    }
+
+    /// LWW edit from any device: each `Some` field is written, `None` fields
+    /// are left alone. `false` when no such row.
+    pub fn update_bot(&mut self, bot_id: &str, update: &BotUpdate) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_BOTS, bot_id) {
+            return Ok(false);
+        }
+        let mut set = BTreeMap::new();
+        if let Some(name) = &update.name {
+            set.insert("name".into(), json!(name));
+        }
+        if let Some(icon) = &update.icon {
+            set.insert("icon".into(), opt_str(icon.as_deref()));
+        }
+        if let Some(color) = &update.color {
+            set.insert("color".into(), opt_str(color.as_deref()));
+        }
+        if let Some(instructions) = &update.instructions {
+            set.insert("instructions".into(), opt_str(instructions.as_deref()));
+        }
+        if let Some(scope) = &update.scope {
+            set.insert("scope".into(), serde_json::to_value(scope)?);
+        }
+        if let Some(capabilities) = &update.capabilities {
+            set.insert("capabilities".into(), serde_json::to_value(capabilities)?);
+        }
+        if let Some(paused) = update.paused {
+            set.insert("paused".into(), json!(paused));
+        }
+        if set.is_empty() {
+            return Ok(true);
+        }
+        self.write(KIND_BOTS, bot_id, OpKind::Update, set);
+        Ok(true)
+    }
+
+    pub fn bot(&self, bot_id: &str) -> Result<Option<Bot>, DocError> {
+        Ok(self
+            .overlay_row(KIND_BOTS, bot_id)
+            .and_then(|row| row_to::<rows::RawBot>(&row))
+            .map(Bot::from))
+    }
+
+    pub fn read_bots(&self) -> Result<Vec<Bot>, DocError> {
+        let mut bots: Vec<Bot> = self
+            .read_kind::<rows::RawBot>(KIND_BOTS)
+            .into_iter()
+            .map(Bot::from)
+            .collect();
+        bots.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        Ok(bots)
+    }
+
+    /// Tombstone the bot with every chat it owns (its bot chat and hidden
+    /// threads) and their status rows, and its records, in one batch.
+    /// Connections and invites stay: the bot's host revokes them on the Edge
+    /// first. Returns the bot's chat ids (its bot chat first) when the bot
+    /// existed.
+    pub fn delete_bot(&mut self, bot_id: &str) -> Result<Option<Vec<String>>, DocError> {
+        let Some(bot) = self.bot(bot_id)? else {
+            return Ok(None);
+        };
+        let mut chat_ids = vec![bot.chat_id.clone()];
+        chat_ids.extend(
+            self.read_chats()?
+                .into_iter()
+                .filter(|c| c.id != bot.chat_id)
+                .filter(|c| c.bot.as_ref().is_some_and(|m| m.bot_id == bot_id))
+                .map(|c| c.id),
+        );
+        let records = self.read_bot_records();
+        let mut records_of: Vec<(&str, String)> = Vec::new();
+        use cypher_proto as p;
+        records_of.extend(
+            records
+                .work
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_WORK, r.id.clone())),
+        );
+        records_of.extend(
+            records
+                .notes
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_NOTES, r.id.clone())),
+        );
+        // The workspace's memory row goes with it (its doc stays unread).
+        records_of.extend(
+            records
+                .memory_stores
+                .iter()
+                .filter(
+                    |r| matches!(&r.scope, p::MemoryScope::Workspace { bot_id: b } if b == bot_id),
+                )
+                .map(|r| (p::KIND_MEMORY_STORES, r.id.clone())),
+        );
+        records_of.extend(
+            records
+                .routines
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_ROUTINES, r.id.clone())),
+        );
+        records_of.extend(
+            records
+                .shortcuts
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_SHORTCUTS, r.id.clone())),
+        );
+        records_of.extend(
+            records
+                .activity
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_ACTIVITY, r.id.clone())),
+        );
+        records_of.extend(
+            records
+                .approvals
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_APPROVALS, r.id.clone())),
+        );
+        records_of.extend(
+            records
+                .exchanges
+                .iter()
+                .filter(|r| r.bot_id == bot_id)
+                .map(|r| (p::KIND_BOT_EXCHANGES, r.id.clone())),
+        );
+        let mut keys: Vec<(&str, &str)> = vec![(KIND_BOTS, bot_id)];
+        for chat_id in &chat_ids {
+            keys.push((KIND_CHATS, chat_id));
+            keys.push((KIND_SESSIONS, chat_id));
+        }
+        keys.extend(records_of.iter().map(|(kind, id)| (*kind, id.as_str())));
+        self.delete_row_ops(&keys);
+        Ok(Some(chat_ids))
+    }
+
+    // ── bot records (cypher_proto::bot_records) ─────────────────────────────
+
+    /// Write `fields` of a record row, creating it when missing. Each field
+    /// is its own LWW value, so a writer sends only the fields it owns.
+    /// Refuses a write the Edge would refuse (over [`RECORD_MAX_BYTES`]):
+    /// a refused batch would wedge sync for every later write.
+    pub fn put_record(
+        &mut self,
+        kind: &str,
+        id: &str,
+        fields: serde_json::Map<String, Value>,
+    ) -> Result<(), DocError> {
+        check_record(kind, id, &fields)?;
+        if fields.is_empty() {
+            return Ok(());
+        }
+        self.write(kind, id, OpKind::Upsert, fields.into_iter().collect());
+        Ok(())
+    }
+
+    /// Write `fields` of an existing record; `false` when there is none.
+    pub fn update_record(
+        &mut self,
+        kind: &str,
+        id: &str,
+        fields: serde_json::Map<String, Value>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(kind, id) {
+            return Ok(false);
+        }
+        check_record(kind, id, &fields)?;
+        if !fields.is_empty() {
+            self.write(kind, id, OpKind::Update, fields.into_iter().collect());
+        }
+        Ok(true)
+    }
+
+    /// Tombstone records, in batches the Edge accepts.
+    pub fn delete_records(&mut self, kind: &str, ids: &[String]) {
+        let keys: Vec<(&str, &str)> = ids.iter().map(|id| (kind, id.as_str())).collect();
+        self.delete_row_ops(&keys);
+    }
+
+    /// One record's fields, overlay applied.
+    pub fn record(&self, kind: &str, id: &str) -> Option<Value> {
+        self.overlay_row(kind, id)
+            .map(|row| Value::Object(row.fields.into_iter().collect()))
+    }
+
+    /// Every live record of `kind` decoded as `T`; malformed rows are
+    /// skipped with a warning.
+    pub fn read_records<T: serde::de::DeserializeOwned>(&self, kind: &str) -> Vec<T> {
+        self.read_kind(kind)
+    }
+
+    /// Every bot record.
+    pub fn read_bot_records(&self) -> cypher_proto::BotRecords {
+        use cypher_proto as p;
+        let mut records = p::BotRecords {
+            work: self.read_records(p::KIND_BOT_WORK),
+            notes: self.read_records(p::KIND_BOT_NOTES),
+            routines: self.read_records(p::KIND_BOT_ROUTINES),
+            activity: self.read_records(p::KIND_BOT_ACTIVITY),
+            approvals: self.read_records(p::KIND_BOT_APPROVALS),
+            connections: self.read_records(p::KIND_BOT_CONNECTIONS),
+            invites: self.read_records(p::KIND_BOT_INVITES),
+            exchanges: self.read_records(p::KIND_BOT_EXCHANGES),
+            memory_stores: self.read_records(p::KIND_MEMORY_STORES),
+            shortcuts: self.read_records(p::KIND_BOT_SHORTCUTS),
+        };
+        records.memory_stores.sort_by(|a, b| a.id.cmp(&b.id));
+        // Stable orders: newest first for logs, oldest first for the rest.
+        records
+            .work
+            .sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        records
+            .notes
+            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.id.cmp(&b.id)));
+        records
+            .routines
+            .sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        records
+            .activity
+            .sort_by(|a, b| b.at.cmp(&a.at).then(b.id.cmp(&a.id)));
+        records
+            .approvals
+            .sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        records
+            .connections
+            .sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        records
+            .invites
+            .sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
+        records
+            .exchanges
+            .sort_by(|a, b| b.asked_at.cmp(&a.asked_at).then(a.id.cmp(&b.id)));
+        records
+    }
+
     // ── whole-doc read ──────────────────────────────────────────────────────
 
     pub fn read_all(&self) -> Result<WorkspaceState, DocError> {
@@ -1199,11 +1508,31 @@ impl RegistryDoc {
             spaces: self.read_spaces()?,
             chats: self.read_chats()?,
             sessions: self.read_sessions()?,
+            bots: self.read_bots()?,
         })
     }
 }
 
 // ── field helpers ───────────────────────────────────────────────────────────
+
+/// The largest record write accepted (UTF-16 units), under the Edge's 16 Ki per-op cap
+/// with room for the op envelope.
+pub const RECORD_MAX_BYTES: usize = 14 * 1024;
+
+fn check_record(
+    kind: &str,
+    id: &str,
+    fields: &serde_json::Map<String, Value>,
+) -> Result<(), DocError> {
+    // The Edge measures `JSON.stringify(op).length`: UTF-16 code units.
+    let units = serde_json::to_string(fields)?.encode_utf16().count() + kind.len() + id.len();
+    if units > RECORD_MAX_BYTES {
+        return Err(DocError::Schema(format!(
+            "{kind} row {id} is {units} characters; the registry takes at most {RECORD_MAX_BYTES}"
+        )));
+    }
+    Ok(())
+}
 
 fn fields<const N: usize>(entries: [(&str, Value); N]) -> BTreeMap<String, Value> {
     entries

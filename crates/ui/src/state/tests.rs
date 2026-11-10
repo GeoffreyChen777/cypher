@@ -1558,12 +1558,27 @@ fn session_context_mirrors_main_lists(cx: &mut gpui::TestAppContext) {
             chat("c", 2, None),
         ]);
         m.sessions = vec![session("c", SessionStatus::Working, 0, Utc::now())];
+        // Bot rows ride along too: a bot's tab reads its bot from here.
+        m.apply_bots(vec![cypher_proto::Bot {
+            id: "bot".into(),
+            name: "Bob".into(),
+            icon: None,
+            color: None,
+            host_device_id: "dev".into(),
+            chat_id: "c".into(),
+            instructions: None,
+            scope: Default::default(),
+            capabilities: Default::default(),
+            paused: false,
+            created_at: Utc::now(),
+        }]);
         cx.notify();
     });
     cx.run_until_parked();
     ctx.read_with(cx, |c, _| {
         assert_eq!(chat_ids(c), ["c", "b", "a"]);
         assert_eq!(c.sessions.len(), 1);
+        assert_eq!(c.bots.len(), 1, "session contexts mirror the bots");
     });
 
     // Deleted elsewhere: the tile's selection goes the same way

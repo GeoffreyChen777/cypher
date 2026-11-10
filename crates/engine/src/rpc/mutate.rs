@@ -220,6 +220,31 @@ impl EngineRpc {
                     .map(drop)
             }
             #[cfg(feature = "development")]
+            MutateParams::SeedBotRecord {
+                kind,
+                id,
+                fields,
+                delete,
+            } => {
+                if !cypher_proto::BOT_RECORD_KINDS.contains(&kind.as_str()) {
+                    return Err(RpcError::BadParams(format!(
+                        "not a bot record kind: {kind}"
+                    )));
+                }
+                if delete {
+                    self.workspace.delete_records(&kind, &[id]);
+                    return Ok(());
+                }
+                self.workspace
+                    .put_record(
+                        &kind,
+                        &id,
+                        &serde_json::Value::Object(fields),
+                        crate::host::workspace_host::Fields::All,
+                    )
+                    .map_err(failed)
+            }
+            #[cfg(feature = "development")]
             MutateParams::SeedDevice {
                 device_id,
                 name,
@@ -234,6 +259,96 @@ impl EngineRpc {
                     last_seen_at.and_then(chrono::DateTime::from_timestamp_millis),
                 )
                 .map_err(failed),
+            MutateParams::UpdateBot {
+                bot_id,
+                name,
+                icon,
+                color,
+                instructions,
+                scope,
+                capabilities,
+            } => {
+                let name = name.trim().to_string();
+                cypher_proto::validate_name(&name).map_err(RpcError::BadParams)?;
+                scope.validate().map_err(RpcError::BadParams)?;
+                let instructions = instructions
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                if instructions
+                    .as_deref()
+                    .is_some_and(|s| s.chars().count() > cypher_proto::BOT_INSTRUCTIONS_MAX_CHARS)
+                {
+                    return Err(RpcError::BadParams("The instructions are too long.".into()));
+                }
+                let update = cypher_doc::BotUpdate {
+                    name: Some(name),
+                    icon: Some(icon.filter(|s| !s.is_empty())),
+                    color: Some(color.filter(|s| !s.is_empty())),
+                    instructions: Some(instructions),
+                    scope: Some(scope),
+                    capabilities,
+                    paused: None,
+                };
+                if !self
+                    .workspace
+                    .update_bot(&bot_id, &update)
+                    .map_err(failed)?
+                {
+                    return Err(RpcError::Failed("No such bot.".into()));
+                }
+                Ok(())
+            }
+            MutateParams::SetBotPaused { bot_id, paused } => {
+                let update = cypher_doc::BotUpdate {
+                    paused: Some(paused),
+                    ..Default::default()
+                };
+                if !self
+                    .workspace
+                    .update_bot(&bot_id, &update)
+                    .map_err(failed)?
+                {
+                    return Err(RpcError::Failed("No such bot.".into()));
+                }
+                Ok(())
+            }
+            record @ (MutateParams::ResolveBotPlan { .. }
+            | MutateParams::StopBotWork { .. }
+            | MutateParams::DeleteBotWork { .. }
+            | MutateParams::ResolveBotApproval { .. }
+            | MutateParams::SaveBotRoutine { .. }
+            | MutateParams::DeleteBotRoutine { .. }
+            | MutateParams::RunBotRoutine { .. }
+            | MutateParams::DeleteBotShortcut { .. }
+            | MutateParams::OrderBotShortcuts { .. }
+            | MutateParams::UpdateBotConnection { .. }
+            | MutateParams::RevokeBotConnection { .. }
+            | MutateParams::RevokeBotInvite { .. }
+            | MutateParams::ReviewBotExchange { .. }) => self.mutate_bot_record(record),
+            MutateParams::DeleteBot { bot_id } => {
+                let bot = self.workspace.bot(&bot_id).map_err(failed)?;
+                let Some(chat_ids) = self.workspace.delete_bot(&bot_id).map_err(failed)? else {
+                    return Ok(());
+                };
+                for chat_id in &chat_ids {
+                    self.doc_host.purge_chat(chat_id);
+                }
+                if bot.is_some_and(|b| b.host_device_id == self.doc_host.device_id()) {
+                    let sessions = self.sessions.clone();
+                    let bots = self.bots.clone();
+                    tokio::spawn(async move {
+                        for chat_id in chat_ids {
+                            if let Err(err) = sessions.interrupt(&chat_id).await {
+                                tracing::debug!(chat = %chat_id, error = %err, "bot interrupt skipped");
+                            }
+                        }
+                        if let Some(bots) = bots {
+                            bots.remove_folder(&bot_id);
+                        }
+                    });
+                }
+                Ok(())
+            }
             MutateParams::MarkChatSeen { chat_id, at } => {
                 let at = at
                     .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)

@@ -1039,7 +1039,7 @@ impl Shell {
             Some(_) => {
                 self.sync.flow = SyncFlow::RestartPending { notice_open: true };
                 self.sync.runtime_change_error =
-                    Some("The synced workspace did not come up — restart to finish.".into());
+                    Some("Sync did not start — restart to finish.".into());
                 cx.notify();
             }
             None => {}

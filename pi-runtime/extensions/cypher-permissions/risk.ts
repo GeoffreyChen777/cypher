@@ -272,7 +272,7 @@ function writeDanger(classification: Classification): string | undefined {
   return undefined;
 }
 
-/** Deleting or moving files outside the workspace, scratch space and caches. */
+/** Deleting or moving files outside the project folders, scratch space and caches. */
 function destroyDanger(command: RiskCommand, view: CommandView, facts: RiskFacts): string | undefined {
   let operands: string[] = [];
   if (DESTROYERS.has(view.program)) operands = view.args.filter((word) => word === UNKNOWN || !word.startsWith("-"));
@@ -314,7 +314,7 @@ function destroyDanger(command: RiskCommand, view: CommandView, facts: RiskFacts
     if (operand === UNKNOWN) return `${verb(view.program)} files named only when it runs`;
     if (command.cwd === undefined && !isAbsolute(operand) && !operand.startsWith("~")) return `${verb(view.program)} files in a directory known only when it runs`;
     const classification = facts.classify(operand, command.cwd);
-    if (!classification || !facts.disposable(classification.path)) return `${verb(view.program)} files outside the workspace (${operand})`;
+    if (!classification || !facts.disposable(classification.path)) return `${verb(view.program)} files outside the project folders (${operand})`;
   }
   return undefined;
 }

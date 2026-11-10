@@ -64,6 +64,8 @@ impl WorkspaceHost {
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 child: None,
+                bot: None,
+                memory: None,
             })
         })?;
         Ok(())
@@ -299,6 +301,8 @@ impl WorkspaceHost {
                 space_id: parent.space_id.clone(),
                 last_seen_at: None,
                 child: None,
+                bot: None,
+                memory: None,
             })
         })?;
         Ok(true)
@@ -355,6 +359,8 @@ impl WorkspaceHost {
                 // it must never flash a "completed (unseen)" badge.
                 last_seen_at: Some(now),
                 child: None,
+                bot: None,
+                memory: None,
             })
         })?;
         Ok(())
@@ -422,6 +428,7 @@ impl WorkspaceHost {
                 harness_session_cwd: None,
                 space_id: parent.space_id.clone(),
                 last_seen_at: None,
+                memory: None,
                 room_gen: Some(2),
                 child: Some(ChildChat {
                     parent_chat_id: parent.id.clone(),
@@ -432,6 +439,7 @@ impl WorkspaceHost {
                     tool_call_id,
                     profile,
                 }),
+                bot: None,
             })
         })?;
         Ok(ChildChatOutcome::Created(chat_id))
@@ -444,6 +452,49 @@ impl WorkspaceHost {
             .into_iter()
             .filter(|c| c.parent_chat_id() == Some(parent_chat_id))
             .collect())
+    }
+
+    // ── agent bots ──────────────────────────────────────────────────────────
+
+    /// Write a new bot and its chat in one batch (the bot's host device).
+    pub fn create_bot(&self, bot: &Bot, chat: &Chat) -> Result<(), EngineError> {
+        self.mutate(|doc| {
+            doc.upsert_chat(chat)?;
+            doc.upsert_bot(bot)
+        })?;
+        Ok(())
+    }
+
+    pub fn bot(&self, bot_id: &str) -> Result<Option<Bot>, EngineError> {
+        Ok(self.read(|doc| doc.bot(bot_id))?)
+    }
+
+    pub fn read_bots(&self) -> Result<Vec<Bot>, EngineError> {
+        Ok(self.read(|doc| doc.read_bots())?)
+    }
+
+    /// LWW edit from any device. A rename also retitles the bot's chat, so
+    /// its tab reads the bot's name. `false` when no such bot.
+    pub fn update_bot(
+        &self,
+        bot_id: &str,
+        update: &cypher_doc::BotUpdate,
+    ) -> Result<bool, EngineError> {
+        let Some(bot) = self.bot(bot_id)? else {
+            return Ok(false);
+        };
+        Ok(self.mutate(|doc| {
+            if let Some(name) = &update.name {
+                doc.rename_chat(&bot.chat_id, name)?;
+            }
+            doc.update_bot(bot_id, update)
+        })?)
+    }
+
+    /// Tombstone the bot with its chats and records; its chat ids (the bot
+    /// chat first) when the bot existed.
+    pub fn delete_bot(&self, bot_id: &str) -> Result<Option<Vec<String>>, EngineError> {
+        Ok(self.mutate(|doc| doc.delete_bot(bot_id))?)
     }
 
     pub fn rename_device(&self, device_id: &str, name: &str) -> Result<bool, EngineError> {

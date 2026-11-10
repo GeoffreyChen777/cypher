@@ -79,7 +79,7 @@ struct SignInView: View {
 
                 VStack(spacing: 12) {
                     #if CYPHER_DEVELOPMENT
-                        Text("Cypher Dev — isolated test workspace")
+                        Text("Cypher Dev — isolated test account")
                         if DevelopmentProfile.isLoopback(DevelopmentProfile.edge) {
                             Button("Connect to local Dev Edge") {
                                 model.connectDevelopment(secret: nil)
@@ -324,7 +324,7 @@ struct OrgPickerView: View {
 
     private var pickerList: some View {
         VStack(spacing: 20) {
-            Text("Choose a workspace")
+            Text("Choose an organization")
                 .font(Theme.sans(16, weight: .semibold))
                 .foregroundStyle(Theme.text)
             VStack(spacing: 8) {

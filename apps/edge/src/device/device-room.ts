@@ -64,6 +64,14 @@ const NUDGE_MAX_PENDING = 256;
 export const SIDECAR_MAX_BYTES = 256 * 1024;
 const CHAT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
+/** Bot network nudges (docs/design/agent-bots.md §11.5): payload
+ * `{botRoomId}` tells the host "this bot's room has entries for you — pull
+ * its inbox". A BotRoom sends them as its owner; durable like chat nudges.
+ * Engines that predate the kind skip it as an unknown stream kind. */
+const BOTS_KIND = "bots";
+const BOTS_MAX_PENDING = 64;
+const BOT_ROOM_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
 export class DeviceRoom implements DurableObject {
   private readonly ctx: DurableObjectState;
   private readonly blobs: BlobStore;
@@ -76,6 +84,9 @@ export class DeviceRoom implements DurableObject {
     );
     ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS pending_nudges (chat_id TEXT PRIMARY KEY, queued_at INTEGER NOT NULL)"
+    );
+    ctx.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS pending_bot_nudges (room_id TEXT PRIMARY KEY, queued_at INTEGER NOT NULL)"
     );
     this.blobs = createBlobStore(ctx.storage.sql);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -194,7 +205,8 @@ export class DeviceRoom implements DurableObject {
     // own doc before executing anything.
     if (url.pathname === "/nudge" && request.method === "POST") {
       if (!owner || owner !== userId) return json({ error: "forbidden" }, owner ? 403 : 404);
-      const body = (await request.json().catch(() => null)) as { chatId?: string } | null;
+      const body = (await request.json().catch(() => null)) as { chatId?: string; botRoomId?: string } | null;
+      if (body?.botRoomId !== undefined) return this.nudgeBots(body.botRoomId);
       const chatId = body?.chatId;
       if (!chatId || !CHAT_ID_RE.test(chatId)) return json({ error: "bad_chat_id" }, 400);
       const host = this.liveHost();
@@ -220,7 +232,37 @@ export class DeviceRoom implements DurableObject {
     return new Response("not found", { status: 404 });
   }
 
+  private nudgeBots(roomId: string): Response {
+    if (!BOT_ROOM_ID_RE.test(roomId)) return json({ error: "bad_bot_room_id" }, 400);
+    const host = this.liveHost();
+    if (host) {
+      this.deliver(host, { s: roomId, k: BOTS_KIND }, new TextEncoder().encode(JSON.stringify({ botRoomId: roomId })));
+      return json({ delivered: true });
+    }
+    this.ctx.storage.sql.exec(
+      "INSERT INTO pending_bot_nudges (room_id, queued_at) VALUES (?, ?) ON CONFLICT(room_id) DO UPDATE SET queued_at = excluded.queued_at",
+      roomId,
+      Date.now()
+    );
+    this.ctx.storage.sql.exec(
+      "DELETE FROM pending_bot_nudges WHERE room_id NOT IN (SELECT room_id FROM pending_bot_nudges ORDER BY queued_at DESC LIMIT ?)",
+      BOTS_MAX_PENDING
+    );
+    return json({ delivered: false, queued: true });
+  }
+
   private replayNudges(host: WebSocket): void {
+    const bots = [
+      ...this.ctx.storage.sql.exec("SELECT room_id FROM pending_bot_nudges ORDER BY queued_at ASC")
+    ] as Array<{ room_id: string }>;
+    for (const row of bots) {
+      this.deliver(
+        host,
+        { s: row.room_id, k: BOTS_KIND },
+        new TextEncoder().encode(JSON.stringify({ botRoomId: row.room_id }))
+      );
+    }
+    if (bots.length > 0) this.ctx.storage.sql.exec("DELETE FROM pending_bot_nudges");
     const rows = [
       ...this.ctx.storage.sql.exec("SELECT chat_id FROM pending_nudges ORDER BY queued_at ASC")
     ] as Array<{ chat_id: string }>;

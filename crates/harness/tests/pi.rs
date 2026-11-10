@@ -12,11 +12,12 @@ use tokio::sync::mpsc;
 use common::{dones, run_to_end};
 use cypher_harness::pi::PiHarness;
 use cypher_harness::{
-    CancellationToken, Harness, HarnessError, RunControls, RunHostContext, SteerMessage,
+    BotRunEnv, CancellationToken, ChildRunEnv, Harness, HarnessError, RunControls, RunHostContext,
+    RunProfile, SteerMessage,
 };
 use cypher_proto::{
-    AgentEvent, AnsweredModel, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SteeringMode,
-    ToolCall,
+    AgentEvent, AnsweredModel, BotOrigin, DoneStatus, HarnessId, ReasoningLevel, RunRequest,
+    SteeringMode, ToolCall,
 };
 
 /// The session file the fake pi reports by default: it now derives its
@@ -176,6 +177,276 @@ fn engine_bridge_url_is_injected_into_children() {
     );
 }
 
+fn args_of(cmd: &tokio::process::Command) -> Vec<String> {
+    cmd.as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// The value `cmd` sets for `key`: `Some(None)` when it clears it, `None`
+/// when it leaves it alone.
+fn env_of(cmd: &tokio::process::Command, key: &str) -> Option<Option<String>> {
+    cmd.as_std()
+        .get_envs()
+        .find(|(k, _)| *k == key)
+        .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+}
+
+/// Each run profile becomes exactly its own flags and env: a root run adds
+/// nothing beyond the extensions every run loads, a child run its allowlist plus the messaging tools, its prompt
+/// and its launch model, and a bot thread of every origin its allowlist, the
+/// embedded bot tools extension, its prompt and `CYPHER_BOT_ID`. Every run
+/// clears the env of the profiles it is not, so none inherits another's.
+#[test]
+fn run_profiles_spawn_exact_args() {
+    let harness = harness();
+    let prompt = std::env::temp_dir().join("cypher-profile-prompt-fixture.md");
+    let prompt_arg = prompt.to_string_lossy().into_owned();
+    let base = vec![
+        "--mode".to_string(),
+        "rpc".into(),
+        "--session-dir".into(),
+        std::env::temp_dir()
+            .join("cypher-pi-test-sessions")
+            .display()
+            .to_string(),
+    ];
+    let profile_env = [
+        "PI_SUBAGENT_ROLE",
+        "PI_SUBAGENT_CHANNEL_ROOT",
+        "PI_SUBAGENT_RUN_ID",
+        "PI_SUBAGENT_AGENT",
+        "PI_SUBAGENT_CHILD_INDEX",
+        "CYPHER_BOT_ID",
+        "CYPHER_BOT_WORKSPACE_ROOTS",
+        "CYPHER_MEMORY",
+    ];
+
+    let root = harness
+        .spawn_command(None, &RunHostContext::default(), Some(&prompt))
+        .expect("command builds");
+    // Every run loads the app's own extensions after the base flags.
+    let mut base = base;
+    let loaded = args_of(&root)[base.len()..].to_vec();
+    assert_eq!(loaded.len(), 6, "{loaded:?}");
+    assert_eq!(
+        (loaded[0].as_str(), loaded[2].as_str(), loaded[4].as_str()),
+        ("--extension", "--extension", "--extension")
+    );
+    assert!(
+        loaded[1].ends_with("cypher-chat-rendering.ts"),
+        "{loaded:?}"
+    );
+    assert!(loaded[3].ends_with("cypher-explain.ts"), "{loaded:?}");
+    assert!(loaded[5].ends_with("cypher-memory.ts"), "{loaded:?}");
+    base.extend(loaded);
+    assert_eq!(args_of(&root), base);
+    for key in profile_env {
+        assert_eq!(env_of(&root, key), Some(None), "root clears {key}");
+    }
+
+    // A session with memory appends its memory section and turns the
+    // memory tools on; a child with an allowlist gets them added.
+    let remembering = RunHostContext {
+        chat_id: Some("session".into()),
+        memory_prompt: Some("<memory>…</memory>".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        remembering.appended_prompt(),
+        Some(("memory".to_string(), "<memory>…</memory>".to_string()))
+    );
+    let cmd = harness
+        .spawn_command(None, &remembering, Some(&prompt))
+        .expect("command builds");
+    let mut expected = base.clone();
+    expected.extend(["--append-system-prompt", &prompt_arg].map(String::from));
+    assert_eq!(args_of(&cmd), expected);
+    assert_eq!(env_of(&cmd, "CYPHER_MEMORY"), Some(Some("1".into())));
+    let remembering_child = RunHostContext {
+        chat_id: Some("child-chat".into()),
+        memory_prompt: Some("<memory>…</memory>".into()),
+        profile: RunProfile::Child(ChildRunEnv {
+            system_prompt: "You review code.".into(),
+            tools: vec!["read".into()],
+            model: None,
+            thinking: None,
+            channel_root: None,
+            run_id: "run-1".into(),
+            agent: "reviewer".into(),
+            child_index: 0,
+        }),
+    };
+    let (_, both) = remembering_child.appended_prompt().unwrap();
+    assert_eq!(both, "You review code.\n\n<memory>…</memory>");
+    let cmd = harness
+        .spawn_command(None, &remembering_child, Some(&prompt))
+        .expect("command builds");
+    let tools = args_of(&cmd)
+        .iter()
+        .skip_while(|a| *a != "--tools")
+        .nth(1)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        tools,
+        "read,send_message,read_inbox,reply_message,memory,search_history,read_history,request_permission"
+    );
+
+    let child = RunHostContext {
+        chat_id: Some("child-chat".into()),
+        memory_prompt: None,
+        profile: RunProfile::Child(ChildRunEnv {
+            system_prompt: "You review code.".into(),
+            tools: vec!["read".into(), "send_message".into()],
+            model: Some("anthropic/claude-sonnet-4-20250514".into()),
+            thinking: Some("high".into()),
+            channel_root: Some("/tmp/channel".into()),
+            run_id: "run-1".into(),
+            agent: "reviewer".into(),
+            child_index: 2,
+        }),
+    };
+    let cmd = harness
+        .spawn_command(None, &child, Some(&prompt))
+        .expect("command builds");
+    let mut expected = base.clone();
+    expected.extend(
+        [
+            "--tools",
+            "read,send_message,read_inbox,reply_message,request_permission",
+            "--append-system-prompt",
+            &prompt_arg,
+            "--model",
+            "anthropic/claude-sonnet-4-20250514",
+            "--thinking",
+            "high",
+        ]
+        .map(String::from),
+    );
+    assert_eq!(args_of(&cmd), expected);
+    for (key, value) in [
+        ("PI_SUBAGENT_ROLE", Some("child")),
+        ("PI_SUBAGENT_CHANNEL_ROOT", Some("/tmp/channel")),
+        ("PI_SUBAGENT_RUN_ID", Some("run-1")),
+        ("PI_SUBAGENT_AGENT", Some("reviewer")),
+        ("PI_SUBAGENT_CHILD_INDEX", Some("2")),
+        ("CYPHER_BOT_ID", None),
+        ("CYPHER_BOT_WORKSPACE_ROOTS", None),
+    ] {
+        assert_eq!(env_of(&cmd, key), Some(value.map(String::from)), "{key}");
+    }
+
+    for origin in [BotOrigin::Owner, BotOrigin::Routine, BotOrigin::Peer] {
+        let bot = RunHostContext {
+            chat_id: Some("bot-chat".into()),
+            memory_prompt: None,
+            profile: RunProfile::Bot(BotRunEnv {
+                bot_id: "bot-1".into(),
+                origin,
+                tools: cypher_proto::BOT_TOOLS.map(String::from).to_vec(),
+                system_prompt: "You are a bot.".into(),
+                workspace_roots: Vec::new(),
+            }),
+        };
+        let cmd = harness
+            .spawn_command(None, &bot, Some(&prompt))
+            .expect("command builds");
+        let args = args_of(&cmd);
+        let extension = args
+            .windows(2)
+            .find(|pair| pair[0] == "-e")
+            .map(|pair| pair[1].clone())
+            .expect("the bot tools extension is loaded");
+        assert!(extension.ends_with("cypher-bot-tools.ts"), "{extension}");
+        let mut expected = base.clone();
+        expected.extend([
+            "--tools".to_string(),
+            cypher_proto::BOT_TOOLS.join(","),
+            "-e".into(),
+            extension.clone(),
+            "--append-system-prompt".into(),
+            prompt_arg.clone(),
+        ]);
+        assert_eq!(args, expected, "{origin:?}");
+        let source = std::fs::read_to_string(&extension).expect("the extension is written");
+        for tool in cypher_proto::BOT_TOOLS {
+            assert!(
+                source.contains(&format!("name: \"{tool}\"")),
+                "the extension registers {tool}"
+            );
+        }
+        for key in profile_env {
+            let value = match key {
+                "CYPHER_BOT_ID" => Some("bot-1".to_string()),
+                // Always set for a bot, so stale roots are dropped.
+                "CYPHER_BOT_WORKSPACE_ROOTS" => Some("[]".to_string()),
+                _ => None,
+            };
+            assert_eq!(env_of(&cmd, key), Some(value), "{origin:?} {key}");
+        }
+    }
+
+    // The coordination tools are registered too (the allowlist decides
+    // which a thread is offered).
+    let extension = args_of(
+        &harness
+            .spawn_command(
+                None,
+                &RunHostContext {
+                    chat_id: Some("bot-chat".into()),
+                    memory_prompt: None,
+                    profile: RunProfile::Bot(BotRunEnv {
+                        bot_id: "bot-1".into(),
+                        origin: BotOrigin::Owner,
+                        tools: Vec::new(),
+                        system_prompt: String::new(),
+                        workspace_roots: Vec::new(),
+                    }),
+                },
+                None,
+            )
+            .expect("command builds"),
+    );
+    let extension = extension
+        .windows(2)
+        .find(|pair| pair[0] == "-e")
+        .map(|pair| pair[1].clone())
+        .unwrap();
+    let source = std::fs::read_to_string(&extension).unwrap();
+    for tool in cypher_proto::BOT_WORK_TOOLS {
+        assert!(
+            source.contains(&format!("name: \"{tool}\"")),
+            "the extension registers {tool}"
+        );
+    }
+
+    // A bot thread with no tools still passes `--tools`: without it Pi
+    // would hand the run every tool.
+    let empty = RunHostContext {
+        chat_id: Some("bot-chat".into()),
+        memory_prompt: None,
+        profile: RunProfile::Bot(BotRunEnv {
+            bot_id: "bot-1".into(),
+            origin: BotOrigin::Peer,
+            tools: Vec::new(),
+            system_prompt: String::new(),
+            workspace_roots: Vec::new(),
+        }),
+    };
+    let args = args_of(
+        &harness
+            .spawn_command(None, &empty, Some(&prompt))
+            .expect("command builds"),
+    );
+    assert!(
+        args.windows(2).any(|pair| pair == ["--tools", ""]),
+        "{args:?}"
+    );
+    assert!(!args.iter().any(|arg| arg == "--append-system-prompt"));
+}
+
 #[test]
 fn requested_model_and_thinking_are_applied_at_process_launch() {
     let harness = harness();
@@ -257,7 +528,8 @@ fn subagents_with_file_tools_can_request_permission() {
     let tools_arg = |tools: &[&str]| {
         let host = RunHostContext {
             chat_id: Some("child-chat".into()),
-            child: Some(cypher_harness::ChildRunEnv {
+            memory_prompt: None,
+            profile: cypher_harness::RunProfile::Child(cypher_harness::ChildRunEnv {
                 system_prompt: String::new(),
                 tools: tools.iter().map(|tool| tool.to_string()).collect(),
                 model: None,
@@ -328,9 +600,12 @@ fn every_pi_loads_the_app_extensions() {
             .filter(|(_, arg)| *arg == "--extension")
             .map(|(at, _)| std::path::Path::new(&args[at + 1]))
             .collect();
-        let [rendering, explain] = extensions[..] else {
-            panic!("two --extension: {args:?}");
+        let [rendering, explain, memory] = extensions[..] else {
+            panic!("three --extension: {args:?}");
         };
+        assert!(memory.ends_with("cypher-memory.ts"), "{args:?}");
+        let source = std::fs::read_to_string(memory).expect("extension written");
+        assert!(source.contains("CYPHER_MEMORY") && source.contains("MemoryTool"));
         assert!(rendering.ends_with("cypher-chat-rendering.ts"), "{args:?}");
         let source = std::fs::read_to_string(rendering).expect("extension written");
         assert!(source.contains("before_agent_start"));
@@ -2260,4 +2535,59 @@ async fn self_started_run_is_probed_and_settles_with_a_done() {
             Some("build is green".into())
         ]
     );
+}
+
+/// A bot thread with *Work directly* spawns with Pi's own tools in its
+/// allowlist, its checkouts as `CYPHER_BOT_WORKSPACE_ROOTS` and the level
+/// the engine decided as `CYPHER_PERMISSION_LEVEL`; its cwd stays the bot's
+/// folder.
+#[test]
+fn a_bot_working_directly_gets_its_roots_and_level() {
+    let harness = harness();
+    let mut tools: Vec<String> = cypher_proto::BOT_TOOLS.map(String::from).to_vec();
+    tools.extend(cypher_proto::BOT_DIRECT_TOOLS.map(String::from));
+    let host = RunHostContext {
+        chat_id: Some("bot-chat".into()),
+        memory_prompt: None,
+        profile: RunProfile::Bot(BotRunEnv {
+            bot_id: "bot-1".into(),
+            origin: BotOrigin::Owner,
+            tools: tools.clone(),
+            system_prompt: "You are a bot.".into(),
+            workspace_roots: vec!["/work/billing".into(), "/work/web app".into()],
+        }),
+    };
+    let folder = std::env::temp_dir();
+    let request = cypher_proto::RunRequest {
+        prompt: "hi".into(),
+        harness: None,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        cwd: folder.display().to_string(),
+        sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
+        auto_approve: false,
+        attachments: Vec::new(),
+        pending_attachments: Vec::new(),
+        resume: None,
+        worktree: None,
+    };
+    let cmd = harness
+        .spawn_run_command(Some(&request.cwd), &host, None, &request)
+        .expect("command builds");
+    let args = args_of(&cmd);
+    assert!(
+        args.windows(2)
+            .any(|pair| pair[0] == "--tools" && pair[1] == tools.join(",")),
+        "{args:?}"
+    );
+    assert_eq!(
+        env_of(&cmd, "CYPHER_BOT_WORKSPACE_ROOTS"),
+        Some(Some(r#"["/work/billing","/work/web app"]"#.to_string()))
+    );
+    assert_eq!(
+        env_of(&cmd, "CYPHER_PERMISSION_LEVEL"),
+        Some(Some("workspace-write".to_string()))
+    );
+    assert_eq!(cmd.as_std().get_current_dir(), Some(folder.as_path()));
 }

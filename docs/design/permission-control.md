@@ -239,7 +239,7 @@ slash-command processes get none and use `defaultLevel`.
 | `SandboxLevel` | Shown as | Extension level | Difference from `standard` |
 |---|---|---|---|
 | `ReadOnly` (`read-only`) | Ask before edits | `read-only` | workspace `write: elevate` |
-| `WorkspaceWrite` (`workspace-write`) | Edit workspace (default) | `standard` | §4.1 |
+| `WorkspaceWrite` (`workspace-write`) | Edit project (default) | `standard` | §4.1 |
 | `DangerFullAccess` (`danger-full-access`) | Full access | `full-access` | no checks: file tools and bash run unsandboxed and unchecked |
 
 The level is picked with **`/permissions`** in the composer's `/` menu: a composer-local

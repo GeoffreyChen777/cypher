@@ -6,15 +6,20 @@ impl AppState {
     /// Non-archived, NON-CHILD chats in sidebar order. Cypher child subagent
     /// chats (engine-owned `child: Some(..)` rows) are hidden from the root
     /// sidebar/session overview — they are reached only through the parent's
-    /// Subagents inspector. [`Self::selected_chat_row`] and transcript
+    /// Subagents inspector. Bot chats live on the Botboard instead, and
+    /// memory consolidation passes nowhere. [`Self::selected_chat_row`] and transcript
     /// subscriptions still work for a selected child (navigation selects it
     /// directly).
     ///
     /// Scoped to this window's projects ([`ProjectScope`]).
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
-        self.chats
-            .iter()
-            .filter(|c| !c.archived && !c.is_child() && self.scope.chat_visible(c))
+        self.chats.iter().filter(|c| {
+            !c.archived
+                && !c.is_child()
+                && !c.is_bot()
+                && !c.is_memory_pass()
+                && self.scope.chat_visible(c)
+        })
     }
 
     pub fn selected_space_row(&self) -> Option<&Space> {
@@ -175,7 +180,7 @@ impl AppState {
     pub fn attention_count(&self, now: DateTime<Utc>) -> usize {
         self.chats
             .iter()
-            .filter(|c| !c.archived && !c.is_child())
+            .filter(|c| !c.archived && !c.is_child() && !c.is_memory_pass())
             .filter(|c| match c.space_id.as_deref() {
                 None => true,
                 Some(id) => self.space_row(id).is_some(),
@@ -434,6 +439,18 @@ impl AppState {
         self.chats.iter().find(|c| c.id == id)
     }
 
+    /// The bot whose conversation `chat_id` is.
+    pub fn bot_for_chat(&self, chat_id: &str) -> Option<&cypher_proto::Bot> {
+        let chat = self.chats.iter().find(|c| c.id == chat_id)?;
+        let marker = chat.bot.as_ref()?;
+        self.bots.iter().find(|b| b.id == marker.bot_id)
+    }
+
+    /// The bot whose conversation is selected.
+    pub fn selected_bot(&self) -> Option<&cypher_proto::Bot> {
+        self.bot_for_chat(self.selected_chat.as_deref()?)
+    }
+
     pub fn gate(&self) -> GatePhase {
         gate_phase(&self.connection, self.workspace_scope, self.auth.as_ref())
     }
@@ -465,6 +482,8 @@ impl AppState {
         self.auto_selected = false;
         self.chats_synced = false;
         self.spaces_synced = false;
+        self.bots_synced = false;
+        self.bot_records = Default::default();
         self.transcript.clear();
         self.commands.clear();
         self.echoes.clear();

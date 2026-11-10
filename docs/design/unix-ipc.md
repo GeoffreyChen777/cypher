@@ -53,8 +53,9 @@ restrictions below are what keeps an agent off the full surface.
 
 Agents never get `engine.sock`. `agent.sock` serves `rpc::AgentRpc`:
 `StartSubagent` (whose parent must be hosted on this device), `QueueCommand` and
-`WatchAgentEvents` for subagent chats hosted on this device, and
-`DetectPiLanguage`. Any other method, and any call carrying `targetDeviceId`,
+`WatchAgentEvents` for subagent chats hosted on this device,
+`DetectPiLanguage`, and `BotTool` for a workspace's own chat hosted on this device
+(the bot tools of [agent bots](agent-bots.md)). Any other method, and any call carrying `targetDeviceId`,
 is refused, so an agent following injected instructions cannot open terminals,
 change settings, or reach other devices through IPC.
 

@@ -22,7 +22,8 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 };
 
 use cypher_rpc::device_room::{
-    CLIENT_CLOSED, CLIENT_GONE, HOST_CLOSED, HOST_OFFLINE, NUDGE_KIND, RELAY_KIND, SECURE_KIND,
+    BOTS_NUDGE_KIND, CLIENT_CLOSED, CLIENT_GONE, HOST_CLOSED, HOST_OFFLINE, NUDGE_KIND, RELAY_KIND,
+    SECURE_KIND,
 };
 use cypher_rpc::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
@@ -92,8 +93,19 @@ impl FakeRelay {
 
     /// Deliver a nudge frame to the connected host (the DO's /nudge live path).
     fn nudge(&self, chat_id: &str) {
-        let header = DeviceFrameHeader::new(chat_id, NUDGE_KIND);
-        let payload = serde_json::json!({ "chatId": chat_id }).to_string();
+        let payload = serde_json::json!({ "chatId": chat_id });
+        self.send_to_host(chat_id, NUDGE_KIND, payload);
+    }
+
+    /// Deliver a bot network nudge (the DO's /nudge `{botRoomId}` path).
+    fn nudge_bots(&self, room_id: &str) {
+        let payload = serde_json::json!({ "botRoomId": room_id });
+        self.send_to_host(room_id, BOTS_NUDGE_KIND, payload);
+    }
+
+    fn send_to_host(&self, stream: &str, kind: &str, payload: serde_json::Value) {
+        let header = DeviceFrameHeader::new(stream, kind);
+        let payload = payload.to_string();
         let frame = encode_device_frame(&header, payload.as_bytes()).expect("encode nudge");
         let state = self.state.lock().expect("lock");
         state
@@ -680,6 +692,38 @@ async fn nudges_reach_the_host_callback() {
         .expect("nudge delivered")
         .expect("channel open");
     assert_eq!(got, "chat-42");
+}
+
+#[tokio::test]
+async fn bot_nudges_reach_their_own_callback() {
+    let relay = FakeRelay::start().await;
+    let (chats_tx, mut chats_rx) = mpsc::unbounded_channel::<String>();
+    let (bots_tx, mut bots_rx) = mpsc::unbounded_channel::<String>();
+    let on_nudge: cypher_rpc::NudgeHandler = Arc::new(move |chat_id| {
+        let _ = chats_tx.send(chat_id);
+    });
+    let on_bots: cypher_rpc::NudgeHandler = Arc::new(move |room| {
+        let _ = bots_tx.send(room);
+    });
+    let config = relay_config(&relay.edge_url(), 100).with_bots_nudge(on_bots);
+    let _host = HostRelay::spawn(config, TestService::new("host-a"), on_nudge);
+    relay.wait_host_connected().await;
+
+    relay.nudge_bots("room-7");
+    relay.nudge("chat-1");
+    let room = tokio::time::timeout(Duration::from_secs(5), bots_rx.recv())
+        .await
+        .expect("bots nudge delivered")
+        .expect("channel open");
+    assert_eq!(room, "room-7");
+    let chat = tokio::time::timeout(Duration::from_secs(5), chats_rx.recv())
+        .await
+        .expect("chat nudge delivered")
+        .expect("channel open");
+    assert_eq!(
+        chat, "chat-1",
+        "a bots nudge never reaches the chat handler"
+    );
 }
 
 /// Live-edge variant: run the same host+client path through a real DeviceRoom DO.

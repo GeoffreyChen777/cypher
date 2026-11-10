@@ -656,8 +656,8 @@ impl Transcript {
             .text_size(px(10.5))
             .text_color(theme.text_faint)
             .child(match &resolution {
-                Resolution::Found(_) => "Current workspace version · click the reference to open",
-                _ => "Workspace lookup",
+                Resolution::Found(_) => "Current project version · click the reference to open",
+                _ => "Project lookup",
             });
         let card = popover::popover_card_flush(&theme)
             // Frosted on every theme: a translucent tint over the blurred

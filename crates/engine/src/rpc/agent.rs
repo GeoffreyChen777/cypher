@@ -2,8 +2,9 @@
 //!
 //! Agents are spawned with the engine's keyless `agent.sock` (see
 //! `cypher_rpc`'s `local` module) rather than the keyed `engine.sock`. Here
-//! they reach only the calls the bundled extensions make — subagents and
-//! language detection — and only on this device: an agent that follows
+//! they reach only the calls the bundled extensions make — subagents,
+//! language detection and a workspace run's bot tools — and only on this
+//! device: an agent that follows
 //! injected instructions cannot open terminals, change settings, or queue
 //! work in chats that run elsewhere.
 
@@ -41,6 +42,41 @@ impl AgentRpc {
             )),
         }
     }
+
+    /// `MemoryTool` speaks for a chat whose run is on this device (its
+    /// handler resolves which stores the chat sees, peers none).
+    fn require_local_chat(&self, params: &Value) -> Result<(), RpcError> {
+        let chat_id = params
+            .get("chatId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::BadParams("chatId required".into()))?;
+        match self.inner.workspace.chat(chat_id).map_err(failed)? {
+            Some(chat) if chat.device_id == self.inner.doc_host.device_id() => Ok(()),
+            _ => Err(RpcError::Failed(
+                "Memory answers only runs on this device.".into(),
+            )),
+        }
+    }
+
+    /// `BotTool` speaks for a workspace's chat hosted on this device (its
+    /// handler resolves the workspace and enforces its scope).
+    fn require_local_bot_chat(&self, params: &Value) -> Result<(), RpcError> {
+        let chat_id = params
+            .get("chatId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::BadParams("chatId required".into()))?;
+        match self.inner.workspace.chat(chat_id).map_err(failed)? {
+            Some(chat)
+                if chat.bot.as_ref().is_some_and(|bot| bot.is_bot_thread())
+                    && chat.device_id == self.inner.doc_host.device_id() =>
+            {
+                Ok(())
+            }
+            _ => Err(RpcError::Failed(
+                "Workspace tools answer only a workspace's own runs on this device.".into(),
+            )),
+        }
+    }
 }
 
 #[async_trait]
@@ -56,6 +92,8 @@ impl RpcService for AgentRpc {
             methods::QUEUE_COMMAND | methods::WATCH_AGENT_EVENTS => {
                 self.require_local_child(&params)?
             }
+            methods::BOT_TOOL => self.require_local_bot_chat(&params)?,
+            methods::MEMORY_TOOL => self.require_local_chat(&params)?,
             other => return Err(RpcError::UnknownMethod(other.to_string())),
         }
         self.inner.handle(method, params).await

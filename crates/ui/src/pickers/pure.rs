@@ -111,7 +111,7 @@ pub struct PermissionLevel {
     pub description: &'static str,
 }
 
-/// The permission levels, strictest first. Edit workspace is the default.
+/// The permission levels, strictest first. Edit project is the default.
 pub const PERMISSION_LEVELS: [PermissionLevel; 3] = [
     PermissionLevel {
         level: SandboxLevel::ReadOnly,
@@ -121,8 +121,8 @@ pub const PERMISSION_LEVELS: [PermissionLevel; 3] = [
     },
     PermissionLevel {
         level: SandboxLevel::WorkspaceWrite,
-        value: "workspace",
-        label: "Edit workspace",
+        value: "project",
+        label: "Edit project",
         description: "Edits this project; asks before touching anything else",
     },
     PermissionLevel {

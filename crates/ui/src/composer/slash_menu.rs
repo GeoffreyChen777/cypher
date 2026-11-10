@@ -101,6 +101,11 @@ const PERMISSION_CHOICES: [Choice; 3] = [
 /// The level a `/permissions` choice (or a typed value) stands for.
 pub fn permission_for(value: &str) -> Option<SandboxLevel> {
     let value = value.trim().to_lowercase();
+    // `workspace` was this level's name before Workspaces meant something
+    // else; typed out of habit, it still sets it.
+    if value == "workspace" {
+        return Some(SandboxLevel::WorkspaceWrite);
+    }
     PERMISSION_LEVELS
         .iter()
         .find(|entry| entry.value == value || entry.label.to_lowercase() == value)
@@ -127,17 +132,21 @@ pub enum Action {
     Attach,
     /// Open the permission level's choices (`/permissions`).
     Permissions,
+    /// Open what agents remember for this session (`/memory`): its
+    /// project's memory in Settings, or yours without a project.
+    Memory,
 }
 
 impl Action {
     /// Every action, in menu order. A composer offers the ones that apply
     /// to it (`/permissions` only for a Pi chat's own composer).
-    pub const ALL: [Self; 2] = [Self::Attach, Self::Permissions];
+    pub const ALL: [Self; 3] = [Self::Attach, Self::Permissions, Self::Memory];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Attach => "Attach files",
             Self::Permissions => "/permissions",
+            Self::Memory => "/memory",
         }
     }
 
@@ -145,6 +154,7 @@ impl Action {
         match self {
             Self::Attach => "Add files or images to this message",
             Self::Permissions => "What the agent may do without asking in this chat",
+            Self::Memory => "What agents remember for this session's project",
         }
     }
 
@@ -152,13 +162,14 @@ impl Action {
         match self {
             Self::Attach => crate::kit::icons::PAPERCLIP,
             Self::Permissions => crate::kit::icons::SHIELD_CHECK,
+            Self::Memory => crate::kit::icons::BOOK,
         }
     }
 
     /// The command whose choices the action opens.
     pub fn choices_command(self) -> Option<&'static str> {
         match self {
-            Self::Attach => None,
+            Self::Attach | Self::Memory => None,
             Self::Permissions => Some(PERMISSIONS),
         }
     }
@@ -168,6 +179,7 @@ impl Action {
         match self {
             Self::Attach => None,
             Self::Permissions => Some(CommandGroup::AgentModes),
+            Self::Memory => Some(CommandGroup::Conversation),
         }
     }
 
@@ -177,6 +189,7 @@ impl Action {
         match self {
             Self::Attach => "attach files images upload",
             Self::Permissions => "permissions access sandbox",
+            Self::Memory => "memory remember notes",
         }
     }
 }
@@ -430,7 +443,7 @@ pub fn command_badge(command: &str, facts: &Facts) -> Option<Badge> {
 /// amber at Full access.
 pub fn action_badge(action: Action, facts: &Facts) -> Option<Badge> {
     match action {
-        Action::Attach => None,
+        Action::Attach | Action::Memory => None,
         Action::Permissions => facts.permission.map(|level| {
             let tone = if level == SandboxLevel::DangerFullAccess {
                 Tone::Warning
@@ -549,6 +562,7 @@ mod tests {
                 "# Message",
                 "Attach files",
                 "# Conversation",
+                "/memory",
                 "compact",
                 "# Agent modes",
                 "/permissions",
@@ -563,7 +577,7 @@ mod tests {
             ]
         );
         // Headers are skipped by the keyboard; the top row is preferred.
-        assert_eq!(menu.selectable, [1, 3, 5, 6, 7, 8, 10, 11, 13]);
+        assert_eq!(menu.selectable, [1, 3, 4, 6, 7, 8, 9, 11, 12, 14]);
         assert_eq!(menu.preferred, Some(0));
     }
 
@@ -705,7 +719,22 @@ mod tests {
         let menu = command_level(&Action::ALL, &commands, |_| false, "");
         assert_eq!(
             names(&menu, &commands),
-            ["# Message", "Attach files", "# Agent modes", "/permissions"]
+            [
+                "# Message",
+                "Attach files",
+                "# Conversation",
+                "/memory",
+                "# Agent modes",
+                "/permissions"
+            ]
+        );
+        let menu = command_level(&Action::ALL, &commands, |_| false, "memory");
+        assert_eq!(
+            menu.rows,
+            [
+                Row::Header(CommandGroup::Conversation.title()),
+                Row::Action(Action::Memory)
+            ]
         );
         for query in ["perm", "access", "sandbox"] {
             let menu = command_level(&Action::ALL, &commands, |_| false, query);
@@ -735,10 +764,7 @@ mod tests {
                 _ => "",
             })
             .collect();
-        assert_eq!(
-            titles,
-            ["Ask before edits", "Edit workspace", "Full access"]
-        );
+        assert_eq!(titles, ["Ask before edits", "Edit project", "Full access"]);
         let checked: Vec<bool> = PERMISSION_CHOICES
             .iter()
             .map(|choice| choice_in_effect(PERMISSIONS, choice, &facts))
@@ -746,7 +772,7 @@ mod tests {
         assert_eq!(checked, [false, true, false]);
         assert_eq!(
             choice_summary(PERMISSIONS, &facts).as_deref(),
-            Some("Now: Edit workspace")
+            Some("Now: Edit project")
         );
         // Typed by value or by label.
         assert_eq!(choice_level(PERMISSIONS, "fu").rows.len(), 1);
@@ -757,6 +783,11 @@ mod tests {
             Some(SandboxLevel::ReadOnly)
         );
         assert_eq!(permission_for("everything"), None);
+        assert_eq!(
+            permission_for("workspace"),
+            Some(SandboxLevel::WorkspaceWrite),
+            "the old name still works"
+        );
     }
 
     #[test]
@@ -767,7 +798,7 @@ mod tests {
         };
         assert_eq!(
             action_badge(Action::Permissions, &at(SandboxLevel::WorkspaceWrite)),
-            Some(badge("Edit workspace", Tone::Neutral))
+            Some(badge("Edit project", Tone::Neutral))
         );
         assert_eq!(
             action_badge(Action::Permissions, &at(SandboxLevel::DangerFullAccess)),

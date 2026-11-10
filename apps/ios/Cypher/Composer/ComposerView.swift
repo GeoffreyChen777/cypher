@@ -369,7 +369,7 @@ struct ComposerView: View {
                 uploadError = nil
                 clearDraft()
             } else {
-                uploadError = "Pick a level: /permissions ask, workspace or full"
+                uploadError = "Pick a level: /permissions ask, project or full"
             }
             return
         }

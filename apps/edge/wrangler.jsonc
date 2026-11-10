@@ -1,6 +1,7 @@
 {
   // Cypher edge: per-chat log-relay DOs, per-user registry DOs, per-device
-  // relay DOs, R2 blobs, and the absorbed WorkOS auth routes.
+  // relay DOs, per-bot network DOs, R2 blobs, and the absorbed WorkOS auth
+  // routes.
   // Design: docs/architecture.md §6, docs/design/chat2-sync.md, docs/design/registry-sync.md.
   // NOTE: Durable Object storage is bound to the worker's script name, so the
   // worker identity (`cypher-edge`) must never be renamed without a data
@@ -32,7 +33,9 @@
       { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
       { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
       { "name": "PUSH_DEVICES", "class_name": "PushDevice" },
-      { "name": "TRUST_ROOMS", "class_name": "TrustRoom" }
+      { "name": "TRUST_ROOMS", "class_name": "TrustRoom" },
+      // Bot network rooms (docs/design/agent-bots.md §11), `bot1/{botRoomId}`.
+      { "name": "BOT_ROOMS", "class_name": "BotRoom" }
     ]
   },
   "services": [
@@ -75,6 +78,12 @@
       // Device trust chains + pairing mailboxes (crates/trust).
       "tag": "v7-trust",
       "new_sqlite_classes": ["TrustRoom"]
+    },
+    {
+      // Bot network rooms (docs/design/agent-bots.md §11). After main's
+      // v7-trust, which production already applied.
+      "tag": "v8-bots",
+      "new_sqlite_classes": ["BotRoom"]
     }
   ],
   "r2_buckets": [

@@ -6,6 +6,9 @@ export interface Env {
   /** chat2 session rooms (`chat2/{chatId}`) — dumb authenticated log relays
    * (docs/design/chat2-sync.md). */
   CHAT_ROOMS: DurableObjectNamespace;
+  /** Bot network rooms (`bot1/{botRoomId}`), one per networked bot
+   * (docs/design/agent-bots.md §11). */
+  BOT_ROOMS: DurableObjectNamespace;
   /** Per-user device trust chains and pairing mailboxes (`t1/{userId}`). */
   TRUST_ROOMS?: DurableObjectNamespace;
   BLOBS: R2Bucket;

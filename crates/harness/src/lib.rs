@@ -8,8 +8,8 @@ use tokio::sync::{mpsc, oneshot};
 pub use tokio_util::sync::CancellationToken;
 
 use cypher_proto::{
-    AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand, SteeringMode,
-    UserInputAnswer, UserInputQuestion,
+    AgentEvent, BotOrigin, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
+    SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -44,11 +44,11 @@ pub struct SlashUi {
     pub cancel: CancellationToken,
 }
 
-/// Host-side run context: which chat this run belongs to and whether the
-/// engine hosts it as a Cypher child subagent. A NON-SERIALIZED internal seam
-/// (never rides the wire — `RunRequest` stays clean); the engine builds it
-/// from the chat row at dispatch time. Discovery processes never see it (they
-/// have no `RunControls`), so a parent id can never leak into a probe.
+/// Host-side run context: which chat this run belongs to and the role it
+/// runs in. A NON-SERIALIZED internal seam (never rides the wire —
+/// `RunRequest` stays clean); the engine builds it from the chat row at
+/// dispatch time. Discovery processes never see it (they have no
+/// `RunControls`), so a parent id can never leak into a probe.
 #[derive(Debug, Clone, Default)]
 pub struct RunHostContext {
     /// The chat id this run belongs to (injected as `CYPHER_CHAT_ID` into the
@@ -57,9 +57,102 @@ pub struct RunHostContext {
     /// never see it (they have no `RunControls`), so a parent id can never
     /// leak into a probe.
     pub chat_id: Option<String>,
-    /// Cypher child-subagent env (present only for child chats): the persisted
-    /// agent profile plus the messaging-channel identity for the initial run.
-    pub child: Option<ChildRunEnv>,
+    pub profile: RunProfile,
+    /// The run's memory section (docs/design/memory.md §4): the
+    /// `MEMORY.md` of each store it sees, appended after the profile's
+    /// prompt. `Some` also turns on the memory tools (`CYPHER_MEMORY`);
+    /// `None` for runs without memory (peer threads, discovery).
+    pub memory_prompt: Option<String>,
+}
+
+impl RunHostContext {
+    /// Everything the run appends to its system prompt, with a name for the
+    /// temp file: the profile's prompt, then the memory section.
+    pub fn appended_prompt(&self) -> Option<(String, String)> {
+        let profile = self.profile.appended_prompt();
+        let memory = self
+            .memory_prompt
+            .as_deref()
+            .filter(|prompt| !prompt.trim().is_empty());
+        let name = profile.map_or("memory", |(name, _)| name).to_string();
+        let prompt = match (profile.map(|(_, prompt)| prompt), memory) {
+            (None, None) => return None,
+            (Some(profile), None) => profile.to_string(),
+            (None, Some(memory)) => memory.to_string(),
+            (Some(profile), Some(memory)) => format!("{profile}\n\n{memory}"),
+        };
+        Some((name, prompt))
+    }
+}
+
+/// The role a run spawns in, which fixes its tool allowlist, extensions,
+/// appended system prompt and env. One value, so a run can never be both a
+/// child and a bot (two `--tools` flags, one silently winning).
+#[derive(Debug, Clone, Default)]
+pub enum RunProfile {
+    /// An ordinary session: Pi's own tools and extensions, no extra prompt.
+    #[default]
+    Root,
+    /// A Cypher-hosted child subagent chat.
+    Child(ChildRunEnv),
+    /// One of an agent bot's threads.
+    Bot(BotRunEnv),
+    /// A memory consolidation pass (docs/design/memory.md §6).
+    Memory(MemoryRunEnv),
+}
+
+impl RunProfile {
+    pub fn child(&self) -> Option<&ChildRunEnv> {
+        match self {
+            Self::Child(child) => Some(child),
+            _ => None,
+        }
+    }
+
+    pub fn bot(&self) -> Option<&BotRunEnv> {
+        match self {
+            Self::Bot(bot) => Some(bot),
+            _ => None,
+        }
+    }
+
+    /// The system prompt the run appends, with a name for its temp file;
+    /// `None` when there is nothing to append.
+    pub fn appended_prompt(&self) -> Option<(&str, &str)> {
+        let (name, prompt) = match self {
+            Self::Root => return None,
+            Self::Child(child) => (child.agent.as_str(), child.system_prompt.as_str()),
+            Self::Bot(bot) => ("bot", bot.system_prompt.as_str()),
+            Self::Memory(pass) => ("memory-pass", pass.system_prompt.as_str()),
+        };
+        (!prompt.trim().is_empty()).then_some((name, prompt))
+    }
+}
+
+/// The agent-bot runtime env the engine derives from (chat, bot row, origin)
+/// (docs/design/agent-bots.md §4.4, §9). The pi harness loads the bot tools
+/// extension, allows ONLY `tools`, and appends `system_prompt`. Scope and
+/// capabilities are not here: every bot tool checks them per call.
+#[derive(Debug, Clone)]
+pub struct BotRunEnv {
+    pub bot_id: String,
+    pub origin: BotOrigin,
+    /// The run's whole tool allowlist (`--tools`), derived from the origin.
+    pub tools: Vec<String>,
+    pub system_prompt: String,
+    /// Checkouts the run may work in directly (owner threads with *Work
+    /// directly*): the permission extension's extra workspace roots for the
+    /// chat, passed as `CYPHER_BOT_WORKSPACE_ROOTS`.
+    pub workspace_roots: Vec<String>,
+}
+
+/// A consolidation pass's env: only the memory tools, and the pass's
+/// instructions.
+#[derive(Debug, Clone)]
+pub struct MemoryRunEnv {
+    /// The run's whole tool allowlist (`--tools`).
+    pub tools: Vec<String>,
+    pub system_prompt: String,
 }
 
 /// The child-subagent runtime env the engine derives from the chat row's
@@ -94,7 +187,7 @@ pub struct RunControls {
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
     pub interrupt: CancellationToken,
-    /// Host-side run context (chat identity + child env). Non-serialized
+    /// Host-side run context (chat identity + run profile). Non-serialized
     /// internal seam — see [`RunHostContext`].
     pub host: RunHostContext,
 }

@@ -289,6 +289,7 @@ impl Transcript {
                 Rc::new(move |row: &str, code: &str| index.borrow().patch_outcome(row, code))
             }),
             live,
+            justify: false,
         };
         let highlight = self.code_highlight_for(row_id, tree, Some(block_ix), cx);
         let Some(top) = tree.blocks.get(block_ix) else {

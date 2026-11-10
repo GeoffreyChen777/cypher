@@ -218,6 +218,8 @@ mod tests {
             last_seen_at: None,
             room_gen: Some(2),
             child: None,
+            bot: None,
+            memory: None,
         }
     }
 

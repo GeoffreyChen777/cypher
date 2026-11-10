@@ -2959,3 +2959,37 @@ fn round_changes_card_labels() {
     assert_eq!(changed_label(&changes), "500 files changed");
     assert_eq!(hidden_files(&changes), 500 - CARD_FILES as u32);
 }
+
+#[test]
+fn a_bot_session_read_takes_its_title_from_the_result() {
+    use super::render::read_session_title;
+    assert_eq!(
+        read_session_title(
+            "Session c1 · \"Fix the invoice migration\" · Billing on Studio · idle · 2026-10-14 09:00 UTC (1h ago) · 12 message(s)"
+        )
+        .as_deref(),
+        Some("Fix the invoice migration")
+    );
+    assert_eq!(
+        read_session_title("No session \"x\" that you can see."),
+        None
+    );
+}
+
+#[test]
+fn a_late_peer_answer_reads_as_an_attributed_answer() {
+    let mut entry = assistant(
+        "bot-answer-x1",
+        MessageStatus::Complete,
+        vec![text_part(
+            "t0",
+            "[Answer from \"Ada\" (alice's bot) to your question \"Which lib?\"]\n\n**jose**, v6.",
+        )],
+    );
+    entry.role = MessageRole::User;
+    let rows = rows_for_entry(&entry, false, &mut parse);
+    assert!(matches!(&rows[0].kind, RowKind::PeerAnswer { header }
+            if header.as_ref() == "Answer from \"Ada\" (alice's bot) to your question \"Which lib?\""));
+    assert!(rows.len() > 1, "the answer follows as text rows");
+    assert!(!rows.iter().any(|r| matches!(r.kind, RowKind::User { .. })));
+}

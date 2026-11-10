@@ -158,7 +158,11 @@ impl Harness for RecoveryHarness {
         } else {
             "Done."
         };
-        let channel = controls.host.child.and_then(|child| child.channel_root);
+        let channel = controls
+            .host
+            .profile
+            .child()
+            .and_then(|child| child.channel_root.clone());
         let mut seen = self.seen.lock().unwrap();
         seen.turns.push((prompt, resume));
         seen.channels.push(channel);

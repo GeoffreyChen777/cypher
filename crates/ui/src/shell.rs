@@ -64,6 +64,10 @@ use crate::transcript::rail;
 use crate::transcript::{self, Transcript};
 use crate::widgets::text_input::{TextInput, TextInputEvent};
 
+mod bots;
+pub(crate) use bots::memory::{
+    MemoryPage, MemoryPane, MemoryPaneEvent, file_name as memory_file_name,
+};
 #[cfg(feature = "dev-capture")]
 mod dev_capture;
 mod dock;
@@ -359,6 +363,8 @@ pub enum SettingsSection {
     Appearance,
     Notifications,
     Shortcuts,
+    /// What agents remember: yours and every project's (memory.md §8).
+    Memory,
     Archived,
 }
 
@@ -375,15 +381,15 @@ impl SettingsSection {
     pub const CLIENT_SETTINGS: [Self; 3] = [Self::Appearance, Self::Notifications, Self::Shortcuts];
     // Registry and archived conversations span the workspace, not the selected
     // host. Keep them separate from both host configuration and UI preferences.
-    pub const WORKSPACE_SETTINGS: [Self; 2] = [Self::Devices, Self::Archived];
+    pub const WORKSPACE_SETTINGS: [Self; 3] = [Self::Devices, Self::Memory, Self::Archived];
     pub const NAV_GROUPS: [(&'static str, &'static [Self]); 3] = [
         ("Device settings", &Self::DEVICE_SETTINGS),
         ("Client settings", &Self::CLIENT_SETTINGS),
-        ("Workspace", &Self::WORKSPACE_SETTINGS),
+        ("Account", &Self::WORKSPACE_SETTINGS),
     ];
 
     #[cfg(test)]
-    pub const ALL: [SettingsSection; 12] = [
+    pub const ALL: [SettingsSection; 13] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Providers,
@@ -395,6 +401,7 @@ impl SettingsSection {
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Shortcuts,
+        SettingsSection::Memory,
         SettingsSection::Archived,
     ];
 
@@ -414,6 +421,7 @@ impl SettingsSection {
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Shortcuts => "Shortcuts",
+            SettingsSection::Memory => "Memory",
             SettingsSection::Archived => "Archived sessions",
         }
     }
@@ -1095,6 +1103,10 @@ struct ShellMenus {
     sidebar_view: popover::Popup<Point<Pixels>>,
     /// Project glyph/colour picker: (space id, window position).
     space_style: popover::Popup<(String, Point<Pixels>)>,
+    /// Bot context menu: (bot id, window position).
+    bot: popover::Popup<(String, Point<Pixels>)>,
+    /// The Botboard's bot switcher list (its filter lives in the board).
+    bot_switcher: popover::Popup<()>,
     user: popover::Popup<()>,
 }
 
@@ -1116,6 +1128,7 @@ struct SettingsPages {
     permissions: Option<Entity<crate::settings::permissions::PermissionsPage>>,
     subagents: Option<Entity<SubagentsPage>>,
     github: Option<Entity<crate::settings::github::GithubPage>>,
+    memory: Option<Entity<crate::settings::memory::MemorySettingsPage>>,
     setup: Option<Entity<SetupPage>>,
     setup_sub: Option<Subscription>,
     /// Continue/Skip dismissed the overlay for this process.
@@ -1143,6 +1156,10 @@ struct ShellDialogs {
     /// The add-space palette (⌘K-style; device tabs + folder search), `Some`
     /// while open.
     add_space: Option<AddSpaceFlow>,
+    /// The bot create/edit dialog.
+    bot: Option<bots::BotDialog>,
+    /// Bot id awaiting delete confirmation.
+    delete_bot: Option<String>,
 }
 
 /// In-app update state: the bundle update's progress, the About dialog,
@@ -1330,6 +1347,8 @@ pub struct Shell {
     /// The session slots behind the workspace's tabs, and how main follows
     /// the focused one.
     tiles: SlotTable,
+    /// The Botboard's conversation slot and detail panel (main window).
+    board: bots::BoardUi,
     /// What closed session tabs leave behind for their next slot.
     closed_tabs: ClosedTabStash,
     /// The main state's chats generation `prune_tabs` last judged: only a
@@ -1379,6 +1398,8 @@ pub struct Shell {
     /// The local→synced account lifecycle and runtime switches.
     sync: SyncUi,
     mutate_task: Option<Task<()>>,
+    /// The bot dialog's in-flight `CreateBot`.
+    bot_task: Option<Task<()>>,
     delete_worktree_task: Option<Task<()>>,
     /// Kept for the failed-gate "Retry" action.
     boot: EngineBootConfig,
@@ -1564,6 +1585,7 @@ impl Shell {
                 saved_workspace,
                 ..Default::default()
             },
+            board: bots::BoardUi::default(),
             closed_tabs: ClosedTabStash::default(),
             seen_chats_generation: 0,
             expected_chats: std::collections::HashMap::new(),
@@ -1587,6 +1609,7 @@ impl Shell {
                 permissions: None,
                 subagents: None,
                 github: None,
+                memory: None,
                 setup: None,
                 setup_sub: None,
                 setup_dismissed: false,
@@ -1645,6 +1668,7 @@ impl Shell {
                 import_current: None,
             },
             mutate_task: None,
+            bot_task: None,
             delete_worktree_task: None,
             boot,
             data_dir,
@@ -1745,10 +1769,8 @@ impl Shell {
                         let s = shell.state.read(cx);
                         let now = Utc::now();
                         shell
-                            .workspace
-                            .visible_tabs()
-                            .into_iter()
-                            .filter_map(|tab| tab.chat_id())
+                            .shown_chats()
+                            .iter()
                             .any(|id| s.indicator_for(id, now) != Indicator::None)
                     };
                     if live
@@ -1788,6 +1810,7 @@ impl Shell {
             Some("settings/appearance") => Route::Settings(SettingsSection::Appearance),
             Some("settings/notifications") => Route::Settings(SettingsSection::Notifications),
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
+            Some("settings/memory") => Route::Settings(SettingsSection::Memory),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
             // `new` pins the new-chat canvas (suppresses boot auto-select).
             Some("new") => {

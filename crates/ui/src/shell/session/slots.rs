@@ -15,9 +15,48 @@ impl Shell {
             .map(|(sid, _)| *sid)
     }
 
-    /// The focused group's active tab's slot.
+    /// The slot keyboard actions go to: the focused group's active tab's,
+    /// or on the Botboard its conversation's.
     pub(in crate::shell) fn focused_slot(&self) -> Option<SlotId> {
+        if self.botboard() {
+            return self.board.slot;
+        }
         self.slot_for_tab(self.workspace.focused_tab()?)
+    }
+
+    /// The tab main's selection follows: the focused tile's, or on the
+    /// Botboard its conversation's.
+    fn followed_tab(&self) -> Option<TabKey> {
+        if self.botboard() {
+            let sid = self.board.slot?;
+            return self.tiles.slots.get(&sid).map(|slot| slot.tab.clone());
+        }
+        self.workspace.focused_tab().cloned()
+    }
+
+    /// The slots on screen: the visible tiles', or the Botboard's.
+    fn shown_slots(&self) -> Vec<SlotId> {
+        if self.botboard() {
+            return self.board.slot.into_iter().collect();
+        }
+        self.workspace
+            .visible_tabs()
+            .into_iter()
+            .filter_map(|tab| self.slot_for_tab(tab))
+            .collect()
+    }
+
+    /// The chats on screen (seen-marking, the working heartbeat).
+    pub(in crate::shell) fn shown_chats(&self) -> Vec<String> {
+        if self.botboard() {
+            return self.board_chat().map(str::to_string).into_iter().collect();
+        }
+        self.workspace
+            .visible_tabs()
+            .into_iter()
+            .filter_map(|tab| tab.chat_id())
+            .map(str::to_string)
+            .collect()
     }
 
     /// The slot whose context shows `chat_id` (comment / side-chat routing).
@@ -55,7 +94,7 @@ impl Shell {
 
     // ---- slot lifecycle ----
 
-    fn create_slot(&mut self, tab: TabKey, cx: &mut Context<Self>) -> SlotId {
+    pub(in crate::shell) fn create_slot(&mut self, tab: TabKey, cx: &mut Context<Self>) -> SlotId {
         let sid = self.tiles.next_slot_id;
         self.tiles.next_slot_id += 1;
         let chat_id = tab.chat_id().map(str::to_string);
@@ -141,6 +180,9 @@ impl Shell {
                         }
                         crate::transcript::TranscriptEvent::OpenTurnDiff { changes, path } => {
                             this.open_turn_diff(sid, changes.clone(), path.clone(), cx);
+                        }
+                        crate::transcript::TranscriptEvent::EditBotPlan { work_id, title } => {
+                            this.edit_bot_plan(sid, work_id, title, cx);
                         }
                     }
                 },
@@ -250,7 +292,7 @@ impl Shell {
     /// temporary side chats (engine objects), detach its surfaces' floating
     /// comment state before the entities go, and park its terminals (their
     /// PTYs outlive the tab) — or close them when the chat is gone.
-    fn dispose_slot(&mut self, sid: SlotId, cx: &mut Context<Self>) {
+    pub(in crate::shell) fn dispose_slot(&mut self, sid: SlotId, cx: &mut Context<Self>) {
         let Some(slot) = self.tiles.slots.remove(&sid) else {
             return;
         };
@@ -299,14 +341,16 @@ impl Shell {
     /// Make the slot set match the workspace: drop the slots of closed
     /// tabs, create one for every visible tab (and the focused one) that has
     /// none yet — background tabs and the tiles hidden behind a zoom get
-    /// theirs when first shown, then keep it.
+    /// theirs when first shown, then keep it. The Botboard's slot is not a
+    /// tab's and stays (see `Shell::sync_board`).
     pub(in crate::shell) fn sync_slots(&mut self, cx: &mut Context<Self>) {
         let tabs: std::collections::HashSet<TabKey> = self.workspace.tabs().cloned().collect();
+        let board = self.board.slot;
         let stale: Vec<SlotId> = self
             .tiles
             .slots
             .iter()
-            .filter(|(_, slot)| !tabs.contains(&slot.tab))
+            .filter(|(sid, slot)| Some(**sid) != board && !tabs.contains(&slot.tab))
             .map(|(sid, _)| *sid)
             .collect();
         for sid in stale {
@@ -374,7 +418,7 @@ impl Shell {
     /// notification activity all read it. Only runs on a focus change, so
     /// main's own notifies never feed back into the workspace.
     pub(in crate::shell) fn sync_follow(&mut self, cx: &mut Context<Self>) {
-        let focused = self.workspace.focused_tab().cloned();
+        let focused = self.followed_tab();
         if focused == self.tiles.followed {
             return;
         }
@@ -393,8 +437,10 @@ impl Shell {
         // landing off the untouched boot canvas REPLACES that entry —
         // zeron's `/` route redirected into the last-used chat, leaving no
         // dead Back target. Walking history lands here too, but the
-        // destination already equals `current()`, so the push dedups.
-        if matches!(self.route, Route::Chat) {
+        // destination already equals `current()`, so the push dedups. The
+        // Botboard's conversation is not a history entry: coming back to
+        // Projects mode dedups against the tab left there.
+        if matches!(self.route, Route::Chat) && !self.botboard() {
             let entry = NavEntry::Chat(chat.unwrap_or_default());
             if self.nav.len() == 1 && *self.nav.current() == NavEntry::Chat(String::new()) {
                 self.nav.replace(entry);
@@ -421,12 +467,7 @@ impl Shell {
     /// with it, and the shared popup closes — it must not float at a stale
     /// anchor over the incoming session. Closed slots did this on disposal.
     fn dismiss_hidden_comment_ui(&mut self, cx: &mut Context<Self>) {
-        let shown: Vec<SlotId> = self
-            .workspace
-            .visible_tabs()
-            .into_iter()
-            .filter_map(|tab| self.slot_for_tab(tab))
-            .collect();
+        let shown = self.shown_slots();
         let before = std::mem::replace(&mut self.tiles.shown_slots, shown);
         let hidden: Vec<SlotId> = before
             .into_iter()
@@ -489,6 +530,9 @@ impl Shell {
             (TabKey::Session(bound), None) if self.chat_awaited(&bound, cx) => {
                 slot_state.update(cx, |s, cx| s.select_chat(Some(bound), cx));
             }
+            // The Botboard's conversation went (its bot was deleted): the
+            // board moves to another bot.
+            (TabKey::Session(_), None) if self.board.slot == Some(sid) => self.sync_board(cx),
             (tab @ TabKey::Session(_), None) => {
                 self.workspace.close(&tab);
                 self.workspace_changed(cx);
@@ -544,6 +588,7 @@ impl Shell {
                     }
                 }
             }
+            ComposerEvent::OpenMemory { scope } => self.open_memory_settings(scope.clone(), cx),
             // Every send glides the prompt to the viewport top and reserves
             // the reply's space below it (notes-app parity).
             ComposerEvent::Sent {

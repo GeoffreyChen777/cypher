@@ -18,7 +18,7 @@
 //! spawn failure, stream error, engine-restart recovery).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::Utc;
@@ -30,7 +30,7 @@ use cypher_doc::{
     SegmentWriter, SessionDoc, fold_event_into_parts, sanitize_tool_call,
 };
 use cypher_harness::{
-    CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, SteerMessage,
+    CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, RunProfile, SteerMessage,
 };
 use cypher_proto::{
     AgentEvent, AnsweredModel, ChatConfig, ContextUsage, DoneStatus, HarnessId, ReasoningLevel,
@@ -39,6 +39,7 @@ use cypher_proto::{
 };
 
 use crate::EngineError;
+use crate::bots::profile::UnattendedStop;
 use crate::host::doc_host::{ChatDocHandle, DocHost};
 use crate::registry::HarnessRegistry;
 use crate::session::journal::RunJournal;
@@ -195,6 +196,12 @@ struct Inner {
     /// checkout tree for the Changes pane's "Latest turn" scope and records
     /// each round's changed files. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Memory (docs/design/memory.md): each run's memory section and a
+    /// consolidation pass's profile. Absent in bare tests.
+    memory: OnceLock<crate::memory::Memory>,
+    /// Hear every unattended run the engine stopped for asking for input:
+    /// the bot scheduler settles the routine or task run as failed.
+    unattended_listeners: Mutex<Vec<UnattendedListener>>,
     /// Temporary Side Chat ids: in-memory status + harness-session
     /// continuity ONLY. Everything that would make a chat observable or durable
     /// — the public `sessions_tx` watch, workspace session rows, the run
@@ -321,6 +328,13 @@ pub enum TurnEvent<'a> {
 /// Turn hook: called with the chat id and what happened.
 pub type TurnListener = Arc<dyn Fn(&str, TurnEvent<'_>) + Send + Sync>;
 
+/// Unattended-stop hook: called once per run the engine stopped.
+pub type UnattendedListener = Arc<dyn Fn(&UnattendedStop) + Send + Sync>;
+
+/// The input bridge a run asks its questions through.
+type InputBridge =
+    Box<dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct SessionsEngine {
     inner: Arc<Inner>,
@@ -353,6 +367,8 @@ impl SessionsEngine {
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                memory: OnceLock::new(),
+                unattended_listeners: Mutex::new(Vec::new()),
                 ephemeral: Mutex::new(HashSet::new()),
                 ephemeral_tx: Mutex::new(HashMap::new()),
                 plugin_epoch: AtomicU64::new(0),
@@ -389,9 +405,19 @@ impl SessionsEngine {
         let _ = self.inner.quiesce.set(windows);
     }
 
+    /// Wire the memory service (called once at engine assembly).
+    pub fn set_memory(&self, memory: crate::memory::Memory) {
+        let _ = self.inner.memory.set(memory);
+    }
+
     /// Wire the turn listener (called once at engine assembly).
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
+    }
+
+    /// Add an unattended-stop listener (engine assembly; tests add more).
+    pub fn add_unattended_listener(&self, listener: UnattendedListener) {
+        lock(&self.inner.unattended_listeners).push(listener);
     }
 
     // ── temporary Side Chat support ─────────────────────────────
@@ -748,13 +774,34 @@ impl SessionsEngine {
     ) -> Result<String, EngineError> {
         // Read before stripping: the transcript shows the quote the user saw.
         let comments = MessageComment::from_agent_prompt(agent_prompt.as_deref().unwrap_or(""));
-        let agent_prompt = agent_prompt_for(harness_id, agent_prompt);
+        let mut agent_prompt = agent_prompt_for(harness_id, agent_prompt);
+        // A bot chat's owner turn learns where its plans stand (approval,
+        // progress and results happen outside the conversation).
+        if let Some(ws) = self.inner.workspace()
+            && let Ok(Some(chat)) = ws.chat(chat_id)
+            && let Some(note) = crate::bots::turn_note(&ws, &chat)
+            && !request.prompt.trim_start().starts_with('/')
+        {
+            let base = agent_prompt.as_deref().unwrap_or(&request.prompt);
+            agent_prompt = Some(crate::bots::with_turn_note(&note, base));
+        }
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::git::repos::expand_home(&request.cwd);
         // A quick chat's scratch folder lives under the host's temp dir,
         // which a reboot may have emptied: recreate it so the run spawns.
         crate::session::scratch::ensure_for_run(chat_id, &request.cwd);
+        // A bot's folder lives under the profile store; recreate it the same
+        // way. A bot also refuses the Runtime commands that would widen its
+        // tools (`/scripts` turns codemode back on under `--tools`).
+        if let Some(chat) = self
+            .inner
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+        {
+            crate::bots::refuse_widening_command(&chat, &request.prompt)?;
+            crate::bots::ensure_folder_for_run(&chat, &request.cwd);
+        }
         // Visible prompt = the doc/user entry truth; the harness gets the
         // augmented effective prompt when `agent_prompt` is present.
         let visible_prompt = request.prompt.clone();
@@ -772,6 +819,14 @@ impl SessionsEngine {
             .and_then(|ws| ws.launch_config(chat_id))
         {
             request.sandbox = config.sandbox;
+        }
+        // A bot thread's level is the engine's, never the row's: any owner
+        // device may write the row (docs/design/agent-bots.md §4.4).
+        if let Some(ws) = self.inner.workspace()
+            && let Ok(Some(chat)) = ws.chat(chat_id)
+            && let Some(level) = crate::bots::profile::run_sandbox(&ws, &chat)
+        {
+            request.sandbox = level;
         }
         // A parked process launched with other model settings or another
         // level must not take this turn: end it here so the turn below
@@ -878,9 +933,18 @@ impl SessionsEngine {
         let (engine_tx, engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let pending_inputs: PendingInputs = Arc::new(Mutex::new(HashMap::new()));
 
+        let interrupt_token = CancellationToken::new();
         // Input bridge: the harness asks questions; we mint the request id, park the
         // resolver for `respond_input`, and surface the event through the run pipeline.
-        let request_input = {
+        // Nobody answers an unattended run, so its bridge denies instead.
+        let request_input: InputBridge = if self.inner.is_unattended(chat_id) {
+            unattended_input(
+                &self.inner,
+                chat_id,
+                engine_tx.clone(),
+                interrupt_token.clone(),
+            )
+        } else {
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
             let inner = Arc::downgrade(&self.inner);
@@ -927,7 +991,6 @@ impl SessionsEngine {
                 answer_rx
             })
         };
-        let interrupt_token = CancellationToken::new();
         let controls = RunControls {
             request_input,
             steering: steer_rx,
@@ -1146,7 +1209,73 @@ impl SessionsEngine {
     }
 }
 
+/// The input bridge of an unattended run (docs/design/agent-bots.md §8).
+/// Nobody can answer, so every question and approval is denied on the spot
+/// (an empty answer list reads as cancelled to ask_user and as "no approval
+/// was given" to the permission extension) and none surfaces as a pending
+/// card. The first one a working turn asks stops the run as failed, with the
+/// reason in the transcript, and tells the unattended-stop listener. A parked
+/// session's post-turn noise is only denied, as the parked gate does for
+/// attended runs.
+fn unattended_input(
+    inner: &Arc<Inner>,
+    chat_id: &str,
+    engine_tx: mpsc::UnboundedSender<AgentEvent>,
+    interrupt: CancellationToken,
+) -> InputBridge {
+    let inner = Arc::downgrade(inner);
+    let chat_id = chat_id.to_string();
+    let stopped = AtomicBool::new(false);
+    Box::new(move |questions: Vec<UserInputQuestion>| {
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(Vec::new());
+        let Some(inner) = inner.upgrade() else {
+            return rx;
+        };
+        let working = lock(&inner.statuses)
+            .get(&chat_id)
+            .is_some_and(|s| s.status == SessionStatus::Working);
+        if !working || stopped.swap(true, Ordering::SeqCst) {
+            return rx;
+        }
+        let reason = crate::bots::profile::unattended_stop_reason(&questions);
+        tracing::warn!(chat = %chat_id, %reason, "unattended run asked for input; stopping it");
+        // The error part first: the run then has output, so its errored
+        // Done is never mistaken for a child that failed to start.
+        let _ = engine_tx.send(AgentEvent::Error {
+            message: reason.clone(),
+        });
+        let _ = engine_tx.send(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            result: None,
+            error: None,
+            session_id: None,
+        });
+        interrupt.cancel();
+        let stop = UnattendedStop {
+            chat_id: chat_id.clone(),
+            reason,
+        };
+        let listeners = lock(&inner.unattended_listeners).clone();
+        for listener in listeners {
+            listener(&stop);
+        }
+        rx
+    })
+}
+
 impl Inner {
+    /// Whether nobody watches this chat's runs
+    /// ([`crate::bots::profile::is_unattended`]).
+    fn is_unattended(&self, chat_id: &str) -> bool {
+        self.workspace().is_some_and(|ws| {
+            ws.chat(chat_id).ok().flatten().is_some_and(|chat| {
+                // A consolidation pass runs where nobody watches, too.
+                chat.is_memory_pass() || crate::bots::profile::is_unattended(&ws, &chat)
+            })
+        })
+    }
+
     fn quiesce_windows(&self) -> QuiesceWindows {
         self.quiesce
             .get()
@@ -1595,50 +1724,64 @@ impl Inner {
         self.doc_host().and_then(|host| host.workspace().cloned())
     }
 
-    /// Host-side run context for one chat: its identity plus — for Cypher-hosted
-    /// child subagent chats — the persisted child env the pi harness applies
-    /// (system prompt/tools/model/thinking) and the host-LOCAL messaging
-    /// channel for the INITIAL run. A NON-serialized internal seam: the child
-    /// semantics come from the chat row, never from `RunRequest` (no arbitrary
-    /// persisted env maps on the wire), and the channel (an absolute host path)
-    /// is engine-local — consumed here so later child turns keep the profile
-    /// but have no channel (messaging tools then honestly report unavailable).
+    /// Host-side run context for one chat: its identity plus the run profile
+    /// the pi harness applies. A bot thread runs in its origin's bot profile
+    /// ([`crate::bots::profile::bot_env`]); a Cypher-hosted child subagent
+    /// chat runs in the persisted child env (system prompt/tools/model/
+    /// thinking) with the host-LOCAL messaging channel for the INITIAL run.
+    /// A NON-serialized internal seam: the profile comes from the chat row,
+    /// never from `RunRequest` (no arbitrary persisted env maps on the wire),
+    /// and the channel (an absolute host path) is engine-local — consumed
+    /// here so later child turns keep the profile but have no channel
+    /// (messaging tools then honestly report unavailable).
     fn host_context(&self, chat_id: &str) -> RunHostContext {
-        let mut ctx = RunHostContext {
-            chat_id: Some(chat_id.to_string()),
-            child: None,
-        };
+        let mut profile = RunProfile::Root;
+        let memory = self.memory.get();
         if let Some(ws) = self.workspace()
             && let Ok(Some(chat)) = ws.chat(chat_id)
-            && let Some(child) = chat.child
         {
-            let channel = lock(&self.child_channels).remove(chat_id);
-            if let Some(channel) = &channel {
-                let mut spent = lock(&self.spent_child_channels);
-                if spent.len() >= MAX_LOCAL_CHILD_CHANNELS
-                    && !spent.contains_key(chat_id)
-                    && let Some(oldest) = spent.keys().next().cloned()
-                {
-                    spent.remove(&oldest);
-                }
-                spent.insert(chat_id.to_string(), channel.clone());
+            if let Some(pass) = memory.and_then(|m| m.run_env(chat_id)) {
+                profile = RunProfile::Memory(pass);
+            } else if let Some(bot) = crate::bots::profile::bot_env(&ws, &chat) {
+                profile = RunProfile::Bot(bot);
+            } else if let Some(child) = chat.child {
+                profile = RunProfile::Child(self.child_env(chat_id, child));
             }
-            let (channel_root, child_index, address) = match channel {
-                Some(c) => (Some(c.channel_root), c.child_index, c.address),
-                None => (None, 0, None),
-            };
-            ctx.child = Some(ChildRunEnv {
-                system_prompt: child.profile.system_prompt,
-                tools: child.profile.tools,
-                model: child.profile.model,
-                thinking: child.profile.thinking,
-                channel_root,
-                run_id: child.parent_run_id,
-                agent: address.unwrap_or(child.agent),
-                child_index,
-            });
         }
-        ctx
+        RunHostContext {
+            chat_id: Some(chat_id.to_string()),
+            profile,
+            memory_prompt: memory.and_then(|m| m.prompt_for(chat_id)),
+        }
+    }
+
+    /// A child chat's run env, consuming its local messaging channel.
+    fn child_env(&self, chat_id: &str, child: cypher_proto::ChildChat) -> ChildRunEnv {
+        let channel = lock(&self.child_channels).remove(chat_id);
+        if let Some(channel) = &channel {
+            let mut spent = lock(&self.spent_child_channels);
+            if spent.len() >= MAX_LOCAL_CHILD_CHANNELS
+                && !spent.contains_key(chat_id)
+                && let Some(oldest) = spent.keys().next().cloned()
+            {
+                spent.remove(&oldest);
+            }
+            spent.insert(chat_id.to_string(), channel.clone());
+        }
+        let (channel_root, child_index, address) = match channel {
+            Some(c) => (Some(c.channel_root), c.child_index, c.address),
+            None => (None, 0, None),
+        };
+        ChildRunEnv {
+            system_prompt: child.profile.system_prompt,
+            tools: child.profile.tools,
+            model: child.profile.model,
+            thinking: child.profile.thinking,
+            channel_root,
+            run_id: child.parent_run_id,
+            agent: address.unwrap_or(child.agent),
+            child_index,
+        }
     }
 
     /// Resolve a pending input request of `chat_id`'s live run; false when

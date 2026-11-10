@@ -97,14 +97,14 @@ final class PermissionTests: XCTestCase {
         XCTAssertEqual(
             SlashMenu.level(in: "/permissions ", commands: commands), .choices(command: "permissions", query: ""))
         XCTAssertEqual(SlashMenu.choiceRows(command: "permissions", query: "fu").map(\.value), ["full"])
-        XCTAssertEqual(SlashMenu.choiceRows(command: "permissions", query: "edit").map(\.value), ["workspace"])
+        XCTAssertEqual(SlashMenu.choiceRows(command: "permissions", query: "edit").map(\.value), ["project"])
 
         let facts = SlashFacts(permission: "danger-full-access")
         XCTAssertEqual(
             SlashMenu.badge(for: "permissions", facts: facts), SlashBadge(label: "Full access", tone: .warning))
         XCTAssertEqual(
             SlashMenu.badge(for: "permissions", facts: SlashFacts(permission: "workspace-write")),
-            SlashBadge(label: "Edit workspace", tone: .neutral))
+            SlashBadge(label: "Edit project", tone: .neutral))
         XCTAssertEqual(
             SlashMenu.choices(for: "permissions").map { SlashMenu.choiceInEffect($0, of: "permissions", facts: facts) },
             [false, false, true])

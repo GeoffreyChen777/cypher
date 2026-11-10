@@ -6,7 +6,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use cypher_proto::{
-    Chat, ChatConfig, ChildChat, Device, Session, SessionStatus, Space, SubagentRun,
+    Bot, BotChat, BotScope, Chat, ChatConfig, ChildChat, Device, Session, SessionStatus, Space,
+    SubagentRun,
 };
 
 /// Everything in the registry, materialized (`read_all`).
@@ -17,6 +18,7 @@ pub struct WorkspaceState {
     pub spaces: Vec<Space>,
     pub chats: Vec<Chat>,
     pub sessions: Vec<Session>,
+    pub bots: Vec<Bot>,
 }
 
 /// Result of a `delete_space` cascade — the chat ids removed alongside the
@@ -161,6 +163,10 @@ pub(crate) struct RawChat {
     #[serde(default)]
     child: Option<ChildChat>,
     #[serde(default)]
+    bot: Option<BotChat>,
+    #[serde(default)]
+    memory: Option<cypher_proto::MemoryChat>,
+    #[serde(default)]
     pinned: bool,
 }
 
@@ -185,6 +191,66 @@ impl From<RawChat> for Chat {
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
             child: raw.child,
+            bot: raw.bot,
+            memory: raw.memory,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RawBot {
+    id: String,
+    name: String,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
+    host_device_id: String,
+    chat_id: String,
+    #[serde(default)]
+    instructions: Option<String>,
+    /// Kept as raw JSON like a chat's `config`: a scope written by a newer
+    /// app must not make the bot undecodable. A scope that does not parse
+    /// reads as the empty scope, so the bot sees nothing rather than more.
+    #[serde(default)]
+    scope: Option<serde_json::Value>,
+    /// Raw like `scope`: unreadable capabilities read as none.
+    #[serde(default)]
+    capabilities: Option<serde_json::Value>,
+    #[serde(default)]
+    paused: Option<bool>,
+    #[serde(default)]
+    created_at: i64,
+}
+
+impl From<RawBot> for Bot {
+    fn from(raw: RawBot) -> Self {
+        let scope = raw
+            .scope
+            .map(|value| match serde_json::from_value::<BotScope>(value) {
+                Ok(scope) if scope.validate().is_ok() => scope,
+                Ok(_) | Err(_) => {
+                    tracing::warn!(bot = %raw.id, "unreadable bot scope; treating it as empty");
+                    BotScope::default()
+                }
+            })
+            .unwrap_or_default();
+        Bot {
+            id: raw.id,
+            name: raw.name,
+            icon: raw.icon,
+            color: raw.color,
+            host_device_id: raw.host_device_id,
+            chat_id: raw.chat_id,
+            instructions: raw.instructions,
+            scope,
+            capabilities: raw
+                .capabilities
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_default(),
+            paused: raw.paused.unwrap_or(false),
+            created_at: dt(raw.created_at),
         }
     }
 }

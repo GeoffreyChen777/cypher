@@ -33,7 +33,7 @@ use cypher_doc::{
     TranscriptDesync, TranscriptFrame,
 };
 use cypher_proto::{
-    AuthState, Chat, ChatIndicator, Device, Session, SideChatStatus, Space, WorkspaceScope,
+    AuthState, Bot, Chat, ChatIndicator, Device, Session, SideChatStatus, Space, WorkspaceScope,
 };
 use cypher_rpc::methods;
 
@@ -269,6 +269,14 @@ pub struct AppState {
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     pub sessions: Vec<Session>,
+    /// Agent bots, oldest first (the Botboard picker's order).
+    pub bots: Vec<Bot>,
+    /// A bots frame has landed: until then an empty `bots` says nothing
+    /// (the Botboard waits rather than showing its empty state).
+    pub bots_synced: bool,
+    /// Every bot record: plans, notes, routines, tasks, activity, approvals
+    /// and the network (the Botboard's cards).
+    pub bot_records: cypher_proto::BotRecords,
     /// The project the new-session canvas mints into. Healed by
     /// [`Self::apply_spaces`] when the row vanishes; selecting a chat implies
     /// its project.
@@ -510,6 +518,8 @@ impl AppState {
             spaces: Vec::new(),
             chats: Vec::new(),
             sessions: Vec::new(),
+            bots: Vec::new(),
+            bot_records: Default::default(),
             selected_space: None,
             no_project: false,
             scratch_pending: false,
@@ -532,6 +542,7 @@ impl AppState {
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
+            bots_synced: false,
             chats_generation: 0,
             scope: ProjectScope::default(),
             transcript_watches: true,
@@ -569,6 +580,9 @@ impl AppState {
         seed.spaces = m.spaces.clone();
         seed.chats = m.chats.clone();
         seed.sessions = m.sessions.clone();
+        seed.bots = m.bots.clone();
+        seed.bot_records = m.bot_records.clone();
+        seed.bots_synced = m.bots_synced;
         seed.chats_synced = m.chats_synced;
         seed.spaces_synced = m.spaces_synced;
         seed.update = m.update.clone();
@@ -683,12 +697,15 @@ impl AppState {
             spaces,
             chats,
             sessions,
+            bots,
+            bot_records,
             local_device_id,
             data_dir,
             update,
             pi_update,
             chats_synced,
             spaces_synced,
+            bots_synced,
             scope,
         );
         // Only a chats frame judges the selection (see `chats_generation`);

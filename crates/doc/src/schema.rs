@@ -15,7 +15,7 @@
 use loro::{ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use cypher_proto::{AnsweredModel, ContextRecovery, TurnChanges};
+use cypher_proto::{AnsweredModel, BotPost, ContextRecovery, TurnChanges};
 
 use crate::command_auth::{CommandAuth, CommandSig, SIG_FIELD, command_signing_bytes, encode_sig};
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
@@ -136,6 +136,10 @@ struct DocPartJson {
     /// older than the kind fall back to a text part built from `text`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning: Option<String>,
+    /// Who posted a post part (additive); its body is `text`, so older
+    /// readers show the post as text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     call: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -242,6 +246,13 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             reasoning: Some(text.clone()),
             ..Default::default()
         },
+        MessagePart::Post { id, text, from } => DocPartJson {
+            id: id.clone(),
+            kind: "post".into(),
+            text: Some(text.clone()),
+            from: Some(serde_json::to_value(from)?),
+            ..Default::default()
+        },
     })
 }
 
@@ -285,6 +296,14 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         "reasoning" => MessagePart::Reasoning {
             id: p.id,
             text: p.reasoning.unwrap_or_default(),
+        },
+        "post" => MessagePart::Post {
+            id: p.id,
+            text: p.text.unwrap_or_default(),
+            from: p
+                .from
+                .and_then(|f| serde_json::from_value(f).ok())
+                .unwrap_or(BotPost::Unknown),
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -499,14 +518,17 @@ impl SessionDoc {
             chat_id,
             fields.iter().map(|(key, value)| (*key, value)),
         ));
-        let commands = self.doc.get_list("commands");
-        let map = commands.push_container(LoroMap::new())?;
+        // Filled detached, then attached in one op: written field by field
+        // into the list, a drain reading meanwhile (another thread, same
+        // doc) saw the entry before its signature and rejected it unsigned.
+        let map = LoroMap::new();
         for (key, value) in fields {
             map.insert(key, value)?;
         }
         if let Some(sig) = sig {
             map.insert(SIG_FIELD, encode_sig(&sig))?;
         }
+        self.doc.get_list("commands").push_container(map)?;
         self.doc.commit();
         Ok(())
     }
@@ -980,6 +1002,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     }
     if let Some(call) = &doc_part.call {
         map.insert("call", loro_value_from_json(call))?;
+    }
+    if let Some(from) = &doc_part.from {
+        map.insert("from", loro_value_from_json(from))?;
     }
     if let Some(is_error) = doc_part.is_error {
         map.insert("isError", is_error)?;

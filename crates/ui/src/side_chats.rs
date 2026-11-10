@@ -129,7 +129,8 @@ impl SideChatPanel {
                 // Settings navigation is emitted only by the main composer.
                 ComposerEvent::OpenProviders { .. }
                 | ComposerEvent::OpenAgentSettings { .. }
-                | ComposerEvent::OpenGithubSettings { .. } => {}
+                | ComposerEvent::OpenGithubSettings { .. }
+                | ComposerEvent::OpenMemory { .. } => {}
                 ComposerEvent::Sent {
                     chat_id,
                     message_id,

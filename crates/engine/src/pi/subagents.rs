@@ -37,8 +37,9 @@ const EXTENSION_PACKAGE: &str = "pi-agent-squad";
 
 /// Frontmatter keys this module renders itself. Every other key in an existing
 /// file is preserved verbatim so hand-authored extras survive a UI save.
-const OWNED_KEYS: [&str; 7] = [
+const OWNED_KEYS: [&str; 8] = [
     "name",
+    "memory",
     "description",
     "readonly",
     "access",
@@ -86,6 +87,11 @@ pub struct PiSubagent {
     /// restores the built-in rather than removing the agent.
     #[serde(default)]
     pub overrides_builtin: bool,
+    /// The agent keeps memory of its own (`memory: user|project`,
+    /// docs/design/memory.md §1): one store across projects, or one per
+    /// project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<cypher_proto::RoleMemory>,
 }
 
 impl PiSubagent {
@@ -390,6 +396,9 @@ fn parse(text: &str) -> Option<Parsed> {
             read_only,
             builtin: false,
             overrides_builtin: false,
+            memory: fields
+                .get("memory")
+                .and_then(|value| cypher_proto::RoleMemory::parse(value)),
         },
         extra,
     })
@@ -437,6 +446,9 @@ fn render(agent: &PiSubagent, extra: &[String]) -> String {
     if !agent.tools.is_empty() {
         let tools: Vec<&str> = agent.tools.iter().map(|tool| tool.trim()).collect();
         out.push_str(&format!("tools: {}\n", tools.join(", ")));
+    }
+    if let Some(memory) = agent.memory {
+        out.push_str(&format!("memory: {}\n", memory.as_str()));
     }
     // Always explicit. The `access` key is intentionally never re-emitted, so
     // this line is the only statement about read-only in the file.

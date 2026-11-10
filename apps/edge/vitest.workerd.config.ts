@@ -11,8 +11,13 @@ export default defineConfig({
       main: "./test/workerd/fixture.ts",
       miniflare: {
         compatibilityDate: "2026-07-01",
+        bindings: { AUTH_MODE: "dev" },
         durableObjects: {
           TEST_LOG: { className: "TestLogRoom", useSQLite: true },
+          // The bot network rooms and the DeviceRoom they nudge, for the
+          // cross-room BotRoom tests.
+          BOT_ROOMS: { className: "BotRoom", useSQLite: true },
+          DEVICE_ROOMS: { className: "DeviceRoom", useSQLite: true },
           TRUST: { className: "TrustRoom", useSQLite: true }
         }
       }

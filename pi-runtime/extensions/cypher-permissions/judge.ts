@@ -101,7 +101,7 @@ export function judgePrompt(request: JudgeRequest): string {
 
   if (request.tier) lines.push(`- tier: ${request.tier}${request.tierReason ? ` (${request.tierReason})` : ""}`);
   lines.push(`- permission level: ${request.level}`);
-  lines.push(`- workspace: ${request.workspaceRoots.join(", ")}`);
+  lines.push(`- project folders: ${request.workspaceRoots.join(", ")}`);
   if (request.command) lines.push("", "## The command", untrusted(clip(request.command, 3000)));
   if (request.remembers?.length) {
     lines.push("", "## An approval also allows, for the rest of this chat, commands matching", ...request.remembers.map((pattern) => `- ${pattern}`), "(`…` stands for any words.) Approve only if those are fine too.");

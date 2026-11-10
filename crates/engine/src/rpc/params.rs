@@ -385,6 +385,81 @@ pub(super) enum MutateParams {
     /// and continues in local-only mode. Refused for THIS device.
     #[serde(rename_all = "camelCase")]
     DeleteDevice { device_id: String },
+    /// LWW bot edit from any device: the bot settings form writes every
+    /// editable field at once (`null` clears an optional one).
+    #[serde(rename_all = "camelCase")]
+    UpdateBot {
+        bot_id: String,
+        name: String,
+        #[serde(default)]
+        icon: Option<String>,
+        #[serde(default)]
+        color: Option<String>,
+        #[serde(default)]
+        instructions: Option<String>,
+        scope: cypher_proto::BotScope,
+        /// Absent from older clients: the capabilities are left alone.
+        #[serde(default)]
+        capabilities: Option<cypher_proto::BotCapabilities>,
+    },
+    /// The bot's kill switch: no routine runs and no new work starts.
+    #[serde(rename_all = "camelCase")]
+    SetBotPaused { bot_id: String, paused: bool },
+    /// Approve or cancel a proposed plan (its host starts the work).
+    #[serde(rename_all = "camelCase")]
+    ResolveBotPlan { work_id: String, approve: bool },
+    /// Stop running work and every session it started.
+    #[serde(rename_all = "camelCase")]
+    StopBotWork { work_id: String },
+    /// Delete finished work and its background session; the sessions it
+    /// started in projects stay.
+    #[serde(rename_all = "camelCase")]
+    DeleteBotWork { work_id: String },
+    /// Approve or decline an action a bot thread is waiting on.
+    #[serde(rename_all = "camelCase")]
+    ResolveBotApproval { approval_id: String, approve: bool },
+    /// Create or edit a routine's definition (its run state is the host's).
+    #[serde(rename_all = "camelCase")]
+    SaveBotRoutine { routine: cypher_proto::BotRoutine },
+    #[serde(rename_all = "camelCase")]
+    DeleteBotRoutine { routine_id: String },
+    /// Run a routine once now.
+    #[serde(rename_all = "camelCase")]
+    RunBotRoutine { routine_id: String },
+    /// Remove a sidebar shortcut (the agent makes them, docs §13.1).
+    #[serde(rename_all = "camelCase")]
+    DeleteBotShortcut { shortcut_id: String },
+    /// Put a workspace's shortcuts in this order (ids, first to last).
+    #[serde(rename_all = "camelCase")]
+    OrderBotShortcuts {
+        bot_id: String,
+        shortcut_ids: Vec<String>,
+    },
+    /// A connection's reply mode and narrowed scope.
+    #[serde(rename_all = "camelCase")]
+    UpdateBotConnection {
+        connection_id: String,
+        reply_mode: cypher_proto::ReplyMode,
+        #[serde(default)]
+        scope: Option<cypher_proto::BotScope>,
+    },
+    /// Revoke a connection on both sides (its host tells the Edge).
+    #[serde(rename_all = "camelCase")]
+    RevokeBotConnection { connection_id: String },
+    #[serde(rename_all = "camelCase")]
+    RevokeBotInvite { invite_id: String },
+    /// Send (optionally edited) or decline an answer drafted in Review mode.
+    #[serde(rename_all = "camelCase")]
+    ReviewBotExchange {
+        exchange_id: String,
+        send: bool,
+        #[serde(default)]
+        text: Option<String>,
+    },
+    /// Tombstone a bot with its chat. Its host stops its run and removes its
+    /// folder.
+    #[serde(rename_all = "camelCase")]
+    DeleteBot { bot_id: String },
     /// Synced seen marker (LWW + monotonic guard): clears the "completed"
     /// badge on every device. `at` is epoch ms; default = now.
     #[serde(rename_all = "camelCase")]
@@ -405,6 +480,18 @@ pub(super) enum MutateParams {
         platform: String,
         #[serde(default)]
         last_seen_at: Option<i64>,
+    },
+    /// Development builds only: write (or, with `delete`, tombstone) any bot
+    /// record row as given, for judging the Botboard with realistic data.
+    #[cfg(feature = "development")]
+    #[serde(rename_all = "camelCase")]
+    SeedBotRecord {
+        kind: String,
+        id: String,
+        #[serde(default)]
+        fields: serde_json::Map<String, serde_json::Value>,
+        #[serde(default)]
+        delete: bool,
     },
 }
 

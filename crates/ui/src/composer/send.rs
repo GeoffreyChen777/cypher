@@ -140,10 +140,21 @@ impl Composer {
                     if released {
                         self.wizard = None;
                         self.advance_task = None;
+                        let placeholder = self.idle_placeholder(cx);
                         self.input
-                            .update(cx, |input, cx| input.set_placeholder("Do anything…", cx));
+                            .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
                     }
                 }
+            }
+        }
+        // The resting prompt follows the chat ("Ask <bot>…"), which can name
+        // a bot only once its row has arrived; a card's own prompt wins.
+        if self.wizard.is_none() {
+            let placeholder = self.idle_placeholder(cx);
+            if placeholder != self.shown_placeholder {
+                self.shown_placeholder = placeholder.clone();
+                self.input
+                    .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
             }
         }
         if self.slash.token.is_some() {
@@ -174,6 +185,9 @@ impl Composer {
     /// A quick chat is the deliberate exception (its folder is minted on
     /// send). Existing chats carry their own project, so they always send.
     pub(super) fn send_blocked(&self, cx: &App) -> bool {
+        if self.typed_memory(self.input.read(cx).text(), cx).is_some() {
+            return false;
+        }
         if matches!(self.transport, ComposerTransport::Main)
             && self
                 .pickers
@@ -216,6 +230,12 @@ impl Composer {
             return;
         }
         let text = self.input.read(cx).text().trim().to_string();
+        if let Some(scope) = self.typed_memory(&text, cx) {
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+            self.slash = SlashState::default();
+            cx.emit(ComposerEvent::OpenMemory { scope });
+            return;
+        }
         if matches!(self.transport, ComposerTransport::Main)
             && self
                 .pickers
@@ -269,7 +289,7 @@ impl Composer {
                     self.failure = None;
                 }
                 None => {
-                    self.failure = Some("Pick a level: /permissions ask, workspace or full".into());
+                    self.failure = Some("Pick a level: /permissions ask, project or full".into());
                 }
             }
             cx.notify();
@@ -293,6 +313,26 @@ impl Composer {
             return;
         }
         self.send_with("/compact".into(), false, SendDraft::Keep, cx);
+    }
+
+    /// Send `text` beside the draft (a sidebar shortcut's request): the
+    /// draft, its attachments and comments stay put, and a live run is
+    /// steered as a typed send would be. `Err` says why it didn't go out;
+    /// a failure once it has shows in the composer, as a typed send's does.
+    pub fn send_aside(&mut self, text: &str, cx: &mut Context<Self>) -> Result<(), SharedString> {
+        // A second send would cancel the one in flight.
+        if self.sending {
+            return Err("A message is still sending.".into());
+        }
+        let steer = self.run_live(cx);
+        if self.send_with(text.to_string(), steer, SendDraft::Keep, cx) {
+            Ok(())
+        } else {
+            Err(self
+                .failure
+                .clone()
+                .unwrap_or_else(|| "It couldn't be sent.".into()))
+        }
     }
 
     /// The checks that block a send before anything is staged or cleared:
@@ -348,24 +388,32 @@ impl Composer {
         Ok(())
     }
 
-    fn send_with(&mut self, text: String, steer: bool, draft: SendDraft, cx: &mut Context<Self>) {
+    /// Whether the send went out: `false` when a check stopped it (the
+    /// composer's failure line says why).
+    fn send_with(
+        &mut self,
+        text: String,
+        steer: bool,
+        draft: SendDraft,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let take_draft = matches!(draft, SendDraft::Take);
         if let Err(message) = self.validate_send(&text, take_draft, cx) {
             self.failure = Some(message);
             cx.notify();
-            return;
+            return false;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.failure = Some("Engine not connected".into());
             cx.notify();
-            return;
+            return false;
         };
         let target = match self.resolve_send_target(cx) {
             Ok(target) => target,
             Err(message) => {
                 self.failure = Some(message);
                 cx.notify();
-                return;
+                return false;
             }
         };
         let refs = match self.snapshot_send_refs(&text, &target, cx) {
@@ -373,7 +421,7 @@ impl Composer {
             Err(message) => {
                 self.failure = Some(message);
                 cx.notify();
-                return;
+                return false;
             }
         };
         let taken = self.begin_optimistic_send(&text, steer, take_draft, &target, cx);
@@ -419,6 +467,7 @@ impl Composer {
             })
             .ok();
         }));
+        true
     }
 
     /// Resolve where a send goes — chat id, checkout plan, model config,

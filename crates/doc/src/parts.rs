@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use cypher_proto::{AgentEvent, ToolCall, ToolDiff, ToolPermission, UserInputQuestion};
+use cypher_proto::{AgentEvent, BotPost, ToolCall, ToolDiff, ToolPermission, UserInputQuestion};
 
 /// Line cap for the tool-output SUMMARY persisted into the doc. Keeping a
 /// small number of complete lines makes the expandable detail useful without
@@ -218,6 +218,16 @@ pub enum MessagePart {
         id: String,
         text: String,
     },
+    /// A message the host posted into a bot chat outside any turn, with who
+    /// posted it: a routine's output (docs/design/agent-bots.md §8). The
+    /// host writes it as a complete entry of its own; no fold produces it.
+    /// Its body sits under `text`, so readers older than this kind show it
+    /// as a plain text part.
+    Post {
+        id: String,
+        text: String,
+        from: BotPost,
+    },
 }
 
 impl MessagePart {
@@ -227,7 +237,8 @@ impl MessagePart {
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
-            | MessagePart::Reasoning { id, .. } => id,
+            | MessagePart::Reasoning { id, .. }
+            | MessagePart::Post { id, .. } => id,
         }
     }
 
@@ -263,6 +274,9 @@ impl MessagePart {
             }
             MessagePart::Error { message, .. } => message.len(),
             MessagePart::Reasoning { text, .. } => text.len(),
+            MessagePart::Post { text, from, .. } => {
+                text.len() + serde_json::to_vec(from).map_or(0, |v| v.len())
+            }
         }
     }
 }

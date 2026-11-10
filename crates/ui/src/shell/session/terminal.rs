@@ -50,6 +50,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A bot's conversation has no terminal: its folder is empty and it
+        // runs no commands.
+        if self.slot_is_bot_chat(sid, cx) {
+            return;
+        }
         let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };

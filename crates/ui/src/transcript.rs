@@ -64,7 +64,9 @@ mod highlight;
 use highlight::*;
 mod artifacts;
 mod attachments;
+pub mod bot_plan;
 mod find;
+mod memory_card;
 pub mod rail;
 mod render;
 mod scroll;
@@ -131,6 +133,12 @@ pub const ATT_STRIP_H: f32 = ATT_THUMB_H + 10.0;
 // ---------------------------------------------------------------------------
 // Transcript entity
 // ---------------------------------------------------------------------------
+
+/// What [`Transcript::sync`] last built rows from: the state's transcript
+/// revision, the selected chat, the attachment devices, the tool call cap,
+/// the chat's plans ([`bot_plan::plans_key`]) and the memory cards
+/// ([`memory_card::MemoryCards`]).
+type SyncedRevision = (u64, Option<String>, Vec<String>, u32, u64, u64);
 
 struct CachedRows {
     fingerprint: u64,
@@ -315,7 +323,7 @@ pub struct Transcript {
     /// (The attachment devices ride along: protected attachments re-key when
     /// the chat's row or the local device id lands; so does the tool call
     /// cap, which [`cap_work_runs`] applies at build time.)
-    synced_revision: Option<(u64, Option<String>, Vec<String>, u32)>,
+    synced_revision: Option<SyncedRevision>,
     /// Hovered rail tick (grows + shows the preview card).
     rail_hover: Option<usize>,
     /// The replies' file-reference chips: the hovered one's preview card
@@ -371,6 +379,17 @@ pub struct Transcript {
     rewind_armed: Option<(String, String)>,
     /// Disarms [`Self::rewind_armed`] after the window elapses.
     rewind_disarm: Option<Task<()>>,
+    /// The plan whose Stop is armed on its card (work id): a second click
+    /// stops it ([`bot_plan`]).
+    bot_plan_armed: Option<String>,
+    /// Disarms [`Self::bot_plan_armed`] after the window elapses.
+    bot_plan_disarm: Option<Task<()>>,
+    /// The memory cards' calls ([`memory_card`]), as rows were built, and
+    /// the held writes answered from them (on their way, or failed with
+    /// what to say), by held write id.
+    memory_cards: memory_card::MemoryCards,
+    memory_busy: std::collections::HashSet<String>,
+    memory_errors: HashMap<String, SharedString>,
     /// In-chat find (⌘F). `None` while the find bar is closed — the shell
     /// renders the bar from this, so the two can never disagree about
     /// whether find is open.
@@ -597,6 +616,11 @@ impl Transcript {
             rewind_pending: std::collections::HashSet::new(),
             rewind_armed: None,
             rewind_disarm: None,
+            bot_plan_armed: None,
+            bot_plan_disarm: None,
+            memory_cards: Default::default(),
+            memory_busy: Default::default(),
+            memory_errors: HashMap::new(),
             find: None,
             live: None,
             trailer_tick: None,

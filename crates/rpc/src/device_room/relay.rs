@@ -20,8 +20,8 @@ use super::trust::{
     RECEIVE_ONLY, REFUSED, REPLY, SECURE_KIND, UNTRUSTED_DEVICE, noise_payload,
 };
 use super::{
-    NUDGE_KIND, NudgeHandler, PING_INTERVAL, RELAY_KIND, RPC_KIND, SILENCE_LEASE, TokenSource,
-    device_room_ws_url, token_changed,
+    BOTS_NUDGE_KIND, NUDGE_KIND, NudgeHandler, PING_INTERVAL, RELAY_KIND, RPC_KIND, SILENCE_LEASE,
+    TokenSource, device_room_ws_url, token_changed,
 };
 use crate::{ClientFrame, RpcError, RpcService, ServerFrame, lock, serve_connection};
 
@@ -35,6 +35,9 @@ pub struct HostRelayConfig {
     /// Device trust: which clients may open a Noise session, and whether
     /// plaintext and unpaired clients are refused.
     pub trust: Arc<dyn PeerTrust>,
+    /// Called with the bot room id of every bot network nudge; `None`
+    /// skips them like any unknown stream kind.
+    pub on_bots_nudge: Option<NudgeHandler>,
 }
 
 impl HostRelayConfig {
@@ -49,7 +52,14 @@ impl HostRelayConfig {
             token,
             retry: Duration::from_secs(5),
             trust: Arc::new(NoTrust),
+            on_bots_nudge: None,
         }
+    }
+
+    /// Hand bot network nudges to `handler`.
+    pub fn with_bots_nudge(mut self, handler: NudgeHandler) -> Self {
+        self.on_bots_nudge = Some(handler);
+        self
     }
 
     pub fn with_trust(mut self, trust: Arc<dyn PeerTrust>) -> Self {
@@ -99,6 +109,7 @@ impl HostRelay {
                             &url,
                             &service,
                             &on_nudge,
+                            config.on_bots_nudge.as_ref(),
                             &config.trust,
                             &config.device_id,
                         );
@@ -241,6 +252,7 @@ async fn host_session(
     url: &str,
     service: &Arc<dyn RpcService>,
     on_nudge: &NudgeHandler,
+    on_bots_nudge: Option<&NudgeHandler>,
     trust: &Arc<dyn PeerTrust>,
     device_id: &str,
 ) -> Result<(), RpcError> {
@@ -255,6 +267,7 @@ async fn host_session(
         service: service.clone(),
         out_tx,
         on_nudge: on_nudge.clone(),
+        on_bots_nudge: on_bots_nudge.cloned(),
         trust: trust.clone(),
         device_id: device_id.to_string(),
     };
@@ -314,6 +327,7 @@ struct Host {
     service: Arc<dyn RpcService>,
     out_tx: mpsc::Sender<Vec<u8>>,
     on_nudge: NudgeHandler,
+    on_bots_nudge: Option<NudgeHandler>,
     trust: Arc<dyn PeerTrust>,
     device_id: String,
 }
@@ -364,6 +378,28 @@ impl Host {
                     chat_id: Some(chat_id),
                 }) => (self.on_nudge)(chat_id),
                 _ => tracing::warn!("device-room: malformed nudge — ignoring"),
+            }
+            return;
+        }
+        if header.k == BOTS_NUDGE_KIND {
+            // Bot network nudge: the bot's host pulls that room's inbox.
+            #[derive(Deserialize)]
+            struct BotsNudge {
+                #[serde(rename = "botRoomId")]
+                bot_room_id: Option<String>,
+            }
+            match (
+                serde_json::from_slice::<BotsNudge>(&payload),
+                &self.on_bots_nudge,
+            ) {
+                (
+                    Ok(BotsNudge {
+                        bot_room_id: Some(room),
+                    }),
+                    Some(handler),
+                ) => handler(room),
+                (Ok(_), None) => {}
+                _ => tracing::warn!("device-room: malformed bots nudge — ignoring"),
             }
             return;
         }

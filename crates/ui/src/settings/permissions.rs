@@ -54,7 +54,7 @@ impl ApprovalKey {
 
     fn title(self) -> &'static str {
         match self {
-            Self::ExternalWrite => "Writing outside the workspace",
+            Self::ExternalWrite => "Writing outside the project",
             Self::ProtectedWrite => "Writing protected files",
             Self::SensitiveRead => "Reading sensitive files",
             Self::SensitiveWrite => "Writing sensitive files",
@@ -77,7 +77,7 @@ impl ApprovalKey {
             Self::Network => "With the filtered network: a domain not on the list.",
             Self::Tools => "MCP and extension tools whose setting below is Ask.",
             Self::Escalate => {
-                "A command that needs more than the sandbox (ssh, gh, other processes) runs as you. Inspections run without asking; dangerous commands (publishing, deleting outside the workspace, secrets) always ask you."
+                "A command that needs more than the sandbox (ssh, gh, other processes) runs as you. Inspections run without asking; dangerous commands (publishing, deleting outside the project folders, secrets) always ask you."
             }
         }
     }
@@ -1083,7 +1083,7 @@ impl PermissionsPage {
                     .child(Self::list_field(
                         theme,
                         "More writable folders",
-                        "Folders shell commands may write besides the workspace and temp. The npm, Cargo, Go and Gradle caches are built in.",
+                        "Folders shell commands may write besides the project and temp. The npm, Cargo, Go and Gradle caches are built in.",
                         &self.lists.writable,
                     ))
                     .child(Self::list_field(
@@ -1361,7 +1361,7 @@ impl Render for PermissionsPage {
                     page.child(Self::section_heading(
                         &theme,
                         "Approvals",
-                        "Inside the workspace, agents read and write freely; they read everything else except sensitive files. Anything more is a request, decided here.",
+                        "Inside the project folder, agents read and write freely; they read everything else except sensitive files. Anything more is a request, decided here.",
                     ))
                     .child(self.approvals_card(&settings, &theme, cx))
                     .child(self.judge_card(&settings, &theme, cx))

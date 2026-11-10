@@ -106,8 +106,37 @@ async fn read_context_usage(
     client: &PiClient,
     fallback_used: Option<&Value>,
 ) -> Option<AgentEvent> {
-    let stats = client.request("get_session_stats", Map::new()).await.ok()?;
-    context_usage_event(&stats, fallback_used)
+    read_session_stats(client, fallback_used).await.0
+}
+
+/// The context gauge and the session's cumulative token use from one
+/// `get_session_stats` call.
+async fn read_session_stats(
+    client: &PiClient,
+    fallback_used: Option<&Value>,
+) -> (Option<AgentEvent>, Option<AgentEvent>) {
+    let Ok(stats) = client.request("get_session_stats", Map::new()).await else {
+        return (None, None);
+    };
+    (
+        context_usage_event(&stats, fallback_used),
+        usage_event(&stats),
+    )
+}
+
+/// The session's token use so far (`stats.tokens`, every turn of the Pi
+/// session): prompt tokens (cached ones included) and output. A
+/// passthrough the engine reads for consolidation passes' cost; never
+/// persisted.
+fn usage_event(stats: &Value) -> Option<AgentEvent> {
+    let tokens = stats.get("tokens")?;
+    let count = |key: &str| tokens.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let input = count("input") + count("cacheRead") + count("cacheWrite");
+    let output = count("output");
+    (input + output > 0).then_some(AgentEvent::Usage {
+        input_tokens: input,
+        output_tokens: output,
+    })
 }
 
 /// Refresh the context gauge without stalling the event loop: the stats
@@ -121,7 +150,8 @@ pub(super) fn refresh_context_usage(
     let client = client.clone();
     let event_tx = event_tx.clone();
     tokio::spawn(async move {
-        if let Some(event) = read_context_usage(&client, fallback_used.as_ref()).await {
+        let (context, usage) = read_session_stats(&client, fallback_used.as_ref()).await;
+        for event in [context, usage].into_iter().flatten() {
             let _ = send(&event_tx, event).await;
         }
     });

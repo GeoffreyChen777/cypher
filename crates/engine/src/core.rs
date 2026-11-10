@@ -45,6 +45,9 @@ pub struct EngineCore {
     /// Session Fork (v1): clone a settled transcript prefix into a NEW
     /// durable root Pi chat on the source chat's host device.
     pub session_forks: SessionForks,
+    /// Agent bots hosted here: creation and the bot tool surface.
+    pub bots: crate::bots::Bots,
+    pub memory: crate::memory::Memory,
     /// Session migration: moves chats to another project, on this device or
     /// another one.
     pub migrations: session::migrations::ChatMigrations,
@@ -152,6 +155,7 @@ impl EngineCore {
                 edge: edge.clone(),
             },
         );
+        let bots_edge = edge.clone();
         let workspace = WorkspaceHost::open(
             store,
             WorkspaceHostConfig {
@@ -187,6 +191,26 @@ impl EngineCore {
             tracing::error!(error = %err, "orphaned-subagent recovery failed");
         }
         let repos = Repos::new(data_dir, &device_id);
+        let bots = crate::bots::Bots::new(
+            workspace.clone(),
+            doc_host.clone(),
+            repos.clone(),
+            profile.store_root().join("bots"),
+        );
+        // A routine or task run stopped for asking settles as failed.
+        sessions.add_unattended_listener(bots.unattended_listener());
+        let memory = crate::memory::Memory::new(
+            workspace.clone(),
+            doc_host.clone(),
+            bots.clone(),
+            profile.store_root().join("memory"),
+        );
+        sessions.set_memory(memory.clone());
+        // The bot network needs the Edge: a signed-in (or dev-bearer)
+        // profile. Without one its tools and RPCs say so.
+        if let Some(edge) = bots_edge {
+            bots.attach_network(Arc::new(crate::bots::HttpBotEdge::new(edge)));
+        }
         // Worktree materialization for Run commands carrying a WorktreeSpec
         // happens on the HOST at drain time (see `DocHost::materialize_worktree`).
         doc_host.set_repos(repos.clone());
@@ -279,6 +303,9 @@ impl EngineCore {
             }
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
+        bots.start_indexer();
+        bots.start_hosts();
+        memory.start();
         Ok(Self {
             sessions,
             doc_host,
@@ -295,6 +322,8 @@ impl EngineCore {
             provider_logins: Arc::new(Default::default()),
             side_chats,
             session_forks,
+            bots,
+            memory,
             migrations,
             context_recovery,
             device_id,
@@ -325,6 +354,13 @@ impl EngineCore {
             expected_user,
             expected_org,
         ));
+        let profile = auth.clone();
+        self.bots.set_owner(Arc::new(move || {
+            profile.state().user().map(|user| crate::bots::Owner {
+                name: user.name.clone().unwrap_or_else(|| user.email.clone()),
+                avatar_url: user.avatar_url.clone(),
+            })
+        }));
         *lock(&self.auth) = Some(auth);
     }
 
@@ -345,6 +381,7 @@ impl EngineCore {
 
     /// Attach the peer link cache — enables `targetDeviceId` routing.
     pub fn set_links(&self, links: Arc<cypher_rpc::LinkCache>) {
+        self.bots.set_links(links.clone());
         *lock(&self.links) = Some(links);
     }
 
@@ -409,8 +446,10 @@ impl EngineCore {
     /// re-reads auth on every (re)dial, so token refreshes take effect at reconnect.
     pub fn start_host_relay(&self, edge_url: &str) -> cypher_rpc::HostRelay {
         let auth = self.auth();
+        let bots = self.bots.clone();
         let mut config =
-            cypher_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth));
+            cypher_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth))
+                .with_bots_nudge(Arc::new(move |room: String| bots.bots_nudged(room)));
         if let Some(trust) = self.trust() {
             config = config.with_trust(Arc::new(trust));
         }
@@ -458,7 +497,9 @@ impl EngineCore {
         .with_title_settings(self.title_settings.clone())
         .with_context_recovery(self.context_recovery.clone())
         .with_migrations(self.migrations.clone())
-        .with_github(self.github.clone());
+        .with_github(self.github.clone())
+        .with_bots(self.bots.clone())
+        .with_memory(self.memory.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -529,6 +570,8 @@ impl EngineCore {
         }
         self.diff_sync.shutdown().await;
         self.spaces_sync.shutdown().await;
+        self.bots.shutdown().await;
+        self.memory.shutdown().await;
         self.doc_host.shutdown_workers().await;
         self.doc_host.flush_all();
         self.workspace.shutdown();

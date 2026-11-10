@@ -1,6 +1,6 @@
 //! Settings → Subagents: the `agents/*.md` profiles the Pi subagents extension
 //! offers when a chat spawns a child — name, description, model, thinking,
-//! tool allowlist and system prompt, edited here instead of by hand.
+//! tool allowlist, system prompt and memory, edited here instead of by hand.
 //!
 //! Profiles belong to the SELECTED DEVICE (they are files in that host's Pi
 //! runtime), so this page is device-targeted like Agents/MCP/Commands.
@@ -39,7 +39,7 @@ use gpui::{
 };
 
 use cypher_engine::pi::subagents::PiSubagent;
-use cypher_proto::Model;
+use cypher_proto::{Model, RoleMemory};
 use cypher_rpc::methods;
 
 use super::device_target::{DeviceTarget, DeviceTicket};
@@ -106,6 +106,8 @@ struct Editor {
     thinking: Option<String>,
     /// Empty = every tool.
     tools: Vec<String>,
+    /// `None` = keeps no memory of its own.
+    memory: Option<RoleMemory>,
     name: Entity<TextInput>,
     description: Entity<TextInput>,
     prompt: Entity<TextInput>,
@@ -437,6 +439,7 @@ impl SubagentsPage {
             model: existing.and_then(|a| a.model.clone()),
             thinking: existing.and_then(|a| a.thinking.clone()),
             tools: existing.map(|a| a.tools.clone()).unwrap_or_default(),
+            memory: existing.and_then(|a| a.memory),
             name,
             description,
             prompt,
@@ -549,6 +552,9 @@ impl SubagentsPage {
             }
             if let Some(thinking) = editor.thinking.clone() {
                 object.insert("thinking".into(), thinking.into());
+            }
+            if let Some(memory) = editor.memory {
+                object.insert("memory".into(), memory.as_str().into());
             }
             // A built-in is not a file we may edit: saving always creates a
             // user override, so the engine must treat it as a fresh write
@@ -761,6 +767,16 @@ impl SubagentsPage {
                 }))
                 .into_any_element(),
         );
+        if let Some(memory) = agent.memory {
+            facts.push(
+                div()
+                    .child(SharedString::from(match memory {
+                        RoleMemory::User => "memory across projects",
+                        RoleMemory::Project => "memory per project",
+                    }))
+                    .into_any_element(),
+            );
+        }
 
         let edit = agent.clone();
         let remove = agent.clone();
@@ -1055,6 +1071,7 @@ impl SubagentsPage {
         let selected_tools = editor.tools.clone();
         let custom_tools = editor.custom_tools();
         let thinking = editor.thinking.clone();
+        let memory = editor.memory;
         let levels = self.available_levels(editor);
         let model_unknown = editor.model.as_deref().is_some_and(|id| {
             matches!(self.models, Loadable::Ready(_)) && self.model_entry(id).is_none()
@@ -1071,6 +1088,7 @@ impl SubagentsPage {
             selected_tools,
             custom_tools,
             thinking,
+            memory,
             levels,
             model_unknown,
             model_trigger_label,
@@ -1097,6 +1115,7 @@ impl SubagentsPage {
             None,
             &editor.prompt,
         ));
+        fields = fields.child(editor_memory_row(&view, theme, cx));
 
         fields = fields.child(
             div()
@@ -1413,6 +1432,62 @@ fn editor_thinking_row(
     thinking_column
 }
 
+/// Memory — whether the agent keeps what it learns between runs, in one
+/// store across projects or one per project (docs/design/memory.md §1).
+fn editor_memory_row(
+    view: &EditorView,
+    theme: &Theme,
+    cx: &mut Context<SubagentsPage>,
+) -> gpui::Div {
+    let busy = view.busy;
+    let choices = [
+        (None, "Off"),
+        (Some(RoleMemory::User), "Across projects"),
+        (Some(RoleMemory::Project), "Per project"),
+    ];
+    let row = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(px(6.0))
+        .children(choices.into_iter().map(|(memory, label)| {
+            let key = memory.map_or("off", RoleMemory::as_str);
+            SubagentsPage::chip(
+                theme,
+                SharedString::from(format!("subagent-memory-{key}")),
+                label,
+                view.memory == memory,
+                !busy,
+            )
+            .when(!busy, |el| {
+                el.on_click(cx.listener(move |page, _, _, cx| {
+                    if let Some(editor) = &mut page.editor {
+                        editor.memory = memory;
+                    }
+                    cx.notify();
+                }))
+            })
+        }));
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .child(widgets::field_label(theme, "Memory"))
+        .child(row)
+        .child(widgets::page_subtitle(
+            theme,
+            match view.memory {
+                None => "Each run starts fresh; it still reads your memory and the project's.",
+                Some(RoleMemory::User) => {
+                    "Keeps what it learns in one memory of its own, read in every project."
+                }
+                Some(RoleMemory::Project) => {
+                    "Keeps what it learns in a memory of its own for each project it works in."
+                }
+            },
+        ))
+}
+
 /// Tools — built-in toggles plus free-form extension/MCP names.
 fn editor_tools_section(
     editor: &Editor,
@@ -1622,6 +1697,7 @@ struct EditorView {
     selected_tools: Vec<String>,
     custom_tools: Vec<String>,
     thinking: Option<String>,
+    memory: Option<RoleMemory>,
     levels: Vec<&'static str>,
     model_unknown: bool,
     model_trigger_label: String,

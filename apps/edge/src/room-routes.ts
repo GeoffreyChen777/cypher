@@ -4,6 +4,7 @@
  *   /chat2/:chatId/…      → CHAT_ROOMS     `chat2/{chatId}`
  *   /registry/:orgId/…    → REGISTRY_ROOMS `reg1/{orgId}/{userId}`
  *   /device/:deviceId/…   → DEVICE_ROOMS   `d2/{deviceId}`
+ *   /bots/:botRoomId/…    → BOT_ROOMS      `bot1/{botRoomId}`
  *
  * A sub-route matches the segments after the room id; the forwarded path is
  * those matched segments, and the forwarded query is empty unless the entry
@@ -29,7 +30,7 @@ interface SubRoute {
 
 interface RoomRoute {
   prefix: string;
-  binding: "CHAT_ROOMS" | "REGISTRY_ROOMS" | "DEVICE_ROOMS";
+  binding: "CHAT_ROOMS" | "REGISTRY_ROOMS" | "DEVICE_ROOMS" | "BOT_ROOMS";
   room: (id: string, auth: Verified) => string;
   /** Checked before any sub-route; a response ends the request. */
   guard?: (id: string, auth: Verified) => Response | undefined;
@@ -38,6 +39,8 @@ interface RoomRoute {
   closed?: boolean;
   subs: readonly SubRoute[];
 }
+
+const botRoom = (_url: URL, botRoomId: string) => `?room=${botRoomId}`;
 
 const ROOM_ROUTES: readonly RoomRoute[] = [
   {
@@ -100,6 +103,28 @@ const ROOM_ROUTES: readonly RoomRoute[] = [
       // Durable command nudge: delivered live if the host is connected, else
       // queued in the DO and replayed on the host's next join.
       { path: ["nudge"], methods: ["POST"] }
+    ]
+  },
+  {
+    // docs/design/agent-bots.md §11.3: one room per networked bot, claimed
+    // on publish and owner-only after. Only these owner routes are forwarded;
+    // the rooms' DO-to-DO `/peer/*` paths are never reachable from here. The
+    // room learns its own id from `?room=`.
+    prefix: "bots",
+    binding: "BOT_ROOMS",
+    room: (botRoomId) => `bot1/${botRoomId}`,
+    closed: true,
+    subs: [
+      { path: ["publish"], methods: ["POST"], exact: true, search: botRoom },
+      { path: ["inbox"], methods: ["GET"], exact: true, search: botRoom },
+      { path: ["invites"], methods: ["POST"], exact: true, search: botRoom },
+      { path: ["invites", ID_RE], methods: ["DELETE"], exact: true, search: botRoom },
+      { path: ["connect"], methods: ["POST"], exact: true, search: botRoom },
+      { path: ["connections", ID_RE], methods: ["DELETE"], exact: true, search: botRoom },
+      { path: ["ask"], methods: ["POST"], exact: true, search: botRoom },
+      { path: ["answer"], methods: ["POST"], exact: true, search: botRoom },
+      { path: ["state"], methods: ["POST"], exact: true, search: botRoom },
+      { path: ["ack"], methods: ["POST"], exact: true, search: botRoom }
     ]
   }
 ];

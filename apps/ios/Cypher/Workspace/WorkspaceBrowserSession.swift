@@ -10,7 +10,7 @@ enum WorkspaceBrowserError: LocalizedError {
         switch self {
         case .unavailable: "Connect to this session's device to browse its files."
         case .contextChanged: "The account, device or checkout changed. Reopen Files / Changes."
-        case .invalidPath: "This path is not available in the workspace browser."
+        case .invalidPath: "This path is not available in the file browser."
         case .missingDirectory:
             "This session has no working directory. Open a session in a project or worktree to browse files."
         case .tooLarge: "This file is too large to preview on iPhone."

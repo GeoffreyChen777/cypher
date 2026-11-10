@@ -13,9 +13,13 @@
 mod agent;
 pub mod agent_prompt;
 pub mod attachment_refs;
+mod bot;
+mod bot_records;
+mod bot_wire;
 mod context_recovery;
 mod entities;
 mod github;
+mod memory;
 pub mod motion;
 pub mod scratch;
 mod session_fork;
@@ -25,9 +29,13 @@ pub mod view;
 mod workspace;
 
 pub use agent::*;
+pub use bot::*;
+pub use bot_records::*;
+pub use bot_wire::*;
 pub use context_recovery::*;
 pub use entities::*;
 pub use github::*;
+pub use memory::*;
 pub use session_fork::*;
 pub use session_migration::*;
 pub use side_chat::*;

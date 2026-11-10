@@ -388,6 +388,19 @@ impl DocsStore {
         Ok(hit.is_some())
     }
 
+    /// When each stored snapshot was last saved (epoch ms), by doc id — no
+    /// blob read. Lets a reader notice that a doc's local copy moved without
+    /// loading it.
+    pub fn snapshot_saved_times(
+        &self,
+    ) -> Result<std::collections::HashMap<String, i64>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT doc_id, saved_at FROM snapshots")?;
+        Ok(stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?)
+    }
+
     pub fn load_outbox(&self, doc_id: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
         let conn = self.conn();
         // rowid is insertion order even when clocks go backwards or several
@@ -640,6 +653,20 @@ mod tests {
         store.save_snapshot("chat-1", b"v3").unwrap();
         let (bytes, cursor, epoch) = store.load_snapshot_with_cursor("chat-1").unwrap().unwrap();
         assert_eq!((bytes.as_slice(), cursor, epoch), (&b"v3"[..], 41, 2));
+    }
+
+    #[test]
+    fn saved_times_list_every_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        assert!(store.snapshot_saved_times().unwrap().is_empty());
+        store.save_snapshot("chat-1", b"v1").unwrap();
+        store
+            .save_snapshot_with_cursor("chat-2", b"v1", 3, 2)
+            .unwrap();
+        let times = store.snapshot_saved_times().unwrap();
+        assert_eq!(times.len(), 2);
+        assert!(times["chat-1"] > 0 && times["chat-2"] >= times["chat-1"]);
     }
 
     #[test]

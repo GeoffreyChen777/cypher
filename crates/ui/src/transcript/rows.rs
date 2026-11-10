@@ -108,6 +108,36 @@ pub enum RowKind {
     ErrorChip {
         message: SharedString,
     },
+    /// A bot's `propose_plan` call: the plan card, drawn from the plan's
+    /// record ([`super::bot_plan`]). The row's version carries the chat's
+    /// plans, so the card re-measures when its record changes.
+    BotPlan {
+        call_id: SharedString,
+        title: SharedString,
+        resolved: bool,
+    },
+    /// A `memory` call whose write was held: its card, drawn from the
+    /// store's row ([`super::memory_card`]), named by the file it wrote.
+    /// The row's version carries the cards' key, like a plan's.
+    MemoryWrite {
+        call_id: SharedString,
+        file: SharedString,
+    },
+    /// The attribution over a routine's output posted into a bot chat (§8):
+    /// the routine's name, when it ran, a failed mark, and its thread. The
+    /// output itself follows as ordinary text rows.
+    BotPost {
+        name: SharedString,
+        failed: bool,
+        run_at: i64,
+        thread: Option<SharedString>,
+    },
+    /// The attribution over another user's bot's late answer in a bot chat
+    /// (§10.6), e.g. `Answer from "Ada" (alice's bot) to your question "…"`.
+    /// The answer itself follows as ordinary text rows.
+    PeerAnswer {
+        header: SharedString,
+    },
     /// The toggle over a reasoning part: "Thinking…" while it streams,
     /// "Thought" once it settled. The `blocks` [`RowKind::ThoughtBlock`] rows
     /// that follow are dropped while it is closed, the default (see
@@ -183,6 +213,17 @@ pub struct Row {
     /// Shift-clicked it to read the original — and the other side's rows are
     /// dropped ([`show_translation_side`]). `None` for everything else.
     pub translation: Option<TranslationSide>,
+    /// A slice of a card several rows draw together (a routine's post):
+    /// which edges this row closes. `None` for ordinary rows.
+    pub card: Option<CardSlice>,
+}
+
+/// One row's part of a multi-row card ([`Row::card`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardSlice {
+    pub top: bool,
+    pub bottom: bool,
+    pub failed: bool,
 }
 
 /// One version of a translated text part ([`Row::translation`]).
@@ -278,6 +319,10 @@ pub(super) fn row_match_count(row: &Row, query: &str) -> u32 {
         | RowKind::TurnChanges { .. }
         | RowKind::InputChip { .. }
         | RowKind::ErrorChip { .. }
+        | RowKind::BotPlan { .. }
+        | RowKind::MemoryWrite { .. }
+        | RowKind::BotPost { .. }
+        | RowKind::PeerAnswer { .. }
         | RowKind::Thought { .. }
         | RowKind::ThoughtBlock { .. } => 0,
     };
@@ -340,6 +385,9 @@ pub enum TranscriptEvent {
         changes: Arc<cypher_proto::TurnChanges>,
         path: Option<String>,
     },
+    /// A plan card's Edit: cancel the proposal and start the owner's reply
+    /// asking for the change in the composer.
+    EditBotPlan { work_id: String, title: String },
 }
 
 impl EventEmitter<TranscriptEvent> for Transcript {}
@@ -351,7 +399,7 @@ pub(super) fn message_copy_text(entry: &SessionMessageEntry) -> Option<String> {
         .parts
         .iter()
         .filter_map(|part| match part {
-            MessagePart::Text { text, .. } => Some(text.as_str()),
+            MessagePart::Text { text, .. } | MessagePart::Post { text, .. } => Some(text.as_str()),
             MessagePart::Error { message, .. } if entry.role != MessageRole::User => {
                 Some(message.as_str())
             }
@@ -615,17 +663,32 @@ pub(super) fn user_entry_is_slash_command(entry: &SessionMessageEntry) -> bool {
     crate::composer::slash_command_label(&text).is_some()
 }
 
-/// Build the block rows of one (already continuation-joined) entry.
-///
-/// `parse` maps `(part_key, text)` to a block tree — the entity supplies
-/// incremental parsers for live parts and a cache for complete ones; tests pass
-/// a plain `parse_full`.
+/// [`entry_rows`] with no memory cards.
+#[cfg(test)]
 pub fn rows_for_entry(
     entry: &SessionMessageEntry,
     pending: bool,
     parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
 ) -> Vec<Row> {
+    entry_rows(entry, pending, &Default::default(), parse)
+}
+
+/// Build the block rows of one (already continuation-joined) entry.
+///
+/// `parse` maps `(part_key, text)` to a block tree — the entity supplies
+/// incremental parsers for live parts and a cache for complete ones; tests pass
+/// a plain `parse_full`. `memory_cards` names the `memory` calls drawn as
+/// cards rather than chips.
+pub(super) fn entry_rows(
+    entry: &SessionMessageEntry,
+    pending: bool,
+    memory_cards: &super::memory_card::MemoryCards,
+    parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
+) -> Vec<Row> {
     if entry.role == MessageRole::User {
+        if let Some(rows) = peer_answer_rows(entry, parse) {
+            return rows;
+        }
         return vec![user_row(entry, pending)];
     }
 
@@ -656,7 +719,11 @@ pub fn rows_for_entry(
             MessagePart::Input { request_id, .. } if fold.filed.contains(request_id) => continue,
             _ => {}
         }
-        if let Some((part_id, item)) = tool_item(part, &fold) {
+        // A plan is a card of its own, not a chip in a group, and so is a
+        // held memory write.
+        let card = super::bot_plan::is_plan_call(part)
+            || super::memory_card::is_card_call(part, memory_cards);
+        if !card && let Some((part_id, item)) = tool_item(part, &fold) {
             // Nothing is pushed until the group flushes, so the run's
             // rows start here.
             run.get_or_insert_with(|| (rows.len(), part_id.clone()));
@@ -686,6 +753,47 @@ pub fn rows_for_entry(
                 text,
                 agent_text,
             } => cx.push_text_rows(&mut rows, part_id, text, agent_text.as_deref(), parse),
+            // A routine's output posted into a bot chat: an attribution row,
+            // then its text as any answer's.
+            MessagePart::Post {
+                id: part_id,
+                text,
+                from,
+            } => {
+                if let cypher_proto::BotPost::Routine {
+                    name,
+                    outcome,
+                    run_at,
+                    thread_chat_id,
+                    ..
+                } = from
+                {
+                    let failed = *outcome == cypher_proto::RunOutcome::Failed;
+                    let header = rows.len();
+                    rows.push(cx.row(
+                        format!("{}#{}#post", entry.id, part_id),
+                        fnv1a(name.as_bytes()) ^ (*run_at as u64) ^ u64::from(failed),
+                        RowKind::BotPost {
+                            name: name.clone().into(),
+                            failed,
+                            run_at: *run_at,
+                            thread: thread_chat_id.clone().map(Into::into),
+                        },
+                    ));
+                    cx.push_text_rows(&mut rows, part_id, text, None, parse);
+                    // The header and its text draw one card together.
+                    let last = rows.len() - 1;
+                    for (ix, row) in rows.iter_mut().enumerate().skip(header) {
+                        row.card = Some(CardSlice {
+                            top: ix == header,
+                            bottom: ix == last,
+                            failed,
+                        });
+                    }
+                } else {
+                    cx.push_text_rows(&mut rows, part_id, text, None, parse)
+                }
+            }
             MessagePart::Reasoning { id: part_id, text } => {
                 run.get_or_insert_with(|| (rows.len(), part_id.clone()));
                 // Still thinking: the reasoning is the live tail.
@@ -710,8 +818,39 @@ pub fn rows_for_entry(
                     message: single_line(message).into(),
                 },
             )),
-            // Tools are grouped above; nothing reaches here.
-            MessagePart::Tool { .. } => {}
+            // Tools are grouped above; only the cards reach here.
+            MessagePart::Tool {
+                id: part_id, call, ..
+            } if super::memory_card::is_card_call(part, memory_cards) => {
+                let file = super::memory_card::call_file(call);
+                rows.push(cx.row(
+                    format!("{}#{}", entry.id, part_id),
+                    fnv1a(part_id.as_bytes()) ^ fnv1a(file.as_bytes()).rotate_left(7),
+                    RowKind::MemoryWrite {
+                        call_id: part_id.clone().into(),
+                        file: file.into(),
+                    },
+                ))
+            }
+            MessagePart::Tool {
+                id: part_id,
+                call,
+                resolved,
+                ..
+            } => {
+                let title = super::bot_plan::call_title(call);
+                rows.push(cx.row(
+                    format!("{}#{}", entry.id, part_id),
+                    fnv1a(part_id.as_bytes())
+                        ^ fnv1a(title.as_bytes()).rotate_left(3)
+                        ^ u64::from(*resolved),
+                    RowKind::BotPlan {
+                        call_id: part_id.clone().into(),
+                        title: title.into(),
+                        resolved: *resolved,
+                    },
+                ))
+            }
         }
     }
     cx.flush_tool_group(
@@ -842,6 +981,7 @@ fn user_row(entry: &SessionMessageEntry, pending: bool) -> Row {
         timestamp: Some(entry.created_at),
         answered: None,
         translation: None,
+        card: None,
     }
 }
 
@@ -1034,15 +1174,61 @@ fn permission_output(
 /// still pending in the composer.
 fn part_is_silent(part: &MessagePart) -> bool {
     match part {
-        MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
-            text.trim().is_empty()
-        }
+        MessagePart::Text { text, .. }
+        | MessagePart::Reasoning { text, .. }
+        | MessagePart::Post { text, .. } => text.trim().is_empty(),
         MessagePart::Input { resolved, .. } => !*resolved,
         MessagePart::Error { .. } | MessagePart::Tool { .. } => false,
     }
 }
 
 /// The per-entry facts every assistant/system row is built from.
+/// The id prefix of the turn the engine starts in a bot chat when another
+/// user's bot answers late (`bots/network/host.rs` `deliver_late`).
+const PEER_ANSWER_PREFIX: &str = "bot-answer-";
+
+/// A late peer answer reads as an attribution row and the answer as
+/// markdown, not as a message the owner sent.
+fn peer_answer_rows(
+    entry: &SessionMessageEntry,
+    parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
+) -> Option<Vec<Row>> {
+    if !entry.id.starts_with(PEER_ANSWER_PREFIX) {
+        return None;
+    }
+    let (part_id, text) = entry.parts.iter().find_map(|part| match part {
+        MessagePart::Text { id, text, .. } => Some((id.as_str(), text.as_str())),
+        _ => None,
+    })?;
+    let (head, body) = text.split_once('\n').unwrap_or((text, ""));
+    let header = head
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let cx = EntryRows {
+        entry,
+        entry_id: entry.id.clone().into(),
+        streaming: false,
+        last_part_ix: entry.parts.len().saturating_sub(1),
+    };
+    let mut first = cx.row(
+        format!("{}#peer", entry.id),
+        fnv1a(header.as_bytes()),
+        RowKind::PeerAnswer {
+            header: header.into(),
+        },
+    );
+    first.turn_start = true;
+    first.timestamp = Some(entry.created_at);
+    let mut rows = vec![first];
+    let body = body.trim();
+    if !body.is_empty() {
+        cx.push_text_rows(&mut rows, part_id, body, None, parse);
+    }
+    Some(rows)
+}
+
 struct EntryRows<'a> {
     entry: &'a SessionMessageEntry,
     entry_id: SharedString,
@@ -1063,6 +1249,7 @@ impl EntryRows<'_> {
             timestamp: None,
             answered: None,
             translation: None,
+            card: None,
         }
     }
 

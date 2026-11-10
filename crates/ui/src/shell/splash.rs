@@ -45,6 +45,8 @@ impl Shell {
         // Deleted / archived sessions, and sessions whose project moved to
         // (or out of) this window's scope, leave the workspace.
         self.prune_tabs(cx);
+        // The Botboard stays on a bot that exists.
+        self.sync_board(cx);
         self.advance_splash(state, cx);
     }
 
@@ -183,8 +185,14 @@ impl Shell {
                     let send_pending = state.send_pending(&s.chat_id, now);
                     let chat = state.chats.iter().find(|c| c.id == s.chat_id);
                     let title = chat.and_then(|c| c.title.clone());
-                    // Rows without a chat yet belong to the main window.
-                    let in_scope = chat.map_or(scope.only.is_none(), |c| scope.chat_visible(c));
+                    // Rows without a chat yet belong to the main window. A
+                    // bot's hidden threads never ring: their results reach
+                    // the owner through the bot chat and the Botboard.
+                    let hidden = chat
+                        .and_then(|c| c.bot.as_ref())
+                        .is_some_and(|marker| !marker.is_main());
+                    let in_scope =
+                        !hidden && chat.map_or(scope.only.is_none(), |c| scope.chat_visible(c));
                     (s.chat_id.clone(), status, send_pending, title, in_scope)
                 })
                 .collect()

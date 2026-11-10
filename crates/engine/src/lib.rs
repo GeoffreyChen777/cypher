@@ -9,6 +9,7 @@
 //! (`pi::packages`, `session::forks`, `host::local_import`, …).
 
 mod auth;
+pub mod bots;
 mod core;
 mod device_identity;
 pub mod device_trust;
@@ -18,6 +19,7 @@ mod headless;
 pub mod host;
 mod instance_lock;
 pub mod mcp;
+pub mod memory;
 pub mod pi;
 mod profile;
 pub mod registry;
@@ -40,6 +42,8 @@ pub use git::diff_sync::{
 pub use git::repos::{Repos, worktree_branch_from_title};
 pub use host::doc_host::{ChatDocHandle, CommandTrust, DocHost, DocHostConfig, EdgeConfig};
 pub use host::spaces::SpacesSync;
+/// Which fields of a bot record a write carries (tests seed records with it).
+pub use host::workspace_host::Fields as RecordFields;
 pub use host::workspace_host::{DEFAULT_ORG_ID, DEFAULT_USER_ID, WorkspaceHost};
 pub use instance_lock::InstanceLock;
 pub use profile::EngineProfile;

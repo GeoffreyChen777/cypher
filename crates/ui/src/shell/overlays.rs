@@ -218,7 +218,7 @@ impl Shell {
                 .child(
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
-                        "Removing the partial sign-in before returning to your local workspace.",
+                        "Removing the partial sign-in before returning to local mode.",
                     )),
                 )
                 .into_any_element(),
@@ -229,7 +229,7 @@ impl Shell {
             SyncFlow::Switching { import } => popover::dialog_card(&theme)
                 .child(popover::dialog_title(
                     &theme,
-                    "Switching to your synced workspace…",
+                    "Switching to your synced account…",
                 ))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(
                     &theme,
@@ -258,7 +258,7 @@ impl Shell {
                 .child(
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
-                        "Removing account credentials and closing the synced workspace.",
+                        "Removing account credentials and stopping sync.",
                     )),
                 )
                 .into_any_element(),
@@ -279,7 +279,7 @@ impl Shell {
             .child(
                 div().mt(px(6.0)).child(popover::dialog_body(
                     theme,
-                    "Finish signing in in your browser. Cypher will keep using this local workspace until you quit and reopen.",
+                    "Finish signing in in your browser. Cypher stays in local mode until you quit and reopen.",
                 )),
             )
             .child(
@@ -319,18 +319,18 @@ impl Shell {
         let has_local_work = work_phrase.is_some();
         let body: SharedString = match (signed_in_email, work_phrase) {
             (Some(email), Some(phrase)) => format!(
-                "You're signed in as {email}. Bring {phrase} from this device into your synced workspace, or start it fresh."
+                "You're signed in as {email}. Bring {phrase} from this device into your synced account, or start it fresh."
             )
             .into(),
             (Some(email), None) => format!(
-                "You're signed in as {email}. Cypher can switch to your synced workspace now."
+                "You're signed in as {email}. Cypher can switch to your synced account now."
             )
             .into(),
             (None, Some(phrase)) => format!(
-                "Bring {phrase} from this device into your synced workspace, or start it fresh."
+                "Bring {phrase} from this device into your synced account, or start it fresh."
             )
             .into(),
-            (None, None) => "Cypher can switch to your synced workspace now.".into(),
+            (None, None) => "Cypher can switch to your synced account now.".into(),
         };
         let mut actions = div()
             .mt(px(16.0))
@@ -425,9 +425,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let body: SharedString = match (imported, skipped) {
-            (0, 0) => "Your synced workspace is ready.".into(),
+            (0, 0) => "Your synced account is ready.".into(),
             (n, 0) => format!(
-                "{n} session{} moved into your synced workspace.",
+                "{n} session{} moved into your synced account.",
                 if n == 1 { "" } else { "s" },
             )
             .into(),
@@ -509,9 +509,9 @@ impl Shell {
                 div().mt(px(6.0)).child(popover::dialog_body(
                     theme,
                     if remote_engine {
-                        "Cypher is using a background daemon. Stop it and quit Cypher, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                        "Cypher is using a background daemon. Stop it and quit Cypher, then reopen to start syncing. Existing local sessions stay on this device and will not be uploaded."
                     } else {
-                        "Quit and reopen Cypher to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                        "Quit and reopen Cypher to start syncing. Existing local sessions stay on this device and will not be uploaded."
                     },
                 )),
             )
@@ -557,12 +557,10 @@ impl Shell {
     fn sync_card_sign_out_confirm(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         popover::dialog_card(theme)
             .child(popover::dialog_title(theme, "Sign out?"))
-            .child(
-                div().mt(px(6.0)).child(popover::dialog_body(
-                    theme,
-                    "Cypher will remove your credentials, close the synced workspace, and continue in local mode.",
-                )),
-            )
+            .child(div().mt(px(6.0)).child(popover::dialog_body(
+                theme,
+                "Cypher will remove your credentials, stop syncing, and continue in local mode.",
+            )))
             .child(
                 div()
                     .mt(px(16.0))
@@ -581,9 +579,7 @@ impl Shell {
                     .child(
                         popover::btn_danger(theme, "Sign out")
                             .id("signout-confirm")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.confirm_sign_out(cx)
-                            })),
+                            .on_click(cx.listener(|this, _, _, cx| this.confirm_sign_out(cx))),
                     ),
             )
             .into_any_element()
@@ -609,6 +605,7 @@ impl Shell {
         }
 
         overlays.extend(self.render_space_overlays(viewport, window, cx));
+        overlays.extend(self.render_bot_overlays(viewport, window, cx));
         if let Some(overlay) = self.render_add_space_overlay(viewport, window, cx) {
             overlays.push(overlay);
         }
@@ -1104,7 +1101,7 @@ impl Shell {
                     .line_height(px(19.0))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(
-                        "Cypher removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
+                        "Cypher removed your credentials but could not finish closing the previous synced account. Retry before continuing in local mode.",
                     )),
             )
             .when_some(self.sync.runtime_change_error.clone(), |card, error| {
@@ -1349,7 +1346,7 @@ impl Shell {
 
         let choosing = matches!(&orgs, Loadable::Ready(rows) if !rows.is_empty());
         let title = if choosing {
-            "Choose a workspace"
+            "Choose an organization"
         } else {
             "Setting up sync"
         };
@@ -1358,8 +1355,8 @@ impl Shell {
                 format!("Choose where to continue. Signed in as {email}.").into()
             }
             (true, None) => "Choose where to continue.".into(),
-            (false, Some(email)) => format!("Preparing your synced workspace for {email}.").into(),
-            (false, None) => "Preparing your synced workspace.".into(),
+            (false, Some(email)) => format!("Preparing your synced account for {email}.").into(),
+            (false, None) => "Preparing your synced account.".into(),
         };
         let card = div()
             .w(px(400.0))

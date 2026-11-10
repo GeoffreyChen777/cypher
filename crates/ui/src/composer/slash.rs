@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Runtime commands a bot chat refuses (`cypher_engine::bots::REFUSED_COMMANDS`).
+const BOT_REFUSED_COMMANDS: [&str; 3] = ["scripts", "orchestrate", "goal"];
+
 impl Composer {
     fn command_target(&self, cx: &App) -> Option<String> {
         if let ComposerTransport::SideChat(side) = &self.transport {
@@ -88,16 +91,61 @@ impl Composer {
             && harness.unwrap_or(HarnessId::Pi) == HarnessId::Pi
     }
 
-    /// The composer's own `/` actions this composer offers.
+    /// The composer's own `/` actions this composer offers. A bot reads
+    /// sessions, not files, and runs read-only: it gets neither.
     fn slash_actions(
         &self,
         harness: Option<HarnessId>,
+        cx: &App,
     ) -> Vec<crate::composer::slash_menu::Action> {
         use crate::composer::slash_menu::Action;
+        if self.in_bot_chat(cx) {
+            return Vec::new();
+        }
         Action::ALL
             .into_iter()
-            .filter(|action| *action != Action::Permissions || self.offers_permissions(harness))
+            .filter(|action| match action {
+                Action::Attach => true,
+                Action::Permissions => self.offers_permissions(harness),
+                Action::Memory => matches!(self.transport, ComposerTransport::Main),
+            })
             .collect()
+    }
+
+    /// `/memory` typed in full: the store it opens — the session's project
+    /// (or the project picked on the new-session canvas), else yours. Never
+    /// sent to the agent; `None` for anything else, and in a side chat or a
+    /// workspace's conversation (its memory is in Settings → Memory).
+    pub(super) fn typed_memory(&self, text: &str, cx: &App) -> Option<cypher_proto::MemoryScope> {
+        if text.trim() != "/memory"
+            || !matches!(self.transport, ComposerTransport::Main)
+            || self.in_bot_chat(cx)
+        {
+            return None;
+        }
+        Some(self.memory_scope(cx))
+    }
+
+    fn memory_scope(&self, cx: &App) -> cypher_proto::MemoryScope {
+        let state = self.state.read(cx);
+        let space = match state.selected_chat_row() {
+            Some(chat) => chat.space_id.clone(),
+            None => state.selected_space_row().map(|space| space.id.clone()),
+        };
+        match space {
+            Some(space_id) => cypher_proto::MemoryScope::Project { space_id },
+            None => cypher_proto::MemoryScope::You,
+        }
+    }
+
+    /// Whether this composer writes into a bot's conversation.
+    pub(super) fn in_bot_chat(&self, cx: &App) -> bool {
+        matches!(self.transport, ComposerTransport::Main)
+            && self
+                .state
+                .read(cx)
+                .selected_chat_row()
+                .is_some_and(|chat| chat.is_bot())
     }
 
     /// `/permissions <level>` typed in full: apply it here, never send it.
@@ -325,10 +373,16 @@ impl Composer {
                     .and_then(|h| self.slash_cache.get(&h))
                     .map(Vec::as_slice)
                     .unwrap_or_default();
+                // A bot chat refuses the commands that would widen its
+                // tools (the engine says so too), so they are not offered.
+                let bot = self.in_bot_chat(cx);
                 crate::composer::slash_menu::command_level(
-                    &self.slash_actions(self.slash.harness),
+                    &self.slash_actions(self.slash.harness, cx),
                     commands,
-                    |name| crate::prefs::slash_commands::shows_in_app(cx, name),
+                    |name| {
+                        !(bot && BOT_REFUSED_COMMANDS.contains(&name))
+                            && crate::prefs::slash_commands::shows_in_app(cx, name)
+                    },
                     &query,
                 )
             }
@@ -416,6 +470,16 @@ impl Composer {
             Row::Action(crate::composer::slash_menu::Action::Permissions) => {
                 // Types `/permissions`; the space after it opens the choices.
                 format!("/{}", crate::composer::slash_menu::PERMISSIONS)
+            }
+            Row::Action(crate::composer::slash_menu::Action::Memory) => {
+                // Like Attach: opens, types nothing.
+                self.input
+                    .update(cx, |input, cx| input.remove_plain_token(token.range, cx));
+                self.reset_slash(None, cx);
+                let scope = self.memory_scope(cx);
+                cx.emit(ComposerEvent::OpenMemory { scope });
+                cx.notify();
+                return;
             }
             Row::Action(crate::composer::slash_menu::Action::Attach) => {
                 // The action types nothing: drop the `/…` that summoned it.

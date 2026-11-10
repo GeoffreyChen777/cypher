@@ -59,6 +59,52 @@ fn round_trips_message_comments() {
 }
 
 #[test]
+fn round_trips_post_parts_and_older_readers_see_their_text() {
+    let doc = SessionDoc::init("chat-1").unwrap();
+    let post = MessagePart::Post {
+        id: "p0".into(),
+        text: "Two sessions are stuck.".into(),
+        from: cypher_proto::BotPost::Routine {
+            routine_id: "r1".into(),
+            name: "Morning brief".into(),
+            outcome: cypher_proto::RunOutcome::Done,
+            run_at: 7,
+            thread_chat_id: Some("thread-1".into()),
+        },
+    };
+    let mut entry = user_entry("m1", "");
+    entry.role = MessageRole::Assistant;
+    entry.parts = vec![post.clone()];
+    doc.push_message(&entry).unwrap();
+    assert_eq!(doc.read_entries().unwrap()[0].parts, vec![post]);
+
+    // A reader that doesn't know the kind falls back to a text part.
+    let raw = doc
+        .doc()
+        .get_list("messages")
+        .get_deep_value()
+        .to_json_value();
+    let part = raw[0]["parts"][0].clone();
+    assert_eq!(part["kind"], "post");
+    assert_eq!(part["text"], "Two sessions are stuck.");
+    assert_eq!(part["from"]["kind"], "routine");
+
+    // A source from a newer engine still renders its text.
+    let future: DocPartJson = serde_json::from_value(serde_json::json!({
+        "id": "p1", "kind": "post", "text": "hi", "from": { "kind": "somethingNew" }
+    }))
+    .unwrap();
+    assert_eq!(
+        from_doc_part(future),
+        MessagePart::Post {
+            id: "p1".into(),
+            text: "hi".into(),
+            from: cypher_proto::BotPost::Unknown,
+        }
+    );
+}
+
+#[test]
 fn remove_messages_truncates_and_leaves_the_prefix_intact() {
     let doc = SessionDoc::init("chat-1").unwrap();
     for id in ["m1", "m2", "m3", "m4"] {

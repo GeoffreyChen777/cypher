@@ -4,12 +4,15 @@
 //! to its right. The main state's selection follows the focused tile
 //! (`Shell::sync_follow`). The layout persists as `UiSettings.workspace`
 //! (and `project_workspaces` per project window), restored at boot landing.
+//! A bot's conversation is never a tab: opening one shows it on the
+//! Botboard ([`super::bots`]), and a saved layout's bot tabs are dropped.
 
 use super::*;
 use crate::workspace::{TabKey, Workspace};
 
 /// A saved layout made fit to restore: session tabs survive only while
-/// `live` (the chat exists, isn't archived, and is in this window's scope);
+/// `live` (the chat exists, isn't archived or a bot's conversation, and is
+/// in this window's scope);
 /// new-session canvases are dropped — a canvas holds nothing but an unsent
 /// project pick, and the boot landing opens a fresh one when no tab is left.
 /// Groups emptied by the pruning collapse; tiles that were already empty
@@ -17,6 +20,21 @@ use crate::workspace::{TabKey, Workspace};
 pub(super) fn restore_workspace(mut saved: Workspace, live: impl Fn(&str) -> bool) -> Workspace {
     saved.retain_tabs(|tab| tab.chat_id().is_some_and(&live));
     saved
+}
+
+/// The bot whose conversation a saved layout has as a tab — the focused
+/// tab's first, else the first in reading order — by `bot_of` (a chat's
+/// bot). Pure.
+pub(super) fn restored_bot(
+    saved: &Workspace,
+    bot_of: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    saved
+        .focused_tab()
+        .into_iter()
+        .chain(saved.tabs())
+        .filter_map(TabKey::chat_id)
+        .find_map(bot_of)
 }
 
 /// Carry the tabs opened before the first chats frame (⌘N, the titlebar
@@ -60,8 +78,9 @@ pub(super) const EXPECTED_CHAT_TTL: std::time::Duration = std::time::Duration::f
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SessionFate {
     Stays,
-    /// Archived, or outside this window's project scope: its tab closes (the
-    /// chat may come back — terminals stay parked).
+    /// Archived, outside this window's project scope, or a bot's
+    /// conversation (those live on the Botboard): its tab closes (the chat
+    /// may come back — terminals stay parked).
     Hidden,
     /// Gone from the list: tab and parked terminals close.
     Deleted,
@@ -84,7 +103,14 @@ pub(super) fn session_fate(
     awaited: bool,
 ) -> SessionFate {
     match chats.iter().find(|c| c.id == chat_id) {
-        Some(chat) if chat.archived || !scope.chat_visible(chat) => SessionFate::Hidden,
+        Some(chat)
+            if chat.archived
+                || chat.is_bot()
+                || chat.is_memory_pass()
+                || !scope.chat_visible(chat) =>
+        {
+            SessionFate::Hidden
+        }
         Some(_) => SessionFate::Stays,
         None if chats_frame && !awaited => SessionFate::Deleted,
         None => SessionFate::Stays,
@@ -129,10 +155,39 @@ impl Shell {
     /// joins the restored layout, focused ([`adopt_presync_tabs`]), and
     /// replaces the landing. A project window also opens the chat its state
     /// selected (the chat moves windows with it) into its restored layout.
+    ///
+    /// The landing fills Projects mode's layout; the main window stays in
+    /// the mode it was saved in. A saved layout holding a bot tab (from
+    /// before the Botboard) loses the tab and lands on the Botboard with
+    /// that bot instead ([`restored_bot`]).
     pub(super) fn boot_select_chat(&mut self, cx: &mut Context<Self>) {
         if self.tiles.boot_landed {
             return;
         }
+        let (synced, pinned) = {
+            let state = self.state.read(cx);
+            (state.chats_synced, state.auto_selected)
+        };
+        if !synced {
+            return;
+        }
+        let mode = self.settings.window_mode;
+        // Not over a pinned landing or a session picked before the frame.
+        let bot = self
+            .tiles
+            .saved_workspace
+            .as_ref()
+            .filter(|_| !self.is_project_window() && !pinned)
+            .and_then(|saved| restored_bot(saved, |id| self.bot_of_chat(id, cx)));
+        self.boot_land(cx);
+        if let Some(bot_id) = bot {
+            self.open_bot(&bot_id, cx);
+        } else if mode == crate::prefs::WindowMode::Botboard {
+            self.set_window_mode(mode, cx);
+        }
+    }
+
+    fn boot_land(&mut self, cx: &mut Context<Self>) {
         let (landing, pinned) = {
             let state = self.state.read(cx);
             if !state.chats_synced {
@@ -162,7 +217,9 @@ impl Shell {
                 state
                     .chats
                     .iter()
-                    .filter(|c| !c.archived && scope.chat_visible(c))
+                    .filter(|c| {
+                        !c.archived && !c.is_bot() && !c.is_memory_pass() && scope.chat_visible(c)
+                    })
                     .map(|c| c.id.clone())
                     .collect()
             };
@@ -245,8 +302,28 @@ impl Shell {
     }
 
     /// [`Self::open_chat`], or with `split` (⌘-click) in a new tile to the
-    /// right of the focused one.
+    /// right of the focused one. A bot's conversation shows on the Botboard
+    /// instead, and one of its hidden threads (an orchestration's, a
+    /// routine's, a peer's) in the Botboard's panel; any other session
+    /// switches the main window to Projects.
     pub(super) fn open_chat_with(&mut self, chat_id: String, split: bool, cx: &mut Context<Self>) {
+        if let Some(bot_id) = self.bot_of_chat(&chat_id, cx) {
+            self.route = Route::Chat;
+            let hidden = self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .find(|c| c.id == chat_id)
+                .and_then(|c| c.bot.as_ref())
+                .is_some_and(|marker| !marker.is_main());
+            self.open_bot(&bot_id, cx);
+            if hidden && self.board.panel != Some(bots::PanelItem::Thread(chat_id.clone())) {
+                self.open_panel(bots::PanelItem::Thread(chat_id), cx);
+            }
+            return;
+        }
+        self.set_window_mode(crate::prefs::WindowMode::Projects, cx);
         self.route = Route::Chat;
         super::workspace_view::route_open(&mut self.workspace, TabKey::Session(chat_id), split);
         self.tiles.focus_pending = true;
@@ -392,7 +469,8 @@ impl Shell {
     /// underneath the add-space palette, stranding the overlay over a session
     /// they never picked.
     pub(super) fn cycle_session(&mut self, forward: bool, cx: &mut Context<Self>) {
-        if !matches!(self.route, Route::Chat) || self.dialogs.add_space.is_some() {
+        if !matches!(self.route, Route::Chat) || self.dialogs.add_space.is_some() || self.botboard()
+        {
             return;
         }
         let selected = self
@@ -413,8 +491,9 @@ impl Shell {
     }
 
     /// A new-session tab in the focused tile: its existing one when it has
-    /// one, else a fresh canvas. Returns the canvas slot.
+    /// one, else a fresh canvas (in Projects mode). Returns the canvas slot.
     fn open_canvas(&mut self, cx: &mut Context<Self>) -> Option<session::SlotId> {
+        self.set_window_mode(crate::prefs::WindowMode::Projects, cx);
         self.route = Route::Chat;
         let focused = self.workspace.focused();
         let existing = self.workspace.group(focused).and_then(|group| {
@@ -598,6 +677,23 @@ mod cycle_tests {
             cycle_target(&list, Some("gone"), false).as_deref(),
             Some("c")
         );
+    }
+
+    #[test]
+    fn a_saved_bot_tab_names_its_bot_focused_first() {
+        use crate::workspace::{Edge, TabKey, Workspace};
+        let bot_of = |id: &str| id.strip_suffix("-chat").map(str::to_string);
+        let mut saved = Workspace::new();
+        let left = saved.open(TabKey::session("ann-chat"));
+        saved.open(TabKey::session("a"));
+        assert_eq!(restored_bot(&saved, bot_of), Some("ann".into()));
+        saved
+            .open_split(TabKey::session("bob-chat"), left, Edge::Right)
+            .unwrap();
+        assert_eq!(restored_bot(&saved, bot_of), Some("bob".into()));
+        let mut plain = Workspace::new();
+        plain.open(TabKey::session("a"));
+        assert_eq!(restored_bot(&plain, bot_of), None);
     }
 
     #[test]

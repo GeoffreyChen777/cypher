@@ -50,7 +50,13 @@ impl Shell {
         // "Send a message to start" canvas with a watermark; no spaces at all
         // → the onboarding card. The composer sits below the first two
         // (new-chat mode mints the chat id on first send).
-        let outlet: AnyElement = if has_selection {
+        let bot_start = (has_selection && self.bot_chat_is_fresh(sid, cx))
+            .then(|| self.render_bot_start(sid, stack_h, cx))
+            .flatten();
+        let outlet: AnyElement = if let Some(start) = bot_start {
+            // A new bot's start screen stands in for its empty transcript.
+            start
+        } else if has_selection {
             // Cached, so loader pulses replay the transcript instead of
             // rebuilding its rows; its live layer paints their frames over
             // it, inside the same edge fade.
@@ -301,6 +307,9 @@ impl Shell {
         );
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
+        // A bot's conversation notes what the bot can see wherever the strip
+        // has nothing more pressing to say.
+        let mut bot_access = self.render_bot_access(sid, &theme, cx);
         let state = slot_state.read(cx);
 
         // Aligned with the composer column: the pill starts after the
@@ -346,11 +355,15 @@ impl Shell {
                     // The working loader lives in the TRANSCRIPT now, under the
                     // streaming reply (user request) — the strip stays empty
                     // (its reserved height still steadies the composer).
-                    Indicator::Working => Empty.into_any_element(),
+                    Indicator::Working => bot_access
+                        .take()
+                        .unwrap_or_else(|| Empty.into_any_element()),
                     // No label: the QuestionPanel right below IS the
                     // awaiting-input surface — a strip caption above it was
                     // redundant (user request).
-                    Indicator::AwaitingInput => Empty.into_any_element(),
+                    Indicator::AwaitingInput => bot_access
+                        .take()
+                        .unwrap_or_else(|| Empty.into_any_element()),
                     Indicator::Errored => div()
                         .text_color(theme.danger)
                         .child(SharedString::from("Run failed"))
@@ -370,7 +383,9 @@ impl Shell {
                                 .child(SharedString::from("Sending…")),
                         )
                         .into_any_element(),
-                    Indicator::None => Empty.into_any_element(),
+                    Indicator::None => bot_access
+                        .take()
+                        .unwrap_or_else(|| Empty.into_any_element()),
                 }
             }
         };

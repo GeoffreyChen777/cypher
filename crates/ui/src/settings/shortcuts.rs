@@ -142,9 +142,7 @@ fn description(id: ShortcutId) -> &'static str {
         ShortcutId::FocusUp => "Move focus to the tile above.",
         ShortcutId::FocusDown => "Move focus to the tile below.",
         ShortcutId::CloseTab => "Close the focused tile's session tab.",
-        ShortcutId::ToggleZoom => {
-            "Fill the workspace with the focused tile, or restore the layout."
-        }
+        ShortcutId::ToggleZoom => "Fill the window with the focused tile, or restore the layout.",
     }
 }
 

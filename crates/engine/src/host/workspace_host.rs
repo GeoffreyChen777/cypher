@@ -24,7 +24,7 @@ use tokio::sync::watch;
 
 use cypher_doc::{DeletedDevice, DeletedSpace, REGISTRY_DOC_ID, RegistryDoc};
 use cypher_proto::{
-    Chat, ChatConfig, ChatHome, ChildAgentProfile, ChildChat, Device, HarnessId, SandboxLevel,
+    Bot, Chat, ChatConfig, ChatHome, ChildAgentProfile, ChildChat, Device, HarnessId, SandboxLevel,
     Session, Space, SubagentRunMode,
 };
 use cypher_sync::{DocsStore, RegistryClient, RegistryTransport, RegistryTuning};
@@ -34,6 +34,8 @@ use crate::host::doc_host::EdgeConfig;
 use crate::util::lock;
 use crate::util::now_ms;
 
+mod bot_records;
+pub use bot_records::Fields;
 mod entities;
 mod persist;
 mod presence;
@@ -131,6 +133,8 @@ struct WorkspaceHostInner {
     devices_tx: watch::Sender<Vec<Device>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
+    bots_tx: watch::Sender<Vec<Bot>>,
+    records_tx: watch::Sender<cypher_proto::BotRecords>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// Bumped on every registry change (local mutation or applied server
     /// frame) — drives republish + the snapshot debounce in `workspace_task`.
@@ -202,6 +206,8 @@ impl WorkspaceHost {
         let (devices_tx, _) = watch::channel(state.devices);
         let (sessions_tx, _) = watch::channel(state.sessions);
         let (spaces_tx, _) = watch::channel(state.spaces);
+        let (bots_tx, _) = watch::channel(state.bots);
+        let (records_tx, _) = watch::channel(doc.read_bot_records());
         let (changed_tx, changed_rx) = watch::channel(0u64);
         let (evicted_tx, _) = watch::channel(false);
         let registry_synced = config.edge.is_none();
@@ -217,6 +223,8 @@ impl WorkspaceHost {
                 devices_tx,
                 sessions_tx,
                 spaces_tx,
+                bots_tx,
+                records_tx,
                 room: Mutex::new(None),
                 changed_tx,
                 registry_synced: AtomicBool::new(registry_synced),
@@ -299,6 +307,18 @@ impl WorkspaceHost {
     }
 
     pub fn notify_session_event(&self, session: &Session) {
+        // A bot's hidden threads (orchestrations, routines, peer questions)
+        // are never the owner's to be pinged about: their results reach the
+        // owner through the bot chat and the Botboard.
+        if self
+            .chat(&session.chat_id)
+            .ok()
+            .flatten()
+            .and_then(|chat| chat.bot)
+            .is_some_and(|marker| !marker.is_main())
+        {
+            return;
+        }
         if let Some(hook) = lock(&self.inner.notification_event).clone() {
             hook(session);
         }
@@ -406,6 +426,10 @@ impl WorkspaceHost {
 
     pub fn watch_spaces(&self) -> watch::Receiver<Vec<Space>> {
         self.inner.spaces_tx.subscribe()
+    }
+
+    pub fn watch_bots(&self) -> watch::Receiver<Vec<Bot>> {
+        self.inner.bots_tx.subscribe()
     }
 
     /// WatchSessions source: durable registry rows merged with this engine's
@@ -717,13 +741,27 @@ impl WorkspaceHostInner {
     }
 
     fn publish(&self) {
-        match lock(&self.reg).read_all() {
-            Ok(mut state) => {
+        // One read under the lock (a second `lock` inside the match would
+        // deadlock: the scrutinee's guard lives to the end of the match).
+        let read = {
+            let reg = lock(&self.reg);
+            reg.read_all().map(|state| (state, reg.read_bot_records()))
+        };
+        match read {
+            Ok((mut state, records)) => {
                 self.overlay_presence(&mut state.devices);
                 publish_if_changed(&self.chats_tx, state.chats);
                 publish_if_changed(&self.devices_tx, state.devices);
                 publish_if_changed(&self.sessions_tx, state.sessions);
                 publish_if_changed(&self.spaces_tx, state.spaces);
+                publish_if_changed(&self.bots_tx, state.bots);
+                self.records_tx.send_if_modified(|current| {
+                    let changed = *current != records;
+                    if changed {
+                        *current = records;
+                    }
+                    changed
+                });
             }
             Err(err) => {
                 tracing::warn!(error = %err, "registry read failed");

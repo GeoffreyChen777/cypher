@@ -296,6 +296,37 @@ pub mod methods {
     /// transcript at a settled anchor and re-point the SAME chat at a
     /// freshly materialized, truncated Pi session. Pi-only, like the fork.
     pub const REWIND_SESSION: &str = "RewindSession";
+    // Agent bots (docs/design/agent-bots.md). Edits and deletes ride `Mutate`
+    // (`updateBot`, `deleteBot`) like other registry rows.
+    /// Create a bot hosted on the target device (unary): its private folder,
+    /// its chat and its registry row; replies with the `Bot`.
+    pub const CREATE_BOT: &str = "CreateBot";
+    /// The registry's bot rows (stream).
+    pub const WATCH_BOTS: &str = "WatchBots";
+    /// Every bot record (plans, notes, routines, tasks, activity, approvals,
+    /// connections, invites, exchanges) as one frame per change.
+    pub const WATCH_BOT_RECORDS: &str = "WatchBotRecords";
+    /// Create an invite to connect another user's bot (runs on the bot's
+    /// host, which publishes the bot's room first). Params `{botId}`; replies
+    /// `{inviteId, code, expiresAt}`. The code is shown once, never stored.
+    pub const CREATE_BOT_INVITE: &str = "CreateBotInvite";
+    /// Redeem another user's invite code for one of your bots (on its host).
+    /// Params `{botId, code}`; replies with the new connection record.
+    pub const REDEEM_BOT_INVITE: &str = "RedeemBotInvite";
+    /// One bot tool call from a bot run's extension (unary, host-local):
+    /// `{chatId, tool, args}` → `{text}`. The engine resolves the bot from
+    /// `chatId` and enforces its scope.
+    pub const BOT_TOOL: &str = "BotTool";
+    // Memory (docs/design/memory.md). Every engine holds every store (they
+    // sync like chats), so none of these is forwarded.
+    /// One memory tool call from a run's memory extension (unary,
+    /// host-local): `{chatId, tool, args}` → `{text}`. The engine resolves
+    /// which stores the chat sees and whether its writes are held.
+    pub const MEMORY_TOOL: &str = "MemoryTool";
+    /// One store as `MemoryView` frames (stream): `{scope}`.
+    pub const WATCH_MEMORY: &str = "WatchMemory";
+    /// One edit from the app (unary): `{scope, edit: MemoryEdit}` → `{text}`.
+    pub const EDIT_MEMORY: &str = "EditMemory";
     /// Move root chats (with their child chats) to another project, on this
     /// or another device (stream of `ChatMigrationEvent`s). Answered by the
     /// chats' current host, which drives the destination with the calls
@@ -562,6 +593,16 @@ pub mod methods {
         // session there too.
         MethodSpec::unary(FORK_SESSION).forwardable(),
         MethodSpec::unary(REWIND_SESSION).forwardable(),
+        // A bot is created on its host; its tools answer only there.
+        MethodSpec::unary(CREATE_BOT).forwardable(),
+        MethodSpec::stream(WATCH_BOTS),
+        MethodSpec::stream(WATCH_BOT_RECORDS),
+        MethodSpec::unary(CREATE_BOT_INVITE).forwardable(),
+        MethodSpec::unary(REDEEM_BOT_INVITE).forwardable(),
+        MethodSpec::unary(BOT_TOOL),
+        MethodSpec::unary(MEMORY_TOOL),
+        MethodSpec::stream(WATCH_MEMORY),
+        MethodSpec::unary(EDIT_MEMORY),
         // A migration runs on the chats' current host; the staging calls
         // land on the destination project's device.
         MethodSpec::stream(MIGRATE_CHATS).forwardable(),

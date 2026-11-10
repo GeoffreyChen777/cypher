@@ -12,6 +12,7 @@ pub mod devices;
 pub mod github;
 pub mod harnesses;
 pub mod mcp;
+pub mod memory;
 pub mod notifications;
 pub mod permissions;
 pub mod providers;

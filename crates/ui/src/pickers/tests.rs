@@ -444,11 +444,11 @@ fn permission_levels_are_labeled_strictest_first() {
     );
     assert_eq!(
         PERMISSION_LEVELS.map(|entry| entry.value),
-        ["ask", "workspace", "full"]
+        ["ask", "project", "full"]
     );
     assert_eq!(
         permission_level(SandboxLevel::WorkspaceWrite).label,
-        "Edit workspace"
+        "Edit project"
     );
     assert_eq!(
         permission_level(SandboxLevel::ReadOnly).label,

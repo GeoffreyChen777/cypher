@@ -12,7 +12,10 @@
 //! · `rclick X Y` · `mclick X Y` · `dclick X Y` · `drag X1 Y1 X2 Y2`
 //! · `scroll X Y DY` · `key COMBO` (e.g. `cmd-\`) · `type TEXT` · `action NAME` (e.g.
 //! `shell::SplitRight`) · `size W H` · `frames MS` (frame rate and draw time over
-//! the next MS, logged).
+//! the next MS, logged) · `inject FILE` (append the message entry in FILE, JSON,
+//! to the Botboard conversation's transcript, locally: a card no harness writes
+//! yet, such as a bot's `propose_plan` call; the next transcript frame for that
+//! chat may drop it).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,6 +25,20 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, Point, ScrollDelta,
     ScrollWheelEvent, TouchPhase, Window, point, px, size,
 };
+
+gpui::actions!(dev_capture, [InjectEntry]);
+
+/// The entry an `inject` command hands the shell.
+#[derive(Default)]
+struct PendingEntry(Option<cypher_doc::SessionMessageEntry>);
+
+impl gpui::Global for PendingEntry {}
+
+/// The entry a just-dispatched [`InjectEntry`] carries.
+pub fn take_entry(cx: &mut App) -> Option<cypher_doc::SessionMessageEntry> {
+    cx.try_global::<PendingEntry>()?;
+    cx.global_mut::<PendingEntry>().0.take()
+}
 
 /// Start polling for commands if `CYPHER_CAPTURE_DIR` is set. Idempotent:
 /// the main window calls it from every render; only the first call starts.
@@ -222,6 +239,17 @@ async fn run(
     let parts: Vec<&str> = line.split_whitespace().collect();
     match parts[0] {
         "wait" => pause(cx, num(&parts, 1)? as u64).await,
+        "inject" => {
+            let path = parts
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("inject needs a file"))?;
+            let entry: cypher_doc::SessionMessageEntry =
+                serde_json::from_str(&std::fs::read_to_string(path)?)?;
+            cx.update_window(window, |_, window, cx| {
+                cx.set_global(PendingEntry(Some(entry)));
+                window.dispatch_action(Box::new(InjectEntry), cx);
+            })?;
+        }
         "frames" => {
             let ms = num(&parts, 1)? as u64;
             gpui::set_frame_trace_enabled(true);

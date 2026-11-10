@@ -197,9 +197,27 @@ pub struct Chat {
     /// Cypher child subagent chat (hidden from the root sidebar/overview).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child: Option<ChildChat>,
+    /// Agent-bot marker. `Some` ⇒ this is a bot's own conversation, shown in
+    /// the sidebar's bot strip instead of a project and visible to no bot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot: Option<crate::BotChat>,
+    /// A memory consolidation pass's chat (docs/design/memory.md §6):
+    /// hidden everywhere, run with only the memory tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<crate::MemoryChat>,
 }
 
 impl Chat {
+    /// True for a bot's own conversation (see [`crate::BotChat`]).
+    pub fn is_bot(&self) -> bool {
+        self.bot.is_some()
+    }
+
+    /// True for a memory consolidation pass's chat.
+    pub fn is_memory_pass(&self) -> bool {
+        self.memory.is_some()
+    }
+
     /// True for a Cypher-hosted child subagent chat (engine-owned child
     /// relation — see [`ChildChat`]). Child chats are hidden from the root
     /// sidebar/overview and reached only through the parent's Inspector.

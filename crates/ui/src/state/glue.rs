@@ -81,6 +81,18 @@ impl AppState {
                 methods::WATCH_SPACES,
                 AppState::apply_spaces,
             ),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_BOTS,
+                AppState::apply_bots,
+            ),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_BOT_RECORDS,
+                AppState::apply_bot_records,
+            ),
             // Auth frames parse tolerantly — engine and proto tags differ today.
             spawn_watch(
                 cx,
@@ -876,5 +888,7 @@ pub(super) fn side_chat_synthetic_row(
         last_seen_at: None,
         room_gen: Some(2),
         child: None,
+        bot: None,
+        memory: None,
     }
 }

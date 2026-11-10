@@ -99,7 +99,7 @@ struct NotificationSettingsView: View {
                     )
                     .font(.footnote).foregroundStyle(.secondary)
                     Text(
-                        "Notification preferences apply to this account's workspace. Lock-screen alerts do not include chat text, task details, or project names."
+                        "Notification preferences apply to this account. Lock-screen alerts do not include chat text, task details, or project names."
                     )
                     .font(.footnote).foregroundStyle(.secondary)
                 }
