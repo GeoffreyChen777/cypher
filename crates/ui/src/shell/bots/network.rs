@@ -475,27 +475,20 @@ impl Shell {
             tint: None,
             title: "Network".into(),
         };
-        // The header's two buttons: invite another workspace, or redeem
-        // someone's code. Both need the account.
+        // The header's one button opens the connect page; a code is made
+        // there only when asked for.
         if ready {
             self.set_panel_actions(vec![
                 super::items::icon_button(
-                    "bot-network-invite",
+                    "bot-network-connect",
                     icons::PLUS,
-                    "Invite a workspace",
+                    "Connect a workspace",
                     theme,
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.create_invite(cx)))
-                .into_any_element(),
-                super::items::icon_button(
-                    "bot-network-redeem",
-                    icons::LINK,
-                    "Connect with a code",
-                    theme,
-                )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    let input = this.redeem_input(cx);
-                    window.focus(&input.focus_handle(cx), cx);
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let net = &mut this.board.network;
+                    net.invite_error = None;
+                    net.redeem_error = None;
                     this.show_panel(PanelItem::Invite, cx);
                 }))
                 .into_any_element(),
@@ -509,9 +502,9 @@ impl Shell {
                     icons::GLOBAL,
                     "No connections yet",
                     format!(
-                        "Press + to invite a workspace, or connect with someone's code. \
-                         Connected workspaces can ask {} questions, read-only, within what you \
-                         allow.",
+                        "Press + to connect a workspace: invite someone with a code, or use \
+                         theirs. Connected workspaces can ask {} questions, read-only, within \
+                         what you allow.",
                         bot.name
                     ),
                 )
