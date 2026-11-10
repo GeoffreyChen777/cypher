@@ -355,11 +355,11 @@ impl EngineCore {
             expected_org,
         ));
         let profile = auth.clone();
-        self.bots.set_owner_name(Arc::new(move || {
-            profile
-                .state()
-                .user()
-                .map(|user| user.name.clone().unwrap_or_else(|| user.email.clone()))
+        self.bots.set_owner(Arc::new(move || {
+            profile.state().user().map(|user| crate::bots::Owner {
+                name: user.name.clone().unwrap_or_else(|| user.email.clone()),
+                avatar_url: user.avatar_url.clone(),
+            })
         }));
         *lock(&self.auth) = Some(auth);
     }

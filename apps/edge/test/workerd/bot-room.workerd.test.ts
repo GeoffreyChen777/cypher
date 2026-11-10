@@ -313,4 +313,43 @@ describe("BotRoom nudges", () => {
     expect(await inbox(mallory)).toMatchObject([{ t: "ask" }]);
     expect(await pendingBotNudges(aliceDevice)).toEqual([]);
   });
+
+  it("carries owners' photos, and a changed profile reaches connected rooms", async () => {
+    const alice = await publish("alice", "Auth bot");
+    const bob = await publish("bob", "Release bot");
+    const photo = "https://avatars.githubusercontent.com/u/1?v=4";
+    const republish = (bot: Bot, ownerAvatarUrl: string) =>
+      call(bot.user, "POST", `/bots/${bot.room}/publish`, {
+        name: bot.user === "alice" ? "Auth bot" : "Release bot",
+        ownerName: bot.user,
+        ownerAvatarUrl,
+        hostDeviceId: bot.device
+      });
+    expect((await republish(alice, photo)).status).toBe(200);
+    // Off the avatar hosts: published without a photo, not refused.
+    expect((await republish(bob, "https://evil.example/pixel.png")).status).toBe(200);
+    const connectionId = await connect(alice, bob);
+    const peers = await roomSql(bob, (sql) =>
+      [...sql.exec("SELECT peer_avatar FROM connections WHERE id = ?", connectionId)].map((r) => r.peer_avatar)
+    );
+    expect(peers).toEqual([photo]);
+    expect(
+      await roomSql(alice, (sql) => [...sql.exec("SELECT peer_avatar FROM connections")].map((r) => r.peer_avatar))
+    ).toEqual([null]);
+
+    const newer = "https://lh3.googleusercontent.com/a/new";
+    expect((await republish(alice, newer)).status).toBe(200);
+    expect(await inbox(bob)).toEqual([
+      {
+        t: "link",
+        connectionId,
+        op: "added",
+        peer: { botRoomId: alice.room, name: "Auth bot", ownerName: "alice", ownerAvatarUrl: newer }
+      }
+    ]);
+    // Republishing the same profile announces nothing.
+    await call("bob", "POST", `/bots/${bob.room}/ack`, { links: [connectionId] });
+    expect((await republish(alice, newer)).status).toBe(200);
+    expect(await inbox(bob)).toEqual([]);
+  });
 });

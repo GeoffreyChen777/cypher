@@ -135,16 +135,54 @@ pub struct WirePeer {
     pub name: String,
     #[serde(default)]
     pub owner_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_avatar_url: Option<String>,
 }
 
 impl From<WirePeer> for crate::PeerBot {
+    /// The peer as recorded: its photo only from an avatar host
+    /// ([`peer_avatar_url`]), whatever the wire said.
     fn from(peer: WirePeer) -> Self {
         Self {
             room_id: peer.bot_room_id,
             name: peer.name,
             owner_name: peer.owner_name,
+            owner_avatar_url: peer.owner_avatar_url.as_deref().and_then(peer_avatar_url),
         }
     }
+}
+
+/// Hosts a connected owner's photo may come from: the identity providers'
+/// avatar CDNs. Another person supplies this URL and every device of
+/// yours loads it, so anything else (a tracking pixel on their own
+/// server) is dropped and the letter tile shows instead.
+const AVATAR_HOSTS: [&str; 4] = [
+    "avatars.githubusercontent.com",
+    "googleusercontent.com",
+    "gravatar.com",
+    "workoscdn.com",
+];
+
+/// `url` when it may be shown as a connected owner's photo: `https`, no
+/// credentials or port, bounded, plain characters, and on one of
+/// [`AVATAR_HOSTS`] (or a subdomain of it).
+pub fn peer_avatar_url(url: &str) -> Option<String> {
+    if url.is_empty() || url.len() > 2048 {
+        return None;
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) || url.contains('\\') {
+        return None;
+    }
+    let rest = url.strip_prefix("https://")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let host = rest[..end].to_ascii_lowercase();
+    if host.is_empty() || host.contains(['@', ':']) {
+        return None;
+    }
+    let allowed = AVATAR_HOSTS
+        .iter()
+        .any(|ok| host == *ok || host.ends_with(&format!(".{ok}")));
+    allowed.then(|| url.to_string())
 }
 
 // ── route bodies ────────────────────────────────────────────────────────────
@@ -155,6 +193,9 @@ impl From<WirePeer> for crate::PeerBot {
 pub struct PublishRequest {
     pub name: String,
     pub owner_name: String,
+    /// The owner's photo, when [`peer_avatar_url`] accepts it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_avatar_url: Option<String>,
     pub host_device_id: String,
     #[serde(default)]
     pub paused: bool,
@@ -381,5 +422,37 @@ mod tests {
             serde_json::to_value(WireState::AwaitingReview).unwrap(),
             "awaiting_review"
         );
+    }
+
+    #[test]
+    fn only_avatar_hosts_give_a_peer_its_photo() {
+        for ok in [
+            "https://avatars.githubusercontent.com/u/123?v=4",
+            "https://lh3.googleusercontent.com/a/ACg8oc",
+            "https://www.gravatar.com/avatar/abc?d=identicon",
+            "https://GRAVATAR.com/avatar/abc",
+        ] {
+            assert_eq!(peer_avatar_url(ok).as_deref(), Some(ok), "{ok}");
+        }
+        for bad in [
+            "http://avatars.githubusercontent.com/u/1",
+            "https://evil.example/pixel.png",
+            "https://githubusercontent.com.evil.example/a.png",
+            "https://evilgravatar.com/a.png",
+            "https://user@avatars.githubusercontent.com/u/1",
+            "https://avatars.githubusercontent.com:8443/u/1",
+            "https://avatars.githubusercontent.com/u/1 x",
+            "file:///etc/passwd",
+            "",
+        ] {
+            assert_eq!(peer_avatar_url(bad), None, "{bad}");
+        }
+        let peer: crate::PeerBot = serde_json::from_value::<WirePeer>(serde_json::json!({
+            "botRoomId": "r", "name": "Ledger", "ownerName": "Dana",
+            "ownerAvatarUrl": "https://evil.example/pixel.png",
+        }))
+        .unwrap()
+        .into();
+        assert_eq!(peer.owner_avatar_url, None, "dropped on the way in");
     }
 }

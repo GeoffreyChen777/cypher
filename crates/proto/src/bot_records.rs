@@ -893,6 +893,10 @@ pub struct PeerBot {
     pub name: String,
     #[serde(default)]
     pub owner_name: String,
+    /// The owner's profile photo, from their identity provider; only a URL
+    /// [`crate::peer_avatar_url`] accepts ever lands here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

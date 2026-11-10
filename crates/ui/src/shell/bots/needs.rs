@@ -643,7 +643,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         let now = Utc::now();
-        let (exchange, peer) = {
+        let (exchange, peer, person) = {
             let state = self.state.read(cx);
             let exchange = state
                 .bot_records
@@ -651,20 +651,23 @@ impl Shell {
                 .iter()
                 .find(|e| e.id == exchange_id)?
                 .clone();
-            let peer = state
+            let person = state
                 .bot_records
                 .connections
                 .iter()
                 .find(|c| c.id == exchange.connection_id)
-                .map(|c| {
-                    if c.peer.owner_name.is_empty() {
-                        c.peer.name.clone()
+                .map(|c| c.peer.clone());
+            let label = person.as_ref().map_or_else(
+                || "A connected workspace".to_string(),
+                |p| {
+                    if p.owner_name.is_empty() {
+                        p.name.clone()
                     } else {
-                        format!("{} ({})", c.peer.name, c.peer.owner_name)
+                        format!("{} ({})", p.name, p.owner_name)
                     }
-                })
-                .unwrap_or_else(|| "A connected workspace".into());
-            (exchange, peer)
+                },
+            );
+            (exchange, label, person)
         };
         let awaiting = exchange.awaiting_review();
         if awaiting
@@ -697,7 +700,20 @@ impl Shell {
             .child(parts::fact(
                 theme,
                 "From",
-                SharedString::from(format!("{peer} · {}", ago(exchange.asked_at, now))),
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .children(
+                        person
+                            .as_ref()
+                            .map(|p| super::network::peer_avatar(p, 16.0, theme)),
+                    )
+                    .child(SharedString::from(format!(
+                        "{peer} · {}",
+                        ago(exchange.asked_at, now)
+                    ))),
             ))
             .child(parts::fact(
                 theme,

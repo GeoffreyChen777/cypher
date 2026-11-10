@@ -31,6 +31,7 @@ import {
   INVITE_MAX_USES,
   INVITE_TTL_MS,
   QUESTION_MAX_BYTES,
+  avatarUrl,
   isFinal,
   splitInviteCode,
   utf8Bytes,
@@ -51,6 +52,7 @@ const INVITE_USES_MAX = 100;
 interface Profile {
   name: string;
   ownerName: string;
+  ownerAvatarUrl?: string;
 }
 
 interface ConnectionRow {
@@ -58,6 +60,7 @@ interface ConnectionRow {
   peer_room: string;
   peer_name: string;
   peer_owner_name: string;
+  peer_avatar: string | null;
   created_at: number;
   revoked_at: number | null;
   invite_id: string | null;
@@ -141,6 +144,9 @@ export class BotRoom implements DurableObject {
         peer_owner_name TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER,
         invite_id TEXT, link_pending TEXT)`
     );
+    // Added with owners' photos; rooms made before have the table without it.
+    const columns = [...sql.exec("PRAGMA table_info(connections)")].map((row) => row.name);
+    if (!columns.includes("peer_avatar")) sql.exec("ALTER TABLE connections ADD COLUMN peer_avatar TEXT");
     // Questions addressed to this bot. `text` is dropped once the host has it.
     sql.exec(
       `CREATE TABLE IF NOT EXISTS inbox (
@@ -181,7 +187,12 @@ export class BotRoom implements DurableObject {
 
   private self(): WirePeer {
     const profile = this.profile() ?? refuse(404, "not_published", "This bot is not published.");
-    return { botRoomId: this.meta("room") ?? "", name: profile.name, ownerName: profile.ownerName };
+    return {
+      botRoomId: this.meta("room") ?? "",
+      name: profile.name,
+      ownerName: profile.ownerName,
+      ...(profile.ownerAvatarUrl ? { ownerAvatarUrl: profile.ownerAvatarUrl } : {})
+    };
   }
 
   private connection(connectionId: string): ConnectionRow | undefined {
@@ -357,16 +368,27 @@ export class BotRoom implements DurableObject {
     const owner = this.meta("owner");
     if (path === "/publish" && method === "POST") {
       if (owner && owner !== userId) refuse(403, "forbidden", "This bot room belongs to someone else.");
+      const photo = avatarUrl(body.ownerAvatarUrl);
       const profile: Profile = {
         name: str(body.name, "name", NAME_MAX),
-        ownerName: str(body.ownerName ?? "", "ownerName", NAME_MAX, 0)
+        ownerName: str(body.ownerName ?? "", "ownerName", NAME_MAX, 0),
+        ...(photo ? { ownerAvatarUrl: photo } : {})
       };
       const host = id(body.hostDeviceId, "hostDeviceId");
+      const before = this.profile();
       if (!owner) this.setMeta("owner", userId);
       this.setMeta("room", room);
       this.setMeta("profile", JSON.stringify(profile));
       this.setMeta("host", host);
       this.setMeta("paused", body.paused === true ? "1" : "0");
+      if (
+        before &&
+        (before.name !== profile.name ||
+          before.ownerName !== profile.ownerName ||
+          (before.ownerAvatarUrl ?? null) !== (profile.ownerAvatarUrl ?? null))
+      ) {
+        await this.announceProfile(room);
+      }
       return ok({ roomId: room });
     }
     if (!owner) refuse(404, "not_published", "This bot is not published.");
@@ -408,7 +430,14 @@ export class BotRoom implements DurableObject {
         connectionId: row.id,
         op,
         ...(op === "added"
-          ? { peer: { botRoomId: row.peer_room, name: row.peer_name, ownerName: row.peer_owner_name } }
+          ? {
+              peer: {
+                botRoomId: row.peer_room,
+                name: row.peer_name,
+                ownerName: row.peer_owner_name,
+                ...(row.peer_avatar ? { ownerAvatarUrl: row.peer_avatar } : {})
+              }
+            }
           : {}),
         ...(op === "added" && row.invite_id ? { inviteId: row.invite_id } : {})
       });
@@ -473,15 +502,29 @@ export class BotRoom implements DurableObject {
     const connectionId = id(reply.connectionId, "connectionId");
     const createdAt = Number(reply.createdAt);
     this.ctx.storage.sql.exec(
-      `INSERT INTO connections (id, peer_room, peer_name, peer_owner_name, created_at, link_pending)
-       VALUES (?, ?, ?, ?, ?, 'added') ON CONFLICT(id) DO NOTHING`,
+      `INSERT INTO connections (id, peer_room, peer_name, peer_owner_name, peer_avatar, created_at, link_pending)
+       VALUES (?, ?, ?, ?, ?, ?, 'added') ON CONFLICT(id) DO NOTHING`,
       connectionId,
       peerRoom,
       peer.name,
       peer.ownerName,
+      avatarUrl(peer.ownerAvatarUrl) ?? null,
       createdAt
     );
     return { connectionId, peer: { ...peer, botRoomId: peerRoom }, createdAt };
+  }
+
+  /** Tell every connected room this bot's profile changed. Best effort: a
+   * room that misses it keeps the older name or photo. */
+  private async announceProfile(room: string): Promise<void> {
+    const peer = this.self();
+    for (const row of this.rows<ConnectionRow>("SELECT * FROM connections WHERE revoked_at IS NULL")) {
+      try {
+        await this.peerCall(row.peer_room, "profile", { connectionId: row.id, room, peer });
+      } catch {
+        // Unreachable now; the next changed profile tries again.
+      }
+    }
   }
 
   private async revoke(connectionId: string, room: string, now: number) {
@@ -637,17 +680,37 @@ export class BotRoom implements DurableObject {
         const connectionId = crypto.randomUUID();
         sql.exec("UPDATE invites SET uses = uses + 1 WHERE id = ?", invite.id);
         sql.exec(
-          `INSERT INTO connections (id, peer_room, peer_name, peer_owner_name, created_at, invite_id, link_pending)
-           VALUES (?, ?, ?, ?, ?, ?, 'added')`,
+          `INSERT INTO connections (id, peer_room, peer_name, peer_owner_name, peer_avatar, created_at, invite_id, link_pending)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'added')`,
           connectionId,
           body.room,
           String(peer!.name).slice(0, NAME_MAX),
           String(peer!.ownerName ?? "").slice(0, NAME_MAX),
+          avatarUrl(peer!.ownerAvatarUrl) ?? null,
           now,
           invite.id
         );
         await this.nudgeHost();
         return ok({ connectionId, peer: self, createdAt: now });
+      }
+      case "profile": {
+        // A connected bot republished a changed profile: its host hears it
+        // as another `added` link and updates the connection.
+        const row = typeof body.connectionId === "string" ? this.connection(body.connectionId) : undefined;
+        const peer = body.peer as WirePeer | undefined;
+        if (!row || row.peer_room !== body.room || row.revoked_at !== null || !peer || typeof peer.name !== "string") {
+          return ok({ ok: false });
+        }
+        sql.exec(
+          `UPDATE connections SET peer_name = ?, peer_owner_name = ?, peer_avatar = ?, link_pending = 'added'
+           WHERE id = ?`,
+          String(peer.name).slice(0, NAME_MAX),
+          String(peer.ownerName ?? "").slice(0, NAME_MAX),
+          avatarUrl(peer.ownerAvatarUrl) ?? null,
+          row.id
+        );
+        await this.nudgeHost();
+        return ok();
       }
       case "revoke": {
         const row = typeof body.connectionId === "string" ? this.connection(body.connectionId) : undefined;

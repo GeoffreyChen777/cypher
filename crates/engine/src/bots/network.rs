@@ -50,14 +50,20 @@ const ANSWER_IN_TOOL: usize = 40_000;
 /// While `ask_bot` waits it pulls this often, in case a nudge went missing.
 const ASK_POLL: Duration = Duration::from_secs(15);
 
-/// The owner's display name, as peers see it.
-pub type OwnerName = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+/// The owner as peers see them: the signed-in profile's name and photo.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Owner {
+    pub name: String,
+    pub avatar_url: Option<String>,
+}
+
+pub type OwnerProfile = Arc<dyn Fn() -> Option<Owner> + Send + Sync>;
 
 /// The network's share of the bot service.
 #[derive(Default)]
 pub(super) struct Network {
     edge: std::sync::Mutex<Option<Arc<dyn BotEdge>>>,
-    owner_name: std::sync::Mutex<Option<OwnerName>>,
+    owner: std::sync::Mutex<Option<OwnerProfile>>,
     /// Wakes the host loop: a nudge, a new question, a review.
     wake: Notify,
     /// Rooms to pull on the next pass (nudged, or asked from here).
@@ -98,9 +104,9 @@ impl Bots {
         self.inner.network.wake.notify_one();
     }
 
-    /// Where the owner's display name comes from (the signed-in profile).
-    pub fn set_owner_name(&self, name: OwnerName) {
-        *lock(&self.inner.network.owner_name) = Some(name);
+    /// Where the owner's name and photo come from (the signed-in profile).
+    pub fn set_owner(&self, owner: OwnerProfile) {
+        *lock(&self.inner.network.owner) = Some(owner);
     }
 
     /// A `bots` nudge from this device's DeviceRoom: pull that room.
@@ -204,10 +210,10 @@ impl Bots {
             .ok_or_else(|| EngineError::Other("No such workspace on this device.".into()))
     }
 
-    fn owner_name(&self) -> String {
-        lock(&self.inner.network.owner_name)
+    fn owner(&self) -> Owner {
+        lock(&self.inner.network.owner)
             .clone()
-            .and_then(|name| name())
+            .and_then(|owner| owner())
             .unwrap_or_default()
     }
 
@@ -256,14 +262,27 @@ impl Bots {
                 file
             }
         };
-        // A moment signed out must not publish an empty owner name.
-        let owner_name = Some(self.owner_name())
-            .filter(|name| !name.is_empty())
-            .or_else(|| file.published.as_ref().map(|p| p.owner_name.clone()))
-            .unwrap_or_default();
+        // A moment signed out must not publish an empty owner: keep what
+        // was published.
+        let owner = Some(self.owner()).filter(|owner| !owner.name.is_empty());
+        let (owner_name, owner_avatar_url) = match (owner, file.published.as_ref()) {
+            (Some(owner), _) => (
+                owner.name,
+                owner
+                    .avatar_url
+                    .as_deref()
+                    .and_then(cypher_proto::peer_avatar_url),
+            ),
+            (None, Some(published)) => (
+                published.owner_name.clone(),
+                published.owner_avatar_url.clone(),
+            ),
+            (None, None) => Default::default(),
+        };
         let profile = PublishRequest {
             name: bot.name.clone(),
             owner_name,
+            owner_avatar_url,
             host_device_id: self.device_id().to_string(),
             paused: bot.paused,
         };
@@ -391,7 +410,18 @@ impl Bots {
         peer: cypher_proto::PeerBot,
         created_at: i64,
     ) -> Result<BotConnection, EngineError> {
-        if let Some(existing) = self.connection(connection_id) {
+        if let Some(mut existing) = self.connection(connection_id) {
+            // Seen again: the peer republished its profile (a new name or
+            // photo), which its room sends as another `added`.
+            if existing.peer != peer && existing.revoked_at.is_none() {
+                existing.peer = peer;
+                self.inner.workspace.put_record(
+                    cypher_proto::KIND_BOT_CONNECTIONS,
+                    &existing.id,
+                    &existing,
+                    Fields::Only(&["peer"]),
+                )?;
+            }
             return Ok(existing);
         }
         let connection = BotConnection {

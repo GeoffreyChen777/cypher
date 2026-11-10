@@ -30,7 +30,7 @@ use crate::host::workspace_host::WorkspaceHost;
 use crate::util::{lock, new_id};
 
 pub(crate) use network::scrub_secrets;
-pub use network::{BotEdge, HttpBotEdge, InviteReply, NetError, OwnerName, SIGNED_OUT};
+pub use network::{BotEdge, HttpBotEdge, InviteReply, NetError, Owner, OwnerProfile, SIGNED_OUT};
 pub(crate) use prompt::space_name as prompt_space_name;
 
 mod activity;

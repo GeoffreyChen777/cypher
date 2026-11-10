@@ -11,7 +11,7 @@ use super::parts::{self, CallError};
 use super::*;
 use crate::kit::theme::MonoStyled as _;
 use cypher_proto::{
-    BotConnection, BotExchange, BotInvite, ExchangeDirection, ExchangeState, ReplyMode,
+    BotConnection, BotExchange, BotInvite, ExchangeDirection, ExchangeState, PeerBot, ReplyMode,
 };
 
 /// The lead column of network rows (peer avatars, the invite and question
@@ -363,7 +363,7 @@ impl Shell {
             .on_hover(motion::hover_listener(key.clone()))
             .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
             .when(revoking, |el| el.opacity(0.6))
-            .child(peer_avatar(&conn.peer.name, LEAD, theme))
+            .child(peer_avatar(&conn.peer, LEAD, theme))
             .child(
                 div()
                     .flex_1()
@@ -559,9 +559,9 @@ impl Shell {
         } else {
             body.child(signed_out(theme))
         };
-        let names: std::collections::HashMap<String, String> = connections
+        let peers: std::collections::HashMap<String, PeerBot> = connections
             .iter()
-            .map(|c| (c.id.clone(), c.peer.name.clone()))
+            .map(|c| (c.id.clone(), c.peer.clone()))
             .collect();
         body = body.child(parts::section_label(theme, "Connections"));
         if connections.is_empty() {
@@ -579,11 +579,8 @@ impl Shell {
         if !exchanges.is_empty() {
             body = body.child(parts::section_label(theme, "Recent questions"));
             for exchange in &exchanges {
-                let peer = names
-                    .get(&exchange.connection_id)
-                    .cloned()
-                    .unwrap_or_else(|| "A former connection".into());
-                body = body.child(exchange_row(exchange, Some(&peer), &bot.name, theme));
+                let peer = peers.get(&exchange.connection_id);
+                body = body.child(exchange_row(exchange, peer, &bot.name, theme));
             }
         }
         (head, body)
@@ -860,6 +857,25 @@ impl Shell {
             tint: None,
             title: conn.peer.name.clone(),
         };
+        // Whose workspace it is, beside its name.
+        if !conn.peer.owner_name.trim().is_empty() || conn.peer.owner_avatar_url.is_some() {
+            self.board.panel_title_note = Some(
+                div()
+                    .min_w_0()
+                    .flex_shrink(1.0)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_size(px(12.5))
+                    .text_color(theme.text_muted)
+                    .child(peer_avatar(&conn.peer, 16.0, theme))
+                    .child(div().min_w_0().truncate().child(SharedString::from(
+                        transcript::single_line(&conn.peer.owner_name),
+                    )))
+                    .into_any_element(),
+            );
+        }
         self.set_panel_back(
             "bot-connection-back",
             "Back to Network",
@@ -1045,12 +1061,7 @@ impl Shell {
             body = body.child(parts::quiet_line(theme, "No questions yet."));
         }
         for exchange in &exchanges {
-            body = body.child(exchange_row(
-                exchange,
-                Some(&conn.peer.name),
-                &bot.name,
-                theme,
-            ));
+            body = body.child(exchange_row(exchange, Some(&conn.peer), &bot.name, theme));
         }
         Some((head, body))
     }
@@ -1160,23 +1171,49 @@ fn invite_glyph_row(key: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
         )
 }
 
-/// Another owner's bot: its initial on a neutral tile (peers publish no
-/// avatar), sized for a row's lead column.
-fn peer_avatar(name: &str, size: f32, theme: &Theme) -> gpui::Div {
-    div()
-        .size(px(size))
-        .flex_none()
-        .rounded(px((size * 0.3).round()))
-        .bg(crate::kit::theme::ink(0.08))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px((size * 0.56).round()))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.text_muted)
-        .child(SharedString::from(crate::appearance::bot_style::initial(
-            name,
-        )))
+/// The person behind a connected workspace: their profile photo, round,
+/// or their initial on a neutral disc while it loads, when it fails, or
+/// when they have none (the workspace's initial when the owner is
+/// unnamed).
+pub(super) fn peer_avatar(peer: &PeerBot, size: f32, theme: &Theme) -> AnyElement {
+    let initial = SharedString::from(crate::appearance::bot_style::initial(
+        if peer.owner_name.trim().is_empty() {
+            &peer.name
+        } else {
+            &peer.owner_name
+        },
+    ));
+    let letter = {
+        let theme = theme.clone();
+        move || {
+            div()
+                .size(px(size))
+                .flex_none()
+                .rounded_full()
+                .bg(crate::kit::theme::ink(0.08))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px((size * 0.52).round()))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text_muted)
+                .child(initial.clone())
+                .into_any_element()
+        }
+    };
+    // The engine keeps only avatar-host URLs; this is the UI's own guard
+    // before gpui fetches one.
+    match crate::shell::safe_avatar_url(peer.owner_avatar_url.clone().map(SharedString::from)) {
+        Some(url) => gpui::img(url)
+            .size(px(size))
+            .flex_none()
+            .rounded_full()
+            .object_fit(gpui::ObjectFit::Cover)
+            .with_loading(letter.clone())
+            .with_fallback(letter)
+            .into_any_element(),
+        None => letter(),
+    }
 }
 
 fn check_box(on: bool, theme: &Theme) -> gpui::Div {
@@ -1199,14 +1236,31 @@ fn check_box(on: bool, theme: &Theme) -> gpui::Div {
         })
 }
 
-/// One question between bots: who asked whom, the question, its state.
-fn exchange_row(exchange: &BotExchange, peer: Option<&str>, bot: &str, theme: &Theme) -> gpui::Div {
+/// One question between bots: the other person, who asked whom, the
+/// question, its state. A former connection's shows its direction instead.
+fn exchange_row(
+    exchange: &BotExchange,
+    peer: Option<&PeerBot>,
+    bot: &str,
+    theme: &Theme,
+) -> gpui::Div {
     let incoming = exchange.direction == ExchangeDirection::Incoming;
     let who = match (incoming, peer) {
-        (true, Some(peer)) => format!("{peer} asked {bot}"),
-        (false, Some(peer)) => format!("{bot} asked {peer}"),
-        (true, None) => format!("Asked of {bot}"),
-        (false, None) => format!("{bot} asked"),
+        (true, Some(peer)) => format!("{} asked {bot}", peer.name),
+        (false, Some(peer)) => format!("{bot} asked {}", peer.name),
+        (true, None) => format!("A former connection asked {bot}"),
+        (false, None) => format!("{bot} asked a former connection"),
+    };
+    let lead = match peer {
+        Some(peer) => peer_avatar(peer, 16.0, theme),
+        None => icon(if incoming {
+            icons::ARROW_DOWN
+        } else {
+            icons::ARROW_UP
+        })
+        .size(px(12.0))
+        .text_color(theme.text_muted)
+        .into_any_element(),
     };
     let state_color = match exchange.state {
         ExchangeState::AwaitingReview => theme.warning,
@@ -1227,16 +1281,8 @@ fn exchange_row(exchange: &BotExchange, peer: Option<&str>, bot: &str, theme: &T
                 .flex_none()
                 .flex()
                 .justify_center()
-                .pt(px(2.0))
-                .child(
-                    icon(if incoming {
-                        icons::ARROW_DOWN
-                    } else {
-                        icons::ARROW_UP
-                    })
-                    .size(px(12.0))
-                    .text_color(theme.text_muted),
-                ),
+                .pt(px(1.0))
+                .child(lead),
         )
         .child(
             div()
@@ -1348,6 +1394,7 @@ mod tests {
                 room_id: "r".into(),
                 name: "Ada".into(),
                 owner_name: "Alice".into(),
+                owner_avatar_url: None,
             },
             created_at: created,
             reply_mode: ReplyMode::Auto,

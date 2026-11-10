@@ -739,9 +739,9 @@ request.
 
 | Table | Contents |
 |---|---|
-| `meta` | `owner` (user id, claimed on the first publish), `room`, `profile` `{name, ownerName}`, `host` (device id), `paused` |
+| `meta` | `owner` (user id, claimed on the first publish), `room`, `profile` `{name, ownerName, ownerAvatarUrl?}`, `host` (device id), `paused` |
 | `invites` | id, `sha256(secret)` (hex), created, expires, max uses, uses, revoked |
-| `connections` | id, peer room id, peer name and owner name, created, revoked, the invite it came from, and `link_pending` (`added` or `revoked`, until the host acks it) |
+| `connections` | id, peer room id, peer name, owner name and owner photo URL, created, revoked, the invite it came from, and `link_pending` (`added` or `revoked`, until the host acks it) |
 | `inbox` | questions addressed to this bot: exchange id, connection, `text` (dropped once the host acks it), state, sent, acked |
 | `outbox` | questions this bot asked: exchange id, connection, state, the answer `text` (dropped once acked), answered, the state the host last acked |
 
@@ -758,7 +758,7 @@ All routes sit behind bearer verification as one `ROOM_ROUTES` entry with prefix
 
 | Route | Caller | Does |
 |---|---|---|
-| `POST /bots/:id/publish` | owner | Claims the room on first use; sets `{name, ownerName, hostDeviceId, paused}`. |
+| `POST /bots/:id/publish` | owner | Claims the room on first use; sets `{name, ownerName, ownerAvatarUrl?, hostDeviceId, paused}`. A photo URL off the avatar hosts is dropped, not refused. A changed name, owner name or photo is sent to every connected room (`/peer/profile`), which updates its row and queues another `added` link for its host. |
 | `GET /bots/:id/inbox` | owner's host | `{entries: [frame…]}`: pending link changes, unacked questions, and the states and answers of its own questions (at most 100 of each). |
 | `POST /bots/:id/invites` | owner | `{ttlMs?, maxUses?}` (defaults 7 days and 1; clamped to 10 min–30 days and 1–100) → `{inviteId, code, createdAt, expiresAt, maxUses}`, `code = <botRoomId>.<secret>` once. |
 | `DELETE /bots/:id/invites/:inviteId` | owner | Revokes an invite. |
@@ -774,8 +774,8 @@ Errors are `{error, message}`: `not_published` and `no_connection`/`no_exchange`
 revoked and used-up codes), `already_connected` and `settled` (409), `too_large` (413),
 `too_many_in_flight` and `rate_limited` (429), `paused` (503).
 
-The rooms call each other at `/peer/redeem`, `/peer/ask`, `/peer/answer`, `/peer/state`
-and `/peer/revoke`. No `ROOM_ROUTES` entry reaches these paths, and a room refuses them
+The rooms call each other at `/peer/redeem`, `/peer/ask`, `/peer/answer`, `/peer/state`,
+`/peer/profile` and `/peer/revoke`. No `ROOM_ROUTES` entry reaches these paths, and a room refuses them
 on any request that carries the Worker's user header.
 
 ### 11.4 Trust chain
@@ -806,7 +806,7 @@ until acked after the engine has written them down. Exchange state flows back as
 ask      {t:"ask", exchangeId, connectionId, text, sentAt}
 answer   {t:"answer", exchangeId, connectionId, status:"answered"|"declined"|"expired", text?, answeredAt}
 state    {t:"state", exchangeId, state}
-link     {t:"link", connectionId, op:"added"|"revoked", peer?:{botRoomId, name, ownerName}, inviteId?}
+link     {t:"link", connectionId, op:"added"|"revoked", peer?:{botRoomId, name, ownerName, ownerAvatarUrl?}, inviteId?}
 ```
 
 `inviteId` names the invite a peer redeemed, on the inviting side. The codec is
@@ -849,7 +849,15 @@ which each member can narrow. Not built.
 `crates/engine/src/bots/network.rs` and `network/` serve the bots hosted on this device.
 `EngineCore` attaches the Edge client (`HttpBotEdge`, a fresh bearer per request) when
 the engine has an Edge; tests attach a fake through the `BotEdge` trait. The owner name
-peers see is the signed-in profile's name, else its email.
+peers see is the signed-in profile's name, else its email, and their photo is the
+profile's picture (GitHub or WorkOS). Another person's devices load that photo, so it is
+kept only from the identity providers' avatar hosts (`avatars.githubusercontent.com`,
+`googleusercontent.com`, `gravatar.com`, `workoscdn.com` and their subdomains), checked
+by the publishing engine, the Edge, the receiving engine and the app; anything else shows
+the person's initial. The app shows the photo on connection rows and pages, beside each
+recent question and on the review page. An `added` link for a connection the engine
+already has updates its peer (a republished name or photo) without logging a new
+connection.
 
 - **Room.** A bot's room id lives in `<store>/bots-network/<botId>.json` with the profile
   last published, beside the bot folders, so it survives a recreated folder. The first

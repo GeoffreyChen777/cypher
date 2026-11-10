@@ -28,6 +28,8 @@ struct Side {
     core: EngineCore,
     bot: Bot,
     runs: Runs,
+    /// The signed-in owner peers see; tests change their photo.
+    owner: Arc<Mutex<cypher_engine::bots::Owner>>,
     _dir: tempfile::TempDir,
 }
 
@@ -68,9 +70,13 @@ async fn side(hub: &Arc<FakeHub>, user: &str, owner: &str, bot_name: &str) -> Si
             .create_space(space, &core.device_id, path.to_str().unwrap(), None, false)
             .unwrap();
     }
-    let owner = owner.to_string();
+    let owner = Arc::new(Mutex::new(cypher_engine::bots::Owner {
+        name: owner.to_string(),
+        avatar_url: None,
+    }));
+    let profile = owner.clone();
     core.bots
-        .set_owner_name(Arc::new(move || Some(owner.clone())));
+        .set_owner(Arc::new(move || Some(profile.lock().unwrap().clone())));
     core.bots.attach_network(hub.client(user));
     hub.register_device(&device, user, core.bots.clone());
     let client = cypher_rpc::memory_client(core.rpc_service());
@@ -92,6 +98,7 @@ async fn side(hub: &Arc<FakeHub>, user: &str, owner: &str, bot_name: &str) -> Si
         core,
         bot,
         runs,
+        owner,
         _dir: dir,
     }
 }
@@ -781,4 +788,48 @@ async fn without_an_edge_the_network_asks_you_to_sign_in() {
             cypher_engine::bots::SIGNED_OUT
         );
     }
+}
+
+/// The owner's photo travels with their profile: the connecting side gets
+/// it, a new one reaches existing connections when the profile is
+/// republished, and a URL off the identity providers' avatar hosts never
+/// lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owners_photo_reaches_connections_and_follows_changes() {
+    let (_hub, alice, bob) = pair().await;
+    let photo = "https://avatars.githubusercontent.com/u/1?v=4";
+    alice.owner.lock().unwrap().avatar_url = Some(photo.into());
+    bob.owner.lock().unwrap().avatar_url = Some("https://evil.example/pixel.png".into());
+    let connection = connect(&alice, &bob).await;
+    let peer_of = |side: &Side| {
+        connections(side)
+            .into_iter()
+            .find(|c| c.id == connection)
+            .map(|c| c.peer)
+            .expect("the connection")
+    };
+    assert_eq!(peer_of(&bob).owner_avatar_url.as_deref(), Some(photo));
+    assert_eq!(peer_of(&alice).owner_avatar_url, None, "not an avatar host");
+
+    let newer = "https://lh3.googleusercontent.com/a/new-photo";
+    alice.owner.lock().unwrap().avatar_url = Some(newer.into());
+    // Any publish carries the change; a new invite publishes.
+    call(
+        &alice.core,
+        cypher_rpc::methods::CREATE_BOT_INVITE,
+        serde_json::json!({ "targetDeviceId": alice.core.device_id, "botId": alice.bot.id }),
+    )
+    .await;
+    wait_for(
+        || peer_of(&bob).owner_avatar_url.as_deref() == Some(newer),
+        "the new photo reaches the connection",
+    )
+    .await;
+    assert_eq!(peer_of(&bob).owner_name, "Alice");
+    let connected = activity(&bob, ActivityKind::ConnectionAdded);
+    assert_eq!(
+        connected.len(),
+        1,
+        "an update, not a second connection: {connected:?}"
+    );
 }

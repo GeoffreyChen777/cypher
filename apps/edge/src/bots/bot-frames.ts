@@ -21,7 +21,25 @@ export interface WirePeer {
   botRoomId: string;
   name: string;
   ownerName: string;
+  /** The owner's photo, from an identity provider's avatar host. */
+  ownerAvatarUrl?: string;
 }
+
+/** Hosts an owner's photo may come from (the Rust side's `AVATAR_HOSTS`):
+ * another person's devices load it, so nothing else is passed on. */
+const AVATAR_HOSTS = ["avatars.githubusercontent.com", "googleusercontent.com", "gravatar.com", "workoscdn.com"];
+
+/** `value` when it may be shown as a connected owner's photo: https, no
+ * credentials or port, bounded, on an avatar host; else `undefined`. */
+export const avatarUrl = (value: unknown): string | undefined => {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2048) return undefined;
+  if (/[\s\u0000-\u001f\u007f\\]/.test(value) || !value.startsWith("https://")) return undefined;
+  const rest = value.slice("https://".length);
+  const end = rest.search(/[/?#]/);
+  const host = (end === -1 ? rest : rest.slice(0, end)).toLowerCase();
+  if (host.length === 0 || host.includes("@") || host.includes(":")) return undefined;
+  return AVATAR_HOSTS.some((ok) => host === ok || host.endsWith(`.${ok}`)) ? value : undefined;
+};
 
 export type BotFrame =
   | { t: "ask"; exchangeId: string; connectionId: string; text: string; sentAt: number }
@@ -81,7 +99,8 @@ const parsePeer = (value: unknown): WirePeer | undefined => {
   if (!isString(peer.botRoomId) || !isString(peer.name)) return undefined;
   const ownerName = peer.ownerName ?? "";
   if (!isString(ownerName)) return undefined;
-  return { botRoomId: peer.botRoomId, name: peer.name, ownerName };
+  const ownerAvatarUrl = avatarUrl(peer.ownerAvatarUrl);
+  return { botRoomId: peer.botRoomId, name: peer.name, ownerName, ...(ownerAvatarUrl ? { ownerAvatarUrl } : {}) };
 };
 
 /** A frame in its wire shape, or `undefined` when it is malformed or of a

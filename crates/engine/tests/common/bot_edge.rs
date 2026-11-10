@@ -164,6 +164,7 @@ impl Hub {
             bot_room_id: room.to_string(),
             name: r.profile.name.clone(),
             owner_name: r.profile.owner_name.clone(),
+            owner_avatar_url: r.profile.owner_avatar_url.clone(),
         }
     }
 
@@ -188,25 +189,52 @@ fn now() -> i64 {
 #[async_trait]
 impl BotEdge for FakeEdge {
     async fn publish(&self, room: &str, request: &PublishRequest) -> Result<(), NetError> {
-        let mut hub = self.hub.state.lock().unwrap();
-        hub.calls.push(format!("{} publish {room}", self.user));
-        match hub.rooms.get_mut(room) {
-            Some(r) if r.owner != self.user => return Err(refuse(403, "forbidden")),
-            Some(r) => r.profile = request.clone(),
-            None => {
-                hub.rooms.insert(
-                    room.to_string(),
-                    Room {
-                        owner: self.user.clone(),
-                        profile: request.clone(),
-                        invites: Vec::new(),
-                        connections: Vec::new(),
-                        inbox: Vec::new(),
-                        outbox: Vec::new(),
-                    },
-                );
+        let mut nudges = Vec::new();
+        {
+            let mut hub = self.hub.state.lock().unwrap();
+            hub.calls.push(format!("{} publish {room}", self.user));
+            match hub.rooms.get_mut(room) {
+                Some(r) if r.owner != self.user => return Err(refuse(403, "forbidden")),
+                Some(r) => {
+                    let changed = r.profile.name != request.name
+                        || r.profile.owner_name != request.owner_name
+                        || r.profile.owner_avatar_url != request.owner_avatar_url;
+                    r.profile = request.clone();
+                    // Like the Edge: a changed profile reaches every room this
+                    // one is connected to, as another `added` link.
+                    if changed {
+                        let me = hub.self_peer(room);
+                        let links: Vec<(String, String)> = hub.rooms[room]
+                            .connections
+                            .iter()
+                            .filter(|c| !c.revoked)
+                            .map(|c| (c.peer_room.clone(), c.id.clone()))
+                            .collect();
+                        for (peer_room, connection_id) in links {
+                            if let Some(conn) = hub.live_conn(&peer_room, &connection_id) {
+                                conn.peer = me.clone();
+                                conn.link_pending = Some(LinkOp::Added);
+                            }
+                            nudges.extend(hub.nudge_for(&peer_room));
+                        }
+                    }
+                }
+                None => {
+                    hub.rooms.insert(
+                        room.to_string(),
+                        Room {
+                            owner: self.user.clone(),
+                            profile: request.clone(),
+                            invites: Vec::new(),
+                            connections: Vec::new(),
+                            inbox: Vec::new(),
+                            outbox: Vec::new(),
+                        },
+                    );
+                }
             }
         }
+        self.hub.nudge(nudges);
         Ok(())
     }
 
@@ -359,6 +387,7 @@ impl BotEdge for FakeEdge {
                     bot_room_id: peer_room.clone(),
                     name: target.profile.name.clone(),
                     owner_name: target.profile.owner_name.clone(),
+                    owner_avatar_url: target.profile.owner_avatar_url.clone(),
                 }
             };
             let created_at = now();
