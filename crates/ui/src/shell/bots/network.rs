@@ -43,12 +43,18 @@ fn mode_words(mode: ReplyMode) -> &'static str {
     }
 }
 
-pub(super) fn exchange_state_words(state: ExchangeState) -> &'static str {
-    match state {
+/// An exchange's state in words. A reviewed answer reads as on its way
+/// until its host has sent or declined it (an offline host does so later).
+pub(super) fn exchange_state_words(exchange: &BotExchange) -> &'static str {
+    match exchange.state {
         ExchangeState::Queued => "queued",
         ExchangeState::Delivered => "delivered",
         ExchangeState::Working => "working",
-        ExchangeState::AwaitingReview => "awaiting your review",
+        ExchangeState::AwaitingReview => match &exchange.review {
+            None => "awaiting your review",
+            Some(review) if review.send => "sending your answer",
+            Some(_) => "declining",
+        },
         ExchangeState::Answered => "answered",
         ExchangeState::Declined => "declined",
         ExchangeState::Expired => "expired",
@@ -469,7 +475,33 @@ impl Shell {
             tint: None,
             title: "Network".into(),
         };
-        // Nothing yet: one centred message, with the way in.
+        // The header's two buttons: invite another workspace, or redeem
+        // someone's code. Both need the account.
+        if ready {
+            self.set_panel_actions(vec![
+                super::items::icon_button(
+                    "bot-network-invite",
+                    icons::PLUS,
+                    "Invite a workspace",
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.create_invite(cx)))
+                .into_any_element(),
+                super::items::icon_button(
+                    "bot-network-redeem",
+                    icons::LINK,
+                    "Connect with a code",
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    let input = this.redeem_input(cx);
+                    window.focus(&input.focus_handle(cx), cx);
+                    this.show_panel(PanelItem::Invite, cx);
+                }))
+                .into_any_element(),
+            ]);
+        }
+        // Nothing yet: one centred message.
         if connections.is_empty() && invites.is_empty() && exchanges.is_empty() {
             let empty = if ready {
                 parts::panel_empty(
@@ -477,41 +509,11 @@ impl Shell {
                     icons::GLOBAL,
                     "No connections yet",
                     format!(
-                        "Connected workspaces can ask {} questions, read-only, within what \
-                         you allow.",
+                        "Press + to invite a workspace, or connect with someone's code. \
+                         Connected workspaces can ask {} questions, read-only, within what you \
+                         allow.",
                         bot.name
                     ),
-                )
-                .child(
-                    div()
-                        .pt(px(8.0))
-                        .flex()
-                        .flex_row()
-                        .gap(px(4.0))
-                        .child(
-                            parts::action(
-                                "bot-network-invite",
-                                icons::PLUS,
-                                "Invite a workspace",
-                                theme.text,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.create_invite(cx))),
-                        )
-                        .child(
-                            parts::action(
-                                "bot-network-redeem",
-                                icons::LINK,
-                                "Connect with a code",
-                                theme.text,
-                            )
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    let input = this.redeem_input(cx);
-                                    window.focus(&input.focus_handle(cx), cx);
-                                    this.show_panel(PanelItem::Invite, cx);
-                                },
-                            )),
-                        ),
                 )
             } else {
                 parts::panel_empty(
@@ -525,40 +527,9 @@ impl Shell {
             return (head, div());
         }
         let mut body = div().p(px(8.0)).flex().flex_col();
-        body = if ready {
-            body.child(
-                div()
-                    .px(px(4.0))
-                    .pt(px(2.0))
-                    .flex()
-                    .flex_row()
-                    .gap(px(4.0))
-                    .child(
-                        parts::action(
-                            "bot-network-invite",
-                            icons::PLUS,
-                            "Invite a workspace",
-                            theme.text,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.create_invite(cx))),
-                    )
-                    .child(
-                        parts::action(
-                            "bot-network-redeem",
-                            icons::LINK,
-                            "Connect with a code",
-                            theme.text,
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            let input = this.redeem_input(cx);
-                            window.focus(&input.focus_handle(cx), cx);
-                            this.show_panel(PanelItem::Invite, cx);
-                        })),
-                    ),
-            )
-        } else {
-            body.child(signed_out(theme))
-        };
+        if !ready {
+            body = body.child(signed_out(theme));
+        }
         let peers: std::collections::HashMap<String, PeerBot> = connections
             .iter()
             .map(|c| (c.id.clone(), c.peer.clone()))
@@ -1257,7 +1228,8 @@ fn exchange_row(
         .into_any_element(),
     };
     let state_color = match exchange.state {
-        ExchangeState::AwaitingReview => theme.warning,
+        // Amber only while it waits on the owner.
+        ExchangeState::AwaitingReview if exchange.awaiting_review() => theme.warning,
         ExchangeState::Declined | ExchangeState::Expired => theme.text_faint,
         _ => theme.text_muted.opacity(0.85),
     };
@@ -1309,7 +1281,7 @@ fn exchange_row(
                         .child(
                             div()
                                 .text_color(state_color)
-                                .child(SharedString::from(exchange_state_words(exchange.state))),
+                                .child(SharedString::from(exchange_state_words(exchange))),
                         )
                         .child("·")
                         .child(SharedString::from(parts::ago_ms(exchange.asked_at))),
@@ -1424,10 +1396,25 @@ mod tests {
         );
         c.revoke_requested_at = Some(1);
         assert_eq!(connection_sub(&c, Some("last 2h")), "Revoking…");
-        assert_eq!(
-            exchange_state_words(ExchangeState::AwaitingReview),
-            "awaiting your review"
-        );
+        let mut asked = BotExchange {
+            id: "x".into(),
+            bot_id: "b".into(),
+            connection_id: "c".into(),
+            direction: ExchangeDirection::Incoming,
+            question: "?".into(),
+            answer: Some("Yes.".into()),
+            state: ExchangeState::AwaitingReview,
+            asked_at: 0,
+            answered_at: None,
+            review: None,
+        };
+        assert_eq!(exchange_state_words(&asked), "awaiting your review");
+        asked.review = Some(cypher_proto::ReviewDecision {
+            send: true,
+            text: None,
+            at: 1,
+        });
+        assert_eq!(exchange_state_words(&asked), "sending your answer");
     }
 
     #[test]
