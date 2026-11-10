@@ -906,14 +906,8 @@ impl Shell {
                 .into_any_element(),
             ]);
         }
+        // The owner is beside the title, with their photo.
         let mut body = div().p(px(8.0)).flex().flex_col();
-        if !conn.peer.owner_name.is_empty() {
-            body = body.child(parts::fact(
-                theme,
-                "Owner",
-                SharedString::from(conn.peer.owner_name.clone()),
-            ));
-        }
         body = body.child(parts::fact(
             theme,
             "Connected",
