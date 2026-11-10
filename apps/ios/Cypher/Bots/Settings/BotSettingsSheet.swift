@@ -58,6 +58,14 @@ struct BotSettingsSheet: View {
                 }
             }
             .interactiveDismissDisabled(busy)
+            .alert(
+                editing ? "Couldn't do that" : "Couldn't create the workspace",
+                isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(error ?? "")
+            }
         }
         .onAppear(perform: seed)
         .task(id: draft?.hostDeviceId) { await loadModels() }
@@ -99,12 +107,6 @@ struct BotSettingsSheet: View {
             permissionsSection(draft)
             instructionsSection(draft)
             if !editing { modelSection(draft) }
-            if let error {
-                Section {
-                    Text(error).font(Theme.sans(13, relativeTo: .footnote)).foregroundStyle(Theme.danger)
-                }
-                .listRowBackground(Color.clear)
-            }
             if editing {
                 Section {
                     Button("Delete Workspace…", role: .destructive) { confirmDelete = true }

@@ -294,7 +294,9 @@ struct BotToolSummary {
         var memory = 0
         var git = 0
         for call in calls {
-            guard let kind = call.botToolKind else { continue }
+            // A call that neither acts nor reads (waiting on a session)
+            // counts as a tool, as the desktop's summary does.
+            guard let kind = call.botToolKind, kind.action != nil || kind.read != nil else { continue }
             counted += 1
             if let action = kind.action {
                 acted[action, default: 0] += 1

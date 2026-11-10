@@ -15,20 +15,6 @@ struct BotActivityPage: View {
     var body: some View {
         let entries = model.data?.activity(of: botId, group: filter) ?? []
         BotPageList(title: "Activity") {
-            Section {
-                chips
-            }
-            .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets())
-            if entries.isEmpty {
-                Section {
-                    BotEmptyState(
-                        symbol: "waveform.path.ecg",
-                        title: filter == nil ? "No activity yet" : "Nothing of this kind yet",
-                        hint: "What the workspace plans, starts, notes and runs is logged here.")
-                }
-                .listRowBackground(Color.clear)
-            }
             ForEach(ActivityDay.group(entries)) { day in
                 Section {
                     ForEach(day.entries) { entry in
@@ -39,6 +25,19 @@ struct BotActivityPage: View {
                 }
                 .groupedRowStyle()
             }
+        }
+        .overlay {
+            if entries.isEmpty {
+                BotEmptyState(
+                    symbol: "waveform.path.ecg",
+                    title: filter == nil ? "No activity yet" : "Nothing of this kind yet",
+                    hint: "What the workspace plans, starts, notes and runs is logged here.")
+            }
+        }
+        // The chips stay put above the log and run to the screen's edges,
+        // so the last one cut off there reads as "scroll for more".
+        .safeAreaInset(edge: .top, spacing: 0) {
+            chips
         }
     }
 
@@ -51,7 +50,17 @@ struct BotActivityPage: View {
             }
         }
         .contentMargins(.horizontal, ScopeChips.margin, for: .scrollContent)
-        .padding(.vertical, 4)
+        .mask {
+            HStack(spacing: 0) {
+                Color.black
+                LinearGradient(colors: [.black, .black.opacity(0)], startPoint: .leading, endPoint: .trailing)
+                    .frame(width: ScopeChips.margin)
+            }
+        }
+        .padding(.vertical, 8)
+        .background(Theme.surface)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Filter")
     }
 
     private func chip(_ group: ActivityGroup?) -> some View {

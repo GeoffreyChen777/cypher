@@ -80,7 +80,7 @@ extension DemoDataset {
                 at: now - 3 * minute, preview: "Waiting on the webapp session's question."),
             hidden(
                 "chat-atlas-thread-notes", "Draft the 0.9 release notes", marker: atlasWork("work-notes"),
-                at: now - 3 * hour, preview: "Release notes drafted in docs/releases/0.9.md."),
+                at: now - 3 * hour, preview: "Release notes drafted in release-notes/0.9.md."),
             hidden(
                 "chat-atlas-thread-loro", "Upgrade Loro to 1.6", marker: atlasWork("work-loro"),
                 at: now - 26 * hour, preview: "The upgrade breaks snapshot decoding."),
@@ -155,14 +155,14 @@ extension DemoDataset {
         botRecords.work = [
             BotWork(
                 id: "work-docs", botId: Self.atlasId, title: "Rewrite the onboarding guide",
-                instruction: "Rewrite docs/onboarding.md for the new device pairing flow.",
+                instruction: "Rewrite ONBOARDING.md for the new device pairing flow.",
                 summary: "Rewrite the guide around pairing, with screenshots from the current build.",
                 steps: [
                     WorkStep(
                         id: "1", title: "Outline the new pairing flow", project: "space-cypher", state: .done,
                         startedAt: now - 2 * day - 50 * minute, endedAt: now - 2 * day - 30 * minute),
                     WorkStep(
-                        id: "2", title: "Rewrite docs/onboarding.md", project: "space-cypher", state: .failed,
+                        id: "2", title: "Rewrite ONBOARDING.md", project: "space-cypher", state: .failed,
                         note: "Stopped", startedAt: now - 2 * day - 30 * minute, endedAt: now - 2 * day),
                 ],
                 state: .stopped, chatId: "chat-atlas", toolCallId: "call-plan-docs",
@@ -198,14 +198,14 @@ extension DemoDataset {
                         id: "1", title: "Collect merged PRs since 0.8", project: "space-cypher", state: .done,
                         sessions: ["chat-atlas-w4"], startedAt: now - 4 * hour, endedAt: now - 3 * hour - 30 * minute),
                     WorkStep(
-                        id: "2", title: "Write docs/releases/0.9.md", project: "space-cypher", state: .done,
+                        id: "2", title: "Write release-notes/0.9.md", project: "space-cypher", state: .done,
                         startedAt: now - 3 * hour - 30 * minute, endedAt: now - 3 * hour),
                 ],
                 state: .done, chatId: "chat-atlas", toolCallId: "call-plan-notes",
                 threadChatId: "chat-atlas-thread-notes", createdAt: now - 4 * hour - 5 * minute,
                 startedAt: now - 4 * hour, endedAt: now - 3 * hour,
                 result: """
-                    Drafted **docs/releases/0.9.md** from 37 merged PRs.
+                    Drafted **release-notes/0.9.md** from 37 merged PRs.
 
                     - **Workspaces:** routines, shortcuts and connections
                     - **iPhone:** session fork and rewind, the workspace browser
@@ -307,7 +307,7 @@ extension DemoDataset {
                 schedule: .manual, createdAt: now - 5 * day, updatedAt: now - 5 * day),
             BotRoutine(
                 id: "routine-release", botId: Self.atlasId, name: "Cut the 0.9 release",
-                prompt: "Remind me to cut the 0.9 release, with the checklist from docs/releasing.md.",
+                prompt: "Remind me to cut the 0.9 release, with the checklist from RELEASING.md.",
                 schedule: .once(at: Self.onceSpec(daysAhead: 2, hour: 10, now: now)),
                 createdAt: now - day, updatedAt: now - day,
                 nextRunAt: Self.todayAt(10, 0, now: now) + 2 * day),
@@ -587,7 +587,7 @@ extension DemoDataset {
                     author: atlasThread, createdAt: now - 5 * day, updatedAt: now - 5 * day),
                 MemoryFile(
                     path: "/release.md",
-                    text: "# Releasing\n- Tag from main only.\n- Release notes go in docs/releases/<version>.md.",
+                    text: "# Releasing\n- Tag from main only.\n- Release notes go in release-notes/<version>.md.",
                     author: .workspace(
                         botId: Self.atlasId, chatId: "chat-atlas-thread-notes", title: "Draft the 0.9 release notes"),
                     createdAt: now - 3 * hour, updatedAt: now - 3 * hour),
@@ -598,7 +598,7 @@ extension DemoDataset {
                     author: .session(chatId: "chat-deploy", title: "Wrangler deploy hygiene"),
                     path: "/deploy.md", command: "create",
                     args: .object(["path": .string("/project/deploy.md")]),
-                    reason: "The session fetched a web page.",
+                    reason: "fetched a web page (https://docs.stripe.com/currencies)",
                     preview: "# Deploying\n- `wrangler deploy --env production` from apps/edge.")
             ],
             changes: [
@@ -647,7 +647,7 @@ extension DemoDataset {
                         "path": .string("/workspace/invoices.md"),
                         "new_str": .string("- Ledger rounds EU totals half-up."),
                     ]),
-                    reason: "This run read an answer from Ledger.",
+                    reason: "read an answer from Ledger",
                     preview: """
                         # Invoices
                         - Totals must match between the CSV export and the web app.
@@ -666,7 +666,7 @@ extension DemoDataset {
             held: [
                 HeldWrite(
                     id: "held-ledger", chatId: "chat-atlas", toolCallId: "call-memory-held", path: "/invoices.md",
-                    preview: "- Ledger rounds EU totals half-up.", reason: "This run read an answer from Ledger.",
+                    preview: "- Ledger rounds EU totals half-up.", reason: "read an answer from Ledger",
                     at: now - 21 * 60_000)
             ],
             decided: [
@@ -712,7 +712,7 @@ extension DemoDataset {
                                 1. Nightly tests failed at 02:14: `reconnect_keeps_cursor` and `ack_before_rows` \
                                 in registry_sync.
                                 2. CI on main failed twice yesterday, both times in the sync tests.
-                                3. The 0.9 release notes are drafted in `docs/releases/0.9.md`.
+                                3. The 0.9 release notes are drafted in `release-notes/0.9.md`.
                                 """,
                             from: .routine(
                                 routineId: "routine-brief", name: "Morning brief", outcome: .done, runAt: briefAt,
@@ -803,11 +803,11 @@ extension DemoDataset {
             let (brief, outcome): (String, String) =
                 switch chatId {
                 case "chat-atlas-thread-notes":
-                    ("Draft release notes for 0.9 from everything merged since 0.8.", "Drafted docs/releases/0.9.md.")
+                    ("Draft release notes for 0.9 from everything merged since 0.8.", "Drafted release-notes/0.9.md.")
                 case "chat-atlas-thread-loro":
                     ("Upgrade loro to 1.6 everywhere.", "The upgrade breaks snapshot decoding; stopping here.")
                 default:
-                    ("Rewrite docs/onboarding.md for the new pairing flow.", "Stopped by the owner.")
+                    ("Rewrite ONBOARDING.md for the new pairing flow.", "Stopped by the owner.")
                 }
             return [
                 user("\(chatId)-u", "Brief: \(brief)", at: now - 4 * hour),

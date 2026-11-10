@@ -276,10 +276,8 @@ extension DemoDataset {
 
     func watchMemory(scope: MemoryScope) -> AsyncThrowingStream<MemoryView, Error> {
         let (stream, continuation) = AsyncThrowingStream<MemoryView, Error>.makeStream()
-        guard let view = memoryViews[scope] else {
-            continuation.finish(throwing: BotActionError("This memory has nothing in it yet."))
-            return stream
-        }
+        // A store nothing has written yet reads empty, as the engine's does.
+        let view = memoryViews[scope] ?? emptyMemoryView(scope)
         let id = UUID()
         memoryWatchers[id] = (scope, continuation)
         continuation.onTermination = { [weak self] _ in
@@ -290,7 +288,7 @@ extension DemoDataset {
     }
 
     func editMemory(scope: MemoryScope, edit: MemoryEdit) async throws -> String {
-        guard var view = memoryViews[scope] else { throw BotActionError("This memory has nothing in it yet.") }
+        var view = memoryViews[scope] ?? emptyMemoryView(scope)
         try? await Task.sleep(nanoseconds: 150_000_000)
         let now = nowMs()
         let result: String
@@ -371,6 +369,12 @@ extension DemoDataset {
             view.store.passRequestedAt = now
             view.store.lastPass = MemoryPass(id: "pass-\(now)", at: now, outcome: .running, manual: true)
             result = "A pass is starting."
+            hostLater { demo in
+                guard var view = demo.memoryViews[scope], view.store.lastPass?.id == "pass-\(now)" else { return }
+                view.store.lastPass?.outcome = .skipped
+                view.store.lastPass?.endedAt = nowMs()
+                demo.setMemoryView(view)
+            }
         }
         view.files.sort { a, b in
             if (a.path == MemoryLimits.index) != (b.path == MemoryLimits.index) { return a.path == MemoryLimits.index }
@@ -399,6 +403,19 @@ extension DemoDataset {
     }
 
     // MARK: Helpers
+
+    /// A store nothing has written yet.
+    private func emptyMemoryView(_ scope: MemoryScope) -> MemoryView {
+        let host: String =
+            switch scope {
+            case .workspace(let botId): bot(id: botId)?.hostDeviceId ?? "dev-mac"
+            case .project(let spaceId): spaces.first { $0.id == spaceId }?.deviceId ?? "dev-mac"
+            default: "dev-mac"
+            }
+        return MemoryView(
+            store: MemoryStore(id: "memory-\(scope)", scope: scope, hostDeviceId: host, createdAt: nowMs()),
+            files: [], pending: [], changes: [])
+    }
 
     private func index<T: Identifiable>(
         of id: T.ID, in list: KeyPath<BotRecords, [T]>, what: String

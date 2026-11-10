@@ -38,9 +38,7 @@ struct WorkspaceChatSheets: ViewModifier {
             .environment(\.seedComposer, seedComposer)
             .environment(\.transcriptMemoryCards, memoryCards)
             .sheet(item: $boardSheet, onDismiss: boardDismissed) { target in
-                BotBoard(botId: target.botId, initial: target.page, openChat: openChat)
-                    .presentationDetents([.medium, .large])
-                    .presentationBackground(Theme.surface)
+                BoardSheet(target: target, openChat: openChat)
                     .environment(\.openBotChat, openChat)
                     .environment(\.openBotRoute, openRoute)
             }
@@ -52,6 +50,52 @@ struct WorkspaceChatSheets: ViewModifier {
             }
             .botDeletePrompt($deletingBot, delete: delete)
             .task { await launch() }
+    }
+}
+
+extension EnvironmentValues {
+    /// Told each board page as it shows (the phone's sheet grows for a
+    /// page that needs the room).
+    @Entry var boardPageShown: ((BotPage) -> Void)? = nil
+}
+
+extension BotPage {
+    /// A page that holds a form, or a decision with content under it (an
+    /// approval, a plan, a drafted answer, an invite): it needs the whole
+    /// height. Lists and the overview open at half height.
+    var wantsFullHeight: Bool {
+        switch self {
+        case .overview, .needsYou, .work, .routines, .projects, .activity, .connections, .memory: false
+        case .workItem, .approval, .asking, .routine, .routineForm, .project, .connection, .exchange, .connect,
+            .memoryFile:
+            true
+        }
+    }
+}
+
+/// The board as the phone's sheet: half height for the overview and lists,
+/// full height for a page with a form or decision, and growing to it when
+/// such a page is pushed (it never shrinks on its own).
+private struct BoardSheet: View {
+    let target: BoardTarget
+    let openChat: (String) -> Void
+    @State private var detent: PresentationDetent
+
+    init(target: BoardTarget, openChat: @escaping (String) -> Void) {
+        self.target = target
+        self.openChat = openChat
+        _detent = State(initialValue: target.page.wantsFullHeight ? .large : .medium)
+    }
+
+    var body: some View {
+        BotBoard(botId: target.botId, initial: target.page, openChat: openChat)
+            .environment(\.boardPageShown) { page in
+                if page.wantsFullHeight, detent != .large {
+                    withAnimation(Motion.fadeQuick) { detent = .large }
+                }
+            }
+            .presentationDetents([.medium, .large], selection: $detent)
+            .presentationBackground(Theme.surface)
     }
 }
 

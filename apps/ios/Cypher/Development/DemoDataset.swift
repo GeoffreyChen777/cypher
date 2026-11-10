@@ -268,6 +268,7 @@ final class DemoDataset {
             devices: [mac, vps], spaces: [cypher, edge, webapp, recoverySpace],
             chats: chats, sessions: sessions)
         dataset.installWorkspaces(now: now)
+        dataset.installEmber(now: now)
         return dataset
     }
 
@@ -827,7 +828,7 @@ final class DemoDataset {
         default:
             // The context recovery showcase, a workspace's chat or thread,
             // or a freshly minted chat (empty).
-            return recoveryTranscript(for: chatId, now: now) ?? workspaceTranscript(for: chatId, now: now) ?? []
+            return recoveryTranscript(for: chatId, now: now) ?? workspaceChatTranscript(for: chatId, now: now) ?? []
         }
     }
 

@@ -250,6 +250,7 @@ struct RoutinePage: View {
 
             Section {
                 BotFact(label: "Status") { BotStatusText(status(routine, state: state)) }
+                    .accessibilityIdentifier("routine-status")
                 BotFact(label: "Where", value: RoutineLook.place(routine.target, model: model))
                 if case .project(_, let worktree, _) = routine.target {
                     BotFact(label: "Checkout", value: worktree ? "Its own worktree" : "The project's checkout")
@@ -305,12 +306,9 @@ struct RoutinePage: View {
             sessionsSection(routine)
         }
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Menu("More", systemImage: "ellipsis") {
-                    Button("Edit", systemImage: "pencil") { editing = true }
-                    Button("Delete", systemImage: "trash", role: .destructive) { deleting = routine }
-                }
-                .accessibilityIdentifier("routine-more")
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Delete", systemImage: "trash", role: .destructive) { deleting = routine }
+                    .accessibilityIdentifier("routine-delete")
             }
         }
         .safeAreaInset(edge: .bottom) {

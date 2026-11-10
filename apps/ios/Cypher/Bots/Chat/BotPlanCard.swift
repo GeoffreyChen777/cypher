@@ -48,7 +48,7 @@ struct BotPlanCard: View {
             BotCardRule()
             VStack(alignment: .leading, spacing: 12) {
                 if let summary = work.summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
-                    Text(summary)
+                    Text(Self.inline(summary))
                         .font(Theme.sans(14, relativeTo: .subheadline))
                         .foregroundStyle(Theme.text)
                         .fixedSize(horizontal: false, vertical: true)
@@ -110,14 +110,14 @@ struct BotPlanCard: View {
                     }
                     .frame(width: 20)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(step.title)
+                        Text(Self.inline(step.title))
                             .font(Theme.sans(14, relativeTo: .subheadline))
                             .foregroundStyle(step.state == .skipped ? Theme.textMuted : Theme.text)
                             .fixedSize(horizontal: false, vertical: true)
                         if numbered, let detail = step.detail?.trimmingCharacters(in: .whitespacesAndNewlines),
                             !detail.isEmpty
                         {
-                            Text(detail)
+                            Text(Self.inline(detail))
                                 .font(Theme.sans(12.5, relativeTo: .footnote))
                                 .foregroundStyle(Theme.textMuted)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -235,6 +235,12 @@ struct BotPlanCard: View {
         }
     }
 
+    /// Agent-written lines with their inline marks (`code`, **bold**).
+    static func inline(_ text: String) -> AttributedString {
+        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(text)
+    }
+
     /// "cypher · MacBook Pro": a step's project and its device.
     private func place(_ spaceId: String) -> String? {
         guard let space = model.spaces.first(where: { $0.id == spaceId }) else { return nil }
@@ -275,7 +281,8 @@ extension BotWork {
 }
 
 /// The plan card's head: the tile in the phase's colour, the title over its
-/// sub-line, and the status at the right.
+/// sub-line, and the status at the right — or under them when the row is
+/// too narrow to hold all three whole (a phone).
 private struct PlanHead: View {
     let title: String
     let subtitle: String
@@ -285,22 +292,35 @@ private struct PlanHead: View {
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             BotCardTile(symbol: "checklist", tint: tone)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(Theme.sans(15, weight: .semibold, relativeTo: .subheadline))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(2)
-                Text(subtitle)
-                    .font(Theme.sans(12, relativeTo: .footnote))
-                    .foregroundStyle(Theme.textMuted)
-                    .lineLimit(1)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 8) {
+                    lines.fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 4)
+                    status
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    lines
+                    status
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Spacer(minLength: 4)
-            status
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .accessibilityElement(children: .combine)
+    }
+
+    private var lines: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title)
+                .font(Theme.sans(15, weight: .semibold, relativeTo: .subheadline))
+                .foregroundStyle(Theme.text)
+                .lineLimit(3)
+            Text(subtitle)
+                .font(Theme.sans(12, relativeTo: .footnote))
+                .foregroundStyle(Theme.textMuted)
+                .lineLimit(2)
+        }
     }
 }
 

@@ -303,6 +303,15 @@ extension ReplyMode {
         }
     }
 
+    /// The picker's segment: "Auto", "Review", "Off".
+    var shortLabel: String {
+        switch self {
+        case .auto: "Auto"
+        case .review: "Review"
+        case .off: "Off"
+        }
+    }
+
     /// The picker's explanation.
     var detail: String {
         switch self {

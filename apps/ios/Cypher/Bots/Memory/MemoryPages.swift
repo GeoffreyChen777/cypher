@@ -21,8 +21,10 @@ final class MemoryPageState {
     var attempt = 0
     /// Edits on their way, by the control that made them.
     var busy: Set<String> = []
-    /// The last reply's sentence, or what went wrong.
+    /// The last reply's sentence, shown for a moment.
     var notice: (text: String, error: Bool)?
+    /// Why the last edit failed: an alert.
+    var failure: String?
     private var noticeClear: Task<Void, Never>?
 
     /// Follow `scope` until cancelled (the page went away).
@@ -39,7 +41,7 @@ final class MemoryPageState {
             }
         } catch {
             guard !Task.isCancelled else { return }
-            self.error = error.localizedDescription
+            self.error = (error as? BotActionError)?.message ?? error.localizedDescription
         }
     }
 
@@ -49,7 +51,7 @@ final class MemoryPageState {
     func edit(_ data: (any WorkspaceData)?, scope: MemoryScope, _ edit: MemoryEdit, key: String) async -> Bool {
         guard !busy.contains(key) else { return false }
         guard let data else {
-            say("Not connected.", error: true)
+            failure = "Not connected."
             return false
         }
         busy.insert(key)
@@ -59,7 +61,7 @@ final class MemoryPageState {
             if !reply.isEmpty { say(reply, error: false) }
             return true
         } catch {
-            say(error.localizedDescription, error: true)
+            failure = (error as? BotActionError)?.message ?? error.localizedDescription
             return false
         }
     }
@@ -71,6 +73,20 @@ final class MemoryPageState {
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled else { return }
             withAnimation(Motion.fadeQuick) { self?.notice = nil }
+        }
+    }
+}
+
+extension View {
+    /// A memory page's failed edit as an alert.
+    fileprivate func memoryFailureAlert(_ state: MemoryPageState) -> some View {
+        alert(
+            "Couldn't do that",
+            isPresented: Binding(get: { state.failure != nil }, set: { if !$0 { state.failure = nil } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(state.failure ?? "")
         }
     }
 }
@@ -147,7 +163,7 @@ struct MemoryPage: View {
                 .listRowBackground(Color.clear)
             }
         }
-        .memoryPageStyle(title: memoryStoreTitle(scope, botId: botId, data: model.data))
+        .botPageStyle(title: memoryStoreTitle(scope, botId: botId, data: model.data))
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
@@ -172,6 +188,7 @@ struct MemoryPage: View {
             }
         }
         .navigationDestination(item: $created) { BotPageView(botId: botId, page: $0) }
+        .memoryFailureAlert(state)
         .task(id: "\(state.attempt)") {
             await state.watch(model.data, scope: scope)
         }
@@ -185,6 +202,7 @@ struct MemoryPage: View {
         } actions: {
             Button("New File") { editor = MemoryEditorTarget(path: nil, text: "") }
                 .buttonStyle(.glass)
+                .accessibilityIdentifier("memory-empty-new-file")
         }
         .listRowBackground(Color.clear)
     }
@@ -214,7 +232,7 @@ struct MemoryPage: View {
                     pendingRow(write).groupedRowStyle()
                 }
             } header: {
-                Text("To review")
+                ListSectionHeader(title: "To review")
             } footer: {
                 Text("From runs that read untrusted content.")
             }
@@ -230,13 +248,12 @@ struct MemoryPage: View {
                     .groupedRowStyle()
                 }
             } header: {
-                HStack {
-                    Text("Files")
-                    Spacer()
+                ListSectionHeader(title: "Files") {
                     Text(
                         "\(MemoryFormat.count(others.count, "file", "files")) · \(MemoryFormat.size(others.reduce(0) { $0 + $1.text.utf8.count }))"
                     )
-                    .textCase(nil)
+                    .font(Theme.sans(13, relativeTo: .footnote))
+                    .foregroundStyle(Theme.textFaint)
                 }
             }
         }
@@ -248,10 +265,10 @@ struct MemoryPage: View {
                         .groupedRowStyle()
                 }
             } header: {
-                HStack {
-                    Text("Recent changes")
-                    Spacer()
-                    Text(MemoryFormat.count(view.changes.count, "change", "changes")).textCase(nil)
+                ListSectionHeader(title: "Recent changes") {
+                    Text(MemoryFormat.count(view.changes.count, "change", "changes"))
+                        .font(Theme.sans(13, relativeTo: .footnote))
+                        .foregroundStyle(Theme.textFaint)
                 }
             }
         }
@@ -322,14 +339,11 @@ struct MemoryPage: View {
                     .groupedRowStyle()
             }
         } header: {
-            HStack {
-                Text("MEMORY.md").textCase(nil)
-                Spacer()
+            ListSectionHeader(title: "MEMORY.md") {
                 Button("Edit") {
                     editor = MemoryEditorTarget(path: MemoryLimits.index, text: index?.text ?? "")
                 }
                 .font(Theme.sans(14, weight: .medium, relativeTo: .footnote))
-                .textCase(nil)
                 .accessibilityLabel("Edit MEMORY.md")
                 .accessibilityIdentifier("memory-index-edit")
             }
@@ -437,10 +451,10 @@ struct MemoryPage: View {
                 .accessibilityIdentifier("memory-undo-pass")
             }
         } header: {
-            HStack {
-                Text("Consolidation")
-                Spacer()
-                Text(setting.enabled ? "Nightly at \(MemoryFormat.hour(setting.hour))" : "Off").textCase(nil)
+            ListSectionHeader(title: "Consolidation") {
+                Text(setting.enabled ? "Nightly at \(MemoryFormat.hour(setting.hour))" : "Off")
+                    .font(Theme.sans(13, relativeTo: .footnote))
+                    .foregroundStyle(Theme.textFaint)
             }
         }
     }
@@ -591,6 +605,12 @@ struct MemoryFilePage: View {
         List {
             if let file {
                 Section {
+                    BotPageHeader(title: MemoryFormat.displayPath(file.path), lines: nil) {
+                        BotHeaderGlyph(symbol: "doc.text")
+                    }
+                    .groupedRowStyle()
+                }
+                Section {
                     if file.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Text("Empty.").foregroundStyle(Theme.textMuted).groupedRowStyle()
                     } else {
@@ -598,8 +618,6 @@ struct MemoryFilePage: View {
                             .padding(.vertical, 6)
                             .groupedRowStyle()
                     }
-                } header: {
-                    Text(MemoryFormat.displayPath(file.path)).textCase(nil)
                 } footer: {
                     Text(
                         "\(MemoryFormat.size(file.text.utf8.count)) · \(file.author.label) · \(BotTime.past(max(file.updatedAt, file.createdAt)))"
@@ -628,7 +646,8 @@ struct MemoryFilePage: View {
                 .listRowBackground(Color.clear)
             }
         }
-        .memoryPageStyle(title: MemoryFormat.fileName(filePath))
+        // The header names the file; the bar keeps its buttons.
+        .botPageStyle(title: "")
         .toolbar {
             if let file {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -682,6 +701,7 @@ struct MemoryFilePage: View {
         } message: {
             Text("The file leaves this memory. Recent changes can put it back.")
         }
+        .memoryFailureAlert(state)
         .task(id: "\(state.attempt)") {
             await state.watch(model.data, scope: scope)
         }
@@ -689,13 +709,13 @@ struct MemoryFilePage: View {
 
     private func rename() {
         guard let to = MemoryFormat.path(typed: renameText) else {
-            state.say("Not usable: no part of it may be empty or start with a dot.", error: true)
+            state.failure = "Not usable: no part of it may be empty or start with a dot."
             return
         }
         let from = filePath
         guard to != from else { return }
         if state.view?.files.contains(where: { $0.path == to }) == true {
-            state.say("\(to) already exists.", error: true)
+            state.failure = "\(MemoryFormat.displayPath(to)) already exists."
             return
         }
         Task {
@@ -764,6 +784,7 @@ struct MemoryEditorSheet: View {
                     } footer: {
                         Text(nameHint)
                     }
+                    .groupedRowStyle()
                 }
                 Section {
                     TextEditor(text: $text)
@@ -773,7 +794,7 @@ struct MemoryEditorSheet: View {
                         .accessibilityIdentifier("memory-editor-text")
                 } header: {
                     Text(isNew ? "Text" : MemoryFormat.displayPath(target.path ?? ""))
-                        .textCase(isNew ? .uppercase : nil)
+                        .textCase(nil)
                 } footer: {
                     if bytes > MemoryLimits.fileMax * 7 / 8 {
                         Text("\(MemoryFormat.size(bytes)) of 64 KB")
@@ -782,11 +803,17 @@ struct MemoryEditorSheet: View {
                         Text("What's worth keeping, in markdown.")
                     }
                 }
-                if let error {
-                    Section {
-                        Text(error).font(Theme.sans(13, relativeTo: .footnote)).foregroundStyle(Theme.danger)
-                    }
-                }
+                .groupedRowStyle()
+            }
+            .scrollContentBackground(.hidden)
+            .background(Theme.surface.ignoresSafeArea())
+            .alert(
+                "Couldn't save",
+                isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(error ?? "")
             }
             .navigationTitle(isNew ? "New file" : "Edit \(MemoryFormat.fileName(target.path ?? ""))")
             .navigationBarTitleDisplayMode(.inline)
@@ -831,7 +858,7 @@ struct MemoryEditorSheet: View {
                 return
             }
             guard !existing.contains(typed) else {
-                error = "\(typed) already exists."
+                error = "\(MemoryFormat.displayPath(typed)) already exists."
                 return
             }
             path = typed
@@ -849,7 +876,7 @@ struct MemoryEditorSheet: View {
                 onSaved(path, reply)
                 dismiss()
             } catch {
-                self.error = error.localizedDescription
+                self.error = (error as? BotActionError)?.message ?? error.localizedDescription
             }
         }
     }
@@ -858,12 +885,8 @@ struct MemoryEditorSheet: View {
 // MARK: - Layout
 
 extension View {
-    /// A memory page: inset-grouped on the surface, inline title.
+    /// A memory page: a board page's list.
     func memoryPageStyle(title: String) -> some View {
-        listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
-            .background(Theme.surface.ignoresSafeArea())
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
+        botPageStyle(title: title)
     }
 }

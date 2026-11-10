@@ -42,7 +42,7 @@ final class BotDemoTests: XCTestCase {
 
     func testTheDemoWorkspaceNeedsYouForFourThings() throws {
         let demo = DemoDataset.standard()
-        XCTAssertEqual(demo.bots.map(\.name), ["Atlas", "Scout"])
+        XCTAssertEqual(demo.bots.map(\.name), ["Atlas", "Scout", "Ember"])
         XCTAssertEqual(
             demo.needsYou(botId: DemoDataset.atlasId),
             [
@@ -137,6 +137,34 @@ final class BotDemoTests: XCTestCase {
         let written = try await iterator.next()
         XCTAssertEqual(written?.files.map(\.path).first, "/MEMORY.md", "the index stays first")
         XCTAssertTrue(written?.files.contains { $0.path == "/new.md" } ?? false)
+    }
+
+    func testADemoStoreNothingWroteStartsEmptyAndTakesAFile() async throws {
+        let demo = DemoDataset.standard()
+        let scope = MemoryScope.project(spaceId: "space-webapp")
+        XCTAssertNil(demo.memoryStore(scope: scope))
+        var iterator = demo.watchMemory(scope: scope).makeAsyncIterator()
+        let first = try await iterator.next()
+        XCTAssertEqual(first?.files, [])
+        XCTAssertEqual(first?.store.hostDeviceId, "dev-mac", "the project's device")
+        let reply = try await demo.editMemory(scope: scope, edit: .write(path: "/notes.md", text: "# Notes"))
+        XCTAssertEqual(reply, "Created /notes.md.")
+        let written = try await iterator.next()
+        XCTAssertEqual(written?.files.map(\.path), ["/notes.md"])
+        XCTAssertEqual(demo.memoryStore(scope: scope)?.files, 1, "listed in Settings › Memory from now on")
+    }
+
+    func testADemoMemoryPassRunsAndEnds() async throws {
+        let demo = DemoDataset.standard()
+        let scope = MemoryScope.workspace(botId: DemoDataset.atlasId)
+        _ = try await demo.editMemory(scope: scope, edit: .runPass)
+        let store = try XCTUnwrap(demo.memoryStore(scope: scope))
+        XCTAssertTrue(MemoryFormat.passWaiting(store))
+        try await Task.sleep(for: .seconds(2))
+        let ended = try XCTUnwrap(demo.memoryStore(scope: scope))
+        XCTAssertFalse(MemoryFormat.passWaiting(ended), "the host ran it")
+        XCTAssertEqual(ended.lastPass?.outcome, .skipped)
+        XCTAssertEqual(ended.lastPass?.manual, true)
     }
 
     func testBoardLaunchSpecsNameEveryPage() {

@@ -11,7 +11,8 @@ import SwiftUI
 struct ConnectionListPage: View {
     @Environment(AppModel.self) private var model
     let botId: String
-    @State private var error: String?
+    @State private var runner = BotActionRunner()
+    @State private var connecting = false
 
     var body: some View {
         let bot = model.bot(id: botId)
@@ -21,57 +22,65 @@ struct ConnectionListPage: View {
         let peers = Dictionary(
             model.botRecords.connections.filter { $0.botId == botId }.map { ($0.id, $0.peer) },
             uniquingKeysWith: { first, _ in first })
+        let empty = connections.isEmpty && invites.isEmpty && exchanges.isEmpty
         List {
-            if connections.isEmpty && invites.isEmpty && exchanges.isEmpty {
-                emptyState(bot)
-            } else {
+            if !empty {
                 Section {
                     if connections.isEmpty {
-                        Text("None yet.").foregroundStyle(Theme.textMuted).groupedRowStyle()
+                        Text("None yet.").foregroundStyle(Theme.textMuted)
                     }
                     ForEach(connections) { connection in
                         NavigationLink(value: BotPage.connection(connection.id)) {
                             ConnectionRow(connection: connection)
                         }
-                        .groupedRowStyle()
+                        .accessibilityIdentifier("connection-row-\(connection.id)")
                     }
                 } header: {
-                    Text("Workspaces")
+                    ListSectionHeader(title: "Workspaces")
                 }
+                .groupedRowStyle()
                 if !invites.isEmpty {
-                    Section("Open invites") {
+                    Section {
                         ForEach(invites) { invite in
                             InviteRow(invite: invite) { revoke(invite) }
-                                .groupedRowStyle()
                                 .swipeActions {
                                     if invite.revokeRequestedAt == nil {
                                         Button("Revoke", role: .destructive) { revoke(invite) }
                                     }
                                 }
                         }
+                    } header: {
+                        ListSectionHeader(title: "Open invites")
                     }
+                    .groupedRowStyle()
                 }
                 if !exchanges.isEmpty {
-                    Section("Recent questions") {
+                    Section {
                         ForEach(exchanges) { exchange in
                             NavigationLink(value: BotPage.exchange(exchange.id)) {
                                 ExchangeRow(
                                     exchange: exchange, peer: peers[exchange.connectionId],
                                     botName: bot?.name ?? "This workspace")
                             }
-                            .groupedRowStyle()
+                            .accessibilityIdentifier("exchange-row-\(exchange.id)")
                         }
+                    } header: {
+                        ListSectionHeader(title: "Recent questions")
                     }
-                }
-                if let error {
-                    Section {
-                        Text(error).font(Theme.sans(13, relativeTo: .footnote)).foregroundStyle(Theme.danger)
-                    }
-                    .listRowBackground(Color.clear)
+                    .groupedRowStyle()
                 }
             }
         }
-        .connectionPageStyle(title: "Connections")
+        .botPageStyle(title: "Connections")
+        .overlay {
+            if empty {
+                BotEmptyState(
+                    symbol: "person.2", title: "No connections yet",
+                    hint:
+                        "Invite someone with a code, or use theirs. Connected workspaces can ask \(bot?.name ?? "this workspace") questions, read-only, within what you allow.",
+                    action: ("Connect a workspace", { connecting = true }))
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 NavigationLink(value: BotPage.connect) {
@@ -81,32 +90,12 @@ struct ConnectionListPage: View {
                 .accessibilityIdentifier("connections-connect")
             }
         }
-    }
-
-    private func emptyState(_ bot: Bot?) -> some View {
-        ContentUnavailableView {
-            Label("No connections yet", systemImage: "globe")
-        } description: {
-            Text(
-                "Connect a workspace: invite someone with a code, or use theirs. Connected workspaces can ask \(bot?.name ?? "this workspace") questions, read-only, within what you allow."
-            )
-        } actions: {
-            NavigationLink("Connect a workspace", value: BotPage.connect)
-                .buttonStyle(.glass)
-                .accessibilityIdentifier("connections-empty-connect")
-        }
-        .listRowBackground(Color.clear)
+        .navigationDestination(isPresented: $connecting) { ConnectPage(botId: botId) }
+        .botActionAlert(runner)
     }
 
     private func revoke(_ invite: BotInvite) {
-        Task {
-            do {
-                error = nil
-                try await model.workspaceData().revokeInvite(inviteId: invite.id)
-            } catch {
-                self.error = error.localizedDescription
-            }
-        }
+        runner.run { try await model.workspaceData().revokeInvite(inviteId: invite.id) }
     }
 }
 
@@ -231,7 +220,7 @@ struct ConnectionPage: View {
     let botId: String
     let connectionId: String
     @State private var confirmRevoke = false
-    @State private var error: String?
+    @State private var runner = BotActionRunner()
 
     var body: some View {
         let connection = model.data?.connection(id: connectionId)
@@ -239,21 +228,25 @@ struct ConnectionPage: View {
         List {
             if let connection, let bot {
                 content(connection, bot: bot)
-            } else {
-                ContentUnavailableView(
-                    "No Connection", systemImage: "globe",
-                    description: Text("It may have been removed on another device."))
-                    .listRowBackground(Color.clear)
             }
         }
-        .connectionPageStyle(title: connection?.peer.name ?? "Connection")
+        .botPageStyle(title: "Connection")
+        .overlay {
+            if connection == nil || bot == nil {
+                BotEmptyState(
+                    symbol: "person.2", title: "Connection gone", hint: "It may have been removed on another device.")
+            }
+        }
         .confirmationDialog("Revoke connection?", isPresented: $confirmRevoke, titleVisibility: .visible) {
-            Button("Revoke", role: .destructive) { revoke() }
+            Button("Revoke", role: .destructive) {
+                runner.run { try await model.workspaceData().revokeConnection(connectionId: connectionId) }
+            }
         } message: {
             Text(
                 "\(connection?.peer.name ?? "It") can no longer ask this workspace anything, and this workspace can no longer ask it. Connecting again takes a new invite."
             )
         }
+        .botActionAlert(runner)
     }
 
     @ViewBuilder
@@ -263,34 +256,31 @@ struct ConnectionPage: View {
             BotPageHeader(title: connection.peer.name) {
                 PeerAvatar(peer: connection.peer, size: 36)
             }
-            .groupedRowStyle()
+        }
+        .groupedRowStyle()
+        Section {
             if !connection.peer.ownerName.isEmpty {
-                BotFact(label: "Owner", value: connection.peer.ownerName).groupedRowStyle()
+                BotFact(label: "Owner", value: connection.peer.ownerName)
             }
-            BotFact(label: "Connected", value: BotTime.past(connection.createdAt)).groupedRowStyle()
+            BotFact(label: "Connected", value: BotTime.past(connection.createdAt))
             if !connection.isLive {
-                BotFact(label: "Status") { BotStatusText("Revoked", tone: .muted) }.groupedRowStyle()
+                BotFact(label: "Status") { BotStatusText("Revoked", tone: .muted) }
             } else if connection.revokeRequestedAt != nil {
                 BotFact(label: "Status") { BotStatusText("Revoking on both sides…", tone: .active) }
-                    .groupedRowStyle()
             }
         }
+        .groupedRowStyle()
         replies(connection, editable: editable)
         reach(connection, bot: bot, editable: editable)
         questions(connection, bot: bot)
-        if let error {
-            Section {
-                Text(error).font(Theme.sans(13, relativeTo: .footnote)).foregroundStyle(Theme.danger)
-            }
-            .listRowBackground(Color.clear)
-        }
         if editable {
             Section {
                 Button("Revoke Connection…", role: .destructive) { confirmRevoke = true }
                     .foregroundStyle(Theme.danger)
-                    .groupedRowStyle()
+                    .disabled(runner.busy)
                     .accessibilityIdentifier("connection-revoke")
             }
+            .groupedRowStyle()
         }
     }
 
@@ -304,9 +294,9 @@ struct ConnectionPage: View {
                         get: { connection.replyMode },
                         set: { save(connection, replyMode: $0, scope: connection.scope) })
                 ) {
-                    Text("Auto").tag(ReplyMode.auto)
-                    Text("Review").tag(ReplyMode.review)
-                    Text("Off").tag(ReplyMode.off)
+                    ForEach([ReplyMode.auto, .review, .off], id: \.self) { mode in
+                        Text(mode.shortLabel).tag(mode)
+                    }
                 }
                 .pickerStyle(.segmented)
                 .listRowBackground(Color.clear)
@@ -316,7 +306,7 @@ struct ConnectionPage: View {
                 BotFact(label: "Replies", value: connection.replyMode.label).groupedRowStyle()
             }
         } header: {
-            Text("Replies")
+            ListSectionHeader(title: "Replies")
         } footer: {
             if editable { Text(connection.replyMode.detail) }
         }
@@ -344,7 +334,6 @@ struct ConnectionPage: View {
                     Text("Only some").tag(false)
                 }
                 .disabled(!editable)
-                .groupedRowStyle()
                 .accessibilityIdentifier("connection-projects")
                 if !reach.sameProjects {
                     ForEach(spaces) { space in
@@ -364,8 +353,8 @@ struct ConnectionPage: View {
                             }
                         }
                         .disabled(!editable)
-                        .groupedRowStyle()
                         .accessibilityAddTraits(on ? .isSelected : [])
+                        .accessibilityIdentifier("connection-project-\(space.id)")
                     }
                 }
             }
@@ -380,13 +369,13 @@ struct ConnectionPage: View {
                     })
             )
             .disabled(!editable || !bot.scope.transcripts)
-            .groupedRowStyle()
             .accessibilityIdentifier("connection-transcripts")
         } header: {
-            Text("May read")
+            ListSectionHeader(title: "May read")
         } footer: {
             Text(reachFooter(reach, bot: bot, spaces: spaces))
         }
+        .groupedRowStyle()
     }
 
     /// What its questions may read, said plainly; a peer only ever reads.
@@ -414,53 +403,42 @@ struct ConnectionPage: View {
         let exchanges = Array(
             (model.data?.exchanges(of: connection.botId, connectionId: connection.id) ?? []).prefix(
                 recentExchangesShown))
-        Section("Recent questions") {
+        Section {
             if exchanges.isEmpty {
-                Text("No questions yet.").foregroundStyle(Theme.textMuted).groupedRowStyle()
+                Text("No questions yet.").foregroundStyle(Theme.textMuted)
             }
             ForEach(exchanges) { exchange in
                 NavigationLink(value: BotPage.exchange(exchange.id)) {
                     ExchangeRow(exchange: exchange, peer: connection.peer, botName: bot.name)
                 }
-                .groupedRowStyle()
             }
+        } header: {
+            ListSectionHeader(title: "Recent questions")
         }
+        .groupedRowStyle()
     }
 
     private func save(_ connection: BotConnection, replyMode: ReplyMode, scope: BotScope?) {
-        Task {
-            do {
-                error = nil
-                try await model.workspaceData().updateConnection(
-                    connectionId: connection.id, replyMode: replyMode, scope: scope)
-            } catch {
-                self.error = error.localizedDescription
-            }
-        }
-    }
-
-    private func revoke() {
-        Task {
-            do {
-                error = nil
-                try await model.workspaceData().revokeConnection(connectionId: connectionId)
-            } catch {
-                self.error = error.localizedDescription
-            }
+        runner.run {
+            try await model.workspaceData().updateConnection(
+                connectionId: connection.id, replyMode: replyMode, scope: scope)
         }
     }
 }
 
 // MARK: - Question
 
+/// One question between workspaces. The header is the question; while a
+/// drafted answer waits on the owner it opens as the review, the answer in
+/// an editable well right under it and Decline / Send at the foot.
 struct ExchangePage: View {
     @Environment(AppModel.self) private var model
     let botId: String
     let exchangeId: String
     /// The answer as the owner edits it; seeded with the draft.
     @State private var draft: String?
-    @State private var busy = false
-    @State private var error: String?
+    @State private var runner = BotActionRunner()
+    @FocusState private var editing: Bool
 
     var body: some View {
         let exchange = model.data?.exchange(id: exchangeId)
@@ -468,18 +446,21 @@ struct ExchangePage: View {
         List {
             if let exchange {
                 content(exchange, awaiting: awaiting)
-            } else {
-                ContentUnavailableView(
-                    "No Question", systemImage: "bubble.left.and.text.bubble.right",
-                    description: Text("It may have been removed on another device."))
-                    .listRowBackground(Color.clear)
             }
         }
-        .connectionPageStyle(title: awaiting ? "Review answer" : "Question")
+        .botPageStyle(title: awaiting ? "Review" : "Question")
+        .scrollDismissesKeyboard(.interactively)
+        .overlay {
+            if exchange == nil {
+                BotEmptyState(
+                    symbol: "bubble.left.and.text.bubble.right", title: "Question gone",
+                    hint: "It may have been removed on another device.")
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             if let exchange, awaiting {
                 BotDecisionBar(
-                    note: error ?? "Edit it before it goes, or decline.",
+                    note: "Edit it before it goes, or decline.",
                     decisions: [
                         BotDecision(title: "Decline", role: .destructive) { review(exchange, send: false) },
                         BotDecision(
@@ -488,12 +469,13 @@ struct ExchangePage: View {
                                 .isEmpty
                         ) { review(exchange, send: true) },
                     ],
-                    busy: busy)
+                    busy: runner.busy)
             }
         }
         .onAppear {
             if draft == nil { draft = exchange?.answer ?? "" }
         }
+        .botActionAlert(runner)
     }
 
     @ViewBuilder
@@ -501,40 +483,15 @@ struct ExchangePage: View {
         let connection = model.data?.connection(id: exchange.connectionId)
         let botName = model.bot(id: exchange.botId)?.name ?? "This workspace"
         Section {
-            BotPageHeader(
-                title: awaiting ? "Review answer" : "Question",
-                symbol: awaiting ? "person.2" : "bubble.left.and.text.bubble.right",
-                tone: awaiting ? .waiting : .muted
-            )
-            .groupedRowStyle()
-            BotFact(label: exchange.direction == .incoming ? "From" : "To") {
-                HStack(spacing: 6) {
-                    if let peer = connection?.peer { PeerAvatar(peer: peer, size: 20) }
-                    Text(
-                        "\(connection?.peerLabel ?? "A connected workspace") · \(BotTime.ago(exchange.askedAt))")
-                }
+            BotPageHeader(title: exchange.question, lines: nil) {
+                BotHeaderGlyph(
+                    symbol: "bubble.left.and.text.bubble.right",
+                    tint: awaiting ? Theme.warning : Theme.textMuted)
             }
-            .groupedRowStyle()
-            if !awaiting {
-                BotFact(status: exchange.status).groupedRowStyle()
-            }
-            BotFact(label: "Asked", value: BotTime.past(exchange.askedAt)).groupedRowStyle()
-            if let answeredAt = exchange.answeredAt {
-                BotFact(label: exchange.direction == .incoming ? "Ended" : "Answered", value: BotTime.past(answeredAt))
-                    .groupedRowStyle()
-            }
-        } footer: {
-            Text(exchange.who(peer: connection?.peer, bot: botName))
         }
-        Section("Question") {
-            Text(exchange.question)
-                .font(Theme.sans(15, relativeTo: .body))
-                .foregroundStyle(Theme.text)
-                .textSelection(.enabled)
-                .groupedRowStyle()
-        }
+        .groupedRowStyle()
         if awaiting {
-            Section("Answer") {
+            Section {
                 TextEditor(
                     text: Binding(
                         get: { draft ?? exchange.answer ?? "" },
@@ -543,19 +500,44 @@ struct ExchangePage: View {
                 .font(Theme.sans(15, relativeTo: .body))
                 .foregroundStyle(Theme.text)
                 .scrollContentBackground(.hidden)
-                .frame(minHeight: 180)
-                .groupedRowStyle()
+                .frame(minHeight: 120, maxHeight: 320)
+                .focused($editing)
+                .accessibilityLabel("Answer")
                 .accessibilityIdentifier("exchange-answer")
+            } header: {
+                ListSectionHeader(title: "Drafted answer")
             }
-        } else if let answer = (exchange.review?.text ?? exchange.answer), !answer.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        ).isEmpty {
-            Section("Answer") {
+            .groupedRowStyle()
+        } else if let answer = (exchange.review?.text ?? exchange.answer),
+            !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            Section {
                 MemoryMarkdown(text: answer, cacheKey: "exchange-\(exchange.id)")
                     .padding(.vertical, 4)
-                    .groupedRowStyle()
+            } header: {
+                ListSectionHeader(title: "Answer")
             }
+            .groupedRowStyle()
         }
+        Section {
+            BotFact(label: exchange.direction == .incoming ? "From" : "To") {
+                HStack(spacing: 6) {
+                    if let peer = connection?.peer { PeerAvatar(peer: peer, size: 20) }
+                    Text(connection?.peerLabel ?? "A connected workspace")
+                }
+            }
+            if !awaiting {
+                BotFact(status: exchange.status)
+                    .accessibilityIdentifier("exchange-status")
+            }
+            BotFact(label: "Asked", value: BotTime.past(exchange.askedAt))
+            if let answeredAt = exchange.answeredAt {
+                BotFact(label: exchange.direction == .incoming ? "Ended" : "Answered", value: BotTime.past(answeredAt))
+            }
+        } footer: {
+            Text(exchange.who(peer: connection?.peer, bot: botName))
+        }
+        .groupedRowStyle()
     }
 
     /// Send (with the text only when it was edited) or decline.
@@ -563,15 +545,9 @@ struct ExchangePage: View {
         let original = (exchange.answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let text = (draft ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let edited = send && text != original ? text : nil
-        busy = true
-        error = nil
-        Task {
-            defer { busy = false }
-            do {
-                try await model.workspaceData().reviewExchange(exchangeId: exchange.id, send: send, text: edited)
-            } catch {
-                self.error = error.localizedDescription
-            }
+        editing = false
+        runner.run {
+            try await model.workspaceData().reviewExchange(exchangeId: exchange.id, send: send, text: edited)
         }
     }
 }
@@ -582,17 +558,22 @@ struct ConnectPage: View {
     @Environment(AppModel.self) private var model
     let botId: String
     @State private var issued: InviteCreated?
-    @State private var creating = false
-    @State private var inviteError: String?
     @State private var copied = false
     @State private var code = ""
-    @State private var redeeming = false
-    @State private var redeemError: String?
+    /// Why the pasted text isn't a code (checked before any call).
+    @State private var codeProblem: String?
+    @State private var runner = BotActionRunner()
+    /// Which call the runner is making.
+    @State private var pending: Call?
     /// The connection a code just made: opened on top of this page.
     @State private var opened: BotPage?
 
+    private enum Call { case create, redeem }
+
     var body: some View {
         let bot = model.bot(id: botId)
+        let creating = runner.busy && pending == .create
+        let redeeming = runner.busy && pending == .redeem
         List {
             Section {
                 if let issued {
@@ -607,23 +588,17 @@ struct ConnectPage: View {
                             if creating { ProgressView().controlSize(.small) }
                         }
                     }
-                    .disabled(creating || bot == nil)
-                    .groupedRowStyle()
+                    .disabled(runner.busy || bot == nil)
                     .accessibilityIdentifier("connect-create-invite")
                 }
-                if let inviteError {
-                    Text(inviteError)
-                        .font(Theme.sans(13, relativeTo: .footnote))
-                        .foregroundStyle(Theme.danger)
-                        .groupedRowStyle()
-                }
             } header: {
-                Text("Invite a workspace")
+                ListSectionHeader(title: "Invite a workspace")
             } footer: {
                 Text(
                     issued.map { issuedInviteNote($0) }
                         ?? "Send the code to the other person; they connect one of their workspaces with it.")
             }
+            .groupedRowStyle()
             Section {
                 TextField("Paste a code", text: $code)
                     .font(Theme.mono(14))
@@ -631,7 +606,7 @@ struct ConnectPage: View {
                     .autocorrectionDisabled()
                     .submitLabel(.go)
                     .onSubmit(redeem)
-                    .groupedRowStyle()
+                    .onChange(of: code) { codeProblem = nil }
                     .accessibilityIdentifier("connect-code")
                 Button {
                     redeem()
@@ -642,20 +617,18 @@ struct ConnectPage: View {
                         if redeeming { ProgressView().controlSize(.small) }
                     }
                 }
-                .disabled(redeeming || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .groupedRowStyle()
+                .disabled(runner.busy || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .accessibilityIdentifier("connect-redeem")
-                if let redeemError {
-                    Text(redeemError)
-                        .font(Theme.sans(13, relativeTo: .footnote))
-                        .foregroundStyle(Theme.danger)
-                        .groupedRowStyle()
-                }
             } header: {
-                Text("Connect with a code")
+                ListSectionHeader(title: "Connect with a code")
             } footer: {
-                Text("Got a code from someone? Connect \(bot?.name ?? "this workspace") to their workspace.")
+                if let codeProblem {
+                    Text(codeProblem).foregroundStyle(Theme.danger)
+                } else {
+                    Text("Got a code from someone? Connect \(bot?.name ?? "this workspace") to their workspace.")
+                }
             }
+            .groupedRowStyle()
             Section {
             } footer: {
                 Text(
@@ -663,8 +636,10 @@ struct ConnectPage: View {
                 )
             }
         }
-        .connectionPageStyle(title: "Connect a workspace")
+        .botPageStyle(title: "Connect")
+        .scrollDismissesKeyboard(.interactively)
         .navigationDestination(item: $opened) { BotPageView(botId: botId, page: $0) }
+        .botActionAlert(runner)
     }
 
     /// The fresh code in a monospaced well, with Copy and Share.
@@ -708,57 +683,31 @@ struct ConnectPage: View {
             .font(Theme.sans(15, weight: .medium, relativeTo: .body))
         }
         .padding(.vertical, 6)
-        .groupedRowStyle()
     }
 
     private func createInvite() {
-        creating = true
-        inviteError = nil
-        Task {
-            defer { creating = false }
-            do {
-                issued = try await model.workspaceData().createInvite(botId: botId)
-            } catch {
-                inviteError = error.localizedDescription
-            }
+        pending = .create
+        runner.run {
+            issued = try await model.workspaceData().createInvite(botId: botId)
         }
     }
 
     private func redeem() {
         let typed = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !redeeming else { return }
+        guard !runner.busy else { return }
         guard !typed.isEmpty else {
-            redeemError = "Paste the code you were sent."
+            codeProblem = "Paste the code you were sent."
             return
         }
         guard splitInviteCode(typed) != nil else {
-            redeemError = "That isn't an invite code. It looks like two parts joined by a dot."
+            codeProblem = "That isn't an invite code. It looks like two parts joined by a dot."
             return
         }
-        redeeming = true
-        redeemError = nil
-        Task {
-            defer { redeeming = false }
-            do {
-                let connection = try await model.workspaceData().redeemInvite(botId: botId, code: typed)
-                code = ""
-                opened = .connection(connection.id)
-            } catch {
-                redeemError = error.localizedDescription
-            }
+        pending = .redeem
+        runner.run {
+            let connection = try await model.workspaceData().redeemInvite(botId: botId, code: typed)
+            code = ""
+            opened = .connection(connection.id)
         }
-    }
-}
-
-// MARK: - Layout
-
-extension View {
-    /// A Connections page: inset-grouped on the surface, inline title.
-    fileprivate func connectionPageStyle(title: String) -> some View {
-        listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
-            .background(Theme.surface.ignoresSafeArea())
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
     }
 }

@@ -134,8 +134,10 @@ final class BoardModelTests: XCTestCase {
     func testRoutinesOrderByNextRunThenManualThenOff() {
         let demo = DemoDataset.standard()
         var ordered = BoardRoutineState.ordered(demo.routines(of: DemoDataset.atlasId))
-        XCTAssertEqual(ordered.last?.id, "routine-triage", "manual after every scheduled one")
-        let nexts = ordered.dropLast().map(\.nextRunAt)
+        XCTAssertEqual(
+            ordered.suffix(2).map(\.id), ["routine-triage", "routine-deps"],
+            "manual after every scheduled one, then the switched-off one")
+        let nexts = ordered.dropLast(2).map(\.nextRunAt)
         XCTAssertEqual(nexts, nexts.sorted { ($0 ?? 0) < ($1 ?? 0) })
         var off = demo.routines(of: DemoDataset.atlasId)[0]
         off.enabled = false

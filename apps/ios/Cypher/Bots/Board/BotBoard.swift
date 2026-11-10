@@ -28,6 +28,7 @@ struct BotBoard: View {
     var close: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.boardPageShown) private var pageShown
     @State private var path = NavigationPath()
 
     init(
@@ -55,7 +56,10 @@ struct BotBoard: View {
                             .accessibilityIdentifier("board-close")
                     }
                 }
-                .navigationDestination(for: BotPage.self) { BotPageView(botId: botId, page: $0) }
+                .navigationDestination(for: BotPage.self) { page in
+                    // The phone's sheet grows for a page that needs the room.
+                    BotPageView(botId: botId, page: page).onAppear { pageShown?(page) }
+                }
                 .navigationDestination(for: BotThreadLink.self) { BotThreadPage(chatId: $0.chatId) }
         }
         .environment(\.openBotChat, openChat)
@@ -100,23 +104,27 @@ struct BotPageList<Content: View>: View {
         List {
             content
         }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-        .background(Theme.surface.ignoresSafeArea())
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
+        .botPageStyle(title: title)
     }
 }
 
-/// A stub page's body until its track builds it: the title and a plain
-/// list of what it will show. (Remove once no page uses it.)
-struct BotStubPage<Content: View>: View {
-    let title: String
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        BotPageList(title: title) { content }
+extension View {
+    /// Every board page's list: inset-grouped on the app's surface, the
+    /// title inline (the kind of page; the header names the item), and the
+    /// first section right under the bar, as on a Settings page.
+    func botPageStyle(title: String) -> some View {
+        listStyle(.insetGrouped)
+            .contentMargins(.top, BotPageMetrics.topMargin, for: .scrollContent)
+            .scrollContentBackground(.hidden)
+            .background(Theme.surface.ignoresSafeArea())
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
     }
+}
+
+enum BotPageMetrics {
+    /// Above a page's first section (the list's own default is ~20pt more).
+    static let topMargin: CGFloat = 4
 }
 
 /// A hidden thread's transcript, read-only (work.rs `render_thread`): what

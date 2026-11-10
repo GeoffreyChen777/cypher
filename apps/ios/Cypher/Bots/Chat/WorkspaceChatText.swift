@@ -73,6 +73,20 @@ enum WorkspaceChatText {
         return out
     }
 
+    /// Who a chat run in a workspace's own folder belongs to, for its
+    /// subtitle ("Atlas · MacBook Pro"): the workspace for its chat and
+    /// threads, "Memory" for a memory pass outside any workspace. nil for
+    /// a session in a project (a project routine's session, the sessions
+    /// work starts), which keeps its project.
+    @MainActor static func threadOwner(_ chat: Chat, in data: (any WorkspaceData)?) -> String? {
+        if let pass = chat.memory {
+            if case .workspace(let botId) = pass.scope, let bot = data?.bot(id: botId) { return bot.name }
+            return "Memory"
+        }
+        guard let marker = chat.bot, marker.isBotThread else { return nil }
+        return data?.bot(id: marker.botId)?.name ?? "Workspace"
+    }
+
     /// "2 need you".
     static func needsYou(_ count: Int) -> String {
         count == 1 ? "1 needs you" : "\(count) need you"

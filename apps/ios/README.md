@@ -303,6 +303,26 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   [`docs/design/notifications.md`](../../docs/design/notifications.md) for delivery and
   account boundaries.
 
+- **Workspaces:** the desktop's agent workspaces
+  ([`docs/design/agent-bots.md`](../../docs/design/agent-bots.md) §13.2).
+  Home lists them above the sessions (what needs you in amber, working,
+  paused, an offline device); New → New Workspace… creates one on an online
+  device. A workspace opens on its chat — the session screen with its
+  avatar, the "N need you" pill, the owner's shortcuts above the composer
+  and a start screen while empty — and its board (the toolbar's grid: a
+  sheet on iPhone, the inspector on iPad): Needs you, Work, Routines,
+  Projects, Connections, Activity and its Memory, each item on a page of its
+  own with its actions. Plans, held memory writes and routine posts draw as
+  cards in the chat; workspace tool calls read as what they did. Hidden
+  sessions (orchestrations, routines, other workspaces' questions, memory
+  passes) never appear among sessions and open read-only. Home's account
+  menu → Memory lists every memory store. Decisions (approve, stop, run,
+  review, revoke, pause, shortcut order) are registry writes that work
+  offline; creating, settings, routines, invites and memory go to the host
+  over the device relay. Demo: `-route bot:bot-atlas`, `-sheet board[:page]`
+  (e.g. `board:work:work-flaky`, `board:connection:conn-ledger`),
+  `-sheet memory`, `-sheet bot-new`, `-sheet bot-settings`.
+
 ### Validation boundary
 
 Simulator build/unit tests cover catalog filtering, failures, target changes,
@@ -435,6 +455,10 @@ Cypher/
   Session/        session screen, new-session flow, side chats, subagents,
                   comments, connection notices
   Workspace/      Files / Changes browser over the host's workspace RPCs
+  Bots/           Workspaces (agent bots): record models and helpers, the
+                  workspace chat's pieces, the board's pages (Board/,
+                  Routines/, Projects/, Connections/, Memory/), settings and
+                  the shared kit (avatars, facts, status words)
   Composer/       glass composer shell and draft, native text input, slash
                   and @ menus, model picker, question panel, attachments
   Transcript/     rows_for_entry port, transcript view, scroll state, veil,
@@ -474,6 +498,9 @@ mirrors and their vectors are listed in [protocol/README.md](../../protocol/READ
 | Hover timestamps / copy | Context menus |
 | gpui `list()` sum-tree virtualization | `LazyVStack` + stable row ids + version fingerprints |
 | Stick-to-bottom spring, wheel-up breaks pin | Scroll-phase-gated pin + spring scrollTo, same 70/320pt thresholds |
+| Workspaces mode (logo switcher, cards sidebar, detail panel) | Workspaces section on Home; the workspace's chat with its board as a sheet (iPhone) or inspector (iPad), one page per item |
+| Workspace shortcuts pinned under the cards | A row of glass chips above the composer |
+| Settings → Memory | Account menu → Memory |
 
 Status colors, fonts, spacing, markdown metrics, veil timing, command-ledger
 shapes, and the wire protocol are ports, not approximations — constants match
@@ -483,6 +510,11 @@ the desktop sources cited in each file header.
 
 - Workspace registry: project/chat creates (host = the project's owning
   device), `archived`/`title`/`lastSeenAt` LWW sets, presence heartbeats.
+  For workspaces, only the owner fields the engine's `mutate_bot_record`
+  writes (a plan's `decision`, `stopRequestedAt`, `runRequestedAt`, a
+  routine's `enabled`, a connection's `replyMode`/`scope`/
+  `revokeRequestedAt`, a review, `paused`, shortcut `order`/deletion); the
+  host watches the rows and acts.
   The phone does not claim to be an execution device.
 - Session docs: command ledger appends only (`run`/`steer`/`interrupt`/
   `respondInput`), with client-minted message ids for optimistic echo. The

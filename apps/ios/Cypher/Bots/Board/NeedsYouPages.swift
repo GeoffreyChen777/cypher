@@ -125,20 +125,18 @@ struct ApprovalPage: View {
     private func page(_ approval: BotApproval) -> some View {
         let work = approval.workId.flatMap { model.data?.work(id: $0) }
         let thread = model.chat(id: approval.threadChatId)
-        return BotPageList(title: approval.awaiting ? "Approve action" : "Action") {
+        return BotPageList(title: "Approval") {
             Section {
                 BotPageHeader(
-                    title: approval.awaiting ? "Approve action" : "Action", symbol: "checkmark.shield",
-                    tone: approval.awaiting ? .waiting : .muted)
+                    title: singleLine(approval.action), symbol: "checkmark.shield",
+                    tone: approval.awaiting ? .waiting : .muted, lines: nil)
             }
             .groupedRowStyle()
             Section {
-                BotFact(label: "Action", value: approval.action)
+                BotFact(status: approval.status)
+                    .accessibilityIdentifier("approval-status")
                 BotFact(label: "Why", value: approval.reason)
                 BotFact(label: "Asked", value: BotTime.past(approval.createdAt))
-                if !approval.awaiting {
-                    BotFact(status: approval.status)
-                }
             }
             .groupedRowStyle()
             Section {

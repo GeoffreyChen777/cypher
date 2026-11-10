@@ -76,15 +76,25 @@ struct BotStatusText: View {
 /// the item go in the toolbar, not here.
 struct BotPageHeader<Leading: View>: View {
     let title: String
+    /// Lines the title may take; a question or an action reads in full.
+    var lines: Int? = 3
     @ViewBuilder var leading: Leading
 
+    init(title: String, lines: Int? = 3, @ViewBuilder leading: () -> Leading) {
+        self.title = title
+        self.lines = lines
+        self.leading = leading()
+    }
+
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: lines == 3 ? .center : .firstTextBaseline, spacing: 12) {
             leading
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 7 }
             Text(title)
-                .font(Theme.sans(22, weight: .semibold, relativeTo: .title2))
+                .font(Theme.sans(lines == 3 ? 22 : 19, weight: .semibold, relativeTo: .title2))
                 .foregroundStyle(Theme.text)
-                .lineLimit(3)
+                .lineLimit(lines)
+                .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 0)
         }
@@ -102,8 +112,9 @@ extension BotPageHeader where Leading == BotAvatar {
 
 extension BotPageHeader where Leading == BotHeaderGlyph {
     /// An item's page: its SF Symbol on a tinted tile.
-    init(title: String, symbol: String, tone: BotTone = .muted) {
+    init(title: String, symbol: String, tone: BotTone = .muted, lines: Int? = 3) {
         self.title = title
+        self.lines = lines
         self.leading = BotHeaderGlyph(symbol: symbol, tint: tone == .muted ? Theme.textMuted : tone.color)
     }
 }

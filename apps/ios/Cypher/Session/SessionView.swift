@@ -583,6 +583,9 @@ struct SessionView: View {
                 botId: board.botId, initial: board.page, openChat: { openChat($0) }, close: hideInspector
             )
             .id(board.id)
+            .background(Theme.surface.ignoresSafeArea())
+            // As wide as the Files inspector: the board's rows need it.
+            .inspectorColumnWidth(min: 320, ideal: SessionInspector.idealWidth, max: 560)
             .environment(\.openBotChat, { openChat($0) })
             .environment(\.openBotRoute, { openRoute($0) })
             detailInspector.present(owner: chatId, content: AnyView(panel), onHide: hideInspector)
@@ -785,6 +788,10 @@ struct SessionView: View {
     private var subtitle: String? {
         guard let chat else { return nil }
         if chat.isScratch { return "Quick chat @ \(model.deviceName(chat.deviceId))" }
+        // A workspace's own thread runs in its folder: name the workspace.
+        if let owner = WorkspaceChatText.threadOwner(chat, in: model.data) {
+            return "\(owner) · \(model.deviceName(chat.deviceId))"
+        }
         let space =
             model.space(for: chat)?.displayName
             ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
@@ -989,7 +996,8 @@ struct SessionView: View {
             model.demo != nil || (model.connected && model.deviceOnline(chat.deviceId) && store.connected)
         let connection = SessionConnectionPhase.resolve(
             transportReady: transportReady,
-            needsCatalog: chat.config?.harness == "pi" && store.openInputRequest == nil,
+            // A read-only thread has no composer to pick a model in.
+            needsCatalog: chat.config?.harness == "pi" && store.openInputRequest == nil && !chat.isReadOnlyThread,
             catalogMatches: catalog.deviceId == chat.deviceId,
             catalogLoading: catalog.loading,
             catalogError: catalog.error,

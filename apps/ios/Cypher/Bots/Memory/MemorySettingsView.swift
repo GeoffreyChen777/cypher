@@ -50,7 +50,7 @@ struct MemorySettingsView: View {
                         .groupedRowStyle()
                     }
                 } header: {
-                    Text("Projects")
+                    ListSectionHeader(title: "Projects")
                 } footer: {
                     Text("Each read by the sessions in its project.")
                 }
@@ -63,7 +63,7 @@ struct MemorySettingsView: View {
                             .groupedRowStyle()
                         }
                     } header: {
-                        Text("Workspaces")
+                        ListSectionHeader(title: "Workspaces")
                     } footer: {
                         Text("Each kept and read by its workspace.")
                     }

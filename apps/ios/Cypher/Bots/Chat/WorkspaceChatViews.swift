@@ -193,6 +193,7 @@ struct ShortcutBar: View {
 /// A new workspace's start screen: who it is, what it can see, and
 /// questions to start with (a tap asks one).
 struct WorkspaceStartView: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
     let bot: Bot
     let device: String
     let access: String
@@ -221,7 +222,10 @@ struct WorkspaceStartView: View {
                     .padding(.top, 8)
                     .accessibilityIdentifier("workspace-access")
                 if WorkspaceChatText.hasAccess(bot) {
-                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                    // Two columns, one at the largest text sizes.
+                    let columns = Array(
+                        repeating: GridItem(.flexible(), spacing: 8), count: typeSize.isAccessibilitySize ? 1 : 2)
+                    LazyVGrid(columns: columns, spacing: 8) {
                         ForEach(suggestions, id: \.text) { suggestion in
                             Button {
                                 ask(suggestion.text)
@@ -263,7 +267,9 @@ struct WorkspaceStartView: View {
             .frame(maxWidth: .infinity)
         }
         .scrollBounceBehavior(.basedOnSize)
-        .defaultScrollAnchor(.center)
+        // Centred while it fits; from its top when large text overflows.
+        .defaultScrollAnchor(.center, for: .alignment)
+        .defaultScrollAnchor(.top, for: .initialOffset)
         .accessibilityIdentifier("workspace-start")
     }
 }
