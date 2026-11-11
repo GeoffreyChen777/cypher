@@ -231,18 +231,29 @@ pub enum DeviceUpdate {
 }
 
 /// A restarting device is done once its registry row reports the target
-/// version; after [`RESTART_TIMEOUT`] without it, the row says so. Pure.
+/// version; after [`RESTART_TIMEOUT`] without it, the row says so.
 pub const RESTART_TIMEOUT: Duration = Duration::from_secs(240);
 
-pub fn restart_resolved(
+/// Follow a device's update phase from the version its registry row reports.
+/// The page checks the fleet once, so a device that updated itself afterwards
+/// (Linux auto-update, `cypher update`, another desktop) must not keep
+/// offering the release it already runs. Pure.
+pub fn registry_resolved(
     phase: &DeviceUpdate,
     device_version: Option<&str>,
     now: Instant,
 ) -> Option<DeviceUpdate> {
-    let DeviceUpdate::Restarting { target, since } = phase else {
-        return None;
+    let reached = |target: &str| {
+        device_version.is_some_and(|v| v == target || cypher_update::version_newer(v, target))
     };
-    if device_version == Some(target.as_str()) {
+    let (target, since) = match phase {
+        DeviceUpdate::Available(latest) => {
+            return reached(latest).then_some(DeviceUpdate::UpToDate);
+        }
+        DeviceUpdate::Restarting { target, since } => (target, since),
+        _ => return None,
+    };
+    if reached(target) {
         return Some(DeviceUpdate::UpToDate);
     }
     (now.duration_since(*since) >= RESTART_TIMEOUT).then(|| DeviceUpdate::Failed {
@@ -300,7 +311,7 @@ pub struct DevicesPage {
 impl DevicesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, state, cx| {
-            this.reconcile_restarts(&state, cx);
+            this.reconcile_registry(&state, cx);
             cx.notify()
         });
         let pairing =
@@ -426,9 +437,9 @@ impl DevicesPage {
 
     // ---- fleet updates ----
 
-    /// Restarting rows resolve from the registry: the device's engine writes
-    /// its version on boot.
-    fn reconcile_restarts(&mut self, state: &Entity<AppState>, cx: &App) {
+    /// Available and Restarting rows resolve from the registry: the device's
+    /// engine writes its version on boot.
+    fn reconcile_registry(&mut self, state: &Entity<AppState>, cx: &App) {
         let now = Instant::now();
         let versions: HashMap<String, Option<String>> = state
             .read(cx)
@@ -438,7 +449,7 @@ impl DevicesPage {
             .collect();
         for (id, phase) in self.updates.iter_mut() {
             if let Some(next) =
-                restart_resolved(phase, versions.get(id).and_then(|v| v.as_deref()), now)
+                registry_resolved(phase, versions.get(id).and_then(|v| v.as_deref()), now)
             {
                 *phase = next;
             }
@@ -1604,18 +1615,22 @@ mod tests {
             target: "0.3.17".into(),
             since,
         };
-        assert_eq!(restart_resolved(&phase, Some("0.3.16"), since), None);
+        assert_eq!(registry_resolved(&phase, Some("0.3.16"), since), None);
         assert_eq!(
-            restart_resolved(&phase, Some("0.3.17"), since),
+            registry_resolved(&phase, Some("0.3.17"), since),
+            Some(DeviceUpdate::UpToDate)
+        );
+        assert_eq!(
+            registry_resolved(&phase, Some("0.3.18"), since),
             Some(DeviceUpdate::UpToDate)
         );
         let late = since + RESTART_TIMEOUT;
         assert!(matches!(
-            restart_resolved(&phase, Some("0.3.16"), late),
+            registry_resolved(&phase, Some("0.3.16"), late),
             Some(DeviceUpdate::Failed { busy: false, .. })
         ));
         assert_eq!(
-            restart_resolved(&DeviceUpdate::UpToDate, Some("0.3.17"), late),
+            registry_resolved(&DeviceUpdate::UpToDate, Some("0.3.17"), late),
             None
         );
         assert_eq!(
@@ -1626,6 +1641,22 @@ mod tests {
             "busy: this device has active runs or open terminals"
         ));
         assert!(!is_busy_error("Check timed out"));
+    }
+
+    #[test]
+    fn available_clears_once_the_device_reports_the_release() {
+        let now = Instant::now();
+        let phase = DeviceUpdate::Available("0.4.1".into());
+        assert_eq!(registry_resolved(&phase, Some("0.4.0"), now), None);
+        assert_eq!(registry_resolved(&phase, None, now), None);
+        assert_eq!(
+            registry_resolved(&phase, Some("0.4.1"), now),
+            Some(DeviceUpdate::UpToDate)
+        );
+        assert_eq!(
+            registry_resolved(&phase, Some("0.4.2"), now),
+            Some(DeviceUpdate::UpToDate)
+        );
     }
 
     #[test]
