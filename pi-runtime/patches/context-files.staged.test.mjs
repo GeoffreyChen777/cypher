@@ -62,11 +62,11 @@ for (const [entry, loadProjectContextFiles] of Object.entries(loaders)) {
 
 test("the patched bridge excludes CLAUDE.local.md and still loads", async () => {
   const entry = join(modules, "pi-claude-bridge", "src", "index.ts");
-  const source = readFileSync(entry, "utf-8");
-  const excludes = source.match(/^const CLAUDE_MD_EXCLUDES = .*$/m)?.[0];
+  const source = readFileSync(join(modules, "pi-claude-bridge", "src", "cc-child.ts"), "utf-8");
+  const excludes = source.match(/^export const CLAUDE_MD_EXCLUDES = .*$/m)?.[0];
   assert.equal(
     excludes,
-    `const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/CLAUDE.local.md", "**/AGENTS.md", "**/.claude/rules/**"];`,
+    `export const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/CLAUDE.local.md", "**/AGENTS.md", "**/.claude/rules/**"];`,
   );
   const piRequire = createRequire(join(pi, "package.json"));
   const { createJiti } = await import(pathToFileURL(piRequire.resolve("jiti")).href);

@@ -35,7 +35,7 @@ const packageDir = packageDirArg("pi-codex-tools-permissions.mjs <pi-codex-tools
 
 const MARKER = "CYPHER-RUNTIME-PATCH: codex-tools-permissions";
 const NAME = "pi-codex-tools";
-requireVersion(packageDir, { name: NAME, expected: "0.4.0", script: "pi-codex-tools-permissions.mjs" });
+requireVersion(packageDir, { name: NAME, expected: "0.4.1", script: "pi-codex-tools-permissions.mjs" });
 
 const patchedOps = patchFile(packageDir, "src/apply-patch.ts", {
   name: NAME,

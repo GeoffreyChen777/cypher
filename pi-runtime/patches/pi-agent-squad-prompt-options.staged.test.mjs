@@ -55,11 +55,12 @@ async function agentStart({ order, orchestrate }) {
   const entries = orchestrate === undefined
     ? []
     : [{ type: "custom", customType: "orchestrator-mode", data: { enabled: orchestrate } }];
-  const runner = new pi.ExtensionRunner(loaded.extensions, runtime, cwd, { getEntries: () => entries }, undefined);
+  const sessionManager = { getEntries: () => entries, getSessionId: () => "prompt-options" };
+  const runner = new pi.ExtensionRunner(loaded.extensions, runtime, cwd, sessionManager, undefined);
   const errors = [];
   runner.onError((error) => errors.push(error));
 
-  const result = await runner.emitBeforeAgentStart("hello", undefined, {
+  const result = await runner.emitBeforeAgentStart({ messageType: "user", prompt: "hello" }, {
     cwd,
     selectedTools: ["read"],
     contextFiles: [{ path: join(cwd, "AGENTS.md"), content: "project rules" }],
@@ -72,8 +73,8 @@ async function agentStart({ order, orchestrate }) {
       rendered = event.systemPrompt;
     });
   }, cwd, undefined, runtime);
-  await new pi.ExtensionRunner([probe], runtime, cwd, { getEntries: () => entries }, undefined)
-    .emitBeforeAgentStart("hello", undefined, options);
+  await new pi.ExtensionRunner([probe], runtime, cwd, sessionManager, undefined)
+    .emitBeforeAgentStart({ messageType: "user", prompt: "hello" }, options);
   runner.getSystemPromptFn = () => rendered;
   await runner.emit({ type: "agent_start" });
   assert.deepEqual(errors, []);
@@ -118,7 +119,7 @@ test("after an earlier extension forces the prompt, the section still lands in i
   }, cwd, undefined, runtime);
   const loaded = await pi.loadExtensions([SQUAD], cwd, undefined, runtime);
   const runner = new pi.ExtensionRunner([forcer, ...loaded.extensions], runtime, cwd, { getEntries: () => [] }, undefined);
-  const { systemPromptOptions } = await runner.emitBeforeAgentStart("hello", undefined, { cwd });
+  const { systemPromptOptions } = await runner.emitBeforeAgentStart({ messageType: "user", prompt: "hello" }, { cwd });
   assert.ok(systemPromptOptions.forceSystemPrompt.startsWith("forced by an earlier extension\n\n"));
   assert.equal(count(systemPromptOptions.forceSystemPrompt, GUARD), 1);
 });
@@ -129,7 +130,7 @@ test("an --append-system-prompt orchestrator is not appended twice", async () =>
   const runtime = pi.createExtensionRuntime();
   const loaded = await pi.loadExtensions([SQUAD], cwd, undefined, runtime);
   const runner = new pi.ExtensionRunner(loaded.extensions, runtime, cwd, { getEntries: () => [] }, undefined);
-  const { systemPromptOptions } = await runner.emitBeforeAgentStart("hello", undefined, {
+  const { systemPromptOptions } = await runner.emitBeforeAgentStart({ messageType: "user", prompt: "hello" }, {
     cwd,
     appendSystemPrompt: `${ORCHESTRATOR}\n\nfrom the command line`,
   });

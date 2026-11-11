@@ -67,7 +67,7 @@ file per directory, `AGENTS.md` first), after the Runtime's own
 Claude, pi-claude-bridge tells Claude Code to load none of its own memory files
 (`CLAUDE.md`, `AGENTS.md`, `.claude/rules`, and `CLAUDE.local.md` via
 `patches/pi-claude-bridge-context-files.mjs`) and the provider path forwards
-Pi's list, so the same rule holds there; AskClaude receives no context files.
+Pi's list, so the same rule holds there.
 Only Claude Code's managed policy memory, which cannot be excluded, still
 loads.
 
@@ -104,9 +104,9 @@ and files left by Runtimes before this change stay.
 Claude Code stores a session's system prompt in its file on the first query
 and keeps it on every resume, whatever prompt it is given. So when Pi's prompt
 changes mid-chat (`/explain` or `/orchestrate on` in a running chat), the
-bridge rebuilds the session from Pi's history instead of resuming it, and
-Claude reads the new prompt; that turn runs without the prompt cache
-(`patches/pi-claude-bridge-prompt-refresh.mjs`).
+bridge (since 0.10) rebuilds the session from Pi's history instead of
+resuming it, and Claude reads the new prompt; that turn runs without the
+prompt cache.
 
 The conversation's Claude Code session cannot search: `pi-claude-bridge`
 runs it without Claude Code's builtin tools, and `pi-web-search` cannot call a

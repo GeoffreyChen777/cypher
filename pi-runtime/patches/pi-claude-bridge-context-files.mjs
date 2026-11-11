@@ -10,9 +10,8 @@
 // still loaded every CLAUDE.local.md from the cwd up to `/` — exactly the
 // ancestor walk Runtime removed from Pi.
 //
-// Adds `**/CLAUDE.local.md` to the excludes, which both the provider path and
-// AskClaude pass. Managed/policy memory stays unexcludable by Claude Code's
-// design.
+// Adds `**/CLAUDE.local.md` to the excludes the provider path passes. Managed/
+// policy memory stays unexcludable by Claude Code's design.
 //
 // Lifetime
 // --------
@@ -31,20 +30,20 @@ import { packageDirArg, patchFile, requireVersion } from "./lib/apply-anchors.mj
 const packageDir = packageDirArg("pi-claude-bridge-context-files.mjs <pi-claude-bridge-package-dir>");
 
 const MARKER = "CYPHER-RUNTIME-PATCH: context-files";
-const EXPECTED_VERSION = "0.9.2";
+const EXPECTED_VERSION = "0.12.0";
 requireVersion(packageDir, { name: "pi-claude-bridge", expected: EXPECTED_VERSION, script: "pi-claude-bridge-context-files.mjs" });
 
 const EDITS = [
   {
     label: "CLAUDE_MD_EXCLUDES",
-    from: `const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/AGENTS.md", "**/.claude/rules/**"];`,
+    from: `export const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/AGENTS.md", "**/.claude/rules/**"];`,
     to: `// ${MARKER}: Local memory too, which Claude Code also reads from every ancestor.
-const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/CLAUDE.local.md", "**/AGENTS.md", "**/.claude/rules/**"];`,
+export const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/CLAUDE.local.md", "**/AGENTS.md", "**/.claude/rules/**"];`,
   },
 ];
 
-if (!patchFile(packageDir, "src/index.ts", { name: "pi-claude-bridge", marker: MARKER, edits: EDITS })) {
+if (!patchFile(packageDir, "src/cc-child.ts", { name: "pi-claude-bridge", marker: MARKER, edits: EDITS })) {
   console.log("pi-claude-bridge patch: context-file excludes already applied");
   process.exit(0);
 }
-console.log("pi-claude-bridge patch: Claude Code excludes CLAUDE.local.md (index.ts)");
+console.log("pi-claude-bridge patch: Claude Code excludes CLAUDE.local.md (cc-child.ts)");

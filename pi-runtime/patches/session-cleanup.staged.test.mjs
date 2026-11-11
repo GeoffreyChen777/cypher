@@ -34,8 +34,8 @@ after(() => {
 });
 
 // A bridge process. `write` mirrors a three-message pi history onto a Claude
-// Code session (the REBUILD path of a first Claude turn after a restart) and
-// prints its file; `load` only loads the extension through Pi's loader, as
+// Code session (the REBUILD path of a first Claude turn after a restart),
+// commits it as the turn's query would, and prints its file; `load` only loads the extension through Pi's loader, as
 // every pi process does at startup. `hold` keeps the process alive until killed.
 const CHILD = `
 import { createRequire } from "node:module";
@@ -58,6 +58,9 @@ if (mode === "load") {
     { role: "user", content: "second", timestamp: now },
   ];
   const { sessionId } = bridge.__test.syncSharedSession(messages, cwd, undefined, "claude-sonnet-5", "pi-session");
+  // The turn's query completed: the bridge commits the mirror to this session.
+  bridge.__test.setSharedSession("pi-session", { ccSessionId: sessionId, cwd, model: "claude-sonnet-5", promptDigest: "",
+    digests: [], uuids: [], cuttable: [], dirtyTail: false });
   const { getSessionPath } = await import(${JSON.stringify(pathToFileURL(join(modules, "cc-session-io", "dist", "index.js")).href)});
   console.log(JSON.stringify({ sessionId, path: getSessionPath(sessionId, cwd, process.env.CLAUDE_CONFIG_DIR), pid: process.pid }));
 }

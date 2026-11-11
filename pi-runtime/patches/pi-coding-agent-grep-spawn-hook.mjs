@@ -33,7 +33,7 @@ const packageDir = packageDirArg("pi-coding-agent-grep-spawn-hook.mjs <pi-coding
 
 const MARKER = "CYPHER-RUNTIME-PATCH: grep-spawn-hook";
 const NAME = "pi-coding-agent";
-requireVersion(packageDir, { name: NAME, expected: "1.1.0", script: "pi-coding-agent-grep-spawn-hook.mjs" });
+requireVersion(packageDir, { name: NAME, expected: "1.5.2", script: "pi-coding-agent-grep-spawn-hook.mjs" });
 
 const patchedJs = patchFile(packageDir, "dist/core/tools/grep.js", {
   name: NAME,
@@ -41,12 +41,12 @@ const patchedJs = patchFile(packageDir, "dist/core/tools/grep.js", {
   edits: [
     {
       label: "ripgrep spawn",
-      from: `                        const child = spawn(rgPath, args, { stdio: ["ignore", "pipe", "pipe"] });`,
+      from: `                        const child = spawn(rgPath, args, {`,
       to: `                        // ${MARKER}: an extension may wrap the ripgrep process.
                         const spawnTarget = typeof options?.spawnHook === "function"
                             ? options.spawnHook({ command: rgPath, args })
                             : { command: rgPath, args };
-                        const child = spawn(spawnTarget.command, spawnTarget.args, { stdio: ["ignore", "pipe", "pipe"] });`,
+                        const child = spawn(spawnTarget.command, spawnTarget.args, {`,
     },
   ],
 });

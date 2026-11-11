@@ -30,7 +30,7 @@ import { packageDirArg, patchFile, requireVersion } from "./lib/apply-anchors.mj
 const packageDir = packageDirArg("pi-claude-bridge-response-model.mjs <pi-claude-bridge-package-dir>");
 
 const MARKER = "CYPHER-RUNTIME-PATCH: response-model";
-const EXPECTED_VERSION = "0.9.2";
+const EXPECTED_VERSION = "0.12.0";
 requireVersion(packageDir, { name: "pi-claude-bridge", expected: EXPECTED_VERSION, script: "pi-claude-bridge-response-model.mjs" });
 
 const EDITS = [
@@ -52,10 +52,10 @@ function noteResponseModel(output: AssistantMessage, served: unknown, model: Mod
   {
     label: "message_start",
     from: `		c.turnStreamBlockStart = c.turnBlocks.length;
-		if (event.message?.usage) recordUsage(c.turnOutput, event.message.usage, model);
+		if (event.message?.usage) recordUsage(c.turnOutput, event.message.usage, model, c.piSessionId);
 		return;`,
     to: `		c.turnStreamBlockStart = c.turnBlocks.length;
-		if (event.message?.usage) recordUsage(c.turnOutput, event.message.usage, model);
+		if (event.message?.usage) recordUsage(c.turnOutput, event.message.usage, model, c.piSessionId);
 		// ${MARKER}
 		noteResponseModel(c.turnOutput, event.message?.model, model);
 		return;`,

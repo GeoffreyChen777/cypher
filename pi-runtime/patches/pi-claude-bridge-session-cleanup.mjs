@@ -3,12 +3,11 @@
 // Why this exists
 // ---------------
 // pi-claude-bridge mirrors each pi session onto a Claude Code session JSONL in
-// ~/.claude/projects/<cwd>/, tracked only in memory. A new pi process starts
-// with no mirror, so its first Claude turn rebuilds the conversation under a
-// fresh UUID and never touches the previous file. Every pi restart — idle
-// reaping, Restart from here, context recovery, an engine restart — left one
-// dead JSONL (and its companion directory) beside the user's own Claude Code
-// sessions, forever.
+// ~/.claude/projects/<cwd>/. It never deletes one: every edit, rewind or
+// prompt change rotates the mirror to a fresh file, and the pointer it keeps
+// per pi session (`<agentDir>/claude-bridge/sessions/`) is never removed with
+// the chat. Each left a dead JSONL (and its companion directory) beside the
+// user's own Claude Code sessions, forever.
 //
 // The bridge now records every session it writes or Claude Code reports to it
 // (one manifest per process, `<agentDir>/claude-bridge-sessions/<pid>.json`,
@@ -36,37 +35,41 @@ import { packageDirArg, patchFile, requireVersion } from "./lib/apply-anchors.mj
 const packageDir = packageDirArg("pi-claude-bridge-session-cleanup.mjs <pi-claude-bridge-package-dir>");
 
 const MARKER = "CYPHER-RUNTIME-PATCH: session-cleanup";
-const EXPECTED_VERSION = "0.9.2";
+const EXPECTED_VERSION = "0.12.0";
 requireVersion(packageDir, { name: "pi-claude-bridge", expected: EXPECTED_VERSION, script: "pi-claude-bridge-session-cleanup.mjs" });
 
 const EDITS = [
   {
     label: "imports",
-    from: `import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
-import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";`,
-    to: `import { createSession, deleteSession, getSessionPath, openSession, repairToolPairing } from "cc-session-io";
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
+    from: `import { appendFileSync, mkdirSync, readFileSync, realpathSync, statSync } from "fs";`,
+    to: `import { appendFileSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";`,
   },
   {
     label: "setSessionStateFor",
-    from: `function setSessionStateFor(piSessionId: string | null | undefined, state: SessionState | null): void {
-	if (state === null) sharedSessions.delete(sessionKey(piSessionId));
-	else sharedSessions.set(sessionKey(piSessionId), state);
+    from: `function setSessionStateFor(piSessionId: string, state: SessionState | null): void {
+	knownSessionIds.add(piSessionId);
+	loadedSessionStates.add(piSessionId);
+	if (state === null) sharedSessions.delete(piSessionId);
+	else sharedSessions.set(piSessionId, state);
 }`,
-    to: `function setSessionStateFor(piSessionId: string | null | undefined, state: SessionState | null): void {
-	if (state === null) sharedSessions.delete(sessionKey(piSessionId));
+    to: `function setSessionStateFor(piSessionId: string, state: SessionState | null): void {
+	knownSessionIds.add(piSessionId);
+	loadedSessionStates.add(piSessionId);
+	if (state === null) sharedSessions.delete(piSessionId);
 	else {
-		ownSession(state.sessionId, state.cwd);
-		sharedSessions.set(sessionKey(piSessionId), state);
+		ownSession(state.ccSessionId, state.cwd);
+		sharedSessions.set(piSessionId, state);
 	}
 }
 
 // ${MARKER}
-// Claude Code session files this process wrote or resumed. No later process
-// resumes one — its mirrors start empty, so its first turn rebuilds under a
-// fresh UUID — so they are deleted when this process exits. The manifest
-// lists them for the next bridge to sweep when this one dies before it can.
+// Claude Code session files this process wrote or resumed, deleted when this
+// process exits. The bridge also persists a pointer per pi session so a later
+// process can resume the file; with the file gone it imports pi's history
+// instead ("missing-transcript"), as it did before pointers existed. The
+// manifest lists them for the next bridge to sweep when this one dies before
+// it can.
 // One registry per process (Symbol.for), however many module instances load.
 interface OwnedSessions {
 	paths: Set<string>; // resolved JSONL paths
@@ -173,29 +176,27 @@ function sweepAbandonedSessions(): void {
   },
   {
     label: "path import",
-    from: `import { dirname, join } from "path";`,
+    from: `import { dirname } from "path";`,
     to: `import { basename, dirname, join } from "path";`,
   },
   {
     label: "own Claude Code's own session id",
-    from: `				if ((message as any).subtype === "init" && (message as any).session_id) {
-					capturedSessionId = (message as any).session_id;
-				}`,
-    to: `				if ((message as any).subtype === "init" && (message as any).session_id) {
-					capturedSessionId = (message as any).session_id;
-					// A clean start's session is Claude Code's; it reaches the mirror only
-					// when the query completes, so an aborted first turn would leak it.
-					if (typeof (message as any).cwd === "string") ownSession(capturedSessionId!, (message as any).cwd);
-				}`,
+    from: `		if (message.type === "system" && message.subtype === "init") {
+			capturedSessionId = message.session_id;`,
+    to: `		if (message.type === "system" && message.subtype === "init") {
+			capturedSessionId = message.session_id;
+			// ${MARKER}: a clean start's session is Claude Code's; it reaches the
+			// mirror only when the query completes, so an aborted first turn would leak it.
+			if (capturedSessionId && typeof message.cwd === "string") ownSession(capturedSessionId, message.cwd);`,
   },
   {
     label: "sweep at load",
     from: `export default function (pi: ExtensionAPI) {
-	// Disable non-essential Claude Code traffic`,
+	const config = loadConfig();`,
     to: `export default function (pi: ExtensionAPI) {
 	sweepAbandonedSessions();
 
-	// Disable non-essential Claude Code traffic`,
+	const config = loadConfig();`,
   },
 ];
 

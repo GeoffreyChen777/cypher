@@ -30,10 +30,12 @@ import { packageDirArg, patchFile, requireVersion } from "./lib/apply-anchors.mj
 const packageDir = packageDirArg("pi-claude-bridge-web-search.mjs <pi-claude-bridge-package-dir>");
 
 const MARKER = "CYPHER-RUNTIME-PATCH: web-search";
-const EXPECTED_VERSION = "0.9.2";
+const EXPECTED_VERSION = "0.12.0";
 requireVersion(packageDir, { name: "pi-claude-bridge", expected: EXPECTED_VERSION, script: "pi-claude-bridge-web-search.mjs" });
 
-const SEARCH = String.raw`// ${MARKER}: Claude Code's own WebSearch as a one-off query, for
+const SEARCH = String.raw`let queryImpl: typeof query = query;
+
+// ${MARKER}: Claude Code's own WebSearch as a one-off query, for
 // pi-web-search. Only WebSearch is enabled; nothing from ~/.claude is loaded
 // and the session is not persisted.
 type ClaudeCodeWebSearchLink = { title: string; url: string };
@@ -66,15 +68,15 @@ async function runClaudeCodeWebSearch(
 	const { signal, onSearch } = options;
 	if (signal?.aborted) throw new Error("Operation aborted");
 	const cwd = process.cwd();
-	const claudeExecutable = loadConfig(cwd).provider?.pathToClaudeCodeExecutable;
+	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 	const cliModel = claudeCodeModelId(model, longContextSettings);
 	debug("web search: spawn model=" + cliModel + " promptLen=" + prompt.length);
 
-	const sdkQuery = query({
+	const sdkQuery = queryImpl({
 		prompt,
 		options: {
 			cwd,
-			env: { ...process.env, ...CC_CHILD_ENV },
+			env: ccChildEnv(),
 			settings: { autoMemoryEnabled: false },
 			tools: ["WebSearch"],
 			permissionMode: "bypassPermissions",
@@ -149,13 +151,12 @@ async function runClaudeCodeWebSearch(
 }
 
 (globalThis as Record<symbol, unknown>)[CLAUDE_CODE_WEB_SEARCH_KEY] = runClaudeCodeWebSearch;
-
-function reinjectPriorCompactionFileOps(`;
+`;
 
 const EDITS = [
   {
     label: "runClaudeCodeWebSearch",
-    from: "function reinjectPriorCompactionFileOps(",
+    from: "let queryImpl: typeof query = query;\n",
     to: SEARCH,
   },
 ];
