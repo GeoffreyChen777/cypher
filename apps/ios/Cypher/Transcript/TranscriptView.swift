@@ -71,6 +71,8 @@ struct TranscriptView: View {
     /// How near the top, in viewports, the page above is read.
     static let earlierPrefetchViewports: CGFloat = 2
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// A workspace chat's held memory writes, by tool call: drawn as cards.
+    @Environment(\.transcriptMemoryCards) private var memoryCards
 
     var body: some View {
         // The parse cache lives on the store (one per session, prewarmed
@@ -396,10 +398,6 @@ struct TranscriptView: View {
                 }
             }
             .padding(.trailing, 16)
-            // 12pt above the COMPOSER, not the safe-area edge: the edge
-            // now sits atop the 24pt status-strip band (SessionView's
-            // inset), so dip into it — the strip never hit-tests.
-            .padding(.bottom, -12)
         }
         .onDisappear {
             hydrationTask?.cancel()
@@ -499,7 +497,7 @@ struct TranscriptView: View {
     private func transcriptRows() -> [TranscriptRow] {
         store.transcriptCache.rows(
             revision: store.revision, entries: store.entries,
-            pendingSends: store.pendingSends, togglePins: togglePins)
+            pendingSends: store.pendingSends, togglePins: togglePins, memoryCards: memoryCards)
     }
 
     /// Index of the first shown row: the first of `shownFrom`'s entry, or 0
@@ -902,6 +900,15 @@ struct TranscriptView: View {
                         folds[row.id] = !(folds[row.id] ?? true)
                     }
                 }
+
+            case .botPlan(let callId, let resolved):
+                BotPlanCard(callId: callId, chatId: chatId, resolved: resolved)
+
+            case .memoryWrite(let callId):
+                MemoryWriteCard(callId: callId)
+
+            case .postHeader(let from):
+                PostAttribution(from: from)
 
             case .thought(_, let live, let preview):
                 let open = TranscriptRowBuilder.isOpen(row, pins: togglePins)

@@ -11,6 +11,8 @@ final class TranscriptBuilderCache {
     private var parsers: [String: IncrementalMarkdownParser] = [:]
     private var completed: [String: CompletedParse] = [:]
     private var cachedRevision: UInt64?
+    /// The memory cards `builtRows` was built with.
+    private var cachedCards: Set<String> = []
     private var builtRows: [TranscriptRow] = []
     /// The toggle pins `cachedRows` was folded for; nil forces a refold.
     private var foldedFor: [String: Bool]?
@@ -30,13 +32,15 @@ final class TranscriptBuilderCache {
         revision: UInt64,
         entries: [MessageEntry],
         pendingSends: [PendingSend],
-        togglePins: [String: Bool]
+        togglePins: [String: Bool],
+        memoryCards: Set<String> = []
     ) -> [TranscriptRow] {
-        if cachedRevision != revision {
+        if cachedRevision != revision || cachedCards != memoryCards {
             builtRows = TranscriptRowBuilder.rows(
                 entries: entries, pendingSends: pendingSends,
-                parsers: &parsers, completed: &completed)
+                parsers: &parsers, completed: &completed, memoryCards: memoryCards)
             cachedRevision = revision
+            cachedCards = memoryCards
             foldedFor = nil
         }
         if foldedFor == togglePins { return cachedRows }
@@ -87,7 +91,7 @@ final class TranscriptBuilderCache {
                 let partId: String
                 let text: String
                 switch part {
-                case .text(let id, let body, _), .reasoning(let id, let body):
+                case .text(let id, let body, _), .reasoning(let id, let body), .post(let id, let body, _):
                     (partId, text) = (id, body)
                 default:
                     continue

@@ -96,6 +96,8 @@ enum SessionReferences {
                     // Hidden reasoning stays out of a reference, as on the
                     // desktop (side_chats.rs `serialize_context_entry`).
                     continue
+                case .post(_, let text, _):
+                    if !isBlank(text) { lines.append(text) }
                 }
             }
             return ReferenceEntry(id: entry.id, role: entry.role, lines: lines)

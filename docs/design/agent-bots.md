@@ -1,11 +1,12 @@
 # Agent bots
 
 Status: **P0–P4 built, with Review mode, the outgoing scrub and *Coordinate: steer*
-from P5, and the whole Workspaces (§13.1).** A bot reads its projects (P0, P1), works in
+from P5, the whole Workspaces (§13.1) and the iPhone and iPad app's (§13.2).** A bot reads its projects (P0, P1), works in
 them directly, plans work that runs in orchestration threads and worker sessions on any
 owner device (P2), keeps a memory ([memory.md](memory.md)) and runs routines (P3),
 and answers other users' bots by invite (P4). Not built: event triggers for routines,
-groups (§11.7), the iPhone surfaces and end-to-end encrypted exchanges (P6). Where the
+groups (§11.7), push notifications for what needs the owner, and end-to-end encrypted
+exchanges (P6). Where the
 built code differs from the design below, the section says so.
 
 **Naming.** Users see this feature as **Workspaces**: each bot is a *workspace* ("New
@@ -958,10 +959,11 @@ Built:
   bot's late answer) over the text rendered like any answer.
 - **Worker sessions:** a quiet "by <bot>" on their sidebar row and tab in Projects mode.
 
+- **iPhone and iPad:** the whole Workspaces surface (§13.2).
+
 Planned:
 
-- **iPhone:** the bot list, the bot chat, plan approvals and reviews, driven by push
-  notifications (P6).
+- **Push notifications** for plans, approvals, asking sessions and reviews (P5/P6).
 
 ### 13.1 Workspaces
 
@@ -1094,6 +1096,44 @@ As built, beyond the table:
   connection. No card carries a `+`.
 - **Signed out**, the Connections card says "Sign in to connect"; records stay visible.
 
+### 13.2 iPhone and iPad
+
+The phone has no engine: it reads every bot record from its replica of the registry
+(the same rows the desktop watches) and is a remote control for the rest, so the iOS
+app has the desktop's whole surface, laid out for a phone.
+
+- **Home** shows the sessions or the workspaces, as the desktop's two modes: a switch
+  at the top left picks the list (kept across launches) and, while the sessions show,
+  carries an amber count of what the workspaces need, like the desktop logo's. A
+  workspace's row has its avatar, name and one status line (what needs you in amber,
+  working, paused, an offline device, else the last message); a row's menu has
+  Settings…, Pause/Resume and Delete…. The list's **+** opens the settings form, which
+  creates the workspace on an online device. On iPad the sidebar heads each list with
+  its title and summary, where the phone's large title sits. Hidden chats
+  (bot-marked threads and memory passes) are never listed among sessions, nor offered
+  by `@` mentions; worker sessions say "by <workspace>".
+- **The workspace** opens on its chat: the session screen with the workspace's avatar
+  and name, its shortcuts as chips above the composer (a `{input}` blank asks first;
+  long press moves or deletes), an amber "N need you" pill in the status row, the
+  quiet off-line ("Atlas is paused" with Resume, "<device> is offline"), and the start
+  screen with suggested questions while the chat is empty. Plan cards, held-memory
+  cards and routine posts draw as on the desktop; bot tool calls read as what they did.
+  Hidden sessions open read-only, under a banner naming the plan, routine or
+  connection they belong to.
+- **The board** replaces the sidebar cards and the detail panel: the toolbar's grid
+  button (badged with the Needs-you count) opens it as a sheet on iPhone and as the
+  inspector beside the chat on iPad. Its overview holds Needs you, Work, Routines,
+  Projects, Connections, Activity and Memory; each item opens a page of its own with
+  the panel's layout (header, facts, lists, a decision bar at the foot).
+- **Memory** is in Home's account menu (the desktop's Settings › Memory) and on the
+  board; a store's page watches it live (`WatchMemory` over the relay).
+- **Writes.** A decision is a registry write of the same owner fields
+  `mutate_bot_record` writes, so it is instant and queued offline; the host acts on it
+  as it does for the desktop. Creating a workspace, settings, routine saves, invites
+  and memory edits go to an online owner device over the device relay (the host first)
+  and say so when none is reachable; deleting a routine or finished work falls back to
+  tombstones when no device answers.
+
 ## 14. RPC
 
 Each method is one constant plus one `SPECS` entry in `cypher_rpc::methods`.
@@ -1139,7 +1179,7 @@ As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is n
 | **P3: memory and routines** (built) | The notebook, since replaced by [Memory](memory.md); the scheduler; routines in the workspace (optionally working directly) or as sessions in a project; their posts in the bot chat; the Routines card; Needs you. Not built: event triggers. |
 | **P4: network** (built) | `BotRoom`, publish, invites, connections, peer threads, `ask_bot`, exchange states, late answers, the Connections card and panels. |
 | **P5: review and control** (built but notifications) | Review mode and the outgoing scrub, reviews in Needs you; *Coordinate: steer* with a per-action approval. Not built: push notifications for reviews, plans and connections. |
-| **P6: groups, iPhone, E2E** | Owner groups, then shared groups; the iOS bot surfaces; end-to-end encrypted exchanges. |
+| **P6: groups, iPhone, E2E** | Owner groups, then shared groups; end-to-end encrypted exchanges. The iOS Workspaces surface is built (§13.2); its push notifications are not. |
 
 P2 comes before the network because a coordinator is useful to a single user on day one,
 while the network pays off once teammates are on board.

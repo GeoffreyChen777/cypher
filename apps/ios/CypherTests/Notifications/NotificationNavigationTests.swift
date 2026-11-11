@@ -266,6 +266,7 @@ private struct ReproStack: View {
                     case .newSession(let id): NewSessionView(spaceId: id, path: $driver.path)
                     case .quickChat(let id):
                         NewSessionView(spaceId: "", path: $driver.path, quickDeviceId: id)
+                    case .bot(let id): BotView(botId: id, path: $driver.path)
                     }
                 }
         }

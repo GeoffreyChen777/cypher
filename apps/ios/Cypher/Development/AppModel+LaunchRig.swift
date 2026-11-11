@@ -55,6 +55,29 @@ extension AppModel {
                 }
             } else if spec.hasPrefix("space:") {
                 launchRoute = .space(String(spec.dropFirst("space:".count)))
+            } else if spec.hasPrefix("bot:") {
+                // A workspace (DemoDataset+BotFixtures.swift: bot-atlas,
+                // bot-scout). With `-sheet board:<page>` its board opens on
+                // that page (`BotPage(launchSpec:botId:)`).
+                let botId = String(spec.dropFirst("bot:".count))
+                launchRoute = .bot(botId)
+                // `-upto <entry id>[#<part index>]` ends its chat at that
+                // entry (or part of it), so an earlier card (a plan that
+                // ended, a decided memory write) shows at the bottom.
+                if let ix = args.firstIndex(of: "-upto"), ix + 1 < args.count, let demo,
+                    let bot = demo.bot(id: botId)
+                {
+                    let spec = args[ix + 1].split(separator: "#").map(String.init)
+                    let store = demo.sessionStore(for: bot.chatId)
+                    var entries = store.fedEntries
+                    if let end = entries.firstIndex(where: { $0.id == spec[0] }) {
+                        entries = Array(entries[...end])
+                        if spec.count > 1, let last = Int(spec[1]), last < entries[end].parts.count {
+                            entries[end].parts = Array(entries[end].parts[...last])
+                        }
+                        store.setEntries(entries)
+                    }
+                }
             }
         }
         if let ix = args.firstIndex(of: "-sheet"), ix + 1 < args.count {

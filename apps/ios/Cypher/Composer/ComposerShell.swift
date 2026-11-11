@@ -46,6 +46,9 @@ struct ComposerShell<Chips: View>: View {
     /// Screenshot rig (-focuscomposer): take keyboard focus shortly after
     /// appearing, so the keyboard-up transcript states can be driven headless.
     var autoFocus = false
+    /// Bumped to take keyboard focus (a draft handed back to keep writing:
+    /// a plan's Edit, a restart's prompt).
+    var focusRequests = 0
     /// The chat's context reading, drawn round the send button; nil draws
     /// nothing (a new session, a side chat, no reading yet).
     var contextGauge: ContextGauge? = nil
@@ -97,6 +100,7 @@ struct ComposerShell<Chips: View>: View {
                 guard !Task.isCancelled else { return }
                 focus.isFocused = true
             }
+            .onChange(of: focusRequests) { focus.isFocused = true }
             .onAppear {
                 guard autoFocus else { return }
                 Task { @MainActor in

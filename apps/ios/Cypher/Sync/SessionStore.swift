@@ -890,6 +890,12 @@ final class SessionStore {
                 resolved: m["resolved"]?.boolValue ?? false)
         case "error":
             return .error(id: id, message: m["message"]?.stringValue ?? "")
+        case "post":
+            // schema.rs: an unreadable source reads as unknown, the text stays.
+            let from = m["from"]
+                .flatMap { try? JSONSerialization.data(withJSONObject: $0.jsonObject) }
+                .flatMap { try? JSONDecoder().decode(BotPost.self, from: $0) }
+            return .post(id: id, text: m["text"]?.stringValue ?? "", from: from ?? .unknown)
         default:
             return nil
         }

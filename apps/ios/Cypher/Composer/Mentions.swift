@@ -428,7 +428,8 @@ enum Mentions {
     }
 
     /// composer.rs `session_candidates`: root sessions of every project and
-    /// device, never children or the current chat; archived ones only once
+    /// device, never children, workspace chats, memory passes or the
+    /// current chat; archived ones only once
     /// something is typed. Unarchived first, then nearest (this project,
     /// this device, elsewhere), then most recent, then title, then id.
     static func sessionCandidates(
@@ -441,7 +442,9 @@ enum Mentions {
             return chat.deviceId == device ? 1 : 2
         }
         let candidates = chats.compactMap { chat -> (Chat, String)? in
-            guard !chat.isChild, chat.id != currentChat, !(chat.archived && needle.isEmpty) else { return nil }
+            guard chat.isListedSession, chat.id != currentChat, !(chat.archived && needle.isEmpty) else {
+                return nil
+            }
             let title = sessionTitle(chat)
             if !needle.isEmpty, !title.lowercased().contains(needle), !chat.id.lowercased().contains(needle) {
                 return nil

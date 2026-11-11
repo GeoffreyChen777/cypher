@@ -452,6 +452,7 @@ struct SelectableTranscriptText: UIViewRepresentable {
     @Environment(\.openWorkspace) private var openWorkspace
     @Environment(\.fileReferenceContext) private var referenceContext
     @Environment(\.fileReferenceSnippet) private var referenceSnippet
+    @Environment(\.openBotChat) private var openSession
 
     func makeUIView(context: Context) -> TranscriptUITextView {
         let storage = NSTextStorage()
@@ -488,6 +489,7 @@ struct SelectableTranscriptText: UIViewRepresentable {
         context.coordinator.actions = actions
         context.coordinator.files = .init(
             open: openWorkspace, context: referenceContext, snippet: referenceSnippet)
+        context.coordinator.openSession = openSession
         context.coordinator.update(view, attributed: attributed, drafts: drafts)
         return view
     }
@@ -497,6 +499,7 @@ struct SelectableTranscriptText: UIViewRepresentable {
         context.coordinator.actions = actions
         context.coordinator.files = .init(
             open: openWorkspace, context: referenceContext, snippet: referenceSnippet)
+        context.coordinator.openSession = openSession
         context.coordinator.update(view, attributed: attributed, drafts: drafts)
     }
 
@@ -524,6 +527,8 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
     var entry: TranscriptEntryContext?
     var actions: TranscriptSelectionActions?
     var files = TranscriptFiles()
+    /// Where a `cypher://session/<id>` link opens its session.
+    var openSession: ((String) -> Void)?
 
     /// What file chips and file links reach: the session's Files sheet.
     struct TranscriptFiles {
@@ -613,6 +618,11 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
     func textView(
         _ textView: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction
     ) -> UIAction? {
+        // A session link opens in-app, never through the system.
+        if case .link(let url) = textItem.content, SessionLink.isSessionLink(url) {
+            guard let id = SessionLink.chatId(url), let openSession else { return nil }
+            return UIAction { _ in openSession(id) }
+        }
         guard let reference = reference(textItem) else { return defaultAction }
         guard let open = files.open else { return nil }
         return UIAction { _ in open(.reference(reference)) }

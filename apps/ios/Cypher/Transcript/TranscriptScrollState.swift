@@ -10,6 +10,11 @@ import SwiftUI
 final class ScrollState {
     /// Flips at the jump threshold; observed by JumpToBottomButton alone.
     var showJump = false
+    /// Something sits at the status row's trailing end (a workspace's "need
+    /// you", the subagents count): the jump button rises clear of the row
+    /// instead of dipping into it. Set by SessionView, which lays out the
+    /// row; observed by JumpToBottomButton alone.
+    var statusRowTrailing = false
     @ObservationIgnored var distanceFromBottom: CGFloat = 0
     @ObservationIgnored var contentHeight: CGFloat = 0
     /// Scroll position in `ScrollPosition.scrollTo(y:)` coordinates (the
@@ -78,6 +83,12 @@ struct JumpToBottomButton: View {
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
         }
+        // 12pt above the COMPOSER, not the safe-area edge: the edge sits
+        // atop the 24pt status-strip band (SessionView's inset), so dip into
+        // it — the strip never hit-tests. Its trailing end can hold
+        // capsules, though: then rise 8pt above the row instead.
+        .padding(.bottom, scroll.statusRowTrailing ? 8 : -12)
         .motionAnimation(Motion.fadeQuick, value: scroll.showJump)
+        .motionAnimation(Motion.fadeQuick, value: scroll.statusRowTrailing)
     }
 }

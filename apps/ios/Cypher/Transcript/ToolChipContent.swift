@@ -32,6 +32,7 @@ extension RenderToolCall {
     var script: String? { isScript ? string("code") : nil }
 
     var chipLabel: String {
+        if let bot = botChipContent { return bot.label }
         if isScript { return "Script" }
         if isToolSearch { return "Find tools" }
         switch tag {
@@ -51,6 +52,7 @@ extension RenderToolCall {
     }
 
     var chipDetail: String {
+        if let bot = botChipContent { return bot.detail }
         if isScript { return script.map(Self.scriptSummary) ?? "" }
         if isToolSearch { return string("query") ?? "" }
         switch tag {
@@ -73,6 +75,7 @@ extension RenderToolCall {
     }
 
     var chipSymbol: String {
+        if let kind = botToolKind { return kind.symbol }
         if isScript { return "chevron.left.forwardslash.chevron.right" }
         if isToolSearch { return "magnifyingglass" }
         switch tag {

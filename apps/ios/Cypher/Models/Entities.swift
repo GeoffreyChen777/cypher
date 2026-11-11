@@ -59,8 +59,25 @@ struct Chat: Identifiable, Hashable {
     var spaceId: String?
     var lastSeenAt: Int64?
     var child: ChildChat? = nil
+    /// Workspace marker (entities.rs `bot`): the workspace's own chat, or one
+    /// of its hidden threads (work, routine, peer) or a project routine's
+    /// session. Never listed as a session.
+    var bot: BotChatMarker? = nil
+    /// A memory consolidation pass's chat: hidden everywhere.
+    var memory: MemoryChatMarker? = nil
 
     var isChild: Bool { child != nil }
+
+    /// entities.rs `is_bot`: any workspace marker.
+    var isBotChat: Bool { bot != nil }
+
+    /// Kept out of every session list, search and picker: workspace chats
+    /// and threads show only in their workspace, memory passes nowhere.
+    /// Opening one by id (a notification, a link) still works.
+    var isHiddenFromSessions: Bool { bot != nil || memory != nil }
+
+    /// Which of its workspace's threads this chat is, when it is one.
+    var botThread: BotThread? { bot?.thread }
 
     /// A quick chat (proto scratch.rs): no project, and the cwd is the
     /// host's `…/cypher-scratch/<chat id>` folder. The folder shape IS the
@@ -296,13 +313,23 @@ enum MessagePart: Hashable, Identifiable {
     /// The model's thinking (doc parts.rs `Reasoning`), stored under the
     /// part's `reasoning` key.
     case reasoning(id: String, text: String)
+    /// A message the host posted into a workspace chat outside any turn
+    /// (doc parts.rs `Post`): a routine's output, with who posted it.
+    case post(id: String, text: String, from: BotPost)
 
     var id: String {
         switch self {
         case .text(let id, _, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _),
-            .reasoning(let id, _):
+            .reasoning(let id, _), .post(let id, _, _):
             return id
         }
+    }
+
+    /// The part as the transcript draws it: a post as plain text, until the
+    /// workspace chat gives it its attribution row.
+    var transcriptShape: MessagePart {
+        if case .post(let id, let text, _) = self { return .text(id: id, text: text) }
+        return self
     }
 }
 
