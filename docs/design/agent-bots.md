@@ -666,6 +666,15 @@ between `<peer-answer>` tags, followed by a reminder that it is another user's d
 "declined to answer" and "expired unanswered" are plain sentences. The extension gives
 `ask_bot` a 630 s call timeout.
 
+**MCP.** The bot chat (owner origin, main thread) also gets Pi's `codemode` and
+`tool_search` (`bots::profile::MCP_DISCOVERY_TOOLS`), so it reaches the owner's MCP
+servers the way a session does: from scripts, or by loading deferred tools. Calls a script
+makes go through the same hooks as direct ones, so permission control and memory's taint
+rule (an MCP call holds the run's memory writes for review) apply to them too.
+`propose_plan` is `model-only`: the plan card is drawn at the call, so the model makes it
+itself, never from a script. Every other bot thread, and every memory pass, starts with
+`--no-mcp`: no server connects, and Pi does not warn that MCP tools are unreachable.
+
 ### 10.5 Prompting
 
 The system prompt states the bot's role and its permissions for this thread in plain

@@ -72,6 +72,16 @@ fn with_permission_tool(mut tools: Vec<String>) -> Vec<String> {
     tools
 }
 
+/// Whether an allowlist names a tool that reaches MCP tools. Pi offers MCP
+/// tools only through `codemode` or `tool_search`; without either its MCP
+/// extension still connects every server and warns that their tools cannot
+/// be called, so such a run starts with `--no-mcp` instead.
+fn reaches_mcp(tools: &[String]) -> bool {
+    tools.iter().any(|tool| {
+        tool == cypher_proto::view::CODEMODE_TOOL || tool == cypher_proto::view::TOOL_SEARCH_TOOL
+    })
+}
+
 /// Every env var a [`RunProfile`] sets; each spawn clears them all first.
 const PROFILE_ENV: [&str; 8] = [
     ENV_CYPHER_MEMORY,
@@ -141,11 +151,15 @@ fn profile_launch(
         // Bot runs see only their allowlist, even an empty one: an absent
         // `--tools` would hand them every tool. No shell or file access
         // unless the engine lists them (then `request_permission` beside
-        // them), no MCP or subagents. The engine enforces the bot's scope
-        // inside each bot tool.
+        // them), no subagents, and MCP only through codemode or tool_search
+        // when the engine lists one of them (the owner's own chat). The
+        // engine enforces the bot's scope inside each bot tool.
         RunProfile::Bot(bot) => {
             args.push("--tools".into());
             args.push(with_permission_tool(bot.tools.clone()).join(","));
+            if !reaches_mcp(&bot.tools) {
+                args.push("--no-mcp".into());
+            }
             args.push("-e".into());
             args.push(
                 private_support_dir()?
@@ -165,6 +179,9 @@ fn profile_launch(
         RunProfile::Memory(pass) => {
             args.push("--tools".into());
             args.push(pass.tools.join(","));
+            if !reaches_mcp(&pass.tools) {
+                args.push("--no-mcp".into());
+            }
         }
     }
     if let Some(path) = append_prompt

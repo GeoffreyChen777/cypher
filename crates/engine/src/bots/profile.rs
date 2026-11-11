@@ -81,8 +81,9 @@ pub fn bot_env(workspace: &WorkspaceHost, chat: &Chat) -> Option<BotRunEnv> {
 
 /// The tool allowlist of a thread: the read tools for every origin, then
 /// what each track adds for this thread and the bot's capabilities (Pi's
-/// tools with *Work directly*, coordination, notes, the network). A deleted
-/// bot's thread keeps only the read tools, which see nothing.
+/// tools with *Work directly*, coordination, notes, the network, and the
+/// owner's MCP servers through [`MCP_DISCOVERY_TOOLS`]). A deleted bot's
+/// thread keeps only the read tools, which see nothing.
 pub fn tools_for(marker: &cypher_proto::BotChat, bot: Option<&Bot>) -> Vec<String> {
     let mut tools: Vec<String> = cypher_proto::BOT_TOOLS
         .iter()
@@ -94,12 +95,14 @@ pub fn tools_for(marker: &cypher_proto::BotChat, bot: Option<&Bot>) -> Vec<Strin
         tools.extend(cypher_proto::MEMORY_TOOLS.iter().map(|t| t.to_string()));
     }
     if bot.is_some() {
+        let mcp = reaches_mcp(marker).then_some(MCP_DISCOVERY_TOOLS.as_slice());
         for tool in work::work_tools(marker, bot)
             .into_iter()
             .chain(memory::memory_tools(marker, bot))
             .chain(shortcuts::shortcut_tools(marker))
             .chain(activity::activity_tools(marker))
             .chain(network::network_tools(marker, bot))
+            .chain(mcp.into_iter().flatten().copied())
         {
             if !tools.iter().any(|t| t == tool) {
                 tools.push(tool.to_string());
@@ -107,6 +110,22 @@ pub fn tools_for(marker: &cypher_proto::BotChat, bot: Option<&Bot>) -> Vec<Strin
         }
     }
     tools
+}
+
+/// Pi's tools that reach MCP tools: `codemode` calls them from scripts,
+/// `tool_search` loads the deferred ones. Pi offers MCP tools only through
+/// them (unless a server is `direct`), and a run whose allowlist names
+/// neither starts without MCP at all (the pi harness passes `--no-mcp`).
+pub const MCP_DISCOVERY_TOOLS: [&str; 2] = [
+    cypher_proto::view::CODEMODE_TOOL,
+    cypher_proto::view::TOOL_SEARCH_TOOL,
+];
+
+/// Whether a thread may use the owner's MCP servers: only the workspace's
+/// own chat with its owner. A peer's questions, routines and orchestration
+/// threads run unattended or for someone else, so they never see them.
+fn reaches_mcp(marker: &cypher_proto::BotChat) -> bool {
+    marker.origin == BotOrigin::Owner && marker.thread == BotThread::Main
 }
 
 /// The permission level a bot thread's run spawns with, decided by the
@@ -201,9 +220,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn network_tools_reach_owner_threads_only() {
-        let bot = Bot {
+    fn bot_row() -> Bot {
+        Bot {
             id: "b1".into(),
             name: "Bot".into(),
             icon: None,
@@ -215,7 +233,12 @@ mod tests {
             capabilities: Default::default(),
             paused: false,
             created_at: DateTime::from_timestamp_millis(0).unwrap(),
-        };
+        }
+    }
+
+    #[test]
+    fn network_tools_reach_owner_threads_only() {
+        let bot = bot_row();
         let owner = tools_for(&BotChat::owner("b1"), Some(&bot));
         for tool in cypher_proto::BOT_NETWORK_TOOLS {
             assert!(owner.iter().any(|t| t == tool), "{tool}");
@@ -236,6 +259,43 @@ mod tests {
                 "{origin:?}: {tools:?}"
             );
         }
+    }
+
+    #[test]
+    fn only_the_owners_own_chat_reaches_mcp() {
+        let bot = bot_row();
+        let reaches = |marker: BotChat| {
+            let tools = tools_for(&marker, Some(&bot));
+            MCP_DISCOVERY_TOOLS.map(|tool| tools.iter().any(|t| t == tool))
+        };
+        assert_eq!(reaches(BotChat::owner("b1")), [true, true]);
+        let work = BotThread::Work {
+            work_id: "w1".into(),
+        };
+        assert_eq!(
+            reaches(BotChat::thread("b1", BotOrigin::Owner, work)),
+            [false, false]
+        );
+        let routine = BotThread::Routine {
+            routine_id: "r1".into(),
+        };
+        assert_eq!(
+            reaches(BotChat::thread("b1", BotOrigin::Routine, routine)),
+            [false, false]
+        );
+        let peer = BotThread::Peer {
+            connection_id: "cn".into(),
+        };
+        assert_eq!(
+            reaches(BotChat::thread("b1", BotOrigin::Peer, peer)),
+            [false, false]
+        );
+        // A deleted bot's thread keeps only the read tools.
+        assert!(
+            !tools_for(&BotChat::owner("b1"), None)
+                .iter()
+                .any(|t| MCP_DISCOVERY_TOOLS.contains(&t.as_str()))
+        );
     }
 
     #[test]

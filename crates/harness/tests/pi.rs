@@ -196,7 +196,8 @@ fn env_of(cmd: &tokio::process::Command, key: &str) -> Option<Option<String>> {
 /// Each run profile becomes exactly its own flags and env: a root run adds
 /// nothing beyond the extensions every run loads, a child run its allowlist plus the messaging tools, its prompt
 /// and its launch model, and a bot thread of every origin its allowlist, the
-/// embedded bot tools extension, its prompt and `CYPHER_BOT_ID`. Every run
+/// embedded bot tools extension, its prompt and `CYPHER_BOT_ID`, without MCP
+/// unless the allowlist names codemode or tool_search. Every run
 /// clears the env of the profiles it is not, so none inherits another's.
 #[test]
 fn run_profiles_spawn_exact_args() {
@@ -364,6 +365,7 @@ fn run_profiles_spawn_exact_args() {
         expected.extend([
             "--tools".to_string(),
             cypher_proto::BOT_TOOLS.join(","),
+            "--no-mcp".into(),
             "-e".into(),
             extension.clone(),
             "--append-system-prompt".into(),
@@ -422,6 +424,36 @@ fn run_profiles_spawn_exact_args() {
         );
     }
 
+    // A thread offered codemode or tool_search keeps Pi's MCP support: its
+    // MCP tools are reached through them.
+    for discovery in ["codemode", "tool_search"] {
+        let args = args_of(
+            &harness
+                .spawn_command(
+                    None,
+                    &RunHostContext {
+                        chat_id: Some("bot-chat".into()),
+                        memory_prompt: None,
+                        profile: RunProfile::Bot(BotRunEnv {
+                            bot_id: "bot-1".into(),
+                            origin: BotOrigin::Owner,
+                            tools: vec!["list_projects".into(), discovery.into()],
+                            system_prompt: String::new(),
+                            workspace_roots: Vec::new(),
+                        }),
+                    },
+                    None,
+                )
+                .expect("command builds"),
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--tools", &format!("list_projects,{discovery}")]),
+            "{args:?}"
+        );
+        assert!(!args.iter().any(|arg| arg == "--no-mcp"), "{args:?}");
+    }
+
     // A bot thread with no tools still passes `--tools`: without it Pi
     // would hand the run every tool.
     let empty = RunHostContext {
@@ -444,6 +476,7 @@ fn run_profiles_spawn_exact_args() {
         args.windows(2).any(|pair| pair == ["--tools", ""]),
         "{args:?}"
     );
+    assert!(args.iter().any(|arg| arg == "--no-mcp"), "{args:?}");
     assert!(!args.iter().any(|arg| arg == "--append-system-prompt"));
 }
 

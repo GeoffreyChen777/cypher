@@ -61,6 +61,8 @@ type ToolDef = {
   parameters: unknown;
   /** Calls that wait (on a session, an approval, another workspace) need longer. */
   timeoutMs?: number;
+  /** Pi's exposure; `model-only` keeps the tool out of codemode scripts. */
+  exposure?: "model-only";
 };
 
 // Every bot tool is registered; the run's `--tools` allowlist (decided by the
@@ -139,6 +141,9 @@ const TOOLS: ToolDef[] = [
   {
     name: "propose_plan",
     label: "Propose a plan",
+    // The plan card is drawn at this call in the chat, so the model makes it
+    // itself, never from a script.
+    exposure: "model-only",
     description:
       "Propose a plan for work that takes more than a couple of steps or touches another device. It shows your owner a plan card to approve; once approved, a background session carries it out and reports back here. After proposing, stop and wait: end your turn.",
     parameters: Type.Object({
