@@ -49,6 +49,7 @@ impl Shell {
     }
 
     fn complete_setup(&mut self, cx: &mut Context<Self>) {
+        self.skip_whats_new_for_new_install();
         self.settings.setup_completed = true;
         self.settings.pi_runtime_setup_version = 1;
         self.pages.setup_dismissed = true;

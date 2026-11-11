@@ -644,6 +644,11 @@ impl Shell {
             covering = true;
         }
 
+        if let Some(overlay) = self.render_whats_new_overlay(viewport, window, cx) {
+            overlays.push(overlay);
+            covering = true;
+        }
+
         crate::files::web_view::set_suppressed(covering);
         overlays
     }

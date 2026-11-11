@@ -24,6 +24,7 @@ mod terminal;
 #[cfg(test)]
 mod test_fixtures;
 mod transcript;
+mod whats_new;
 mod widgets;
 mod workspace;
 

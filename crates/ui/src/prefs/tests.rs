@@ -21,6 +21,7 @@ fn round_trip() {
         appearance: AppearanceMode::Light,
         setup_completed: true,
         pi_runtime_setup_version: 1,
+        seen_update_intro: 1,
         shown_slash_commands: vec!["goal".into(), "skill:x".into()],
         offered_slash_commands: slash_commands::SHOWN_BY_DEFAULT
             .iter()
@@ -236,6 +237,10 @@ fn settings_without_appearance_default_to_system() {
     assert_eq!(
         pre_runtime.pi_runtime_setup_version, 0,
         "users who completed the old system-Pi setup see the runtime prompt once"
+    );
+    assert_eq!(
+        pre_runtime.seen_update_intro, 0,
+        "files from before the What's new card show it once"
     );
 }
 
