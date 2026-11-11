@@ -36,7 +36,7 @@ pub(super) use panel::PanelItem;
 
 /// Hosts older than this answer `CreateBot` with an unknown-method error, so
 /// the dialog does not offer them.
-const BOTS_MIN_VERSION: (u64, u64, u64) = (0, 3, 57);
+const BOTS_MIN_VERSION: (u64, u64, u64) = (0, 4, 0);
 
 /// The Botboard's own UI state. Everything it shows comes from the main
 /// state; this holds only what the board has open.
@@ -550,17 +550,17 @@ mod tests {
         let local = Some("mac");
         assert!(can_host(&device("mac", "macos", None), local, false));
         assert!(can_host(
-            &device("vps", "linux", Some("0.3.57")),
-            local,
-            true
-        ));
-        assert!(can_host(
             &device("vps", "linux", Some("0.4.0")),
             local,
             true
         ));
+        assert!(can_host(
+            &device("vps", "linux", Some("0.4.1")),
+            local,
+            true
+        ));
         assert!(!can_host(
-            &device("vps", "linux", Some("0.3.56")),
+            &device("vps", "linux", Some("0.3.70")),
             local,
             true
         ));
