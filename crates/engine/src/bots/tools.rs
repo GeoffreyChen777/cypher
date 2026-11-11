@@ -246,6 +246,13 @@ struct ReadSession {
     limit: Option<usize>,
 }
 
+/// Drop the [`super::TOOL_CALL_ID_ARG`] the `BotTool` RPC set.
+fn without_call_id(arguments: &mut serde_json::Value) {
+    if let Some(object) = arguments.as_object_mut() {
+        object.remove(super::TOOL_CALL_ID_ARG);
+    }
+}
+
 fn args<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, EngineError> {
     serde_json::from_value(value)
         .map_err(|err| EngineError::Other(format!("Invalid arguments: {err}")))
@@ -259,7 +266,7 @@ impl Bots {
         &self,
         chat_id: &str,
         tool: &str,
-        arguments: serde_json::Value,
+        mut arguments: serde_json::Value,
     ) -> Result<String, EngineError> {
         // The tracks' own tools first (coordination, memory, network); each
         // checks the thread and the bot's capabilities per call (§4.4).
@@ -267,6 +274,11 @@ impl Bots {
             if let Some(answer) = self.work_tool(&chat, &marker, tool, &arguments).await {
                 return answer;
             }
+            // Only coordination reads the calling tool call's id (the plan
+            // card is drawn at it); the other tools get the model's
+            // arguments alone, so one that refuses unknown fields
+            // (`ask_bot`) never sees it.
+            without_call_id(&mut arguments);
             if let Some(answer) = self.memory_tool(&chat, &marker, tool, &arguments).await {
                 return answer;
             }
@@ -280,6 +292,7 @@ impl Bots {
                 return answer;
             }
         }
+        without_call_id(&mut arguments);
         let view = self.view(chat_id)?;
         match tool {
             "list_projects" => Ok(list_projects(&view)),

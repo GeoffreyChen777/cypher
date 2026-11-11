@@ -110,11 +110,13 @@ async fn call(core: &EngineCore, method: &str, params: serde_json::Value) -> ser
         .unwrap_or_else(|err| panic!("{method}: {err}"))
 }
 
+/// One bot tool call as the bot tools extension makes it: with the Pi tool
+/// call's id, which the RPC hands the tool beside the model's arguments.
 async fn tool(core: &EngineCore, chat_id: &str, name: &str, args: serde_json::Value) -> String {
     let reply = call(
         core,
         cypher_rpc::methods::BOT_TOOL,
-        serde_json::json!({ "chatId": chat_id, "tool": name, "args": args }),
+        serde_json::json!({ "chatId": chat_id, "tool": name, "args": args, "toolCallId": "call-1" }),
     )
     .await;
     reply["text"].as_str().expect("text").to_string()
