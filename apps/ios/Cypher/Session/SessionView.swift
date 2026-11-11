@@ -22,6 +22,9 @@ struct SessionView: View {
     /// Reserve room around the native title slot for Back and child-session
     /// actions. A bounded title avoids an unbounded custom title-view proposal.
     private static let headerChromeInset: CGFloat = 170
+    /// The same for a workspace's chat, whose trailing group holds one more
+    /// button.
+    private static let workspaceHeaderChromeInset: CGFloat = 230
 
     /// The view's own width, the only reliable basis for capping the principal
     /// toolbar item (its container proposes an unbounded width).
@@ -266,8 +269,13 @@ struct SessionView: View {
     private func workspaceToolbar(_ chat: Chat, bot: Bot) -> some ToolbarContent {
         ToolbarItem(placement: .principal) {
             WorkspaceTitle(bot: bot, device: model.deviceName(bot.hostDeviceId))
+                // The avatar's tile reads as part of Back without a gap as
+                // wide as a session title's.
+                .padding(.leading, 4)
                 .clearsHiddenSidebarButton(splitColumns)
-                .frame(width: max(140, viewWidth - Self.headerChromeInset), alignment: .leading)
+                // Two buttons trail it (the board, the menu): a session's
+                // inset would have the bar push the title onto Back.
+                .frame(width: max(140, viewWidth - Self.workspaceHeaderChromeInset), alignment: .leading)
         }
         .sharedBackgroundVisibility(.hidden)
         let needs = model.data?.needsYouCount(botId: bot.id) ?? 0
@@ -872,19 +880,27 @@ struct SessionView: View {
                             // Only the progress bar's strip takes a tap (its card).
                             .allowsHitTesting(status == .working && sessionRow(chat: chat)?.progress != nil)
                             .lineLimit(1)
-                        if let bot = workspaceBot {
-                            WorkspaceStatusAccessory(
-                                bot: bot, needs: model.data?.needsYouCount(botId: bot.id) ?? 0,
-                                hostOnline: model.data?.botHostOnline(bot) ?? false,
-                                device: model.deviceName(bot.hostDeviceId),
-                                openNeeds: { openBoard(.needsYou, botId: bot.id) },
-                                resume: { setPaused(bot, false) })
+                        HStack(spacing: 8) {
+                            if let bot = workspaceBot {
+                                WorkspaceStatusAccessory(
+                                    bot: bot, needs: model.data?.needsYouCount(botId: bot.id) ?? 0,
+                                    hostOnline: model.data?.botHostOnline(bot) ?? false,
+                                    device: model.deviceName(bot.hostDeviceId),
+                                    openNeeds: { openBoard(.needsYou, botId: bot.id) },
+                                    resume: { setPaused(bot, false) })
+                            }
+                            SubagentsAccessory(
+                                parent: chat, store: store,
+                                maxWidth: max(130, viewWidth * 0.5)
+                            ) { childId in
+                                path = SessionNavigation.opening(childId, in: path)
+                            }
                         }
-                        SubagentsAccessory(
-                            parent: chat, store: store,
-                            maxWidth: max(130, viewWidth * 0.5)
-                        ) { childId in
-                            path = SessionNavigation.opening(childId, in: path)
+                        // Capsules here: the jump button rises clear of them.
+                        .onGeometryChange(for: Bool.self) {
+                            $0.size.width > 12
+                        } action: { [scroll] occupied in
+                            scroll.statusRowTrailing = occupied
                         }
                         .padding(.trailing, 16)
                     }

@@ -398,10 +398,6 @@ struct TranscriptView: View {
                 }
             }
             .padding(.trailing, 16)
-            // 12pt above the COMPOSER, not the safe-area edge: the edge
-            // now sits atop the 24pt status-strip band (SessionView's
-            // inset), so dip into it — the strip never hit-tests.
-            .padding(.bottom, -12)
         }
         .onDisappear {
             hydrationTask?.cancel()
