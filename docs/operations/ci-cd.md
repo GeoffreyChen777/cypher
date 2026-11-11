@@ -98,6 +98,15 @@ The Rust toolchain is pinned in `rust-toolchain.toml`. Node is pinned to 24.19.0
 Worker deployments use Wrangler from `apps/edge/package-lock.json`, not a floating
 `npx wrangler@4`. Actions are pinned by commit.
 
+**Ubuntu packages.** The `ubuntu:20.04` containers (the Linux release build and the
+installer test) install packages with `scripts/ci/apt-install.sh`, inlined in
+`linux.yml` because nothing is checked out yet: Ubuntu's servers with retries first, then
+fallback mirrors for the container's architecture. apt verifies every package against
+Ubuntu's archive keys, so a mirror is trusted only to be reachable. `linux-backend` installs
+only the build tools GitHub's runner image lacks, normally none. On 2026-11-11 the runners
+could not resolve `archive.ubuntu.com` for hours, which failed every Linux job that ran
+`apt-get`.
+
 `deploy`, `release.publish` and `pi-runtime.publish` share the
 **`cypher-production`** concurrency group with `queue: max` and no cancellation
 of running jobs. GitHub.com supports
