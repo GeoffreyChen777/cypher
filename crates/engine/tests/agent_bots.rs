@@ -452,7 +452,7 @@ async fn a_bot_chat_refuses_commands_that_widen_its_tools() {
         cwd: cwd.clone(),
         ..run_request(prompt)
     };
-    for prompt in ["/scripts on", "  /goal ship it", "/orchestrate"] {
+    for prompt in ["  /goal ship it", "/orchestrate"] {
         let refused = core
             .sessions
             .dispatch(&bot.chat_id, HarnessId::Pi, run(prompt), None)
@@ -469,6 +469,11 @@ async fn a_bot_chat_refuses_commands_that_widen_its_tools() {
         .dispatch(&bot.chat_id, HarnessId::Pi, run("/compact"), None)
         .await
         .expect("an ordinary command runs");
+    // The bot chat's allowlist names codemode, so /scripts only switches it.
+    core.sessions
+        .dispatch(&bot.chat_id, HarnessId::Pi, run("/scripts off"), None)
+        .await
+        .expect("the owner's chat switches scripts");
     let plain = core.workspace.chat("chat-billing").unwrap().unwrap();
     cypher_engine::bots::refuse_widening_command(&plain, "/scripts on")
         .expect("ordinary chats are unaffected");

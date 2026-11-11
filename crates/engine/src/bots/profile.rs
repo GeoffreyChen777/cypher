@@ -81,9 +81,9 @@ pub fn bot_env(workspace: &WorkspaceHost, chat: &Chat) -> Option<BotRunEnv> {
 
 /// The tool allowlist of a thread: the read tools for every origin, then
 /// what each track adds for this thread and the bot's capabilities (Pi's
-/// tools with *Work directly*, coordination, notes, the network, and the
-/// owner's MCP servers through [`MCP_DISCOVERY_TOOLS`]). A deleted bot's
-/// thread keeps only the read tools, which see nothing.
+/// tools with *Work directly*, coordination, notes, the network, and in the
+/// owner's chat [`OWNER_CHAT_TOOLS`]). A deleted bot's thread keeps only the
+/// read tools, which see nothing.
 pub fn tools_for(marker: &cypher_proto::BotChat, bot: Option<&Bot>) -> Vec<String> {
     let mut tools: Vec<String> = cypher_proto::BOT_TOOLS
         .iter()
@@ -95,14 +95,16 @@ pub fn tools_for(marker: &cypher_proto::BotChat, bot: Option<&Bot>) -> Vec<Strin
         tools.extend(cypher_proto::MEMORY_TOOLS.iter().map(|t| t.to_string()));
     }
     if bot.is_some() {
-        let mcp = reaches_mcp(marker).then_some(MCP_DISCOVERY_TOOLS.as_slice());
+        let owner_chat = marker
+            .is_owner_chat()
+            .then_some(OWNER_CHAT_TOOLS.as_slice());
         for tool in work::work_tools(marker, bot)
             .into_iter()
             .chain(memory::memory_tools(marker, bot))
             .chain(shortcuts::shortcut_tools(marker))
             .chain(activity::activity_tools(marker))
             .chain(network::network_tools(marker, bot))
-            .chain(mcp.into_iter().flatten().copied())
+            .chain(owner_chat.into_iter().flatten().copied())
         {
             if !tools.iter().any(|t| t == tool) {
                 tools.push(tool.to_string());
@@ -112,21 +114,26 @@ pub fn tools_for(marker: &cypher_proto::BotChat, bot: Option<&Bot>) -> Vec<Strin
     tools
 }
 
-/// Pi's tools that reach MCP tools: `codemode` calls them from scripts,
-/// `tool_search` loads the deferred ones. Pi offers MCP tools only through
-/// them (unless a server is `direct`), and a run whose allowlist names
-/// neither starts without MCP at all (the pi harness passes `--no-mcp`).
-pub const MCP_DISCOVERY_TOOLS: [&str; 2] = [
+/// The tools a session has that the workspace's own chat with its owner
+/// gets too, and no other thread: a peer's questions, routines and
+/// orchestration threads run unattended or for someone else.
+///
+/// - `codemode` calls MCP tools from scripts and `tool_search` loads the
+///   deferred ones; Pi offers MCP tools only through them (unless a server
+///   is `direct`), and a run whose allowlist names neither starts without
+///   MCP at all (the pi harness passes `--no-mcp`).
+/// - `web_search` and `url_context` (pi-web-search) read the web.
+/// - `ask_user` (pi-ask-user) asks the owner, who is watching this chat.
+///
+/// What they read is untrusted: memory's taint rule holds the run's writes
+/// for review after a web or MCP call, scripts' nested calls included.
+pub const OWNER_CHAT_TOOLS: [&str; 5] = [
     cypher_proto::view::CODEMODE_TOOL,
     cypher_proto::view::TOOL_SEARCH_TOOL,
+    "web_search",
+    "url_context",
+    "ask_user",
 ];
-
-/// Whether a thread may use the owner's MCP servers: only the workspace's
-/// own chat with its owner. A peer's questions, routines and orchestration
-/// threads run unattended or for someone else, so they never see them.
-fn reaches_mcp(marker: &cypher_proto::BotChat) -> bool {
-    marker.origin == BotOrigin::Owner && marker.thread == BotThread::Main
-}
 
 /// The permission level a bot thread's run spawns with, decided by the
 /// engine whatever the chat row says: workspace-write for an owner thread
@@ -262,39 +269,39 @@ mod tests {
     }
 
     #[test]
-    fn only_the_owners_own_chat_reaches_mcp() {
+    fn only_the_owners_own_chat_gets_a_sessions_tools() {
         let bot = bot_row();
         let reaches = |marker: BotChat| {
             let tools = tools_for(&marker, Some(&bot));
-            MCP_DISCOVERY_TOOLS.map(|tool| tools.iter().any(|t| t == tool))
+            OWNER_CHAT_TOOLS.map(|tool| tools.iter().any(|t| t == tool))
         };
-        assert_eq!(reaches(BotChat::owner("b1")), [true, true]);
+        assert_eq!(reaches(BotChat::owner("b1")), [true; 5]);
         let work = BotThread::Work {
             work_id: "w1".into(),
         };
         assert_eq!(
             reaches(BotChat::thread("b1", BotOrigin::Owner, work)),
-            [false, false]
+            [false; 5]
         );
         let routine = BotThread::Routine {
             routine_id: "r1".into(),
         };
         assert_eq!(
             reaches(BotChat::thread("b1", BotOrigin::Routine, routine)),
-            [false, false]
+            [false; 5]
         );
         let peer = BotThread::Peer {
             connection_id: "cn".into(),
         };
         assert_eq!(
             reaches(BotChat::thread("b1", BotOrigin::Peer, peer)),
-            [false, false]
+            [false; 5]
         );
         // A deleted bot's thread keeps only the read tools.
         assert!(
             !tools_for(&BotChat::owner("b1"), None)
                 .iter()
-                .any(|t| MCP_DISCOVERY_TOOLS.contains(&t.as_str()))
+                .any(|t| OWNER_CHAT_TOOLS.contains(&t.as_str()))
         );
     }
 
@@ -412,15 +419,31 @@ mod tests {
         ] {
             refuse_widening_command(&plain, prompt).expect("ordinary chats run every command");
         }
-        for prompt in ["/scripts on", "  /goal ship it", "/orchestrate"] {
+        for prompt in ["  /goal ship it", "/orchestrate"] {
             let err = refuse_widening_command(&owner, prompt).unwrap_err();
             assert!(
                 err.to_string()
                     .contains("isn't available in a workspace chat")
             );
         }
-        for prompt in ["/compact", "what changed?", "see /goal"] {
+        for prompt in ["/compact", "what changed?", "see /goal", "/scripts off"] {
             refuse_widening_command(&owner, prompt).expect("owner threads keep the rest");
+        }
+        // /scripts only switches codemode in the owner's chat, whose
+        // allowlist names it; an orchestration thread's does not.
+        let work = chat(Some(BotChat::thread(
+            "b1",
+            BotOrigin::Owner,
+            BotThread::Work {
+                work_id: "w1".into(),
+            },
+        )));
+        for prompt in ["/scripts on", "/goal x"] {
+            let err = refuse_widening_command(&work, prompt).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("isn't available in a workspace chat")
+            );
         }
         for origin in [BotOrigin::Routine, BotOrigin::Peer] {
             let thread = chat(Some(BotChat::new("b1", origin)));

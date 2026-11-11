@@ -197,6 +197,13 @@ impl BotChat {
     pub fn is_main(&self) -> bool {
         is_main(&self.thread)
     }
+
+    /// The workspace's own chat with its owner: the one thread the owner
+    /// watches and types in, so it gets a session's tools and `/scripts`
+    /// (docs/design/agent-bots.md §10.4).
+    pub fn is_owner_chat(&self) -> bool {
+        self.origin == BotOrigin::Owner && self.is_main()
+    }
 }
 
 /// Who started a bot thread, which fixes what the thread may do

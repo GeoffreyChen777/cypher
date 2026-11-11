@@ -371,8 +371,14 @@ pub fn with_turn_note(note: &str, prompt: &str) -> String {
 /// run's tools or modes behind the bot tool allowlist.
 pub const REFUSED_COMMANDS: [&str; 3] = ["scripts", "orchestrate", "goal"];
 
+/// The one of [`REFUSED_COMMANDS`] the workspace's own chat runs: its
+/// allowlist already names codemode, so `/scripts` only switches it off and
+/// on again, never past the allowlist.
+pub const OWNER_CHAT_COMMANDS: [&str; 1] = ["scripts"];
+
 /// Refuse a bot thread's prompt that is a slash command it may not run:
-/// one of [`REFUSED_COMMANDS`] in an owner thread, any command at all in a
+/// one of [`REFUSED_COMMANDS`] in an owner thread (but
+/// [`OWNER_CHAT_COMMANDS`] in the owner's chat), any command at all in a
 /// routine or peer thread (§4.4). Ordinary chats run every command.
 pub fn refuse_widening_command(chat: &Chat, prompt: &str) -> Result<(), EngineError> {
     let Some(marker) = &chat.bot else {
@@ -384,6 +390,9 @@ pub fn refuse_widening_command(chat: &Chat, prompt: &str) -> Result<(), EngineEr
     let command = rest.split_whitespace().next().unwrap_or_default();
     match marker.origin {
         BotOrigin::Owner if !REFUSED_COMMANDS.contains(&command) => Ok(()),
+        BotOrigin::Owner if marker.is_owner_chat() && OWNER_CHAT_COMMANDS.contains(&command) => {
+            Ok(())
+        }
         BotOrigin::Owner => Err(EngineError::Other(format!(
             "/{command} isn't available in a workspace chat."
         ))),

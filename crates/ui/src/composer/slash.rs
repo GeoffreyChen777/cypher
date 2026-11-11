@@ -4,6 +4,9 @@ use super::*;
 
 /// Runtime commands a bot chat refuses (`cypher_engine::bots::REFUSED_COMMANDS`).
 const BOT_REFUSED_COMMANDS: [&str; 3] = ["scripts", "orchestrate", "goal"];
+/// The ones the workspace's own chat with its owner runs after all
+/// (`cypher_engine::bots::OWNER_CHAT_COMMANDS`).
+const OWNER_CHAT_COMMANDS: [&str; 1] = ["scripts"];
 
 impl Composer {
     fn command_target(&self, cx: &App) -> Option<String> {
@@ -136,6 +139,18 @@ impl Composer {
             Some(space_id) => cypher_proto::MemoryScope::Project { space_id },
             None => cypher_proto::MemoryScope::You,
         }
+    }
+
+    /// Whether this composer writes into a workspace's own chat with its
+    /// owner, not one of its hidden threads.
+    fn in_owner_chat(&self, cx: &App) -> bool {
+        matches!(self.transport, ComposerTransport::Main)
+            && self
+                .state
+                .read(cx)
+                .selected_chat_row()
+                .and_then(|chat| chat.bot.as_ref())
+                .is_some_and(|marker| marker.is_owner_chat())
     }
 
     /// Whether this composer writes into a bot's conversation.
@@ -376,11 +391,14 @@ impl Composer {
                 // A bot chat refuses the commands that would widen its
                 // tools (the engine says so too), so they are not offered.
                 let bot = self.in_bot_chat(cx);
+                let owner_chat = self.in_owner_chat(cx);
                 crate::composer::slash_menu::command_level(
                     &self.slash_actions(self.slash.harness, cx),
                     commands,
                     |name| {
-                        !(bot && BOT_REFUSED_COMMANDS.contains(&name))
+                        !(bot
+                            && BOT_REFUSED_COMMANDS.contains(&name)
+                            && !(owner_chat && OWNER_CHAT_COMMANDS.contains(&name)))
                             && crate::prefs::slash_commands::shows_in_app(cx, name)
                     },
                     &query,

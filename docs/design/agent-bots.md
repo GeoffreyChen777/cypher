@@ -156,7 +156,9 @@ thread with *Coordinate: steer* answers, steers or stops a session its work didn
   empty folder and no Pi tools.
 - **Slash commands.** The engine refuses `/scripts`, `/orchestrate` and `/goal` in owner
   threads, because codemode honours `/scripts` under `--tools`; *Work directly* may lift
-  this. Peer and routine threads accept no slash commands at all (built).
+  this. The bot chat runs `/scripts` after all: its allowlist names codemode (§10.4), so
+  the command only switches it off and on. Peer and routine threads accept no slash
+  commands at all (built).
 
 As built (P1): the origin rides the chat row's `bot` marker (`{botId, origin}`; a missing
 origin reads as owner, an unknown one as peer). Only the engine writes it: `CreateBot`
@@ -666,14 +668,27 @@ between `<peer-answer>` tags, followed by a reminder that it is another user's d
 "declined to answer" and "expired unanswered" are plain sentences. The extension gives
 `ask_bot` a 630 s call timeout.
 
-**MCP.** The bot chat (owner origin, main thread) also gets Pi's `codemode` and
-`tool_search` (`bots::profile::MCP_DISCOVERY_TOOLS`), so it reaches the owner's MCP
-servers the way a session does: from scripts, or by loading deferred tools. Calls a script
-makes go through the same hooks as direct ones, so permission control and memory's taint
-rule (an MCP call holds the run's memory writes for review) apply to them too.
-`propose_plan` is `model-only`: the plan card is drawn at the call, so the model makes it
-itself, never from a script. Every other bot thread, and every memory pass, starts with
-`--no-mcp`: no server connects, and Pi does not warn that MCP tools are unreachable.
+**A session's tools.** The bot chat (owner origin, main thread,
+`BotChat::is_owner_chat`) is the one thread its owner watches and types in, so it also
+gets the session tools that need someone there or read the outside world
+(`bots::profile::OWNER_CHAT_TOOLS`):
+
+- `codemode` and `tool_search`: the owner's MCP servers, the way a session reaches them
+  (from scripts, or by loading deferred tools). `/scripts` switches codemode as in a
+  session; with it off, MCP tools are found through `tool_search`.
+- `web_search` and `url_context`: the web, through pi-web-search.
+- `ask_user`: questions to the owner, answered in the chat like a session's.
+
+Calls a script makes go through the same hooks as direct ones, so permission control and
+memory's taint rule (a web or MCP call holds the run's memory writes for review) apply to
+them too. `propose_plan` is `model-only`: the plan card is drawn at the call, so the model
+makes it itself, never from a script. No other thread gets these tools: routines and
+orchestration threads run unattended, and a peer's questions run for someone else. Every
+such thread, and every memory pass, starts with `--no-mcp`: no server connects, and Pi does
+not warn that MCP tools are unreachable.
+
+Still a session's only: subagents (*Coordinate* starts sessions instead), `/goal` and
+`/orchestrate`, and Pi's file and shell tools without *Work directly*.
 
 ### 10.5 Prompting
 
