@@ -7,9 +7,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 docker run --rm -v "$ROOT:/repo:ro" -w /repo ubuntu:20.04 bash -ec '
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y -qq python3 curl ca-certificates >/dev/null
+  bash scripts/ci/apt-install.sh python3 curl ca-certificates >/dev/null
   python3 --version
   python3 scripts/tests/test-linux-cli.py
 '

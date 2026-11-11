@@ -51,11 +51,31 @@ jobs:
       run:
         shell: bash
     steps:
+      # scripts/ci/apt-install.sh, inlined: no git, so no checkout, yet.
+      # Ubuntu's servers with retries, then signature-checked fallback
+      # mirrors (GitHub's runners could not resolve archive.ubuntu.com for
+      # hours on 2026-11-11). Change both together.
       - name: bootstrap glibc 2.31 build environment
         run: |
+          set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update -qq
-          apt-get install -y -qq ca-certificates curl git build-essential pkg-config cmake binutils python3 systemd
+          printf 'Acquire::Retries "3";\nAcquire::http::Timeout "20";\n' >/etc/apt/apt.conf.d/80-ci-retries
+          packages=(ca-certificates curl git build-essential pkg-config cmake binutils python3 systemd)
+          install() { apt-get update -qq && apt-get install -y -qq "${packages[@]}"; }
+          install && exit 0
+          case "$(dpkg --print-architecture)" in
+            amd64) mirrors=(http://mirrors.edge.kernel.org/ubuntu http://mirror.us.leaseweb.net/ubuntu http://mirrors.mit.edu/ubuntu) ;;
+            arm64) mirrors=(http://ftp.tu-chemnitz.de/pub/linux/ubuntu-ports http://mirrors.ustc.edu.cn/ubuntu-ports) ;;
+            *) mirrors=() ;;
+          esac
+          cp /etc/apt/sources.list /etc/apt/sources.list.ubuntu
+          for mirror in "${mirrors[@]}"; do
+            echo "Ubuntu's servers failed; trying $mirror" >&2
+            sed -E "s#http://(archive|security|ports)\.ubuntu\.com/ubuntu(-ports)?/?#$mirror/#" \
+              /etc/apt/sources.list.ubuntu >/etc/apt/sources.list
+            install && exit 0
+          done
+          exit 1
       - name: bootstrap rustup (toolchain version comes from rust-toolchain.toml)
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
