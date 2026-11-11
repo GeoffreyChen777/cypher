@@ -96,6 +96,10 @@ pub struct UiSettings {
     /// system-independent Pi runtime; pre-runtime settings deserialize as 0
     /// and receive the one-time download prompt.
     pub pi_runtime_setup_version: u32,
+    /// The "What's new" edition already shown
+    /// ([`crate::whats_new::UPDATE_INTRO_VERSION`]). Files from before the
+    /// card load as 0, so it shows once after the update.
+    pub seen_update_intro: u32,
     /// Slash commands the user turned on for the composer `/` menu; every
     /// other command stays hidden ([`slash_commands::ShownSlashCommands`]). Older
     /// files kept a `hiddenSlashCommands` list instead, which held nothing a
@@ -297,6 +301,7 @@ impl Default for UiSettings {
             appearance: AppearanceMode::default(),
             setup_completed: false,
             pi_runtime_setup_version: 0,
+            seen_update_intro: 0,
             shown_slash_commands: slash_commands::SHOWN_BY_DEFAULT
                 .iter()
                 .map(|name| name.to_string())

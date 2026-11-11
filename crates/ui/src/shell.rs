@@ -86,6 +86,7 @@ mod spaces;
 mod splash;
 mod tabs;
 mod updates;
+mod whats_new;
 mod windows;
 mod workspace_view;
 
@@ -1376,6 +1377,8 @@ pub struct Shell {
     dialogs: ShellDialogs,
     /// In-app updates, the About dialog and the Pi runtime update.
     updates: UpdateUi,
+    /// The one-time "What's new" card after a large update.
+    whats_new: whats_new::WhatsNewUi,
     /// Scratch-folder removal after a quick chat was deleted (host RPC).
     scratch_cleanup_task: Option<Task<()>>,
     /// Sidebar scroll, notice strip, resort glide and disclosure state.
@@ -1574,6 +1577,12 @@ impl Shell {
         }
         let route = Self::boot_route(&state, main_window, cx);
         let (debug_dialog, debug_setup, debug_gate) = debug_knobs(main_window);
+        let whats_new_due = main_window
+            && crate::whats_new::should_show(
+                settings.seen_update_intro,
+                settings.setup_completed,
+                debug_dialog.as_deref() == Some("whats-new"),
+            );
         let nav = NavHistory::new(match route {
             Route::Chat => NavEntry::Chat(String::new()),
             Route::Settings(section) => NavEntry::Settings(section),
@@ -1622,6 +1631,7 @@ impl Shell {
                 gate: debug_gate,
             },
             dialogs: ShellDialogs::default(),
+            whats_new: whats_new::WhatsNewUi::new(whats_new_due),
             updates: UpdateUi {
                 relaunch_quit_sent: false,
                 flow: UpdateFlow::Idle,
@@ -1909,8 +1919,9 @@ impl Shell {
 /// Capture knobs (like `CYPHER_OPEN_ROUTE`, main window only):
 /// `CYPHER_OPEN_DIALOG=rename|delete` opens that dialog for the first chat
 /// once chats land; `=model` pops the combined harness/model menu once the
-/// shell is Ready; `CYPHER_FORCE_GATE=signin|org|failed|setup` renders that
-/// gate regardless of real auth state (display-only — for styling passes).
+/// shell is Ready; `=whats-new` opens the "What's new" card on every launch;
+/// `CYPHER_FORCE_GATE=signin|org|failed|setup` renders that gate regardless
+/// of real auth state (display-only — for styling passes).
 /// Returns the dialog knob, whether to force the setup page, and the forced
 /// gate.
 fn debug_knobs(main_window: bool) -> (Option<String>, bool, Option<GatePhase>) {

@@ -35,6 +35,9 @@ macro_rules! icon_assets {
 
         impl AssetSource for Assets {
             fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+                if let Some(bytes) = crate::whats_new::asset(path) {
+                    return Ok(Some(Cow::Borrowed(bytes)));
+                }
                 Ok(match path {
                     $(concat!("icons/", $path, ".svg") => Some(Cow::Borrowed(
                         include_bytes!(concat!("../../assets/icons/", $path, ".svg")).as_slice(),

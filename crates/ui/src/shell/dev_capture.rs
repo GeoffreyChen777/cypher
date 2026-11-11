@@ -15,7 +15,9 @@
 //! the next MS, logged) · `inject FILE` (append the message entry in FILE, JSON,
 //! to the Botboard conversation's transcript, locally: a card no harness writes
 //! yet, such as a bot's `propose_plan` call; the next transcript frame for that
-//! chat may drop it).
+//! chat may drop it) · `offscreen` / `onscreen` (macOS: move the window off
+//! every screen and back. Off-screen, gpui renders at 2x, so a 1x display
+//! still yields Retina captures; follow with `size W H` to redraw).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -432,7 +434,63 @@ async fn run(
             let target = size(px(num(&parts, 1)?), px(num(&parts, 2)?));
             cx.update_window(window, |_, window, _| window.resize(target))?;
         }
+        #[cfg(target_os = "macos")]
+        "offscreen" | "onscreen" => {
+            let offscreen = parts[0] == "offscreen";
+            cx.update_window(window, |_, window, _| place_window(window, offscreen))??;
+        }
         other => anyhow::bail!("unknown command {other}"),
+    }
+    Ok(())
+}
+
+/// Move the native window off every screen (gpui then reads the scale factor
+/// as 2) or back onto the main one.
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)] // objc's `msg_send!` expands an obsolete cfg
+fn place_window(window: &Window, offscreen: bool) -> anyhow::Result<()> {
+    let origin = if offscreen {
+        (-20_000.0, -20_000.0)
+    } else {
+        (80.0, 80.0)
+    };
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    #[repr(C)]
+    struct NSPoint {
+        x: f64,
+        y: f64,
+    }
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window)
+        .map_err(|err| anyhow::anyhow!("{err:?}"))?
+        .as_raw()
+    else {
+        anyhow::bail!("not an AppKit window");
+    };
+    let view: *mut Object = handle.ns_view.as_ptr().cast();
+    // SAFETY: the view is gpui's live content view (main thread); its window
+    // outlives this call.
+    unsafe {
+        let native: *mut Object = msg_send![view, window];
+        anyhow::ensure!(!native.is_null(), "the view has no window");
+        // AppKit keeps a strip of a titled window on screen: off screen, the
+        // window goes borderless (unclamped) and gets its style back after.
+        static TITLED_MASK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if offscreen {
+            let mask: u64 = msg_send![native, styleMask];
+            if mask != 0 {
+                TITLED_MASK.store(mask, std::sync::atomic::Ordering::Relaxed);
+            }
+            let _: () = msg_send![native, setStyleMask: 0u64];
+        } else {
+            let mask = TITLED_MASK.load(std::sync::atomic::Ordering::Relaxed);
+            if mask != 0 {
+                let _: () = msg_send![native, setStyleMask: mask];
+            }
+        }
+        let _: () = msg_send![native, setFrameOrigin: NSPoint { x: origin.0, y: origin.1 }];
     }
     Ok(())
 }
