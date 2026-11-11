@@ -1,6 +1,7 @@
 // Home — the mobile shell, session-first: every session in one inset-grouped
-// list under time headings (Now, Today, Yesterday, …), one tap from launch,
-// with the workspaces in a section above them (WorkspaceRows.swift).
+// list under time headings (Now, Today, Yesterday, …), one tap from launch.
+// The switch at the top left (HomeMode) shows the workspaces instead
+// (WorkspaceRows.swift), each list with its own search, title and New.
 // Project chips narrow it (a long press opens the project's own page,
 // SpaceView), search finds any session, archived ones included, and the view
 // menu (SessionListMenu) filters by device and time and picks the sort.
@@ -27,6 +28,8 @@ struct HomeView: View {
     @State private var showPermissions = false
     @State private var showPairing = false
     @State private var showMemory = false
+    /// Which list Home shows; kept across launches.
+    @AppStorage(HomeMode.storageKey) private var mode: HomeMode = .sessions
     /// A workspace's settings (or a new one's, with a nil id).
     @State private var botSettings: BotSettingsTarget?
     /// A workspace the settings sheet created: opened once it's gone.
@@ -146,7 +149,25 @@ struct HomeView: View {
     }
 
     /// The detail column with nothing selected.
-    private var detailPlaceholder: some View {
+    @ViewBuilder private var detailPlaceholder: some View {
+        if mode == .workspaces {
+            ContentUnavailableView {
+                Label("No Workspace Selected", systemImage: HomeMode.workspaces.symbol)
+            } description: {
+                Text("Pick a workspace from the list, or create a new one.")
+            } actions: {
+                Button("New Workspace") { botSettings = BotSettingsTarget(botId: nil) }
+                    .buttonStyle(.glass)
+                    .disabled(model.devices.isEmpty)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.bg.ignoresSafeArea())
+        } else {
+            sessionPlaceholder
+        }
+    }
+
+    private var sessionPlaceholder: some View {
         ContentUnavailableView {
             Label("No Session Selected", systemImage: "bubble.left.and.bubble.right")
         } description: {
@@ -242,6 +263,9 @@ struct HomeView: View {
         }()
         return ScrollViewReader { proxy in
             List {
+                if split {
+                    splitTitle
+                }
                 if !isEmpty {
                     // A row in the list, not `.searchable`: the system
                     // drawer on iOS 26 starts hidden (pull down to show), and
@@ -255,13 +279,11 @@ struct HomeView: View {
                     }
                     .listSectionSpacing(.compact)
                 }
-                if currentScope == .all {
-                    WorkspaceSection(
-                        bots: model.listedBots(matching: query),
-                        settings: { botSettings = BotSettingsTarget(botId: $0.id) },
-                        delete: { deletingBot = $0 })
+                if mode == .workspaces {
+                    workspaceRows
+                } else {
+                    sessionRows(chats: chats, sections: sections, statusSlot: statusSlot, showLocation: showLocation)
                 }
-                sessionRows(chats: chats, sections: sections, statusSlot: statusSlot, showLocation: showLocation)
             }
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 geometry.contentOffset.y + geometry.contentInsets.top > Self.searchTuckOffset
@@ -284,12 +306,43 @@ struct HomeView: View {
         .overlay {
             if isEmpty { emptyState }
         }
-        .navigationTitle("Sessions")
-        .navigationSubtitle(subtitle)
+        .navigationTitle(mode.title)
+        // The split sidebar's list carries its summary (`splitTitle`).
+        .navigationSubtitle(split ? "" : subtitle)
+        // Each list starts from its own top, unsearched.
+        .onChange(of: mode) {
+            query = ""
+            searchFocused = false
+        }
         .navigationBarTitleDisplayMode(.large)
     }
 
     private static let searchRowId = "home-search-row"
+
+    /// The split sidebar's title and summary, where the phone's large title
+    /// sits: its bar is full of buttons.
+    private var splitTitle: some View {
+        // A header, not a row: a cell masks its content to the section's
+        // rounded corners, which cut into the summary's first character.
+        Section {
+        } header: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(mode.title)
+                    .font(Theme.sans(28, weight: .bold, relativeTo: .largeTitle))
+                    .foregroundStyle(Theme.text)
+                    .accessibilityAddTraits(.isHeader)
+                Text(subtitle)
+                    .font(Theme.sans(13, relativeTo: .subheadline))
+                    .foregroundStyle(Theme.textMuted)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 4)
+            .listRowInsets(EdgeInsets())
+            .textCase(nil)
+        }
+        .listSectionSpacing(.compact)
+    }
     /// About the field's height: past it, the field is under the bar.
     private static let searchTuckOffset: CGFloat = 40
 
@@ -338,7 +391,7 @@ struct HomeView: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(Theme.textMuted)
-            TextField("Search sessions", text: $query)
+            TextField(mode == .workspaces ? "Search workspaces" : "Search sessions", text: $query)
                 .font(Theme.sans(16, relativeTo: .body))
                 .foregroundStyle(Theme.text)
                 .focused($searchFocused)
@@ -418,7 +471,17 @@ struct HomeView: View {
     @ToolbarContentBuilder
     private var homeToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            SessionListMenu(showsDevice: true)
+            HomeModeSwitch(mode: $mode, needs: model.data?.needsYouTotal ?? 0)
+        }
+        if mode == .sessions {
+            ToolbarItem(placement: .topBarLeading) {
+                SessionListMenu(showsDevice: true)
+            }
+        }
+        // The split sidebar's bar has no room left for its inline title
+        // beside five buttons: the list heads itself instead (`splitTitle`).
+        if split {
+            ToolbarItem(placement: .principal) { Color.clear.frame(width: 1, height: 1) }
         }
         // The search field scrolled away: search from here instead. Tinted
         // while a search is narrowing the list.
@@ -442,7 +505,11 @@ struct HomeView: View {
         // Account and New are unrelated: separate glass groups.
         ToolbarSpacer(.fixed, placement: .topBarTrailing)
         ToolbarItem(placement: .topBarTrailing) {
-            composeMenu
+            if mode == .workspaces {
+                newWorkspaceButton
+            } else {
+                composeMenu
+            }
         }
     }
 
@@ -602,13 +669,63 @@ struct HomeView: View {
             .disabled(model.devices.isEmpty)
             Divider()
             Button("New Project…", systemImage: "folder.badge.plus") { showNewSpace = true }
-            Button("New Workspace…", systemImage: "square.grid.2x2") { botSettings = BotSettingsTarget(botId: nil) }
-                .disabled(model.devices.isEmpty)
         } label: {
             Image(systemName: "square.and.pencil")
         }
         .accessibilityLabel("New")
         .accessibilityIdentifier("compose")
+    }
+
+    /// New, in the workspaces list: a new workspace's settings.
+    private var newWorkspaceButton: some View {
+        Button {
+            botSettings = BotSettingsTarget(botId: nil)
+        } label: {
+            Image(systemName: "plus")
+        }
+        .disabled(model.devices.isEmpty)
+        .accessibilityLabel("New Workspace")
+        .accessibilityIdentifier("new-workspace")
+    }
+
+    /// The workspaces list: every workspace matching the search (an empty
+    /// workspace list says so over the whole screen instead).
+    @ViewBuilder private var workspaceRows: some View {
+        let bots = model.listedBots(matching: query)
+        if bots.isEmpty, !isEmpty {
+            Section {
+                ContentUnavailableView.search(text: query)
+                    .listRowBackground(Color.clear)
+            }
+        } else {
+            WorkspaceSection(
+                bots: bots,
+                settings: { botSettings = BotSettingsTarget(botId: $0.id) },
+                delete: { deletingBot = $0 })
+        }
+    }
+
+    /// One line, like the sessions': what needs you and what is working,
+    /// else how many workspaces there are.
+    private var workspacesSubtitle: String {
+        var needs = 0
+        var working = 0
+        var paused = 0
+        for bot in model.bots {
+            switch model.workspaceRowStatus(bot) {
+            case .needsYou(let n): needs += n
+            case .working: working += 1
+            case .paused: paused += 1
+            default: break
+            }
+        }
+        var parts: [String] = []
+        if needs > 0 { parts.append(WorkspaceChatText.needsYou(needs)) }
+        if working > 0 { parts.append("\(working) working") }
+        if paused > 0 { parts.append("\(paused) paused") }
+        if !parts.isEmpty { return parts.joined(separator: " · ") }
+        let count = model.bots.count
+        return count == 1 ? "1 workspace" : "\(count) workspaces"
     }
 
     /// Where New Session goes: the chosen project, else the latest session's.
@@ -622,13 +739,30 @@ struct HomeView: View {
     /// first, then live activity, then the plain session count.
     private var subtitle: String {
         guard model.connected else { return "Connecting…" }
+        if mode == .workspaces { return workspacesSubtitle }
         let activity = ChatIndicator.activitySummary(model.activeChats.map { model.indicator(for: $0) })
         if !activity.isEmpty { return activity.joined(separator: " · ") }
         let count = model.activeChats.count
         return count == 1 ? "1 session" : "\(count) sessions"
     }
 
-    private var emptyState: some View {
+    @ViewBuilder private var emptyState: some View {
+        if mode == .workspaces {
+            ContentUnavailableView {
+                Label("No Workspaces Yet", systemImage: HomeMode.workspaces.symbol)
+            } description: {
+                Text("A workspace looks after the projects you give it: it answers, plans and runs work.")
+            } actions: {
+                Button("New Workspace") { botSettings = BotSettingsTarget(botId: nil) }
+                    .buttonStyle(.glass)
+                    .disabled(model.devices.isEmpty)
+            }
+        } else {
+            sessionsEmptyState
+        }
+    }
+
+    private var sessionsEmptyState: some View {
         ContentUnavailableView {
             Label("No Projects", systemImage: "folder.badge.plus")
         } description: {
@@ -643,9 +777,10 @@ struct HomeView: View {
 
     // MARK: List
 
-    /// Nothing anywhere yet: no project and no session.
+    /// Nothing anywhere yet: no project and no session (no workspace, in
+    /// the workspaces list).
     private var isEmpty: Bool {
-        model.spaces.isEmpty && model.activeChats.isEmpty
+        mode == .workspaces ? model.bots.isEmpty : model.spaces.isEmpty && model.activeChats.isEmpty
     }
 
     private var searching: Bool {
@@ -754,9 +889,7 @@ struct HomeView: View {
             let archivedMatch = model.archivedChats().contains {
                 currentScope.contains($0, liveSpaceIds: liveSpaceIds) && model.matches($0, query: query)
             }
-            // Neither do matching workspaces above.
-            let workspaceMatch = currentScope == .all && !model.listedBots(matching: query).isEmpty
-            if !archivedMatch && !workspaceMatch {
+            if !archivedMatch {
                 Section {
                     ContentUnavailableView.search(text: query)
                         .listRowBackground(Color.clear)

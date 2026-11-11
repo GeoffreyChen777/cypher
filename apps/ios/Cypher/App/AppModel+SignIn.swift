@@ -92,6 +92,10 @@ extension AppModel {
         demo = DemoDataset.standard()
         // The demo's account, not saved: an initial, never a network picture.
         profile = AccountProfile(email: "demo@letscypher.app", name: "Demo", avatarURL: nil)
+        // Home opens the demo on Sessions: a list an earlier run chose
+        // doesn't carry over (`-homeMode` still picks one, from the
+        // argument domain).
+        UserDefaults.standard.removeObject(forKey: HomeMode.storageKey)
         phase = .ready
     }
 

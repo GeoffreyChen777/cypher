@@ -305,9 +305,11 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
 
 - **Workspaces:** the desktop's agent workspaces
   ([`docs/design/agent-bots.md`](../../docs/design/agent-bots.md) §13.2).
-  Home lists them above the sessions (what needs you in amber, working,
-  paused, an offline device); New → New Workspace… creates one on an online
-  device. A workspace opens on its chat — the session screen with its
+  Home shows the sessions or the workspaces: the switch at its top left
+  picks the list (kept across launches) and, over the sessions, counts what
+  the workspaces need in amber. A workspace's row says what needs you,
+  working, paused or an offline device; the list's **+** creates one on an
+  online device. A workspace opens on its chat — the session screen with its
   avatar, the "N need you" pill, the owner's shortcuts above the composer
   and a start screen while empty — and its board (the toolbar's grid: a
   sheet on iPhone, the inspector on iPad): Needs you, Work, Routines,
@@ -321,7 +323,8 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   offline; creating, settings, routines, invites and memory go to the host
   over the device relay. Demo: `-route bot:bot-atlas`, `-sheet board[:page]`
   (e.g. `board:work:work-flaky`, `board:connection:conn-ledger`),
-  `-sheet memory`, `-sheet bot-new`, `-sheet bot-settings`.
+  `-homeMode workspaces`, `-sheet memory`, `-sheet bot-new`,
+  `-sheet bot-settings`.
 
 ### Validation boundary
 
@@ -498,7 +501,7 @@ mirrors and their vectors are listed in [protocol/README.md](../../protocol/READ
 | Hover timestamps / copy | Context menus |
 | gpui `list()` sum-tree virtualization | `LazyVStack` + stable row ids + version fingerprints |
 | Stick-to-bottom spring, wheel-up breaks pin | Scroll-phase-gated pin + spring scrollTo, same 70/320pt thresholds |
-| Workspaces mode (logo switcher, cards sidebar, detail panel) | Workspaces section on Home; the workspace's chat with its board as a sheet (iPhone) or inspector (iPad), one page per item |
+| Workspaces mode (logo switcher, cards sidebar, detail panel) | Home's list switch (Sessions / Workspaces); the workspace's chat with its board as a sheet (iPhone) or inspector (iPad), one page per item |
 | Workspace shortcuts pinned under the cards | A row of glass chips above the composer |
 | Settings → Memory | Account menu → Memory |
 

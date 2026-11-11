@@ -1,8 +1,8 @@
-// Home's Workspaces: a section over the sessions (All only) with a row per
-// workspace — its avatar, name and one status line, the most pressing
-// first: what needs you, working, paused, its device offline, else its
-// latest message. A tap opens the workspace; a swipe or long press offers
-// Settings, Pause / Resume and Delete.
+// Home's Workspaces list (HomeMode): a row per workspace — its avatar, name
+// and one status line, the most pressing first: what needs you, working,
+// paused, its device offline, else its latest message. A tap opens the
+// workspace; a swipe or long press offers Settings, Pause / Resume and
+// Delete.
 
 import SwiftUI
 
@@ -95,7 +95,7 @@ struct WorkspaceRow: View {
     }
 }
 
-/// The Workspaces section; nothing when there are none.
+/// The workspaces' rows; nothing when there are none.
 struct WorkspaceSection: View {
     @Environment(AppModel.self) private var model
     let bots: [Bot]
@@ -128,8 +128,6 @@ struct WorkspaceSection: View {
                         Button("Delete…", systemImage: "trash", role: .destructive) { delete(bot) }
                     }
                 }
-            } header: {
-                ListSectionHeader(title: "Workspaces")
             }
         }
     }

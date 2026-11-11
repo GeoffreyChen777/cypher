@@ -1102,10 +1102,14 @@ The phone has no engine: it reads every bot record from its replica of the regis
 (the same rows the desktop watches) and is a remote control for the rest, so the iOS
 app has the desktop's whole surface, laid out for a phone.
 
-- **Home** lists the workspaces above the sessions: avatar, name and one status line
-  (what needs you in amber, working, paused, an offline device, else the last message).
-  New → New Workspace… opens the settings form, which creates the workspace on an
-  online device; a row's menu has Settings…, Pause/Resume and Delete…. Hidden chats
+- **Home** shows the sessions or the workspaces, as the desktop's two modes: a switch
+  at the top left picks the list (kept across launches) and, while the sessions show,
+  carries an amber count of what the workspaces need, like the desktop logo's. A
+  workspace's row has its avatar, name and one status line (what needs you in amber,
+  working, paused, an offline device, else the last message); a row's menu has
+  Settings…, Pause/Resume and Delete…. The list's **+** opens the settings form, which
+  creates the workspace on an online device. On iPad the sidebar heads each list with
+  its title and summary, where the phone's large title sits. Hidden chats
   (bot-marked threads and memory passes) are never listed among sessions, nor offered
   by `@` mentions; worker sessions say "by <workspace>".
 - **The workspace** opens on its chat: the session screen with the workspace's avatar

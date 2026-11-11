@@ -1,6 +1,7 @@
 import XCTest
 
-/// The workspace chat end to end on the demo: Home's Workspaces row opens
+/// The workspace chat end to end on the demo: Home's switch shows the
+/// workspaces, Atlas's row opens
 /// Atlas's chat, its plan awaiting approval shows as a card, and Approve
 /// turns it into running work (the card's Stop replaces its decision).
 @MainActor
@@ -8,7 +9,15 @@ final class WorkspaceChatUITests: XCTestCase {
     func testApprovingThePlanCardStartsTheWork() {
         let app = XCUIApplication.launchDemo()
         let row = app.descendants(matching: .any).matching(identifier: "workspace-row-bot-atlas").firstMatch
+        let switcher = app.buttons["home-mode"]
+        XCTAssertTrue(switcher.waitForExistence(timeout: 10), "Home's list switch")
+        XCTAssertFalse(row.exists, "Sessions and workspaces are separate lists")
+        switcher.tap()
+        let workspaces = app.buttons["Workspaces"]
+        XCTAssertTrue(workspaces.waitForExistence(timeout: 5), "the switch offers the workspaces")
+        workspaces.tap()
         XCTAssertTrue(row.waitForExistence(timeout: 10), "Home lists the workspace")
+        XCTAssertTrue(app.navigationBars["Workspaces"].exists, "under the Workspaces title")
         row.tap()
 
         XCTAssertTrue(app.buttons["workspace-board"].waitForExistence(timeout: 10), "the workspace's toolbar")
