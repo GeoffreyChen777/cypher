@@ -47,7 +47,14 @@ fn harness(runs: Runs, finish: bool) -> common::TestHarness {
                 ))])
             })
             .flatten();
-            return Ok(futures::stream::iter([Ok(started)]).chain(rest).boxed());
+            // The brief's run says something before it holds, so a cut-off
+            // thread leaves half an answer behind.
+            let opening = if brief {
+                vec![Ok(started), Ok(common::text("On it."))]
+            } else {
+                vec![Ok(started)]
+            };
+            return Ok(futures::stream::iter(opening).chain(rest).boxed());
         }
         if request.prompt == "ask" {
             let answer = (controls.request_input)(vec![UserInputQuestion {
@@ -615,6 +622,328 @@ async fn stop_reaches_the_thread_and_every_session() {
     );
     assert!(rig.core.workspace.chat(&thread).unwrap().is_none());
     assert!(rig.core.workspace.chat(&session).unwrap().is_some());
+    rig.core.shutdown().await;
+}
+
+/// The request id a `wait_for_session` answer names.
+fn request_id_of(text: &str) -> String {
+    text.split("request ")
+        .nth(1)
+        .and_then(|rest| rest.split([';', ')']).next())
+        .unwrap_or_else(|| panic!("no request id in {text}"))
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_hands_a_question_over_once_then_waits_for_the_owner() {
+    let rig = rig(false);
+    let bot = rig.bot(coordinate()).await;
+    let work_id = rig.propose(&bot, "Ask the owner").await;
+    let thread = rig.approve(&work_id).await;
+    let session = session_id_of(
+        &rig.tool(
+            &thread,
+            "start_session",
+            serde_json::json!({ "step": 1, "project": "sp-billing", "prompt": "ask" }),
+        )
+        .await,
+    );
+    wait_for(
+        || rig.session_status(&session) == Some(SessionStatus::AwaitingInput),
+        "the session to ask",
+    )
+    .await;
+
+    // The first wait reads the question out at once.
+    let wait = |timeout_s: u64| {
+        rig.tool(
+            &thread,
+            "wait_for_session",
+            serde_json::json!({ "session_id": session, "timeout_s": timeout_s }),
+        )
+    };
+    let first = wait(30).await;
+    assert!(first.contains("is asking a question"), "{first}");
+    assert!(first.contains("options: invoices | credits"), "{first}");
+    let request_id = request_id_of(&first);
+
+    // The plan doesn't say, so the thread waits again: this time the wait
+    // holds until it runs out, the question still the owner's.
+    let began = tokio::time::Instant::now();
+    let second = wait(1).await;
+    assert!(
+        began.elapsed() >= Duration::from_millis(900),
+        "the second wait returned after {:?}",
+        began.elapsed()
+    );
+    assert!(
+        second.contains("still waiting on the same question; your owner hasn't answered"),
+        "{second}"
+    );
+    assert_eq!(rig.work(&work_id).state, WorkState::Running);
+    assert_eq!(rig.work(&work_id).steps[0].state, StepState::Asking);
+
+    // The owner answers in the session while the thread waits: the wait
+    // ends with the session's result, and the plan goes on.
+    let (third, ()) = tokio::join!(wait(30), async {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        rig.core
+            .doc_host
+            .queue_command(
+                &session,
+                SessionCommandPayload::RespondInput {
+                    request_id: request_id.clone(),
+                    answers: vec![cypher_proto::UserInputAnswer {
+                        question_id: "q1".into(),
+                        labels: vec!["credits".into()],
+                    }],
+                },
+            )
+            .unwrap();
+    });
+    assert!(third.contains("finished its run"), "{third}");
+    assert!(third.contains("Migrated credits."), "{third}");
+    assert_eq!(rig.work(&work_id).state, WorkState::Running);
+
+    // Stop ends a wait on a question nobody answers.
+    let asking = session_id_of(
+        &rig.tool(
+            &thread,
+            "start_session",
+            serde_json::json!({ "step": 2, "project": "sp-billing", "prompt": "ask" }),
+        )
+        .await,
+    );
+    wait_for(
+        || rig.session_status(&asking) == Some(SessionStatus::AwaitingInput),
+        "the second session to ask",
+    )
+    .await;
+    let wait_on = |timeout_s: u64| {
+        rig.tool(
+            &thread,
+            "wait_for_session",
+            serde_json::json!({ "session_id": asking, "timeout_s": timeout_s }),
+        )
+    };
+    assert!(wait_on(30).await.contains("is asking a question"));
+    let began = tokio::time::Instant::now();
+    let (stopped, ()) = tokio::join!(wait_on(60), async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rig.mutate(serde_json::json!({ "op": "stopBotWork", "workId": work_id }))
+            .await;
+    });
+    assert!(began.elapsed() < Duration::from_secs(20), "{stopped}");
+    wait_for(
+        || rig.work(&work_id).state == WorkState::Stopped,
+        "the work stopped",
+    )
+    .await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn however_a_plan_ends_its_open_steps_end_with_it() {
+    let rig = rig(false);
+    let bot = rig.bot(coordinate()).await;
+
+    // finish_work with a step under way and one never started.
+    let failed = rig.propose(&bot, "Fails").await;
+    let thread = rig.approve(&failed).await;
+    let step = rig
+        .tool(
+            &thread,
+            "update_step",
+            serde_json::json!({ "step": 1, "state": "running", "note": "n".repeat(500) }),
+        )
+        .await;
+    assert!(step.starts_with("Step 1 is running."), "{step}");
+    assert!(step.contains("note was cut to 200 characters"), "{step}");
+    let long = rig
+        .tool(
+            &thread,
+            "finish_work",
+            serde_json::json!({ "outcome": "failed", "result": "r".repeat(2_001) }),
+        )
+        .await;
+    assert!(long.contains("has 2001 characters"), "{long}");
+    assert!(long.contains("Nothing is cut"), "{long}");
+    assert_eq!(rig.work(&failed).state, WorkState::Running, "refused");
+    let finished = rig
+        .tool(
+            &thread,
+            "finish_work",
+            serde_json::json!({ "outcome": "failed", "result": "Blocked." }),
+        )
+        .await;
+    assert!(finished.starts_with("Recorded."), "{finished}");
+    let work = rig.work(&failed);
+    assert_eq!(work.state, WorkState::Failed);
+    assert_eq!(
+        work.steps.iter().map(|s| s.state).collect::<Vec<_>>(),
+        [StepState::Failed, StepState::Skipped]
+    );
+    assert!(work.steps.iter().all(|s| s.ended_at == work.ended_at));
+    rig.core.sessions.interrupt(&thread).await.unwrap();
+
+    // A thread cut off mid-turn, with no finish_work: failed, not done.
+    let cut = rig.propose(&bot, "Cut off").await;
+    let thread = rig.approve(&cut).await;
+    rig.tool(
+        &thread,
+        "update_step",
+        serde_json::json!({ "step": 1, "state": "running" }),
+    )
+    .await;
+    wait_for(
+        || rig.session_status(&thread) == Some(SessionStatus::Working),
+        "the thread to run",
+    )
+    .await;
+    rig.core.sessions.interrupt(&thread).await.unwrap();
+    wait_for(
+        || rig.work(&cut).state != WorkState::Running,
+        "the cut-off work to settle",
+    )
+    .await;
+    let work = rig.work(&cut);
+    assert_eq!(work.state, WorkState::Failed);
+    assert!(
+        work.result.as_deref().is_some_and(|r| r
+            .contains("was stopped before it finished the plan")
+            && r.ends_with("On it.")),
+        "{:?}",
+        work.result
+    );
+    assert_eq!(
+        work.steps.iter().map(|s| s.state).collect::<Vec<_>>(),
+        [StepState::Failed, StepState::Skipped]
+    );
+    assert!(rig.activity(&bot).contains(&ActivityKind::WorkFailed));
+
+    // A row an older engine left: ended, a step still running. The host
+    // closes it on its next pass.
+    let mut stale = rig.work(&cut);
+    stale.id = "stale-work".into();
+    stale.thread_chat_id = None;
+    stale.state = WorkState::Done;
+    stale.steps[0].state = StepState::Running;
+    stale.steps[0].ended_at = None;
+    stale.steps[1].state = StepState::Pending;
+    rig.core
+        .workspace
+        .put_record(
+            cypher_proto::KIND_BOT_WORK,
+            &stale.id,
+            &stale,
+            cypher_engine::RecordFields::All,
+        )
+        .unwrap();
+    wait_for(
+        || {
+            rig.work("stale-work")
+                .steps
+                .iter()
+                .map(|s| s.state)
+                .collect::<Vec<_>>()
+                == [StepState::Done, StepState::Skipped]
+        },
+        "the host to close a stale row's steps",
+    )
+    .await;
+    assert!(rig.work("stale-work").steps[0].ended_at.is_some());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plan_is_refused_rather_than_cut() {
+    let rig = rig(false);
+    let bot = rig.bot(coordinate()).await;
+    let propose = |steps: serde_json::Value| {
+        rig.tool(
+            &bot.chat_id,
+            "propose_plan",
+            serde_json::json!({ "title": "Long plan", "steps": steps }),
+        )
+    };
+    let long_step = propose(serde_json::json!([
+        { "title": "a", "project": "sp-billing", "detail": "d".repeat(1_501) },
+    ]))
+    .await;
+    assert!(
+        long_step
+            .contains("Step 1's detail has 1501 characters; a step's detail holds at most 1500"),
+        "{long_step}"
+    );
+    let long_plan = propose(serde_json::json!([
+        { "title": "a", "detail": "d".repeat(1_500) },
+        { "title": "b", "detail": "d".repeat(1_500) },
+        { "title": "c", "detail": "d".repeat(1_001) },
+    ]))
+    .await;
+    assert!(
+        long_plan.contains("add up to 4001 characters; a plan holds at most 4000"),
+        "{long_plan}"
+    );
+    let long_title = propose(serde_json::json!([{ "title": "t".repeat(161) }])).await;
+    assert!(
+        long_title.contains("Step 1's title has 161"),
+        "{long_title}"
+    );
+    assert!(
+        rig.core.workspace.read_bot_records().work.is_empty(),
+        "a refused plan writes nothing"
+    );
+
+    // At the caps it is stored whole, and the brief carries every character.
+    rig.core
+        .doc_host
+        .open(&bot.chat_id)
+        .unwrap()
+        .write_user_message("m-long", &"词".repeat(1_600), 1_000)
+        .unwrap();
+    let detail = format!("{}END", "设".repeat(1_497));
+    let kept = propose(serde_json::json!([
+        { "title": "a", "project": "sp-billing", "detail": detail },
+    ]))
+    .await;
+    assert!(kept.contains("waiting for your owner's approval"), "{kept}");
+    // The owner's own message can't be refused; the model is told it was cut.
+    assert!(
+        kept.contains(
+            "has 1600 characters and the background session is given only its first 1500"
+        ),
+        "{kept}"
+    );
+    let work = rig
+        .core
+        .workspace
+        .read_bot_records()
+        .work
+        .into_iter()
+        .next()
+        .expect("the plan");
+    assert_eq!(work.steps[0].detail.as_deref(), Some(detail.as_str()));
+    let thread = rig.approve(&work.id).await;
+    let (request, _) = wait_for_some("the brief run", || {
+        rig.run_of("Carry out this approved plan")
+    })
+    .await;
+    assert!(request.prompt.contains(&detail), "the whole detail");
+    assert!(
+        request
+            .prompt
+            .contains("only its first 1500 characters, the rest was cut"),
+        "{}",
+        request.prompt
+    );
+    rig.mutate(serde_json::json!({ "op": "stopBotWork", "workId": work.id }))
+        .await;
+    wait_for(
+        || rig.session_status(&thread) == Some(SessionStatus::Idle),
+        "the thread stopped",
+    )
+    .await;
     rig.core.shutdown().await;
 }
 

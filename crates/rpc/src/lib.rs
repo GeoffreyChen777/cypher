@@ -24,7 +24,7 @@ pub mod device_room;
 mod local;
 mod server;
 
-pub use client::RpcClient;
+pub use client::{Redial, RpcClient};
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig, NoTrust,
     NudgeHandler, PeerTrust, StaticToken, TokenSource, decode_device_frame, device_room_ws_url,
@@ -838,6 +838,73 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RpcError::Failed(m) if m == "boom"));
+    }
+
+    #[tokio::test]
+    async fn a_closed_connection_is_redialed_for_the_next_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A connection whose far end this test holds, and so can drop.
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel::<String>(8);
+        let (in_tx, in_rx) = tokio::sync::mpsc::channel::<String>(8);
+        let dials = Arc::new(AtomicUsize::new(0));
+        let up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (counted, engine_up) = (dials.clone(), up.clone());
+        let client = RpcClient::new(out_tx, in_rx).with_redial(Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let up = engine_up.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if up {
+                    Ok(memory_client(Arc::new(TestService)))
+                } else {
+                    Err(RpcError::Transport("nothing listening".into()))
+                }
+            })
+        }));
+        let mut stream = client
+            .subscribe("Never", serde_json::Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            0,
+            "an open connection is kept"
+        );
+
+        // The engine goes away: the stream ends, and while nothing answers
+        // a request fails as closed.
+        drop((out_rx, in_tx));
+        assert_eq!(stream.recv().await, None);
+        let down = client.call("Echo", serde_json::json!(1)).await;
+        assert!(matches!(down, Err(RpcError::Closed)), "{down:?}");
+        assert_eq!(dials.load(Ordering::SeqCst), 1);
+        // A failed dial is not repeated at once by the next request.
+        let down = client.subscribe("Count", serde_json::json!({"n": 1})).await;
+        assert!(matches!(down, Err(RpcError::Closed)));
+        assert_eq!(dials.load(Ordering::SeqCst), 1);
+
+        // It is back: the next request dials and is answered, streams too,
+        // and the new connection is kept.
+        up.store(true, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let echoed = client.call("Echo", serde_json::json!("hi")).await.unwrap();
+        assert_eq!(echoed, serde_json::json!("hi"));
+        let mut items = client
+            .subscribe("Count", serde_json::json!({"n": 2}))
+            .await
+            .unwrap();
+        assert_eq!(items.recv().await, Some(serde_json::json!(0)));
+        assert_eq!(items.recv().await, Some(serde_json::json!(1)));
+        assert_eq!(items.recv().await, None);
+        assert_eq!(dials.load(Ordering::SeqCst), 2);
+
+        // A client with no way to dial stays closed.
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel::<String>(8);
+        let (in_tx, in_rx) = tokio::sync::mpsc::channel::<String>(8);
+        let plain = RpcClient::new(out_tx, in_rx);
+        drop((out_rx, in_tx));
+        let closed = plain.call("Echo", serde_json::json!(1)).await;
+        assert!(matches!(closed, Err(RpcError::Closed)));
     }
 
     #[tokio::test]

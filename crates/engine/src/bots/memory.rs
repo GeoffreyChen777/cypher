@@ -240,19 +240,20 @@ impl Bots {
             .workspace
             .update_record(p::KIND_BOT_ROUTINES, &routine.id, fields)?;
         self.wake_schedule();
+        // A request the scheduler will skip is not a run that started.
+        if let Some(reason) = schedule::skip_reason(bot.paused).or_else(|| {
+            routine.target.space_id().and_then(|id| {
+                schedule::project_skip(bot.capabilities.coordinate, bot.scope.sees_space(id))
+            })
+        }) {
+            return Ok(format!("\"{}\" didn't run. {reason}", routine.name));
+        }
         let mut out = vec![format!(
             "Started \"{}\": a fresh run; its result will be posted in this chat when it ends.",
             routine.name
         )];
         if schedule::is_running(routine.last_run.as_ref()) {
             out.push("A run is going now; this one starts when it ends.".into());
-        }
-        if let Some(reason) = schedule::skip_reason(bot.paused).or_else(|| {
-            routine.target.space_id().and_then(|id| {
-                schedule::project_skip(bot.capabilities.coordinate, bot.scope.sees_space(id))
-            })
-        }) {
-            out.push(format!("It won't run, though. {reason}"));
         }
         Ok(out.join(" "))
     }

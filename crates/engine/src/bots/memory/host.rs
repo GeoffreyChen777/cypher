@@ -502,7 +502,9 @@ impl Bots {
             "This is a run of the routine \"{}\". Nobody is watching it: you cannot ask \
              questions or wait for an approval, and anything that would ask stops the run as \
              failed. When something is unclear, make the reasonable choice and say what you \
-             assumed.\n\n{}",
+             assumed. Only what you write after your last tool call is delivered to your \
+             owner: finish every tool call first, then write the whole answer in one \
+             piece.\n\n{}",
             routine.name, routine.prompt
         );
         (request, Some(agent_prompt))

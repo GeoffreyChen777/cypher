@@ -131,7 +131,9 @@ The chain enforces it, so every member (and the edge) applies the same rules:
 Hosts refuse a receive-only member at the handshake (refusal reason
 `receive_only`) and re-check on every sealed frame, so a change ends open
 sessions as soon as the host learns of it. A receive-only device's own engine
-dials no other device.
+dials no other device: a request for one is refused at once with the reason,
+with no dial attempts, retries or backoff (a view left open on another
+device's session asks again every few seconds).
 
 Chat messages to a chat another device hosts travel as durable commands in
 the synced chat doc, not over the relay; those are covered by

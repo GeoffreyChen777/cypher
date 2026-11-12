@@ -52,6 +52,16 @@ pub const TITLE_MAX: usize = 120;
 pub const LINE_MAX: usize = 300;
 pub const STEP_TITLE_MAX: usize = 160;
 pub const DETAIL_MAX: usize = 400;
+/// One step's detail: what the orchestration needs to start it.
+pub const STEP_DETAIL_MAX: usize = 1_500;
+/// Every step's detail together. With the other caps this keeps a work row
+/// under the registry's per-row size ([`WORK_ROW_MAX`]).
+pub const PLAN_DETAILS_MAX: usize = 4_000;
+/// A step's progress note.
+pub const STEP_NOTE_MAX: usize = 200;
+/// The largest work row written, in UTF-16 units of its JSON (the registry
+/// refuses a row over 14 Ki).
+pub const WORK_ROW_MAX: usize = 13_800;
 pub const INSTRUCTION_MAX: usize = 1_500;
 pub const RESULT_MAX: usize = 2_000;
 pub const NOTE_MAX: usize = 1_000;
@@ -201,6 +211,105 @@ impl BotWork {
         for step in &mut self.steps {
             step.clamp();
         }
+        // The details share one budget: the longest gives way first.
+        while self.details_len() > PLAN_DETAILS_MAX {
+            let over = self.details_len() - PLAN_DETAILS_MAX;
+            let Some(longest) = self
+                .steps
+                .iter_mut()
+                .filter_map(|step| step.detail.as_mut())
+                .max_by_key(|detail| detail.chars().count())
+            else {
+                break;
+            };
+            let keep = longest.chars().count().saturating_sub(over);
+            *longest = clip(longest, keep.max(1));
+        }
+        self.fit_row();
+    }
+
+    /// The steps' details together, in characters.
+    pub fn details_len(&self) -> usize {
+        self.steps
+            .iter()
+            .filter_map(|step| step.detail.as_deref())
+            .map(|detail| detail.chars().count())
+            .sum()
+    }
+
+    /// The row's size as the registry measures it.
+    fn row_units(&self) -> usize {
+        serde_json::to_string(self).map_or(0, |json| json.encode_utf16().count())
+    }
+
+    /// A last resort for text the caps let through but whose JSON runs long
+    /// (escaped newlines and quotes): shorten the result, then the longest
+    /// detail, until the row is one the registry takes.
+    fn fit_row(&mut self) {
+        for _ in 0..16 {
+            let units = self.row_units();
+            if units <= WORK_ROW_MAX {
+                return;
+            }
+            let over = units - WORK_ROW_MAX + 16;
+            let shorten = |text: &mut String| {
+                let keep = text.chars().count().saturating_sub(over);
+                *text = clip(text, keep.max(1));
+            };
+            match self.result.as_mut().filter(|r| r.chars().count() > 200) {
+                Some(result) => shorten(result),
+                None => match self
+                    .steps
+                    .iter_mut()
+                    .filter_map(|step| step.detail.as_mut())
+                    .max_by_key(|detail| detail.chars().count())
+                {
+                    Some(detail) if detail.chars().count() > 1 => shorten(detail),
+                    _ => return,
+                },
+            }
+        }
+    }
+
+    /// How an open step reads once its plan has ended as `self.state`: what
+    /// was under way ended with the plan (done, or failed), what never
+    /// started was skipped, and a stopped plan skipped the rest. The steps
+    /// of a live plan, of a cancelled one (it never ran: they stay as
+    /// proposed) and steps already closed read as they are.
+    pub fn ended_step_state(&self, step: StepState) -> StepState {
+        let open = matches!(
+            step,
+            StepState::Pending | StepState::Running | StepState::Asking
+        );
+        if !open {
+            return step;
+        }
+        match (self.state, step) {
+            (WorkState::Proposed | WorkState::Running | WorkState::Cancelled, _) => step,
+            (WorkState::Done, StepState::Running | StepState::Asking) => StepState::Done,
+            (WorkState::Failed, StepState::Running | StepState::Asking) => StepState::Failed,
+            _ => StepState::Skipped,
+        }
+    }
+
+    /// Close the steps an ended plan left open ([`Self::ended_step_state`]),
+    /// ending them when the plan did. `true` when a step changed.
+    pub fn close_steps(&mut self, now_ms: i64) -> bool {
+        let ended = self.ended_at.unwrap_or(now_ms);
+        let states: Vec<StepState> = self
+            .steps
+            .iter()
+            .map(|step| self.ended_step_state(step.state))
+            .collect();
+        let mut changed = false;
+        for (step, state) in self.steps.iter_mut().zip(states) {
+            if step.state != state {
+                step.state = state;
+                step.ended_at.get_or_insert(ended);
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn is_live(&self) -> bool {
@@ -290,8 +399,8 @@ pub struct WorkStep {
 impl WorkStep {
     fn clamp(&mut self) {
         self.title = clip(&self.title, STEP_TITLE_MAX);
-        self.detail = clip_opt(&self.detail, DETAIL_MAX);
-        self.note = clip_opt(&self.note, STEP_TITLE_MAX);
+        self.detail = clip_opt(&self.detail, STEP_DETAIL_MAX);
+        self.note = clip_opt(&self.note, STEP_NOTE_MAX);
         self.sessions.truncate(STEP_SESSIONS_MAX);
     }
 }
@@ -1277,6 +1386,128 @@ mod tests {
         assert!(units < 14 * 1024, "{units}");
         assert_eq!(work.title.chars().count(), TITLE_MAX);
         assert!(work.title.ends_with('…'));
+        assert!(work.details_len() <= PLAN_DETAILS_MAX);
+
+        // Text whose JSON runs long (every character escaped), with every
+        // step noted and the most sessions a work starts: still a row the
+        // registry takes.
+        work.result = Some("\"".repeat(RESULT_MAX));
+        work.instruction = "\"".repeat(INSTRUCTION_MAX);
+        for (index, step) in work.steps.iter_mut().enumerate() {
+            step.detail = Some("\"".repeat(STEP_DETAIL_MAX));
+            step.note = Some("n".repeat(STEP_NOTE_MAX));
+            if index < MAX_SESSIONS_PER_WORK {
+                step.sessions = vec!["0".repeat(36)];
+            }
+            step.started_at = Some(1_794_465_204_971);
+            step.ended_at = Some(1_794_465_204_971);
+        }
+        work.clamp();
+        let units = serde_json::to_string(&work).unwrap().encode_utf16().count();
+        assert!(units <= WORK_ROW_MAX, "{units}");
+    }
+
+    #[test]
+    fn a_plan_within_its_caps_is_stored_whole() {
+        let step = |detail: &str| WorkStep {
+            id: "1".into(),
+            title: "t".repeat(STEP_TITLE_MAX),
+            project: None,
+            detail: Some(detail.into()),
+            state: StepState::Pending,
+            sessions: vec![],
+            note: None,
+            started_at: None,
+            ended_at: None,
+        };
+        let mut work = BotWork {
+            id: "w".into(),
+            bot_id: "b".into(),
+            title: "t".repeat(TITLE_MAX),
+            instruction: "指".repeat(INSTRUCTION_MAX),
+            summary: Some("s".repeat(DETAIL_MAX)),
+            steps: vec![
+                step(&"设".repeat(STEP_DETAIL_MAX)),
+                step(&"计".repeat(STEP_DETAIL_MAX)),
+                step(&"d".repeat(PLAN_DETAILS_MAX - 2 * STEP_DETAIL_MAX)),
+            ],
+            state: WorkState::Proposed,
+            chat_id: "c".into(),
+            tool_call_id: None,
+            thread_chat_id: None,
+            created_at: 0,
+            started_at: None,
+            ended_at: None,
+            result: None,
+            decision: None,
+            stop_requested_at: None,
+        };
+        let before = work.clone();
+        work.clamp();
+        assert_eq!(work, before, "nothing within the caps is cut");
+    }
+
+    #[test]
+    fn an_ended_plan_closes_the_steps_it_left_open() {
+        let step = |state: StepState| WorkStep {
+            id: "1".into(),
+            title: "s".into(),
+            project: None,
+            detail: None,
+            state,
+            sessions: vec![],
+            note: None,
+            started_at: Some(10),
+            ended_at: None,
+        };
+        let work = |state: WorkState| BotWork {
+            id: "w".into(),
+            bot_id: "b".into(),
+            title: "w".into(),
+            instruction: String::new(),
+            summary: None,
+            steps: vec![
+                step(StepState::Done),
+                step(StepState::Running),
+                step(StepState::Asking),
+                step(StepState::Pending),
+            ],
+            state,
+            chat_id: "c".into(),
+            tool_call_id: None,
+            thread_chat_id: None,
+            created_at: 0,
+            started_at: Some(5),
+            ended_at: Some(90),
+            result: None,
+            decision: None,
+            stop_requested_at: None,
+        };
+        let states = |w: &BotWork| w.steps.iter().map(|s| s.state).collect::<Vec<_>>();
+        use StepState::{Asking, Done, Failed, Pending, Running, Skipped};
+
+        let mut running = work(WorkState::Running);
+        assert!(!running.close_steps(100), "a live plan keeps its steps");
+        assert_eq!(states(&running), [Done, Running, Asking, Pending]);
+
+        let mut done = work(WorkState::Done);
+        assert!(done.close_steps(100));
+        assert_eq!(states(&done), [Done, Done, Done, Skipped]);
+        assert_eq!(done.steps[0].ended_at, None, "a closed step is left alone");
+        assert_eq!(done.steps[1].ended_at, Some(90), "it ended with its plan");
+        assert!(!done.close_steps(100), "nothing left to close");
+
+        let mut failed = work(WorkState::Failed);
+        failed.close_steps(100);
+        assert_eq!(states(&failed), [Done, Failed, Failed, Skipped]);
+
+        let mut stopped = work(WorkState::Stopped);
+        stopped.close_steps(100);
+        assert_eq!(states(&stopped), [Done, Skipped, Skipped, Skipped]);
+
+        let mut cancelled = work(WorkState::Cancelled);
+        assert!(!cancelled.close_steps(100), "it never ran");
+        assert_eq!(states(&cancelled), [Done, Running, Asking, Pending]);
     }
 
     #[test]

@@ -32,18 +32,59 @@ impl Shared {
     }
 }
 
-/// A multiplexing RPC client over any string-frame duplex ([`crate::memory_client`] or
-/// [`crate::connect_local`]). Cheap to clone-by-Arc internally; use one per connection.
-pub struct RpcClient {
+/// Dials a replacement for a connection that closed
+/// ([`RpcClient::with_redial`]).
+pub type Redial =
+    Arc<dyn Fn() -> futures::future::BoxFuture<'static, Result<RpcClient, RpcError>> + Send + Sync>;
+
+/// A failed redial is not repeated for this long: every watch of a viewport
+/// retries on its own, and one dial answers them all.
+const REDIAL_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
+
+struct Redialer {
+    dial: Redial,
+    /// One dial at a time; holds when the last one failed.
+    last_failure: tokio::sync::Mutex<Option<std::time::Instant>>,
+}
+
+/// Why a request got no answer: it never left (the connection was already
+/// closed, so sending it again elsewhere is safe), or it failed.
+enum Unanswered {
+    Unsent,
+    Failed(RpcError),
+}
+
+impl From<Unanswered> for RpcError {
+    fn from(unanswered: Unanswered) -> Self {
+        match unanswered {
+            Unanswered::Unsent => RpcError::Closed,
+            Unanswered::Failed(err) => err,
+        }
+    }
+}
+
+/// One connection: its outbound queue, the requests waiting on it and the
+/// task reading its frames.
+struct Conn {
     out: mpsc::Sender<String>,
     shared: Arc<Shared>,
     next_id: AtomicU64,
     reader: tokio::task::JoinHandle<()>,
 }
 
-impl RpcClient {
-    /// Wrap an existing duplex: `out` carries client frames, `inbound` server frames.
-    pub fn new(out: mpsc::Sender<String>, mut inbound: mpsc::Receiver<String>) -> Self {
+/// A multiplexing RPC client over any string-frame duplex ([`crate::memory_client`] or
+/// [`crate::connect_local`]). Cheap to clone-by-Arc internally; use one per connection.
+///
+/// A client is one connection for life unless it was given a way to dial
+/// another ([`Self::with_redial`]): then a request that finds the connection
+/// closed dials again and goes out on the new one.
+pub struct RpcClient {
+    conn: Mutex<Arc<Conn>>,
+    redial: Option<Redialer>,
+}
+
+impl Conn {
+    fn new(out: mpsc::Sender<String>, mut inbound: mpsc::Receiver<String>) -> Self {
         let shared = Arc::new(Shared {
             pending: Mutex::new(HashMap::new()),
         });
@@ -86,12 +127,11 @@ impl RpcClient {
         }
     }
 
-    /// Unary request.
-    pub async fn call(
+    async fn call(
         &self,
         method: &str,
         params: serde_json::Value,
-    ) -> Result<serde_json::Value, RpcError> {
+    ) -> Result<serde_json::Value, Unanswered> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.shared.lock().insert(id, Pending::Call(tx));
@@ -105,7 +145,121 @@ impl RpcClient {
         .inspect_err(|_| {
             self.shared.lock().remove(&id);
         })?;
-        rx.await.map_err(|_| RpcError::Closed)?
+        rx.await
+            .map_err(|_| Unanswered::Failed(RpcError::Closed))?
+            .map_err(Unanswered::Failed)
+    }
+
+    async fn subscribe(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<mpsc::Receiver<serde_json::Value>, Unanswered> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAP);
+        self.shared.lock().insert(id, Pending::Stream(tx));
+        self.send(ClientFrame {
+            id,
+            method: Some(method.into()),
+            params,
+            cancel: false,
+        })
+        .await
+        .inspect_err(|_| {
+            self.shared.lock().remove(&id);
+        })?;
+        Ok(rx)
+    }
+
+    async fn send(&self, frame: ClientFrame) -> Result<(), Unanswered> {
+        let json = serde_json::to_string(&frame).map_err(|e| {
+            Unanswered::Failed(RpcError::Transport(format!("serialize frame: {e}")))
+        })?;
+        self.out.send(json).await.map_err(|_| Unanswered::Unsent)
+    }
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+impl RpcClient {
+    /// Wrap an existing duplex: `out` carries client frames, `inbound` server frames.
+    pub fn new(out: mpsc::Sender<String>, inbound: mpsc::Receiver<String>) -> Self {
+        Self {
+            conn: Mutex::new(Arc::new(Conn::new(out, inbound))),
+            redial: None,
+        }
+    }
+
+    /// Dial again with `dial` when a request finds the connection closed
+    /// (the engine it reached restarted). Requests in flight when it closed
+    /// still fail, and streams still end: only a request that never left is
+    /// sent on the new connection, so nothing is delivered twice.
+    ///
+    /// `dial` is called on whatever executor made the request, which need
+    /// not be a Tokio runtime: a dial that needs one hops onto it itself.
+    pub fn with_redial(mut self, dial: Redial) -> Self {
+        self.redial = Some(Redialer {
+            dial,
+            last_failure: tokio::sync::Mutex::new(None),
+        });
+        self
+    }
+
+    fn conn(&self) -> Arc<Conn> {
+        crate::lock(&self.conn).clone()
+    }
+
+    /// The connection to use after `closed` turned out closed: one another
+    /// request already dialed, else a new one.
+    async fn reconnect(&self, closed: &Arc<Conn>) -> Result<Arc<Conn>, RpcError> {
+        let Some(redialer) = &self.redial else {
+            return Err(RpcError::Closed);
+        };
+        let mut last_failure = redialer.last_failure.lock().await;
+        let current = self.conn();
+        if !Arc::ptr_eq(&current, closed) {
+            return Ok(current);
+        }
+        if last_failure.is_some_and(|at| at.elapsed() < REDIAL_PAUSE) {
+            return Err(RpcError::Closed);
+        }
+        match (redialer.dial)().await {
+            Ok(client) => {
+                let conn = client.conn();
+                *crate::lock(&self.conn) = conn.clone();
+                *last_failure = None;
+                tracing::info!("rpc: reconnected");
+                Ok(conn)
+            }
+            Err(err) => {
+                tracing::debug!(error = %err, "rpc: redial failed");
+                *last_failure = Some(std::time::Instant::now());
+                Err(RpcError::Closed)
+            }
+        }
+    }
+
+    /// Unary request.
+    pub async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcError> {
+        let conn = self.conn();
+        if self.redial.is_none() {
+            return Ok(conn.call(method, params).await?);
+        }
+        match conn.call(method, params.clone()).await {
+            Err(Unanswered::Unsent) => {
+                let conn = self.reconnect(&conn).await?;
+                Ok(conn.call(method, params).await?)
+            }
+            other => Ok(other?),
+        }
     }
 
     /// Typed unary request.
@@ -126,32 +280,17 @@ impl RpcClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<mpsc::Receiver<serde_json::Value>, RpcError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAP);
-        self.shared.lock().insert(id, Pending::Stream(tx));
-        self.send(ClientFrame {
-            id,
-            method: Some(method.into()),
-            params,
-            cancel: false,
-        })
-        .await
-        .inspect_err(|_| {
-            self.shared.lock().remove(&id);
-        })?;
-        Ok(rx)
-    }
-
-    async fn send(&self, frame: ClientFrame) -> Result<(), RpcError> {
-        let json = serde_json::to_string(&frame)
-            .map_err(|e| RpcError::Transport(format!("serialize frame: {e}")))?;
-        self.out.send(json).await.map_err(|_| RpcError::Closed)
-    }
-}
-
-impl Drop for RpcClient {
-    fn drop(&mut self) {
-        self.reader.abort();
+        let conn = self.conn();
+        if self.redial.is_none() {
+            return Ok(conn.subscribe(method, params).await?);
+        }
+        match conn.subscribe(method, params.clone()).await {
+            Err(Unanswered::Unsent) => {
+                let conn = self.reconnect(&conn).await?;
+                Ok(conn.subscribe(method, params).await?)
+            }
+            other => Ok(other?),
+        }
     }
 }
 

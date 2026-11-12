@@ -962,13 +962,20 @@ async fn a_client_that_requires_pairing_never_talks_to_an_unknown_host() {
     let relay = FakeRelay::start().await;
     let pair = Pair::new();
     let _host = trusted_host(&relay, pair.host(true, false)).await;
-    let err = trusted_cache(&relay, pair.client(false, true))
+    let links = trusted_cache(&relay, pair.client(false, true));
+    let began = tokio::time::Instant::now();
+    let err = links
         .client("dev-a")
         .await
         .err()
         .expect("an unknown host is refused before dialing");
     assert!(err.to_string().contains("isn't paired"), "{err}");
     assert!(relay.state.lock().unwrap().seen.is_empty());
+    // Its own policy's refusal is no failed dial: no in-call retries, and
+    // the next request reads the same reason, not a backoff.
+    assert!(began.elapsed() < Duration::from_secs(1), "no retries");
+    let again = links.client("dev-a").await.err().expect("still refused");
+    assert!(again.to_string().contains("isn't paired"), "{again}");
 }
 
 #[tokio::test]
@@ -1005,12 +1012,23 @@ async fn a_receive_only_device_is_controlled_but_controls_nothing() {
         local_receive_only: true,
         ..Arc::into_inner(pair.client(true, true)).unwrap()
     });
-    let err = trusted_cache(&relay, own)
+    let links = trusted_cache(&relay, own);
+    let began = tokio::time::Instant::now();
+    let err = links
         .client("dev-a")
         .await
         .err()
         .expect("refused before dialing");
     assert!(err.to_string().contains("receive-only"), "{err}");
+    assert!(relay.state.lock().unwrap().seen.is_empty());
+    // Refused at once, every time: a view left open on another device's
+    // session asks again every couple of seconds, and each request used to
+    // run three attempts over 4.5 s and then count as a failed dial.
+    assert!(began.elapsed() < Duration::from_secs(1), "no retries");
+    for _ in 0..3 {
+        let again = links.client("dev-a").await.err().expect("still refused");
+        assert!(again.to_string().contains("receive-only"), "{again}");
+    }
     assert!(relay.state.lock().unwrap().seen.is_empty());
 }
 

@@ -299,8 +299,8 @@ worker's prompt carries it.
 
 Workers started by an orchestration run unattended by default: anything that would ask for
 approval fails the step instead of waiting. A worker that asks the user a question is
-surfaced to the orchestration thread, which answers from the plan or passes it to the
-owner. Nothing stalls silently.
+surfaced to the orchestration thread, which answers from the plan or leaves it to the
+owner and waits for their answer (§6.7). Nothing stalls silently.
 
 ### 6.6 Control and limits
 
@@ -337,6 +337,15 @@ owner. Nothing stalls silently.
      └─ a worker waits on an answer: its step is asking, then running again
   ```
 
+  A thread whose run ended without `finish_work` is done only when it ended cleanly with
+  a last message; one that errored, was cut off mid-answer (interrupted, or an engine
+  restart it did not come back from) or said nothing is failed, with what it had written
+  quoted in the result. However a plan ends, **the steps it left open end with it**
+  (`BotWork::close_steps`): one under way is done or failed like its plan, one never
+  started is skipped, and Stop skips them all. The host also closes the open steps of
+  ended rows an older engine wrote, and the apps read such rows closed, so no step shows
+  as running under a finished plan.
+
   Starting means writing the item running first, then a hidden thread chat (marker
   `{origin: owner, thread: {kind: work, workId}}`, the bot's folder, the bot chat's
   config, the plan's title), then queueing its first run, the brief, under a message id
@@ -348,7 +357,11 @@ owner. Nothing stalls silently.
   the work with the reason instead of stalling where nobody looks. Its worker sessions are
   attended: their questions reach the thread through `wait_for_session` and the owner
   through *Needs you*. A thread may answer a question but never a permission prompt;
-  only the owner approves a session's commands.
+  only the owner approves a session's commands. A question the plan doesn't answer is
+  the owner's: the thread waits for it. `wait_for_session` hands a thread each question
+  once; called again on the same open question it holds until the owner answers, so the
+  plan stays running (its step asking) instead of ending as failed the moment a worker
+  asks, and goes on from the answer. The thread's four-hour budget bounds the wait.
 - **The brief** (`bots/work/text.rs`) carries the plan with step ids, projects and
   devices, the instruction verbatim in quotes, and what the thread may do in plain words.
   Its memory joins it with the memory track.
@@ -457,7 +470,8 @@ while a run it started is going or a post waits, on session status changes. Per 
   working session is waiting and a settled one ended. No command 60 s after the record
   means it never started. After a restart the next pass settles whatever the old engine
   left running.
-- **Settling:** a run ends `done` with its last answer as `summary` (clipped to 1,000
+- **Settling:** a run ends `done` with its last answer (the text after its last tool
+  call, which is what its prompt tells it to write the whole answer in) as `summary` (clipped to 1,000
   characters) or `failed` with the best reason: the unattended stop's reason, the
   command's, the transcript's last error, or "The run was stopped before it finished."
   for a run interrupted mid-answer or that ended with no answer at all.
@@ -630,11 +644,11 @@ orchestration thread gets the rest but `stop_work` (it ends its own work with
 | `stop_work {work_id}` | Bot chat: stops running work at the owner's word, like the work page's Stop. A plan awaiting approval is the owner's to cancel. After a peer's answer, the owner approves it first (§4.3). |
 | `create_worktree {project, branch?}` | A new `cypher/<name>` worktree in one of the plan's projects, off `branch` (default HEAD), on that project's device: locally through the engine's repos, on another device through its forwardable `CreateWorktree` within 30 s. Returns the path. |
 | `start_session {step, project, prompt, title?, cwd?, model?}` | A session in one of the plan's projects or a worktree from `create_worktree`, recorded on the step; returns its id. |
-| `wait_for_session {session_id, timeout_s?}` | Waits (default 300 s, at most 900) until a session settles or asks; returns its state, its last message and any question with its options, as quoted data. |
+| `wait_for_session {session_id, timeout_s?}` | Waits (default 300 s, at most 900) until a session settles or asks; returns its state, its last message and any question with its options, as quoted data. A question is read out once: called again while the same question is open, it waits for the owner's answer (or the wait's end, or Stop). |
 | `answer_session {session_id, answers? \| text?}` | Answers the question a session is asking (never a permission prompt). |
 | `steer_session {session_id, message}`, `stop_session {session_id}` | For sessions this work started; for others only with *Coordinate: steer* and the owner's approval of each action. |
 | `update_step {step, state, note?}` | Running, done, failed or skipped, for the progress card. |
-| `finish_work {outcome, result}` | Done or failed, with the result the owner reads, citing sessions. |
+| `finish_work {outcome, result}` | Done or failed, with the result the owner reads (at most 2,000 characters, refused over that), citing sessions. Closes the steps still open. |
 
 ### 10.4 Memory and network
 
@@ -1017,7 +1031,7 @@ A workspace
 
 **Switching.** A click on the logo opens one list: **Sessions** (the projects view, the
 default) first, then every workspace by name with what it is doing (a Needs-you count, a
-spinner while it works, "paused", an offline host), a check on what shows now, then New
+spinner while its chat or a plan of its is running, "paused", an offline host), a check on what shows now, then New
 workspace; past five rows it leads with a search field. Type to filter, ↑↓ and Enter to
 pick, Esc to close; a right-click on the tag or a workspace row opens its Open /
 Settings… / Delete… menu. The chosen workspace follows "Cypher" as a soft tag: its face

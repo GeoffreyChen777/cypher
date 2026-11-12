@@ -363,6 +363,17 @@ impl EngineHandle {
                         !expected.trim().is_empty() && expected.trim() == engine_info.device_id,
                         "IPC engine identity does not match the selected data directory"
                     );
+                    // The daemon outlives this window and may restart under
+                    // it (an update, a crash): the next request then dials
+                    // the same socket again, and the watches, which
+                    // resubscribe when their streams end, pick up from the
+                    // new engine. Without this they retried on the closed
+                    // connection for the rest of the window's life.
+                    let client = client.with_redial(redial(
+                        tokio::runtime::Handle::current(),
+                        ipc_socket.to_path_buf(),
+                        engine_info.device_id.clone(),
+                    ));
                     let client = Arc::new(client);
                     let (state_tx, state_rx) =
                         tokio::sync::watch::channel(DeferredEngineState::Waiting);
@@ -429,6 +440,45 @@ impl EngineHandle {
 
 /// Query the current protocol first, with a conservative fallback for daemons
 /// from before `EngineInfo` existed. Old daemons are always treated as synced.
+/// How long a restarted engine gets to finish assembling before a redial
+/// gives up (the next request tries again).
+const REDIAL_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Dials the daemon's socket again: the same engine (by device id), ready
+/// to serve data calls. The dial runs on `runtime`: a request that finds the
+/// connection closed comes from the window's own executor, which has no
+/// Tokio reactor for the socket.
+fn redial(
+    runtime: tokio::runtime::Handle,
+    ipc_socket: PathBuf,
+    device_id: String,
+) -> cypher_rpc::Redial {
+    Arc::new(move || {
+        let (ipc_socket, device_id) = (ipc_socket.clone(), device_id.clone());
+        let dial = runtime.spawn(async move {
+            let client = cypher_rpc::connect_local(&ipc_socket).await?;
+            let info = query_engine_info(&client).await?;
+            if info.device_id != device_id {
+                return Err(RpcError::Transport(
+                    "another engine answers on the IPC socket now".into(),
+                ));
+            }
+            tokio::time::timeout(
+                REDIAL_READY_TIMEOUT,
+                client.call(methods::ENGINE_READY, serde_json::json!({})),
+            )
+            .await
+            .map_err(|_| RpcError::Transport("the engine is still starting".into()))??;
+            tracing::info!(socket = %ipc_socket.display(), "engine daemon reconnected");
+            Ok(client)
+        });
+        Box::pin(async move {
+            dial.await
+                .map_err(|err| RpcError::Transport(format!("redial did not finish: {err}")))?
+        })
+    })
+}
+
 pub(super) async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
     tokio::time::timeout(
         std::time::Duration::from_secs(5),

@@ -138,6 +138,33 @@ final class BotModelTests: XCTestCase {
             "an unknown work state fails the row, which projection skips")
     }
 
+    func testAnEndedPlanClosesTheStepsItLeftOpen() throws {
+        // bot_records.rs `an_ended_plan_closes_the_steps_it_left_open`.
+        func states(_ state: String) throws -> [StepState] {
+            try decodeFixture(
+                BotWork.self,
+                #"""
+                {"id":"w","botId":"b","title":"t","chatId":"c","createdAt":1,"endedAt":90,"state":"\#(state)",
+                 "steps":[{"id":"1","title":"a","state":"done"},{"id":"2","title":"b","state":"running"},
+                          {"id":"3","title":"c","state":"asking"},{"id":"4","title":"d"}]}
+                """#
+            ).steps.map(\.state)
+        }
+        XCTAssertEqual(try states("running"), [.done, .running, .asking, .pending], "a live plan keeps its steps")
+        XCTAssertEqual(try states("done"), [.done, .done, .done, .skipped])
+        XCTAssertEqual(try states("failed"), [.done, .failed, .failed, .skipped])
+        XCTAssertEqual(try states("stopped"), [.done, .skipped, .skipped, .skipped])
+        XCTAssertEqual(try states("cancelled"), [.done, .running, .asking, .pending], "it never ran")
+        // A step closed here ended when its plan did, so its timer stops.
+        let failed = try decodeFixture(
+            BotWork.self,
+            #"""
+            {"id":"w","botId":"b","title":"t","chatId":"c","createdAt":1,"endedAt":90,"state":"failed",
+             "steps":[{"id":"1","title":"a","state":"running","startedAt":10}]}
+            """#)
+        XCTAssertEqual(failed.steps[0].endedAt, 90)
+    }
+
     func testUnknownKindsReadAsTheirFallbacks() throws {
         XCTAssertEqual(try decodeFixture([ActivityKind].self, #"["future","planProposed"]"#), [.other, .planProposed])
         XCTAssertEqual(try decodeFixture(BotCapabilities.self, "{}"), BotCapabilities())
