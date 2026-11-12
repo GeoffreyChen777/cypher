@@ -425,6 +425,175 @@ fn session_subagents_round_trip_and_clear() {
     assert!(doc2.read_sessions().unwrap()[0].subagents.is_empty());
 }
 
+/// The harness lets a session's subagent list grow to 32 runs with 4 KiB of
+/// progress each; the row is one op, which the Edge caps at 16 Ki. A session
+/// with 21 runs wrote rows the Edge refused, so its status reached no other
+/// device. The row carries a list that fits; what gives way first is what
+/// other devices need least.
+#[test]
+fn a_session_row_with_many_subagents_fits_the_edge_op_cap() {
+    let run = |n: i64, status: SubagentRunStatus| SubagentRun {
+        run_id: format!("run-{n:02}-{}", "0".repeat(28)),
+        tool_call_id: Some(format!("toolu_{n:02}_{}", "0".repeat(22))),
+        agent: "reviewer".into(),
+        model: Some("claude-bridge/claude-fable-5-1".into()),
+        task: format!("Task {n}: {}", "审".repeat(480)),
+        mode: SubagentRunMode::Async,
+        status,
+        progress: Some(format!("{}\nlast line of {n}", "p".repeat(3_000))),
+        started_at: 1_000 + n,
+        updated_at: 2_000 + n,
+        ended_at: (status != SubagentRunStatus::Running).then_some(3_000 + n),
+        child_chat_id: Some(format!("child-{n:02}-{}", "0".repeat(26))),
+    };
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut s = session("chat-1", "dev-a", SessionStatus::Working);
+    s.subagents = (0..32)
+        .map(|n| {
+            run(
+                n,
+                if n % 8 == 7 {
+                    SubagentRunStatus::Running
+                } else {
+                    SubagentRunStatus::Done
+                },
+            )
+        })
+        .collect();
+    doc.upsert_session(&s).unwrap();
+
+    let batches = doc.take_pushable();
+    assert_eq!(batches.len(), 1, "the row is pushed");
+    let op = &batches[0].ops[0];
+    assert!(op_units(op) <= EDGE_OP_MAX_UNITS, "{} units", op_units(op));
+    let read = doc.read_sessions().unwrap().remove(0).subagents;
+    assert!(
+        read.len() < 32 && read.len() >= 12,
+        "{} runs kept",
+        read.len()
+    );
+    // Every running one stays, and the settled ones dropped are the oldest.
+    let running: Vec<&str> = read
+        .iter()
+        .filter(|r| r.status == SubagentRunStatus::Running)
+        .map(|r| &r.run_id[..6])
+        .collect();
+    assert_eq!(running, ["run-07", "run-15", "run-23", "run-31"]);
+    let kept: Vec<i64> = read.iter().map(|r| r.started_at - 1_000).collect();
+    assert!(kept.windows(2).all(|w| w[0] < w[1]), "order kept: {kept:?}");
+    let dropped = 32 - read.len() as i64;
+    assert!(
+        kept.iter().filter(|n| *n % 8 != 7).all(|n| *n >= dropped),
+        "the oldest settled runs went first: {kept:?}"
+    );
+    for run in &read {
+        assert!(run.task.chars().count() <= 120, "{}", run.task);
+        assert!(run.task.starts_with("Task "));
+        assert_eq!(
+            run.progress.as_deref(),
+            Some(format!("last line of {}", run.started_at - 1_000).as_str())
+        );
+    }
+
+    // A list that fits is written as it is.
+    let mut few = session("chat-2", "dev-a", SessionStatus::Working);
+    few.subagents = (0..3).map(|n| run(n, SubagentRunStatus::Running)).collect();
+    doc.upsert_session(&few).unwrap();
+    let read = doc.read_sessions().unwrap();
+    let read = read.iter().find(|s| s.chat_id == "chat-2").unwrap();
+    assert_eq!(read.subagents, few.subagents);
+
+    // Settled runs give way before running ones lose anything.
+    let mut mixed = session("chat-3", "dev-a", SessionStatus::Working);
+    mixed.subagents = (0..6)
+        .map(|n| {
+            run(
+                n,
+                if n < 4 {
+                    SubagentRunStatus::Done
+                } else {
+                    SubagentRunStatus::Running
+                },
+            )
+        })
+        .collect();
+    doc.upsert_session(&mixed).unwrap();
+    let read = doc.read_sessions().unwrap();
+    let read = &read
+        .iter()
+        .find(|s| s.chat_id == "chat-3")
+        .unwrap()
+        .subagents;
+    assert_eq!(read.len(), 6);
+    assert_eq!(read[4..], mixed.subagents[4..], "running runs untouched");
+    assert!(read[..4].iter().all(|r| r.task.chars().count() <= 120));
+}
+
+/// A batch with an op over the Edge's cap is refused whole, and the Edge's
+/// error names no batch: the client pushed it, and was refused, on every
+/// connect for good. It is never pushed; it stays while the overlay still
+/// reads something from it, and goes once the stored rows override it.
+#[test]
+fn a_write_the_edge_would_refuse_is_never_pushed_and_goes_once_overridden() {
+    let mut doc = RegistryDoc::new("dev-a");
+    // An oversize session write from an engine that didn't fit the list.
+    let hlc = doc.next_hlc();
+    let mut runs = subagents();
+    runs[0].task = "x".repeat(EDGE_OP_MAX_UNITS);
+    doc.pending.push(PendingBatch {
+        batch: "b-oversize".into(),
+        ops: vec![RowOp {
+            kind: KIND_SESSIONS.into(),
+            id: "chat-1".into(),
+            op: OpKind::Upsert,
+            set: Some(fields([
+                ("chatId", json!("chat-1")),
+                ("deviceId", json!("dev-a")),
+                ("status", json!("working")),
+                ("updatedAt", json!(3_500)),
+                ("subagents", serde_json::to_value(&runs).unwrap()),
+            ])),
+            hlc,
+            clocks: None,
+        }],
+        in_flight: false,
+    });
+    doc.upsert_chat(&chat("chat-2", "dev-a")).unwrap();
+
+    // Only the sendable batch goes out, on this connection and the next.
+    for _ in 0..2 {
+        let pushed = doc.take_pushable();
+        assert_eq!(pushed.len(), 1);
+        assert_eq!(pushed[0].ops[0].kind, KIND_CHATS);
+        doc.mark_disconnected();
+    }
+    assert_eq!(doc.pending_len(), 2, "kept: this device still shows it");
+    assert_eq!(
+        doc.read_sessions().unwrap()[0].status,
+        SessionStatus::Working
+    );
+
+    // An engine before this fix had pushed it, so it was in flight (and so
+    // not replaced) when a later write of the same row was queued. That one
+    // reaches the server and comes back.
+    doc.pending[0].in_flight = true;
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    doc.upsert_session(&session("chat-1", "dev-a", SessionStatus::Idle))
+        .unwrap();
+    assert_eq!(doc.pending_len(), 3);
+    server_round(&mut server, &mut seq, &mut [&mut doc]);
+    assert_eq!(doc.pending_len(), 1, "the sendable ones were acked");
+    // The next connection: nothing reads the oversize write any more, so
+    // it is retired instead of pushed.
+    doc.mark_disconnected();
+    assert!(doc.take_pushable().is_empty());
+    assert_eq!(doc.pending_len(), 0);
+    let read = doc.read_sessions().unwrap();
+    assert_eq!(read[0].status, SessionStatus::Idle);
+    assert!(read[0].subagents.is_empty());
+}
+
 /// Subagents ride the same registry rows as status — the OWNING host writes
 /// (writer discipline), the peer sees the projection through the broadcast,
 /// and a clear on the host converges to empty on both.
