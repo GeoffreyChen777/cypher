@@ -567,6 +567,26 @@ fn service_units_pin_the_versions_they_run_by_path() {
     );
 }
 
+#[test]
+fn an_engine_behind_current_is_a_service_that_starts_its_own_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("app");
+    for name in ["0.3.69", "0.4.2"] {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+    }
+    // No `current` yet: nothing to be behind.
+    assert_eq!(behind_current(&root, "0.3.69"), None);
+    std::os::unix::fs::symlink(root.join("0.4.2"), root.join("current")).unwrap();
+    // The device on 2026-11-12: `current` was switched to 0.4.2 and the
+    // service restarted, but its unit starts app/0.3.69.
+    assert_eq!(behind_current(&root, "0.3.69").as_deref(), Some("0.4.2"));
+    assert_eq!(behind_current(&root, "0.4.2"), None);
+    assert_eq!(behind_current(&root, "0.4.3"), None);
+    let message = behind_current_message("0.3.69", "0.4.2");
+    assert!(message.contains("0.4.2 is installed"), "{message}");
+    assert!(message.contains("cypher daemon install"), "{message}");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn versions_another_process_runs_from_are_never_pruned() {

@@ -428,6 +428,32 @@ pub fn migrate_linux_service_to_current(data_dir: &Path) -> anyhow::Result<bool>
 
 pub(super) const CURRENT_EXEC_LINE: &str = "ExecStart=:\"%h/.cypher/app/current/cypher\" headless";
 
+/// The version `app/current` points at.
+fn current_link_version(app_root: &Path) -> Option<String> {
+    let target = std::fs::read_link(app_root.join("current")).ok()?;
+    let version = target.file_name()?.to_str()?.to_owned();
+    validate_version(&version).ok().map(|()| version)
+}
+
+/// The newer release `app/current` already names while this engine runs
+/// `running`: an update was applied, but the service still starts a binary of
+/// its own (a unit pinned to `app/<version>/cypher`, or another path), so
+/// switching `current` and restarting brings `running` straight back. `None`
+/// when the engine runs what `current` names, or something newer.
+pub fn behind_current(app_root: &Path, running: &str) -> Option<String> {
+    current_link_version(app_root).filter(|current| version_newer(current, running))
+}
+
+/// What a device reports while [`behind_current`]: the cause, and the one
+/// command that fixes it on that device.
+pub fn behind_current_message(running: &str, installed: &str) -> String {
+    format!(
+        "Cypher {installed} is installed, but this device's service still starts {running}: \
+         its unit doesn't run ~/.cypher/app/current. Run `cypher daemon install` on the \
+         device to switch the service and restart it."
+    )
+}
+
 /// Rewrite the default unit's `ExecStart` to the managed `current` link when
 /// `matches` accepts the existing line. Only the default data directory's
 /// unit at its expected path is touched; anything else is left as-is.

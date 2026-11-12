@@ -73,6 +73,19 @@ or open terminals) and restart themselves; the engine also keeps the Runtime
 current. Set `CYPHER_AUTO_UPDATE=0` before `cypher daemon install`, or in
 `~/.cypher/env`, to make updates manual. `cypher status` shows which applies.
 
+An update only takes once the service starts the binary behind
+`~/.cypher/app/current`. A unit written before that layout pins
+`~/.cypher/app/<version>/cypher`, so every restart brought the old release
+back: the engine reapplied the update and restarted again, about every 24
+seconds, and desktops kept showing the old version as "available". Every
+update path now repoints such a unit at `current` first (the engine's own
+updater, a desktop's **Update**, and `cypher update` even when the binary is
+already current), and an engine that boots behind `current` repoints it once
+and restarts. A unit it can't rewrite (a custom unit, or one without its
+`CYPHER_DATA_DIR` line) stops the updater instead, and the update check reports
+the cause. `cypher daemon install` rewrites the unit by hand, and is the fix
+for a device still running a release from before this repair.
+
 The low-level `headless`, `login`, `logout`, `sync` and `daemon` commands remain.
 The guided flow handles stopping and restarting its own idle service around
 authentication; users do not need to chain `daemon stop; login; daemon start`.

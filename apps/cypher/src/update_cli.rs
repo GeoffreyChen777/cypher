@@ -94,7 +94,15 @@ pub async fn update(config: EngineConfig, options: UpdateOptions) -> anyhow::Res
         InstallKind::Managed { .. } | InstallKind::Unmanaged => {}
     }
     let adopt = matches!(kind, InstallKind::Unmanaged);
-    if !app_newer && !runtime.newer() && !adopt {
+    // `cypher` runs through `current`, so it can be up to date while the
+    // service, from a unit pinned to `app/<version>`, still starts an old
+    // release: point the unit at `current` and restart onto it.
+    let unit_switched = matches!(kind, InstallKind::Managed { .. })
+        && cypher_update::migrate_linux_service_to_current(&config.data_dir)?;
+    if unit_switched {
+        println!("✓ Service switched to app/current");
+    }
+    if !app_newer && !runtime.newer() && !adopt && !unit_switched {
         return Ok(());
     }
 
@@ -119,7 +127,7 @@ pub async fn update(config: EngineConfig, options: UpdateOptions) -> anyhow::Res
             adopt_unmanaged(&config, &manifest, &exe).await?;
             true
         }
-        _ => false,
+        _ => unit_switched,
     };
 
     let mut restarted = false;

@@ -111,6 +111,7 @@ impl Updater {
                     !version_newer(staged, current_version())
                 });
                 if let InstallKind::Managed { app_root } = detect_install() {
+                    heal_pinned_service(&app_root, &data_dir);
                     prune_managed_versions(&app_root, |installed| {
                         !version_newer(installed, current_version())
                     });
@@ -267,7 +268,7 @@ impl Updater {
     async fn check_once(&self) -> bool {
         match fetch_latest(&self.edge_url).await {
             Ok(manifest) => {
-                let status = UpdateStatus {
+                let mut status = UpdateStatus {
                     current_version: current_version().to_string(),
                     update_available: version_newer(&manifest.version, current_version()),
                     latest_version: Some(manifest.version),
@@ -275,6 +276,16 @@ impl Updater {
                     error: None,
                     relaunch_pending: self.status_tx.borrow().relaunch_pending,
                 };
+                // Applying again would restart into this same version: the
+                // service doesn't run `current`. Report why instead, so the
+                // auto-updater stops and a desktop's Devices row says so.
+                if status.update_available
+                    && let InstallKind::Managed { app_root } = detect_install()
+                    && let Some(installed) = behind_current(&app_root, current_version())
+                {
+                    status.update_available = false;
+                    status.error = Some(behind_current_message(current_version(), &installed));
+                }
                 if status.update_available {
                     tracing::info!(
                         latest = status.latest_version.as_deref().unwrap_or(""),
@@ -317,6 +328,16 @@ impl Updater {
                     let (app_root, version) = (app_root.clone(), manifest.version.clone());
                     off_runtime(move || apply_headless(&app_root, &version)).await?;
                 }
+                // A unit pinned to `app/<version>` would restart into the old
+                // release; point it at `current` first, as `cypher update` does.
+                let data_dir = self.data_dir.clone();
+                match off_runtime(move || migrate_linux_service_to_current(&data_dir)).await {
+                    Ok(true) => tracing::info!("service switched to app/current"),
+                    Ok(false) => {}
+                    Err(err) => {
+                        tracing::warn!(error = %err, "could not switch the service to app/current")
+                    }
+                }
                 let data_dir = self.data_dir.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -342,6 +363,30 @@ impl Updater {
                 bail!("this install is not update-managed — source builds update via git")
             }
         }
+    }
+}
+
+/// Boot: an engine running behind `app/current` came back from an update that
+/// could not take, because the service starts its own version. Point the unit
+/// at `current` once and restart onto it; when the unit can't be rewritten,
+/// [`Updater::check_once`] reports why instead of applying the release again.
+fn heal_pinned_service(app_root: &Path, data_dir: &Path) {
+    let Some(installed) = behind_current(app_root, current_version()) else {
+        return;
+    };
+    match migrate_linux_service_to_current(data_dir) {
+        Ok(true) => {
+            tracing::info!(%installed, running = current_version(), "service switched to app/current; restarting onto it");
+            if let Err(err) = restart_service_from_engine(data_dir) {
+                tracing::warn!(error = %err, "service restart failed — restart the engine to run the installed version");
+            }
+        }
+        Ok(false) => tracing::warn!(
+            %installed,
+            running = current_version(),
+            "the service does not run app/current; run `cypher daemon install` to switch it"
+        ),
+        Err(err) => tracing::warn!(error = %err, "could not switch the service to app/current"),
     }
 }
 
