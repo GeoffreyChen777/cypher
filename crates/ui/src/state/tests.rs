@@ -597,6 +597,56 @@ fn update_backoff_is_capped_and_restarts_from_zero() {
 }
 
 #[test]
+fn an_ended_plan_from_an_older_host_reads_with_its_steps_closed() {
+    use cypher_proto::{BotRecords, BotWork, StepState, WorkState, WorkStep};
+    let step = |state: StepState| WorkStep {
+        id: "1".into(),
+        title: "s".into(),
+        project: None,
+        detail: None,
+        state,
+        sessions: vec![],
+        note: None,
+        started_at: Some(10),
+        ended_at: None,
+    };
+    let work = |id: &str, state: WorkState, ended_at: Option<i64>| BotWork {
+        id: id.into(),
+        bot_id: "b".into(),
+        title: id.into(),
+        instruction: String::new(),
+        summary: None,
+        steps: vec![step(StepState::Running), step(StepState::Pending)],
+        state,
+        chat_id: "c".into(),
+        tool_call_id: None,
+        thread_chat_id: None,
+        created_at: 0,
+        started_at: Some(5),
+        ended_at,
+        result: None,
+        decision: None,
+        stop_requested_at: None,
+    };
+    let mut s = AppState::new();
+    s.apply_bot_records(BotRecords {
+        work: vec![
+            // The production row this came from: failed, its step running.
+            work("failed", WorkState::Failed, Some(90)),
+            work("live", WorkState::Running, None),
+        ],
+        ..Default::default()
+    });
+    let failed = &s.bot_records.work[0];
+    assert_eq!(failed.steps[0].state, StepState::Failed, "no spinner");
+    assert_eq!(failed.steps[0].ended_at, Some(90), "its timer stops");
+    assert_eq!(failed.steps[1].state, StepState::Skipped);
+    let live = &s.bot_records.work[1];
+    assert_eq!(live.steps[0].state, StepState::Running);
+    assert_eq!(live.steps[1].state, StepState::Pending);
+}
+
+#[test]
 fn send_pending_overlays_working_until_ttl() {
     let now = Utc::now();
     let s_chat = chat("c", 0, Some(10)); // unseen, no session row

@@ -11,15 +11,19 @@
 //!    ▼
 //! Running ── finish_work ─────────────────────────────────────► Done | Failed
 //!    │  ├─ the thread's run settles without finish_work ───────► Done (its last
-//!    │  │                                                          message) | Failed
+//!    │  │                                    message) | Failed (errored, cut off
+//!    │  │                                    mid-answer, or nothing said)
 //!    │  └─ Stop: interrupt the thread and its sessions ────────► Stopped
 //!    └─ steps: a worker session waiting on an answer ⇄ Asking
 //! ```
+//!
+//! However a plan ends, the steps it left open end with it
+//! ([`BotWork::close_steps`]).
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use cypher_doc::SessionCommandPayload;
+use cypher_doc::{MessageRole, MessageStatus, SessionCommandPayload};
 use cypher_proto::{
     self as p, ActivityKind, ApprovalState, Bot, BotActivity, BotApproval, BotChat, BotOrigin,
     BotThread, BotWork, Chat, RunRequest, Session, SessionStatus, StepState, WorkState,
@@ -183,6 +187,17 @@ impl Bots {
                     WorkState::Running => {
                         running += 1;
                         self.follow_work(bot, w, &sessions)
+                    }
+                    // Ended work whose steps were left open (a row from an
+                    // engine that closed them only on Stop): close them, or
+                    // one spins on the owner's card for good.
+                    WorkState::Done | WorkState::Failed | WorkState::Stopped
+                        if w.steps
+                            .iter()
+                            .any(|step| w.ended_step_state(step.state) != step.state) =>
+                    {
+                        self.edit_work(&w.id, |w| w.close_steps(p::now_ms()))
+                            .map(drop)
                     }
                     _ => Ok(()),
                 };
@@ -468,9 +483,31 @@ impl Bots {
         {
             let entries = handle.doc().read_entries()?;
             let last = last_answer(&entries);
-            let error = (row.status == SessionStatus::Errored).then(|| {
-                last_error(&entries).unwrap_or_else(|| "The work's session failed.".into())
-            });
+            // Cut off mid-answer (interrupted, or an engine restart it
+            // didn't come back from): whatever it had written by then is not
+            // a result.
+            let cut_off = entries
+                .iter()
+                .rev()
+                .find(|entry| entry.role == MessageRole::Assistant)
+                .is_some_and(|entry| entry.status == Some(MessageStatus::Aborted));
+            let error = if row.status == SessionStatus::Errored {
+                Some(last_error(&entries).unwrap_or_else(|| "The work's session failed.".into()))
+            } else if cut_off {
+                Some(match &last {
+                    Some(last) => format!(
+                        "Its background session was stopped before it finished the plan. \
+                         Its last message:\n\n{last}"
+                    ),
+                    None => {
+                        "Its background session was stopped before it finished the plan.".into()
+                    }
+                })
+            } else if last.is_none() {
+                Some("Its background session ended without a result.".into())
+            } else {
+                None
+            };
             return self.settle_work(bot, work, error, last);
         }
         let asking = |id: &str| {
@@ -514,6 +551,7 @@ impl Bots {
                 (None, None) => "The orchestration ended without a result.".into(),
             });
             w.ended_at = Some(now);
+            w.close_steps(now);
             true
         })?;
         if settled == Some(true) {
@@ -573,15 +611,7 @@ impl Bots {
             if let Some(reason) = reason {
                 w.result = Some(reason.to_string());
             }
-            for step in &mut w.steps {
-                if !matches!(
-                    step.state,
-                    StepState::Done | StepState::Failed | StepState::Skipped
-                ) {
-                    step.state = StepState::Skipped;
-                    step.ended_at = Some(now);
-                }
-            }
+            w.close_steps(now);
             true
         })?;
         if stopped == Some(true) {

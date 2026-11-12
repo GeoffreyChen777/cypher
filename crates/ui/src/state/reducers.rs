@@ -226,7 +226,15 @@ impl AppState {
         self.bots_synced = true;
     }
 
-    pub fn apply_bot_records(&mut self, records: cypher_proto::BotRecords) {
+    pub fn apply_bot_records(&mut self, mut records: cypher_proto::BotRecords) {
+        // A plan that ended takes its open steps with it. Its host closes
+        // them in the row; one written by an older host, which didn't,
+        // would show a step running, with a spinner and a growing timer,
+        // under a finished plan for good.
+        let now = chrono::Utc::now().timestamp_millis();
+        for work in &mut records.work {
+            work.close_steps(now);
+        }
         self.bot_records = records;
     }
 
