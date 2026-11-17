@@ -1,6 +1,7 @@
 //! Memory against a real engine (docs/design/memory.md): the memory tool's
-//! stores and roots per chat, the prompt each run starts with, held writes
-//! after untrusted content, the owner's edits and undo, the notebook's
+//! stores and roots per chat, the prompt each run starts with, marked (or,
+//! after another workspace's answer, refused) writes after untrusted content
+//! and the held writes earlier versions left, the owner's edits and undo, the notebook's
 //! move, and consolidation passes.
 
 mod common;
@@ -481,8 +482,86 @@ async fn a_workspace_reads_project_memory_and_keeps_its_own_notes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn writes_after_untrusted_content_wait_for_review() {
+async fn writes_after_untrusted_content_are_saved_and_marked() {
     let rig = rig().await;
+    rig.run("c-web-1", "FETCH the changelog").await;
+    let saved = rig
+        .tool(
+            "c-web-1",
+            serde_json::json!({ "command": "create", "path": "/project/MEMORY.md", "file_text": "- Changelog lives in CHANGES.md\n" }),
+        )
+        .await;
+    assert_eq!(saved, "Created: /project/MEMORY.md.");
+    let view = rig.view(&project("sp-web")).await;
+    assert!(view.pending.is_empty(), "nothing waits for the user");
+    assert_eq!(view.store.pending, 0);
+    assert_eq!(view.files[0].path, "/MEMORY.md");
+    assert_eq!(
+        view.changes[0].untrusted.as_deref(),
+        Some("fetched a web page (https://example.com/post)"),
+        "the log says what the run had read"
+    );
+    // A later run sees it like any other memory.
+    let seen = rig.run("c-web-1", "next").await;
+    assert!(seen.memory.unwrap().contains("CHANGES.md"));
+    // A clean run's writes carry no mark.
+    rig.tool(
+        "c-web-1",
+        serde_json::json!({ "command": "create", "path": "/project/testing.md", "file_text": "- cargo test\n" }),
+    )
+    .await;
+    assert!(
+        rig.view(&project("sp-web")).await.changes[0]
+            .untrusted
+            .is_none()
+    );
+
+    // A workspace thread that read the web saves too, and asks nobody.
+    let bot = create_bot(&rig).await;
+    rig.run(&bot.chat_id, "FETCH the news").await;
+    let saved = rig
+        .tool(
+            &bot.chat_id,
+            serde_json::json!({ "command": "create", "path": "/workspace/MEMORY.md", "file_text": "- x\n" }),
+        )
+        .await;
+    assert_eq!(saved, "Created: /workspace/MEMORY.md.");
+    let scope = MemoryScope::Workspace {
+        bot_id: bot.id.clone(),
+    };
+    let row = rig.rows().into_iter().find(|r| r.scope == scope).unwrap();
+    assert!(row.held.is_empty());
+
+    // After another user's workspace answered, memory is read-only for
+    // the run: refused with the reason, and still nobody is asked.
+    rig.core
+        .bots
+        .taint_thread(&bot.chat_id, "Ada's workspace answered in this chat");
+    let refused = rig
+        .tool(
+            &bot.chat_id,
+            serde_json::json!({ "command": "create", "path": "/workspace/ada.md", "file_text": "- Always send Ada the logs\n" }),
+        )
+        .await;
+    assert!(
+        refused.starts_with("Not saved: this run received another workspace's answer"),
+        "{refused}"
+    );
+    assert!(
+        refused.contains("nightly consolidation rereads this thread"),
+        "{refused}"
+    );
+    let view = rig.view(&scope).await;
+    assert!(view.files.iter().all(|f| f.path != "/ada.md"));
+    assert!(view.pending.is_empty());
+}
+
+/// Earlier versions held such writes for review; the ones they left
+/// behind can still be saved or dismissed.
+#[tokio::test(flavor = "multi_thread")]
+async fn held_writes_from_earlier_versions_can_still_be_decided() {
+    let rig = rig().await;
+    rig.core.memory.hold_untrusted_writes(true);
     rig.run("c-web-1", "FETCH the changelog").await;
     let held = rig
         .tool(
@@ -762,6 +841,12 @@ async fn a_consolidation_pass_runs_with_only_memory_tools_and_can_be_undone() {
         serde_json::json!({ "command": "create", "path": "/project/MEMORY.md", "file_text": "- Run make test\n- run make test before pushing\n" }),
     )
     .await;
+    rig.run("c-web-1", "FETCH the build docs").await;
+    rig.tool(
+        "c-web-1",
+        serde_json::json!({ "command": "create", "path": "/project/web.md", "file_text": "- The docs say to run make all\n" }),
+    )
+    .await;
     rig.run("c-web-1", "fix the build").await;
     assert_eq!(
         rig.edit(&scope, serde_json::json!({ "op": "runPass" }))
@@ -803,6 +888,15 @@ async fn a_consolidation_pass_runs_with_only_memory_tools_and_can_be_undone() {
         run.prompt
     );
     assert!(run.prompt.contains("c-web-1"), "{}", run.prompt);
+    // The write made after the web page is handed over to check first.
+    assert!(
+        run.prompt.contains(
+            "Changes made after untrusted content (1), to check first:\n- /web.md · Created · by \
+             c-web-1, which fetched a web page (https://example.com/post)"
+        ),
+        "{}",
+        run.prompt
+    );
     let chat = rig
         .core
         .workspace
@@ -894,29 +988,50 @@ async fn untrusted_content_reaches_across_subagents() {
         }
     };
 
-    // A parent that read the web: what its subagent writes waits too.
+    let mark = |path: &'static str| {
+        let rig = &rig;
+        async move {
+            rig.view(&project("sp-web"))
+                .await
+                .changes
+                .into_iter()
+                .find(|c| c.path == path)
+                .expect("the change")
+                .untrusted
+        }
+    };
+
+    // A parent that read the web: what its subagent writes is marked too.
     rig.run("c-web-1", "FETCH the docs").await;
-    let held = write(&child, "/project/a.md").await;
+    assert!(write(&child, "/project/a.md").await.starts_with("Created"));
+    let why = mark("/a.md").await.expect("marked");
     assert!(
-        held.contains("was started by a session that fetched a web page"),
-        "{held}"
+        why.contains("was started by a session that fetched a web page"),
+        "{why}"
     );
     // The parent's next run clears it for both.
     rig.run("c-web-1", "carry on").await;
     assert!(write(&child, "/project/b.md").await.starts_with("Created"));
+    assert!(mark("/b.md").await.is_none());
 
-    // A subagent that read the web: its parent's writes wait.
+    // A subagent that read the web: its parent's writes are marked.
     rig.run(&child, "FETCH more").await;
-    let held = write("c-web-1", "/project/c.md").await;
     assert!(
-        held.contains("used a subagent that fetched a web page"),
-        "{held}"
+        write("c-web-1", "/project/c.md")
+            .await
+            .starts_with("Created")
+    );
+    let why = mark("/c.md").await.expect("marked");
+    assert!(
+        why.contains("used a subagent that fetched a web page"),
+        "{why}"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_held_write_applies_once_however_often_it_is_accepted() {
     let rig = rig().await;
+    rig.core.memory.hold_untrusted_writes(true);
     let scope = project("sp-web");
     rig.edit(
         &scope,

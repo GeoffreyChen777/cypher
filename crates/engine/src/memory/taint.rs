@@ -1,7 +1,9 @@
 //! Runs that read untrusted content (docs/design/memory.md §7): a web
 //! page, a web search, an MCP tool's answer, or a command that fetches a
-//! URL. Their memory writes are held for the owner's review, because
-//! memory reaches every later run and injected text would persist there.
+//! URL. Their memory writes are saved, but marked with what the run read,
+//! because memory reaches every later run and injected text would persist
+//! there: the owner sees the mark in the change log, and the next
+//! consolidation pass checks those changes first.
 //!
 //! The run task reports every event here ([`Taint::observe`]); a new run
 //! clears its chat ([`Taint::clear`], when its memory prompt is built). In
@@ -48,13 +50,31 @@ fn web_named(name: &str) -> bool {
     .any(|word| lower.contains(word))
 }
 
-/// Whether a shell command reads from the network.
+/// Programs that read from the network, by name.
+const FETCHERS: [&str; 9] = [
+    "curl", "wget", "http", "https", "httpie", "xh", "lynx", "w3m", "aria2c",
+];
+
+/// Wrappers that run the next word as the command.
+const WRAPPERS: [&str; 7] = ["sudo", "env", "command", "exec", "time", "nohup", "xargs"];
+
+/// Whether a shell command runs a program that reads from the network: the
+/// command word of one of its parts (after `sudo`, `env`, `VAR=…`) is a
+/// fetcher. A pattern or path that only names a URL (`rg "https://" src`,
+/// `grep http config`) doesn't count.
 fn fetches(command: &str) -> bool {
-    let lower = command.to_lowercase();
-    lower.contains("://")
-        || lower
-            .split(|c: char| !(c.is_alphanumeric() || c == '-'))
-            .any(|word| matches!(word, "curl" | "wget" | "http" | "https" | "lynx" | "w3m"))
+    command.split(['|', ';', '&', '\n', '(', '`']).any(|part| {
+        part.split_whitespace()
+            .map(|word| word.trim_matches(['"', '\'', '$', '{', '}']))
+            .find(|word| {
+                !word.is_empty()
+                    && !WRAPPERS.contains(word)
+                    && !(word.contains('=') && !word.starts_with('-'))
+                    && !word.starts_with('-')
+            })
+            .map(|word| word.rsplit('/').next().unwrap_or(word).to_lowercase())
+            .is_some_and(|program| FETCHERS.contains(&program.as_str()))
+    })
 }
 
 impl Taint {
@@ -143,6 +163,24 @@ mod tests {
         );
         assert!(taint.reason(chat).unwrap().contains("fetches"));
         taint.clear(chat);
+        for quiet in [
+            r#"rg -n "https://" src"#,
+            "grep -i http config.toml",
+            "cat notes/curl-notes.txt",
+            "git log --oneline",
+        ] {
+            assert!(!fetches(quiet), "{quiet}");
+        }
+        for loud in [
+            "curl -s https://example.com",
+            "cd x && wget https://e.com/a.tgz",
+            "FOO=1 sudo /usr/bin/curl e.com",
+            "echo $(curl -s e.com)",
+            "cat urls | xargs -n1 curl",
+            "http GET e.com",
+        ] {
+            assert!(fetches(loud), "{loud}");
+        }
         taint.observe(
             chat,
             &call(ToolCall::WebFetch {

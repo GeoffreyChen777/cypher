@@ -1206,7 +1206,7 @@ As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is n
 | *Work directly* | Owner threads only; permission control on with the bot's local checkouts as workspace roots; the taint rule. |
 | *Coordinate* | Capabilities checked per call; an audit log of every coordination call; worker sessions limited to the read scope; plan approval; Stop that reaches every started session; limits. |
 | Routines | A non-interactive run mode that denies approvals and settles as failed; the `paused` kill switch; no `ask_bot` from routines. |
-| Agent-written memory | Provenance on every file and change, undo, and writes after untrusted content held for review ([memory.md](memory.md) §7). |
+| Agent-written memory | Provenance on every file and change, undo; writes after untrusted content saved but marked and checked by the next pass, and refused after another workspace's answer ([memory.md](memory.md) §7). |
 | *Represent* | Peer threads read-only with no memory, no network tools and no slash commands; scope ∩ connection scope; the outgoing scrub; rate limits. |
 | *Coordinate: steer* | The same as *Coordinate*, plus per-session confirmation for sessions the bot did not start. |
 

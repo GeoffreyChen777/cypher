@@ -42,6 +42,7 @@ fn applying_logs_who_changed_what_and_flags_the_owners_text() {
         &store,
         &planned(MEMORY_INDEX, Some("- mine\n")),
         &MemoryAuthor::Owner,
+        None,
     )
     .unwrap();
     let agent = MemoryAuthor::Session {
@@ -52,21 +53,34 @@ fn applying_logs_who_changed_what_and_flags_the_owners_text() {
         &store,
         &planned(MEMORY_INDEX, Some("- mine, corrected\n")),
         &agent,
+        None,
     )
     .unwrap();
-    apply(&store, &planned("/testing.md", Some("cargo test")), &agent).unwrap();
+    apply(
+        &store,
+        &planned("/testing.md", Some("cargo test")),
+        &agent,
+        Some("fetched a web page (https://example.com)"),
+    )
+    .unwrap();
     let changes = store.changes();
     assert_eq!(changes.len(), 3);
     assert_eq!(changes[0].path, "/testing.md");
     assert_eq!(changes[0].action, MemoryAction::Create);
     assert!(!changes[0].owner_text);
+    assert_eq!(
+        changes[0].untrusted.as_deref(),
+        Some("fetched a web page (https://example.com)"),
+        "saved, and marked with what the run had read"
+    );
+    assert!(changes[1].untrusted.is_none());
     assert_eq!(changes[1].action, MemoryAction::Edit);
     assert!(changes[1].owner_text, "an agent changed the owner's line");
     assert_eq!(changes[1].before.as_deref(), Some("- mine"));
     assert!(changes[1].undo.is_some());
     assert_eq!(store.file(MEMORY_INDEX).unwrap().author, agent);
     // Deleting a missing file is refused, not logged.
-    assert!(apply(&store, &planned("/nope.md", None), &agent).is_err());
+    assert!(apply(&store, &planned("/nope.md", None), &agent, None).is_err());
     assert_eq!(store.changes().len(), 3);
 }
 

@@ -3,8 +3,9 @@
 //! every session and workspace — then each project's, kept by the sessions
 //! in it, then each workspace's own. A store opens on the page
 //! [`crate::shell::MemoryPane`] draws; `/memory` in a session lands here on
-//! its project's store. Writes held for review ask in the chat that made
-//! them ([`crate::transcript`]) and wait on the store's page too.
+//! its project's store. Writes are never held for review now; ones earlier
+//! versions held still ask in the chat that made them
+//! ([`crate::transcript`]) and wait on the store's page too.
 
 use gpui::{AnyElement, Context, Entity, SharedString, Subscription, Window, div, prelude::*, px};
 

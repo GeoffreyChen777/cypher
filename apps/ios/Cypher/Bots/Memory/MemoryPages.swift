@@ -545,7 +545,8 @@ struct MemoryPage: View {
         }
     }
 
-    /// "Atlas · 2h ago", with "undone" and an amber "edited your text".
+    /// "Atlas · 2h ago", with "undone", an amber "edited your text", or what
+    /// untrusted content came before the change ("after a web page").
     private func changeSub(_ change: MemoryChange) -> AttributedString {
         var line = AttributedString("\(change.author.label) · \(BotTime.ago(change.at))")
         if change.undone { line += AttributedString(" · undone") }
@@ -553,6 +554,8 @@ struct MemoryPage: View {
             var tail = AttributedString(" · edited your text")
             tail.foregroundColor = Theme.warning
             line += tail
+        } else if let why = change.untrusted {
+            line += AttributedString(" · \(MemoryFormat.untrustedLabel(why))")
         }
         return line
     }

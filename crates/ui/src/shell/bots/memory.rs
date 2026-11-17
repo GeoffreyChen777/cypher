@@ -3,9 +3,10 @@
 //! on its page in Settings → Memory ([`crate::settings::memory`]), built
 //! from the pieces the Botboard's panels use.
 //!
-//! A store's page reads top to bottom: writes held for review, `MEMORY.md`
-//! rendered, the other files, consolidation, then the recent changes, each
-//! undoable. A file opens on a page of its own to read, edit, copy or
+//! A store's page reads top to bottom: writes earlier versions held for
+//! review, `MEMORY.md` rendered, the other files, consolidation, then the
+//! recent changes, each undoable and marked when made after untrusted
+//! content. A file opens on a page of its own to read, edit, copy or
 //! delete. The pane watches its store (`WatchMemory`) while it lives; every
 //! edit is one `EditMemory` call, whose sentence shows on the page for a
 //! moment. Its host lays the page out ([`MemoryParts`]) and follows the
@@ -909,7 +910,13 @@ impl MemoryPane {
                 sub,
                 change
                     .owner_text
-                    .then(|| ("edited your text".to_string(), theme.warning)),
+                    .then(|| ("edited your text".to_string(), theme.warning))
+                    .or_else(|| {
+                        change
+                            .untrusted
+                            .as_deref()
+                            .map(|why| (untrusted_label(why).to_string(), theme.text_muted))
+                    }),
                 theme,
             ))
             .children(undo.map(|undo| div().my(px(-2.0)).child(undo)))
@@ -1358,6 +1365,20 @@ fn small_button(
 
 /// A row's title over its one-line detail, with an optional tinted tail on
 /// the detail line ("edited your text").
+/// A change made after untrusted content, by what that was: saved all the
+/// same, and shown so it can be checked.
+fn untrusted_label(why: &str) -> &'static str {
+    if why.starts_with("fetched a web page") {
+        "after a web page"
+    } else if why.starts_with("searched the web") {
+        "after a web search"
+    } else if why.starts_with("used an MCP tool") {
+        "after an MCP tool"
+    } else {
+        "after outside content"
+    }
+}
+
 fn two_line(
     title: String,
     detail: String,
@@ -1545,7 +1566,24 @@ mod tests {
             owner_text: false,
             undo: Some("ab".into()),
             undone: false,
+            untrusted: None,
         }
+    }
+
+    #[test]
+    fn untrusted_changes_say_what_came_before() {
+        assert_eq!(
+            untrusted_label("fetched a web page (https://e.com)"),
+            "after a web page"
+        );
+        assert_eq!(
+            untrusted_label("used an MCP tool (wiki/search)"),
+            "after an MCP tool"
+        );
+        assert_eq!(
+            untrusted_label("was started by a session that searched the web"),
+            "after outside content"
+        );
     }
 
     #[test]

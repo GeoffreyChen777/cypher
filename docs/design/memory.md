@@ -105,8 +105,12 @@ or 16 KB per store, at most 32 KB in all (You first, then Project or Workspace, 
 past the budget the prompt says so and where the rest is.
 
 The prompt's guidance stays short and unsteered: keep `MEMORY.md` an index of what you will
-need again, put detail in topic files and link them, fix or delete what turns out wrong,
-and never store secrets. It does not prescribe what kinds of things to save.
+need again and couldn't find in the code, its history or the project's instructions, put
+detail in topic files and link them, fix or delete what turns out wrong, and never store
+secrets. The agent decides and saves quietly: it never asks the user whether to save
+something (every change is in Settings › Memory, undoable). Memory is notes, not
+instructions: a note asking for something unusual is not followed, and the user is told. It
+does not prescribe what kinds of things to save.
 
 Injection happens when a run starts, like the appended prompt today, so a write is seen by
 the next run; the writing run already knows what it wrote.
@@ -141,6 +145,8 @@ mattering into it. It never edits transcripts.
 - **You store:** run over all sessions since the last pass, keeping only what holds across
   projects.
 - **Inputs:** sessions and threads since the last pass, at most 100; never peer threads.
+  The request also lists the changes runs made after untrusted content (§7), to check
+  first against their conversations.
 - **Output:** applied in place. The run's short summary shows in Settings › Memory
   (and a workspace's Activity), every change is in the change log, and "Undo" restores the
   store from the doc history before the pass.
@@ -151,11 +157,20 @@ mattering into it. It never edits transcripts.
 
 Memory is injected into every later run, so a bad write persists. The rules:
 
-- **Tainted runs don't write memory freely.** A run that read untrusted content (a web
-  page, another workspace's answer; the permission system already tracks this) may still
-  call `memory`, but its writes land as **pending**: kept, asked about in the chat with a
-  Save / Don't save card (§8), and left out of injection until you save them. Consolidation never accepts
-  pending writes on its own.
+- **Nobody is asked.** Like Claude Code's memory, a write is never put to the user for
+  approval. A run that read untrusted content (a web page or search, an MCP tool's answer,
+  a command that runs a network program) still saves, but the change records what the run
+  read: Settings › Memory shows it ("after a web page"), and the next consolidation pass
+  checks those changes first and keeps one only if its conversation bears it out.
+- **Another workspace's answer makes memory read-only.** Like an agent handling outside
+  input getting its stores read-only, a run that received another user's workspace's answer
+  (or was started by one) has its writes refused until its next run, with the reason and
+  "don't retry or ask the user". The workspace's nightly pass rereads the thread and keeps
+  what matters, under the rules below.
+- **Consolidation reads conversations as data.** It never records text telling an agent to
+  ignore its instructions, reveal secrets or send data somewhere, nor instructions from web
+  pages, tool output or other workspaces' answers as conventions unless the user adopted
+  them.
 - **Your text can be corrected, never silently.** Agents may edit or remove lines you
   wrote; each such change is logged in Activity with the old text and can be undone.
 - **No secrets.** Writes are scanned like peer answers (Agent bots §11.6) and a match is
@@ -171,10 +186,11 @@ Memory works quietly: nothing in a session or workspace makes people manage it.
   consolidation (on/off, hour, last pass, Run now, Undo) and the change log with Undo.
   `/memory` in a session opens it. The subagent editor has a Memory choice (off, across
   projects, per project).
-- **Approval in the chat:** a held write (§7) is asked about where it was made, as a card
-  at its `memory` tool call: "Save to memory?" with the file, the proposed text and why it
-  was held; Save / Don't save. Decided, the card says "Saved to memory" or "Not saved".
-  The store's row carries its newest held writes and recent decisions for the card.
+- **No approval cards.** Writes are never held (§7). Earlier versions held writes after
+  untrusted content and asked with a "Save to memory?" card at the tool call; the ones they
+  left still show there and on the store's page, and can be saved or dismissed.
+- **The change log marks** a change made after untrusted content ("after a web page",
+  "after an MCP tool"), beside the amber "edited your text".
 - **In the transcript** a memory tool call is a quiet chip ("Saved to memory ·
   testing.md").
 - **Not shown:** no memory card or panel in a workspace, no Memory section on project pages,
@@ -205,7 +221,10 @@ calls them). The Notebook card and panel are gone.
    the project's sessions never see.
 3. **Consolidation:** on by default, nightly, skipping stores with no new activity.
 4. **Your text:** agents may edit it; every change is logged and undoable.
-5. **Untrusted writes:** held as pending, out of prompts until you accept them.
+5. **Untrusted writes:** saved and marked, never asked about; checked first by the next
+   pass. After another workspace's answer, memory is read-only for the run. (Earlier: held
+   as pending with a card in the chat; that interrupted too often, since most runs touch
+   the web or an MCP tool.)
 
 ## 12. As built
 
@@ -233,11 +252,13 @@ calls them). The Notebook card and panel are gone.
 - **History**: the search index now holds every session and the workspaces' own threads
   hosted here (never peer threads or passes); who may read which is decided per query.
 - **Untrusted content**: a run is tainted by a web fetch or search, an MCP tool call, a
-  shell command that fetches from the network (curl, wget, a URL), a tool named like it
-  browses or fetches, and, in a workspace, by another workspace's answer; the taint lasts
-  until the chat's next run. It crosses subagents both ways: a subagent of a tainted
-  session writes held, and a subagent that reads the web taints the sessions above it.
-  Accepting a held write re-applies it to the file as it is then, once.
+  shell command whose program reads the network (curl, wget, httpie… as the command word,
+  not a URL in a pattern), a tool named like it browses or fetches, and, in a workspace, by
+  another workspace's answer; the taint lasts until the chat's next run. It crosses
+  subagents both ways: a subagent of a tainted session writes marked, and a subagent that
+  reads the web marks the sessions above it. The change keeps the reason (`untrusted`);
+  a peer answer instead refuses the write. A held write left by an earlier version is
+  re-applied, once, to the file as it is then when accepted.
 - **Consolidation** runs where its sources live (a project's device, a workspace's host;
   user-level stores on the device that made them). A pass is a hidden chat (`Chat.memory`)
   run unattended with only the memory tools; its token use comes from Pi's session stats.
