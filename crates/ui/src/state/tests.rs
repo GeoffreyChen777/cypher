@@ -293,6 +293,80 @@ async fn an_embedded_engine_serves_the_ipc_socket_for_other_viewports() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remote_viewport_reconnects_when_its_engine_restarts() {
+    // A window attached to a separate engine used to retry its watches on
+    // the closed connection for the rest of its life once that engine
+    // restarted: no update ever arrived again, and nothing said so.
+    let dir = tempfile::tempdir().unwrap();
+    let config = EngineBootConfig {
+        data_dir: dir.path().to_path_buf(),
+        ipc_socket: cypher_env::ipc_socket(dir.path()).unwrap(),
+        edge_url: "http://127.0.0.1:1".into(),
+        edge_token: None, // offline
+        org_id: None,
+        workos_client_id: None,
+        default_harness: HarnessId::Mock,
+    };
+    let engine = EngineHandle::bootstrap(config.clone()).await.unwrap();
+    assert_eq!(engine.mode(), EngineMode::InProcess);
+    let viewport = EngineHandle::bootstrap(config.clone()).await.unwrap();
+    assert!(matches!(viewport.mode(), EngineMode::Remote { .. }));
+    let mut sessions = viewport
+        .client()
+        .subscribe(methods::WATCH_SESSIONS, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(sessions.recv().await.is_some(), "the standing watch");
+
+    // The engine goes away: the watch ends, and requests fail while
+    // nothing listens.
+    engine.shutdown().await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while sessions.recv().await.is_some() {}
+    })
+    .await
+    .expect("the watch ends with its engine");
+    assert!(
+        viewport
+            .client()
+            .call(methods::LIST_HARNESSES, serde_json::json!({}))
+            .await
+            .is_err()
+    );
+
+    // It comes back (the same data directory, so the same device). The
+    // window asks from its own executor, which is not a Tokio runtime.
+    let engine = EngineHandle::bootstrap(config).await.unwrap();
+    assert_eq!(engine.mode(), EngineMode::InProcess);
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    let window = viewport.clone();
+    let asked = std::thread::spawn(move || {
+        futures::executor::block_on(async {
+            let mut sessions = window
+                .client()
+                .subscribe(methods::WATCH_SESSIONS, serde_json::json!({}))
+                .await?;
+            let first = sessions.recv().await.is_some();
+            let harnesses = window
+                .client()
+                .call(methods::LIST_HARNESSES, serde_json::json!({}))
+                .await?;
+            Ok::<_, RpcError>((first, harnesses))
+        })
+    });
+    let (first, harnesses) = tokio::task::spawn_blocking(move || asked.join())
+        .await
+        .unwrap()
+        .expect("the request must not panic off the Tokio runtime")
+        .expect("the viewport reaches the restarted engine");
+    assert!(first, "the watch resubscribes on the new connection");
+    assert!(harnesses.as_array().is_some_and(|h| !h.is_empty()));
+
+    viewport.shutdown().await;
+    engine.shutdown().await;
+}
+
 #[tokio::test]
 async fn concurrent_bootstraps_elect_one_embedded_engine() {
     // Two viewports of one app booting at once (the Local-switch restart
@@ -594,6 +668,56 @@ fn update_backoff_is_capped_and_restarts_from_zero() {
     );
     // A healthy stream resets the step, so the next retry is fast again.
     assert_eq!(update_backoff_delay(0), std::time::Duration::from_secs(2));
+}
+
+#[test]
+fn an_ended_plan_from_an_older_host_reads_with_its_steps_closed() {
+    use cypher_proto::{BotRecords, BotWork, StepState, WorkState, WorkStep};
+    let step = |state: StepState| WorkStep {
+        id: "1".into(),
+        title: "s".into(),
+        project: None,
+        detail: None,
+        state,
+        sessions: vec![],
+        note: None,
+        started_at: Some(10),
+        ended_at: None,
+    };
+    let work = |id: &str, state: WorkState, ended_at: Option<i64>| BotWork {
+        id: id.into(),
+        bot_id: "b".into(),
+        title: id.into(),
+        instruction: String::new(),
+        summary: None,
+        steps: vec![step(StepState::Running), step(StepState::Pending)],
+        state,
+        chat_id: "c".into(),
+        tool_call_id: None,
+        thread_chat_id: None,
+        created_at: 0,
+        started_at: Some(5),
+        ended_at,
+        result: None,
+        decision: None,
+        stop_requested_at: None,
+    };
+    let mut s = AppState::new();
+    s.apply_bot_records(BotRecords {
+        work: vec![
+            // The production row this came from: failed, its step running.
+            work("failed", WorkState::Failed, Some(90)),
+            work("live", WorkState::Running, None),
+        ],
+        ..Default::default()
+    });
+    let failed = &s.bot_records.work[0];
+    assert_eq!(failed.steps[0].state, StepState::Failed, "no spinner");
+    assert_eq!(failed.steps[0].ended_at, Some(90), "its timer stops");
+    assert_eq!(failed.steps[1].state, StepState::Skipped);
+    let live = &s.bot_records.work[1];
+    assert_eq!(live.steps[0].state, StepState::Running);
+    assert_eq!(live.steps[1].state, StepState::Pending);
 }
 
 #[test]

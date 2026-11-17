@@ -66,6 +66,16 @@ Server→client:
 `Op = {kind, id, op: "upsert"|"update"|"delete", set?: {field: value|null}, hlc, clocks?}`
 `Row = {kind, id, seq, deleted, delHlc?, fields, clocks}`
 
+**Size.** An op is at most 16 Ki (`JSON.stringify(op).length`, UTF-16 units): a row is an
+index entry, never a document. The server refuses the whole batch of an op over the cap
+(`invalid_op`), and its error names no batch, so the client can't retire one. Writers
+therefore stay under it: bot records are refused over 14 Ki (`RECORD_MAX_BYTES`), and a
+session row fits its `subagents` projection to the room the row has (settled runs keep a
+short task and their last progress line, then running ones, then the runs settled longest
+ago go). A pending batch that still holds an op over the cap is never pushed: it stays
+while this device's overlay reads something from it, and is dropped once the stored rows
+override every op of it.
+
 ## Merge rules (identical in TS, Rust and Swift; shared test vectors)
 
 The vectors are in `protocol/vectors/registry-core-v1.json`; see
@@ -96,7 +106,8 @@ The vectors are in `protocol/vectors/registry-core-v1.json`; see
 
 - Presence is ephemeral: an in-memory map in the Durable Object, 15 s client beats and a
   45 s freshness window in the host, which falls back to probing a peer over the device
-  relay.
+  relay. A peer whose beats resume clears its dial cooldown in the link cache, once per
+  return: a peer that is alive but can't be reached keeps its backoff.
 - `/registry/:orgId/stats` carries per-device push attribution (`pushOutcomes`), the
   surface for debugging a device whose writes are not landing.
 - The daily alarm takes a nightly R2 backup of the row table (seq-monotonic guard) and GCs

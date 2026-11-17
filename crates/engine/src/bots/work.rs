@@ -79,6 +79,12 @@ pub(super) struct WorkShared {
     /// host loop never overwrite each other's change.
     rows: Mutex<()>,
     approval_wait: Mutex<Duration>,
+    /// The question each work thread last read from each session it follows
+    /// (thread chat id, session id) → request id. `wait_for_session` hands a
+    /// thread a question once; asked again about the same one, it waits for
+    /// the owner's answer. Lost at a restart, when the question is read out
+    /// once more.
+    asked: Mutex<std::collections::HashMap<(String, String), String>>,
 }
 
 impl Default for WorkShared {
@@ -88,6 +94,7 @@ impl Default for WorkShared {
             sandbox: Default::default(),
             rows: Default::default(),
             approval_wait: Mutex::new(APPROVAL_WAIT),
+            asked: Default::default(),
         }
     }
 }

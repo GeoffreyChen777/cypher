@@ -64,15 +64,10 @@ impl DeviceLink {
         host_device_id: &str,
         trust: &dyn PeerTrust,
     ) -> Result<Self, RpcError> {
-        if trust.local_receive_only() {
-            return Err(RpcError::Transport(RECEIVE_ONLY_MESSAGE.into()));
+        if let Some(refusal) = policy_refusal(trust, host_device_id) {
+            return Err(RpcError::Transport(refusal));
         }
         let secure = trust.local_keys().zip(trust.peer_key(host_device_id));
-        if secure.is_none() && trust.require_paired() {
-            return Err(RpcError::Transport(format!(
-                "Device {host_device_id} isn't paired with this device, and this device only uses paired devices. Pair it in Settings → Devices."
-            )));
-        }
         let ws = cypher_net::dial::connect_ws(url)
             .await
             .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
@@ -124,6 +119,21 @@ impl Drop for DeviceLink {
     fn drop(&mut self) {
         self.pump.abort();
     }
+}
+
+/// Why this device's own trust policy forbids a link to `host_device_id`,
+/// before anything is dialed: it is receive-only, or it only uses paired
+/// devices and the host isn't one. `None` when it may dial.
+fn policy_refusal(trust: &dyn PeerTrust, host_device_id: &str) -> Option<String> {
+    if trust.local_receive_only() {
+        return Some(RECEIVE_ONLY_MESSAGE.into());
+    }
+    let paired = trust.local_keys().is_some() && trust.peer_key(host_device_id).is_some();
+    (!paired && trust.require_paired()).then(|| {
+        format!(
+            "Device {host_device_id} isn't paired with this device, and this device only uses paired devices. Pair it in Settings → Devices."
+        )
+    })
 }
 
 /// Run the client's half of the Noise handshake on a fresh socket.
@@ -430,6 +440,15 @@ impl LinkCache {
         // Fast path outside any lock.
         if let Some(link) = self.cached(device_id) {
             return Ok(link.client());
+        }
+        // A link this device's own policy forbids is not a failed dial:
+        // nothing was tried and trying again changes nothing. Answer at once,
+        // with no retries, no cooldown and no "dialing" in the log. A
+        // receive-only device with a view onto another device's session
+        // used to run the three in-call attempts for every request, about
+        // 25 "dialing" lines a minute for as long as the view stayed open.
+        if let Some(refusal) = policy_refusal(self.config.trust.as_ref(), device_id) {
+            return Err(RpcError::Transport(refusal));
         }
         let dial_lock = {
             let mut locks = lock(&self.dial_locks);

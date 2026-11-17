@@ -69,6 +69,13 @@ fn picks<'a>(lines: &'a [BotLine], query: &str) -> Vec<Pick<'a>> {
         .collect()
 }
 
+/// Whether a workspace has a plan running in the background.
+fn bot_is_working(records: &cypher_proto::BotRecords, bot_id: &str) -> bool {
+    records
+        .work_of(bot_id)
+        .any(|work| work.state == cypher_proto::WorkState::Running)
+}
+
 /// What needs the owner in bots other than `current`.
 fn needs_elsewhere(lines: &[BotLine], current: &str) -> usize {
     lines
@@ -86,11 +93,17 @@ impl Shell {
             .bots
             .iter()
             .map(|bot| BotLine {
-                status: state
-                    .chats
-                    .iter()
-                    .find(|c| c.id == bot.chat_id)
-                    .map(|c| state.display_status_for(c, now)),
+                // Working: its chat's turn, or a plan it is carrying out in
+                // the background.
+                status: if bot_is_working(&state.bot_records, &bot.id) {
+                    Some(ChatIndicator::Working)
+                } else {
+                    state
+                        .chats
+                        .iter()
+                        .find(|c| c.id == bot.chat_id)
+                        .map(|c| state.display_status_for(c, now))
+                },
                 needs: bot_needs(state, bot, now).len(),
                 online: state.device_online(&bot.host_device_id, now),
                 bot: bot.clone(),
@@ -607,6 +620,39 @@ mod tests {
             needs,
             online: true,
         }
+    }
+
+    #[test]
+    fn a_workspace_works_while_a_plan_of_its_runs() {
+        use cypher_proto::{BotRecords, BotWork, WorkState};
+        let work = |bot: &str, state: WorkState| BotWork {
+            id: format!("{bot}-{state:?}"),
+            bot_id: bot.into(),
+            title: "t".into(),
+            instruction: String::new(),
+            summary: None,
+            steps: vec![],
+            state,
+            chat_id: "c".into(),
+            tool_call_id: None,
+            thread_chat_id: None,
+            created_at: 0,
+            started_at: None,
+            ended_at: None,
+            result: None,
+            decision: None,
+            stop_requested_at: None,
+        };
+        let records = BotRecords {
+            work: vec![
+                work("a", WorkState::Done),
+                work("a", WorkState::Proposed),
+                work("b", WorkState::Running),
+            ],
+            ..Default::default()
+        };
+        assert!(!bot_is_working(&records, "a"), "ended or only proposed");
+        assert!(bot_is_working(&records, "b"));
     }
 
     #[test]

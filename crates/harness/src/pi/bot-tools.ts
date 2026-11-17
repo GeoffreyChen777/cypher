@@ -145,15 +145,15 @@ const TOOLS: ToolDef[] = [
     // itself, never from a script.
     exposure: "model-only",
     description:
-      "Propose a plan for work that takes more than a couple of steps or touches another device. It shows your owner a plan card to approve; once approved, a background session carries it out and reports back here. After proposing, stop and wait: end your turn.",
+      "Propose a plan for work that takes more than a couple of steps or touches another device. It shows your owner a plan card to approve; once approved, a background session carries it out and reports back here. That session reads only the plan and your owner's last message, not this conversation, so the steps' details must carry whatever else it needs. Text over a limit is refused, never cut. After proposing, stop and wait: end your turn.",
     parameters: Type.Object({
-      title: Type.String({ description: "Short title of the task" }),
-      summary: Type.Optional(Type.String({ description: "One or two sentences: the approach and how the steps depend on each other" })),
+      title: Type.String({ description: "Short title of the task, at most 120 characters" }),
+      summary: Type.Optional(Type.String({ description: "One or two sentences, at most 400 characters: the approach and how the steps depend on each other" })),
       steps: Type.Array(
         Type.Object({
-          title: Type.String({ description: "What this step does" }),
+          title: Type.String({ description: "What this step does, at most 160 characters" }),
           project: Type.Optional(Type.String({ description: "Project id or name it works in" })),
-          detail: Type.Optional(Type.String({ description: "How: directly or in a session, worktree, how it gets another step's change (path, pushed branch, version)" })),
+          detail: Type.Optional(Type.String({ description: "How: directly or in a session, worktree, how it gets another step's change (path, pushed branch, version), and the constraints and decisions from this conversation the step depends on. At most 1,500 characters a step and 4,000 across the plan" })),
         }),
         { minItems: 1, maxItems: 10 },
       ),
@@ -212,7 +212,7 @@ const TOOLS: ToolDef[] = [
     name: "wait_for_session",
     label: "Wait for session",
     description:
-      "Wait until a session finishes, fails or asks a question, up to timeout_s. Returns its state, its last message and, when it asks, the question with its options.",
+      "Wait until a session finishes, fails or asks a question, up to timeout_s. Returns its state, its last message and, when it asks, the question with its options. Called again while the same question is open, it waits for your owner to answer it.",
     parameters: Type.Object({
       session_id: Type.String({ description: "Session id" }),
       timeout_s: Type.Optional(Type.Integer({ minimum: 1, maximum: 900, description: "Default 300, at most 900" })),
@@ -257,17 +257,17 @@ const TOOLS: ToolDef[] = [
     parameters: Type.Object({
       step: Type.String({ description: "Step id" }),
       state: Type.Union([Type.Literal("running"), Type.Literal("done"), Type.Literal("failed"), Type.Literal("skipped")]),
-      note: Type.Optional(Type.String({ description: "A short note: what happened" })),
+      note: Type.Optional(Type.String({ description: "A short note, at most 200 characters: what happened" })),
     }),
   },
   {
     name: "finish_work",
     label: "Finish work",
     description:
-      "Finish the orchestration with its outcome and a concise result for your owner, citing sessions as cypher://session/<id> links. Call it once, at the end.",
+      "Finish the orchestration with its outcome and a concise result for your owner, citing sessions as cypher://session/<id> links. Call it once, at the end: the steps still open end with it. A session that is still working or waiting on your owner is a reason to keep waiting, not to finish.",
     parameters: Type.Object({
       outcome: Type.Union([Type.Literal("done"), Type.Literal("failed")]),
-      result: Type.String({ description: "What was done, what was found, what needs the owner" }),
+      result: Type.String({ description: "What was done, what was found, what needs the owner; at most 2,000 characters" }),
     }),
   },
 

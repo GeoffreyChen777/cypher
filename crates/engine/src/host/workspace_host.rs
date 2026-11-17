@@ -156,10 +156,14 @@ struct WorkspaceHostInner {
     /// device's overlay back to its boot-time row `lastSeenAt` — an instant
     /// (and false) "offline" badge for a host that beat 20s ago.
     presence_seen: Mutex<std::collections::HashMap<String, i64>>,
+    /// The peers the last presence overlay found alive: the peer-alive hook
+    /// fires for a peer that was not among them (it came back), not on every
+    /// heartbeat of one that never left.
+    presence_alive: Mutex<std::collections::HashSet<String>>,
     relay_probe_backoff: Mutex<std::collections::HashMap<String, RelayProbeRetry>>,
     relay_probe_wake: Arc<tokio::sync::Notify>,
-    /// Called with a device id whenever its presence heartbeat proves it alive —
-    /// wired to `LinkCache::reset_cooldown` so a peer that comes back is dialed
+    /// Called with a device id when its presence heartbeats resume — wired to
+    /// `LinkCache::reset_cooldown` so a peer that comes back is dialed
     /// immediately instead of waiting out the failure backoff.
     peer_alive: Mutex<Option<PeerAliveHook>>,
     /// Where a chat's launch settings come from when the row isn't the last
@@ -232,6 +236,7 @@ impl WorkspaceHost {
                 announced: AtomicBool::new(announced),
                 evicted_tx,
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
+                presence_alive: Mutex::new(std::collections::HashSet::new()),
                 relay_probe_backoff: Mutex::new(std::collections::HashMap::new()),
                 relay_probe_wake: Arc::new(tokio::sync::Notify::new()),
                 peer_alive: Mutex::new(None),
@@ -291,8 +296,8 @@ impl WorkspaceHost {
         lock(&self.inner.room).take();
     }
 
-    /// Wire the "peer is alive" signal (fresh presence heartbeat) to a callback —
-    /// the engine points this at `LinkCache::reset_cooldown`.
+    /// Wire the "peer came back" signal (its presence heartbeats resumed) to a
+    /// callback — the engine points this at `LinkCache::reset_cooldown`.
     pub fn set_peer_alive_hook(&self, hook: PeerAliveHook) {
         *lock(&self.inner.peer_alive) = Some(hook);
     }

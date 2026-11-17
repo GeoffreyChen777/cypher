@@ -127,8 +127,8 @@ impl WorkspaceHostInner {
     /// before publishing. The row is written on boot/shutdown ONLY (server-
     /// state hygiene), so without this overlay every device looks offline
     /// ~70s after its boot — and a genuinely dead host is indistinguishable
-    /// from slow sync. Fresh remote heartbeats also fire the peer-alive hook
-    /// (dial-cooldown reset).
+    /// from slow sync. A peer whose heartbeats resume also fires the
+    /// peer-alive hook (dial-cooldown reset), once per return.
     pub(super) fn overlay_presence(&self, devices: &mut [Device]) {
         let mut alive_peers: Vec<String> = Vec::new();
         {
@@ -179,6 +179,22 @@ impl WorkspaceHostInner {
                 self.check_presence_deafness(room, live_fresh_peers, now);
             }
         }
+        // The peers that came back: alive now, not at the last overlay. The
+        // hook clears their dial cooldown so the next call dials at once.
+        // Firing it for every alive peer on every overlay (each registry
+        // change runs one) cleared the cooldown of a peer that was alive but
+        // not reachable every few seconds, so its backoff never held and it
+        // was dialed at full cadence for as long as anything asked.
+        let came_back: Vec<String> = {
+            let mut alive = lock(&self.presence_alive);
+            let came_back = alive_peers
+                .iter()
+                .filter(|id| !alive.contains(*id))
+                .cloned()
+                .collect();
+            *alive = alive_peers.iter().cloned().collect();
+            came_back
+        };
         if alive_peers.is_empty() {
             return;
         }
@@ -190,7 +206,7 @@ impl WorkspaceHostInner {
         }
         let hook = lock(&self.peer_alive).clone();
         if let Some(hook) = hook {
-            for id in &alive_peers {
+            for id in &came_back {
                 hook(id);
             }
         }

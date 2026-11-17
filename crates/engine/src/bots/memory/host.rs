@@ -502,7 +502,9 @@ impl Bots {
             "This is a background run of the routine \"{}\". Questions and permission \
              requests pause this run until your owner answers in Needs you. Never bypass \
              approval. For nonessential ambiguities, make the reasonable choice and say \
-             what you assumed.\n\n{}",
+             what you assumed. Only what you write after your last tool call is delivered to your \
+             owner: finish every tool call first, then write the whole answer in one \
+             piece.\n\n{}",
             routine.name, routine.prompt
         );
         (request, Some(agent_prompt))

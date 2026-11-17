@@ -145,6 +145,34 @@ struct BotWork: Codable, Hashable, Identifiable, Sendable {
         }
         return nil
     }
+
+    /// How an open step reads once its plan has ended (bot_records.rs
+    /// `ended_step_state`): what was under way ended with the plan (done, or
+    /// failed), what never started was skipped, and a stopped plan skipped
+    /// the rest. The steps of a live plan, of a cancelled one and steps
+    /// already closed read as they are.
+    func endedStepState(_ step: StepState) -> StepState {
+        guard step == .pending || step == .running || step == .asking else { return step }
+        switch (state, step) {
+        case (.proposed, _), (.running, _), (.cancelled, _): return step
+        case (.done, .running), (.done, .asking): return .done
+        case (.failed, .running), (.failed, .asking): return .failed
+        default: return .skipped
+        }
+    }
+
+    /// Close the steps an ended plan left open (bot_records.rs
+    /// `close_steps`). Its host does this in the row; a row from an older
+    /// host, which didn't, would show a step running, its spinner turning and
+    /// its timer counting, under a finished plan for good.
+    mutating func closeSteps() {
+        for ix in steps.indices {
+            let closed = endedStepState(steps[ix].state)
+            guard closed != steps[ix].state else { continue }
+            steps[ix].state = closed
+            if steps[ix].endedAt == nil { steps[ix].endedAt = endedAt }
+        }
+    }
 }
 
 extension BotWork {
@@ -171,6 +199,7 @@ extension BotWork {
         result = try c.decodeIfPresent(String.self, forKey: .result)
         decision = try c.decodeIfPresent(PlanDecision.self, forKey: .decision)
         stopRequestedAt = try c.decodeIfPresent(Int64.self, forKey: .stopRequestedAt)
+        closeSteps()
     }
 }
 

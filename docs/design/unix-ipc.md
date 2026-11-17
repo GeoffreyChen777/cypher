@@ -51,6 +51,14 @@ Keychain prompt on signed macOS builds; on Linux and in development builds the
 key file is readable by the user's processes, and the agent socket's
 restrictions below are what keeps an agent off the full surface.
 
+A window attached to a separate Engine (`cypher headless`, the background
+service) outlives that Engine's restarts: the first request that finds the
+connection closed dials `engine.sock` again, reads the key the new Engine
+minted, checks it is the same device and waits for it to be ready
+(`RpcClient::with_redial`). Only a request that never left is sent on the new
+connection, so nothing is delivered twice; the window's watches end with the
+old connection and resubscribe on the new one.
+
 Agents never get `engine.sock`. `agent.sock` serves `rpc::AgentRpc`:
 `StartSubagent` (whose parent must be hosted on this device), `QueueCommand` and
 `WatchAgentEvents` for subagent chats hosted on this device,

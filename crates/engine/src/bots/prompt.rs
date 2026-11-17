@@ -65,6 +65,10 @@ pub(super) fn system_prompt(
             "- Your final answer is delivered to your owner as a message. Make it stand on \
              its own: what you found, and what needs them."
                 .to_string(),
+            "- Only what you write after your last tool call is delivered. Finish every \
+             tool call first, saving to memory included, then write the whole answer in \
+             one piece."
+                .to_string(),
         ],
         BotOrigin::Peer => {
             let asking = match asker {

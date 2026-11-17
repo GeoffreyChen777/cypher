@@ -282,6 +282,46 @@ async fn relay_probe_errors_do_not_mean_offline_and_alive_answers_back_off() {
 }
 
 #[tokio::test]
+async fn the_peer_alive_hook_fires_when_a_peer_comes_back_not_on_every_heartbeat() {
+    // The hook clears a peer's dial cooldown. Every registry change runs an
+    // overlay, so firing for every alive peer cleared the cooldown of a
+    // peer that was alive but not reachable every few seconds: its backoff
+    // never held.
+    let dir = tempfile::tempdir().unwrap();
+    let host = open_host(dir.path(), "self", false);
+    add_probe_peer(&host);
+    let fired = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = fired.clone();
+    host.set_peer_alive_hook(Arc::new(move |id: &str| {
+        seen.lock().unwrap().push(id.to_string());
+    }));
+    let overlay = || {
+        let mut devices = host.read_devices().unwrap();
+        host.inner.overlay_presence(&mut devices);
+    };
+    let beat = |age_ms: i64| {
+        super::lock(&host.inner.presence_seen)
+            .insert("peer".into(), crate::util::now_ms() - age_ms);
+    };
+    overlay();
+    assert!(fired.lock().unwrap().is_empty(), "never seen");
+
+    beat(0);
+    for _ in 0..5 {
+        overlay();
+    }
+    assert_eq!(*fired.lock().unwrap(), ["peer"], "once, when it appeared");
+
+    // Its heartbeats stop for the whole freshness window, then resume.
+    beat(super::presence::PRESENCE_FRESH_MS + 1);
+    overlay();
+    beat(0);
+    overlay();
+    overlay();
+    assert_eq!(*fired.lock().unwrap(), ["peer", "peer"], "again on return");
+}
+
+#[tokio::test]
 async fn relay_probe_fresh_presence_wins_a_late_negative_and_deleted_peers_are_pruned() {
     let dir = tempfile::tempdir().unwrap();
     let host = open_host(dir.path(), "self", false);

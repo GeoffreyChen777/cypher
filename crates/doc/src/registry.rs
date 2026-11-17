@@ -18,7 +18,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use cypher_proto::{Bot, Chat, ChatConfig, ChatHome, Device, Session, Space};
+use cypher_proto::{
+    Bot, Chat, ChatConfig, ChatHome, Device, Session, Space, SubagentRun, SubagentRunStatus,
+};
 
 use crate::schema::DocError;
 
@@ -167,6 +169,9 @@ pub struct RegistryDoc {
     /// Bumped on every mutation (local or applied) — the engine host converts
     /// this into watch-channel publishes and snapshot debounces.
     generation: u64,
+    /// Pending batches held back from the server ([`Self::take_pushable`]),
+    /// so each is reported once per process.
+    held_back: std::collections::HashSet<String>,
 }
 
 impl RegistryDoc {
@@ -179,6 +184,7 @@ impl RegistryDoc {
             clock: HlcClock::default(),
             pending: Vec::new(),
             generation: 0,
+            held_back: Default::default(),
         }
     }
 
@@ -422,11 +428,56 @@ impl RegistryDoc {
         }
     }
 
-    /// Batches to push: everything not already in flight on this connection.
+    /// Batches to push: everything not already in flight on this connection,
+    /// but for a batch the Edge is certain to refuse.
+    ///
+    /// The Edge rejects a whole batch when one op is over its size cap
+    /// ([`EDGE_OP_MAX_UNITS`]), and its error names no batch, so the client
+    /// can't retire it: it was pushed, and refused, on every connect for
+    /// good. Such a batch is never pushed. While it still shows something
+    /// locally (the overlay reads pending ops) it is kept; once the stored
+    /// rows override every op of it, nothing reads it any more and it goes.
     pub fn take_pushable(&mut self) -> Vec<PendingBatch> {
+        let authoritative = &self.authoritative;
+        let held_back = &mut self.held_back;
+        let mut retired = false;
+        self.pending.retain(|batch| {
+            if batch.in_flight {
+                return true;
+            }
+            let Some(oversize) = batch.ops.iter().find(|op| op_units(op) > EDGE_OP_MAX_UNITS)
+            else {
+                return true;
+            };
+            let shows = batch.ops.iter().any(|op| {
+                let row = authoritative.get(&op.kind).and_then(|m| m.get(&op.id));
+                apply_op(row, op).1
+            });
+            if !shows {
+                tracing::warn!(
+                    kind = %oversize.kind,
+                    id = %oversize.id,
+                    units = op_units(oversize),
+                    "registry: dropped an unsendable write that later ones replaced"
+                );
+                held_back.remove(&batch.batch);
+                retired = true;
+            } else if held_back.insert(batch.batch.clone()) {
+                tracing::warn!(
+                    kind = %oversize.kind,
+                    id = %oversize.id,
+                    units = op_units(oversize),
+                    "registry: a write is over the server's size cap; kept on this device only"
+                );
+            }
+            shows
+        });
+        if retired {
+            self.generation += 1;
+        }
         let mut out = Vec::new();
         for batch in &mut self.pending {
-            if !batch.in_flight {
+            if !batch.in_flight && !self.held_back.contains(&batch.batch) {
                 batch.in_flight = true;
                 out.push(batch.clone());
             }
@@ -1185,7 +1236,18 @@ impl RegistryDoc {
     /// does a context recovery: a row without one ends it, and a turn's
     /// narrated progress.
     pub fn upsert_session(&mut self, session: &Session) -> Result<(), DocError> {
-        let subagents = serde_json::to_value(&session.subagents)?;
+        self.write_session(session, &session.subagents)
+    }
+
+    /// [`Self::upsert_session`] with the `subagents` projection given. The
+    /// harness lets it grow to 32 runs of 4 KiB each; the row is one op the
+    /// Edge caps at 16 Ki, so a session with many subagents wrote rows the
+    /// Edge refused, and its status reached no other device until the list
+    /// shrank. A row that would be over the cap carries a shortened list
+    /// ([`fit_subagents`]); this device's own view is not the row and keeps
+    /// every run.
+    fn write_session(&mut self, session: &Session, runs: &[SubagentRun]) -> Result<(), DocError> {
+        let subagents = serde_json::to_value(runs)?;
         let mut set = fields([
             ("chatId", json!(session.chat_id)),
             ("deviceId", json!(session.device_id)),
@@ -1194,7 +1256,7 @@ impl RegistryDoc {
             ("updatedAt", json!(session.updated_at.timestamp_millis())),
             (
                 "subagents",
-                if session.subagents.is_empty() {
+                if runs.is_empty() {
                     Value::Null
                 } else {
                     subagents
@@ -1224,6 +1286,16 @@ impl RegistryDoc {
         ]);
         if let Some(usage) = session.context_usage {
             set.insert("contextUsage".into(), serde_json::to_value(usage)?);
+        }
+        let units = json_units(&set)?;
+        if units > RECORD_MAX_BYTES && !runs.is_empty() {
+            // What the row has left for the list once everything else is in.
+            let list = json_units(&runs)?;
+            let room = RECORD_MAX_BYTES.saturating_sub(units - list);
+            let fitted = fit_subagents(runs, room);
+            if fitted != runs {
+                return self.write_session(session, &fitted);
+            }
         }
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1511,6 +1583,79 @@ impl RegistryDoc {
             bots: self.read_bots()?,
         })
     }
+}
+
+// ── size caps ───────────────────────────────────────────────────────────────
+
+/// The Edge's per-op cap (`MAX_OP_BYTES` in `apps/edge/src/registry/
+/// registry-core.ts`), which it measures as `JSON.stringify(op).length`:
+/// UTF-16 code units.
+pub const EDGE_OP_MAX_UNITS: usize = 16 * 1024;
+
+/// `value`'s JSON length as the Edge measures it.
+fn json_units<T: Serialize + ?Sized>(value: &T) -> Result<usize, DocError> {
+    Ok(serde_json::to_string(value)?.encode_utf16().count())
+}
+
+/// An op's size on the wire, as the Edge measures it. An op that won't
+/// serialize counts as over any cap.
+fn op_units(op: &RowOp) -> usize {
+    json_units(op).unwrap_or(usize::MAX)
+}
+
+/// A settled run's task, and any run's once the list is still too long.
+const SUBAGENT_TASK_SHORT: usize = 120;
+/// The one line of progress kept beside it.
+const SUBAGENT_PROGRESS_SHORT: usize = 160;
+
+/// `runs` shortened until their JSON fits `room` UTF-16 units, giving up
+/// what other devices need least first: settled runs keep a short task and
+/// the last line of their progress, then running ones do too, then whole
+/// runs go, the ones that settled longest ago first and the longest-running
+/// last. The order of what stays is kept.
+fn fit_subagents(runs: &[SubagentRun], room: usize) -> Vec<SubagentRun> {
+    let fits = |runs: &[SubagentRun]| json_units(runs).is_ok_and(|units| units <= room);
+    let mut runs = runs.to_vec();
+    if fits(&runs) {
+        return runs;
+    }
+    let settled = |run: &SubagentRun| run.status != SubagentRunStatus::Running;
+    let shorten = |run: &mut SubagentRun| {
+        run.task = short(&run.task, SUBAGENT_TASK_SHORT);
+        run.progress = run
+            .progress
+            .as_deref()
+            .and_then(|progress| progress.lines().rev().find(|line| !line.trim().is_empty()))
+            .map(|line| short(line, SUBAGENT_PROGRESS_SHORT));
+    };
+    runs.iter_mut().filter(|run| settled(run)).for_each(shorten);
+    if fits(&runs) {
+        return runs;
+    }
+    runs.iter_mut().for_each(shorten);
+    while !fits(&runs) {
+        let Some(oldest) = runs
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, run)| (!settled(run), run.ended_at.unwrap_or(run.updated_at)))
+            .map(|(index, _)| index)
+        else {
+            break;
+        };
+        runs.remove(oldest);
+    }
+    runs
+}
+
+/// `text` trimmed to at most `max` characters, an ellipsis marking a cut.
+fn short(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 // ── field helpers ───────────────────────────────────────────────────────────

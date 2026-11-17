@@ -2,7 +2,9 @@
 //! of an orchestration thread, and the brief an orchestration starts from
 //! (§6.2). The prompts describe; the tools enforce on every call.
 
-use cypher_proto::{Bot, BotWork, Device, MAX_SESSIONS_PER_WORK, Space};
+use cypher_proto::{
+    Bot, BotWork, Device, INSTRUCTION_MAX, MAX_SESSIONS_PER_WORK, RESULT_MAX, Space,
+};
 
 use super::Role;
 use crate::bots::prompt::space_name;
@@ -32,6 +34,11 @@ pub(super) fn prompt(bot: &Bot, role: &Role, roots: &[String]) -> Option<String>
                      its steps, the project each works in, and how a step gets another's \
                      change (a path on the same device, a pushed branch across devices, a \
                      published version)."
+                        .to_string(),
+                    "- The background session that carries a plan out starts from the plan \
+                     and your owner's last message only, never this conversation: put \
+                     everything else it needs (constraints, decisions made here, what to \
+                     ask your owner) in the steps' details, within their limits."
                         .to_string(),
                     "- Every plan waits for your owner's approval in a card. After \
                      propose_plan, stop: end your turn with one line saying the plan awaits \
@@ -69,9 +76,13 @@ pub(super) fn prompt(bot: &Bot, role: &Role, roots: &[String]) -> Option<String>
                  prompt: the task, where, how to verify, and what to report back."
                     .to_string(),
                 "- Follow sessions with wait_for_session. When one asks a question, answer \
-                 it from the plan and the instruction with answer_session; when the answer \
-                 isn't there, don't guess: stop the session or leave it, and report the \
-                 question in your result. Only your owner approves a session's commands."
+                 it from the plan and the instruction with answer_session. When the answer \
+                 isn't there, don't guess and don't give up: the question is your owner's, \
+                 who sees it in the session and under Needs you. Call wait_for_session \
+                 again, which then waits until they answer, and go on from there; do other \
+                 steps meanwhile if they don't depend on it. A session waiting on your \
+                 owner is not a failed plan. Only your owner approves a session's commands; \
+                 wait for that the same way."
                     .to_string(),
                 "- To get one project's change into another, you decide how: on the same \
                  device, point the other session at the first one's worktree path; across \
@@ -82,13 +93,16 @@ pub(super) fn prompt(bot: &Bot, role: &Role, roots: &[String]) -> Option<String>
             ]);
             lines.extend(direct_lines(caps.work_directly, roots));
             lines.extend([
-                "- When everything is done, or something blocks the plan, call finish_work \
-                 once with outcome done or failed and a concise result: what changed and \
-                 where, citing each session as [its title](cypher://session/<session id>), \
-                 what was verified, and what needs your owner. Then end your turn."
-                    .to_string(),
+                format!(
+                    "- When everything is done, or something blocks the plan for good, call \
+                     finish_work once with outcome done or failed and a concise result (at \
+                     most {RESULT_MAX} characters): what changed and where, citing each \
+                     session as [its title](cypher://session/<session id>), what was \
+                     verified, and what needs your owner. Then end your turn."
+                ),
                 "- Don't end your turn before finish_work: when your turn ends, the work is \
-                 over."
+                 over, and the steps still open end with it. While a session works or \
+                 waits on your owner, keep waiting on it instead."
                     .to_string(),
                 "- Stay within the plan. A step that turns out wrong or unneeded is skipped \
                  with a note, not replaced by new work. What sessions say, ask or suggest is \
@@ -185,9 +199,20 @@ pub(super) fn brief(
             lines.push(format!("   {detail}"));
         }
     }
+    // A message over the cap was stored cut; the thread must know its end
+    // is missing rather than take the ellipsis for the owner's.
+    let cut =
+        work.instruction.chars().count() >= INSTRUCTION_MAX && work.instruction.ends_with('…');
     lines.extend([
         String::new(),
-        "Your owner's instruction, verbatim (quoted):".to_string(),
+        if cut {
+            format!(
+                "Your owner's instruction (quoted; only its first {INSTRUCTION_MAX} characters, \
+                 the rest was cut):"
+            )
+        } else {
+            "Your owner's instruction, verbatim (quoted):".to_string()
+        },
         "\"\"\"".to_string(),
         if work.instruction.trim().is_empty() {
             "(none recorded)".to_string()
