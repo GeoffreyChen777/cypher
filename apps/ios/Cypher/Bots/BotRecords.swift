@@ -459,7 +459,7 @@ extension RoutineTarget: Codable {
     }
 }
 
-/// A workspace job run by hand or on a schedule, unattended (registry kind
+/// A workspace job run by hand or on a schedule, in the background (registry kind
 /// `botRoutines`). Scheduled runs reuse one standing session
 /// (`threadChatId`); each Run now gets a fresh one (`manualChatId`).
 struct BotRoutine: Codable, Hashable, Identifiable, Sendable {

@@ -432,7 +432,7 @@ impl Bots {
             next_words(&routine.schedule, routine.enabled, Local::now()),
         )];
         out.push(match &routine.target {
-            RoutineTarget::Workspace => "It runs unattended as you, in its own thread, and posts \
+            RoutineTarget::Workspace => "It runs in the background as you, in its own thread, and posts \
                  its result in this chat."
                 .to_string(),
             RoutineTarget::Project {
@@ -440,7 +440,7 @@ impl Bots {
             } => {
                 let space = view.space(Some(space_id));
                 format!(
-                    "It runs unattended as an ordinary session in {} on {}, {}; scheduled runs \
+                    "It runs in the background as an ordinary session in {} on {}, {}; scheduled runs \
                      continue one session and Run now starts a fresh one. Its result is posted \
                      in this chat.",
                     space.map(super::prompt::space_name).unwrap_or_default(),
@@ -455,13 +455,14 @@ impl Bots {
                 )
             }
         });
+        out.push("Questions and approvals wait for your owner in Needs you.".into());
         if routine.write_notes {
             out.push("It may write to your memory.".into());
         }
         if routine.work_directly {
             out.push(if bot.capabilities.work_directly {
                 "It may run commands and edit files in your local projects; anything that \
-                 needs approval fails the run."
+                 needs approval waits for your owner."
                     .into()
             } else {
                 "It asks to work directly, but your owner turned Work directly off for you, \

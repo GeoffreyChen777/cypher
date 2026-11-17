@@ -116,7 +116,7 @@ pub fn tools_for(marker: &cypher_proto::BotChat, bot: Option<&Bot>) -> Vec<Strin
 
 /// The tools a session has that the workspace's own chat with its owner
 /// gets too, and no other thread: a peer's questions, routines and
-/// orchestration threads run unattended or for someone else.
+/// orchestration threads run in the background or for someone else.
 ///
 /// - `codemode` calls MCP tools from scripts and `tool_search` loads the
 ///   deferred ones; Pi offers MCP tools only through them (unless a server
@@ -145,14 +145,15 @@ pub fn run_sandbox(workspace: &WorkspaceHost, chat: &Chat) -> Option<SandboxLeve
 
 /// Whether nobody watches this chat's runs, so they must never wait for an
 /// answer: the engine denies every question and approval such a run asks
-/// and settles the run as failed (§8). Routine threads; orchestration
+/// and settles the run as failed. Orchestration
 /// threads, which are hidden: a permission prompt there would stall the
-/// work where nobody sees it, so it fails the work instead (§6.5). A project
-/// routine's session is a routine's too (origin routine).
+/// work where nobody sees it, so it fails the work instead (§6.5).
+/// Routine threads and project routine sessions instead wait for their
+/// owner in Needs you, on both scheduled and manual runs.
 pub fn is_unattended(_workspace: &WorkspaceHost, chat: &Chat) -> bool {
-    chat.bot.as_ref().is_some_and(|marker| {
-        marker.origin == BotOrigin::Routine || matches!(marker.thread, BotThread::Work { .. })
-    })
+    chat.bot
+        .as_ref()
+        .is_some_and(|marker| matches!(marker.thread, BotThread::Work { .. }))
 }
 
 /// An unattended run the engine stopped because it asked for input. The
@@ -325,7 +326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routine_threads_and_routine_sessions_are_unattended() {
+    async fn routines_can_wait_for_input_but_orchestration_cannot() {
         let dir = tempfile::tempdir().unwrap();
         let ws = WorkspaceHost::open(
             std::sync::Arc::new(cypher_sync::DocsStore::open(dir.path()).unwrap()),
@@ -346,7 +347,7 @@ mod tests {
             &ws,
             &chat(Some(BotChat::new("b1", BotOrigin::Peer)))
         ));
-        assert!(is_unattended(
+        assert!(!is_unattended(
             &ws,
             &chat(Some(BotChat::new("b1", BotOrigin::Routine)))
         ));
@@ -361,7 +362,7 @@ mod tests {
             )))
         ));
 
-        // A project routine's session: unattended, but a plain session.
+        // A project routine can wait too, and keeps its plain-session profile.
         let session = chat(Some(BotChat::thread(
             "b1",
             BotOrigin::Routine,
@@ -369,7 +370,7 @@ mod tests {
                 routine_id: "r".into(),
             },
         )));
-        assert!(is_unattended(&ws, &session));
+        assert!(!is_unattended(&ws, &session));
         assert!(bot_env(&ws, &session).is_none());
         assert!(run_sandbox(&ws, &session).is_none());
     }

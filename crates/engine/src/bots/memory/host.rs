@@ -72,8 +72,8 @@ struct RunResult {
 }
 
 impl Bots {
-    /// The engine's unattended-stop listener: a routine run that asked for
-    /// input is settled as failed with the reason.
+    /// Preserve an unattended stop's reason if it belongs to a tracked run.
+    /// Routines now use the ordinary input bridge and wait in Needs you.
     pub fn unattended_listener(&self) -> UnattendedListener {
         let inner = Arc::downgrade(&self.inner);
         Arc::new(move |stop| {
@@ -429,7 +429,7 @@ impl Bots {
         Ok(())
     }
 
-    /// A project routine's Run: an ordinary unattended session's request,
+    /// A project routine's Run: an ordinary background session's request,
     /// in the routine's own worktree (made by this run when it has none yet)
     /// or the project's checkout.
     async fn project_request(
@@ -499,10 +499,10 @@ impl Bots {
             worktree: spec,
         };
         let agent_prompt = format!(
-            "This is a run of the routine \"{}\". Nobody is watching it: you cannot ask \
-             questions or wait for an approval, and anything that would ask stops the run as \
-             failed. When something is unclear, make the reasonable choice and say what you \
-             assumed. Only what you write after your last tool call is delivered to your \
+            "This is a background run of the routine \"{}\". Questions and permission \
+             requests pause this run until your owner answers in Needs you. Never bypass \
+             approval. For nonessential ambiguities, make the reasonable choice and say \
+             what you assumed. Only what you write after your last tool call is delivered to your \
              owner: finish every tool call first, then write the whole answer in one \
              piece.\n\n{}",
             routine.name, routine.prompt

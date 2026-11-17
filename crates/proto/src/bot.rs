@@ -214,8 +214,7 @@ pub enum BotOrigin {
     /// The owner: the bot chat, and later its orchestration threads.
     #[default]
     Owner,
-    /// A routine running unattended: nobody watches it, so it never waits
-    /// for an answer or an approval.
+    /// A background routine: questions and approvals wait in Needs you.
     Routine,
     /// Another user's bot asking a question. An origin this engine does not
     /// know also reads as a peer, the narrowest one, so a row from a newer

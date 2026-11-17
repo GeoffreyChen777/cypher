@@ -678,7 +678,7 @@ impl RoutineTarget {
     }
 }
 
-/// A bot job run by hand or on a schedule, unattended. Scheduled runs reuse
+/// A bot job run by hand or on a schedule, in the background. Scheduled runs reuse
 /// one standing session (`threadChatId`); each Run now gets a fresh one
 /// (`manualChatId`), kept until the next replaces it. Its output is posted
 /// in the bot chat either way.
@@ -705,7 +705,7 @@ pub struct BotRoutine {
     pub write_notes: bool,
     /// May use Pi's shell and file tools in the bot's local projects, like
     /// an owner thread with *Work directly* (and only while the bot has it).
-    /// Unattended: anything that would ask for approval fails the run.
+    /// Anything that asks for approval waits for the owner in Needs you.
     #[serde(default)]
     pub work_directly: bool,
     pub created_at: i64,
@@ -1178,8 +1178,11 @@ pub enum NeedsYou {
     Plan(String),
     /// An action awaiting approval (approval id).
     Approval(String),
-    /// A session the bot started is asking (session id, work id).
-    Asking { chat_id: String, work_id: String },
+    /// A worker or routine is asking (session id, work id for workers).
+    Asking {
+        chat_id: String,
+        work_id: Option<String>,
+    },
     /// A peer's answer drafted in Review mode (exchange id).
     Review(String),
 }
@@ -1216,9 +1219,27 @@ impl BotRecords {
                 if asking(chat_id) {
                     items.push(NeedsYou::Asking {
                         chat_id: chat_id.to_string(),
-                        work_id: w.id.clone(),
+                        work_id: Some(w.id.clone()),
                     });
                 }
+            }
+        }
+        let mut routines: Vec<&BotRoutine> = self
+            .routines
+            .iter()
+            .filter(|r| r.bot_id == bot_id)
+            .collect();
+        routines.sort_by_key(|r| r.last_run.as_ref().map(|run| run.at));
+        for routine in routines {
+            if let Some(run) = &routine.last_run
+                && run.outcome == RunOutcome::Running
+                && let Some(chat_id) = &run.chat_id
+                && asking(chat_id)
+            {
+                items.push(NeedsYou::Asking {
+                    chat_id: chat_id.clone(),
+                    work_id: None,
+                });
             }
         }
         items.extend(
@@ -1567,16 +1588,44 @@ mod tests {
                 NeedsYou::Approval("a".into()),
                 NeedsYou::Asking {
                     chat_id: "s2".into(),
-                    work_id: "run".into()
+                    work_id: Some("run".into())
                 },
                 NeedsYou::Asking {
                     chat_id: "s3".into(),
-                    work_id: "ended".into()
+                    work_id: Some("ended".into())
                 },
                 NeedsYou::Plan("plan".into()),
             ]
         );
         assert_eq!(records.started_by("s1").unwrap().0.id, "run");
+    }
+
+    #[test]
+    fn routine_approvals_need_the_owner_only_while_the_run_is_waiting() {
+        let mut routine: BotRoutine = serde_json::from_value(serde_json::json!({
+            "id": "r", "botId": "b", "name": "Cleanup", "prompt": "Clean",
+            "createdAt": 0, "updatedAt": 0,
+            "lastRun": { "at": 1, "outcome": "running", "chatId": "routine-chat" }
+        }))
+        .unwrap();
+        let mut records = BotRecords {
+            routines: vec![routine.clone()],
+            ..Default::default()
+        };
+        assert_eq!(
+            records.needs_you("b", |id| id == "routine-chat"),
+            vec![NeedsYou::Asking {
+                chat_id: "routine-chat".into(),
+                work_id: None
+            }]
+        );
+        assert!(records.needs_you("other", |_| true).is_empty());
+        assert!(records.needs_you("b", |_| false).is_empty());
+        for outcome in [RunOutcome::Done, RunOutcome::Failed, RunOutcome::Skipped] {
+            routine.last_run.as_mut().unwrap().outcome = outcome;
+            records.routines = vec![routine.clone()];
+            assert!(records.needs_you("b", |_| true).is_empty());
+        }
     }
 
     #[test]

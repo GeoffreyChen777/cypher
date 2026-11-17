@@ -14,8 +14,8 @@ use cypher_doc::SessionCommandPayload;
 use cypher_engine::EngineCore;
 use cypher_harness::RunProfile;
 use cypher_proto::{
-    AgentEvent, Bot, BotChat, BotOrigin, BotScope, BotThread, HarnessId, MemoryScope, MemoryView,
-    PassOutcome, ProjectGrant, ToolCall,
+    AgentEvent, Bot, BotChat, BotOrigin, BotScope, BotThread, HarnessId, MemoryEdit, MemoryScope,
+    MemoryView, PassOutcome, ProjectGrant, ToolCall,
 };
 use cypher_rpc::RpcClient;
 
@@ -39,7 +39,7 @@ struct Rig {
 /// A stand-in Pi: a prompt with FETCH fetches a web page first; a
 /// consolidation pass rewrites `/project/MEMORY.md` through the memory
 /// tool before answering; every run reports its token use.
-fn rig() -> Rig {
+async fn rig() -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
@@ -106,6 +106,7 @@ fn rig() -> Rig {
         common::script(events)
     });
     let core = common::engine_at(&root.join("data"), harness);
+    disable_nightly(&core, MemoryScope::You).await;
     let _ = client.set(cypher_rpc::memory_client(core.rpc_service()));
     for (space, chats) in [
         ("sp-web", &["c-web-1", "c-web-2"][..]),
@@ -116,6 +117,7 @@ fn rig() -> Rig {
         core.workspace
             .create_space(space, &core.device_id, path.to_str().unwrap(), None, false)
             .unwrap();
+        disable_nightly(&core, project(space)).await;
         for chat in chats {
             core.workspace
                 .create_chat(chat, Some(space), None, None, None)
@@ -131,6 +133,21 @@ fn rig() -> Rig {
         seen,
         _dir: dir,
     }
+}
+
+async fn disable_nightly(core: &EngineCore, scope: MemoryScope) {
+    // These tests explicitly request passes. Wall-clock nightly runs would
+    // mutate the fixture and race with the pass whose tokens/undo we assert.
+    core.memory
+        .edit(
+            scope,
+            MemoryEdit::SetConsolidation {
+                enabled: false,
+                hour: 3,
+            },
+        )
+        .await
+        .unwrap();
 }
 
 impl Rig {
@@ -241,12 +258,20 @@ async fn create_bot(rig: &Rig) -> Bot {
         )
         .await
         .expect("CreateBot");
-    serde_json::from_value(value).expect("a Bot")
+    let bot: Bot = serde_json::from_value(value).expect("a Bot");
+    disable_nightly(
+        &rig.core,
+        MemoryScope::Workspace {
+            bot_id: bot.id.clone(),
+        },
+    )
+    .await;
+    bot
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sessions_share_their_projects_memory_and_start_with_it() {
-    let rig = rig();
+    let rig = rig().await;
     let created = rig
         .tool(
             "c-web-1",
@@ -380,7 +405,7 @@ async fn sessions_share_their_projects_memory_and_start_with_it() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_workspace_reads_project_memory_and_keeps_its_own_notes() {
-    let rig = rig();
+    let rig = rig().await;
     rig.tool(
         "c-web-1",
         serde_json::json!({ "command": "create", "path": "/project/MEMORY.md", "file_text": "- Deploys on Fridays\n" }),
@@ -457,7 +482,7 @@ async fn a_workspace_reads_project_memory_and_keeps_its_own_notes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn writes_after_untrusted_content_wait_for_review() {
-    let rig = rig();
+    let rig = rig().await;
     rig.run("c-web-1", "FETCH the changelog").await;
     let held = rig
         .tool(
@@ -574,7 +599,7 @@ async fn writes_after_untrusted_content_wait_for_review() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn what_you_ask_a_workspace_to_remember_every_session_knows() {
-    let rig = rig();
+    let rig = rig().await;
     let bot = create_bot(&rig).await;
     // "Remember that I had a hazelnut coffee today. I like hazelnut coffee."
     rig.tool(
@@ -605,7 +630,7 @@ async fn what_you_ask_a_workspace_to_remember_every_session_knows() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_edits_undoes_and_secrets_never_land() {
-    let rig = rig();
+    let rig = rig().await;
     let scope = project("sp-web");
     assert_eq!(
         rig.edit(&scope, serde_json::json!({ "op": "write", "path": "MEMORY.md", "text": "- Ship on Tuesdays\n" }))
@@ -676,7 +701,7 @@ async fn the_owner_edits_undoes_and_secrets_never_land() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_notebook_moves_into_the_workspaces_memory() {
-    let rig = rig();
+    let rig = rig().await;
     let bot = create_bot(&rig).await;
     for (id, text, at) in [
         ("n1", "Alice owns auth", 2_000),
@@ -730,7 +755,7 @@ async fn the_notebook_moves_into_the_workspaces_memory() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_consolidation_pass_runs_with_only_memory_tools_and_can_be_undone() {
-    let rig = rig();
+    let rig = rig().await;
     let scope = project("sp-web");
     rig.tool(
         "c-web-1",
@@ -826,7 +851,7 @@ async fn a_consolidation_pass_runs_with_only_memory_tools_and_can_be_undone() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn untrusted_content_reaches_across_subagents() {
-    let rig = rig();
+    let rig = rig().await;
     let parent = rig.core.workspace.chat("c-web-1").unwrap().unwrap();
     rig.core
         .workspace
@@ -891,7 +916,7 @@ async fn untrusted_content_reaches_across_subagents() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_held_write_applies_once_however_often_it_is_accepted() {
-    let rig = rig();
+    let rig = rig().await;
     let scope = project("sp-web");
     rig.edit(
         &scope,

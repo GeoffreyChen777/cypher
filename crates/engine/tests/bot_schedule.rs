@@ -61,9 +61,30 @@ fn harness(runs: Runs, hold: Arc<Notify>) -> TestHarness {
             let started =
                 common::session_started(HarnessId::Pi, "mock-1", &request.cwd, "s", "a-1");
             let rest = futures::stream::once(async move {
-                let _ = answer.await;
+                let answers = answer.await.unwrap_or_default();
+                if answers.is_empty() {
+                    // Stop cancels the dialog, unlike an explicit Deny.
+                    let mut done = common::done("s");
+                    if let p::AgentEvent::Done { status, .. } = &mut done {
+                        *status = p::DoneStatus::Interrupted;
+                    }
+                    return futures::stream::iter(vec![Ok(done)]);
+                }
+                let approved = answers
+                    .iter()
+                    .any(|answer| answer.question_id == "perm-1" && answer.labels == ["Run once"]);
                 futures::stream::iter(
-                    [common::text("Carried on without it."), common::done("s")].map(Ok),
+                    [
+                        common::text(if approved {
+                            "Approved command ran."
+                        } else {
+                            "Command denied; nothing ran."
+                        }),
+                        common::done("s"),
+                    ]
+                    .into_iter()
+                    .map(Ok)
+                    .collect::<Vec<_>>(),
                 )
             })
             .flatten();
@@ -203,6 +224,214 @@ async fn wait_for(predicate: impl FnMut() -> bool, what: &str) {
 
 fn last_outcome(core: &EngineCore, id: &str) -> Option<RunOutcome> {
     routine(core, id).last_run.map(|run| run.outcome)
+}
+
+async fn waiting_approval(core: &EngineCore, id: &str) -> (String, String) {
+    wait_for(
+        || {
+            routine(core, id)
+                .last_run
+                .as_ref()
+                .and_then(|run| run.chat_id.as_deref())
+                .is_some_and(|chat| {
+                    common::status(core, chat) == Some(p::SessionStatus::AwaitingInput)
+                })
+        },
+        "routine awaiting its owner's approval",
+    )
+    .await;
+    let run = routine(core, id).last_run.unwrap();
+    assert_eq!(run.outcome, RunOutcome::Running);
+    let chat = run.chat_id.unwrap();
+    let request = common::wait_for_some("approval card", || {
+        common::entries(core, &chat)
+            .into_iter()
+            .flat_map(|e| e.parts)
+            .find_map(|part| match part {
+                MessagePart::Input {
+                    request_id,
+                    resolved: false,
+                    ..
+                } => Some(request_id),
+                _ => None,
+            })
+    })
+    .await;
+    (chat, request)
+}
+
+fn answer_approval(core: &EngineCore, chat: &str, request_id: String, label: &str) {
+    core.doc_host
+        .queue_command(
+            chat,
+            cypher_doc::SessionCommandPayload::RespondInput {
+                request_id,
+                answers: vec![p::UserInputAnswer {
+                    question_id: "perm-1".into(),
+                    labels: vec![label.into()],
+                }],
+            },
+        )
+        .unwrap();
+}
+
+/// Scheduled workspace and project runs both wait without overlapping a
+/// later slot, and an explicit answer (approval or denial) is delivered once.
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduled_approvals_wait_without_starting_another_run() {
+    let Rig {
+        core,
+        runs,
+        dir: _dir,
+        ..
+    } = rig().await;
+    let bot = create_bot(&core, true).await;
+    for (id, project, label) in [
+        ("workspace-approve", false, "Run once"),
+        ("workspace-deny", false, "Deny"),
+        ("project-approve", true, "Run once"),
+        ("project-deny", true, "Deny"),
+    ] {
+        let mut def = routine_def(
+            id,
+            &bot,
+            "ASK before a scheduled command",
+            Schedule::Interval { minutes: 15 },
+        );
+        if project {
+            def.target = p::RoutineTarget::Project {
+                space_id: "sp-web".into(),
+                worktree: false,
+                model: None,
+            };
+        }
+        save_routine(&core, &def).await;
+        wait_for(
+            || routine(&core, id).next_run_at.is_some(),
+            "the scheduled routine to be planned",
+        )
+        .await;
+        core.workspace
+            .put_record(
+                p::KIND_BOT_ROUTINES,
+                id,
+                &serde_json::json!({ "nextRunAt": p::now_ms() - 1 }),
+                cypher_engine::RecordFields::All,
+            )
+            .unwrap();
+        core.bots.schedule_now().await;
+        let (chat, request) = waiting_approval(&core, id).await;
+        let run = routine(&core, id).last_run.unwrap();
+        assert!(!run.manual);
+        assert!(run.summary.is_none());
+        let started = runs.lock().unwrap().len();
+        assert!(
+            !runs.lock().unwrap().last().unwrap().0.auto_approve,
+            "waiting for approval must not turn on auto-approve"
+        );
+        core.workspace
+            .put_record(
+                p::KIND_BOT_ROUTINES,
+                id,
+                &serde_json::json!({ "nextRunAt": p::now_ms() - 1 }),
+                cypher_engine::RecordFields::All,
+            )
+            .unwrap();
+        core.bots.schedule_now().await;
+        assert_eq!(routine(&core, id).last_run, Some(run));
+        assert!(routine(&core, id).next_run_at.unwrap() > p::now_ms());
+        assert_eq!(
+            runs.lock().unwrap().len(),
+            started,
+            "no overlapping scheduled run"
+        );
+        assert_eq!(
+            core.workspace
+                .read_bot_records()
+                .needs_you(&bot.id, |id| common::status(&core, id)
+                    == Some(p::SessionStatus::AwaitingInput)),
+            vec![p::NeedsYou::Asking {
+                chat_id: chat.clone(),
+                work_id: None
+            }],
+        );
+        answer_approval(&core, &chat, request, label);
+        wait_for(
+            || last_outcome(&core, id) == Some(RunOutcome::Done),
+            "scheduled run finishes after answer",
+        )
+        .await;
+        assert_eq!(
+            routine(&core, id).last_run.unwrap().summary.as_deref(),
+            Some(if label == "Run once" {
+                "Approved command ran."
+            } else {
+                "Command denied; nothing ran."
+            })
+        );
+        assert!(
+            core.workspace
+                .read_bot_records()
+                .needs_you(&bot.id, |id| common::status(&core, id)
+                    == Some(p::SessionStatus::AwaitingInput))
+                .is_empty()
+        );
+        assert!(
+            !common::entries(&core, &chat)
+                .iter()
+                .flat_map(|e| &e.parts)
+                .any(|part| matches!(
+                    part,
+                    MessagePart::Input {
+                        resolved: false,
+                        ..
+                    }
+                ))
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_a_routine_waiting_for_approval_retires_its_question() {
+    let Rig {
+        core, dir: _dir, ..
+    } = rig().await;
+    let bot = create_bot(&core, false).await;
+    save_routine(
+        &core,
+        &routine_def("stop-ask", &bot, "ASK before a command", Schedule::Manual),
+    )
+    .await;
+    mutate(
+        &core,
+        serde_json::json!({ "op": "runBotRoutine", "routineId": "stop-ask" }),
+    )
+    .await;
+    let (chat, _) = waiting_approval(&core, "stop-ask").await;
+    core.sessions.interrupt(&chat).await.unwrap();
+    wait_for(
+        || last_outcome(&core, "stop-ask") == Some(RunOutcome::Failed),
+        "stopped routine settles",
+    )
+    .await;
+    assert!(
+        core.workspace
+            .read_bot_records()
+            .needs_you(&bot.id, |_| true)
+            .is_empty()
+    );
+    assert!(
+        !common::entries(&core, &chat)
+            .iter()
+            .flat_map(|e| &e.parts)
+            .any(|part| matches!(
+                part,
+                MessagePart::Input {
+                    resolved: false,
+                    ..
+                }
+            ))
+    );
 }
 
 /// The post parts in a bot chat, with who posted them.
@@ -356,12 +585,12 @@ async fn a_due_routine_runs_in_its_thread_and_posts_to_the_bot_chat() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn run_now_failures_and_the_pause_switch() {
+async fn run_now_waits_for_approval_and_the_pause_switch() {
     let Rig {
         core, dir: _dir, ..
     } = rig().await;
     let bot = create_bot(&core, false).await;
-    // An unattended run that asks for approval stops failed, with why.
+    // A manual run waits for a real answer and is discoverable in Needs you.
     let asking = routine_def("r-ask", &bot, "ASK before cleaning up", Schedule::Manual);
     save_routine(&core, &asking).await;
     mutate(
@@ -369,19 +598,27 @@ async fn run_now_failures_and_the_pause_switch() {
         serde_json::json!({ "op": "runBotRoutine", "routineId": "r-ask" }),
     )
     .await;
-    wait_for(
-        || last_outcome(&core, "r-ask") == Some(RunOutcome::Failed),
-        "the asking run to fail",
-    )
-    .await;
-    let failed = routine(&core, "r-ask").last_run.unwrap();
-    let reason = "This run is unattended, so it couldn't ask for approval to run a command \
-                  outside the sandbox. It stopped.";
-    assert_eq!(failed.summary.as_deref(), Some(reason));
+    let (chat, request) = waiting_approval(&core, "r-ask").await;
     assert_eq!(routine(&core, "r-ask").next_run_at, None, "manual");
     let records = core.workspace.read_bot_records();
-    // A failed run is state on its routine, not a decision for Needs you.
-    assert_eq!(records.needs_you(&bot.id, |_| false), vec![]);
+    assert_eq!(
+        records.needs_you(&bot.id, |id| id == chat),
+        vec![p::NeedsYou::Asking {
+            chat_id: chat.clone(),
+            work_id: None,
+        }]
+    );
+    assert!(
+        posts(&core, &bot.chat_id).is_empty(),
+        "no result before approval"
+    );
+    answer_approval(&core, &chat, request, "Run once");
+    wait_for(
+        || last_outcome(&core, "r-ask") == Some(RunOutcome::Done),
+        "approved run finishes",
+    )
+    .await;
+    let reason = "Approved command ran.";
     wait_for(
         || {
             posts(&core, &bot.chat_id).iter().any(|(text, from)| {
@@ -389,13 +626,13 @@ async fn run_now_failures_and_the_pause_switch() {
                     && matches!(
                         from,
                         BotPost::Routine {
-                            outcome: RunOutcome::Failed,
+                            outcome: RunOutcome::Done,
                             ..
                         }
                     )
             })
         },
-        "the failure posted to the workspace chat",
+        "the result posted to the workspace chat",
     )
     .await;
 
@@ -519,9 +756,14 @@ async fn a_project_routine_runs_as_a_plain_session_in_its_own_worktree() {
     assert!(
         request
             .prompt
-            .starts_with("This is a run of the routine \"Nightly tests\""),
-        "the agent is told nobody watches: {}",
+            .starts_with("This is a background run of the routine \"Nightly tests\""),
+        "the agent is told this is a background routine: {}",
         request.prompt
+    );
+    assert!(
+        request
+            .prompt
+            .contains("pause this run until your owner answers in Needs you")
     );
     let shown = common::entries(&core, &manual)
         .into_iter()
@@ -649,7 +891,7 @@ async fn a_project_routine_runs_as_a_plain_session_in_its_own_worktree() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn project_routines_need_coordinate_and_run_unattended() {
+async fn project_routines_need_coordinate_and_wait_for_approval() {
     let Rig {
         core, dir: _dir, ..
     } = rig().await;
@@ -699,7 +941,7 @@ async fn project_routines_need_coordinate_and_run_unattended() {
         "the owner op refuses it too"
     );
 
-    // With it, a run that asks fails unattended in the project's checkout.
+    // With it, a run waits in the project's checkout, retaining permission control.
     let bot = create_bot(&core, true).await;
     def.bot_id = bot.id.clone();
     save_routine(&core, &def).await;
@@ -708,19 +950,7 @@ async fn project_routines_need_coordinate_and_run_unattended() {
         serde_json::json!({ "op": "runBotRoutine", "routineId": "r-clean" }),
     )
     .await;
-    wait_for(
-        || last_outcome(&core, "r-clean") == Some(RunOutcome::Failed),
-        "the asking run to fail",
-    )
-    .await;
-    let run = routine(&core, "r-clean").last_run.unwrap();
-    assert!(
-        run.summary
-            .as_deref()
-            .is_some_and(|s| s.starts_with("This run is unattended")),
-        "{run:?}"
-    );
-    let session = run.chat_id.unwrap();
+    let (session, request) = waiting_approval(&core, "r-clean").await;
     let web = core.workspace.space("sp-web").unwrap().unwrap();
     assert_eq!(
         core.workspace.chat(&session).unwrap().unwrap().cwd,
@@ -732,8 +962,28 @@ async fn project_routines_need_coordinate_and_run_unattended() {
         .flat_map(|e| e.parts)
         .collect();
     assert!(
-        !parts.iter().any(|p| matches!(p, MessagePart::Input { .. })),
-        "no approval card waits in the session: {parts:?}"
+        parts.iter().any(|p| matches!(
+            p,
+            MessagePart::Input {
+                resolved: false,
+                ..
+            }
+        )),
+        "an approval card waits in the session: {parts:?}"
+    );
+    answer_approval(&core, &session, request, "Deny");
+    wait_for(
+        || last_outcome(&core, "r-clean") == Some(RunOutcome::Done),
+        "denied run finishes safely",
+    )
+    .await;
+    assert_eq!(
+        routine(&core, "r-clean")
+            .last_run
+            .unwrap()
+            .summary
+            .as_deref(),
+        Some("Command denied; nothing ran.")
     );
 
     // Pausing the workspace skips its project routines too.

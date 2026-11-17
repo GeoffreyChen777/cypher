@@ -329,6 +329,16 @@ mod tests {
         assert_eq!(
             progress(
                 0,
+                24 * 3_600_000,
+                Some((C::Applied, None)),
+                Some(SessionStatus::AwaitingInput)
+            ),
+            Progress::Waiting,
+            "approval waits do not expire under the startup grace period"
+        );
+        assert_eq!(
+            progress(
+                0,
                 1_000,
                 Some((C::Applied, None)),
                 Some(SessionStatus::Idle)

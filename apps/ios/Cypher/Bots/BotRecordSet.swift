@@ -55,7 +55,7 @@ enum NeedsYouItem: Hashable, Identifiable, Sendable {
     /// An action awaiting approval (approval id).
     case approval(String)
     /// A session the workspace started is asking.
-    case asking(chatId: String, workId: String)
+    case asking(chatId: String, workId: String?)
     /// A plan awaiting approval (work id).
     case plan(String)
     /// A peer's answer drafted in Review mode (exchange id).
@@ -65,7 +65,7 @@ enum NeedsYouItem: Hashable, Identifiable, Sendable {
         switch self {
         case .chat(let id): "chat:\(id)"
         case .approval(let id): "approval:\(id)"
-        case .asking(let chatId, let workId): "asking:\(workId):\(chatId)"
+        case .asking(let chatId, let workId): "asking:\(workId ?? "routine"):\(chatId)"
         case .plan(let id): "plan:\(id)"
         case .review(let id): "review:\(id)"
         }
@@ -92,6 +92,15 @@ extension BotRecords {
         for item in mine {
             for session in item.sessionIds where asking(session) {
                 items.append(.asking(chatId: session, workId: item.id))
+            }
+        }
+        for routine in routines.filter({ $0.botId == botId })
+            .sorted(by: { ($0.lastRun?.at ?? 0) < ($1.lastRun?.at ?? 0) })
+        {
+            if let run = routine.lastRun, run.outcome == .running,
+                let session = run.chatId, asking(session)
+            {
+                items.append(.asking(chatId: session, workId: nil))
             }
         }
         items += mine.filter(\.awaitingApproval).map { .plan($0.id) }

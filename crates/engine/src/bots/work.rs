@@ -148,9 +148,9 @@ pub(super) fn work_prompt(
         return Some(format!(
             "This routine may run commands and edit files with bash, read, write, edit, grep, \
              find and ls, under your owner's permission rules, in these local checkouts:\n{}\n\
-             Nobody is watching: a command that would need approval fails the run, so stay \
-             inside these folders and the sandbox. Change files only when the routine asks you \
-             to.",
+             Stay inside these folders and the sandbox when possible. Commands that need \
+             approval pause the run until your owner answers in Needs you; never bypass \
+             approval. Change files only when the routine asks you to.",
             roots
                 .iter()
                 .map(|root| format!("- {root}"))

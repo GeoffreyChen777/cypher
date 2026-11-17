@@ -57,9 +57,9 @@ pub(super) fn system_prompt(
                  AI agents across their devices, and the projects those sessions belong to."
             ),
             String::new(),
-            "Nobody is watching this run:".to_string(),
-            "- You cannot ask questions or wait for an approval. Anything that would ask \
-             stops the run as failed. When something is unclear, make the reasonable choice \
+            "This run happens in the background:".to_string(),
+            "- Permission requests pause this run until your owner answers in Needs you. \
+             Never bypass approval. For nonessential ambiguities, make the reasonable choice \
              and say what you assumed."
                 .to_string(),
             "- Your final answer is delivered to your owner as a message. Make it stand on \
@@ -279,8 +279,8 @@ mod tests {
         assert!(!owner.contains("Nobody is watching"));
 
         let routine = prompt(BotOrigin::Routine, None);
-        assert!(routine.contains("Nobody is watching this run"));
-        assert!(routine.contains("cannot ask questions or wait for an approval"));
+        assert!(routine.contains("This run happens in the background"));
+        assert!(routine.contains("pause this run until your owner answers in Needs you"));
         assert!(routine.contains("delivered to your owner as a message"));
         assert!(routine.contains("Keep answers short."));
 

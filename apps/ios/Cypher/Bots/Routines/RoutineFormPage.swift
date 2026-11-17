@@ -228,7 +228,7 @@ struct RoutineFormPage: View {
                 Toggle(isOn: $draft.workDirectly) {
                     toggleLabel(
                         "May run commands",
-                        "In the workspace's projects on its device, e.g. to run tests. Anything that needs approval fails the run."
+                        "In the workspace's projects on its device, e.g. to run tests. Anything that needs approval waits for you in Needs you."
                     )
                 }
                 .accessibilityIdentifier("routine-form-commands")

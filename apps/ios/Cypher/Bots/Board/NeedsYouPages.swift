@@ -190,7 +190,7 @@ struct AskingPage: View {
     @Environment(\.openBotChat) private var openChat
     let botId: String
     let chatId: String
-    let workId: String
+    let workId: String?
     @State private var answerError: String?
     @State private var answered: Set<String> = []
 
@@ -207,7 +207,7 @@ struct AskingPage: View {
     private func page(_ chat: Chat, store: SessionStore?) -> some View {
         let asking = model.indicator(for: chat) == .awaitingInput
         let space = chat.spaceId.flatMap { id in model.spaces.first { $0.id == id } }
-        let work = model.data?.work(id: workId)
+        let work = workId.flatMap { model.data?.work(id: $0) }
         let request = store?.openInputRequest.flatMap { answered.contains($0.requestId) ? nil : $0 }
         return BotPageList(title: "Asking") {
             Section {

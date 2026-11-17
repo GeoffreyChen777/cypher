@@ -413,6 +413,10 @@ mod tests {
         }));
         let core =
             crate::EngineCore::assemble(dir.path(), registry.clone(), HarnessId::Pi, None).unwrap();
+        // This fixture records title runs only. At the nightly consolidation
+        // hour, newly created chats can also trigger a background memory run
+        // through the same harness and contaminate the model assertions.
+        core.memory.shutdown().await;
         let generator = TitleGenerator::new(core.workspace.clone(), registry, core.repos.clone())
             .with_settings(core.title_settings.clone());
         for (id, model) in [

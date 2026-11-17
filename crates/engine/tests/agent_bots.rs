@@ -332,6 +332,8 @@ async fn a_bot_chat_runs_locked_down() {
         common::reply(HarnessId::Pi, &request, "sess-bot", "On it.")
     });
     let core = common::engine_at(&tmp.path().join("data"), harness);
+    // Keep nightly memory runs out of this bot-only recording harness.
+    core.memory.shutdown().await;
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
     // A read-only bot: no capability beyond reading (tests/bot_work.rs
@@ -439,6 +441,7 @@ async fn a_bot_chat_refuses_commands_that_widen_its_tools() {
         common::reply(HarnessId::Pi, &request, "sess", "ok")
     });
     let core = common::engine_at(&tmp.path().join("data"), harness);
+    core.memory.shutdown().await;
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
     let cwd = core
@@ -525,7 +528,7 @@ fn status(core: &EngineCore, chat_id: &str) -> Option<SessionStatus> {
     core.sessions.session_status(chat_id).map(|s| s.status)
 }
 
-/// A routine thread runs unattended: the approval it asks for is denied on
+/// An orchestration thread runs unattended: the approval it asks for is denied on
 /// the spot, never parked as a card, and the run settles failed with the
 /// reason in its transcript and on the unattended-stop hook.
 #[tokio::test(flavor = "multi_thread")]
@@ -533,6 +536,7 @@ async fn an_unattended_run_that_asks_stops_failed() {
     let tmp = tempfile::tempdir().unwrap();
     let answers = Arc::new(Mutex::new(Vec::new()));
     let core = common::engine_at(&tmp.path().join("data"), asking_harness(answers.clone()));
+    core.memory.shutdown().await;
     let stops = Arc::new(Mutex::new(Vec::<UnattendedStop>::new()));
     let heard = stops.clone();
     core.sessions.add_unattended_listener(Arc::new(move |stop| {
@@ -540,11 +544,20 @@ async fn an_unattended_run_that_asks_stops_failed() {
     }));
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
-    let cwd = bot_thread(&core, &bot, "routine-1", BotOrigin::Routine);
+    let cwd = bot_thread(&core, &bot, "work-thread", BotOrigin::Owner);
+    let mut chat = core.workspace.chat("work-thread").unwrap().unwrap();
+    chat.bot = Some(BotChat::thread(
+        &bot.id,
+        BotOrigin::Owner,
+        cypher_proto::BotThread::Work {
+            work_id: "work-1".into(),
+        },
+    ));
+    core.workspace.import_chat_row(&chat).unwrap();
 
     core.sessions
         .dispatch(
-            "routine-1",
+            "work-thread",
             HarnessId::Pi,
             RunRequest {
                 cwd,
@@ -553,10 +566,10 @@ async fn an_unattended_run_that_asks_stops_failed() {
             None,
         )
         .await
-        .expect("the routine run starts");
+        .expect("the orchestration run starts");
     wait_for(
-        || status(&core, "routine-1") == Some(SessionStatus::Errored),
-        "the routine run to settle failed",
+        || status(&core, "work-thread") == Some(SessionStatus::Errored),
+        "the orchestration run to settle failed",
     )
     .await;
 
@@ -570,11 +583,11 @@ async fn an_unattended_run_that_asks_stops_failed() {
     assert_eq!(
         stops.lock().unwrap().clone(),
         vec![UnattendedStop {
-            chat_id: "routine-1".into(),
+            chat_id: "work-thread".into(),
             reason: expected.into(),
         }]
     );
-    let parts: Vec<MessagePart> = common::entries(&core, "routine-1")
+    let parts: Vec<MessagePart> = common::entries(&core, "work-thread")
         .into_iter()
         .filter(|e| e.role == MessageRole::Assistant)
         .flat_map(|e| e.parts)
@@ -596,7 +609,7 @@ async fn an_unattended_run_that_asks_stops_failed() {
         "the run stopped: {parts:?}"
     );
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert_eq!(status(&core, "routine-1"), Some(SessionStatus::Errored));
+    assert_eq!(status(&core, "work-thread"), Some(SessionStatus::Errored));
 }
 
 /// Attended threads are unchanged: the owner's thread parks the approval
@@ -606,6 +619,7 @@ async fn an_attended_bot_run_waits_for_its_approval() {
     let tmp = tempfile::tempdir().unwrap();
     let answers = Arc::new(Mutex::new(Vec::new()));
     let core = common::engine_at(&tmp.path().join("data"), asking_harness(answers.clone()));
+    core.memory.shutdown().await;
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
     let cwd = core
@@ -921,6 +935,7 @@ async fn owner_turns_learn_where_their_plans_stand() {
         common::reply(HarnessId::Pi, &request, "sess-bot", "On it.")
     });
     let core = common::engine_at(&tmp.path().join("data"), harness);
+    core.memory.shutdown().await;
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
     let now = cypher_proto::now_ms();
