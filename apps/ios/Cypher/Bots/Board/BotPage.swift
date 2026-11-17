@@ -15,7 +15,7 @@ enum BotPage: Hashable {
     /// An action awaiting approval (approval id).
     case approval(String)
     /// A session the workspace started, asking.
-    case asking(chatId: String, workId: String)
+    case asking(chatId: String, workId: String?)
     case routines
     case routine(String)
     /// New (nil) or edit a routine.

@@ -285,7 +285,7 @@ const TOOLS: ToolDef[] = [
     name: "save_routine",
     label: "Save routine",
     description:
-      "Create or change a routine: a job run by hand or on a schedule, unattended; its result is posted in this chat. It runs either as you, in its own session, reading everything you read (\"every morning, tell me what's stuck\"), or, with `project`, as an ordinary session in that project that can change its code (\"every night, run the tests and fix anything flaky\"; needs the Coordinate permission). Scheduled runs continue one session; each run by hand starts a fresh one. Pass `id` to change an existing routine (list_routines shows ids). The schedule is one of {\"kind\":\"daily\",\"time\":\"09:00\",\"days\":[1,2,3,4,5]} (days 1 = Monday … 7 = Sunday; leave out for every day), {\"kind\":\"interval\",\"minutes\":60} (at least 15), {\"kind\":\"once\",\"at\":\"2026-11-10T09:00\"} (one run: a reminder) or {\"kind\":\"manual\"} (only when run by hand), in the host device's local time. Returns what was saved and the next run.",
+      "Create or change a routine: a job run by hand or on a schedule, in the background; its result is posted in this chat. Questions and approvals pause the run until your owner answers in Needs you. It runs either as you, in its own session, reading everything you read (\"every morning, tell me what's stuck\"), or, with `project`, as an ordinary session in that project that can change its code (\"every night, run the tests and fix anything flaky\"; needs the Coordinate permission). Scheduled runs continue one session; each run by hand starts a fresh one. Pass `id` to change an existing routine (list_routines shows ids). The schedule is one of {\"kind\":\"daily\",\"time\":\"09:00\",\"days\":[1,2,3,4,5]} (days 1 = Monday … 7 = Sunday; leave out for every day), {\"kind\":\"interval\",\"minutes\":60} (at least 15), {\"kind\":\"once\",\"at\":\"2026-11-10T09:00\"} (one run: a reminder) or {\"kind\":\"manual\"} (only when run by hand), in the host device's local time. Returns what was saved and the next run.",
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: "The routine to change; leave out to create one" })),
       name: Type.String({ description: "A short name, e.g. Morning brief" }),
@@ -301,7 +301,7 @@ const TOOLS: ToolDef[] = [
         { description: "When it runs" },
       ),
       write_notes: Type.Optional(Type.Boolean({ description: "Runs as you only: whether its runs may write to your memory (/workspace; default off)" })),
-      work_directly: Type.Optional(Type.Boolean({ description: "Runs as you only: whether its runs may run commands and edit files in your local projects (default off; needs your own Work directly). Runs are unattended: anything that would ask for approval fails the run." })),
+      work_directly: Type.Optional(Type.Boolean({ description: "Runs as you only: whether its runs may run commands and edit files in your local projects (default off; needs your own Work directly). Anything that asks for approval pauses the run until your owner answers in Needs you." })),
       enabled: Type.Optional(Type.Boolean({ description: "Off keeps it but runs it only by hand (default on)" })),
       project: Type.Optional(Type.String({ description: "Run as a session in this project (id or name) instead of as you; \"\" moves it back to you; leave out to keep where it runs" })),
       worktree: Type.Optional(Type.Boolean({ description: "project only: run in its own worktree, kept across runs, instead of the project's checkout (default off)" })),

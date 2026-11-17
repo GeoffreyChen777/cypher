@@ -21,6 +21,23 @@ func jsonFixture(_ json: String) throws -> JSONValue {
 }
 
 final class BotModelTests: XCTestCase {
+    func testRoutineApprovalsAppearInNeedsYouOnlyWhileWaiting() throws {
+        var records = try decodeFixture(
+            BotRecords.self,
+            #"""
+            {"routines":[{"id":"r","botId":"b","name":"Cleanup","prompt":"Clean",
+             "createdAt":0,"updatedAt":0,
+             "lastRun":{"at":1,"outcome":"running","chatId":"routine-chat"}}]}
+            """#)
+        let expected = NeedsYouItem.asking(chatId: "routine-chat", workId: nil)
+        XCTAssertEqual(records.needsYou(botId: "b", chatId: nil, asking: { $0 == "routine-chat" }), [expected])
+        XCTAssertEqual(BotPage.settling(expected), .asking(chatId: "routine-chat", workId: nil))
+        XCTAssertTrue(records.needsYou(botId: "other", chatId: nil, asking: { _ in true }).isEmpty)
+        XCTAssertTrue(records.needsYou(botId: "b", chatId: nil, asking: { _ in false }).isEmpty)
+        records.routines[0].lastRun?.outcome = .failed
+        XCTAssertTrue(records.needsYou(botId: "b", chatId: nil, asking: { _ in true }).isEmpty)
+    }
+
     func testBotRowsDecodeFromTheRegistryAndFromCreateBot() throws {
         // registry.rs `upsert_bot`: createdAt is epoch ms.
         let row = try decodeFixture(

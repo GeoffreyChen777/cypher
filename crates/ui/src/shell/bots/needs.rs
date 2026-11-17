@@ -248,7 +248,7 @@ impl Shell {
             PanelItem::Plan(id) => self.render_work_item(id, theme, window, cx),
             PanelItem::Approval(id) => self.render_approval_panel(bot, id, theme, cx),
             PanelItem::Asking { chat_id, work_id } => {
-                self.render_asking_panel(bot, chat_id, work_id, theme, cx)
+                self.render_asking_panel(bot, chat_id, work_id.as_deref(), theme, cx)
             }
             PanelItem::Review(id) => self.render_question_panel(id, theme, cx),
             _ => None,
@@ -393,7 +393,7 @@ impl Shell {
         &mut self,
         bot: &Bot,
         chat_id: &str,
-        work_id: &str,
+        work_id: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
@@ -408,7 +408,7 @@ impl Shell {
                 .bot_records
                 .work
                 .iter()
-                .find(|w| w.id == work_id)
+                .find(|w| Some(w.id.as_str()) == work_id)
                 .map(|w| w.title.clone());
             (
                 transcript::single_line(chat.title.as_deref().unwrap_or("New session")),

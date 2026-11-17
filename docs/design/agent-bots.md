@@ -37,7 +37,7 @@ Goals:
 - **Work that runs on its own.** Large tasks run in their own threads, in parallel, while
   the bot stays available. They survive restarts and run with no UI open.
 - **Permissions by origin.** What a thread may do depends on who started it: the owner,
-  an unattended routine, or another user's bot. The engine enforces it on every call; the
+  a background routine, or another user's bot. The engine enforces it on every call; the
   model cannot widen it (§4).
 - **Bot-to-bot questions across users and organizations.** Connections are made by invite,
   either side can revoke them, and each connection has its own policy.
@@ -93,7 +93,7 @@ tree); coordination between sessions goes through the bot.
 | Thread origin | Tools | Approvals |
 |---|---|---|
 | **Owner** (bot chat, orchestration threads) | Read tools; coordination tools if *Coordinate* is on; Pi's own tools (shell, files) in local projects if *Work directly* is on | The owner's permission control and sandbox, exactly as in a session, plus the taint rule (§4.3) |
-| **Routine** | What the owner granted when creating the routine, never more than an owner thread | Never waits: anything that would ask for approval fails the run and notifies the owner |
+| **Routine** | What the owner granted when creating the routine, never more than an owner thread | Questions and approvals pause the run in Needs you until the owner answers |
 | **Peer** | Read tools only, scope ∩ connection scope | None needed: nothing it can call acts |
 
 The engine stamps a thread's origin when it creates the thread and stores it on the chat
@@ -411,8 +411,11 @@ routines apart is where they run and what they can reach:
   post in the bot chat is the reminder. A time already past is refused; a once routine that
   ran keeps its last result and has no next run. Reminders are not memory: memory is read
   only when a run starts.
-- **Unattended:** a routine run never waits for approval. Permission prompts
-  are denied automatically and the run settles as failed, with a notification.
+- **Background, with owner approval:** manual and scheduled runs both wait for questions
+  and permission prompts. The original session's input appears in **Needs you**, where
+  the owner can approve or deny it; there is no automatic approval or sandbox bypass.
+  The run remains `running` while its session is `awaitingInput`. Later scheduled slots
+  are skipped while it waits, just as while it is working.
 - **Limits:** the 15-minute minimum interval and the bot's `paused` flag as a kill switch
   for all of its routines. There is no per-day run cap.
 - **Missed runs:** a device that slept through a schedule runs the job once on wake and
@@ -466,7 +469,7 @@ while a run it started is going or a post waits, on session status changes. Per 
 this device marked `{botId, origin: "routine", thread: {kind: "routine", routineId}}`,
 titled with the routine's name, in the bot's folder, with the bot chat's config. The Run's
 prompt is a header and the routine's prompt: `Routine "<name>" · <Weekday Month D, YYYY,
-HH:MM>`, a blank line, then the prompt. The run is unattended (P1). When it settles, the
+HH:MM>`, a blank line, then the prompt. The run can wait for its owner's input. When it settles, the
 host writes `lastRun`, adds a `routineRan` activity entry, and **posts the output into the
 bot chat**: a complete assistant entry (id `routine-<routineId>-<run start ms>`, so it is
 posted once) with one `post` part, written straight into the doc. It starts no turn. If
@@ -487,11 +490,11 @@ the result's rows each draw their slice of the box (`transcript::rows::CardSlice
 **Project routine runs.** A project routine runs on the device of its project's space (a
 workspace routine on its bot's host). Its session is a chat in the space, marked `{botId,
 origin: "routine", thread: {kind: "routineSession", routineId}}`: the marker hides it from
-the sidebar, chimes and pushes and makes its runs unattended, but
+the sidebar, chimes and pushes, but its pending input appears in Needs you.
 `BotChat::is_bot_thread` is false for it, so `bot_env` gives it none of the bot's profile
 and it runs as a plain session with the routine's model, workspace-write sandbox and
 permission control. The visible prompt is the routine header and prompt; the agent's copy
-also says the run is unattended. With `worktree` set, the first run carries a
+also says questions and approvals wait for the owner. With `worktree` set, the first run carries a
 `WorktreeSpec` (the space's folder, its current branch as the base) so the host creates
 the worktree at drain time, and the scheduler records the session's new cwd as
 `worktreePath`; later runs, scheduled or by hand, work there (a missing worktree is made
@@ -499,9 +502,9 @@ again). Without it, runs work in the project's checkout. A due project routine i
 with a reason when its bot lost *Coordinate* or the project left its scope. Deleting a
 routine deletes its sessions, never the worktree.
 
-**Unattended runs.** `bots::profile::is_unattended(workspace, chat)` covers every chat
-with a routine origin (workspace routine threads and project routine sessions) and
-orchestration threads. The engine hands every unattended stop
+**Unattended runs.** `bots::profile::is_unattended(workspace, chat)` covers hidden
+orchestration threads, not routine threads or project routine sessions. Memory
+consolidation passes also use the unattended input bridge. The engine hands every unattended stop
 to its listeners (`SessionsEngine::add_unattended_listener`); the scheduler's records the
 reason and settles the run `failed` with it.
 
@@ -567,8 +570,8 @@ device. As built:
   spawn first clears the env of the profiles it is not. Scope and capabilities stay out of
   the profile, because they are checked per call (§4.4). The persisted
   `ChildAgentProfile` keeps its synced shape.
-- **Unattended runs (built in P1).** `bots::profile::is_unattended` (routine threads for
-  now) switches a run's input bridge: every question and approval is answered at once
+- **Unattended runs (built in P1).** `bots::profile::is_unattended` (orchestration
+  threads, not routines) switches a run's input bridge: every question and approval is answered at once
   with an empty answer, which ask_user reads as cancelled and the permission extension
   as "no approval was given", and none surfaces as a pending card. The first one a working
   turn asks stops the run: the transcript gets "This run is unattended, so it couldn't ask
@@ -579,8 +582,8 @@ device. As built:
   workspace roots and its permission level, answers the direct-tool gate, asks for
   approvals and writes the activity log (§4.3, §4.4). `bots/work/coordinate.rs` holds the
   coordination tools and `bots/work/host.rs` the work host, one loop per engine started
-  with the other host loops (§6.7). Orchestration threads run unattended like routine
-  threads; their worker sessions don't. `Bots::set_pi_runtime` hands the work track the
+  with the other host loops (§6.7). Orchestration threads run unattended;
+  routines and worker sessions don't. `Bots::set_pi_runtime` hands the work track the
   Pi runtime, whose permission settings and Landstrip status the gate reads (the status
   is cached for 10 minutes, since `doctor` spawns a process).
 - **Scheduler (built in P3).** One host loop (`bots/memory/host.rs`) runs the workspace
@@ -1114,7 +1117,7 @@ As built, beyond the table:
   Projects sidebar and never chime, banner or push; the panel's Thread view shows one
   read-only with a way back to its work item, routine or connection.
 - **A routine** can be granted *Work directly* ("May run commands"), only while the bot
-  has it; unattended, anything that needs approval fails the run.
+  has it; anything that needs approval waits for the owner in Needs you.
 - **Empty cards** for Routines and Connections show only their header with a quiet
   hint; the header opens the panel, whose own button adds the first routine, note or
   connection. No card carries a `+`.

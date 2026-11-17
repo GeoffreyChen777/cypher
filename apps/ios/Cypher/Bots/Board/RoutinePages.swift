@@ -332,8 +332,14 @@ struct RoutinePage: View {
     private func lastRunSection(_ routine: BotRoutine, now: Int64) -> some View {
         Section {
             if let run = routine.lastRun {
+                let asking =
+                    run.outcome == .running
+                    && run.chatId.flatMap { model.chat(id: $0) }
+                        .map { model.indicator(for: $0) == .awaitingInput } == true
                 BotFact(label: "Outcome") {
-                    if run.outcome == .running {
+                    if asking {
+                        BotStatusText("Needs you", tone: .waiting)
+                    } else if run.outcome == .running {
                         HStack(spacing: 6) {
                             MiniSpinner(cellSize: 2.0).foregroundStyle(Theme.statusWorking)
                             Text("Running").font(Theme.sans(15, weight: .medium, relativeTo: .body))
@@ -348,7 +354,7 @@ struct RoutinePage: View {
                 if let ended = run.endedAt {
                     BotFact(label: "Took", value: BotTime.span(ended - run.at))
                 } else if run.outcome == .running {
-                    BotFact(label: "Running for", value: BotTime.span(now - run.at))
+                    BotFact(label: asking ? "Elapsed" : "Running for", value: BotTime.span(now - run.at))
                 }
                 if let summary = run.summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
                     BotMarkdown(text: summary, cacheKey: "routine-\(routine.id)-summary")

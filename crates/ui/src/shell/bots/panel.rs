@@ -22,7 +22,7 @@ pub(in crate::shell) enum PanelItem {
     /// A session the bot started, asking (session chat id, work id).
     Asking {
         chat_id: String,
-        work_id: String,
+        work_id: Option<String>,
     },
     /// A peer answer drafted in Review mode (exchange id).
     Review(String),

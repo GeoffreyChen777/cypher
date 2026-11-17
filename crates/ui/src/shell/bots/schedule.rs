@@ -879,7 +879,7 @@ impl Shell {
             body = body.child(parts::fact(
                 theme,
                 "Last run",
-                self.last_run_value(routine.last_run.as_ref(), theme),
+                self.last_run_value(routine.last_run.as_ref(), theme, cx),
             ));
         }
         Some((head, body))
@@ -1000,14 +1000,26 @@ impl Shell {
 
     /// The last run: its outcome and time (and whether it was run by
     /// hand), and its summary. Its session opens from the actions.
-    fn last_run_value(&self, run: Option<&RunRecord>, theme: &Theme) -> AnyElement {
+    fn last_run_value(&self, run: Option<&RunRecord>, theme: &Theme, cx: &App) -> AnyElement {
         let Some(run) = run else {
             return div()
                 .text_color(theme.text_muted)
                 .child(SharedString::from("Not run yet"))
                 .into_any_element();
         };
+        let asking = run.outcome == RunOutcome::Running
+            && run.chat_id.as_deref().is_some_and(|id| {
+                let state = self.state.read(cx);
+                state
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == id)
+                    .is_some_and(|chat| {
+                        state.display_status_for(chat, Utc::now()) == ChatIndicator::AwaitingInput
+                    })
+            });
         let (word, glyph, color) = match run.outcome {
+            RunOutcome::Running if asking => ("Needs you", None, theme.warning),
             RunOutcome::Running => ("Running", None, theme.text),
             RunOutcome::Done => ("Done", Some(icons::CHECK), theme.success),
             RunOutcome::Failed => ("Failed", Some(icons::DANGER_TRIANGLE), theme.danger),
@@ -1015,7 +1027,11 @@ impl Shell {
         };
         let mark = match run.outcome {
             RunOutcome::Running => super::super::render::status_mark(
-                ChatIndicator::Working,
+                if asking {
+                    ChatIndicator::AwaitingInput
+                } else {
+                    ChatIndicator::Working
+                },
                 self.pulse_ticker.entity_id(),
                 theme,
             ),
@@ -1028,15 +1044,7 @@ impl Shell {
             .items_center()
             .gap(px(5.0))
             .children(mark)
-            .child(
-                div()
-                    .text_color(if run.outcome == RunOutcome::Failed {
-                        theme.danger
-                    } else {
-                        theme.text
-                    })
-                    .child(SharedString::from(word)),
-            )
+            .child(div().text_color(color).child(SharedString::from(word)))
             .child(
                 div()
                     .text_color(theme.text_muted)
@@ -1655,7 +1663,7 @@ impl Shell {
                                 "bot-form-direct",
                                 "May run commands",
                                 "In the workspace's projects on this device, e.g. to run tests. \
-                                 Anything that needs approval fails the run.",
+                                 Anything that needs approval waits for you in Needs you.",
                                 form.work_directly,
                                 false,
                                 theme,
