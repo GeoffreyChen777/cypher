@@ -186,6 +186,10 @@ struct LoginAttempt {
     cancel: CancellationToken,
 }
 
+/// Subscription providers whose sign-in runs in the provider service
+/// (`OAUTH_PROVIDERS` in `pi-runtime/provider-service.mjs`).
+const SIGN_IN_PROVIDERS: &[&str] = &["openai-codex", "devin"];
+
 /// One subscription sign-in per runtime. Credentials stay on this device.
 #[derive(Default)]
 pub struct Logins(Arc<Mutex<Option<LoginAttempt>>>);
@@ -216,8 +220,8 @@ impl Logins {
     }
 
     pub fn begin(&self, paths: &PiRuntimePaths, provider_id: &str) -> Result<LoginStatus, String> {
-        if provider_id != "openai-codex" {
-            return Err("Sign in is only available for ChatGPT.".into());
+        if !SIGN_IN_PROVIDERS.contains(&provider_id) {
+            return Err("Sign in is only available for ChatGPT and Devin.".into());
         }
         if !paths.installed() {
             return Err(

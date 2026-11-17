@@ -138,8 +138,8 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
               const names = new Set(responses.get("commands").commands.map(command => command.name));
               // `mcp` is Pi's built-in MCP, which Settings → MCP drives; `fast`
               // and `scripts` are Cypher's extensions, which the composer's /
-              // menu drives.
-              for (const name of ["provider", "login", "logout", "newapi-provider-add", "mcp", "fast", "scripts"]) {
+              // menu drives; `devin` proves the bundled Devin provider loaded.
+              for (const name of ["provider", "login", "logout", "newapi-provider-add", "mcp", "fast", "scripts", "devin"]) {
                 assert.ok(names.has(name), `Required command missing: ${name}`);
               }
               finish();

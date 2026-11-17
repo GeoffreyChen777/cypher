@@ -290,6 +290,7 @@ impl ProvidersPage {
         let (mark, tint) = match provider.id.as_str() {
             "anthropic" | "claude-code" => (icons::CLAUDE_MARK, Some(icons::claude_brand())),
             "openai-codex" => (icons::OPENAI_MARK, None),
+            "devin" => (icons::BOT_CHIP, None),
             _ => (icons::GLOBAL, Some(theme.accent)),
         };
         div()
@@ -466,6 +467,8 @@ fn provider_details(
                         theme,
                         if claude_cli {
                             "Claude Code CLI"
+                        } else if provider.id == "devin" {
+                            "Devin account (unofficial)"
                         } else if oauth {
                             "ChatGPT subscription"
                         } else {

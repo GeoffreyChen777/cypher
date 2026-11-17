@@ -776,6 +776,7 @@ fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String
         let packages = description
             .plugins
             .keys()
+            .filter(|name| !crate::pi::packages::enabled_on_sign_in(name))
             .map(|name| {
                 let source = paths
                     .current
@@ -903,6 +904,9 @@ fn reconcile_bundled_packages(paths: &PiRuntimePaths, runtime: &Path) -> Result<
     let mut changed = false;
     let mut offered_changed = false;
     for name in bundled.plugins.keys() {
+        if crate::pi::packages::enabled_on_sign_in(name) {
+            continue;
+        }
         if !offered.insert(name.clone()) {
             continue;
         }
@@ -1387,6 +1391,29 @@ mod tests {
         let listed = packages(&paths);
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[1].as_str(), Some(squad.to_str().unwrap()));
+
+        // Devin's package waits for a Devin sign-in instead.
+        let devin = paths.current.join("npm/node_modules/@buyong/pi-devin");
+        std::fs::create_dir_all(&devin).unwrap();
+        std::fs::write(devin.join("package.json"), r#"{"name":"@buyong/pi-devin"}"#).unwrap();
+        std::fs::write(
+            paths.current.join("runtime.json"),
+            serde_json::to_vec(&InstalledRuntime {
+                version: "4".into(),
+                pi_version: "0.85.2".into(),
+                plugins: BTreeMap::from([
+                    ("pi-web-search".into(), "1.4.0".into()),
+                    ("pi-claude-bridge".into(), "0.7.0".into()),
+                    ("pi-agent-squad".into(), "0.8.5".into()),
+                    ("@buyong/pi-devin".into(), "0.1.16".into()),
+                ]),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        reconcile_bundled_packages(&paths, &paths.current).unwrap();
+        assert_eq!(packages(&paths).len(), 2);
+        assert!(!read_offered_packages(&paths).contains("@buyong/pi-devin"));
     }
 
     #[test]

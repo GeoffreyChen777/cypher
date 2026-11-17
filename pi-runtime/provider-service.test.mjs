@@ -7,7 +7,8 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { normalizeUrl, validateId, serializeModelRefreshes } from "./provider-service.mjs";
-import { isOauthProvider, pickOauthSelect } from "./provider-service.mjs";
+import { isOauthProvider, pickOauthSelect, isExtensionProvider, extensionEntries, loginError }
+  from "./provider-service.mjs";
 
 test("SDK background refreshes and explicit refreshes are serialized, including failures", async () => {
   let release;
@@ -59,6 +60,25 @@ test("subscription providers are reserved and pick a headless OAuth method", () 
     { id: "device_code", label: "Device code login (headless)" },
   ]), "device_code");
   assert.equal(pickOauthSelect([{ id: "browser" }]), "browser");
+  // Devin's choices: the loopback browser callback cannot reach a remote host.
+  assert.equal(pickOauthSelect([{ id: "browser" }, { id: "manual" }]), "manual");
+});
+
+test("Devin is a subscription provider loaded from its bundled extension", () => {
+  assert.equal(isOauthProvider("devin"), true);
+  assert.equal(isExtensionProvider("devin"), true);
+  assert.equal(isExtensionProvider("openai-codex"), false);
+  assert.deepEqual(extensionEntries("/rt/pkg/", { pi: { extensions: ["./index.ts"] } }), ["/rt/pkg/index.ts"]);
+  assert.deepEqual(extensionEntries("/rt/pkg/", { pi: {} }), []);
+  assert.deepEqual(extensionEntries("/rt/pkg/", { pi: { extensions: [1] } }), []);
+});
+
+test("sign-in errors: extension messages pass through, others stay generic", () => {
+  const typed = "Enter a valid authorization code. API keys and session tokens are not accepted.";
+  assert.equal(loginError("devin", new Error(typed)), typed);
+  assert.equal(loginError("devin", new Error("line one\nAuthorization: Bearer x")), "Sign-in failed. Start again.");
+  assert.equal(loginError("devin", new Error("x".repeat(301))), "Sign-in failed. Start again.");
+  assert.equal(loginError("openai-codex", new Error("token=secret")), "Sign-in failed. Start again.");
 });
 
 test("isolated Runtime provider lifecycle and credential redaction", {

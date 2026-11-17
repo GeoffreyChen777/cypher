@@ -8,6 +8,7 @@
     "test:staged": "node --test patches/pi-agent-squad-prompt-options.staged.test.mjs patches/pi-agent-squad-permission-tool.staged.test.mjs patches/pi-agent-squad-model-options.staged.test.mjs patches/response-model.staged.test.mjs patches/context-files.staged.test.mjs patches/session-cleanup.staged.test.mjs patches/web-search.staged.test.mjs mcp-login.staged.test.mjs extensions/cypher-permissions.staged.test.mjs extensions/cypher-file-references.staged.test.mjs"
   },
   "dependencies": {
+    "@buyong/pi-devin": "0.1.16",
     "@earendil-works/pi-ai": "1.5.2",
     "@earendil-works/pi-coding-agent": "1.5.2",
     "@earendil-works/pi-tui": "1.5.2",

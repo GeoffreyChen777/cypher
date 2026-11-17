@@ -85,6 +85,22 @@ on the selected Runtime host, stores tokens in that host's `auth.json`, and
 uses a paste-callback / device-code handoff so remote devices work. Cypher
 does not open a Runtime-local browser callback for those hosts.
 
+**Devin** (`devin`) comes from the bundled, unofficial **@buyong/pi-devin**
+package, which signs in to a Devin account with OAuth and uses Devin's private
+CLI APIs (Cognition may change them, and the account's terms apply). The
+provider service loads that package through Pi's extension loader to reach its
+provider (commands, tools and event handlers never run there), so Devin is
+offered only by Runtimes that bundle it. Sign-in uses the package's manual
+authorization-code flow: open the page, sign in, and paste the one-time code
+shown there, which works for remote hosts too. After sign-in and on Refresh the
+service fetches the account's model catalog into `models-store.json`, where Pi
+sessions restore it. Unlike the other bundled packages, it is not enabled at
+activation: it adds Effect and protobuf to every Pi process's startup and its
+own commands, so the first successful Devin sign-in enables it in
+`settings.json` (Settings → Agents can turn it off again). `/devin` (quota
+and display settings) and `/devin-fusion` (lead/sidekick pair) are the
+package's own commands.
+
 **Claude** in Settings → Providers is the Claude Code CLI, via the bundled
 **pi-claude-bridge** plugin (pinned from GitHub, not npm). Cypher does not ship
 `claude` and no longer uses Pi's built-in Anthropic OAuth. If the host has
