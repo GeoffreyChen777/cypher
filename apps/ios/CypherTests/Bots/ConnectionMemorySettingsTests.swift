@@ -142,7 +142,10 @@ final class MemoryFormatTests: XCTestCase {
             MemoryFormat.untrustedLabel("was started by a session that searched the web"),
             "after outside content"
         )
-        let json = #"{"id":"c","at":1,"author":{"kind":"owner"},"path":"/a.md","action":{"kind":"create"},"untrusted":"searched the web"}"#
+        let json = """
+            {"id": "c", "at": 1, "author": {"kind": "owner"}, "path": "/a.md",
+             "action": {"kind": "create"}, "untrusted": "searched the web"}
+            """
         let change = try? JSONDecoder().decode(MemoryChange.self, from: Data(json.utf8))
         XCTAssertEqual(change?.untrusted, "searched the web")
     }
