@@ -3,7 +3,9 @@
 //!
 //! - two short chimes embedded in the binary (`assets/sounds/*.wav`, synthesized
 //!   in-repo — no external assets): **done** (run finished) and **request**
-//!   (agent is asking a question);
+//!   (agent is asking a question). Done uses the selected descending Soft pair;
+//!   Request uses the adjusted ascending pair. Regenerate with
+//!   `scripts/generate-notification-sounds.py`;
 //! - playback = write to a temp file, hand it to the system player on a
 //!   background thread: `afplay` (macOS), PowerShell `Media.SoundPlayer`
 //!   (Windows), first of `paplay`/`pw-play`/`aplay`/`ffplay`/`mpv` (Linux —
@@ -147,11 +149,41 @@ fn run_checked(program: &str, args: &[&str], path: &Path) -> Result<(), String> 
 // Transition mapping (pure — herdr's notification_sound_for_state_change)
 // ---------------------------------------------------------------------------
 
-use cypher_proto::SessionStatus;
+use cypher_proto::{Chat, SessionStatus};
+
+/// One baseline per user-facing conversation. Internal sessions must neither
+/// notify on their own nor leave an edge to replay when chat metadata arrives
+/// late (or a chat becomes visible again).
+#[derive(Default)]
+pub struct SessionChimes {
+    previous: std::collections::HashMap<String, SessionStatus>,
+}
+
+impl SessionChimes {
+    pub fn observe(
+        &mut self,
+        chat_id: &str,
+        chat: Option<&Chat>,
+        status: SessionStatus,
+    ) -> Option<Sound> {
+        let user_facing = chat.is_some_and(|chat| {
+            !chat.archived
+                && !chat.is_child()
+                && !chat.is_memory_pass()
+                && chat.bot.as_ref().is_none_or(|bot| bot.is_owner_chat())
+        });
+        if !user_facing {
+            self.previous.remove(chat_id);
+            return None;
+        }
+        let prev = self.previous.insert(chat_id.to_owned(), status)?;
+        sound_for_transition(prev, status)
+    }
+}
 
 /// Which chime (if any) a session-status transition deserves. Same-state
-/// updates never chime; a question always chimes; a completion chimes on the
-/// Working→Idle edge.
+/// updates never chime; a question chimes; a completion chimes on the
+/// Working→Idle edge. Call through [`SessionChimes`] to exclude internal chats.
 pub fn sound_for_transition(prev: SessionStatus, new: SessionStatus) -> Option<Sound> {
     if prev == new {
         return None;
@@ -166,6 +198,163 @@ pub fn sound_for_transition(prev: SessionStatus, new: SessionStatus) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cypher_proto::{BotChat, BotOrigin, BotThread};
+
+    fn chat() -> Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": "chat",
+            "deviceId": "device",
+            "archived": false,
+            "createdAt": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    fn child_chat() -> Chat {
+        let mut chat = chat();
+        chat.id = "child".into();
+        chat.child = Some(
+            serde_json::from_value(serde_json::json!({
+                "parentChatId": "chat",
+                "parentRunId": "run",
+                "agent": "worker",
+                "task": "background work",
+                "mode": "async",
+                "profile": { "systemPrompt": "" }
+            }))
+            .unwrap(),
+        );
+        chat
+    }
+
+    fn assert_silent(chat: &Chat) {
+        use SessionStatus::*;
+        let mut chimes = SessionChimes::default();
+        for status in [Working, AwaitingInput, Working, Idle, Errored] {
+            assert_eq!(chimes.observe(&chat.id, Some(chat), status), None);
+        }
+    }
+
+    #[test]
+    fn normal_sessions_and_workspace_owner_chats_still_notify_once() {
+        use SessionStatus::*;
+        let regular = chat();
+        let mut workspace = chat();
+        workspace.bot = Some(BotChat::owner("bot"));
+        for chat in [regular, workspace] {
+            let mut chimes = SessionChimes::default();
+            for (status, expected) in [
+                (Idle, None),
+                (Working, None),
+                (AwaitingInput, Some(Sound::Request)),
+                (AwaitingInput, None),
+                (Working, None),
+                (Idle, Some(Sound::Done)),
+                (Idle, None),
+            ] {
+                assert_eq!(chimes.observe(&chat.id, Some(&chat), status), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn children_memory_passes_and_archived_chats_never_notify() {
+        assert_silent(&child_chat());
+        let mut memory = chat();
+        memory.memory = Some(cypher_proto::MemoryChat {
+            store_id: "store".into(),
+            scope: cypher_proto::MemoryScope::You,
+            pass_id: "pass".into(),
+        });
+        assert_silent(&memory);
+        let mut archived = chat();
+        archived.archived = true;
+        assert_silent(&archived);
+    }
+
+    #[test]
+    fn all_internal_bot_threads_and_non_owner_origins_stay_silent() {
+        for origin in [BotOrigin::Owner, BotOrigin::Routine, BotOrigin::Peer] {
+            for thread in [
+                BotThread::Main,
+                BotThread::Work {
+                    work_id: "work".into(),
+                },
+                BotThread::Routine {
+                    routine_id: "routine".into(),
+                },
+                BotThread::RoutineSession {
+                    routine_id: "project-routine".into(),
+                },
+                BotThread::Peer {
+                    connection_id: "connection".into(),
+                },
+                BotThread::Unknown,
+            ] {
+                let marker = BotChat::thread("bot", origin, thread);
+                if marker.is_owner_chat() {
+                    continue;
+                }
+                let mut chat = chat();
+                chat.bot = Some(marker);
+                assert_silent(&chat);
+            }
+        }
+    }
+
+    #[test]
+    fn missing_metadata_never_rings_or_seeds_a_late_completion() {
+        use SessionStatus::*;
+        let chat = chat();
+        let mut chimes = SessionChimes::default();
+        for status in [Working, AwaitingInput, Working, Idle, Working] {
+            assert_eq!(chimes.observe(&chat.id, None, status), None);
+        }
+        assert_eq!(chimes.observe(&chat.id, Some(&chat), Idle), None);
+        assert_eq!(chimes.observe(&chat.id, Some(&chat), Working), None);
+        assert_eq!(
+            chimes.observe(&chat.id, Some(&chat), Idle),
+            Some(Sound::Done)
+        );
+        // Losing metadata also clears an existing baseline.
+        assert_eq!(chimes.observe(&chat.id, Some(&chat), Working), None);
+        assert_eq!(chimes.observe(&chat.id, None, Working), None);
+        assert_eq!(chimes.observe(&chat.id, Some(&chat), Idle), None);
+    }
+
+    #[test]
+    fn unarchiving_does_not_replay_a_suppressed_completion() {
+        use SessionStatus::*;
+        let mut chat = chat();
+        let mut chimes = SessionChimes::default();
+        assert_eq!(chimes.observe(&chat.id, Some(&chat), Working), None);
+        chat.archived = true;
+        assert_eq!(chimes.observe(&chat.id, Some(&chat), Working), None);
+        chat.archived = false;
+        assert_eq!(chimes.observe(&chat.id, Some(&chat), Idle), None);
+    }
+
+    #[test]
+    fn child_input_notifies_only_when_forwarded_to_the_parent() {
+        use SessionStatus::*;
+        let parent = chat();
+        let child = child_chat();
+        let mut chimes = SessionChimes::default();
+        assert_eq!(chimes.observe(&parent.id, Some(&parent), Working), None);
+        assert_eq!(chimes.observe(&child.id, Some(&child), Working), None);
+        assert_eq!(chimes.observe(&child.id, Some(&child), AwaitingInput), None);
+        assert_eq!(
+            chimes.observe(&parent.id, Some(&parent), AwaitingInput),
+            Some(Sound::Request)
+        );
+        assert_eq!(chimes.observe(&child.id, Some(&child), Working), None);
+        assert_eq!(chimes.observe(&child.id, Some(&child), Idle), None);
+        assert_eq!(chimes.observe(&parent.id, Some(&parent), Working), None);
+        assert_eq!(
+            chimes.observe(&parent.id, Some(&parent), Idle),
+            Some(Sound::Done)
+        );
+    }
 
     #[test]
     fn transition_mapping_matches_herdr_semantics() {
