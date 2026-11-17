@@ -1319,9 +1319,8 @@ struct CommentUi {
 /// the Dock badge, and the desktop activity the engine is told about.
 #[derive(Default)]
 struct Attention {
-    /// Last seen session status per chat — the chime trigger compares against
-    /// it (a row's FIRST appearance never chimes, so boot stays silent).
-    sound_prev: std::collections::HashMap<String, cypher_proto::SessionStatus>,
+    /// User-facing session baselines; internal/unknown chats stay silent.
+    session_chimes: crate::kit::sound::SessionChimes,
     /// The count last written to the Dock badge (`None` = never written), so
     /// frequent state notifies only touch AppKit when the number changes.
     dock_badge: Option<usize>,

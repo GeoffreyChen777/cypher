@@ -137,8 +137,10 @@ impl Shell {
 
     /// Session chimes (herdr semantics, `sound::sound_for_transition`): a
     /// question rings whenever a session flips to AwaitingInput, a
-    /// completion rings on the Working→Idle edge — for ANY session on any
-    /// device. A row's first appearance only seeds the baseline, so boot
+    /// completion rings on the Working→Idle edge — for user-facing sessions
+    /// on any device. Child agents, memory passes, archived chats and hidden
+    /// bot threads stay silent. Unknown chat rows do not seed a baseline.
+    /// A known chat's first appearance only seeds the baseline, so boot
     /// (restored rows) and fresh sends stay silent. Desktop banners
     /// (`notify::post`) ride the SAME edges and gates behind their own
     /// settings flag — one detector, two outputs, so the banner can never
@@ -163,7 +165,7 @@ impl Shell {
         let now = Utc::now();
         type Ping = (
             String,
-            cypher_proto::SessionStatus,
+            Option<crate::kit::sound::Sound>,
             bool,
             Option<String>,
             bool,
@@ -185,15 +187,15 @@ impl Shell {
                     let send_pending = state.send_pending(&s.chat_id, now);
                     let chat = state.chats.iter().find(|c| c.id == s.chat_id);
                     let title = chat.and_then(|c| c.title.clone());
-                    // Rows without a chat yet belong to the main window. A
-                    // bot's hidden threads never ring: their results reach
-                    // the owner through the bot chat and the Botboard.
-                    let hidden = chat
-                        .and_then(|c| c.bot.as_ref())
-                        .is_some_and(|marker| !marker.is_main());
-                    let in_scope =
-                        !hidden && chat.map_or(scope.only.is_none(), |c| scope.chat_visible(c));
-                    (s.chat_id.clone(), status, send_pending, title, in_scope)
+                    // Classify before tracking transitions. In particular, a
+                    // session frame arriving before its chat metadata must
+                    // not make an internal run sound like a normal session.
+                    let sound = self
+                        .attention
+                        .session_chimes
+                        .observe(&s.chat_id, chat, status);
+                    let in_scope = chat.is_some_and(|c| scope.chat_visible(c));
+                    (s.chat_id.clone(), sound, send_pending, title, in_scope)
                 })
                 .collect()
         };
@@ -203,14 +205,13 @@ impl Shell {
         // focused app still stays a chime — you're already looking at
         // Cypher; the sidebar dot carries the rest.
         let app_focused = cx.active_window().is_some();
-        for (chat_id, status, send_pending, title, in_scope) in sessions {
-            let prev = self.attention.sound_prev.insert(chat_id, status);
+        for (chat_id, sound, send_pending, title, in_scope) in sessions {
             if in_scope
-                && let Some(prev) = prev
-                && let Some(sound) = crate::kit::sound::sound_for_transition(prev, status)
+                && let Some(sound) = sound
                 && !(send_pending && sound == crate::kit::sound::Sound::Done)
             {
                 if sound_enabled {
+                    tracing::debug!(%chat_id, ?sound, "session notification sound requested");
                     crate::kit::sound::play(sound);
                 }
                 if notifications_enabled && !(background_only && app_focused) {
