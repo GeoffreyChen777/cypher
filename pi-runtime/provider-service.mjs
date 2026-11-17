@@ -34,8 +34,12 @@ export function validateId(id) {
   return id;
 }
 
+// `extension` names the bundled Pi package that registers the provider; the
+// helper loads it into its own model runtime. Without that package (an older
+// Runtime) the provider is not offered.
 export const OAUTH_PROVIDERS = Object.freeze([
   { id: "openai-codex", title: "ChatGPT", baseUrl: "https://chatgpt.com" },
+  { id: "devin", title: "Devin", baseUrl: "https://app.devin.ai", extension: "@buyong/pi-devin" },
 ]);
 
 export function isOauthProvider(id) {
@@ -53,6 +57,70 @@ export function pickOauthSelect(options) {
   return options.find((option) => option.id === "device_code")?.id
     || options.find((option) => option.id !== "browser")?.id
     || options[0].id;
+}
+
+/** The entry files a Pi package declares in `package.json` → `pi.extensions`. */
+export function extensionEntries(packageRoot, manifest) {
+  const entries = manifest?.pi?.extensions;
+  if (!Array.isArray(entries) || entries.some((entry) => typeof entry !== "string")) return [];
+  return entries.map((entry) => join(packageRoot, entry));
+}
+
+/**
+ * Register the providers that bundled extensions own (see OAUTH_PROVIDERS)
+ * through Pi's own extension loader, as a Pi session would. Only the provider
+ * is used: commands, tools and event handlers never run here. A missing or
+ * broken package leaves its provider unregistered, so it is not offered.
+ */
+async function registerExtensionProviders(runtime, pkg, require, agent) {
+  const specs = OAUTH_PROVIDERS.filter((spec) => spec.extension);
+  if (!specs.length) return;
+  let loader;
+  try { loader = await import(pathToFileURL(join(pkg, "dist/core/extensions/loader.js"))); }
+  catch { return; }
+  for (const spec of specs) {
+    try {
+      const manifestPath = require.resolve(`${spec.extension}/package.json`);
+      const root = manifestPath.replace(/package\.json$/, "");
+      const entries = extensionEntries(root, JSON.parse(await readFile(manifestPath, "utf8")));
+      if (!entries.length) continue;
+      const loaded = await loader.loadExtensions(entries, agent);
+      for (const { provider } of loaded.runtime.pendingNativeProviderRegistrations ?? [])
+        if (provider?.id === spec.id && !runtime.getProvider(spec.id)) runtime.registerNativeProvider(provider);
+    } catch {}
+  }
+}
+
+export function isExtensionProvider(id) {
+  return OAUTH_PROVIDERS.some((provider) => provider.id === id && provider.extension);
+}
+
+async function openRuntime(agent, pkg) {
+  const require = createRequire(join(await realpath(pkg), "package.json"));
+  const { ModelRuntime } = await import(pathToFileURL(join(pkg, "dist/core/model-runtime.js")));
+  const { AuthStorage } = await import(pathToFileURL(join(pkg, "dist/core/auth-storage.js")));
+  const auth = AuthStorage.create(join(agent, "auth.json"));
+  const runtime = serializeModelRefreshes(await ModelRuntime.create({
+    credentials: auth, modelsPath: join(agent, "models.json"),
+    modelsStorePath: join(agent, "models-store.json"), refreshOnCreate: false,
+  }));
+  await registerExtensionProviders(runtime, pkg, require, agent);
+  return { require, runtime, auth };
+}
+
+/**
+ * Fetch an extension provider's catalog now, so Pi sessions restore it from
+ * models-store.json instead of starting without models. Built-in providers
+ * ship static catalogs. A failure keeps the stored catalog.
+ */
+async function refreshExtensionCatalog(runtime, id) {
+  if (!isExtensionProvider(id)) return undefined;
+  try {
+    const result = await runtime.refresh({
+      allowNetwork: true, force: true, providers: [id], signal: AbortSignal.timeout(30000),
+    });
+    return result?.errors?.get?.(id);
+  } catch (error) { return error; }
 }
 
 async function jsonFile(path, fallback) {
@@ -122,19 +190,12 @@ export async function providerRequest(request) {
   if (!agent || !pkg || !isAbsolute(agent) || !isAbsolute(pkg))
     throw new ProviderError("Cypher's isolated Pi Runtime is not configured.");
   await mkdir(join(agent, "extension-settings"), { recursive: true });
-  const require = createRequire(join(await realpath(pkg), "package.json"));
+  const { require, runtime, auth } = await openRuntime(agent, pkg);
   const { createJiti } = require("jiti");
   const jiti = createJiti(join(pkg, "package.json"), { fsCache: false });
   const pluginRoot = require.resolve("pi-provider-newapi/package.json").replace(/package\.json$/, "");
   const { buildProviderModels, parseModelsResponse } = await jiti.import(join(pluginRoot, "src/models.ts"));
   const { deserializeConfig } = await jiti.import(join(pluginRoot, "src/config.ts"));
-  const { ModelRuntime } = await import(pathToFileURL(join(pkg, "dist/core/model-runtime.js")));
-  const { AuthStorage } = await import(pathToFileURL(join(pkg, "dist/core/auth-storage.js")));
-  const auth = AuthStorage.create(join(agent, "auth.json"));
-  const runtime = serializeModelRefreshes(await ModelRuntime.create({
-    credentials: auth, modelsPath: join(agent, "models.json"),
-    modelsStorePath: join(agent, "models-store.json"), refreshOnCreate: false,
-  }));
   const configPath = join(agent, "extension-settings/provider-newapi.json");
   const statusPath = join(agent, "cypher-provider-status.json");
   const config = await jsonFile(configPath, { version: 1, providers: {}, settings: {} });
@@ -161,6 +222,8 @@ export async function providerRequest(request) {
   if (action !== "list") {
     const id = validateId(request.id);
     const existing = Object.hasOwn(config.providers, id) ? config.providers[id] : undefined;
+    if (isOauthProvider(id) && !runtime.getProvider(id))
+      throw new ProviderError("This provider is not available in the installed Pi Runtime. Update it in Settings → Agents.");
     if (action === "save") {
       if (isReservedProvider(id))
         throw new ProviderError("That name is reserved.");
@@ -204,6 +267,8 @@ export async function providerRequest(request) {
           const credential = await auth.read(id);
           try {
             const check = await runtime.checkAuth(id);
+            const catalogError = credential && check ? await refreshExtensionCatalog(runtime, id) : undefined;
+            if (catalogError) throw catalogError;
             statuses[id] = {
               state: credential && check ? "connected" : credential ? "unverified" : "signed_out",
               checkedAt: Date.now(),
@@ -254,6 +319,7 @@ export async function providerRequest(request) {
   const oauth = [];
   const gateways = [];
   for (const spec of OAUTH_PROVIDERS) {
+    if (!runtime.getProvider(spec.id)) continue;
     const credential = await auth.read(spec.id);
     const saved = statuses[spec.id];
     const status = saved?.fingerprint === fingerprint({ baseUrl: spec.id }, credential) ? saved : undefined;
@@ -287,6 +353,19 @@ export async function providerRequest(request) {
   }
   gateways.sort((a, b) => a.id.localeCompare(b.id));
   return { providers: oauth.concat(gateways) };
+}
+
+/**
+ * Extension providers word their sign-in failures for users (a mistyped code,
+ * a denied login) and redact the code and verifier themselves; pass a short
+ * single-line message through. Built-in flows keep the generic message.
+ */
+export function loginError(id, error) {
+  if (error instanceof ProviderError) return error.message;
+  const message = typeof error?.message === "string" ? error.message.trim() : "";
+  if (isExtensionProvider(id) && message && message.length <= 300 && !/[\r\n]/.test(message))
+    return message;
+  return "Sign-in failed. Start again.";
 }
 
 async function runOauthLogin(id, remaining) {
@@ -337,17 +416,19 @@ async function runOauthLogin(id, remaining) {
   try {
     const agent = process.env.PI_CODING_AGENT_DIR;
     const pkg = process.env.PI_PACKAGE_DIR;
-    const { ModelRuntime } = await import(pathToFileURL(join(pkg, "dist/core/model-runtime.js")));
-    const { AuthStorage } = await import(pathToFileURL(join(pkg, "dist/core/auth-storage.js")));
-    const auth = AuthStorage.create(join(agent, "auth.json"));
-    const runtime = serializeModelRefreshes(await ModelRuntime.create({
-      credentials: auth, modelsPath: join(agent, "models.json"),
-      modelsStorePath: join(agent, "models-store.json"), refreshOnCreate: false,
-    }));
+    const { runtime } = await openRuntime(agent, pkg);
+    if (!runtime.getProvider(id))
+      throw new ProviderError("This provider is not available in the installed Pi Runtime. Update it in Settings → Agents.");
     await runtime.login(id, "oauth", interaction);
+    send({ type: "event", event: { type: "progress", message: "Loading models…" } });
+    await refreshExtensionCatalog(runtime, id);
+    await runtime.settleCredentialWrites?.();
     send({ type: "done", data: await providerRequest({ action: "list" }) });
   } catch (error) {
-    send({ type: "error", error: ac.signal.aborted ? "Sign-in cancelled." : safeError(error) });
+    send({
+      type: "error",
+      error: ac.signal.aborted ? "Sign-in cancelled." : loginError(id, error),
+    });
     process.exitCode = 1;
   } finally {
     ac.abort();

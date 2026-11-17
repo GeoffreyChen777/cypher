@@ -110,6 +110,10 @@ const RECOMMENDED: &[(&str, &str)] = &[
         "npm:pi-web-search-claude-bridge",
         "Route web search through a fallback model while a Claude Code model is selected.",
     ),
+    (
+        "npm:@buyong/pi-devin",
+        "Use a Devin account as a Pi provider (unofficial). Sign in under Providers.",
+    ),
     ("npm:pi-agent-squad", "Coordinate multiple Pi agents."),
     ("npm:pi-provider-newapi", "Additional provider integration."),
 ];
@@ -123,6 +127,27 @@ fn curated(source: &str) -> bool {
     RECOMMENDED
         .iter()
         .any(|(recommended, _)| *recommended == source)
+}
+
+/// Bundled packages that stay off until their provider is signed in, keyed
+/// by provider id: the Devin package loads Effect and protobuf into every Pi
+/// process and adds its own commands, which only a Devin user needs.
+const SIGN_IN_PACKAGES: &[(&str, &str)] = &[("devin", "npm:@buyong/pi-devin")];
+
+/// The curated package a provider's sign-in enables, if any.
+pub fn sign_in_package(provider_id: &str) -> Option<&'static str> {
+    SIGN_IN_PACKAGES
+        .iter()
+        .find(|(provider, _)| *provider == provider_id)
+        .map(|(_, source)| *source)
+}
+
+/// Whether a bundled package (by npm name) is left off at activation and
+/// enabled by its provider's sign-in instead.
+pub fn enabled_on_sign_in(name: &str) -> bool {
+    SIGN_IN_PACKAGES
+        .iter()
+        .any(|(_, source)| source_name(source) == name)
 }
 
 const NOT_CURATED: &str = "Only Cypher's curated Pi packages can be added here. Edit the Pi settings.json on this device to add others.";
@@ -489,6 +514,40 @@ mod tests {
             Some(package.to_str().unwrap())
         );
         assert!(package_enabled("npm:pi-web-search", &configured));
+    }
+
+    #[test]
+    fn devin_sign_in_enables_its_bundled_package() {
+        assert_eq!(sign_in_package("devin"), Some("npm:@buyong/pi-devin"));
+        assert_eq!(sign_in_package("openai-codex"), None);
+        assert!(enabled_on_sign_in("@buyong/pi-devin"));
+        assert!(!enabled_on_sign_in("pi-web-search"));
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::pi::runtime::PiRuntimePaths::for_data_dir(temp.path());
+        let package = paths.current.join("npm/node_modules/@buyong/pi-devin");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"@buyong/pi-devin","version":"0.1.16"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        std::fs::write(settings_path(&paths), r#"{"packages":[]}"#).unwrap();
+        let source = sign_in_package("devin").unwrap();
+        assert!(!enabled(&paths, source));
+        set_package_enabled(
+            &paths,
+            SetPackageEnabled {
+                source: source.into(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+        assert!(enabled(&paths, source));
+        assert_eq!(
+            configured_packages(&paths)[0].as_str(),
+            Some(package.to_str().unwrap())
+        );
     }
 
     #[test]

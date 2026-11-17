@@ -124,6 +124,7 @@ fn provider_display_name(id: &str) -> SharedString {
     SharedString::from(match id {
         "anthropic" | "claude-code" | "claude-bridge" => "Claude",
         "openai-codex" | "openai" => "ChatGPT",
+        "devin" => "Devin",
         "mock" => "Mock",
         "other" => "Other",
         other => other,
@@ -137,6 +138,7 @@ fn provider_brand_icon(id: &str) -> (&'static str, Option<gpui::Hsla>) {
             Some(crate::kit::icons::claude_brand()),
         ),
         "openai-codex" | "openai" => (crate::kit::icons::OPENAI_MARK, None),
+        "devin" => (crate::kit::icons::BOT_CHIP, None),
         "mock" => (
             crate::kit::icons::CLAUDE_MARK,
             Some(crate::kit::icons::claude_brand()),

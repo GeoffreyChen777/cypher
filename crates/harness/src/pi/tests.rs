@@ -66,6 +66,25 @@ fn expected_model_providers_read_newapi_and_claude_bridge() {
 }
 
 #[test]
+fn expected_model_providers_wait_for_devin_only_when_signed_in() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"packages":["/runtime/npm/node_modules/@buyong/pi-devin"]}"#,
+    )
+    .unwrap();
+    assert!(!expected_model_providers(dir.path()).contains("devin"));
+    std::fs::write(
+        dir.path().join("auth.json"),
+        r#"{"devin":{"type":"oauth","access":"x","refresh":"","expires":0}}"#,
+    )
+    .unwrap();
+    assert!(expected_model_providers(dir.path()).contains("devin"));
+    std::fs::write(dir.path().join("settings.json"), r#"{"packages":[]}"#).unwrap();
+    assert!(!expected_model_providers(dir.path()).contains("devin"));
+}
+
+#[test]
 fn synthesized_commands_dedup_against_the_probe() {
     let probe = vec![
         SlashCommand {

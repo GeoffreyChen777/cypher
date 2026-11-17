@@ -510,7 +510,7 @@ impl ProvidersPage {
     ) -> AnyElement {
         let (id, remove) = self.confirm.clone().unwrap();
         let busy = self.busy.is_some();
-        let oauth = matches!(id.as_str(), "anthropic" | "openai-codex");
+        let oauth = matches!(id.as_str(), "anthropic" | "openai-codex" | "devin");
         let title = if remove {
             "Delete provider?"
         } else if oauth {
@@ -526,10 +526,10 @@ impl ProvidersPage {
         } else if oauth {
             format!(
                 "You'll need to sign in again to use {} models on {}.",
-                if id == "anthropic" {
-                    "Claude"
-                } else {
-                    "ChatGPT"
+                match id.as_str() {
+                    "anthropic" => "Claude",
+                    "devin" => "Devin",
+                    _ => "ChatGPT",
                 },
                 self.target.read(cx).label(cx)
             )

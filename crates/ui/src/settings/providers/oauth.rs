@@ -235,6 +235,7 @@ impl ProvidersPage {
             .map(|s| match s.provider_id.as_str() {
                 "anthropic" => "Claude",
                 "openai-codex" => "ChatGPT",
+                "devin" => "Devin",
                 other => other,
             })
             .unwrap_or("Sign in");

@@ -878,11 +878,13 @@ impl ProvidersPage {
                 .iter()
                 .find(|provider| is_claude_cli(provider))
                 .cloned();
-            let chatgpt = snapshot
+            // ChatGPT, Devin: subscription sign-ins, in the service's order.
+            let oauth: Vec<_> = snapshot
                 .providers
                 .iter()
-                .find(|provider| provider.id == "openai-codex")
-                .cloned();
+                .filter(|provider| is_oauth(provider))
+                .cloned()
+                .collect();
             let gateways: Vec<_> = snapshot
                 .providers
                 .iter()
@@ -901,11 +903,11 @@ impl ProvidersPage {
                 ));
                 first_group = false;
             }
-            if let Some(provider) = chatgpt {
+            for (offset, provider) in oauth.into_iter().take(7).enumerate() {
                 body = body.child(self.subscription_group(
                     theme,
                     provider,
-                    1,
+                    1 + offset,
                     first_group,
                     current,
                     cx,

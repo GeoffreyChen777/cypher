@@ -67,6 +67,7 @@ enum HarnessCatalog {
         switch id {
         case "anthropic", "claude-code", "claude-bridge": return "Claude"
         case "openai-codex", "openai": return "ChatGPT"
+        case "devin": return "Devin"
         case "demo": return "Demo"
         case "other": return "Other"
         default: return id

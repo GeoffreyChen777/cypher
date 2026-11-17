@@ -60,8 +60,21 @@ fn catalog_providers(models: &[Model]) -> HashSet<String> {
         .collect()
 }
 
+fn package_enabled(packages: &[Value], name: &str) -> bool {
+    packages.iter().any(|entry| {
+        let source = match entry {
+            Value::String(source) => source.as_str(),
+            Value::Object(object) => object.get("source").and_then(Value::as_str).unwrap_or(""),
+            _ => "",
+        };
+        source.contains(name)
+    })
+}
+
 /// Providers that should appear in a complete catalog for this agent dir:
-/// NewAPI gateways plus pi-claude-bridge when that package is enabled.
+/// NewAPI gateways, pi-claude-bridge when that package is enabled, and Devin
+/// when its package is enabled and an account is signed in (it restores its
+/// catalog a moment after startup, and has none without a sign-in).
 pub(super) fn expected_model_providers(agent_dir: &std::path::Path) -> HashSet<String> {
     let mut expected = HashSet::new();
     let newapi = agent_dir.join("extension-settings/provider-newapi.json");
@@ -73,20 +86,21 @@ pub(super) fn expected_model_providers(agent_dir: &std::path::Path) -> HashSet<S
         expected.extend(providers.keys().cloned());
     }
     let settings = agent_dir.join("settings.json");
-    if let Some(value) = std::fs::read_to_string(settings)
+    let packages = std::fs::read_to_string(settings)
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        && let Some(packages) = value.get("packages").and_then(Value::as_array)
-        && packages.iter().any(|entry| {
-            let source = match entry {
-                Value::String(source) => source.as_str(),
-                Value::Object(object) => object.get("source").and_then(Value::as_str).unwrap_or(""),
-                _ => "",
-            };
-            source.contains("pi-claude-bridge")
-        })
-    {
+        .and_then(|value| value.get("packages").and_then(Value::as_array).cloned())
+        .unwrap_or_default();
+    if package_enabled(&packages, "pi-claude-bridge") {
         expected.insert("claude-bridge".into());
+    }
+    if package_enabled(&packages, "pi-devin")
+        && std::fs::read_to_string(agent_dir.join("auth.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .is_some_and(|auth| auth.get("devin").is_some_and(Value::is_object))
+    {
+        expected.insert("devin".into());
     }
     expected
 }

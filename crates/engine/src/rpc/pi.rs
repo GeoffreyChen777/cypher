@@ -239,6 +239,23 @@ pub(super) async fn pi_provider_login(
     }
     .map_err(RpcError::Failed)?;
     if status.phase == "succeeded" {
+        // A provider whose bundled package stays off until sign-in (Devin)
+        // needs it in settings.json before Pi sessions can list its models.
+        if let Some(source) = crate::pi::packages::sign_in_package(&status.provider_id) {
+            let paths = rpc.pi_runtime()?.paths().clone();
+            if !crate::pi::packages::enabled(&paths, source) {
+                let enabled = crate::pi::packages::set_package_enabled(
+                    &paths,
+                    crate::pi::packages::SetPackageEnabled {
+                        source: source.into(),
+                        enabled: true,
+                    },
+                );
+                if let Err(error) = enabled {
+                    tracing::warn!(%error, "could not enable the signed-in provider's package");
+                }
+            }
+        }
         rpc.reload_pi_runtime().await;
     }
     RpcReply::value(&status)
