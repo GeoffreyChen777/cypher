@@ -332,6 +332,8 @@ async fn a_bot_chat_runs_locked_down() {
         common::reply(HarnessId::Pi, &request, "sess-bot", "On it.")
     });
     let core = common::engine_at(&tmp.path().join("data"), harness);
+    // Keep nightly memory runs out of this bot-only recording harness.
+    core.memory.shutdown().await;
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
     // A read-only bot: no capability beyond reading (tests/bot_work.rs
@@ -439,6 +441,7 @@ async fn a_bot_chat_refuses_commands_that_widen_its_tools() {
         common::reply(HarnessId::Pi, &request, "sess", "ok")
     });
     let core = common::engine_at(&tmp.path().join("data"), harness);
+    core.memory.shutdown().await;
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
     let cwd = core
@@ -533,6 +536,7 @@ async fn an_unattended_run_that_asks_stops_failed() {
     let tmp = tempfile::tempdir().unwrap();
     let answers = Arc::new(Mutex::new(Vec::new()));
     let core = common::engine_at(&tmp.path().join("data"), asking_harness(answers.clone()));
+    core.memory.shutdown().await;
     let stops = Arc::new(Mutex::new(Vec::<UnattendedStop>::new()));
     let heard = stops.clone();
     core.sessions.add_unattended_listener(Arc::new(move |stop| {
@@ -615,6 +619,7 @@ async fn an_attended_bot_run_waits_for_its_approval() {
     let tmp = tempfile::tempdir().unwrap();
     let answers = Arc::new(Mutex::new(Vec::new()));
     let core = common::engine_at(&tmp.path().join("data"), asking_harness(answers.clone()));
+    core.memory.shutdown().await;
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
     let cwd = core
@@ -930,6 +935,7 @@ async fn owner_turns_learn_where_their_plans_stand() {
         common::reply(HarnessId::Pi, &request, "sess-bot", "On it.")
     });
     let core = common::engine_at(&tmp.path().join("data"), harness);
+    core.memory.shutdown().await;
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
     let now = cypher_proto::now_ms();

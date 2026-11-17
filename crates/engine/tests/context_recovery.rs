@@ -206,11 +206,11 @@ struct Rig {
     _dir: tempfile::TempDir,
 }
 
-fn assemble(refuse_always: bool) -> Rig {
-    assemble_gated(refuse_always, None)
+async fn assemble(refuse_always: bool) -> Rig {
+    assemble_gated(refuse_always, None).await
 }
 
-fn assemble_gated(refuse_always: bool, gate: Option<Arc<tokio::sync::Notify>>) -> Rig {
+async fn assemble_gated(refuse_always: bool, gate: Option<Arc<tokio::sync::Notify>>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let seen = Arc::new(Mutex::new(Seen::default()));
     let registry = cypher_engine::HarnessRegistry::new();
@@ -223,6 +223,8 @@ fn assemble_gated(refuse_always: bool, gate: Option<Arc<tokio::sync::Notify>>) -
     }));
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None)
         .expect("engine core assembles");
+    // Stop before creating chats: the pass host can wake on another worker.
+    core.memory.shutdown().await;
     core.workspace
         .create_chat(
             CHAT,
@@ -316,7 +318,7 @@ fn text_of(entry: &cypher_doc::SessionMessageEntry) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_round_restarts_with_supplementary_context() {
-    let rig = assemble(false);
+    let rig = assemble(false).await;
     configure(&rig.core, "model-x", 1).await;
     send(&rig.core, "m1", "first question").await;
     common::wait_for(|| idle(&rig.core), "the first round to settle").await;
@@ -382,7 +384,7 @@ async fn a_failed_round_restarts_with_supplementary_context() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_prompt_that_keeps_failing_stops_at_the_attempt_limit() {
-    let rig = assemble(true);
+    let rig = assemble(true).await;
     configure(&rig.core, "model-x", 1).await;
     send(&rig.core, "m1", "delete the build folder").await;
     let entries = common::wait_for_some("the recovered round to settle", || {
@@ -411,7 +413,7 @@ async fn a_prompt_that_keeps_failing_stops_at_the_attempt_limit() {
 /// context, said to have failed, and the resent prompt's record carries them.
 #[tokio::test(flavor = "multi_thread")]
 async fn later_attempts_see_every_failed_context() {
-    let rig = assemble(true);
+    let rig = assemble(true).await;
     configure(&rig.core, "model-x", 3).await;
     send(&rig.core, "m1", "delete the build folder").await;
     let entries = common::wait_for_some("the third attempt to settle", || {
@@ -446,7 +448,7 @@ async fn later_attempts_see_every_failed_context() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn chats_on_unwatched_models_are_left_alone() {
-    let rig = assemble(false);
+    let rig = assemble(false).await;
     configure(&rig.core, "p/fixer", 1).await;
     send(&rig.core, "m1", "delete the build folder").await;
     common::wait_for(
@@ -467,7 +469,7 @@ async fn chats_on_unwatched_models_are_left_alone() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_session_shows_the_recovery_under_way_until_the_resend() {
     let gate = Arc::new(tokio::sync::Notify::new());
-    let rig = assemble_gated(false, Some(gate.clone()));
+    let rig = assemble_gated(false, Some(gate.clone())).await;
     configure(&rig.core, "model-x", 1).await;
     send(&rig.core, "m1", "delete the build folder").await;
     let progress = common::wait_for_some("the recovery to be published", || {
@@ -580,7 +582,7 @@ async fn text_before_done(events: &mut Events) -> Vec<String> {
 /// or replayed.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_subagent_task_restarts_and_its_parent_gets_the_retry() {
-    let rig = assemble(false);
+    let rig = assemble(false).await;
     configure(&rig.core, "model-x", 1).await;
     let child = start_subagent(&rig.core, "delete the build folder").await;
     let mut events = watch(&rig.core, &child).await;
@@ -618,7 +620,7 @@ async fn a_failed_subagent_task_restarts_and_its_parent_gets_the_retry() {
 /// A subagent result that stands reaches the parent without waiting.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_subagent_result_that_stands_is_delivered_at_once() {
-    let rig = assemble(false);
+    let rig = assemble(false).await;
     configure(&rig.core, "model-x", 1).await;
     let child = start_subagent(&rig.core, "plan the panel").await;
     let mut events = watch(&rig.core, &child).await;
@@ -638,7 +640,7 @@ async fn a_subagent_result_that_stands_is_delivered_at_once() {
 /// its briefing rides the resent prompt and the record.
 #[tokio::test(flavor = "multi_thread")]
 async fn work_the_failed_round_did_is_carried_into_the_restart() {
-    let rig = assemble(false);
+    let rig = assemble(false).await;
     configure(&rig.core, "model-x", 1).await;
     send(&rig.core, "m1", "fix the parser").await;
     let entries = common::wait_for_some("the recovered round to settle", || {
@@ -681,7 +683,7 @@ async fn work_the_failed_round_did_is_carried_into_the_restart() {
 /// no briefing requested, no block.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_round_that_did_no_work_is_restarted_without_a_briefing() {
-    let rig = assemble(false);
+    let rig = assemble(false).await;
     configure(&rig.core, "model-x", 1).await;
     send(&rig.core, "m1", "delete the build folder").await;
     common::wait_for_some("the recovered round to settle", || {
