@@ -7,12 +7,13 @@
 //! [`MemoryStore`] row per store. This service resolves which stores a chat
 //! sees ([`access`]), answers the `memory`, `search_history` and
 //! `read_history` tools ([`tool`]), builds each run's memory section of the
-//! prompt ([`prompt`]), holds writes from runs that read untrusted content
-//! ([`taint`]), applies the app's edits, and runs consolidation passes
-//! ([`passes`]).
+//! prompt ([`prompt`]), marks writes from runs that read untrusted content
+//! and refuses them after another workspace's answer ([`taint`]), applies
+//! the app's edits, and runs consolidation passes ([`passes`]).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -80,6 +81,9 @@ struct Inner {
     passes: passes::PassState,
     /// Runs that read untrusted content, and passes' token use.
     taint: taint::Taint,
+    /// Hold such runs' writes for review (tests only; see
+    /// [`Memory::hold_untrusted_writes`]).
+    hold_untrusted: AtomicBool,
     cancel: tokio_util::sync::CancellationToken,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -88,7 +92,17 @@ struct Inner {
 #[derive(Debug, PartialEq)]
 enum Written {
     Applied(String),
+    /// Kept for review instead ([`Memory::hold_untrusted_writes`]).
     Held(String),
+}
+
+/// What untrusted content the writing run had read.
+enum Untrusted {
+    /// A web page or search, an MCP tool, a fetching command: the write is
+    /// saved and marked.
+    Content(String),
+    /// Another user's workspace answered: memory is read-only for the run.
+    Peer(String),
 }
 
 /// A write in store terms: the file's new text (`None`: removed), and the
@@ -114,6 +128,7 @@ impl Memory {
                 pi_runtime: Default::default(),
                 passes: Default::default(),
                 taint: Default::default(),
+                hold_untrusted: AtomicBool::new(false),
                 cancel: Default::default(),
                 tasks: Default::default(),
             }),
@@ -331,7 +346,30 @@ impl Memory {
             }
         }
         let shown = format!("{}{}", root.path, planned.path);
-        if let Some(reason) = self.taint_reason(reader) {
+        let untrusted = match self.untrusted(reader) {
+            // Another user's workspace may have put words in this run:
+            // its memory is read-only until the next one, the way an agent
+            // handling outside input gets its stores read-only. Nobody is
+            // asked; the workspace's nightly pass rereads the thread.
+            Some(Untrusted::Peer(reason)) => {
+                let later = if matches!(root.scope, MemoryScope::Workspace { .. }) {
+                    " The workspace's nightly consolidation rereads this thread and keeps what \
+                     matters."
+                } else {
+                    ""
+                };
+                return Err(EngineError::Other(format!(
+                    "Not saved: this run {reason}, so memory is read-only until its next run. \
+                     Don't retry or ask the user about it.{later}"
+                )));
+            }
+            Some(Untrusted::Content(reason)) => Some(reason),
+            None => None,
+        };
+        if let Some(reason) = untrusted
+            .clone()
+            .filter(|_| self.inner.hold_untrusted.load(Ordering::Relaxed))
+        {
             // A rename keeps its source in store terms; the other commands
             // keep their arguments, so accepting one re-applies it to the
             // file as it is then.
@@ -364,31 +402,49 @@ impl Memory {
                  Nothing else to do."
             )));
         }
-        let summary = apply(store, &planned, &reader.author)?;
+        // Saved like any other write (as Claude Code saves its memory):
+        // the change keeps what the run had read, for the log and the next
+        // consolidation pass, and Undo puts it back.
+        let summary = apply(store, &planned, &reader.author, untrusted.as_deref())?;
         store.commit();
         self.sync_row(&root.scope, &store_id, store);
         self.note_activity(root, &format!("{summary}: {shown}"), reader);
         Ok(Written::Applied(format!("{summary}: {shown}.")))
     }
 
-    /// Why `reader`'s writes are held: it, or a parent it was spawned
-    /// from, read untrusted content this run (a child's own taint reaches
-    /// its parents when it happens, [`Memory::observe`]).
-    fn taint_reason(&self, reader: &Reader) -> Option<String> {
-        let own = self.inner.taint.reason(&reader.chat.id).or_else(|| {
+    /// What untrusted content `reader`, or a parent it was spawned from,
+    /// read this run (a child's own taint reaches its parents when it
+    /// happens, [`Memory::observe`]). Another workspace's answer wins: it
+    /// makes memory read-only, where other content only marks the write.
+    fn untrusted(&self, reader: &Reader) -> Option<Untrusted> {
+        let ancestors = self.ancestors(&reader.chat);
+        let peer = |chat: &str| self.inner.bots.peer_taint(chat);
+        if let Some(reason) = peer(&reader.chat.id) {
+            return Some(Untrusted::Peer(format!(
+                "received another workspace's answer ({reason})"
+            )));
+        }
+        if let Some(reason) = ancestors.iter().find_map(|parent| peer(parent)) {
+            return Some(Untrusted::Peer(format!(
+                "was started by a thread that received another workspace's answer ({reason})"
+            )));
+        }
+        if let Some(reason) = self.inner.taint.reason(&reader.chat.id) {
+            return Some(Untrusted::Content(reason));
+        }
+        ancestors.into_iter().find_map(|parent| {
             self.inner
-                .bots
-                .peer_taint(&reader.chat.id)
-                .map(|reason| format!("received another workspace's answer ({reason})"))
-        });
-        own.or_else(|| {
-            self.ancestors(&reader.chat).into_iter().find_map(|parent| {
-                self.inner
-                    .taint
-                    .reason(&parent)
-                    .map(|reason| format!("was started by a session that {reason}"))
-            })
+                .taint
+                .reason(&parent)
+                .map(|reason| Untrusted::Content(format!("was started by a session that {reason}")))
         })
+    }
+
+    /// Tests: hold writes after untrusted content as earlier versions did,
+    /// so the held writes they left behind can still be accepted.
+    #[doc(hidden)]
+    pub fn hold_untrusted_writes(&self, hold: bool) {
+        self.inner.hold_untrusted.store(hold, Ordering::Relaxed);
     }
 
     /// The chats `chat` was spawned from, nearest first.
@@ -706,6 +762,7 @@ impl Memory {
             owner_text: false,
             undo: Some(undo_version),
             undone: false,
+            untrusted: None,
         })?;
         store.mark_undone(std::slice::from_ref(&change.id))?;
         store.commit();
@@ -783,6 +840,7 @@ impl Memory {
             owner_text: false,
             undo: Some(undo_version),
             undone: false,
+            untrusted: None,
         })?;
         store.commit();
         self.sync_row(scope, &store_id, &store);
@@ -884,7 +942,7 @@ impl Memory {
             text: Some(text),
             from: None,
         };
-        apply(&store, &planned, &MemoryAuthor::Notebook)?;
+        apply(&store, &planned, &MemoryAuthor::Notebook, None)?;
         store.commit();
         self.sync_row(scope, &store_id, &store);
         Ok(())
@@ -940,10 +998,13 @@ fn check_limits(store: &StoreDoc, planned: &Planned) -> Result<(), EngineError> 
 }
 
 /// Apply `planned` and log it; the log line's summary.
+/// `untrusted`: what untrusted content the writing run had read, kept on
+/// the change.
 fn apply(
     store: &StoreDoc,
     planned: &Planned,
     author: &MemoryAuthor,
+    untrusted: Option<&str>,
 ) -> Result<String, EngineError> {
     let now = p::now_ms();
     let version = doc::version_hex(store.raw());
@@ -1003,6 +1064,7 @@ fn apply(
         owner_text,
         undo: Some(version),
         undone: false,
+        untrusted: untrusted.map(|why| p::clip(why, 300)),
     })?;
     Ok(summary)
 }

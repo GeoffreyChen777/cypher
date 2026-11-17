@@ -426,11 +426,14 @@ struct MemoryChange: Hashable, Identifiable, Sendable {
     var undo: String?
     /// Already undone.
     var undone = false
+    /// Made after the run read untrusted content, and what that was
+    /// ("fetched a web page (…)"): saved all the same, shown so it can be checked.
+    var untrusted: String?
 }
 
 extension MemoryChange: Codable {
     private enum CodingKeys: String, CodingKey {
-        case id, at, author, path, action, summary, before, ownerText, undo, undone
+        case id, at, author, path, action, summary, before, ownerText, undo, undone, untrusted
     }
 
     init(from decoder: Decoder) throws {
@@ -445,6 +448,7 @@ extension MemoryChange: Codable {
         ownerText = try c.decode(.ownerText, or: false)
         undo = try c.decodeIfPresent(String.self, forKey: .undo)
         undone = try c.decode(.undone, or: false)
+        untrusted = try c.decodeIfPresent(String.self, forKey: .untrusted)
     }
 }
 

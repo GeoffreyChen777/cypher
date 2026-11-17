@@ -354,6 +354,7 @@ mod tests {
                     owner_text: false,
                     undo: None,
                     undone: false,
+                    untrusted: None,
                 })
                 .unwrap();
         }

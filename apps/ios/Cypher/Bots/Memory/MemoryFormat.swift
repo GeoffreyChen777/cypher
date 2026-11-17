@@ -75,6 +75,15 @@ enum MemoryFormat {
         return store.lastPass.map { $0.at < asked } ?? true
     }
 
+    /// A change made after untrusted content, by what that was (the
+    /// desktop's `untrusted_label`): saved all the same, shown to be checked.
+    static func untrustedLabel(_ why: String) -> String {
+        if why.hasPrefix("fetched a web page") { return "after a web page" }
+        if why.hasPrefix("searched the web") { return "after a web search" }
+        if why.hasPrefix("used an MCP tool") { return "after an MCP tool" }
+        return "after outside content"
+    }
+
     /// Whether a change can still be put back: it kept the version before
     /// it, is not undone, and is not itself an undo.
     static func undoable(_ change: MemoryChange) -> Bool {

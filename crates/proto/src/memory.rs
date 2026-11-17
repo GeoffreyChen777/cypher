@@ -440,9 +440,16 @@ pub struct MemoryChange {
     /// Already undone.
     #[serde(default)]
     pub undone: bool,
+    /// Made by a run that had read untrusted content, and what that was
+    /// ("fetched a web page (…)"): saved all the same, and shown in the log
+    /// so the owner and the next consolidation pass can check it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untrusted: Option<String>,
 }
 
-/// A write held for review: made by a run that had read untrusted content.
+/// A write held for review: made by a run that had read untrusted content
+/// (earlier versions held them; none are held now, but old ones can still
+/// be saved or dismissed).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryPending {

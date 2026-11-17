@@ -134,6 +134,19 @@ final class ConnectionReachTests: XCTestCase {
 }
 
 final class MemoryFormatTests: XCTestCase {
+    func testUntrustedChangesSayWhatCameBefore() {
+        // memory.rs `untrusted_changes_say_what_came_before`.
+        XCTAssertEqual(MemoryFormat.untrustedLabel("fetched a web page (https://e.com)"), "after a web page")
+        XCTAssertEqual(MemoryFormat.untrustedLabel("used an MCP tool (wiki/search)"), "after an MCP tool")
+        XCTAssertEqual(
+            MemoryFormat.untrustedLabel("was started by a session that searched the web"),
+            "after outside content"
+        )
+        let json = #"{"id":"c","at":1,"author":{"kind":"owner"},"path":"/a.md","action":{"kind":"create"},"untrusted":"searched the web"}"#
+        let change = try? JSONDecoder().decode(MemoryChange.self, from: Data(json.utf8))
+        XCTAssertEqual(change?.untrusted, "searched the web")
+    }
+
     func testTypedNamesBecomeStorePaths() {
         // memory.rs `new_file_names_become_store_paths`.
         XCTAssertEqual(MemoryFormat.path(typed: "testing"), "/testing.md")
