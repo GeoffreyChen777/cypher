@@ -41,27 +41,23 @@ impl DocHost {
     /// The launch facts trusted records establish for `chat_id`; `None`
     /// unless "Only paired devices" is on (rows decide then).
     pub(crate) fn trusted_launch(&self, chat_id: &str) -> Option<TrustedLaunch> {
-        let trust = self.command_trust()?;
-        if !trust.strict() {
-            return None;
-        }
+        let trust = self.strict_trust()?;
         let handle = self.open(chat_id).ok()?;
-        let trusted = handle
-            .doc
-            .read_launch_records(chat_id)
-            .into_iter()
-            .filter(|record| trust.trusts_record(&record.signer, &record.auth));
-        let (host, config) = latest_launch(trusted);
-        Some(TrustedLaunch {
-            host: host.and_then(|record| match record.fact {
-                LaunchFact::Host { device_id, cwd } => Some((device_id, cwd)),
-                LaunchFact::Config(_) => None,
-            }),
-            config: config.and_then(|record| match record.fact {
-                LaunchFact::Config(config) => Some(config),
-                LaunchFact::Host { .. } => None,
-            }),
-        })
+        Some(launch_from(trust.as_ref(), &handle))
+    }
+
+    /// [`Self::trusted_launch`] for a doc the caller already holds. It never
+    /// opens a doc, so it takes no lock of this host: the warm-doc cache
+    /// asks it while deciding what to evict, and reaching `open()` from there
+    /// once deadlocked the whole engine (the cache re-took its own lock).
+    pub(super) fn trusted_launch_of(&self, handle: &ChatDocHandle) -> Option<TrustedLaunch> {
+        let trust = self.strict_trust()?;
+        Some(launch_from(trust.as_ref(), handle))
+    }
+
+    /// The device trust, when "Only paired devices" is on.
+    fn strict_trust(&self) -> Option<Arc<dyn CommandTrust>> {
+        self.command_trust().filter(|trust| trust.strict())
     }
 
     /// The device trusted records say hosts `chat_id`, when they say.
@@ -185,6 +181,26 @@ impl DocHost {
         if let Err(err) = self.record_launch_if_missing(chat_id, &fact) {
             tracing::warn!(chat = %chat_id, error = %err, "launch record write failed");
         }
+    }
+}
+
+/// The launch facts the records in `handle` that `trust` accepts establish.
+fn launch_from(trust: &dyn CommandTrust, handle: &ChatDocHandle) -> TrustedLaunch {
+    let trusted = handle
+        .doc
+        .read_launch_records(&handle.chat_id)
+        .into_iter()
+        .filter(|record| trust.trusts_record(&record.signer, &record.auth));
+    let (host, config) = latest_launch(trusted);
+    TrustedLaunch {
+        host: host.and_then(|record| match record.fact {
+            LaunchFact::Host { device_id, cwd } => Some((device_id, cwd)),
+            LaunchFact::Config(_) => None,
+        }),
+        config: config.and_then(|record| match record.fact {
+            LaunchFact::Config(config) => Some(config),
+            LaunchFact::Host { .. } => None,
+        }),
     }
 }
 

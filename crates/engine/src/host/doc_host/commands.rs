@@ -792,7 +792,7 @@ impl DocHost {
         if handle.is_ephemeral() {
             return;
         }
-        if !self.is_host(&handle.chat_id) {
+        if !self.is_host_of(handle) {
             return;
         }
         // A migration is moving the chat away: whatever queues meanwhile

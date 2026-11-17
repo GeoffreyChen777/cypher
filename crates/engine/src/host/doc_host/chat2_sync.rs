@@ -158,7 +158,7 @@ impl DocHost {
                         // once, shortly after join (an idle chat never hits
                         // the quiesce tick, so the tick can't be the only
                         // trigger).
-                        if host.is_host(&chat) {
+                        if host.is_host_of(&handle) {
                             let host = host.clone();
                             let weak = weak.clone();
                             host.clone().spawn_worker(async move {
@@ -188,7 +188,7 @@ impl DocHost {
                         // seed checkpoint or fresh readers see only
                         // post-reset rows; rejected pushes reach peers only
                         // through a checkpoint. Watcher dies with the handle.
-                        if host.is_host(&chat) {
+                        if host.is_host_of(&handle) {
                             let host = host.clone();
                             let weak = weak.clone();
                             let chat = chat.clone();
@@ -281,11 +281,10 @@ impl DocHost {
         if self.inner.config.edge.is_none() {
             return;
         }
-        let chat_id = handle.chat_id.clone();
         // Only the workspace owner can publish chat sidecars/checkpoints;
         // non-host replicas would pay a guaranteed 403 and cannot change the
         // authoritative document anyway.
-        if !self.is_host(&chat_id) {
+        if !self.is_host_of(handle) {
             return;
         }
         // Threshold checkpoint (rowBytes > 512KB || rows > 200), one in

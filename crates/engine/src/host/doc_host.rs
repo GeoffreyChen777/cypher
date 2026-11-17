@@ -845,7 +845,23 @@ impl DocHost {
     /// Under "Only paired devices" a trusted host record decides instead of
     /// the row (`launch`): a device that edits rows can't move a chat.
     fn is_host(&self, chat_id: &str) -> bool {
-        if let Some(host) = self.trusted_host(chat_id) {
+        let trusted = self.trusted_host(chat_id);
+        self.host_decision(chat_id, trusted)
+    }
+
+    /// [`Self::is_host`] for a doc the caller already holds: the trusted
+    /// host record is read from `handle`, never through `open()`, so this
+    /// takes no lock of this host (see [`Self::trusted_launch_of`]).
+    fn is_host_of(&self, handle: &ChatDocHandle) -> bool {
+        let trusted = self
+            .trusted_launch_of(handle)
+            .and_then(|launch| launch.host)
+            .map(|(host, _)| host);
+        self.host_decision(&handle.chat_id, trusted)
+    }
+
+    fn host_decision(&self, chat_id: &str, trusted_host: Option<String>) -> bool {
+        if let Some(host) = trusted_host {
             return host == self.inner.config.device_id;
         }
         self.workspace().is_none_or(|ws| ws.is_host(chat_id))
