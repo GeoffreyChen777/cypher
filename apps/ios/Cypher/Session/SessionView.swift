@@ -554,6 +554,7 @@ struct SessionView: View {
             showMemorySettings: $showMemorySettings,
             memoryCards: chat?.isBotChat == true ? model.botRecords.memoryCardIds : [],
             openChat: { openChat($0) },
+            openPage: workspaceBot.map { bot in { page in openBoard(page, botId: bot.id) } },
             openRoute: { openRoute($0) },
             seedComposer: { [model, chatId] in model.offerDraft($0, chatId: chatId) },
             boardDismissed: {

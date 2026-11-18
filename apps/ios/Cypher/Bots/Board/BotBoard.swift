@@ -91,6 +91,7 @@ struct BotPageView: View {
         case .connect: ConnectPage(botId: botId)
         case .memory(let scope): MemoryPage(botId: botId, scope: scope)
         case .memoryFile(let scope, let path): MemoryFilePage(botId: botId, scope: scope, path: path)
+        case .post(let entryId): BotPostPage(botId: botId, entryId: entryId)
         }
     }
 }

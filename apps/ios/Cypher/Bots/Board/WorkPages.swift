@@ -60,6 +60,8 @@ struct WorkListPage: View {
 struct WorkItemPage: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.seedComposer) private var seedComposer
+    @Environment(\.botOpenChat) private var openChat
     let botId: String
     let workId: String
     @State private var actions = BotActionRunner()
@@ -72,6 +74,17 @@ struct WorkItemPage: View {
         } else {
             BotEmptyState(
                 symbol: "list.bullet.indent", title: "Work gone", hint: "It was deleted on another device.")
+        }
+    }
+
+    /// Edit: reject the proposal, put the start of the reply that asks for
+    /// the change in the workspace chat's composer, and go there.
+    private func edit(_ work: BotWork) {
+        let title = work.title.split(whereSeparator: \.isNewline).joined(separator: " ")
+        actions.run {
+            try await model.workspaceData().resolvePlan(workId: work.id, approve: false)
+            seedComposer?("Change the plan “\(title)”: ")
+            openChat(work.chatId)
         }
     }
 
@@ -146,9 +159,12 @@ struct WorkItemPage: View {
                 BotDecisionBar(
                     note: "Nothing runs until you approve.",
                     decisions: [
-                        BotDecision(title: "Cancel plan", role: .destructive) {
+                        BotDecision(title: "Reject", role: .destructive) {
                             actions.run { try await model.workspaceData().resolvePlan(workId: work.id, approve: false) }
                         },
+                        // Reject it and start the reply that asks for the
+                        // change (bots.rs `edit_bot_plan`).
+                        BotDecision(title: "Edit", enabled: seedComposer != nil) { edit(work) },
                         BotDecision(title: "Approve", role: .primary) {
                             actions.run { try await model.workspaceData().resolvePlan(workId: work.id, approve: true) }
                         },

@@ -49,12 +49,18 @@ enum RowKind {
     /// plan's record (transcript/bot_plan.rs). `resolved`: the call ended,
     /// so a missing record is gone rather than still being written.
     case botPlan(callId: String, resolved: Bool)
+    /// A workspace's `save_routine` call that went through: a compact card
+    /// naming the routine, which opens it on the board (transcript.rs
+    /// `BotRoutine`), by the name and id its answer gives.
+    case botRoutine(name: String, routineId: String)
     /// A `memory` call whose write was held for the owner: Save / Don't
     /// save, then the decision (transcript/memory_card.rs).
     case memoryWrite(callId: String)
-    /// What posted a message outside any turn (a routine, when it ran):
-    /// the line over the post's text.
-    case postHeader(BotPost)
+    /// A result notice in a workspace chat (transcript.rs `BotPost`): a
+    /// routine's run or a plan that ended, as one compact card naming it
+    /// and how it went. Its text is not drawn here: the card opens it on
+    /// the board. `entryId` is the post's entry, which its details open by.
+    case botPost(entryId: String, from: BotPost)
 }
 
 /// What an append-mode translation puts between the agent's answer and its
@@ -357,6 +363,10 @@ enum TranscriptRowBuilder {
         let streaming = entry.status == .streaming
 
         if entry.role == .user {
+            // The turn a host starts to tell the workspace's agent a job
+            // ended: the notice's card stands before it, so its own message
+            // draws nothing.
+            guard !entry.id.hasPrefix(BotPost.eventPrefix) else { return }
             // One bubble row per user message.
             let text = entry.parts.compactMap { part -> String? in
                 if case .text(_, let t, _) = part { return t }
@@ -484,12 +494,14 @@ enum TranscriptRowBuilder {
         }
 
         for (ix, part) in entry.parts.enumerated() {
-            // A routine's post reads as an answer under a line naming the
-            // routine; a source this app doesn't know is plain text.
-            if case .post(let partId, _, let from) = part, case .routine = from {
+            // A result notice is one compact card (its text is read from
+            // the card's details); a source this app doesn't know is plain
+            // text.
+            if case .post(let partId, _, let from) = part, from != .unknown {
                 appendCard(
                     id: "\(entry.id)#\(partId).from", version: UInt64(truncatingIfNeeded: from.hashValue) << 1,
-                    kind: .postHeader(from), before: ix)
+                    kind: .botPost(entryId: entry.id, from: from), before: ix)
+                continue
             }
             switch part.transcriptShape {
             case .tool(let partId, let call, let isError, let resolved):
@@ -506,6 +518,16 @@ enum TranscriptRowBuilder {
                         appendCard(
                             id: "\(entry.id)#\(partId)", version: fnv1a(partId) | (resolved ? 1 : 0),
                             kind: .botPlan(callId: partId, resolved: resolved), before: ix)
+                        continue
+                    }
+                    // A routine it saved, named by the call's answer (a
+                    // refused or unreadable one stays a chip).
+                    if kind == .saveRoutine, !isError, resolved,
+                        let saved = SavedRoutine(output: call.string(SavedRoutine.outputField))
+                    {
+                        appendCard(
+                            id: "\(entry.id)#\(partId)", version: fnv1a(saved.id + saved.name),
+                            kind: .botRoutine(name: saved.name, routineId: saved.id), before: ix)
                         continue
                     }
                     if kind.isMemory, memoryCards.contains(partId) {

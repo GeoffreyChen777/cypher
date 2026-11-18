@@ -209,6 +209,7 @@ private struct RoutineDeleteConfirmation: ViewModifier {
 struct RoutinePage: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.botOpenChat) private var openChat
     let botId: String
     let routineId: String
     @State private var runner = BotActionRunner()
@@ -372,7 +373,7 @@ struct RoutinePage: View {
     }
 
     /// The sessions its runs happen in: the standing one scheduled runs
-    /// continue, and the latest Run now's (both hidden; read-only here).
+    /// continue, and the latest Run now's.
     @ViewBuilder
     private func sessionsSection(_ routine: BotRoutine) -> some View {
         let sessions = [
@@ -382,18 +383,31 @@ struct RoutinePage: View {
         if !sessions.isEmpty {
             Section {
                 ForEach(sessions, id: \.id) { session in
-                    NavigationLink(value: BotThreadLink(chatId: session.id)) {
-                        let chat = model.chat(id: session.id)
-                        BoardRow(
-                            title: session.label,
-                            sub: chat?.lastMessagePreview.map(singleLine) ?? "Not on this device yet",
-                            trailing: chat.map { BotTime.ago($0.lastMessageAt ?? $0.createdAt) }
-                        ) {
-                            if let chat, model.indicator(for: chat) != .idle {
-                                SessionStatusMark(indicator: model.indicator(for: chat), cellSize: 2.0)
-                            } else {
-                                BoardGlyph(symbol: "bubble.left")
+                    let chat = model.chat(id: session.id)
+                    let row = BoardRow(
+                        title: session.label,
+                        sub: chat?.lastMessagePreview.map(singleLine) ?? "Not on this device yet",
+                        trailing: chat.map { BotTime.ago($0.lastMessageAt ?? $0.createdAt) }
+                    ) {
+                        if let chat, model.indicator(for: chat) != .idle {
+                            SessionStatusMark(indicator: model.indicator(for: chat), cellSize: 2.0)
+                        } else {
+                            BoardGlyph(symbol: "bubble.left")
+                        }
+                    }
+                    Group {
+                        // A project routine's session is an ordinary session:
+                        // it opens as one. The workspace's own thread opens
+                        // read-only on the board.
+                        if let chat, !chat.isReadOnlyThread {
+                            Button {
+                                openChat(session.id)
+                            } label: {
+                                row
                             }
+                            .tint(Theme.text)
+                        } else {
+                            NavigationLink(value: BotThreadLink(chatId: session.id)) { row }
                         }
                     }
                     .accessibilityIdentifier("routine-session-\(session.id)")

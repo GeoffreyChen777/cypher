@@ -495,14 +495,17 @@ extension WorkspaceData {
         }
     }
 
-    /// Each granted project with its sessions in the workspace's scope:
-    /// live root sessions, not archived, not excluded.
+    /// Each granted project with the sessions there that are the
+    /// workspace's business: its own (a plan's, a project routine's) and
+    /// the owner's in its scope (live root sessions, not archived, not
+    /// excluded).
     func boardProjects(_ bot: Bot) -> [BoardProjectLoad] {
         grantedSpaces(of: bot).map { space in
             var load = BoardProjectLoad(space: space)
             for chat in chats
-            where chat.spaceId == space.id && chat.isListedSession && !chat.archived
-                && !bot.scope.excludeSessions.contains(chat.id)
+            where chat.spaceId == space.id && !chat.archived && !chat.isChild
+                && (chat.workspaceSessionOf == bot.id
+                    || (chat.isListedSession && !bot.scope.excludeSessions.contains(chat.id)))
             {
                 load.sessions += 1
                 switch indicator(for: chat) {
@@ -538,7 +541,8 @@ extension WorkspaceData {
     /// it.
     func activityChatLink(_ chatId: String) -> ActivityLink? {
         guard let chat = chat(id: chatId) else { return nil }
-        if chat.isListedSession || chat.bot?.isMain == true { return .chat(chatId) }
-        return .thread(chatId)
+        // A session (the owner's, or one the workspace runs in a project)
+        // opens as itself; only a hidden thread opens read-only.
+        return chat.isReadOnlyThread ? .thread(chatId) : .chat(chatId)
     }
 }

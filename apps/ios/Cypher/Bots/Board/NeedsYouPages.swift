@@ -1,7 +1,9 @@
-// What needs the owner (needs.rs): the Needs you list, most pressing first,
-// each row opening the page that settles it and, where the decision is one
-// tap, offering it in place (swipe or long press); an action awaiting
-// approval; and a session the workspace started that is asking.
+// What needs the owner (needs.rs), in one place: the Needs you page lists
+// every item, most pressing first, each with its decision under it: an
+// action or a plan to approve, a permission prompt or a question from a
+// session the workspace runs (a plan's worker, a routine), answered where
+// it stands. A row still opens the item's own page for its context (the
+// plan's steps, the session, the drafted answer to review).
 
 import SwiftUI
 
@@ -68,7 +70,7 @@ struct NeedsYouRowLink: View {
                 Decision(title: "Approve", symbol: "checkmark") {
                     try await model.workspaceData().resolvePlan(workId: id, approve: true)
                 },
-                Decision(title: "Cancel Plan", symbol: "xmark", role: .destructive) {
+                Decision(title: "Reject", symbol: "xmark", role: .destructive) {
                     try await model.workspaceData().resolvePlan(workId: id, approve: false)
                 },
             ]
@@ -82,23 +84,181 @@ struct NeedsYouPage: View {
     @Environment(AppModel.self) private var model
     let botId: String
     @State private var actions = BotActionRunner()
+    @State private var answered: Set<String> = []
 
     var body: some View {
         let rows = model.bot(id: botId).flatMap { bot in model.data?.boardNeedRows(bot) } ?? []
         BotPageList(title: "Needs you") {
             ForEach(rows) { row in
-                NeedsYouRowLink(row: row, actions: actions)
-                    .groupedRowStyle()
+                Section {
+                    NeedsYouRowLink(row: row, actions: actions)
+                    decision(row)
+                }
+                .groupedRowStyle()
             }
         }
         .overlay {
             if rows.isEmpty {
                 BotEmptyState(
                     symbol: "checkmark.circle", title: "Nothing needs you",
-                    hint: "Plans, approvals, questions and answers to review land here.")
+                    hint: "Approvals, permission prompts, questions and answers to review land here.")
             }
         }
         .botActionAlert(actions)
+    }
+
+    /// The decision under an item's row, where it is one tap or one pick.
+    @ViewBuilder
+    private func decision(_ row: BoardNeedRow) -> some View {
+        switch row.item {
+        case .approval(let id):
+            NeedDecisions(
+                decisions: [
+                    BotDecision(title: "Decline", role: .destructive) {
+                        actions.run { try await model.workspaceData().resolveApproval(approvalId: id, approve: false) }
+                    },
+                    BotDecision(title: "Approve", role: .primary) {
+                        actions.run { try await model.workspaceData().resolveApproval(approvalId: id, approve: true) }
+                    },
+                ], busy: actions.busy)
+        case .plan(let id):
+            NeedDecisions(
+                decisions: [
+                    BotDecision(title: "Reject", role: .destructive) {
+                        actions.run { try await model.workspaceData().resolvePlan(workId: id, approve: false) }
+                    },
+                    BotDecision(title: "Approve", role: .primary) {
+                        actions.run { try await model.workspaceData().resolvePlan(workId: id, approve: true) }
+                    },
+                ], busy: actions.busy)
+        case .asking(let chatId, _):
+            if let chat = model.chat(id: chatId), let store = model.sessionStore(for: chat) {
+                AskingAnswer(chat: chat, store: store, answered: $answered, compact: true)
+            }
+        case .chat, .review:
+            EmptyView()
+        }
+    }
+}
+
+/// An item's decision as buttons in its section, the primary one last.
+private struct NeedDecisions: View {
+    let decisions: [BotDecision]
+    var busy = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            ForEach(decisions) { decision in
+                BotCardButton(
+                    title: decision.title,
+                    role: decision.role == .primary ? .primary : decision.role == .destructive ? .destructive : .secondary,
+                    busy: busy && decision.role == .primary, action: decision.action)
+            }
+        }
+        .disabled(busy)
+        .padding(.vertical, 2)
+    }
+}
+
+// MARK: - A session's question, answered in place
+
+/// The open question of a session the workspace runs, answered where it is
+/// listed (needs.rs `asking_content`): a permission prompt as its card with
+/// the extension's own options, one question with answers to pick as
+/// buttons, anything else as the question and the way into the session.
+struct AskingAnswer: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.openBotChat) private var openChat
+    let chat: Chat
+    let store: SessionStore
+    /// Requests answered from here, until the session says so.
+    @Binding var answered: Set<String>
+    /// In a list of several items: no section header of its own.
+    var compact = false
+    @State private var answerError: String?
+
+    var body: some View {
+        let request = store.openInputRequest.flatMap { answered.contains($0.requestId) ? nil : $0 }
+        Group {
+            if let request, let question = request.questions.first {
+                if request.questions.count == 1, let permission = PermissionRequest(question) {
+                    PermissionPanel(
+                        requestId: request.requestId, question: question, request: permission,
+                        canRespond: canAnswer
+                    ) { requestId, answers in
+                        respond(requestId, answers)
+                    }
+                    .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 0))
+                    .listRowBackground(Color.clear)
+                } else {
+                    let text = question.question.trimmingCharacters(in: .whitespacesAndNewlines)
+                    Text(text.isEmpty ? question.header : text)
+                        .font(Theme.sans(16, weight: .medium, relativeTo: .body))
+                        .foregroundStyle(Theme.text)
+                        .padding(.vertical, 2)
+                    if Self.simple(request.questions) {
+                        ForEach(Array(question.options.enumerated()), id: \.offset) { ix, option in
+                            Button {
+                                respond(
+                                    request.requestId,
+                                    [UserInputAnswer(questionId: question.id, labels: [option])])
+                            } label: {
+                                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                    Text("\(ix + 1)")
+                                        .font(Theme.sans(12, weight: .semibold, relativeTo: .caption))
+                                        .foregroundStyle(Theme.textMuted)
+                                        .frame(width: 22, height: 22)
+                                        .background(Theme.text.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                                    Text(option)
+                                        .font(Theme.sans(15, relativeTo: .body))
+                                        .foregroundStyle(Theme.text)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                            .disabled(!canAnswer)
+                            .accessibilityIdentifier("asking-option-\(ix)")
+                        }
+                    } else if compact {
+                        Button {
+                            openChat?(chat.id)
+                        } label: {
+                            Label("Answer in the session", systemImage: "bubble.left.and.text.bubble.right")
+                                .font(Theme.sans(15, weight: .medium, relativeTo: .body))
+                        }
+                        .accessibilityIdentifier("asking-open")
+                    }
+                }
+            }
+        }
+        .alert(
+            "Couldn't answer",
+            isPresented: Binding(get: { answerError != nil }, set: { if !$0 { answerError = nil } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(answerError ?? "")
+        }
+    }
+
+    private func respond(_ requestId: String, _ answers: [UserInputAnswer]) {
+        if store.respondInput(requestId: requestId, answers: answers) {
+            answered.insert(requestId)
+        } else {
+            answerError = "Couldn't queue your answer. Please retry."
+        }
+    }
+
+    /// One question answered by one pick here: a permission prompt, or a
+    /// question with options to choose one of.
+    static func simple(_ questions: [UserInputQuestion]) -> Bool {
+        guard questions.count == 1, let question = questions.first else { return false }
+        if PermissionRequest(question) != nil { return true }
+        return question.multiSelect != true && !question.options.isEmpty
+    }
+
+    private var canAnswer: Bool {
+        chat.config?.harness == "pi" && (model.demo != nil || (model.connected && model.deviceOnline(chat.deviceId)))
     }
 }
 
@@ -182,16 +342,15 @@ struct ApprovalPage: View {
 
 // MARK: - Asking
 
-/// A session the workspace started, asking: where it runs and for which
-/// work, its question (a single question with options answers here), its
-/// latest messages, and the way into the session.
+/// A session the workspace runs, asking: where it runs and for which work,
+/// its question (a permission prompt or a single question with options
+/// answers here), its latest messages, and the way into the session.
 struct AskingPage: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openBotChat) private var openChat
     let botId: String
     let chatId: String
     let workId: String?
-    @State private var answerError: String?
     @State private var answered: Set<String> = []
 
     var body: some View {
@@ -239,7 +398,12 @@ struct AskingPage: View {
             }
             .groupedRowStyle()
             if let request, let store {
-                questionSection(request, store: store, canAnswer: canAnswer(chat))
+                Section {
+                    AskingAnswer(chat: chat, store: store, answered: $answered)
+                } header: {
+                    ListSectionHeader(title: AskingAnswer.simple(request.questions) ? "Answer" : "Question")
+                }
+                .groupedRowStyle()
             }
             if let store {
                 let recent = recentMessages(store.entries)
@@ -266,72 +430,9 @@ struct AskingPage: View {
         }
         .safeAreaInset(edge: .bottom) {
             BotDecisionBar(
-                note: request != nil && !simple(request) ? "Answer it in the session." : nil,
+                note: request.map { !AskingAnswer.simple($0.questions) } == true ? "Answer it in the session." : nil,
                 decisions: [BotDecision(title: "Open session", role: .primary) { openChat?(chatId) }])
         }
-        .alert(
-            "Couldn't answer",
-            isPresented: Binding(get: { answerError != nil }, set: { if !$0 { answerError = nil } })
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(answerError ?? "")
-        }
-    }
-
-    private typealias InputRequest = (entryId: String, requestId: String, questions: [UserInputQuestion])
-
-    /// One question with options, picked from one: answered here.
-    private func simple(_ request: InputRequest?) -> Bool {
-        guard let request, request.questions.count == 1, let question = request.questions.first else { return false }
-        return question.multiSelect != true && question.permission == nil && !question.options.isEmpty
-    }
-
-    @ViewBuilder
-    private func questionSection(_ request: InputRequest, store: SessionStore, canAnswer: Bool) -> some View {
-        let question = request.questions[0]
-        let text = question.question.trimmingCharacters(in: .whitespacesAndNewlines)
-        Section {
-            Text(text.isEmpty ? question.header : text)
-                .font(Theme.sans(16, weight: .medium, relativeTo: .body))
-                .foregroundStyle(Theme.text)
-                .padding(.vertical, 2)
-            if simple(request) {
-                ForEach(Array(question.options.enumerated()), id: \.offset) { ix, option in
-                    Button {
-                        if store.respondInput(
-                            requestId: request.requestId,
-                            answers: [UserInputAnswer(questionId: question.id, labels: [option])])
-                        {
-                            answered.insert(request.requestId)
-                        } else {
-                            answerError = "Couldn't queue your answer. Please retry."
-                        }
-                    } label: {
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Text("\(ix + 1)")
-                                .font(Theme.sans(12, weight: .semibold, relativeTo: .caption))
-                                .foregroundStyle(Theme.textMuted)
-                                .frame(width: 22, height: 22)
-                                .background(Theme.text.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
-                            Text(option)
-                                .font(Theme.sans(15, relativeTo: .body))
-                                .foregroundStyle(Theme.text)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                    .disabled(!canAnswer)
-                    .accessibilityIdentifier("asking-option-\(ix)")
-                }
-            }
-        } header: {
-            ListSectionHeader(title: simple(request) ? "Answer" : "Question")
-        }
-        .groupedRowStyle()
-    }
-
-    private func canAnswer(_ chat: Chat) -> Bool {
-        chat.config?.harness == "pi" && (model.demo != nil || (model.connected && model.deviceOnline(chat.deviceId)))
     }
 }
 

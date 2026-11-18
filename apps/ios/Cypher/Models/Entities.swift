@@ -65,16 +65,30 @@ struct Chat: Identifiable, Hashable {
     var bot: BotChatMarker? = nil
     /// A memory consolidation pass's chat: hidden everywhere.
     var memory: MemoryChatMarker? = nil
+    /// The workspace that started this session for one of its plans
+    /// (entities.rs `started_by`): an ordinary coding session that belongs
+    /// to that workspace and is listed there, not among the sessions.
+    var startedBy: ChatStartedBy? = nil
 
     var isChild: Bool { child != nil }
 
     /// entities.rs `is_bot`: any workspace marker.
     var isBotChat: Bool { bot != nil }
 
-    /// Kept out of every session list, search and picker: workspace chats
-    /// and threads show only in their workspace, memory passes nowhere.
-    /// Opening one by id (a notification, a link) still works.
-    var isHiddenFromSessions: Bool { bot != nil || memory != nil }
+    /// Kept out of every session list, search and picker: workspace chats,
+    /// threads and the sessions a workspace started show only in their
+    /// workspace, memory passes nowhere. Opening one by id (a notification,
+    /// a link) still works.
+    var isHiddenFromSessions: Bool { bot != nil || memory != nil || startedBy != nil }
+
+    /// entities.rs `workspace_session_of`: the workspace this chat is one of
+    /// the sessions of, in a project: a session one of its plans started,
+    /// or a project routine's.
+    var workspaceSessionOf: String? {
+        if let startedBy { return startedBy.botId }
+        if let bot, case .routineSession = bot.thread { return bot.botId }
+        return nil
+    }
 
     /// Which of its workspace's threads this chat is, when it is one.
     var botThread: BotThread? { bot?.thread }
@@ -101,6 +115,13 @@ struct Chat: Identifiable, Hashable {
         guard let lastSeenAt else { return true }
         return lastMessageAt > lastSeenAt
     }
+}
+
+/// entities.rs `ChatStartedBy`: who started a session when a workspace did.
+struct ChatStartedBy: Hashable, Codable, Sendable {
+    var botId: String
+    /// The plan it was started for.
+    var workId: String?
 }
 
 enum SessionStatus: String {

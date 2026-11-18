@@ -84,8 +84,11 @@ final class BotDemoTests: XCTestCase {
         for list in [demo.activeChats, demo.overviewChats, demo.projectlessChats, demo.archivedChats()] {
             XCTAssertTrue(Set(list.map(\.id)).isDisjoint(with: hidden))
         }
-        XCTAssertTrue(
-            demo.chats(in: "space-cypher").contains { $0.id == "chat-atlas-w2" }, "work's sessions stay listed")
+        XCTAssertTrue(hidden.contains("chat-atlas-w2"), "a session a workspace started is listed in it only")
+        XCTAssertFalse(demo.chats(in: "space-cypher").contains { $0.id == "chat-atlas-w2" })
+        XCTAssertEqual(
+            ProjectLoads.workspaceSessions(botId: DemoDataset.atlasId, chats: demo.chats, spaceId: "space-cypher")
+                .first?.id, "chat-atlas-w2", "newest first, on its workspace's board")
         XCTAssertEqual(demo.chats(in: "space-edge").map(\.id), ["chat-deploy"])
     }
 

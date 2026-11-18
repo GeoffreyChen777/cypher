@@ -1,7 +1,6 @@
-// The workspace chat's other transcript cards: a held memory write asking
-// the owner where it was made (transcript/memory_card.rs; docs/design/
-// memory.md §7), and the line over a routine's post naming the routine,
-// when it ran and how, with its session one tap away.
+// The workspace chat's memory card: a held memory write asking the owner
+// where it was made (transcript/memory_card.rs; docs/design/memory.md §7).
+// The plan and result notices are in BotPlanCard.swift.
 
 import SwiftUI
 
@@ -184,49 +183,5 @@ struct MemoryWriteCard: View {
         while reason.hasSuffix(".") { reason.removeLast() }
         return reason.isEmpty
             ? "Held because this session read untrusted content" : "Held because this session \(reason)"
-    }
-}
-
-// MARK: - Routine post
-
-/// The line over a routine's post: the routine, when it ran, how it went,
-/// and its session.
-struct PostAttribution: View {
-    @Environment(\.openBotChat) private var openChat
-    let from: BotPost
-
-    var body: some View {
-        if case .routine(_, let name, let outcome, let runAt, let threadChatId) = from {
-            HStack(spacing: 10) {
-                BotCardTile(symbol: "clock", tint: Theme.accent)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(name)
-                        .font(Theme.sans(14, weight: .semibold, relativeTo: .subheadline))
-                        .foregroundStyle(Theme.text)
-                        .lineLimit(1)
-                    Text("Routine · \(BotTime.past(runAt))")
-                        .font(Theme.sans(12, relativeTo: .footnote))
-                        .foregroundStyle(Theme.textMuted)
-                        .lineLimit(1)
-                }
-                .accessibilityElement(children: .combine)
-                Spacer(minLength: 4)
-                BotStatusText(outcome.status, size: 12.5)
-                    .fixedSize()
-                if let threadChatId, let openChat {
-                    Button("Open session") { openChat(threadChatId) }
-                        .font(Theme.sans(12.5, weight: .medium, relativeTo: .footnote))
-                        .foregroundStyle(Theme.textMuted)
-                        .buttonStyle(.plain)
-                        .padding(.leading, 4)
-                        .frame(minHeight: 32)
-                        .contentShape(Rectangle())
-                        .accessibilityIdentifier("post-open-session")
-                }
-            }
-            .padding(.bottom, 2)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("routine-post")
-        }
     }
 }

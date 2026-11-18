@@ -162,9 +162,15 @@ final class BoardModelTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(webapp.asking, 1, "the e2e session asks")
         XCTAssertTrue(webapp.note.contains("asking"))
         XCTAssertEqual(demo.boardProjectMode(bot, space: webapp.space), "works directly")
+        // The scope's exclusions are about the owner's sessions; the ones
+        // the workspace runs there are its own business whatever it reads.
         var excluded = bot
         excluded.scope.excludeSessions = ["chat-atlas-w3"]
-        XCTAssertEqual(demo.boardProjects(excluded).last?.asking, webapp.asking - 1)
+        XCTAssertEqual(demo.boardProjects(excluded).last?.asking, webapp.asking)
+        let cypher = try XCTUnwrap(loads.first)
+        let mine = try XCTUnwrap(demo.chats(in: "space-cypher").first?.id)
+        excluded.scope.excludeSessions = [mine]
+        XCTAssertEqual(demo.boardProjects(excluded).first?.sessions, cypher.sessions - 1)
 
         XCTAssertEqual(BoardProjectLoad(space: webapp.space, sessions: 3).note, "3 sessions")
         XCTAssertEqual(BoardProjectLoad(space: webapp.space, sessions: 1).note, "1 session")

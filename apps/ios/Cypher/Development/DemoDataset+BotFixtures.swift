@@ -115,7 +115,8 @@ extension DemoDataset {
                 memory: MemoryChatMarker(
                     storeId: "mem-p-space-cypher", scope: .project(spaceId: "space-cypher"),
                     passId: "pass-cypher-1")),
-            // Sessions Atlas's work started: ordinary project sessions.
+            // Sessions Atlas's work started: ordinary project sessions (marked
+            // as Atlas's below).
             session(
                 "chat-atlas-w1", "Find the flaky sync tests", space: "space-cypher", at: now - 15 * minute,
                 created: now - 18 * minute, preview: "registry_reconnect and chat_room_catch_up flake on CI."),
@@ -134,6 +135,16 @@ extension DemoDataset {
                 "chat-atlas-w5", "Bump loro to 1.6", space: "space-cypher", at: now - 26 * hour,
                 created: now - 27 * hour, preview: "Snapshot decoding fails after the bump.", branch: "atlas/loro-1.6"),
         ]
+        // They belong to Atlas: listed on its board under their project,
+        // not among the sessions.
+        for (id, workId) in [
+            ("chat-atlas-w1", "work-flaky"), ("chat-atlas-w2", "work-flaky"), ("chat-atlas-w3", "work-flaky"),
+            ("chat-atlas-w4", "work-notes"), ("chat-atlas-w5", "work-loro"),
+        ] {
+            if let ix = chats.firstIndex(where: { $0.id == id }) {
+                chats[ix].startedBy = ChatStartedBy(botId: Self.atlasId, workId: workId)
+            }
+        }
         // Live rows and the host are stamped a year ahead: a negative age
         // reads as fresh (`effectiveStatus`, `deviceOnline`), so the board
         // never goes stale while someone explores it, and no timer re-renders
@@ -719,6 +730,19 @@ extension DemoDataset {
                                 routineId: "routine-brief", name: "Morning brief", outcome: .done, runAt: briefAt,
                                 threadChatId: "chat-atlas-routine-brief"))
                     ], createdAt: briefAt + 2 * minute, deviceId: "dev-mac", status: .complete),
+                // The turn that told Atlas the run ended (it draws nothing),
+                // and Atlas's sentence about it.
+                user(
+                    "\(BotPost.eventPrefix)atlas-post-brief", "[Routine \"Morning brief\" finished]",
+                    at: briefAt + 2 * minute + 1_000),
+                reply(
+                    "atlas-a-brief",
+                    [
+                        .text(
+                            id: "atlas-a-brief-t",
+                            text: "Nightly tests failed and CI broke twice on main, both in the sync tests; "
+                                + "the 0.9 notes are drafted. The sync failures need a look.")
+                    ], at: briefAt + 2 * minute + 6_000),
                 user(
                     "atlas-u2",
                     "The CSV export and the web app disagree on invoice totals again. Find out why and propose a fix.",
