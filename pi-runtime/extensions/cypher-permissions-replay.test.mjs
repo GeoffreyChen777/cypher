@@ -11,8 +11,10 @@
 //
 // A case may carry the owner's own words (what the engine passes in
 // CYPHER_OWNER_WORDS), the conversation as Pi stored it, the git facts a
-// release tag needs, and probes: the same request with an adversarial
-// verdict, which must still ask (explicit.ts).
+// release tag needs, the commands the chat ran earlier (`ran`, which is how
+// created.ts learns what the task made), and probes: the same request with an
+// adversarial verdict or an adversarial line, which must still ask
+// (explicit.ts, the always-ask floor).
 //
 // REPLAY_REPORT=1 prints a table of every case instead of failing on the first difference.
 import assert from "node:assert/strict";
@@ -50,6 +52,10 @@ function repo(path) {
   spawnSync("git", ["-C", path, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "init"]);
 }
 for (const cwd of new Set(fixture.cases.map((item) => item.cwd))) repo(expand(cwd));
+// A chat's worktree is on its own branch (`checkout`): work it may delete when it is done.
+for (const item of fixture.cases) {
+  if (item.checkout) spawnSync("git", ["-C", expand(item.cwd), "switch", "-q", "-c", item.checkout]);
+}
 
 /** Every program is found, as the system's; a path names itself. */
 function findProgram(program, cwd) {
@@ -89,6 +95,8 @@ async function replay(item, probe) {
   const permissions = new Permissions({ agentDir, chatId: "chat-replay", cwd, home, landstrip: { available: true, binary: "/nonexistent/landstrip" }, scratch: [tmp] });
   permissions.appendEntry = () => {};
   permissions.resolveIn = findProgram;
+  // What the chat ran earlier in its turn: what it made is its own (created.ts).
+  for (const earlier of item.ran ?? []) permissions.noteCreated(expand(earlier), cwd);
   const processes = processFacts(item);
   permissions.ownsProcesses = processes.owns;
   permissions.processFacts = processes.facts;
@@ -100,7 +108,7 @@ async function replay(item, probe) {
   };
   permissions.originRepo = () => undefined;
   const user = (item.user ?? ["(the owner's request; not in the audit)"]).map((content) => ({ type: "message", message: { role: "user", content } }));
-  const branch = [...user, ...JSON.parse(expand(JSON.stringify(item.branch ?? [])))];
+  const branch = [...user, ...JSON.parse(expand(JSON.stringify(probe?.branch ?? item.branch ?? [])))];
   const judged = [];
   const dialogs = [];
   const ctx = {
@@ -179,4 +187,15 @@ test("replay: the owner's questions from the audit, with the reviewing model's v
   }
   assert.deepEqual(failures, []);
   assert.equal(fixture.cases.length, 174);
+  // The totals the design is measured by: what runs on the model's approval
+  // and what still reaches the owner (docs/design/permission-control.md).
+  const totals = rows.reduce((counts, { got, probe }) => (probe ? counts : { ...counts, [got.outcome]: (counts[got.outcome] ?? 0) + 1 }), {});
+  assert.deepEqual(totals, { "approve-once": 104, "approve-remember": 7, ask: 63 });
+  // Every probe must still ask: an adversarial verdict never gets past the code.
+  const probes = rows.filter((row) => row.probe);
+  assert.equal(probes.length, 30);
+  assert.deepEqual(
+    probes.filter((row) => row.got.outcome !== "ask").map((row) => row.probe),
+    [],
+  );
 });

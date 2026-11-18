@@ -222,8 +222,10 @@ test("a command that needs more fails in the sandbox; escalated and approved, it
   assert.equal(results[0].isError, true);
   assert.match(results[0].text, /run it again with `escalate`/);
   assert.equal(dialogs.length, 1);
-  // Reading a key is dangerous: a human decides, every time.
-  assert.match(dialogs[0].title, /^Run this dangerous command outside the sandbox\?\n\nContext:\nNote: Dangerous: it reads or writes a secret \(~\/\.ssh\/id_ed25519\)\. This always asks\.\nPurpose: Update the other repo\n/);
+  // Reading a key here is local work (its contents reach the model provider, not
+  // another machine): with no reviewing model available, the user decides, once.
+  assert.match(dialogs[0].title, /^Run this command outside the sandbox\?\n\nContext:\nPurpose: Update the other repo\n/);
+  assert.deepEqual(dialogs[0].options, ["Run once", "Deny", "Deny and stop"]);
   assert.equal(results[1].isError, false, results[1].text);
   assert.match(results[1].text, /PRIVATE KEY/);
   assert.match(results[1].text, /Ran outside the sandbox \(approved once; no rule could cover it, because it writes ~\/Developer\/other\/outside\.txt, which commands in the sandbox can't\. Next time, escalate only the command that needs it and do the rest in the sandbox\)\./);
@@ -231,19 +233,22 @@ test("a command that needs more fails in the sandbox; escalated and approved, it
 });
 
 test("allowed for the task, matching dangerous commands run outside without asking; others still ask", { skip }, async () => {
+  // Sending data to a server is dangerous, and every such command carries the
+  // same danger, so a task grant covers the next one.
+  const post = (path) => `curl -sS -m 2 -X POST https://example.invalid/${path} || true`;
   const { results, dialogs } = await turn(
     [
-      { tool: "bash", args: { command: "cat ~/.ssh/id_ed25519", escalate: { label: "Read the key", reason: "x", patterns: [["cat", "**/.ssh/*"]] } } },
-      { tool: "bash", args: { command: "cat ~/.ssh/id_ed25519" } },
+      { tool: "bash", args: { command: post("one"), escalate: { label: "Notify", reason: "x", patterns: [["curl", "**"]] } } },
+      { tool: "bash", args: { command: post("two") } },
       { tool: "bash", args: { command: "cat .env", escalate: { label: "Read the env", reason: "x" } } },
     ],
     { answers: ["Allow for this task", "Deny"] },
   );
   assert.equal(dialogs.length, 2, "the second command matched the pattern and the danger");
   assert.deepEqual(dialogs[0].options, ["Allow for this task", "Deny", "Deny and stop"]);
-  assert.match(results[0].text, /PRIVATE KEY/);
-  assert.match(results[1].text, /PRIVATE KEY/);
-  assert.match(results[1].text, /allowed by `cat \*\*\/\.ssh\/\*`/);
+  assert.match(dialogs[0].title, /Dangerous: it sends data to a server/);
+  assert.match(results[0].text, /Ran outside the sandbox \(approved for this task/);
+  assert.match(results[1].text, /allowed by `curl …`/);
   assert.equal(results[2].isError, true);
   assert.doesNotMatch(results[2].text, /hunter2/);
 });
@@ -347,13 +352,26 @@ test("model first: the judge runs local work outside the sandbox and may read a 
   assert.equal(secret.dialogs.length, 0);
   assert.match(secret.results[0].text, /hunter2/);
 
+  // A secret the model approves is read once and never remembered.
+  const key = await turn(
+    [
+      { tool: "bash", args: { command: `cat ${join(home, ".ssh", "id_ed25519")}`, escalate: { label: "Show the key", reason: "x" } } },
+      { tool: "bash", args: { command: `cat ${join(home, ".ssh", "id_ed25519")}` } },
+    ],
+    { judge: approve },
+  );
+  assert.equal(key.dialogs.length, 0);
+  assert.match(key.results[0].text, /PRIVATE KEY/);
+  assert.equal(key.results[1].isError, true, "nothing was remembered");
+
+  // A danger asks even when the model would approve it: the owner's own words
+  // must say so, and nothing here quotes them.
   const held = await turn(
-    [{ tool: "bash", args: { command: `cat ${join(home, ".ssh", "id_ed25519")}`, escalate: { label: "Show the key", reason: "x" } } }],
+    [{ tool: "bash", args: { command: `rm -rf ${join(other, "everything")}`, escalate: { label: "Clean up", reason: "x" } } }],
     { judge: approve, answers: ["Deny"] },
   );
   assert.equal(held.dialogs.length, 1, "a dangerous command asks even when the model would approve");
-  assert.match(held.dialogs[0].title, /Dangerous: it reads or writes a secret/);
-  assert.doesNotMatch(held.dialogs[0].title, /Review:/);
+  assert.match(held.dialogs[0].title, /Dangerous: it deletes files outside the project folders/);
   assert.equal(held.results[0].isError, true);
 });
 
