@@ -22,6 +22,15 @@ pub(super) fn retry_command(rpc: &EngineRpc, params: Value) -> Result<RpcReply, 
     RpcReply::value(&serde_json::json!({ "commandId": command_id }))
 }
 
+pub(super) fn dismiss_command(rpc: &EngineRpc, params: Value) -> Result<RpcReply, RpcError> {
+    let p: RetryCommandParams = parse_params(params)?;
+    let dismissed = rpc
+        .doc_host
+        .dismiss_command(&p.chat_id, &p.command_id)
+        .map_err(failed)?;
+    RpcReply::value(&serde_json::json!({ "commandIds": dismissed }))
+}
+
 pub(super) fn watch_doc_messages(rpc: &EngineRpc, params: Value) -> Result<RpcReply, RpcError> {
     let p: ChatParams = parse_params(params)?;
     let handle = rpc.doc_host.open(&p.chat_id).map_err(failed)?;

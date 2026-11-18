@@ -356,6 +356,7 @@ fn command(chat: &str, issued_by: &str, signer: Option<&DeviceTrust>) -> Command
         status: cypher_doc::SessionCommandStatus::Pending,
         resolution: None,
         sent_at: None,
+        dismissed: false,
     };
     doc.queue_signed_command(chat, &entry, |bytes| signer.and_then(|s| s.sign(bytes)))
         .unwrap();

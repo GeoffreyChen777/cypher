@@ -176,8 +176,11 @@ planted entry naming this device can't borrow its signature.
 Limits: a signed command can be re-inserted into the same chat. The host's
 processed-command ledger skips an id it has seen, and the signed `expiresAt`
 (a day by default) bounds the window on a host that hasn't, such as one a
-chat just migrated to. Transcripts and the display fields of chat rows
-(titles, pins) aren't signed.
+chat just migrated to. Transcripts, the display fields of chat rows
+(titles, pins) and dismissals of failed sends (the doc's `dismissedCommands`
+map, which only hides a "Send failed" row and never runs anything) aren't
+signed. A receive-only device can't dismiss on a chat another device hosts,
+the same as Retry.
 
 ## Signed launch records
 

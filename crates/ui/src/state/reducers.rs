@@ -437,8 +437,17 @@ impl AppState {
     /// optimistic send-in-flight overlay so the sidebar dot stops reading
     /// "Working" for a message the host refused, and the composer's failed
     /// row + Retry take over.
-    pub fn apply_commands(&mut self, commands: Vec<SessionCommandEntry>) {
+    pub fn apply_commands(&mut self, mut commands: Vec<SessionCommandEntry>) {
+        {
+            let dismissed = self.dismissed_commands.borrow();
+            for command in commands.iter_mut() {
+                if dismissed.contains(&command.id) {
+                    command.dismissed = true;
+                }
+            }
+        }
         self.commands = commands;
+        self.drop_dismissed_echoes();
         self.bump_transcript();
         let Some(chat_id) = self.selected_chat.as_deref() else {
             return;
@@ -446,8 +455,61 @@ impl AppState {
         let mut pending = self.pending_sends.borrow_mut();
         if pending.get(chat_id).is_some_and(|p| {
             command_send_status(&self.commands, &p.message_id) == Some(CommandSendStatus::Failed)
+                || send_dismissed(&self.commands, &p.message_id)
         }) {
             pending.remove(chat_id);
+        }
+    }
+
+    /// The composer's × on a failed send: hide its row now, ahead of the
+    /// `DismissCommand` round-trip. Marks `command_id` and the earlier failed
+    /// attempts of its message — the set the engine dismisses — and drops
+    /// the message's optimistic echo. Returns the ids marked; empty when
+    /// `command_id` is no failed message command of the selected chat.
+    pub fn dismiss_failed_command(&mut self, command_id: &str) -> Vec<String> {
+        let Some(target) = self.commands.iter().find(|c| c.id == command_id) else {
+            return Vec::new();
+        };
+        let Some(message_id) = command_message_id(&target.payload).map(str::to_string) else {
+            return Vec::new();
+        };
+        let failed = |c: &SessionCommandEntry| {
+            matches!(
+                c.status,
+                SessionCommandStatus::Rejected | SessionCommandStatus::Expired
+            )
+        };
+        if !failed(target) {
+            return Vec::new();
+        }
+        let issued_at = target.issued_at;
+        let mut ids = Vec::new();
+        for command in self.commands.iter_mut() {
+            if failed(command)
+                && command_message_id(&command.payload) == Some(message_id.as_str())
+                && (command.id == command_id || command.issued_at <= issued_at)
+            {
+                command.dismissed = true;
+                ids.push(command.id.clone());
+            }
+        }
+        self.dismissed_commands
+            .borrow_mut()
+            .extend(ids.iter().cloned());
+        self.drop_dismissed_echoes();
+        self.bump_transcript();
+        ids
+    }
+
+    /// A dismissed failed send's echo leaves the transcript: the host never
+    /// wrote the message, so no device shows it, and a full-opacity bubble
+    /// with no reply would read as sent.
+    fn drop_dismissed_echoes(&mut self) {
+        if let Some(chat_id) = self.selected_chat.as_deref()
+            && let Some(echoes) = self.echoes.get_mut(chat_id)
+        {
+            let commands = &self.commands;
+            echoes.retain(|echo| !send_dismissed(commands, &echo.id));
         }
     }
 

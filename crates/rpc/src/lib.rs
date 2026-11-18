@@ -122,6 +122,12 @@ pub mod methods {
     /// Re-issue a failed/expired durable message command with a fresh command
     /// id while preserving its logical message identity.
     pub const RETRY_COMMAND: &str = "RetryCommand";
+    /// Dismiss a failed/expired durable message command's "Send failed" row
+    /// (and its message's earlier failed attempts). Params
+    /// `{chatId, commandId}`; replies `{commandIds}`, the ids dismissed. The
+    /// doc records it in its `dismissedCommands` map, beside the ledger, so
+    /// it syncs to every device without touching the host's outcome.
+    pub const DISMISS_COMMAND: &str = "DismissCommand";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Durable command ledger of one chat (forwardable stream, params
     /// `{chatId}`): the current command list first, then every doc change.
@@ -501,6 +507,7 @@ pub mod methods {
         MethodSpec::unary(PI_SESSION_MODES).forwardable(),
         MethodSpec::unary(QUEUE_COMMAND).forwardable(),
         MethodSpec::unary(RETRY_COMMAND).forwardable(),
+        MethodSpec::unary(DISMISS_COMMAND).forwardable(),
         MethodSpec::stream(WATCH_DOC_MESSAGES).forwardable(),
         MethodSpec::stream(WATCH_DOC_COMMANDS).forwardable(),
         MethodSpec::unary(PROBE_SYNC),

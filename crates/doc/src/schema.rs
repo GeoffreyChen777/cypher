@@ -30,6 +30,19 @@ pub use launch::{LaunchFact, LaunchRecord, latest_launch};
 use salvage::*;
 pub use segment_writer::*;
 
+/// Root map of dismissed command ids → epoch millis of the dismissal.
+const DISMISSED_COMMANDS: &str = "dismissedCommands";
+
+/// The entry as the ledger projects it: `dismissed` comes from the
+/// `dismissedCommands` map alone, never from a field in the entry's own map.
+fn with_dismissal(
+    mut entry: SessionCommandEntry,
+    dismissed: &std::collections::HashSet<String>,
+) -> SessionCommandEntry {
+    entry.dismissed = dismissed.contains(&entry.id);
+    entry
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
     #[error("loro: {0}")]
@@ -452,16 +465,47 @@ impl SessionDoc {
             .get_deep_value()
             .to_json_value();
         let raw: Vec<serde_json::Value> = serde_json::from_value(commands)?;
+        let dismissed = self.dismissed_command_ids();
         Ok(raw
             .into_iter()
             .filter_map(|v| match serde_json::from_value(v) {
-                Ok(entry) => Some(entry),
+                Ok(entry) => Some(with_dismissal(entry, &dismissed)),
                 Err(err) => {
                     tracing::warn!(error = %err, "skipping malformed command entry");
                     None
                 }
             })
             .collect())
+    }
+
+    /// Ids in the `dismissedCommands` map: failed message commands whose
+    /// "Send failed" row the user dismissed. Additive container — docs that
+    /// never dismissed anything don't carry it, and peers that predate it
+    /// ignore it.
+    pub fn dismissed_command_ids(&self) -> std::collections::HashSet<String> {
+        let LoroValue::Map(map) = self.doc.get_map(DISMISSED_COMMANDS).get_value() else {
+            return Default::default();
+        };
+        map.keys().cloned().collect()
+    }
+
+    /// Record that the user dismissed `command_ids` (epoch millis `at_ms`),
+    /// in one commit. Kept OUT of the entries themselves: rule 2 leaves
+    /// status/resolution to the host, and a field written into an entry's map
+    /// would change the bytes its signature covers for every peer that
+    /// doesn't know to skip it. Idempotent; an empty list writes nothing.
+    pub fn dismiss_commands(&self, command_ids: &[String], at_ms: i64) -> Result<(), DocError> {
+        if command_ids.is_empty() {
+            return Ok(());
+        }
+        let map = self.doc.get_map(DISMISSED_COMMANDS);
+        for id in command_ids {
+            if map.get(id).is_none() {
+                map.insert(id, at_ms)?;
+            }
+        }
+        self.doc.commit();
+        Ok(())
     }
 
     /// Append a command entry (rule 1: own entries only, append-only),
@@ -543,6 +587,7 @@ impl SessionDoc {
         let LoroValue::List(items) = self.doc.get_list("commands").get_deep_value() else {
             return Ok(Vec::new());
         };
+        let dismissed = self.dismissed_command_ids();
         Ok(items
             .iter()
             .filter_map(|item| {
@@ -550,7 +595,7 @@ impl SessionDoc {
                     return None;
                 };
                 let entry = match serde_json::from_value(item.to_json_value()) {
-                    Ok(entry) => entry,
+                    Ok(entry) => with_dismissal(entry, &dismissed),
                     Err(err) => {
                         tracing::warn!(error = %err, "skipping malformed command entry");
                         return None;

@@ -4,6 +4,10 @@
 //! 1. Each device inserts only its own entries; entries are append-only and immutable.
 //! 2. The chat's HOST is the sole writer of command outcomes; a composer may only set
 //!    `cancelled` on its own still-pending entries.
+//!    Dismissing a failed message command (the composer's "Send failed" row) is
+//!    NOT an outcome write: it lands in the doc's separate `dismissedCommands`
+//!    map (see `SessionDoc::dismiss_commands`), so the host's status/resolution and
+//!    every entry's signed bytes stay untouched.
 //! 3. Evaluation (`evaluate_command`, pure): processed-id dedupe → Skip; expired TTL → Expired;
 //!    a newer command of the same kind supersedes steer/interrupt; an interrupt whose
 //!    `based_on.turn_id` is already past → Superseded; otherwise Execute.
@@ -112,6 +116,15 @@ pub struct SessionCommandEntry {
     /// before this field existed stay byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<i64>,
+    /// The user dismissed this failed attempt's "Send failed" row. A
+    /// projection, never written into the entry's own map: the doc keeps
+    /// dismissals in its `dismissedCommands` map and `SessionDoc::read_commands`
+    /// fills this in, so the signed entry bytes (and peers that don't know
+    /// the flag) are unaffected. Additive + serde-defaulted for the
+    /// `WatchDocCommands` wire: old frames read as not dismissed, and the
+    /// field is omitted when false so old readers see identical frames.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dismissed: bool,
 }
 
 impl SessionCommandEntry {
@@ -241,6 +254,7 @@ mod tests {
             status: SessionCommandStatus::Pending,
             resolution: None,
             sent_at: None,
+            dismissed: false,
         }
     }
 
@@ -558,6 +572,49 @@ mod tests {
         let back: SessionCommandEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back.sent_at, Some(1000));
         assert_eq!(serde_json::to_string(&back).unwrap(), json);
+    }
+
+    #[test]
+    fn dismissed_is_additive_on_the_wire() {
+        // New reader, old payload: a 0.4.5 frame reads as not dismissed and
+        // re-serializes byte-identically (the flag is omitted when false).
+        let old = r#"{"id":"c1","payload":{"kind":"run","request":{"prompt":"hello","model":null,"reasoning":null,"modelOptions":{},"cwd":"/tmp","sandbox":"workspace-write","autoApprove":false,"resume":null},"messageId":"m1"},"issuedBy":"device-a","issuedAt":1000,"basedOn":null,"expiresAt":null,"status":"rejected","resolution":"no host","sentAt":1000}"#;
+        let entry: SessionCommandEntry = serde_json::from_str(old).unwrap();
+        assert!(!entry.dismissed);
+        assert_eq!(serde_json::to_string(&entry).unwrap(), old);
+
+        // A dismissed entry carries the flag.
+        let mut dismissed = entry.clone();
+        dismissed.dismissed = true;
+        let new = serde_json::to_string(&dismissed).unwrap();
+        assert!(new.ends_with(r#","dismissed":true}"#), "{new}");
+        let back: SessionCommandEntry = serde_json::from_str(&new).unwrap();
+        assert!(back.dismissed);
+
+        // Old reader, new payload: the 0.4.5 struct (no `dismissed`, no
+        // `deny_unknown_fields`) still reads the frame and just ignores it.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        #[allow(dead_code)]
+        struct Release045Entry {
+            id: String,
+            payload: SessionCommandPayload,
+            issued_by: String,
+            issued_at: i64,
+            #[serde(default)]
+            based_on: Option<CommandBasedOn>,
+            #[serde(default)]
+            expires_at: Option<i64>,
+            status: SessionCommandStatus,
+            #[serde(default)]
+            resolution: Option<String>,
+            #[serde(default)]
+            sent_at: Option<i64>,
+        }
+        let frame = format!("[{new},{old}]");
+        let read: Vec<Release045Entry> = serde_json::from_str(&frame).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].status, SessionCommandStatus::Rejected);
     }
 
     #[test]
