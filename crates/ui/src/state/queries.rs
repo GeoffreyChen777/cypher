@@ -177,10 +177,15 @@ impl AppState {
     /// App-wide: the Dock icon is shared by every window, so this counts
     /// the sessions of projects open in their own windows too (the
     /// [`ProjectScope`] is ignored).
+    ///
+    /// Only user-facing chats count ([`Chat::is_user_facing`], the same
+    /// rule the chimes follow): a workspace's owner chat does — the logo
+    /// and the workspace switcher show it unread — but its hidden threads
+    /// never do, as nothing in the main UI would show (or clear) them.
     pub fn attention_count(&self, now: DateTime<Utc>) -> usize {
         self.chats
             .iter()
-            .filter(|c| !c.archived && !c.is_child() && !c.is_memory_pass())
+            .filter(|c| c.is_user_facing())
             .filter(|c| match c.space_id.as_deref() {
                 None => true,
                 Some(id) => self.space_row(id).is_some(),

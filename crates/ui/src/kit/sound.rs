@@ -166,13 +166,7 @@ impl SessionChimes {
         chat: Option<&Chat>,
         status: SessionStatus,
     ) -> Option<Sound> {
-        let user_facing = chat.is_some_and(|chat| {
-            !chat.archived
-                && !chat.is_child()
-                && !chat.is_memory_pass()
-                && chat.bot.as_ref().is_none_or(|bot| bot.is_owner_chat())
-        });
-        if !user_facing {
+        if !chat.is_some_and(Chat::is_user_facing) {
             self.previous.remove(chat_id);
             return None;
         }

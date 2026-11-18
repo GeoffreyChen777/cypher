@@ -149,7 +149,8 @@ pub(super) fn bot_needs(
 }
 
 /// What needs the owner across every bot: the logo's count in the Sessions
-/// view.
+/// view (which the picker sums from the same per-bot lists).
+#[cfg(test)]
 pub(super) fn needs_you_count(state: &crate::state::AppState, now: chrono::DateTime<Utc>) -> usize {
     state
         .bots

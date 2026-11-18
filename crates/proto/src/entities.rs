@@ -229,6 +229,22 @@ impl Chat {
     pub fn parent_chat_id(&self) -> Option<&str> {
         self.child.as_ref().map(|c| c.parent_chat_id.as_str())
     }
+
+    /// True for a conversation the user sees and follows in the app: a
+    /// root session, or a workspace's own chat with its owner. Archived
+    /// chats, child subagent chats, memory passes and every hidden bot
+    /// thread (work, routine, peer and routine-session threads) are not —
+    /// they must neither chime nor count on the Dock badge, since nothing
+    /// in the main UI would show why.
+    pub fn is_user_facing(&self) -> bool {
+        !self.archived
+            && !self.is_child()
+            && !self.is_memory_pass()
+            && self
+                .bot
+                .as_ref()
+                .is_none_or(|marker| marker.is_owner_chat())
+    }
 }
 
 impl Chat {
