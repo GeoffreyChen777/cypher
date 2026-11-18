@@ -13,7 +13,8 @@
 // probe's request, and with the probe's adversarial verdict (as the test does).
 //
 //   node live.mjs [--context FILE] [--out DIR] [--concurrency N] [--model ID]
-//                 [--only 1,2,3] [--timeout-ms N] [--sdk PATH]
+//                 [--only 1,2,3] [--timeout-ms N] [--sdk PATH] [--cases FILE]
+//                 [--label NAME]
 //
 // --context: per-case conversation (`{ "<id>": { branch, model } }`), built
 //   from the owner's sessions and kept out of the repository; without it a
@@ -21,6 +22,9 @@
 // --model: the default model (claude-opus-5-5); a case whose chat ran on
 //   another claude-bridge model uses that one.
 // --sdk: the Claude Agent SDK's sdk.mjs (default: the installed Runtime's).
+// --cases: other cases in the fixture's format (`{ "cases": [...] }`), e.g. the
+//   commands of one agent's session, instead of the fixture's.
+// Results: <out>/<label>.json.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -39,6 +43,7 @@ const { values: args } = parseArgs({
     sdk: { type: "string", default: join(homedir(), ".cypher/pi-runtime/current/npm/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs") },
     claude: { type: "string" },
     label: { type: "string", default: "live" },
+    cases: { type: "string" },
   },
 });
 
@@ -147,12 +152,13 @@ function verdictOf(answer) {
   }
 }
 
-const machine = createMachine({ judgeTimeoutMs: Number(args["timeout-ms"]) });
+const replayed = args.cases ? JSON.parse(readFileSync(args.cases, "utf8")).cases : fixture.cases;
+const machine = createMachine({ judgeTimeoutMs: Number(args["timeout-ms"]), cases: replayed });
 const jobs = [];
-for (const item of fixture.cases) {
+for (const item of replayed) {
   if (only && !only.has(item.id)) continue;
   const branch = context[item.id]?.branch;
-  const proposal = proposalFor(item, branch);
+  const proposal = proposalFor(item, branch) ?? item.proposal;
   jobs.push({ item, branch, proposal });
   for (const [index, probe] of (item.probes ?? []).entries()) jobs.push({ item, probe, index, branch, proposal });
 }

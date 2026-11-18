@@ -52,11 +52,12 @@ export function stubbedModel(verdict) {
 }
 
 /**
- * Build the fake machine. `judgeTimeoutMs` sets the reviewing model's
- * timeout in the fake agent directory's permissions.json (the live runner
- * waits longer than the extension's default, and reports the latency).
+ * Build the fake machine for `cases` (the fixture's by default). `judgeTimeoutMs`
+ * sets the reviewing model's timeout in the fake agent directory's
+ * permissions.json (the live runner waits longer than the extension's
+ * default, and reports the latency).
  */
-export function createMachine({ judgeTimeoutMs } = {}) {
+export function createMachine({ judgeTimeoutMs, cases = fixture.cases } = {}) {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), "cypher-replay-")));
   const home = join(scratch, "home");
   /** The cases' `/tmp`: scratch space, apart from the fake home. */
@@ -77,9 +78,9 @@ export function createMachine({ judgeTimeoutMs } = {}) {
     spawnSync("git", ["init", "-q", "-b", "main", path]);
     spawnSync("git", ["-C", path, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "init"]);
   }
-  for (const cwd of new Set(fixture.cases.map((item) => item.cwd))) repo(expand(cwd));
+  for (const cwd of new Set(cases.map((item) => item.cwd))) repo(expand(cwd));
   // A chat's worktree is on its own branch (`checkout`): work it may delete when it is done.
-  for (const item of fixture.cases) {
+  for (const item of cases) {
     if (item.checkout) spawnSync("git", ["-C", expand(item.cwd), "switch", "-q", "-c", item.checkout]);
   }
 
