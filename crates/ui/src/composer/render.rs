@@ -917,14 +917,15 @@ fn failure_notice(
         .child(div().min_w_0().child(message))
 }
 
-/// A durable send the host failed: its prompt, the host's resolution, and
-/// Retry.
+/// A durable send the host failed: its prompt, the host's resolution, Retry,
+/// and × to dismiss it.
 fn delivery_failure_notice(
     failed: crate::state::FailedCommand,
     theme: &Theme,
     cx: &mut Context<Composer>,
 ) -> gpui::Stateful<gpui::Div> {
     let command_id = failed.command_id.clone();
+    let dismiss_id = failed.command_id.clone();
     let resolution = failed
         .resolution
         .clone()
@@ -983,5 +984,25 @@ fn delivery_failure_notice(
                     this.retry_failed_command(command_id.clone(), cx);
                 }))
                 .child("Retry"),
+        )
+        .child(
+            div()
+                .id("composer-delivery-dismiss")
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(26.0))
+                .rounded(px(7.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.danger.opacity(0.18)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.dismiss_failed_command(dismiss_id.clone(), cx);
+                }))
+                .child(
+                    crate::kit::icons::icon(crate::kit::icons::CLOSE)
+                        .size(px(14.0))
+                        .text_color(theme.danger_muted.opacity(0.9)),
+                ),
         )
 }

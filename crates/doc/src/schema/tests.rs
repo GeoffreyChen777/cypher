@@ -822,6 +822,7 @@ fn command_queue_and_outcome_round_trip() {
         status: SessionCommandStatus::Pending,
         resolution: None,
         sent_at: None,
+        dismissed: false,
     };
     doc.queue_command(&entry).unwrap();
     doc.set_command_status("c1", SessionCommandStatus::Applied, None)
@@ -864,6 +865,7 @@ fn run_request_attachments_survive_command_round_trip() {
         status: SessionCommandStatus::Pending,
         resolution: None,
         sent_at: None,
+        dismissed: false,
     })
     .unwrap();
     match &doc.read_commands().unwrap()[0].payload {
@@ -1156,6 +1158,7 @@ fn a_signed_command_reads_back_with_the_bytes_it_was_signed_over() {
         status: SessionCommandStatus::Pending,
         resolution: None,
         sent_at: Some(10),
+        dismissed: false,
     };
     let mut signed = Vec::new();
     doc.queue_signed_command("chat-1", &entry, |bytes| {
@@ -1203,6 +1206,85 @@ fn a_signed_command_reads_back_with_the_bytes_it_was_signed_over() {
             .1
             .signing_bytes,
         signed
+    );
+}
+
+#[test]
+fn dismissals_sit_beside_the_ledger_and_sync() {
+    use crate::commands::SessionCommandPayload;
+    let doc = SessionDoc::init("chat-1").unwrap();
+    // A doc from before dismissals: no map, nothing dismissed.
+    assert!(doc.dismissed_command_ids().is_empty());
+    let entry = SessionCommandEntry {
+        id: "c1".into(),
+        payload: SessionCommandPayload::Steer {
+            prompt: "hi".into(),
+            message_id: Some("m1".into()),
+            agent_prompt: None,
+        },
+        issued_by: "dev-b".into(),
+        issued_at: 10,
+        based_on: None,
+        expires_at: Some(99),
+        status: SessionCommandStatus::Pending,
+        resolution: None,
+        sent_at: Some(10),
+        dismissed: false,
+    };
+    doc.queue_signed_command("chat-1", &entry, |_| Some([7; 64]))
+        .unwrap();
+    doc.queue_command(&SessionCommandEntry {
+        id: "c2".into(),
+        ..entry.clone()
+    })
+    .unwrap();
+    doc.set_command_status("c1", SessionCommandStatus::Rejected, Some("x"))
+        .unwrap();
+    let before = doc.read_commands_with_auth("chat-1").unwrap();
+    assert!(before.iter().all(|(c, _)| !c.dismissed));
+
+    doc.dismiss_commands(&["c1".to_string()], 1_000).unwrap();
+    // Idempotent, and an empty list writes nothing.
+    doc.dismiss_commands(&["c1".to_string()], 2_000).unwrap();
+    doc.dismiss_commands(&[], 3_000).unwrap();
+
+    let after = doc.read_commands_with_auth("chat-1").unwrap();
+    assert!(after[0].0.dismissed && !after[1].0.dismissed);
+    // The entry, its outcome and its signature are untouched.
+    assert_eq!(after[0].1, before[0].1);
+    assert_eq!(after[0].0.status, SessionCommandStatus::Rejected);
+    assert_eq!(after[0].0.resolution.as_deref(), Some("x"));
+    if let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+        doc.doc().get_list("commands").get(0)
+    {
+        assert!(
+            map.get("dismissed").is_none(),
+            "nothing written into the entry"
+        );
+    } else {
+        panic!("entry map");
+    }
+    let read = doc.read_commands().unwrap();
+    assert!(read[0].dismissed && !read[1].dismissed);
+    // The first dismissal's time stands.
+    assert_eq!(
+        doc.doc()
+            .get_map("dismissedCommands")
+            .get_value()
+            .to_json_value(),
+        serde_json::json!({ "c1": 1_000 })
+    );
+
+    // Another device reads it from the synced doc.
+    let replica = LoroDoc::new();
+    replica
+        .import(&doc.doc().export(ExportMode::Snapshot).unwrap())
+        .unwrap();
+    let replica = SessionDoc::from_doc(replica);
+    assert!(replica.read_commands().unwrap()[0].dismissed);
+    assert_eq!(
+        replica.read_commands_with_auth("chat-1").unwrap()[0].1,
+        before[0].1
     );
 }
 

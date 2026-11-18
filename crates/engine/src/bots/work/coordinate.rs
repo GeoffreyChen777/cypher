@@ -1710,6 +1710,7 @@ mod tests {
             status,
             resolution: Some("no such model".into()),
             sent_at: None,
+            dismissed: false,
         };
         let run = || SessionCommandPayload::Steer {
             prompt: "go".into(),

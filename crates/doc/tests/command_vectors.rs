@@ -82,6 +82,7 @@ fn written_run() -> BTreeMap<String, LoroValue> {
         status: SessionCommandStatus::Pending,
         resolution: None,
         sent_at: Some(1_700_000_000_000),
+        dismissed: false,
     };
     doc.queue_signed_command("chat-7", &entry, |_| Some([0x5a; 64]))
         .unwrap();

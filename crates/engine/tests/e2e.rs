@@ -150,6 +150,7 @@ fn queue_as_viewer(doc: &SessionDoc, id: &str, payload: SessionCommandPayload) {
         status: SessionCommandStatus::Pending,
         resolution: None,
         sent_at: None,
+        dismissed: false,
     })
     .expect("queue command");
 }

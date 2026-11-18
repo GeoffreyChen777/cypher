@@ -85,6 +85,7 @@ fn run(id: &str, issued_by: &str, prompt: &str) -> SessionCommandEntry {
         status: SessionCommandStatus::Pending,
         resolution: None,
         sent_at: None,
+        dismissed: false,
     }
 }
 

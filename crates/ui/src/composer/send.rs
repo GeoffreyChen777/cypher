@@ -870,6 +870,49 @@ impl Composer {
             }
         }));
     }
+
+    /// Dismiss one failed durable Run/Steer's row (×). Hidden at once from
+    /// the local overlay; `DismissCommand` then records it in the chat doc so
+    /// it stays dismissed on every device and across restarts. When that
+    /// write fails (engine gone, receive-only device) the row stays hidden
+    /// for this session and the failure notice says it wasn't saved.
+    pub(super) fn dismiss_failed_command(&mut self, command_id: String, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+            return;
+        };
+        self.state.update(cx, |state, cx| {
+            state.dismiss_failed_command(&command_id);
+            cx.notify();
+        });
+        cx.notify();
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.failure = Some("Dismissed on this device only: engine not connected".into());
+            return;
+        };
+        // Detached, not `send_task`: a dismissal must not cancel (or be
+        // cancelled by) a send in flight.
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    methods::DISMISS_COMMAND,
+                    serde_json::json!({
+                        "chatId": chat_id,
+                        "commandId": command_id,
+                    }),
+                )
+                .await;
+            if let Err(err) = result {
+                tracing::warn!(%chat_id, command = %command_id, error = %err, "dismiss failed");
+                this.update(cx, |composer, cx| {
+                    composer.failure = Some(format!("Dismissed on this device only: {err}").into());
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
 }
 
 /// Where a send goes, resolved before anything is staged.

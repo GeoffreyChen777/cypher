@@ -53,6 +53,7 @@ pub(super) struct QueueCommandParams {
     pub(super) command: SessionCommandPayload,
 }
 
+/// `RetryCommand` and `DismissCommand`: one command of one chat.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct RetryCommandParams {

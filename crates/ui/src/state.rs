@@ -160,6 +160,14 @@ pub enum CommandSendStatus {
     Failed,
 }
 
+/// Whether `command` is a failed (Rejected/Expired) attempt.
+fn command_failed(command: &SessionCommandEntry) -> bool {
+    matches!(
+        command.status,
+        SessionCommandStatus::Rejected | SessionCommandStatus::Expired
+    )
+}
+
 /// The logical message id a Run/Steer command carries (the same client-minted
 /// id as the optimistic echo — the dedup key across attempts).
 pub fn command_message_id(payload: &SessionCommandPayload) -> Option<&str> {
@@ -174,7 +182,9 @@ pub fn command_message_id(payload: &SessionCommandPayload) -> Option<&str> {
 }
 
 /// Map a message id to its projected send status from the durable ledger.
-/// `None` = no Run/Steer command (or the message already resolved).
+/// `None` = no Run/Steer command, the message already resolved, or the user
+/// dismissed its failure (see [`send_dismissed`]). A dismissed failure still
+/// counts toward Retrying when another device retries the message later.
 pub fn command_send_status(
     commands: &[SessionCommandEntry],
     message_id: &str,
@@ -189,23 +199,31 @@ pub fn command_send_status(
     let has_live = attempts
         .iter()
         .any(|c| c.status == SessionCommandStatus::Pending);
-    let has_failed = attempts.iter().any(|c| {
-        matches!(
-            c.status,
-            SessionCommandStatus::Rejected | SessionCommandStatus::Expired
-        )
-    });
+    let has_failed = attempts.iter().any(|c| command_failed(c));
     if has_live {
         if has_failed {
             Some(CommandSendStatus::Retrying)
         } else {
             Some(CommandSendStatus::Queued)
         }
-    } else if has_failed {
-        Some(CommandSendStatus::Failed)
     } else {
-        None
+        // The LATEST attempt decides: a retry that went through (Applied)
+        // resolves the message even though an earlier attempt failed.
+        let latest = attempts.iter().max_by_key(|c| c.issued_at)?;
+        (command_failed(latest) && !latest.dismissed).then_some(CommandSendStatus::Failed)
     }
+}
+
+/// The user dismissed this message's failed send: it failed, nothing is
+/// retrying it, and every failed attempt is dismissed. Its optimistic echo
+/// leaves the transcript then — the host never wrote the message, so this is
+/// what every other device (and this one after a restart) shows anyway.
+pub fn send_dismissed(commands: &[SessionCommandEntry], message_id: &str) -> bool {
+    let mut attempts = commands
+        .iter()
+        .filter(|c| command_message_id(&c.payload) == Some(message_id))
+        .peekable();
+    attempts.peek().is_some() && attempts.all(|c| command_failed(c) && c.dismissed)
 }
 
 /// A failed (Rejected/Expired) message command the user can retry — the
@@ -218,13 +236,17 @@ pub struct FailedCommand {
 }
 
 /// The retry-able failures in the ledger, in doc order, skipping messages
-/// with a live pending attempt (their retry is already in flight).
+/// with a live pending attempt (their retry is already in flight) and
+/// failures the user dismissed.
 pub fn failed_commands(commands: &[SessionCommandEntry]) -> Vec<FailedCommand> {
     let mut out: Vec<FailedCommand> = Vec::new();
     for command in commands {
         let Some(message_id) = command_message_id(&command.payload) else {
             continue;
         };
+        if command.dismissed {
+            continue;
+        }
         // A live attempt supersedes the failed row: Retrying is in flight.
         if command_send_status(commands, message_id) != Some(CommandSendStatus::Failed) {
             continue;
@@ -319,6 +341,12 @@ pub struct AppState {
     /// Message ids this device sent as a Steer. Labels the optimistic echo
     /// before the ledger frame carrying its Steer command arrives.
     local_steers: HashSet<String>,
+    /// Command ids this UI dismissed (the composer's × on a failed send).
+    /// Folded into every ledger frame so the row disappears at once, before
+    /// `DismissCommand`'s doc write echoes back — and stays gone for this
+    /// session if that write fails. Shared like [`Self::pending_sends`]
+    /// (command ids are globally unique, so one set serves every chat).
+    dismissed_commands: Rc<RefCell<HashSet<String>>>,
     /// Send-in-flight overlay per chat id: a queued doc command the host
     /// hasn't executed yet (see [`Self::begin_pending_send`]). Shared between
     /// a main state and its session contexts ([`Self::new_session_context`])
@@ -529,6 +557,7 @@ impl AppState {
             commands: Vec::new(),
             echoes: HashMap::new(),
             local_steers: HashSet::new(),
+            dismissed_commands: Rc::default(),
             pending_sends: Rc::default(),
             upload_progress: None,
             local_device_id: None,
@@ -606,6 +635,7 @@ impl AppState {
                 .collect(),
         ));
         seed.local_steers = m.local_steers.clone();
+        seed.dismissed_commands = m.dismissed_commands.clone();
         seed.selected_space = Some(space.id.clone());
         seed.selected_device = Some(space.device_id.clone());
         let state = cx.new(|_| seed);
@@ -658,6 +688,7 @@ impl AppState {
             seed.echoes.insert(id.to_string(), echoes.clone());
         }
         seed.local_steers = m.local_steers.clone();
+        seed.dismissed_commands = m.dismissed_commands.clone();
         let state = cx.new(|cx| {
             seed.mirror = Some(cx.observe(main, |this: &mut AppState, main, cx| {
                 this.mirror_from_parent(&main, cx);

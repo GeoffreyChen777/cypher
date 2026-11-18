@@ -27,6 +27,8 @@ fn engine_identity_is_not_forwardable() {
     assert!(forwardable(methods::QUEUE_COMMAND));
     assert!(forwardable(methods::PI_SESSION_MODES));
     assert!(forwardable(methods::RETRY_COMMAND));
+    assert!(forwardable(methods::DISMISS_COMMAND));
+    assert!(!is_stream_method(methods::DISMISS_COMMAND));
     assert!(forwardable(methods::WATCH_DOC_COMMANDS));
     assert!(is_stream_method(methods::WATCH_DOC_COMMANDS));
     assert!(forwardable(methods::SEARCH_FILES));

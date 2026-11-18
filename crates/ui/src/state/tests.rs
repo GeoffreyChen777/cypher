@@ -2461,6 +2461,7 @@ fn run_command(
         status,
         resolution: Some("nope".into()),
         sent_at: Some(issued_at),
+        dismissed: false,
     }
 }
 
@@ -2558,6 +2559,176 @@ fn failed_command_lifts_echo_veil_and_ends_send_overlay() {
         run_command("c2", "m1", 2, SessionCommandStatus::Pending),
     ]);
     assert!(s.echo_pending("m1"));
+    assert!(s.failed_commands().is_empty());
+}
+
+#[test]
+fn a_retry_that_went_through_clears_the_failed_row() {
+    // Regression: an Applied retry left the row up ("The host did not
+    // complete this send.") because any earlier failure counted.
+    let commands = vec![
+        run_command("c1", "m1", 1, SessionCommandStatus::Rejected),
+        run_command("c2", "m1", 2, SessionCommandStatus::Applied),
+    ];
+    assert_eq!(command_send_status(&commands, "m1"), None);
+    assert!(failed_commands(&commands).is_empty());
+    assert!(!send_dismissed(&commands, "m1"));
+    // The reverse order is still a failure.
+    let commands = vec![
+        run_command("c1", "m1", 1, SessionCommandStatus::Applied),
+        run_command("c2", "m1", 2, SessionCommandStatus::Expired),
+    ];
+    assert_eq!(
+        command_send_status(&commands, "m1"),
+        Some(CommandSendStatus::Failed)
+    );
+    assert_eq!(failed_commands(&commands)[0].command_id, "c2");
+}
+
+fn dismissed(mut command: SessionCommandEntry) -> SessionCommandEntry {
+    command.dismissed = true;
+    command
+}
+
+#[test]
+fn dismissed_failures_leave_the_failed_row_and_status() {
+    use SessionCommandStatus::{Expired, Pending, Rejected};
+    // Both attempts of m1 dismissed: no row, no Failed bubble status.
+    let commands = vec![
+        dismissed(run_command("c1", "m1", 1, Rejected)),
+        dismissed(run_command("c2", "m1", 2, Expired)),
+        run_command("c3", "m2", 3, Expired),
+    ];
+    let failed = failed_commands(&commands);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].command_id, "c3");
+    assert_eq!(command_send_status(&commands, "m1"), None);
+    assert!(send_dismissed(&commands, "m1"));
+    assert!(!send_dismissed(&commands, "m2"));
+    assert!(!send_dismissed(&commands, "m-none"));
+
+    // Another device retries it later: Retrying, the message is live again.
+    let retried = vec![
+        dismissed(run_command("c1", "m1", 1, Rejected)),
+        run_command("c4", "m1", 4, Pending),
+    ];
+    assert_eq!(
+        command_send_status(&retried, "m1"),
+        Some(CommandSendStatus::Retrying)
+    );
+    assert!(!send_dismissed(&retried, "m1"));
+    // ...and that retry fails: a new failure shows again.
+    let failed_again = vec![
+        dismissed(run_command("c1", "m1", 1, Rejected)),
+        run_command("c4", "m1", 4, Rejected),
+    ];
+    assert_eq!(
+        command_send_status(&failed_again, "m1"),
+        Some(CommandSendStatus::Failed)
+    );
+    let failed = failed_commands(&failed_again);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].command_id, "c4");
+}
+
+#[test]
+fn dismissing_a_failed_send_hides_it_and_drops_its_echo() {
+    use SessionCommandStatus::{Applied, Pending, Rejected};
+    let now = Utc::now();
+    let mut s = AppState::new();
+    s.selected_chat = Some("c".into());
+    let echo = |id: &str| SessionMessageEntry {
+        id: id.into(),
+        role: cypher_doc::MessageRole::User,
+        device_id: "local".into(),
+        ..crate::test_fixtures::entry()
+    };
+    s.push_echo("c", echo("m1"));
+    s.push_echo("c", echo("m2"));
+    s.begin_pending_send("c", "m1", now);
+    let ledger = || {
+        vec![
+            run_command("c1", "m1", 1, Rejected),
+            run_command("c2", "m1", 2, Rejected),
+            run_command("c3", "m2", 3, Rejected),
+            run_command("c4", "m3", 4, Applied),
+            run_command("c5", "m4", 5, Pending),
+        ]
+    };
+    s.apply_commands(ledger());
+    assert_eq!(s.failed_commands().len(), 2);
+    assert_eq!(s.pending_echoes().len(), 2);
+
+    // Nothing to dismiss on a live, resolved, or unknown command.
+    assert!(s.dismiss_failed_command("c5").is_empty());
+    assert!(s.dismiss_failed_command("c4").is_empty());
+    assert!(s.dismiss_failed_command("nope").is_empty());
+
+    // × on m1's row: the latest attempt and the earlier one, at once.
+    let revision = s.transcript_revision();
+    let mut ids = s.dismiss_failed_command("c2");
+    ids.sort();
+    assert_eq!(ids, ["c1", "c2"]);
+    assert!(s.transcript_revision() > revision);
+    let rows: Vec<String> = s
+        .failed_commands()
+        .into_iter()
+        .map(|f| f.command_id)
+        .collect();
+    assert_eq!(rows, ["c3"]);
+    assert_eq!(s.command_status_for("m1"), None);
+    // The unsent message leaves the transcript (it never reached the host);
+    // m2's still-failed echo stays, unveiled, beside its row.
+    let echoes: Vec<&str> = s.pending_echoes().iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(echoes, ["m2"]);
+    assert!(!s.echo_pending("m2"));
+    assert!(!s.send_pending("c", now));
+
+    // A ledger frame from before the DismissCommand write landed (or one
+    // whose write failed) doesn't bring the row back...
+    s.apply_commands(ledger());
+    let rows: Vec<String> = s
+        .failed_commands()
+        .into_iter()
+        .map(|f| f.command_id)
+        .collect();
+    assert_eq!(rows, ["c3"]);
+    // ...nor does the engine's own flagged frame.
+    s.apply_commands(vec![
+        dismissed(run_command("c1", "m1", 1, Rejected)),
+        dismissed(run_command("c2", "m1", 2, Rejected)),
+        run_command("c3", "m2", 3, Rejected),
+    ]);
+    assert_eq!(s.failed_commands().len(), 1);
+}
+
+#[test]
+fn a_dismissal_synced_from_another_device_drops_the_echo() {
+    let mut s = AppState::new();
+    s.selected_chat = Some("c".into());
+    s.push_echo(
+        "c",
+        SessionMessageEntry {
+            id: "m1".into(),
+            role: cypher_doc::MessageRole::User,
+            device_id: "local".into(),
+            ..crate::test_fixtures::entry()
+        },
+    );
+    s.apply_commands(vec![run_command(
+        "c1",
+        "m1",
+        1,
+        SessionCommandStatus::Expired,
+    )]);
+    assert_eq!(s.pending_echoes().len(), 1);
+    s.apply_commands(vec![dismissed(run_command(
+        "c1",
+        "m1",
+        1,
+        SessionCommandStatus::Expired,
+    ))]);
+    assert!(s.pending_echoes().is_empty());
     assert!(s.failed_commands().is_empty());
 }
 

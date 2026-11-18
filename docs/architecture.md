@@ -117,6 +117,9 @@ Two persistent kinds of data. When sync is enabled, session docs ride the chat2 
 Send/steer/interrupt/respondInput = durable command entries in the session doc (`QueueCommand`),
 executed by the chat's **host** device (executor gated on chat ownership; mark-processed BEFORE
 execute; steer with no live run dispatches as the next turn). Offline sends queue in the doc.
+A failed send's composer row offers Retry (`RetryCommand`, a fresh attempt) and × (`DismissCommand`):
+a dismissal is recorded in the doc's `dismissedCommands` map beside the ledger, so it syncs to every
+device without touching the host's outcome or the entry's signature.
 
 ## 3. Repository and crates
 

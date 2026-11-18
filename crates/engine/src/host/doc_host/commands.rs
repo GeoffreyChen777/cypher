@@ -615,6 +615,7 @@ impl DocHost {
                 // The first attempt IS the original send: the UI uses sent_at as
                 // the stable message-send clock across retries.
                 sent_at: Some(now),
+                dismissed: false,
             },
             true,
         )?;
@@ -710,6 +711,7 @@ impl DocHost {
             // The user's original send time, not the retry's: the message's
             // place in the transcript/order is set by when it was first sent.
             sent_at: old.sent_at.or(Some(old.issued_at)),
+            dismissed: false,
         };
         let retry_id = retry.id.clone();
         // A command this device didn't sign — another device's, or one
@@ -718,6 +720,74 @@ impl DocHost {
         self.append_command(&handle, &retry, self.may_resign(&old_auth))?;
         self.nudge_remote_host(chat_id);
         Ok(retry_id)
+    }
+
+    /// Dismiss a failed or expired message command's "Send failed" row,
+    /// together with every earlier failed attempt of the same message (a
+    /// retry that failed again leaves the first attempt Rejected too).
+    /// Returns the ids dismissed.
+    ///
+    /// Not an outcome write and not a new command: the ids land in the doc's
+    /// `dismissedCommands` map, so the host stays the sole writer of
+    /// status/resolution (ledger rule 2), the entries' signed bytes don't
+    /// change, nothing is appended for a host to execute, and peers that
+    /// predate the map simply ignore it. Same device gate as Retry: a
+    /// receive-only device can't act on a chat another device hosts.
+    pub fn dismiss_command(
+        &self,
+        chat_id: &str,
+        command_id: &str,
+    ) -> Result<Vec<String>, EngineError> {
+        self.check_may_command(chat_id)?;
+        let handle = self.open(chat_id)?;
+        let commands = handle.doc.read_commands()?;
+        let target = commands
+            .iter()
+            .find(|command| command.id == command_id)
+            .ok_or_else(|| EngineError::Other("command not found".into()))?;
+        let failed = |command: &SessionCommandEntry| {
+            matches!(
+                command.status,
+                SessionCommandStatus::Rejected | SessionCommandStatus::Expired
+            )
+        };
+        if !failed(target) {
+            return Err(EngineError::Other(
+                "only failed or expired commands can be dismissed".into(),
+            ));
+        }
+        if !matches!(
+            &target.payload,
+            SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
+        ) {
+            return Err(EngineError::Other(
+                "only message commands can be dismissed".into(),
+            ));
+        }
+        // A retry already in flight owns the message now: there is no failed
+        // row to dismiss, and hiding its earlier failure would only lose the
+        // Retrying state.
+        let has_live_attempt = commands.iter().any(|other| {
+            other.status == SessionCommandStatus::Pending
+                && same_message_identity(&other.payload, &target.payload)
+        });
+        if has_live_attempt {
+            return Err(EngineError::Other(
+                "a retry for this message is already pending".into(),
+            ));
+        }
+        let ids: Vec<String> = commands
+            .iter()
+            .filter(|command| {
+                command.id == target.id
+                    || (failed(command)
+                        && command.issued_at <= target.issued_at
+                        && same_message_identity(&command.payload, &target.payload))
+            })
+            .map(|command| command.id.clone())
+            .collect();
+        handle.doc.dismiss_commands(&ids, now_ms())?;
+        Ok(ids)
     }
 }
 

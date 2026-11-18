@@ -292,6 +292,7 @@ mod tests {
             status: SessionCommandStatus::Pending,
             resolution: None,
             sent_at: None,
+            dismissed: false,
         }
     }
 
