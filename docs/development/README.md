@@ -121,6 +121,9 @@ Tests per platform:
   headless engine with the mock harness; `scripts/dev-app.sh [local|dev]` runs a
   UI attached to it over Unix IPC. Data lives in `~/.cypher-development/`;
   `CYPHER_DEV_INSTANCE=<name>` keeps a second checkout's instance separate.
+  `scripts/dev-instance.sh start|status|capture NAME|stop [all]` runs both for
+  one instance with pid files, logs and screenshots in its own data dirs (the
+  `cypher-dev-app` skill in `.agents/skills/`).
   Typing `[mock:artifacts]` into a chat there answers with chat
   [artifacts](../features/artifacts.md), and `[mock:artifacts:revise]` with a
   revision of the page.

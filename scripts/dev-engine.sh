@@ -9,8 +9,13 @@ case "$mode" in local|dev) ;; *) echo 'Usage: dev-engine.sh [local|dev]' >&2; ex
 instance="${CYPHER_DEV_INSTANCE:-}"
 [[ "$instance" =~ ^[A-Za-z0-9._-]*$ ]] || { echo 'CYPHER_DEV_INSTANCE: letters, digits, . _ - only' >&2; exit 2; }
 unset CYPHER_DEV_INSTANCE
+# CYPHER_DEV_FEATURES adds features to the dev build (dev-instance.sh passes
+# development,dev-capture so the UI it runs from the same binary can capture).
+features="${CYPHER_DEV_FEATURES:-development}"
+[[ "$features" =~ ^[a-z,-]+$ ]] || { echo 'CYPHER_DEV_FEATURES: comma-separated feature names' >&2; exit 2; }
+unset CYPHER_DEV_FEATURES
 export CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
-cargo build --locked -p cypher --features development
+cargo build --locked -p cypher --features "$features"
 unset CYPHER_EDGE_TOKEN CYPHER_EDGE_URL CYPHER_WORKOS_CLIENT_ID CYPHER_ENGINE_DATA_DIR CYPHER_ORG_ID CYPHER_USER_ID CYPHER_DEV_ACCESS_TOKEN
 export CYPHER_DATA_DIR="$HOME/.cypher-development/$mode-engine${instance:+-$instance}"
 umask 077
@@ -58,4 +63,6 @@ else
 fi
 export CYPHER_HARNESS="${CYPHER_HARNESS:-mock}"
 export CYPHER_AUTO_UPDATE=0
+# exec keeps this pid: dev-instance.sh stops the engine by this file.
+echo "$$" >"$CYPHER_DATA_DIR/dev.pid"
 exec target/debug/cypher headless

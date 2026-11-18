@@ -19,4 +19,6 @@ CYPHER_DATA_DIR="$CYPHER_ENGINE_DATA_DIR" target/debug/cypher status --verbose |
   || { echo "No engine listening for $CYPHER_ENGINE_DATA_DIR; start dev-engine.sh first" >&2; exit 1; }
 umask 077
 mkdir -p "$CYPHER_DATA_DIR"
+# exec keeps this pid: dev-instance.sh stops the UI by this file.
+echo "$$" >"$CYPHER_DATA_DIR/dev.pid"
 exec target/debug/cypher
