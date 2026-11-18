@@ -932,7 +932,10 @@ Tests: `cypher-permissions.test.mjs` (engine, no Pi or Landstrip),
 from 2026-11-11, sanitized in `cypher-permissions-replay/`, replayed through the
 classifier and the decision path with the judge's verdict stubbed per case; the
 explicit-request cases carry the owner's words and adversarial probes that must still
-ask) and
+ask; `cypher-permissions-replay/harness.mjs` is its fake machine, and
+`cypher-permissions-replay/live.mjs`, run by hand and never by `npm test`, puts the same
+cases and probes through the real reviewing model, as claude-bridge calls it, with each
+case's conversation from a context file kept outside the repository) and
 `cypher-permissions.staged.test.mjs` (a real `bin/pi` in RPC mode from a staged Runtime,
 a scripted faux model that also answers as the judge, the real Landstrip, the patched
 grep and apply_patch, dialogs answered over RPC). The package script runs both on macOS and Linux builds; the

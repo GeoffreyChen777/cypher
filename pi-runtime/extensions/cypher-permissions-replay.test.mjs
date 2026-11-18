@@ -4,10 +4,10 @@
 // stubbed by each case's verdict: what now runs on the model's approval
 // (once, or remembered for the chat) and what still asks the user.
 //
-// The machine is faked: a home with the main checkout and the chats'
-// worktrees, program lookup that finds every program as the system's (so the
-// result does not depend on what this host has installed), and the process
-// facts each `kill` case records.
+// The machine is faked (cypher-permissions-replay/harness.mjs): a home with
+// the main checkout and the chats' worktrees, program lookup that finds every
+// program as the system's (so the result does not depend on what this host
+// has installed), and the process facts each `kill` case records.
 //
 // A case may carry the owner's own words (what the engine passes in
 // CYPHER_OWNER_WORDS), the conversation as Pi stored it, the git facts a
@@ -17,135 +17,20 @@
 // (explicit.ts, the always-ask floor).
 //
 // REPLAY_REPORT=1 prints a table of every case instead of failing on the first difference.
+// cypher-permissions-replay/live.mjs runs the same cases against the real
+// reviewing model instead (by hand; it needs the network and an account).
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 import { after, test } from "node:test";
-import { fileURLToPath } from "node:url";
 
-import { Permissions } from "./cypher-permissions/core.ts";
-import { UNKNOWN } from "./cypher-permissions/shell.ts";
+import { createMachine, fixture } from "./cypher-permissions-replay/harness.mjs";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const fixture = JSON.parse(readFileSync(join(here, "cypher-permissions-replay", "audit-2026-11.json"), "utf8"));
 const report = process.env.REPLAY_REPORT === "1";
-
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), "cypher-replay-")));
-after(() => rmSync(scratch, { recursive: true, force: true }));
-const home = join(scratch, "home");
-/** The cases' `/tmp`: scratch space, apart from the fake home. */
-const tmp = join(scratch, "tmp");
-mkdirSync(tmp, { recursive: true });
-const agentDir = join(home, ".cypher", "pi-runtime", "agent");
-mkdirSync(agentDir, { recursive: true });
-mkdirSync(join(home, ".cypher-development"), { recursive: true });
-mkdirSync(join(home, ".cypher", "orgs", "org_FIXTURE", "user_FIXTURE"), { recursive: true });
-
-// `/tmp` first: the fake home may itself be under /tmp (Linux).
-const expand = (text) => text.replace(/(^|[^\w.~-])\/tmp(?=\/|\b)/g, `$1${tmp}`).replaceAll("@HOME@", home);
-
-function repo(path) {
-  mkdirSync(path, { recursive: true });
-  spawnSync("git", ["init", "-q", "-b", "main", path]);
-  spawnSync("git", ["-C", path, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "init"]);
-}
-for (const cwd of new Set(fixture.cases.map((item) => item.cwd))) repo(expand(cwd));
-// A chat's worktree is on its own branch (`checkout`): work it may delete when it is done.
-for (const item of fixture.cases) {
-  if (item.checkout) spawnSync("git", ["-C", expand(item.cwd), "switch", "-q", "-c", item.checkout]);
-}
-
-/** Every program is found, as the system's; a path names itself. */
-function findProgram(program, cwd) {
-  if (!program || program === UNKNOWN) return undefined;
-  if (program.includes("/")) {
-    if (cwd === undefined && !isAbsolute(program)) return undefined;
-    return isAbsolute(program) ? program : resolve(cwd, program);
-  }
-  return `/usr/bin/${program}`;
-}
-
-/** The replay's process facts: `chat` (carries this chat's marker), `roots` (runs in its folders), `foreign`, `app` (the installed app's). */
-function processFacts(item) {
-  const of = (target) => ("pids" in target ? target.pids.map((pid) => item.processes?.[pid] ?? "foreign") : [item.processes?.pgrep ?? "foreign"]);
-  return {
-    owns: (target) => of(target).every((kind) => kind === "chat"),
-    facts: (target) => {
-      const kinds = of(target);
-      return {
-        owned: kinds.every((kind) => kind === "chat"),
-        inRoots: kinds.every((kind) => kind === "chat" || kind === "roots"),
-        installedApp: kinds.some((kind) => kind === "app"),
-      };
-    },
-  };
-}
-
-function lastAudit() {
-  const lines = readFileSync(join(agentDir, "permission-audit.jsonl"), "utf8").trim().split("\n");
-  return JSON.parse(lines.at(-1));
-}
-
-async function replay(item, probe) {
-  const verdict = probe ? probe.verdict : item.verdict;
-  const command = probe?.command ?? item.command;
-  const cwd = expand(item.cwd);
-  const permissions = new Permissions({ agentDir, chatId: "chat-replay", cwd, home, landstrip: { available: true, binary: "/nonexistent/landstrip" }, scratch: [tmp] });
-  permissions.appendEntry = () => {};
-  permissions.resolveIn = findProgram;
-  // What the chat ran earlier in its turn: what it made is its own (created.ts).
-  for (const earlier of item.ran ?? []) permissions.noteCreated(expand(earlier), cwd);
-  const processes = processFacts(item);
-  permissions.ownsProcesses = processes.owns;
-  permissions.processFacts = processes.facts;
-  const owner = probe && "owner" in probe ? probe.owner : item.owner;
-  permissions.ownerWords = owner ? { messages: owner.messages, agentWritten: owner.agentWritten === true } : undefined;
-  permissions.releaseFacts = (_dir, commit, version) => {
-    const facts = item.release?.[commit];
-    return facts ? { onDefault: facts.onDefault, hasVersion: facts.versions.includes(version) } : {};
-  };
-  permissions.originRepo = () => undefined;
-  const user = (item.user ?? ["(the owner's request; not in the audit)"]).map((content) => ({ type: "message", message: { role: "user", content } }));
-  const branch = [...user, ...JSON.parse(expand(JSON.stringify(probe?.branch ?? item.branch ?? [])))];
-  const judged = [];
-  const dialogs = [];
-  const ctx = {
-    cwd,
-    hasUI: true,
-    ui: {
-      async select(title, options) {
-        dialogs.push({ title, options });
-        return "Deny";
-      },
-      notify() {},
-    },
-    branch: () => branch,
-    complete: async (_system, prompt) => {
-      judged.push(prompt);
-      return verdict ? JSON.stringify(verdict) : '{"decision":"ask-user","reason":"no verdict for this case"}';
-    },
-  };
-  const before = permissions.grants.all().length;
-  let result;
-  if (item.capability === "escalate") {
-    result = await permissions.requestEscalation(expand(command), { label: "replay" }, ctx);
-  } else if (item.tool === "request_permission") {
-    result = await permissions.requestPermission({ capability: item.capability, paths: item.paths.map(expand) }, ctx);
-  } else {
-    result = await permissions.authorize(item.paths.map((path) => ({ capability: item.capability, path: expand(path) })), { tool: item.tool }, ctx);
-  }
-  const audit = lastAudit();
-  const remembered = permissions.grants.all().length > before;
-  let outcome;
-  if (dialogs.length) outcome = "ask";
-  else if (!result.ok) outcome = "denied";
-  else if (audit.decidedBy === "judge") outcome = remembered ? "approve-remember" : "approve-once";
-  else outcome = `auto-${audit.decidedBy}`;
-  const plain = (text) => text?.replaceAll(home, "@HOME@").replaceAll(tmp, "/tmp");
-  return { outcome, tier: audit.tier, kind: plain(audit.kind), judged: judged.length > 0, audit, onceOnly: plain(audit.onceOnly), explicit: plain(audit.explicit?.reason), missingVerdict: judged.length > 0 && !verdict };
-}
+const machine = createMachine();
+after(() => machine.cleanup());
+const replay = (item, probe) => machine.replay(item, probe);
 
 test("replay: the owner's questions from the audit, with the reviewing model's verdicts stubbed", async () => {
   const rows = [];
