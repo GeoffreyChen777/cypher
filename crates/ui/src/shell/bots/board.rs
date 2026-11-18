@@ -1,7 +1,8 @@
 //! The Botboard sidebar under the header: the bot picker, a notice line
 //! when something is off, then the current bot's cards, top to bottom
 //! (§13.1). This file holds the cards' shared shapes, the floating card,
-//! and **Projects** (each granted project with its sessions in scope). A
+//! and **Projects** (each granted project with the sessions the workspace
+//! runs there). A
 //! card with nothing to show is not drawn; with no bots the sidebar says so and
 //! offers a new one. Cards hold no state: everything is read from the main
 //! state on render. A card's header opens its whole list in the detail
@@ -15,7 +16,26 @@ use cypher_proto::{Chat, Space};
 const CARD_PAD: f32 = 12.0;
 const CARD_RADIUS: f32 = 12.0;
 
-/// One granted project on the Projects card: its sessions in the bot's
+/// The sessions a project shows on the Projects card before "N more".
+const PROJECT_SESSIONS: usize = 6;
+
+/// One project on the Projects card with the workspace's sessions there.
+struct ProjectSessions {
+    space: Space,
+    /// The newest [`PROJECT_SESSIONS`] of them.
+    sessions: Vec<SessionLine>,
+    total: usize,
+}
+
+/// A workspace session's row under its project.
+struct SessionLine {
+    id: String,
+    title: String,
+    status: ChatIndicator,
+    time_ago: String,
+}
+
+/// One granted project in the Projects list: its sessions in the bot's
 /// scope, and how many of them run or ask.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ProjectLoad {
@@ -55,8 +75,9 @@ pub(super) fn project_loads(
         .collect()
 }
 
-/// A project's sessions the bot can read, newest activity first: its live
-/// top-level sessions (subagent children ride their parent's row).
+/// The owner's sessions in a project that the bot can read, newest activity
+/// first: its live top-level sessions (subagent children ride their
+/// parent's row; a workspace's own sessions are listed apart).
 pub(super) fn scoped_sessions<'a>(
     scope: &BotScope,
     chats: &'a [Chat],
@@ -74,6 +95,7 @@ pub(super) fn scoped_sessions<'a>(
 fn in_project(chat: &Chat, space_id: &str) -> bool {
     !chat.archived
         && !chat.is_child()
+        && !chat.is_workspace_session()
         && !chat.is_memory_pass()
         && chat.space_id.as_deref() == Some(space_id)
 }
@@ -105,22 +127,6 @@ pub(super) fn board_notice(
     }
 }
 
-/// A Projects row's right-hand note: "1 asking · 2 running", else "idle".
-pub(super) fn load_note(load: &ProjectLoad) -> String {
-    let mut parts = Vec::new();
-    if load.asking > 0 {
-        parts.push(format!("{} asking", load.asking));
-    }
-    if load.running > 0 {
-        parts.push(format!("{} running", load.running));
-    }
-    if parts.is_empty() {
-        "idle".to_string()
-    } else {
-        parts.join(" · ")
-    }
-}
-
 /// A card's shape. Like the project sidebar's groups, cards are bare: one
 /// plate floats under the focused card ([`focused_card`]) and glides when
 /// focus moves.
@@ -135,13 +141,12 @@ pub(super) fn card_of(
     thread_kind: impl Fn(&str) -> Option<cypher_proto::BotThread>,
 ) -> &'static str {
     match item {
-        PanelItem::Projects | PanelItem::Project(_) => "projects",
-        PanelItem::NeedsYou
-        | PanelItem::Plan(_)
-        | PanelItem::Approval(_)
-        | PanelItem::Asking { .. }
-        | PanelItem::Review(_) => "needs",
+        PanelItem::Projects | PanelItem::Project(_) | PanelItem::Session(_) => "projects",
+        PanelItem::NeedsYou | PanelItem::Plan(_) | PanelItem::Review(_) => "needs",
         PanelItem::Work | PanelItem::WorkItem(_) => "work",
+        // A result notice names a routine's run or an ended plan.
+        PanelItem::Post(id) if id.starts_with("routine-") => "schedule",
+        PanelItem::Post(_) => "work",
         PanelItem::Schedule | PanelItem::Routine(_) | PanelItem::NewRoutine => "schedule",
         // The log opens from the Work panel and the chat header.
         PanelItem::Activity => "work",
@@ -352,8 +357,12 @@ impl Shell {
         )
     }
 
-    /// Each granted project with its sessions in scope; the header opens
-    /// the full list, a row opens the project. `None` with nothing granted.
+    /// The projects the workspace covers, each with the sessions the
+    /// workspace runs there (the ones its plans started, its project
+    /// routines'), the way the Sessions view lists a project's sessions:
+    /// they are listed nowhere else. A project's row opens its page, a
+    /// session's the session, live, in the panel. `None` with nothing
+    /// granted.
     fn render_projects_card(
         &self,
         bot: &Bot,
@@ -361,20 +370,38 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let now = Utc::now();
-        let rows: Vec<(ProjectLoad, Space)> = {
+        let ticker = self.pulse_ticker.entity_id();
+        let projects: Vec<ProjectSessions> = {
             let state = self.state.read(cx);
-            let spaces = state.spaces_sorted();
-            project_loads(&bot.scope, &spaces, &state.chats, |chat| {
-                state.display_status_for(chat, now)
-            })
-            .into_iter()
-            .filter_map(|load| {
-                let space = state.space_row(&load.space_id)?.clone();
-                Some((load, space))
-            })
-            .collect()
+            state
+                .spaces_sorted()
+                .into_iter()
+                .filter(|space| bot.scope.sees_space(&space.id))
+                .map(|space| {
+                    let sessions = state.workspace_sessions(&bot.id, &space.id);
+                    ProjectSessions {
+                        space: space.clone(),
+                        total: sessions.len(),
+                        sessions: sessions
+                            .into_iter()
+                            .take(PROJECT_SESSIONS)
+                            .map(|chat| SessionLine {
+                                id: chat.id.clone(),
+                                title: transcript::single_line(&super::items::plain_markdown(
+                                    chat.title.as_deref().unwrap_or("New session"),
+                                )),
+                                status: state.display_status_for(chat, now),
+                                time_ago: format_time_ago(
+                                    chat.last_message_at.unwrap_or(chat.created_at),
+                                    now,
+                                ),
+                            })
+                            .collect(),
+                    }
+                })
+                .collect()
         };
-        if rows.is_empty() {
+        if projects.is_empty() {
             return None;
         }
         let open = self.board.panel.clone();
@@ -382,39 +409,81 @@ impl Shell {
             "projects",
             "bot-projects-header",
             "Projects",
-            rows.len(),
+            projects.len(),
             PanelItem::Projects,
             None,
             theme,
             cx,
         );
-        let rows = rows.into_iter().map(|(load, space)| {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for project in projects {
+            let space = project.space;
             let item = PanelItem::Project(space.id.clone());
             let selected = open.as_ref() == Some(&item);
-            let key = format!("bot-project-{}", space.id);
             let tint = crate::appearance::space_style::space_color(space.color.as_deref(), theme)
                 .unwrap_or(theme.text_muted);
             let glyph = crate::appearance::space_style::space_icon(space.icon.as_deref());
-            // What runs or asks there, else how many sessions it holds.
-            let corner = if load.asking > 0 || load.running > 0 {
-                card_corner(
-                    load_note(&load),
-                    (load.asking > 0).then_some(theme.warning),
+            let project_item = item.clone();
+            rows.push(
+                card_item(
+                    &format!("bot-project-{}", space.id),
+                    Some(card_glyph(glyph, tint.opacity(0.82))),
+                    space.display_name().to_string(),
+                    None,
+                    selected,
                     theme,
                 )
-            } else {
-                card_corner(load.sessions.to_string(), None, theme)
-            };
-            card_item(
-                &key,
-                Some(card_glyph(glyph, tint.opacity(0.82))),
-                space.display_name().to_string(),
-                Some(corner),
-                selected,
-                theme,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
-        });
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.open_panel(project_item.clone(), cx)),
+                )
+                .into_any_element(),
+            );
+            let more = project.total.saturating_sub(project.sessions.len());
+            for session in project.sessions {
+                let item = PanelItem::Session(session.id.clone());
+                let menu_id = session.id.clone();
+                let selected = open.as_ref() == Some(&item);
+                let corner = super::super::render::status_mark(session.status, ticker, theme)
+                    .unwrap_or_else(|| card_corner(session.time_ago, None, theme));
+                rows.push(
+                    card_item(
+                        &format!("bot-session-{}", session.id),
+                        None,
+                        session.title,
+                        Some(corner),
+                        selected,
+                        theme,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
+                    // A session's own menu (rename, archive, delete), as on
+                    // its row in the Sessions view.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.menus.chat.open((menu_id.clone(), event.position));
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                );
+            }
+            if more > 0 {
+                rows.push(
+                    card_item(
+                        &format!("bot-project-more-{}", space.id),
+                        None,
+                        format!("{more} more"),
+                        None,
+                        false,
+                        theme,
+                    )
+                    .text_color(theme.text_muted)
+                    .on_click(cx.listener(move |this, _, _, cx| this.show_panel(item.clone(), cx)))
+                    .into_any_element(),
+                );
+            }
+        }
         Some(self.fold_card("projects", header, rows, theme))
     }
 
@@ -591,6 +660,21 @@ pub(super) fn card_item(
     selected: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    card_item_detail(key, mark, title, corner, None, selected, theme)
+}
+
+/// [`card_item`] with `detail` under its title, on the titles' column: a
+/// running item's current step over its small progress bar. The mark and
+/// the corner stay on the title's line.
+pub(super) fn card_item_detail(
+    key: &str,
+    mark: Option<AnyElement>,
+    title: impl Into<SharedString>,
+    corner: Option<AnyElement>,
+    detail: Option<AnyElement>,
+    selected: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
     let hover = crate::appearance::surface_style::sidebar_hover(theme);
     let selected_wash = crate::appearance::surface_style::sidebar_selected(theme);
     let rest_bg = if selected {
@@ -605,29 +689,11 @@ pub(super) fn card_item(
         theme.text.opacity(0.8)
     };
     let has_mark = mark.is_some();
-    div()
-        .id(SharedString::from(key.to_string()))
+    let line = div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .rounded(px(8.0))
-        .mx(px(ROW_MARGIN))
-        .mb(px(2.0))
-        // The mark under the switcher's icon (and the card's title), the
-        // title under the workspace's name; a row without a mark keeps its
-        // title on that column.
-        .pl(px(if has_mark {
-            ROW_MARK_INSET
-        } else {
-            ROW_MARK_INSET + 14.0 + ROW_MARK_GAP
-        }))
-        .pr(px(8.0))
-        .py(px(6.0))
-        .cursor_pointer()
-        .text_color(motion::hover_blend(key, rest_text, theme.text))
-        .bg(motion::hover_blend(key, rest_bg, hover_bg))
-        .on_hover(motion::hover_listener(key.to_string()))
         .child(
             div()
                 .flex_1()
@@ -657,7 +723,34 @@ pub(super) fn card_item(
                         .child(title.into()),
                 ),
         )
-        .children(corner)
+        .children(corner);
+    div()
+        .id(SharedString::from(key.to_string()))
+        .flex()
+        .flex_col()
+        .rounded(px(8.0))
+        .mx(px(ROW_MARGIN))
+        .mb(px(2.0))
+        // The mark under the switcher's icon (and the card's title), the
+        // title under the workspace's name; a row without a mark keeps its
+        // title on that column.
+        .pl(px(if has_mark {
+            ROW_MARK_INSET
+        } else {
+            ROW_MARK_INSET + 14.0 + ROW_MARK_GAP
+        }))
+        .pr(px(8.0))
+        .py(px(6.0))
+        .cursor_pointer()
+        .text_color(motion::hover_blend(key, rest_text, theme.text))
+        .bg(motion::hover_blend(key, rest_bg, hover_bg))
+        .on_hover(motion::hover_listener(key.to_string()))
+        .child(line)
+        .children(detail.map(|detail| {
+            div()
+                .pl(px(if has_mark { 14.0 + ROW_MARK_GAP } else { 0.0 }))
+                .child(detail)
+        }))
 }
 
 /// A card row's corner: the session rows' 10px time-and-state note, in the
@@ -908,19 +1001,6 @@ mod tests {
             .map(|c| c.id.as_str())
             .collect();
         assert_eq!(ids, ["old", "mid"]);
-    }
-
-    #[test]
-    fn project_notes_read_plainly() {
-        let load = |running, asking| ProjectLoad {
-            space_id: "a".into(),
-            sessions: 3,
-            running,
-            asking,
-        };
-        assert_eq!(load_note(&load(0, 0)), "idle");
-        assert_eq!(load_note(&load(2, 0)), "2 running");
-        assert_eq!(load_note(&load(1, 1)), "1 asking · 1 running");
     }
 
     #[test]

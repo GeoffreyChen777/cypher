@@ -13,19 +13,18 @@ pub(in crate::shell) enum PanelItem {
     Projects,
     /// One project's sessions in the bot's scope, by space id.
     Project(String),
-    /// Everything that needs the owner.
+    /// Everything that needs the owner, each item answered in place.
     NeedsYou,
     /// A plan awaiting approval (work id).
     Plan(String),
-    /// An action awaiting approval.
-    Approval(String),
-    /// A session the bot started, asking (session chat id, work id).
-    Asking {
-        chat_id: String,
-        work_id: Option<String>,
-    },
     /// A peer answer drafted in Review mode (exchange id).
     Review(String),
+    /// One of the workspace's sessions in a project (a session a plan
+    /// started, a project routine's), live: its transcript and composer,
+    /// by chat id.
+    Session(String),
+    /// A result notice from the chat, in full (the post's entry id).
+    Post(String),
     /// One question between workspaces, either way, opened from the
     /// Network panel (exchange id); a waiting review shows as `Review`.
     Question(String),
@@ -70,20 +69,23 @@ impl Shell {
             self.board.panel_tween = Some(WidthTween::new(from, self.panel_span()));
         }
         self.board.panel = Some(item);
+        self.board.panel_last = None;
         self.drop_panel_extras();
+        self.sync_panel_session(cx);
         cx.notify();
     }
 
-    /// What an item kept while it was open (the session it looked into, a
+    /// What an item kept while it was open (the sessions it looked into, a
     /// draft being edited) goes with it.
     pub(super) fn drop_panel_extras(&mut self) {
-        let keep_peek = match self.board.panel.as_ref() {
-            Some(PanelItem::Asking { chat_id, .. }) => Some(chat_id.clone()),
-            Some(PanelItem::Thread(_)) => self.board.peek.as_ref().map(|p| p.chat_id.clone()),
-            _ => None,
-        };
-        if self.board.peek.as_ref().map(|p| &p.chat_id) != keep_peek.as_ref() {
-            self.board.peek = None;
+        match self.board.panel.as_ref() {
+            // The page prunes its own, to the sessions that still ask.
+            Some(PanelItem::NeedsYou) => {}
+            Some(PanelItem::Thread(chat_id)) => {
+                let keep = chat_id.clone();
+                self.board.peeks.retain(|id, _| *id == keep);
+            }
+            _ => self.board.peeks.clear(),
         }
         if !matches!(
             self.board.panel,
@@ -91,16 +93,52 @@ impl Shell {
         ) {
             self.board.review = None;
         }
+        if self.board.panel != Some(PanelItem::NeedsYou) {
+            self.board.needs_focus = None;
+        }
+    }
+
+    /// Keep the live session slot on the session the panel shows, or showed
+    /// while it slides shut: made when a session opens, dropped once the
+    /// panel shows something else or is shut. Its docks start closed: the
+    /// panel has room for the conversation only.
+    pub(super) fn sync_panel_session(&mut self, cx: &mut Context<Self>) {
+        let wanted = match self.board.panel.as_ref().or(self.board.panel_last.as_ref()) {
+            Some(PanelItem::Session(chat_id)) => Some(chat_id.clone()),
+            _ => None,
+        };
+        let bound = self
+            .board
+            .session_slot
+            .and_then(|sid| self.tiles.slots.get(&sid))
+            .and_then(|slot| slot.tab.chat_id().map(str::to_string));
+        if bound == wanted && (wanted.is_none() || self.board.session_slot.is_some()) {
+            return;
+        }
+        if let Some(sid) = self.board.session_slot.take() {
+            self.dispose_slot(sid, cx);
+        }
+        if let Some(chat_id) = wanted {
+            let sid = self.create_slot(crate::workspace::TabKey::Session(chat_id), cx);
+            if let Some(slot) = self.tiles.slots.get_mut(&sid) {
+                slot.dock.open = false;
+                slot.terminal_open = false;
+            }
+            self.board.session_slot = Some(sid);
+        }
+        self.dismiss_hidden_comment_ui(cx);
     }
 
     /// Slide the panel shut, its content kept until the tween ends.
-    pub(super) fn close_panel(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::shell) fn close_panel(&mut self, cx: &mut Context<Self>) {
         let Some(item) = self.board.panel.take() else {
             return;
         };
         let from = self.eval_tween(self.board.panel_tween, self.panel_span());
         self.board.panel_tween = Some(WidthTween::new(from, 0.0));
         self.board.panel_last = Some(item);
+        // A live session's slot stays for the slide; the rest goes now.
+        self.sync_panel_session(cx);
         cx.notify();
     }
 
@@ -129,11 +167,12 @@ impl Shell {
     }
 
     /// Shut at once (the bot changed under it).
-    pub(super) fn close_panel_now(&mut self) {
+    pub(super) fn close_panel_now(&mut self, cx: &mut Context<Self>) {
         self.board.panel = None;
         self.board.panel_last = None;
         self.board.panel_tween = None;
         self.drop_panel_extras();
+        self.sync_panel_session(cx);
     }
 
     /// The panel card for `item`, `None` when it no longer resolves (the
@@ -141,7 +180,7 @@ impl Shell {
     pub(super) fn render_panel_card(
         &mut self,
         item: &PanelItem,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
@@ -159,14 +198,16 @@ impl Shell {
             PanelItem::Project(space_id) => {
                 self.render_project_panel(&bot, space_id, &theme, window, cx)?
             }
-            PanelItem::NeedsYou
-            | PanelItem::Plan(_)
-            | PanelItem::Approval(_)
-            | PanelItem::Asking { .. }
-            | PanelItem::Review(_) => self.render_needs_panel(&bot, item, &theme, window, cx)?,
+            PanelItem::NeedsYou | PanelItem::Plan(_) | PanelItem::Review(_) => {
+                self.render_needs_panel(&bot, item, &theme, window, cx)?
+            }
             PanelItem::Work | PanelItem::WorkItem(_) | PanelItem::Thread(_) => {
                 self.render_work_panel(&bot, item, &theme, window, cx)?
             }
+            PanelItem::Session(chat_id) => {
+                self.render_session_panel(&bot, chat_id, &theme, window, cx)?
+            }
+            PanelItem::Post(entry_id) => self.render_post_panel(entry_id, &theme, window, cx)?,
             PanelItem::Schedule | PanelItem::Routine(_) | PanelItem::NewRoutine => {
                 self.render_schedule_panel(&bot, item, &theme, cx)?
             }
@@ -289,18 +330,25 @@ impl Shell {
                         .child(motion::fade_quick(content_key, div().child(empty))),
                 )
                 .into_any_element()
-        } else if matches!(item, PanelItem::Thread(_)) {
+        } else if matches!(item, PanelItem::Thread(_) | PanelItem::Session(_)) {
             div()
                 .flex_1()
                 .min_h_0()
                 .child(motion::fade_quick(content_key, body.size_full()))
                 .into_any_element()
         } else {
-            div()
+            let frame = div()
                 .id("bot-panel-body")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
+                .overflow_y_scroll();
+            // The Needs you page scrolls to the card a row asked for.
+            let frame = if matches!(item, PanelItem::NeedsYou) {
+                frame.track_scroll(&self.board.needs_scroll)
+            } else {
+                frame
+            };
+            frame
                 .child(motion::fade_quick(content_key, body))
                 .into_any_element()
         };

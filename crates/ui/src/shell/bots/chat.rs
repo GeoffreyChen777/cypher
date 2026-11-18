@@ -99,7 +99,8 @@ impl Shell {
     }
 
     /// Whether the slot shows a bot's conversation (true even once the bot
-    /// row is gone: the chat stays a bot chat).
+    /// row is gone: the chat stays a bot chat). A project routine's session
+    /// is not one: it is an ordinary coding session the workspace owns.
     pub(in crate::shell) fn slot_is_bot_chat(&self, sid: SlotId, cx: &App) -> bool {
         let Some(slot) = self.tiles.slots.get(&sid) else {
             return false;
@@ -111,7 +112,7 @@ impl Shell {
             .read(cx)
             .chats
             .iter()
-            .any(|c| c.id == chat_id && c.is_bot())
+            .any(|c| c.id == chat_id && c.bot.as_ref().is_some_and(|marker| marker.is_bot_thread()))
     }
 
     /// Whether the slot's bot conversation has nothing in it yet: the start
@@ -124,7 +125,7 @@ impl Shell {
         let Some(chat) = state.selected_chat_row() else {
             return false;
         };
-        chat.is_bot()
+        chat.bot.as_ref().is_some_and(|marker| marker.is_main())
             && chat.last_message_at.is_none()
             && state.transcript.is_empty()
             && state.pending_echoes().is_empty()

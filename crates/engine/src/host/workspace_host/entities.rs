@@ -66,6 +66,7 @@ impl WorkspaceHost {
                 child: None,
                 bot: None,
                 memory: None,
+                started_by: None,
             })
         })?;
         Ok(())
@@ -232,6 +233,15 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.upsert_space(space))?)
     }
 
+    /// Mark a session as started by a workspace ([`Chat::started_by`]).
+    pub fn set_chat_started_by(
+        &self,
+        chat_id: &str,
+        by: &cypher_proto::ChatStartedBy,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_started_by(chat_id, by))?)
+    }
+
     pub fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
     }
@@ -303,6 +313,7 @@ impl WorkspaceHost {
                 child: None,
                 bot: None,
                 memory: None,
+                started_by: None,
             })
         })?;
         Ok(true)
@@ -361,6 +372,7 @@ impl WorkspaceHost {
                 child: None,
                 bot: None,
                 memory: None,
+                started_by: None,
             })
         })?;
         Ok(())
@@ -429,6 +441,7 @@ impl WorkspaceHost {
                 space_id: parent.space_id.clone(),
                 last_seen_at: None,
                 memory: None,
+                started_by: None,
                 room_gen: Some(2),
                 child: Some(ChildChat {
                     parent_chat_id: parent.id.clone(),

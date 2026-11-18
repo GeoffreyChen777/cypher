@@ -106,6 +106,7 @@ pub(super) fn session_fate(
         Some(chat)
             if chat.archived
                 || chat.is_bot()
+                || chat.is_workspace_session()
                 || chat.is_memory_pass()
                 || !scope.chat_visible(chat) =>
         {
@@ -218,7 +219,11 @@ impl Shell {
                     .chats
                     .iter()
                     .filter(|c| {
-                        !c.archived && !c.is_bot() && !c.is_memory_pass() && scope.chat_visible(c)
+                        !c.archived
+                            && !c.is_bot()
+                            && !c.is_workspace_session()
+                            && !c.is_memory_pass()
+                            && scope.chat_visible(c)
                     })
                     .map(|c| c.id.clone())
                     .collect()
@@ -303,10 +308,31 @@ impl Shell {
 
     /// [`Self::open_chat`], or with `split` (⌘-click) in a new tile to the
     /// right of the focused one. A bot's conversation shows on the Botboard
-    /// instead, and one of its hidden threads (an orchestration's, a
-    /// routine's, a peer's) in the Botboard's panel; any other session
-    /// switches the main window to Projects.
+    /// instead, and in the Botboard's panel one of its hidden threads (an
+    /// orchestration's, a routine's, a peer's), read-only, or one of its
+    /// sessions in a project, live; any other session switches the main
+    /// window to Projects.
     pub(super) fn open_chat_with(&mut self, chat_id: String, split: bool, cx: &mut Context<Self>) {
+        // A session a workspace started, or its project routine's, lives
+        // in that workspace: it opens in the panel beside its chat.
+        let workspace = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|c| c.id == chat_id)
+            .and_then(|c| c.workspace_session_of())
+            .map(str::to_string);
+        if let Some(bot_id) = workspace {
+            if self.is_project_window() {
+                self.forward_to_main(cx, move |main, cx| main.open_chat(chat_id.clone(), cx));
+                return;
+            }
+            self.route = Route::Chat;
+            self.open_bot(&bot_id, cx);
+            self.show_panel(bots::PanelItem::Session(chat_id), cx);
+            return;
+        }
         if let Some(bot_id) = self.bot_of_chat(&chat_id, cx) {
             self.route = Route::Chat;
             let hidden = self
@@ -318,8 +344,8 @@ impl Shell {
                 .and_then(|c| c.bot.as_ref())
                 .is_some_and(|marker| !marker.is_main());
             self.open_bot(&bot_id, cx);
-            if hidden && self.board.panel != Some(bots::PanelItem::Thread(chat_id.clone())) {
-                self.open_panel(bots::PanelItem::Thread(chat_id), cx);
+            if hidden {
+                self.show_panel(bots::PanelItem::Thread(chat_id), cx);
             }
             return;
         }
@@ -773,13 +799,26 @@ mod cycle_tests {
         let scope = ProjectScope::default();
         let mut archived = chat("archived", None);
         archived.archived = true;
-        let chats = [chat("live", None), archived, chat("elsewhere", Some("p"))];
+        // A session a workspace started lives in that workspace: its tab
+        // here closes once its row says so.
+        let mut worker = chat("worker", None);
+        worker.started_by = Some(cypher_proto::ChatStartedBy {
+            bot_id: "b".into(),
+            work_id: None,
+        });
+        let chats = [
+            chat("live", None),
+            archived,
+            chat("elsewhere", Some("p")),
+            worker,
+        ];
         let fate = |id: &str, scope: &ProjectScope, frame: bool, awaited: bool| {
             session_fate(id, &chats, scope, frame, awaited)
         };
         assert_eq!(fate("live", &scope, true, false), SessionFate::Stays);
         // Archived / out of scope: judged on any notify, no frame needed.
         assert_eq!(fate("archived", &scope, false, false), SessionFate::Hidden);
+        assert_eq!(fate("worker", &scope, false, false), SessionFate::Hidden);
         let other_window = ProjectScope {
             only: Some("q".into()),
             ..ProjectScope::default()

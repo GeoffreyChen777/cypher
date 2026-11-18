@@ -42,11 +42,14 @@ pub(super) fn prompt(bot: &Bot, role: &Role, roots: &[String]) -> Option<String>
                         .to_string(),
                     "- Every plan waits for your owner's approval in a card. After \
                      propose_plan, stop: end your turn with one line saying the plan awaits \
-                     approval. Don't ask in text whether to go ahead."
+                     approval. Don't repeat its steps (the card opens them) and don't ask \
+                     in text whether to go ahead."
                         .to_string(),
-                    "- Once approved, a background session carries the plan out and its \
-                     result appears here. Use list_work and get_work to follow up on plans, \
-                     their steps and their sessions."
+                    "- Once approved, a background session carries the plan out. Your owner \
+                     follows it beside this conversation, so don't narrate its progress \
+                     here. When it ends you get a bracketed notice with the result: answer \
+                     that in one or two sentences. Use list_work and get_work to follow up \
+                     on plans, their steps and their sessions."
                         .to_string(),
                 ]);
             } else {
@@ -61,7 +64,7 @@ pub(super) fn prompt(bot: &Bot, role: &Role, roots: &[String]) -> Option<String>
             lines.extend([
                 "You are carrying out one plan your owner approved, in a background \
                  session of your own. Your first message is the brief: the plan, your owner's \
-                 instruction and what you may do. Your owner follows the progress card and \
+                 instruction and what you may do. Your owner follows the plan's page and \
                  reads your result; nobody answers you here."
                     .to_string(),
                 String::new(),
@@ -98,7 +101,9 @@ pub(super) fn prompt(bot: &Bot, role: &Role, roots: &[String]) -> Option<String>
                      finish_work once with outcome done or failed and a concise result (at \
                      most {RESULT_MAX} characters): what changed and where, citing each \
                      session as [its title](cypher://session/<session id>), what was \
-                     verified, and what needs your owner. Then end your turn."
+                     verified, and what needs your owner. Open with one sentence that \
+                     says how it went: your owner is told that much first and reads the \
+                     rest on the plan's page. Then end your turn."
                 ),
                 "- Don't end your turn before finish_work: when your turn ends, the work is \
                  over, and the steps still open end with it. While a session works or \
@@ -342,6 +347,7 @@ mod tests {
             result: None,
             decision: None,
             stop_requested_at: None,
+            notify: false,
         };
         let spaces = [
             space("sp-a", "mac-a", "/w/app-a"),

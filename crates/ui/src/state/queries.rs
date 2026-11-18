@@ -6,7 +6,9 @@ impl AppState {
     /// Non-archived, NON-CHILD chats in sidebar order. Cypher child subagent
     /// chats (engine-owned `child: Some(..)` rows) are hidden from the root
     /// sidebar/session overview — they are reached only through the parent's
-    /// Subagents inspector. Bot chats live on the Botboard instead, and
+    /// Subagents inspector. Bot chats live on the Botboard instead, with the
+    /// sessions a workspace started ([`Chat::is_workspace_session`]: listed
+    /// under their project there), and
     /// memory consolidation passes nowhere. [`Self::selected_chat_row`] and transcript
     /// subscriptions still work for a selected child (navigation selects it
     /// directly).
@@ -17,9 +19,29 @@ impl AppState {
             !c.archived
                 && !c.is_child()
                 && !c.is_bot()
+                && !c.is_workspace_session()
                 && !c.is_memory_pass()
                 && self.scope.chat_visible(c)
         })
+    }
+
+    /// The sessions `bot_id` has in `space_id`, newest activity first: the
+    /// ones its plans started and its project routines' (see
+    /// [`Chat::workspace_session_of`]). The workspace lists them under the
+    /// project; the Sessions view never does.
+    pub fn workspace_sessions(&self, bot_id: &str, space_id: &str) -> Vec<&Chat> {
+        let mut chats: Vec<&Chat> = self
+            .chats
+            .iter()
+            .filter(|c| {
+                !c.archived
+                    && !c.is_child()
+                    && c.space_id.as_deref() == Some(space_id)
+                    && c.workspace_session_of() == Some(bot_id)
+            })
+            .collect();
+        chats.sort_by_key(|c| std::cmp::Reverse(c.last_message_at.unwrap_or(c.created_at)));
+        chats
     }
 
     pub fn selected_space_row(&self) -> Option<&Space> {
@@ -181,22 +203,31 @@ impl AppState {
     /// Only user-facing chats count ([`Chat::is_user_facing`], the same
     /// rule the chimes follow): a workspace's owner chat does — the logo
     /// and the workspace switcher show it unread — but its hidden threads
-    /// never do, as nothing in the main UI would show (or clear) them.
+    /// never do, as nothing in the main UI would show (or clear) them. A
+    /// session a workspace started counts while it waits on an answer.
     pub fn attention_count(&self, now: DateTime<Utc>) -> usize {
         self.chats
             .iter()
-            .filter(|c| c.is_user_facing())
+            .filter(|c| c.is_user_facing() || c.is_workspace_session())
             .filter(|c| match c.space_id.as_deref() {
                 None => true,
                 Some(id) => self.space_row(id).is_some(),
             })
             .filter(|chat| {
-                matches!(
-                    self.display_status_for(chat, now),
-                    ChatIndicator::AwaitingInput
-                        | ChatIndicator::Errored
-                        | ChatIndicator::Completed
-                ) && chat.unseen()
+                let status = self.display_status_for(chat, now);
+                // A workspace's session counts only while it asks: what it
+                // finished is its workspace's to report.
+                let counts = if chat.is_workspace_session() {
+                    status == ChatIndicator::AwaitingInput
+                } else {
+                    matches!(
+                        status,
+                        ChatIndicator::AwaitingInput
+                            | ChatIndicator::Errored
+                            | ChatIndicator::Completed
+                    )
+                };
+                counts && chat.unseen()
             })
             .count()
     }
@@ -447,7 +478,9 @@ impl AppState {
     /// The bot whose conversation `chat_id` is.
     pub fn bot_for_chat(&self, chat_id: &str) -> Option<&cypher_proto::Bot> {
         let chat = self.chats.iter().find(|c| c.id == chat_id)?;
-        let marker = chat.bot.as_ref()?;
+        // A project routine's session is an ordinary coding session: the
+        // marker only says whose it is.
+        let marker = chat.bot.as_ref().filter(|marker| marker.is_bot_thread())?;
         self.bots.iter().find(|b| b.id == marker.bot_id)
     }
 

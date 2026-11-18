@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use cypher_proto::{
     self as p, ActivityKind, ApprovalState, Bot, BotActivity, BotApproval, BotChat, BotOrigin,
-    BotThread, BotWork, Chat, SandboxLevel,
+    BotThread, BotWork, Chat, SandboxLevel, WorkState,
 };
 
 use super::Bots;
@@ -85,6 +85,8 @@ pub(super) struct WorkShared {
     /// the owner's answer. Lost at a restart, when the question is read out
     /// once more.
     asked: Mutex<std::collections::HashMap<(String, String), String>>,
+    /// Sessions known to carry their workspace's mark (`Chat::started_by`).
+    marked: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Default for WorkShared {
@@ -95,6 +97,7 @@ impl Default for WorkShared {
             rows: Default::default(),
             approval_wait: Mutex::new(APPROVAL_WAIT),
             asked: Default::default(),
+            marked: Default::default(),
         }
     }
 }
@@ -529,7 +532,18 @@ impl Bots {
         let Some(mut work) = ws.record::<BotWork>(p::KIND_BOT_WORK, work_id) else {
             return Ok(None);
         };
+        let was_running = work.state == WorkState::Running;
         let out = edit(&mut work);
+        // However it ended (finish_work, a settled run, Stop): its chat is
+        // owed the result notice.
+        if was_running
+            && matches!(
+                work.state,
+                WorkState::Done | WorkState::Failed | WorkState::Stopped
+            )
+        {
+            work.notify = true;
+        }
         work.clamp();
         ws.put_record(
             p::KIND_BOT_WORK,

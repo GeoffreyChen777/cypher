@@ -15,7 +15,6 @@ const STOP_ARM_MS: u64 = 4000;
 /// transcript (an asking worker's question, an orchestration thread), and
 /// for a thread the read-only transcript drawn from it.
 pub(super) struct Peek {
-    pub chat_id: String,
     pub state: Entity<crate::state::AppState>,
     pub transcript: Option<Entity<Transcript>>,
     _observe: Subscription,
@@ -245,13 +244,15 @@ pub(super) fn session_mark(
 /// A square icon button (the chat header's bot actions): a hover wash and a
 /// tooltip.
 pub(super) fn icon_button(
-    key: &'static str,
+    key: impl Into<SharedString>,
     path: &'static str,
     tip: &'static str,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    let key: SharedString = key.into();
+    let key = &key;
     div()
-        .id(key)
+        .id(key.clone())
         .flex_none()
         .size(px(28.0))
         .rounded(px(8.0))
@@ -387,42 +388,31 @@ impl Shell {
         transcript: bool,
         cx: &mut Context<Self>,
     ) -> Entity<crate::state::AppState> {
-        if self
-            .board
-            .peek
-            .as_ref()
-            .is_none_or(|p| p.chat_id != chat_id)
-        {
+        if !self.board.peeks.contains_key(chat_id) {
             let state = crate::state::AppState::new_session_context(
                 &self.state,
                 Some(chat_id.to_string()),
                 cx,
             );
             let observe = cx.observe(&state, |_, _, cx| cx.notify());
-            self.board.peek = Some(Peek {
-                chat_id: chat_id.to_string(),
-                state,
-                transcript: None,
-                _observe: observe,
-            });
+            self.board.peeks.insert(
+                chat_id.to_string(),
+                Peek {
+                    state,
+                    transcript: None,
+                    _observe: observe,
+                },
+            );
         }
-        let state = self
+        let peek = self
             .board
-            .peek
-            .as_ref()
-            .map(|p| p.state.clone())
+            .peeks
+            .get_mut(chat_id)
             .expect("peek was just made");
-        if transcript
-            && self
-                .board
-                .peek
-                .as_ref()
-                .is_some_and(|p| p.transcript.is_none())
-        {
+        let state = peek.state.clone();
+        if transcript && peek.transcript.is_none() {
             let view = cx.new(|cx| Transcript::for_side_chat(state.clone(), cx));
-            if let Some(peek) = self.board.peek.as_mut() {
-                peek.transcript = Some(view);
-            }
+            peek.transcript = Some(view);
         }
         state
     }

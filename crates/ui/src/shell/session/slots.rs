@@ -34,10 +34,16 @@ impl Shell {
         self.workspace.focused_tab().cloned()
     }
 
-    /// The slots on screen: the visible tiles', or the Botboard's.
+    /// The slots on screen: the visible tiles', or the Botboard's (its
+    /// conversation and the session its panel shows live).
     fn shown_slots(&self) -> Vec<SlotId> {
         if self.botboard() {
-            return self.board.slot.into_iter().collect();
+            return self
+                .board
+                .slot
+                .into_iter()
+                .chain(self.board.session_slot)
+                .collect();
         }
         self.workspace
             .visible_tabs()
@@ -49,7 +55,17 @@ impl Shell {
     /// The chats on screen (seen-marking, the working heartbeat).
     pub(in crate::shell) fn shown_chats(&self) -> Vec<String> {
         if self.botboard() {
-            return self.board_chat().map(str::to_string).into_iter().collect();
+            let panel = self
+                .board
+                .session_slot
+                .and_then(|sid| self.tiles.slots.get(&sid))
+                .and_then(|slot| slot.tab.chat_id());
+            return self
+                .board_chat()
+                .into_iter()
+                .chain(panel)
+                .map(str::to_string)
+                .collect();
         }
         self.workspace
             .visible_tabs()
@@ -181,8 +197,17 @@ impl Shell {
                         crate::transcript::TranscriptEvent::OpenTurnDiff { changes, path } => {
                             this.open_turn_diff(sid, changes.clone(), path.clone(), cx);
                         }
-                        crate::transcript::TranscriptEvent::EditBotPlan { work_id, title } => {
-                            this.edit_bot_plan(sid, work_id, title, cx);
+                        crate::transcript::TranscriptEvent::OpenBotWork { work_id } => {
+                            this.open_bot_work(work_id, cx);
+                        }
+                        crate::transcript::TranscriptEvent::OpenBotPost { entry_id } => {
+                            this.open_bot_post(entry_id, cx);
+                        }
+                        crate::transcript::TranscriptEvent::OpenBotRoutine { routine_id } => {
+                            this.show_panel(
+                                super::bots::PanelItem::Routine(routine_id.clone()),
+                                cx,
+                            );
                         }
                     }
                 },
@@ -341,16 +366,17 @@ impl Shell {
     /// Make the slot set match the workspace: drop the slots of closed
     /// tabs, create one for every visible tab (and the focused one) that has
     /// none yet — background tabs and the tiles hidden behind a zoom get
-    /// theirs when first shown, then keep it. The Botboard's slot is not a
-    /// tab's and stays (see `Shell::sync_board`).
+    /// theirs when first shown, then keep it. The Botboard's slots (its
+    /// conversation, the session in its panel) are not tabs' and stay (see
+    /// `Shell::sync_board`, `Shell::sync_panel_session`).
     pub(in crate::shell) fn sync_slots(&mut self, cx: &mut Context<Self>) {
         let tabs: std::collections::HashSet<TabKey> = self.workspace.tabs().cloned().collect();
-        let board = self.board.slot;
+        let board = [self.board.slot, self.board.session_slot];
         let stale: Vec<SlotId> = self
             .tiles
             .slots
             .iter()
-            .filter(|(sid, slot)| Some(**sid) != board && !tabs.contains(&slot.tab))
+            .filter(|(sid, slot)| !board.contains(&Some(**sid)) && !tabs.contains(&slot.tab))
             .map(|(sid, _)| *sid)
             .collect();
         for sid in stale {
@@ -466,7 +492,7 @@ impl Shell {
     /// nav, drop, preset, zoom…) takes its comment pill/editor and selection
     /// with it, and the shared popup closes — it must not float at a stale
     /// anchor over the incoming session. Closed slots did this on disposal.
-    fn dismiss_hidden_comment_ui(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::shell) fn dismiss_hidden_comment_ui(&mut self, cx: &mut Context<Self>) {
         let shown = self.shown_slots();
         let before = std::mem::replace(&mut self.tiles.shown_slots, shown);
         let hidden: Vec<SlotId> = before
@@ -533,6 +559,10 @@ impl Shell {
             // The Botboard's conversation went (its bot was deleted): the
             // board moves to another bot.
             (TabKey::Session(_), None) if self.board.slot == Some(sid) => self.sync_board(cx),
+            // The session the Botboard's panel shows went: the panel shuts.
+            (TabKey::Session(_), None) if self.board.session_slot == Some(sid) => {
+                self.close_panel(cx)
+            }
             (tab @ TabKey::Session(_), None) => {
                 self.workspace.close(&tab);
                 self.workspace_changed(cx);

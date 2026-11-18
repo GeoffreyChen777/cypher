@@ -464,7 +464,7 @@ impl Shell {
 
     /// Open `item`, leaving it open when it already is (unlike a row's
     /// second click).
-    pub(super) fn show_panel(&mut self, item: PanelItem, cx: &mut Context<Self>) {
+    pub(in crate::shell) fn show_panel(&mut self, item: PanelItem, cx: &mut Context<Self>) {
         if self.board.panel.as_ref() != Some(&item) {
             self.open_panel(item, cx);
         }

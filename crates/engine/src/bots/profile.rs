@@ -225,6 +225,7 @@ mod tests {
             child: None,
             bot,
             memory: None,
+            started_by: None,
         }
     }
 

@@ -238,7 +238,7 @@ impl Shell {
     /// never reflows mid-slide. `None` once shut.
     fn render_panel_column(
         &mut self,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let span = self.panel_span_in(window);
@@ -249,7 +249,9 @@ impl Shell {
         };
         let width = self.eval_tween(self.board.panel_tween, target).min(span);
         if width < 0.5 && self.board.panel.is_none() {
-            self.board.panel_last = None;
+            if self.board.panel_last.take().is_some() || self.board.session_slot.is_some() {
+                self.sync_panel_session(cx);
+            }
             self.board.panel_tween = None;
             self.drop_panel_extras();
             return None;

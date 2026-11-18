@@ -870,7 +870,11 @@ impl Transcript {
                 s.selected_chat.clone(),
                 self.attachment_device_ids(cx),
                 crate::appearance::chat_style::settings(cx).tool_call_limit,
-                super::bot_plan::plans_key(&s.bot_records, s.selected_chat.as_deref()),
+                super::bot_plan::plans_key(
+                    &s.bot_records,
+                    s.selected_chat.as_deref(),
+                    s.selected_bot().map(|bot| bot.id.as_str()),
+                ),
                 memory_cards.key,
             );
             (revision, memory_cards)
@@ -919,7 +923,8 @@ impl Transcript {
         // memory card's its store's row.
         for row in &mut new_rows {
             match row.kind {
-                RowKind::BotPlan { .. } => row.version ^= plans_key,
+                // (A routine's card reads its schedule from its record.)
+                RowKind::BotPlan { .. } | RowKind::BotRoutine { .. } => row.version ^= plans_key,
                 RowKind::MemoryWrite { .. } => row.version ^= self.memory_cards.key,
                 _ => {}
             }

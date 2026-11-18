@@ -251,6 +251,7 @@ fn fork_title_appends_and_bounds() {
         child: None,
         bot: None,
         memory: None,
+        started_by: None,
     };
     assert_eq!(fork_title(&chat), "My chat — Fork");
     chat.title = None;

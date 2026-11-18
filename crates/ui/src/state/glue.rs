@@ -890,5 +890,6 @@ pub(super) fn side_chat_synthetic_row(
         child: None,
         bot: None,
         memory: None,
+        started_by: None,
     }
 }

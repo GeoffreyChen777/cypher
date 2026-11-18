@@ -956,6 +956,7 @@ async fn owner_turns_learn_where_their_plans_stand() {
         result: Some("Fixed in calc.py; tests pass.".into()),
         decision: None,
         stop_requested_at: None,
+        notify: false,
     };
     core.workspace
         .put_record(

@@ -965,8 +965,32 @@ impl RegistryDoc {
                     .unwrap_or(Value::Null),
             ),
         ]);
+        let mut set = set;
+        // Written only when set: an upsert from a device that never read the
+        // field must not clear what the workspace's host stamped.
+        if let Some(by) = &chat.started_by {
+            set.insert("startedBy".into(), serde_json::to_value(by)?);
+        }
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
+    }
+
+    /// Mark a session as started by a workspace ([`Chat::started_by`]).
+    pub fn set_chat_started_by(
+        &mut self,
+        chat_id: &str,
+        by: &cypher_proto::ChatStartedBy,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("startedBy", serde_json::to_value(by)?)]),
+        );
+        Ok(true)
     }
 
     /// Claim-on-first-command row: ONLY the fields the claim actually knows

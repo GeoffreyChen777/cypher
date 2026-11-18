@@ -9,7 +9,7 @@
 //! record and bot changes, when a tool saves a job, and while a run it
 //! started is in flight, on session status changes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,10 +24,11 @@ use cypher_doc::{
 };
 use cypher_proto::{
     self as p, ActivityKind, Bot, BotChat, BotOrigin, BotPost, BotRoutine, BotThread, Chat,
-    RoutineTarget, RunOutcome, RunRecord, SessionStatus, Space,
+    RoutineTarget, RunOutcome, RunRecord, Space,
 };
 
 use super::super::Bots;
+use super::super::notice::{Notice, Posted, Wake};
 use super::record_activity;
 use super::schedule::{self, Progress};
 use crate::EngineError;
@@ -53,8 +54,6 @@ pub(in crate::bots) struct ScheduleState {
     pass: tokio::sync::Mutex<()>,
     /// Unattended stops by chat id, waiting for the pass that settles the run.
     stops: Mutex<HashMap<String, String>>,
-    /// Post entry ids known to be in their bot chat.
-    posted: Mutex<HashSet<String>>,
     /// A run is in flight or a post waits for its bot chat: wake on session
     /// status changes too.
     watching: AtomicBool,
@@ -708,9 +707,10 @@ impl Bots {
         run_result(entries, run_at)
     }
 
-    /// Post a settled run's output into the bot chat, once, as a `post`
-    /// part attributed to the routine. A bot chat in the middle of a turn
-    /// gets it after the turn (`true`: watch for that).
+    /// Tell the bot chat a settled run ended, once: its output as a `post`
+    /// attributed to the routine, and the workspace agent's turn about it
+    /// ([`crate::bots::notice`]). A bot chat in the middle of a turn gets
+    /// them after the turn (`true`: watch for that).
     fn post_routine_output(
         &self,
         bot: &Bot,
@@ -729,73 +729,45 @@ impl Bots {
             return false;
         }
         let entry_id = post_entry_id(&routine.id, run.at);
-        if lock(&self.inner.schedule.posted).contains(&entry_id) {
+        if self.notice_posted(&entry_id) {
             return false;
         }
-        let busy = self
-            .inner
-            .doc_host
-            .sessions()
-            .and_then(|sessions| sessions.session_status(&bot.chat_id))
-            .is_some_and(|s| {
-                matches!(
-                    s.status,
-                    SessionStatus::Working | SessionStatus::AwaitingInput
-                )
-            });
-        if busy {
-            return true;
-        }
-        let handle = match self.inner.doc_host.open(&bot.chat_id) {
-            Ok(handle) => handle,
-            Err(err) => {
-                tracing::warn!(bot = %bot.id, error = %err, "bot chat open failed");
-                return false;
-            }
+        let text = match outcome {
+            RunOutcome::Done => run
+                .chat_id
+                .as_deref()
+                .and_then(|chat| self.run_result(chat, run.at).text)
+                .or_else(|| run.summary.clone())
+                .unwrap_or_else(|| "The routine finished without a message.".into()),
+            _ => run
+                .summary
+                .clone()
+                .unwrap_or_else(|| "The run failed.".into()),
         };
-        let already = handle
-            .doc()
-            .read_entries()
-            .is_ok_and(|entries| entries.iter().any(|e| e.id == entry_id));
-        if !already {
-            let text = match outcome {
-                RunOutcome::Done => run
-                    .chat_id
-                    .as_deref()
-                    .and_then(|chat| self.run_result(chat, run.at).text)
-                    .or_else(|| run.summary.clone())
-                    .unwrap_or_else(|| "The routine finished without a message.".into()),
-                _ => run
-                    .summary
-                    .clone()
-                    .unwrap_or_else(|| "The run failed.".into()),
-            };
-            let text = p::clip(&text, POST_MAX_CHARS);
-            let entry = post_entry(
-                &entry_id,
-                &text,
-                BotPost::Routine {
-                    routine_id: routine.id.clone(),
-                    name: routine.name.clone(),
-                    outcome,
-                    run_at: run.at,
-                    thread_chat_id: run.chat_id.clone(),
-                },
-                self.inner.doc_host.device_id(),
-                now_ms,
-            );
-            if let Err(err) = handle.doc().push_message(&entry) {
-                tracing::warn!(bot = %bot.id, error = %err, "routine post failed");
-                return false;
-            }
-            self.inner.doc_host.flush_chat_sync(&bot.chat_id);
-            self.inner
-                .workspace
-                .note_message(&bot.chat_id, &format!("{}: {text}", routine.name));
-            tracing::info!(bot = %bot.id, routine = %routine.id, "routine output posted");
-        }
-        lock(&self.inner.schedule.posted).insert(entry_id);
-        false
+        let text = p::clip(&text, POST_MAX_CHARS);
+        let failed = outcome == RunOutcome::Failed;
+        let notice = Notice {
+            preview: format!("{}: {text}", routine.name),
+            from: BotPost::Routine {
+                routine_id: routine.id.clone(),
+                name: routine.name.clone(),
+                outcome,
+                run_at: run.at,
+                thread_chat_id: run.chat_id.clone(),
+            },
+            text,
+            wake: Some(Wake {
+                headline: format!(
+                    "Routine \"{}\" {}",
+                    routine.name,
+                    if failed { "failed" } else { "finished" }
+                ),
+                what: "this routine just ran",
+                author: cypher_doc::command_author::ROUTINE,
+            }),
+            entry_id,
+        };
+        self.post_notice(bot, notice, now_ms) == Posted::Waiting
     }
 }
 
@@ -830,6 +802,7 @@ fn hidden_chat(
         child: None,
         bot: Some(marker),
         memory: None,
+        started_by: None,
     }
 }
 
@@ -837,34 +810,6 @@ fn hidden_chat(
 /// restart never posts twice.
 pub(super) fn post_entry_id(routine_id: &str, run_at: i64) -> String {
     format!("routine-{routine_id}-{run_at}")
-}
-
-/// The complete assistant entry a post is.
-pub(super) fn post_entry(
-    id: &str,
-    text: &str,
-    from: BotPost,
-    device_id: &str,
-    now_ms: i64,
-) -> SessionMessageEntry {
-    SessionMessageEntry {
-        id: id.to_string(),
-        role: MessageRole::Assistant,
-        parts: vec![MessagePart::Post {
-            id: "p0".into(),
-            text: text.to_string(),
-            from,
-        }],
-        created_at: now_ms,
-        device_id: device_id.to_string(),
-        status: Some(MessageStatus::Complete),
-        continuation_of: None,
-        completed_at: Some(now_ms),
-        comments: Vec::new(),
-        models: Vec::new(),
-        turn_changes: None,
-        recovery: None,
-    }
 }
 
 /// The last answer and error among the entries of a run that started at
@@ -918,7 +863,7 @@ mod tests {
     use super::*;
 
     fn entry(id: &str, role: MessageRole, at: i64, parts: Vec<MessagePart>) -> SessionMessageEntry {
-        let mut e = post_entry(id, "", BotPost::Unknown, "dev", at);
+        let mut e = crate::bots::notice::post_entry(id, "", BotPost::Unknown, "dev", at);
         e.role = role;
         e.parts = parts;
         e

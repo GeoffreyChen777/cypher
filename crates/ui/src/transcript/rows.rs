@@ -116,6 +116,13 @@ pub enum RowKind {
         title: SharedString,
         resolved: bool,
     },
+    /// A workspace agent's `save_routine` call that went through: a compact
+    /// card naming the routine, which opens it in the detail panel
+    /// ([`super::bot_plan`]), by the name and id its answer gives.
+    BotRoutine {
+        name: SharedString,
+        routine_id: SharedString,
+    },
     /// A `memory` call whose write was held: its card, drawn from the
     /// store's row ([`super::memory_card`]), named by the file it wrote.
     /// The row's version carries the cards' key, like a plan's.
@@ -123,14 +130,20 @@ pub enum RowKind {
         call_id: SharedString,
         file: SharedString,
     },
-    /// The attribution over a routine's output posted into a bot chat (§8):
-    /// the routine's name, when it ran, a failed mark, and its thread. The
-    /// output itself follows as ordinary text rows.
+    /// A result notice in a workspace chat (§13.1): a routine's run or a
+    /// plan that ended, as one compact card naming it and how it went. Its
+    /// output is not drawn here: the card opens it in the detail panel.
     BotPost {
-        name: SharedString,
-        failed: bool,
-        run_at: i64,
-        thread: Option<SharedString>,
+        /// The post's entry id, which its details open by.
+        entry: SharedString,
+        /// The routine's name or the plan's title.
+        title: SharedString,
+        source: PostSource,
+        outcome: PostOutcome,
+        /// When the routine ran, or the plan ended.
+        at: i64,
+        /// How long a plan took.
+        took_ms: Option<i64>,
     },
     /// The attribution over another user's bot's late answer in a bot chat
     /// (§10.6), e.g. `Answer from "Ada" (alice's bot) to your question "…"`.
@@ -213,17 +226,64 @@ pub struct Row {
     /// Shift-clicked it to read the original — and the other side's rows are
     /// dropped ([`show_translation_side`]). `None` for everything else.
     pub translation: Option<TranslationSide>,
-    /// A slice of a card several rows draw together (a routine's post):
-    /// which edges this row closes. `None` for ordinary rows.
-    pub card: Option<CardSlice>,
 }
 
-/// One row's part of a multi-row card ([`Row::card`]).
+/// What a result notice is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CardSlice {
-    pub top: bool,
-    pub bottom: bool,
-    pub failed: bool,
+pub enum PostSource {
+    Routine,
+    Plan,
+}
+
+/// How the job a result notice names ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PostOutcome {
+    Done,
+    Failed,
+    Stopped,
+}
+
+/// The card a `post` part draws, `None` for a source this build does not
+/// know (its text then reads as an ordinary answer).
+pub(super) fn post_card(entry_id: &str, from: &cypher_proto::BotPost) -> Option<RowKind> {
+    match from {
+        cypher_proto::BotPost::Routine {
+            name,
+            outcome,
+            run_at,
+            ..
+        } => Some(RowKind::BotPost {
+            entry: entry_id.to_owned().into(),
+            title: single_line(name).into(),
+            source: PostSource::Routine,
+            outcome: if *outcome == cypher_proto::RunOutcome::Failed {
+                PostOutcome::Failed
+            } else {
+                PostOutcome::Done
+            },
+            at: *run_at,
+            took_ms: None,
+        }),
+        cypher_proto::BotPost::Work {
+            title,
+            outcome,
+            started_at,
+            ended_at,
+            ..
+        } => Some(RowKind::BotPost {
+            entry: entry_id.to_owned().into(),
+            title: single_line(title).into(),
+            source: PostSource::Plan,
+            outcome: match outcome {
+                cypher_proto::WorkState::Failed => PostOutcome::Failed,
+                cypher_proto::WorkState::Stopped => PostOutcome::Stopped,
+                _ => PostOutcome::Done,
+            },
+            at: *ended_at,
+            took_ms: started_at.map(|start| ended_at.saturating_sub(start)),
+        }),
+        cypher_proto::BotPost::Unknown => None,
+    }
 }
 
 /// One version of a translated text part ([`Row::translation`]).
@@ -320,6 +380,7 @@ pub(super) fn row_match_count(row: &Row, query: &str) -> u32 {
         | RowKind::InputChip { .. }
         | RowKind::ErrorChip { .. }
         | RowKind::BotPlan { .. }
+        | RowKind::BotRoutine { .. }
         | RowKind::MemoryWrite { .. }
         | RowKind::BotPost { .. }
         | RowKind::PeerAnswer { .. }
@@ -385,9 +446,13 @@ pub enum TranscriptEvent {
         changes: Arc<cypher_proto::TurnChanges>,
         path: Option<String>,
     },
-    /// A plan card's Edit: cancel the proposal and start the owner's reply
-    /// asking for the change in the composer.
-    EditBotPlan { work_id: String, title: String },
+    /// A plan card's Details: open the plan in the detail panel.
+    OpenBotWork { work_id: String },
+    /// A result notice's card: open what it names in the detail panel (the
+    /// post's entry id).
+    OpenBotPost { entry_id: String },
+    /// A saved routine's card: open the routine in the detail panel.
+    OpenBotRoutine { routine_id: String },
 }
 
 impl EventEmitter<TranscriptEvent> for Transcript {}
@@ -686,6 +751,12 @@ pub(super) fn entry_rows(
     parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
 ) -> Vec<Row> {
     if entry.role == MessageRole::User {
+        // The turn a host starts to tell the workspace's agent a job ended:
+        // the notice's card stands before it, so its own message draws
+        // nothing (an optimistic echo of it neither).
+        if entry.id.starts_with(cypher_proto::BOT_EVENT_PREFIX) {
+            return Vec::new();
+        }
         if let Some(rows) = peer_answer_rows(entry, parse) {
             return rows;
         }
@@ -722,6 +793,7 @@ pub(super) fn entry_rows(
         // A plan is a card of its own, not a chip in a group, and so is a
         // held memory write.
         let card = super::bot_plan::is_plan_call(part)
+            || super::bot_plan::saved_routine(part).is_some()
             || super::memory_card::is_card_call(part, memory_cards);
         if !card && let Some((part_id, item)) = tool_item(part, &fold) {
             // Nothing is pushed until the group flushes, so the run's
@@ -753,47 +825,24 @@ pub(super) fn entry_rows(
                 text,
                 agent_text,
             } => cx.push_text_rows(&mut rows, part_id, text, agent_text.as_deref(), parse),
-            // A routine's output posted into a bot chat: an attribution row,
-            // then its text as any answer's.
+            // A result notice: one compact card. Its text is the card's
+            // details, read in the panel, not here.
             MessagePart::Post {
                 id: part_id,
                 text,
                 from,
-            } => {
-                if let cypher_proto::BotPost::Routine {
-                    name,
-                    outcome,
-                    run_at,
-                    thread_chat_id,
-                    ..
-                } = from
-                {
-                    let failed = *outcome == cypher_proto::RunOutcome::Failed;
-                    let header = rows.len();
-                    rows.push(cx.row(
-                        format!("{}#{}#post", entry.id, part_id),
-                        fnv1a(name.as_bytes()) ^ (*run_at as u64) ^ u64::from(failed),
+            } => match post_card(&entry.id, from) {
+                Some(kind) => {
+                    let version = match &kind {
                         RowKind::BotPost {
-                            name: name.clone().into(),
-                            failed,
-                            run_at: *run_at,
-                            thread: thread_chat_id.clone().map(Into::into),
-                        },
-                    ));
-                    cx.push_text_rows(&mut rows, part_id, text, None, parse);
-                    // The header and its text draw one card together.
-                    let last = rows.len() - 1;
-                    for (ix, row) in rows.iter_mut().enumerate().skip(header) {
-                        row.card = Some(CardSlice {
-                            top: ix == header,
-                            bottom: ix == last,
-                            failed,
-                        });
-                    }
-                } else {
-                    cx.push_text_rows(&mut rows, part_id, text, None, parse)
+                            title, outcome, at, ..
+                        } => fnv1a(title.as_bytes()) ^ (*at as u64) ^ ((*outcome as u64) << 3),
+                        _ => 0,
+                    };
+                    rows.push(cx.row(format!("{}#{}#post", entry.id, part_id), version, kind));
                 }
-            }
+                None => cx.push_text_rows(&mut rows, part_id, text, None, parse),
+            },
             MessagePart::Reasoning { id: part_id, text } => {
                 run.get_or_insert_with(|| (rows.len(), part_id.clone()));
                 // Still thinking: the reasoning is the live tail.
@@ -829,6 +878,18 @@ pub(super) fn entry_rows(
                     RowKind::MemoryWrite {
                         call_id: part_id.clone().into(),
                         file: file.into(),
+                    },
+                ))
+            }
+            MessagePart::Tool { id: part_id, .. }
+                if let Some(saved) = super::bot_plan::saved_routine(part) =>
+            {
+                rows.push(cx.row(
+                    format!("{}#{}", entry.id, part_id),
+                    fnv1a(saved.id.as_bytes()) ^ fnv1a(saved.name.as_bytes()).rotate_left(5),
+                    RowKind::BotRoutine {
+                        name: saved.name.into(),
+                        routine_id: saved.id.into(),
                     },
                 ))
             }
@@ -981,7 +1042,6 @@ fn user_row(entry: &SessionMessageEntry, pending: bool) -> Row {
         timestamp: Some(entry.created_at),
         answered: None,
         translation: None,
-        card: None,
     }
 }
 
@@ -1249,7 +1309,6 @@ impl EntryRows<'_> {
             timestamp: None,
             answered: None,
             translation: None,
-            card: None,
         }
     }
 

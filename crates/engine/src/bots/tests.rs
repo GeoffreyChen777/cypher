@@ -46,6 +46,7 @@ fn chat(id: &str, space: &str, last: i64) -> Chat {
         child: None,
         bot: None,
         memory: None,
+        started_by: None,
     }
 }
 

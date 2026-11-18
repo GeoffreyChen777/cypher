@@ -160,7 +160,8 @@ impl Composer {
                 .state
                 .read(cx)
                 .selected_chat_row()
-                .is_some_and(|chat| chat.is_bot())
+                .and_then(|chat| chat.bot.as_ref())
+                .is_some_and(|marker| marker.is_bot_thread())
     }
 
     /// `/permissions <level>` typed in full: apply it here, never send it.

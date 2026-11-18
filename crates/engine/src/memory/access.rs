@@ -132,6 +132,7 @@ fn owner_chat() -> Chat {
         child: None,
         bot: None,
         memory: None,
+        started_by: None,
     }
 }
 

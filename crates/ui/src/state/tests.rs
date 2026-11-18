@@ -701,6 +701,7 @@ fn an_ended_plan_from_an_older_host_reads_with_its_steps_closed() {
         result: None,
         decision: None,
         stop_requested_at: None,
+        notify: false,
     };
     let mut s = AppState::new();
     s.apply_bot_records(BotRecords {
@@ -1028,6 +1029,82 @@ fn attention_count_tracks_the_sidebar_corners() {
         3,
         "a send in flight reads as working"
     );
+}
+
+#[test]
+fn a_workspaces_sessions_are_listed_in_it_and_nowhere_else() {
+    use cypher_proto::{BotChat, BotOrigin, BotThread, ChatStartedBy};
+    let now = Utc::now();
+    // Created at `minute`, last active a minute after.
+    let in_space = |id: &str, minute: i64| Chat {
+        space_id: Some("sp".into()),
+        ..chat(id, minute, Some(minute + 1))
+    };
+    let mut worker = in_space("worker", 1);
+    worker.started_by = Some(ChatStartedBy {
+        bot_id: "alpha".into(),
+        work_id: Some("w".into()),
+    });
+    let mut newer = in_space("newer", 2);
+    newer.started_by = Some(ChatStartedBy {
+        bot_id: "alpha".into(),
+        work_id: None,
+    });
+    newer.last_message_at = Some(now);
+    let mut routine = in_space("routine", 3);
+    routine.bot = Some(BotChat::thread(
+        "alpha",
+        BotOrigin::Routine,
+        BotThread::RoutineSession {
+            routine_id: "r".into(),
+        },
+    ));
+    let mut others = in_space("others", 4);
+    others.started_by = Some(ChatStartedBy {
+        bot_id: "beta".into(),
+        work_id: None,
+    });
+    let mut archived = in_space("archived", 5);
+    archived.started_by = worker.started_by.clone();
+    archived.archived = true;
+    let mut s = AppState::new();
+    s.apply_spaces(vec![cypher_proto::Space {
+        id: "sp".into(),
+        ..crate::test_fixtures::space()
+    }]);
+    s.apply_chats(vec![
+        in_space("mine", 0),
+        worker,
+        newer,
+        routine,
+        others,
+        archived,
+    ]);
+    let listed: Vec<&str> = s.visible_chats().map(|c| c.id.as_str()).collect();
+    assert_eq!(listed, ["mine"], "the Sessions view lists the owner's own");
+    let ids = |bot: &str| -> Vec<String> {
+        s.workspace_sessions(bot, "sp")
+            .into_iter()
+            .map(|c| c.id.clone())
+            .collect()
+    };
+    assert_eq!(ids("alpha"), ["newer", "routine", "worker"], "newest first");
+    assert_eq!(ids("beta"), ["others"]);
+    assert!(s.workspace_sessions("alpha", "elsewhere").is_empty());
+
+    // On the Dock a workspace's session counts while it asks, and only
+    // then: what it finished is its workspace's to report.
+    let unseen = |s: &AppState| s.attention_count(now);
+    let base = unseen(&s);
+    s.apply_sessions(vec![session(
+        "worker",
+        SessionStatus::AwaitingInput,
+        5,
+        now,
+    )]);
+    assert_eq!(unseen(&s), base + 1, "its question counts");
+    s.apply_sessions(vec![session("worker", SessionStatus::Idle, 5, now)]);
+    assert_eq!(unseen(&s), base, "its finished turn doesn't");
 }
 
 #[test]

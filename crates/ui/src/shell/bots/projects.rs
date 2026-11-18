@@ -17,6 +17,12 @@ use cypher_proto::{BotRoutine, BotWork, WorkState};
 
 /// Work items the project page lists, newest first.
 const PROJECT_WORK: usize = 5;
+/// The owner's own sessions a project's page lists (the ones the workspace
+/// reads); the Sessions view has them all.
+const PROJECT_READ: usize = 8;
+
+/// A session on a project's page: its id, title, state and last activity.
+type SessionRow = (String, String, ChatIndicator, i64);
 
 /// One project on the list: its load and last activity.
 struct ProjectEntry {
@@ -202,7 +208,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         let now = Utc::now();
-        let (space, device, sessions, work, routines) = {
+        let (space, device, sessions, read, work, routines) = {
             let state = self.state.read(cx);
             if !bot.scope.sees_space(space_id) {
                 return None;
@@ -212,22 +218,29 @@ impl Shell {
                 .device_name(&space.device_id)
                 .unwrap_or("Unknown device")
                 .to_string();
-            let sessions: Vec<(String, String, ChatIndicator, i64)> =
-                scoped_sessions(&bot.scope, &state.chats, space_id)
-                    .into_iter()
-                    .map(|chat| {
-                        (
-                            chat.id.clone(),
-                            transcript::single_line(&super::items::plain_markdown(
-                                chat.title.as_deref().unwrap_or("New session"),
-                            )),
-                            state.display_status_for(chat, now),
-                            chat.last_message_at
-                                .unwrap_or(chat.created_at)
-                                .timestamp_millis(),
-                        )
-                    })
-                    .collect();
+            let line = |chat: &cypher_proto::Chat| {
+                (
+                    chat.id.clone(),
+                    transcript::single_line(&super::items::plain_markdown(
+                        chat.title.as_deref().unwrap_or("New session"),
+                    )),
+                    state.display_status_for(chat, now),
+                    chat.last_message_at
+                        .unwrap_or(chat.created_at)
+                        .timestamp_millis(),
+                )
+            };
+            // The workspace's own sessions here, then the owner's it reads.
+            let sessions: Vec<SessionRow> = state
+                .workspace_sessions(&bot.id, space_id)
+                .into_iter()
+                .map(line)
+                .collect();
+            let read: Vec<SessionRow> = scoped_sessions(&bot.scope, &state.chats, space_id)
+                .into_iter()
+                .take(PROJECT_READ)
+                .map(line)
+                .collect();
             let records = &state.bot_records;
             let mut work: Vec<BotWork> = records
                 .work_of(&bot.id)
@@ -248,7 +261,7 @@ impl Shell {
                 .cloned()
                 .collect();
             routines.sort_by_key(|r| r.name.to_lowercase());
-            (space, device, sessions, work, routines)
+            (space, device, sessions, read, work, routines)
         };
         let head = PanelHead {
             glyph: crate::appearance::space_style::space_icon(space.icon.as_deref()),
@@ -305,48 +318,60 @@ impl Shell {
         );
         let mut body = div().p(px(8.0)).flex().flex_col();
 
-        // ── its sessions ──
+        // ── the workspace's sessions here, then the owner's it reads ──
         body = body.child(section_head("Sessions", true, theme));
         if sessions.is_empty() {
-            body = body.child(parts::quiet_line(theme, "No sessions here yet."));
+            body = body.child(parts::quiet_line(
+                theme,
+                "No sessions of this workspace here yet.",
+            ));
         }
-        for (chat_id, title, status, at) in sessions {
+        let session_row = |(chat_id, title, status, at): SessionRow, cx: &mut Context<Self>| {
             let key = format!("bot-panel-session-{chat_id}");
-            body = body.child(
-                hover_row(&key)
-                    .items_center()
-                    .py(px(6.0))
-                    .cursor_pointer()
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(14.0))
-                            .flex()
-                            .justify_center()
-                            .child(session_mark(status, ticker, theme)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.0))
-                            .text_color(theme.text)
-                            .child(SharedString::from(title)),
-                    )
-                    .children(session_word(status, theme).map(|(word, color)| {
-                        div()
-                            .flex_none()
-                            .text_size(px(11.0))
-                            .text_color(color)
-                            .child(word)
-                    }))
-                    .child(trailing(super::items::ago(at, now), theme.text_faint))
-                    .child(arrow_in(&key, theme)),
-            );
+            hover_row(&key)
+                .items_center()
+                .py(px(6.0))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(14.0))
+                        .flex()
+                        .justify_center()
+                        .child(session_mark(status, ticker, theme)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(13.0))
+                        .text_color(theme.text)
+                        .child(SharedString::from(title)),
+                )
+                .children(session_word(status, theme).map(|(word, color)| {
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(color)
+                        .child(word)
+                }))
+                .child(trailing(super::items::ago(at, now), theme.text_faint))
+                .child(arrow_in(&key, theme))
+        };
+        for session in sessions {
+            body = body.child(session_row(session, cx));
+        }
+        if !read.is_empty() {
+            body = body.child(section_rule()).child(section_head(
+                "Your sessions it reads",
+                false,
+                theme,
+            ));
+            for session in read {
+                body = body.child(session_row(session, cx));
+            }
         }
 
         // ── the bot's work there ──

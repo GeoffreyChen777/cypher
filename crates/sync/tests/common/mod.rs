@@ -44,6 +44,7 @@ pub fn chat(id: &str, device_id: &str) -> Chat {
         child: None,
         bot: None,
         memory: None,
+        started_by: None,
     }
 }
 

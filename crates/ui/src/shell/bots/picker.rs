@@ -846,6 +846,7 @@ mod tests {
             result: None,
             decision: None,
             stop_requested_at: None,
+            notify: false,
         };
         state.bot_records = BotRecords {
             work: vec![work],
@@ -962,6 +963,7 @@ mod tests {
             result: None,
             decision: None,
             stop_requested_at: None,
+            notify: false,
         };
         let records = BotRecords {
             work: vec![

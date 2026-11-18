@@ -14,12 +14,12 @@ use cypher_doc::{MessagePart, MessageRole, SessionCommandPayload};
 use cypher_proto::{
     AckRequest, ActivityKind, AnswerRequest, AnswerStatus, Bot, BotChat, BotConnection,
     BotExchange, BotFrame, BotInvite, BotOrigin, BotThread, Chat, ExchangeDirection, ExchangeState,
-    LinkOp, ReplyMode, RunRequest, SessionStatus, StateAck, StateRequest, WIRE_ANSWER_MAX_BYTES,
-    WireState,
+    LinkOp, ReplyMode, SessionStatus, StateAck, StateRequest, WIRE_ANSWER_MAX_BYTES, WireState,
 };
 
 use super::{Bots, is_settled, net, one_line, peer_label, scrub::scrub};
 use crate::EngineError;
+use crate::bots::notice::run_request;
 use crate::util::{lock, new_id};
 
 /// How often a room with live connections or waiting questions is pulled.
@@ -776,6 +776,7 @@ impl Bots {
             room_gen: Some(2),
             child: None,
             memory: None,
+            started_by: None,
             bot: Some(BotChat::thread(
                 &bot.id,
                 BotOrigin::Peer,
@@ -791,30 +792,6 @@ impl Bots {
         updated.thread_chat_id = Some(thread.id.clone());
         self.put_connection(&updated)?;
         Ok(thread)
-    }
-}
-
-/// A run in `chat` with its own config, as the composer would send it.
-fn run_request(chat: &Chat, prompt: String) -> RunRequest {
-    let config = chat.config.clone();
-    RunRequest {
-        prompt,
-        harness: config.as_ref().map(|c| c.harness),
-        model: config.as_ref().and_then(|c| c.model.clone()),
-        reasoning: config.as_ref().and_then(|c| c.reasoning),
-        model_options: config
-            .as_ref()
-            .map(|c| c.model_options.clone())
-            .unwrap_or_default(),
-        cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
-        sandbox: config
-            .as_ref()
-            .map_or(cypher_proto::SandboxLevel::ReadOnly, |c| c.sandbox),
-        auto_approve: false,
-        resume: None,
-        attachments: Vec::new(),
-        pending_attachments: Vec::new(),
-        worktree: None,
     }
 }
 

@@ -259,20 +259,34 @@ impl Shell {
         let elapsed = format_span(now - work.started_at.unwrap_or(work.created_at));
         let stopping = plan_phase(work) == PlanPhase::Stopping;
         if !roomy {
-            // On the card: its mark, title and how far it got.
-            return card_item(
+            // On the card: its mark, title and how long it has run, then
+            // the step it is on over a small bar of the steps done.
+            let detail = div()
+                .pt(px(3.0))
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.0))
+                        .line_height(px(14.0))
+                        .text_color(theme.text_muted.opacity(0.85))
+                        .child(SharedString::from(if stopping {
+                            "Stopping…".to_string()
+                        } else {
+                            current_step_line(work)
+                        })),
+                )
+                .child(div().pb(px(2.0)).child(progress_bar(done, total, theme)))
+                .into_any_element();
+            return super::board::card_item_detail(
                 &key,
                 Some(work_mark(work, self.pulse_ticker.entity_id(), theme)),
                 transcript::single_line(&work.title),
-                Some(card_corner(
-                    if stopping {
-                        "stopping".to_string()
-                    } else {
-                        format!("{done}/{total}")
-                    },
-                    None,
-                    theme,
-                )),
+                Some(card_corner(elapsed, None, theme)),
+                Some(detail),
                 selected,
                 theme,
             )
@@ -636,10 +650,11 @@ impl Shell {
         // ── footer: the decision it waits on ──
         if phase.awaiting() {
             let (approve, cancel) = (work.id.clone(), work.id.clone());
+            let (edit_id, edit_title) = (work.id.clone(), work.title.clone());
             self.set_panel_footer(
                 decision_bar(Some("Nothing runs until you approve."), theme)
                     .child(
-                        popover::btn_ghost(theme, "Cancel plan", "bot-plan-cancel")
+                        popover::btn_ghost(theme, "Reject", "bot-plan-cancel")
                             .id("bot-plan-cancel")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.mutate(
@@ -648,6 +663,14 @@ impl Shell {
                                     }),
                                     cx,
                                 )
+                            })),
+                    )
+                    // Reject it and start the reply that asks for the change.
+                    .child(
+                        popover::btn_ghost(theme, "Edit", "bot-plan-edit")
+                            .id("bot-plan-edit")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.edit_bot_plan(&edit_id, &edit_title, cx)
                             })),
                     )
                     .child(
@@ -1196,7 +1219,7 @@ impl Shell {
             }
         };
         self.peek(thread, true, cx);
-        let view = self.board.peek.as_ref()?.transcript.clone()?;
+        let view = self.board.peeks.get(thread)?.transcript.clone()?;
         let head = PanelHead {
             glyph: icons::CHAT_ROUND_LINE,
             tint: None,
@@ -1278,6 +1301,7 @@ mod tests {
             result: None,
             decision: None,
             stop_requested_at: None,
+            notify: false,
         }
     }
 

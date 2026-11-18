@@ -9,7 +9,7 @@
 //! Mutate; the run state (last run, next run, runs today, its sessions) is
 //! the host's and only read here.
 
-use super::board::{card_corner, card_glyph, card_item, two_lines};
+use super::board::{card_corner, card_glyph, two_lines};
 use super::panel::{PanelHead, PanelItem};
 use super::parts::{self, CallError};
 use super::*;
@@ -597,11 +597,46 @@ impl Shell {
         };
         let dim = job.dim();
         let item = job.item();
-        card_item(
+        // A run under way says so under the name, as a plan says its step:
+        // how long it has run, or that its session waits on the owner.
+        let detail =
+            job.last
+                .as_ref()
+                .filter(|_| state == JobState::Running)
+                .map(|run| {
+                    let now = Utc::now();
+                    let asking = run.chat_id.as_deref().is_some_and(|chat_id| {
+                        super::chat_asking(self.state.read(cx), chat_id, now)
+                    });
+                    let (text, color) = if asking {
+                        ("Waiting on you".to_string(), theme.warning)
+                    } else {
+                        (
+                            format!(
+                                "Running · {}",
+                                crate::transcript::bot_plan::format_span(
+                                    now.timestamp_millis() - run.at
+                                )
+                            ),
+                            theme.text_muted.opacity(0.85),
+                        )
+                    };
+                    div()
+                        .pt(px(3.0))
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.0))
+                        .line_height(px(14.0))
+                        .text_color(color)
+                        .child(SharedString::from(text))
+                        .into_any_element()
+                });
+        super::board::card_item_detail(
             &format!("bot-job-{}", job.id),
             Some(card_glyph(glyph, tint.opacity(0.82))),
             job.name.clone(),
             Some(corner),
+            detail,
             selected,
             theme,
         )

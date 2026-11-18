@@ -2053,6 +2053,7 @@ fn needs_you_counts_records_and_worker_questions_across_bots() {
         result: None,
         decision: None,
         stop_requested_at: None,
+        notify: false,
     };
     let records = cypher_proto::BotRecords {
         work: vec![

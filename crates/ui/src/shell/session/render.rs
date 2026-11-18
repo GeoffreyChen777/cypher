@@ -381,6 +381,53 @@ impl Shell {
             }
         };
 
+        // Over a workspace's own composer: what waits on the owner in its
+        // sessions and plans, in the amber of a session awaiting input. A
+        // click opens the page that answers them.
+        let needs = (self.board.slot == Some(sid))
+            .then(|| self.board_needs_count(cx))
+            .filter(|count| *count > 0)
+            .map(|count| {
+                let key = "board-needs-strip";
+                div()
+                    .id(key)
+                    .flex_none()
+                    .h(px(20.0))
+                    .px(px(8.0))
+                    .rounded_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(5.0))
+                    .cursor_pointer()
+                    .text_size(px(11.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.warning)
+                    .bg(motion::hover_blend(
+                        key,
+                        theme.warning.opacity(0.1),
+                        theme.warning.opacity(0.18),
+                    ))
+                    .on_hover(motion::hover_listener(key))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_need(None, cx)))
+                    .child(
+                        icon(icons::BELL)
+                            .size(px(11.0))
+                            .flex_none()
+                            .text_color(theme.warning),
+                    )
+                    .child(SharedString::from(if count == 1 {
+                        "1 needs you".to_string()
+                    } else {
+                        format!("{count} need you")
+                    }))
+                    .child(
+                        icon(icons::ALT_ARROW_RIGHT)
+                            .size(px(9.0))
+                            .flex_none()
+                            .text_color(theme.warning.opacity(0.8)),
+                    )
+            });
         // Pending-comments indicator pinned to the strip's upper-left; the
         // session status sits centered; the Subagents trigger stays right.
         let comments_trigger =
@@ -389,6 +436,7 @@ impl Shell {
             .child(comments_trigger)
             .child(div().flex_1())
             .child(left)
+            .children(needs)
             // Flex spacer keeps the center status centered and the subagents
             // trigger pinned to the composer-aligned right edge; when the
             // trigger renders Empty (no records) the strip is just the left

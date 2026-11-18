@@ -331,6 +331,7 @@ impl Shell {
                     child: None,
                     bot: None,
                     memory: None,
+                    started_by: None,
                 });
                 cx.notify();
             }
