@@ -307,9 +307,6 @@ impl Shell {
         );
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
-        // A bot's conversation notes what the bot can see wherever the strip
-        // has nothing more pressing to say.
-        let mut bot_access = self.render_bot_access(sid, &theme, cx);
         let state = slot_state.read(cx);
 
         // Aligned with the composer column: the pill starts after the
@@ -355,15 +352,11 @@ impl Shell {
                     // The working loader lives in the TRANSCRIPT now, under the
                     // streaming reply (user request) — the strip stays empty
                     // (its reserved height still steadies the composer).
-                    Indicator::Working => bot_access
-                        .take()
-                        .unwrap_or_else(|| Empty.into_any_element()),
+                    Indicator::Working => Empty.into_any_element(),
                     // No label: the QuestionPanel right below IS the
                     // awaiting-input surface — a strip caption above it was
                     // redundant (user request).
-                    Indicator::AwaitingInput => bot_access
-                        .take()
-                        .unwrap_or_else(|| Empty.into_any_element()),
+                    Indicator::AwaitingInput => Empty.into_any_element(),
                     Indicator::Errored => div()
                         .text_color(theme.danger)
                         .child(SharedString::from("Run failed"))
@@ -383,9 +376,7 @@ impl Shell {
                                 .child(SharedString::from("Sending…")),
                         )
                         .into_any_element(),
-                    Indicator::None => bot_access
-                        .take()
-                        .unwrap_or_else(|| Empty.into_any_element()),
+                    Indicator::None => Empty.into_any_element(),
                 }
             }
         };

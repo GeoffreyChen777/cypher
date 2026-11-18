@@ -979,9 +979,8 @@ Built:
   *Coordinate*, *Steer others' sessions*), with an access summary under it;
   instructions), a "Run on device" rail on the right (fixed after creation), and a
   Cancel / Save footer with Delete when editing. New bots start with *Work directly* and *Coordinate* on.
-- **Bot conversation:** the Workspaces board's middle card, wearing the bot's avatar. A quiet
-  access note over the composer ("invoice-demo · works directly · starts sessions")
-  opens the bot's settings. A new bot opens on a start screen with a 2×2 grid of
+- **Bot conversation:** the Workspaces board's middle card, wearing the bot's avatar.
+  A new bot opens on a start screen with a 2×2 grid of
   suggested questions. Bot tool calls read as what they did ("Read session · <title>";
   "Proposed a plan · read 2 sessions"), and cited `cypher://session/<id>` links open the
   session (a link to one of the bot's hidden threads opens it read-only in the panel).
@@ -1045,7 +1044,7 @@ layout. Sessions a workspace started stay in their projects, marked "by <workspa
 Project windows have only the plain wordmark.
 
 **No status card.** Who the bot is reads from the logo's tag and the chat header, what it
-may do from the access note over the composer, and its pause and settings buttons sit
+may do from its settings (Permissions), and its pause and settings buttons sit
 in the chat header where a tile keeps its actions. Under the header a single quiet line
 appears only when something is off, the way the project sidebar marks only an offline
 host: "Bob is paused" (with Resume), "<device> is offline", or "The last run failed".
@@ -1080,8 +1079,7 @@ items are never below the fold. One card floats at a time, the open panel item's
 the panel shut none does. A click on a card's header folds the card to that one row and back, as a project card's does (for this window only, like the project cards); the arrow at the header's end, shown on hover, opens its whole list; a row opens that item.
 
 **The chat** is the bot conversation as built: the owner instructs the bot here, and
-plan, progress and result cards appear inline. Its access note over the composer opens
-the bot's settings. It has no terminal and no session dock.
+plan, progress and result cards appear inline. It has no terminal and no session dock.
 
 **The detail panel** slides in from the window's right edge and the chat narrows to make
 room. Its left edge drags to resize it (340 to 760px, never squeezing the chat below

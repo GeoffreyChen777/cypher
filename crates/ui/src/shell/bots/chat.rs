@@ -1,6 +1,5 @@
-//! A bot's conversation on the Botboard: the note over the composer saying
-//! what the bot can see, and the start screen a new bot opens on. Its other
-//! differences live where they apply (the card's header wears the bot's
+//! A bot's conversation on the Botboard: the start screen a new bot opens
+//! on. Its other differences live where they apply (the card's header wears the bot's
 //! avatar, the slot has no terminal and no dock, the composer asks "Ask
 //! <bot>…", the transcript names bot tool calls).
 
@@ -113,47 +112,6 @@ impl Shell {
             .chats
             .iter()
             .any(|c| c.id == chat_id && c.is_bot())
-    }
-
-    /// The status strip's note in a bot's conversation: what the bot can
-    /// see, in a few words; a click opens its settings.
-    pub(in crate::shell) fn render_bot_access(
-        &self,
-        sid: SlotId,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let bot = self.slot_bot(sid, cx)?;
-        let access = access_summary(&bot, self.tiles.slots.get(&sid)?.state.read(cx));
-        let key = format!("bot-access-{sid}");
-        let tint = motion::hover_blend(&key, theme.text_muted.opacity(0.75), theme.text);
-        Some(
-            div()
-                .id(SharedString::from(key.clone()))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(5.0))
-                .px(px(6.0))
-                .py(px(2.0))
-                .rounded(px(6.0))
-                .cursor_pointer()
-                .text_size(px(11.5))
-                .text_color(tint)
-                .on_hover(motion::hover_listener(key.clone()))
-                .tooltip(|_, cx| {
-                    cx.new(|_| super::super::session::FindTooltip("Workspace permissions".into()))
-                        .into()
-                })
-                .on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        this.open_bot_dialog(Some(bot.id.clone()), cx)
-                    }),
-                )
-                .child(icon(icons::SHIELD_CHECK).size(px(12.0)).text_color(tint))
-                .child(SharedString::from(access))
-                .into_any_element(),
-        )
     }
 
     /// Whether the slot's bot conversation has nothing in it yet: the start
