@@ -5,10 +5,17 @@
  *
  * - `inspect` (R0): changes nothing and moves no data off the machine. Runs
  *   outside the sandbox without asking.
- * - `local` (R1): changes only this machine's, the user's, undoable things.
- *   The reviewing model decides; failing that the user, once per kind.
- * - `danger` (R2): irreversible, reaches other people or shared systems,
- *   persists beyond the task, or exposes a secret. Always a human.
+ * - `local` (R1): changes only this machine's, the user's, undoable things,
+ *   wherever they are. The reviewing model decides; failing that the user,
+ *   once per kind.
+ * - `danger` (R2): irreversible, reaches other people or shared systems, or
+ *   persists beyond the task. The reviewing model may approve one only on a
+ *   fact Cypher checks itself: the owner's own words asking for exactly it
+ *   (explicit.ts), or that it touches nothing but what this task made
+ *   (created.ts, `facts.created`).
+ * - `floor` on top of `danger`: the few things no rule, grant or model ever
+ *   approves (a secret leaving the machine, a change to the permission
+ *   system itself). The user decides, every time.
  *
  * The classifier is deterministic and conservative: a word known only when
  * the line runs counts as whatever would make the command dangerous, and a
@@ -43,33 +50,72 @@ export interface Assessment {
    * with the same key (every tag of a release, not a force-push).
    */
   key?: string;
-  /** A danger the reviewing model may approve once, when the user's own message asks for it (`reviewable`). */
-  reviewable?: true;
+  /**
+   * The always-ask floor: the user decides, whatever anyone says. Never set
+   * for anything but a secret leaving the machine or a change to the
+   * permission system itself.
+   */
+  floor?: true;
+  /** An approval covers this call alone and is never remembered (a secret read). */
+  once?: true;
 }
 
 /**
- * Dangers a human alone decides, whatever the user said in chat: secrets and
- * credentials, deleting or discarding, the administrator, the machine's own
- * setup, anything that can run code later, and what the line leaves unknown.
+ * Text that shows a command means to change a file it names, not read it:
+ * an interpreter opening it for writing, a database writing or restoring,
+ * a script deleting or renaming. Read by `fileEffect` for programs whose
+ * operands could be either.
  */
-const HUMAN_ONLY_KIND =
-  /secret|credential|keys|environment|administrator|how this machine runs|scheduled jobs|disk|raw data|delet|drops|discards|removes|rewrites|force-push|run a program|runs? code later|access to this machine|Cypher's own data|protected target|known only when it runs|cannot tell|downloads? code/i;
-/** Subcommands that delete, or that reach credentials, keys, secrets or ownership. */
-const HUMAN_ONLY_VERB =
-  /^(delete|destroy|remove|rm|rmi|rb|purge|prune|terminate|uninstall|unpublish|yank|reset|down|deregister|revoke|drop)([-:].*)?$|^.+:(delete|destroy|remove|purge)$|^(login|logout|adduser|signin|signout|token|tokens|owner|access|team|auth|secret|secrets|variable|variables|env|ssh-key|gpg-key|deploy-key|match|cert|sigh|pem|configure|credential|credentials|key|keys)$/i;
-/** Options that delete. */
-const HUMAN_ONLY_OPTION = /^(--delete|--prune|--purge|--destroy|-destroy|-XDELETE|--request=DELETE|--method=DELETE)$/i;
+const WRITE_HINT =
+  /\bopen\s*\([^)]*['"][waxr]\+?[bt+]*['"]|>\s*["'$\w/~.]|\bwrite(?:lines|_text|_bytes|File|FileSync)?\s*\(|\bdump\s*\(|\bunlink\b|\brmtree\b|\bremove\s*\(|\brename\s*\(|\bmkdir\b|\bchmod\b|\bcopy(?:file|tree)?\s*\(|\btruncate\b|\.backup\b|\.restore\b|\.import\b|\binsert\s+into\b|\bupdate\s+\w+\s+set\b|\bdelete\s+from\b|\bdrop\s+(table|index)\b|\balter\s+table\b|\bcreate\s+(table|index)\b|\bvacuum\b|\bsave\b/i;
+
+/** Programs that only read the files they name. */
+const READERS: ReadonlySet<string> = new Set([
+  "cat", "head", "tail", "less", "more", "bat", "grep", "rg", "egrep", "fgrep", "wc", "sort", "uniq", "cut", "tr", "nl", "fold", "column", "rev",
+  "diff", "cmp", "comm", "file", "strings", "xxd", "od", "hexdump", "md5", "md5sum", "shasum", "sha1sum", "sha256sum", "cksum", "jq", "yq", "plutil",
+  "awk", "gawk", "json_pp", "xmllint", "iconv", "base64", "gunzip", "zcat", "bzcat", "xzcat", "open", "qlmanage", "wc",
+]);
+
+/** Interpreters and tools whose operands may be read or written: their text says which. */
+const EITHER = /^(python\d*(\.\d+)?|node|deno|bun|ruby|perl|php|lua|osascript|sqlite3|sed|tee|tar|unzip|zip|ditto|plutil|defaults|jq|java)$/;
 
 /**
- * Every other danger (publishing, deploying, sending, installing, a pull
- * request) the reviewing model may approve once, when the user's own message
- * asks for exactly it.
+ * Whether a command changes a path it names, or only reads it: a copy reads
+ * its sources and writes its destination, and anything else is decided by the
+ * program (`fileEffect`).
  */
-function reviewable(assessment: Assessment, view: CommandView): Assessment {
-  if (HUMAN_ONLY_KIND.test(assessment.kind ?? "")) return assessment;
-  if (view.positionals.some((word) => HUMAN_ONLY_VERB.test(word))) return assessment;
-  if (view.args.some((word, i) => HUMAN_ONLY_OPTION.test(word) || (/^(-X|--request|--method)$/.test(word) && /^DELETE$/i.test(view.args[i + 1] ?? "")))) return assessment;
-  return { ...assessment, reviewable: true };
+function pathEffect(command: RiskCommand, view: CommandView, path: string): "read" | "write" {
+  if (/^(cp|mv|rsync|scp|ditto|install|ln)$/.test(view.program)) {
+    const copy = copyOperands(view.words);
+    if (copy) return path === copy.dest ? "write" : "read";
+  }
+  return fileEffect(command, view, path);
+}
+
+/**
+ * Whether a command changes the file it names, or only reads it. A program
+ * this cannot place counts as writing: the facts a danger may be approved on
+ * must never rest on a guess.
+ */
+export function fileEffect(command: RiskCommand, view: CommandView, path: string): "read" | "write" {
+  if (command.writes.includes(path)) return "write";
+  if (command.reads.includes(path)) return "read";
+  const program = view.program;
+  // `mkdir` is named-only for reading a secret's directory, but it does make it.
+  if (program !== "mkdir" && (NAME_ONLY.has(program) || READERS.has(program))) return "read";
+  // `find` and friends only list what they name, unless told to act on it
+  // (which `destroyDanger` reads).
+  if (/^(find|fd|tree|du|rg|ag|ack)$/.test(program)) {
+    return view.args.some((word) => /^-(delete|exec|execdir|ok|okdir|fprint.*|fls|X)$/.test(word)) ? "write" : "read";
+  }
+  if (EITHER.test(program)) {
+    if (program === "sed" || program === "perl") return view.args.some((word) => /^-[A-Za-z]*i/.test(word) || word.startsWith("--in-place")) ? "write" : "read";
+    if (program === "sqlite3" && (view.args.includes("-readonly") || view.words.some((word) => /[?&]mode=ro\b/.test(word)))) return "read";
+    if (program === "tar" || program === "unzip" || program === "zip" || program === "ditto") return "write";
+    if (program === "tee") return "write";
+    return view.words.some((word) => word !== UNKNOWN && WRITE_HINT.test(word)) ? "write" : "read";
+  }
+  return "write";
 }
 
 /** The danger a kind names, without the specifics that differ from command to command (which tag). */
@@ -87,10 +133,24 @@ export interface RiskCommand {
   cwd: string | undefined;
   reads: readonly string[];
   writes: readonly string[];
+  /** Words it carries besides its own: values assigned in front of it, its wrappers' words. */
+  carried?: readonly string[];
 }
 
 /** What `kill`, `pkill` and `killall` would stop. */
 export type KillTarget = { pids: number[] } | { pgrep: string[] };
+
+/** What can be told about the processes a kill would stop (each undefined when it cannot be). */
+export interface ProcessFacts {
+  /** Every one carries this chat's marker: it started them, or they descend from its commands. */
+  owned?: boolean;
+  /** Every one runs in the chat's project folders (its working directory). */
+  inRoots?: boolean;
+  /** Every one runs in, or on, what this task made (created.ts): its dev instance, its worktrees. */
+  inCreated?: boolean;
+  /** One is the installed Cypher app's (its program or folder). */
+  installedApp?: boolean;
+}
 
 export interface GitFacts {
   /** The branch checked out, if any. */
@@ -111,10 +171,25 @@ export interface RiskFacts extends PackFacts {
   inspect: readonly string[][];
   /** Whether every target is a process this chat started; undefined when that cannot be told. */
   ownsProcesses(target: KillTarget): boolean | undefined;
+  /** More about the targets: where they run, whose they are. Without it, only `ownsProcesses`. */
+  processFacts?(target: KillTarget): ProcessFacts;
+  /** A canonical path that is the installed Cypher app or its data (not a chat's worktree). */
+  installedApp?(path: string): boolean;
   /** The repository at a directory (undefined: none, or not known). */
   git(dir: string): GitFacts | undefined;
   /** A directory inside the chat's workspace. */
   inWorkspace(dir: string): boolean;
+  /** The branches checked out in the chat's project folders, bar a default branch: the chat's own work. */
+  workspaceBranches?(): readonly string[];
+  /** What this task made (created.ts): what it may undo without asking anyone. */
+  created?: { has(path: string): boolean; worktree(path: string): boolean; branch(name: string): boolean };
+  /** A canonical path of the permission system itself (config.ts): a change there always asks. */
+  permissionSystem?(path: string): boolean;
+}
+
+/** A path the task may delete, move or discard: the workspace, scratch, caches, or what it made itself. */
+function disposable(path: string, facts: RiskFacts): boolean {
+  return facts.disposable(path) || facts.created?.has(path) === true;
 }
 
 /** Programs whose file operands are read only by name (listing a key's directory reads no key). */
@@ -188,24 +263,57 @@ function pathWords(words: readonly string[]): string[] {
  * x >> ~/.zshrc` changes a file that runs code later, `cat < key` reads a
  * secret. Every command is checked, inert builtins and filters too.
  */
-export function redirectDanger(command: Pick<RiskCommand, "reads" | "writes" | "cwd">, facts: RiskFacts): string | undefined {
+export function redirectRisk(command: Pick<RiskCommand, "reads" | "writes" | "cwd">, facts: RiskFacts): Assessment | undefined {
+  let soft: Assessment | undefined;
   for (const path of command.reads) {
-    const classification = facts.classify(path, command.cwd);
-    if (!classification) return `reads ${path}, in a directory known only when it runs`;
-    if (classification.zone === "sensitive") return `reads a secret (${path})`;
+    const classification = facts.classify(path, command.cwd) ?? named(path, facts);
+    if (!classification) continue;
+    // Reading a secret sends it to the model provider: the model may approve
+    // it for the request at hand, once, and nothing is remembered.
+    if (classification.zone === "sensitive") soft ??= { tier: "local", kind: `reads a secret (${path})`, once: true };
   }
   for (const path of command.writes) {
-    const classification = facts.classify(path, command.cwd);
-    if (!classification) return `writes ${path}, in a directory known only when it runs`;
-    const why = writeDanger(classification);
-    if (why) return `${why} (${path})`;
+    const classification = facts.classify(path, command.cwd) ?? named(path, facts);
+    // A name in a directory known only when it runs that could be no secret
+    // and no startup file is ordinary work.
+    if (!classification) continue;
+    if (facts.permissionSystem?.(classification.path)) return { tier: "danger", kind: `changes the permission system itself (${path})`, key: "permission-system", floor: true };
+    const why = writeDanger(classification, facts);
+    if (why) return { tier: "danger", kind: `${why} (${path})`, key: dangerKey(why) };
   }
-  return undefined;
+  return soft;
 }
 
-function pathDanger(command: RiskCommand, view: CommandView, facts: RiskFacts): string | undefined {
-  const redirected = redirectDanger(command, facts);
-  if (redirected) return redirected;
+/**
+ * What a path in a directory known only when it runs could be, by its name
+ * alone: `cat > step2.py` could land anywhere, but only a name like
+ * `id_rsa` or `.zshrc` could be a secret or a startup file. Undefined when
+ * the name is an ordinary one, whichever directory it turns out to be in.
+ */
+function named(path: string, facts: RiskFacts): Classification | undefined {
+  const home = facts.classify("~", undefined)?.path;
+  if (home === undefined) return undefined;
+  const classification = facts.classify(basename(path), home);
+  if (!classification) return undefined;
+  return classification.zone === "sensitive" || classification.guard !== undefined ? classification : undefined;
+}
+
+/** Programs that send a file named `@file` (`curl -d @f`, `-F x=@f`, `http x=@f`). */
+const SENDS_AT_FILES = /^(curl|http|https|xh)$/;
+
+function pathRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): Assessment | undefined {
+  const redirected = redirectRisk(command, facts);
+  if (redirected?.tier === "danger") return redirected;
+  let soft: Assessment | undefined = redirected;
+  if (SENDS_AT_FILES.test(view.program)) {
+    for (const word of view.args) {
+      const file = /^(?:[^=@\s]*=)?@([^;]+)/.exec(word)?.[1];
+      if (!file || file === "-") continue;
+      const classification = facts.classify(file, command.cwd);
+      // A secret leaving the machine: the floor, never approved by anyone but the user.
+      if (classification?.zone === "sensitive") return { tier: "danger", kind: `sends a secret off this machine (${file})`, key: "secret-off-machine", floor: true };
+    }
+  }
   const words = view.args;
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
@@ -214,13 +322,21 @@ function pathDanger(command: RiskCommand, view: CommandView, facts: RiskFacts): 
     if (/^(ssh|scp|sftp|rsync|git|mosh)$/.test(view.program) && (words[i - 1] === "-i" || /IdentityFile/i.test(words[i - 1] ?? ""))) continue;
     const classification = facts.classify(word, command.cwd);
     if (!classification) continue;
-    if (classification.zone === "sensitive" && !NAME_ONLY.has(view.program)) return `reads or writes a secret (${word})`;
-    if (WRITERS.has(view.program) && view.program !== "git") {
-      const why = writeDanger(classification);
-      if (why) return why;
+    const effect = pathEffect(command, view, word);
+    if (facts.permissionSystem?.(classification.path) && effect === "write") {
+      return { tier: "danger", kind: `changes the permission system itself (${word})`, key: "permission-system", floor: true };
+    }
+    if (classification.zone === "sensitive" && !NAME_ONLY.has(view.program)) {
+      if (effect === "write") return { tier: "danger", kind: `writes a secret (${word})`, key: "writes a secret" };
+      soft ??= { tier: "local", kind: `reads a secret (${word})`, once: true };
+      continue;
+    }
+    if (WRITERS.has(view.program) && view.program !== "git" && effect === "write") {
+      const why = writeDanger(classification, facts);
+      if (why) return { tier: "danger", kind: why, key: dangerKey(why) };
     }
   }
-  return undefined;
+  return soft;
 }
 
 /**
@@ -265,7 +381,11 @@ function copyDanger(command: RiskCommand, view: CommandView, facts: RiskFacts): 
   return undefined;
 }
 
-function writeDanger(classification: Classification): string | undefined {
+function writeDanger(classification: Classification, facts?: RiskFacts): string | undefined {
+  // What this task made is its own to change, even where a file there runs
+  // code later (its dev instance's Runtime); the installed app and the
+  // permission system are never recorded as made (created.ts `recordable`).
+  if (facts?.created?.has(classification.path) && classification.zone !== "sensitive") return undefined;
   if (classification.zone === "sensitive") return "writes a secret";
   if (classification.guard === "self") return "changes Cypher's own data";
   if (classification.guard === "protected") return "changes a file that runs code later";
@@ -307,14 +427,17 @@ function destroyDanger(command: RiskCommand, view: CommandView, facts: RiskFacts
       operands.push(word);
     }
     if (operands.length === 0) operands = ["."];
-  } else if (/^(chmod|chown|chgrp)$/.test(view.program) && view.args.some((word) => word === UNKNOWN || /^-[A-Za-z]*R/.test(word))) {
-    operands = view.positionals.slice(1);
+  } else if (/^(chmod|chown|chgrp)$/.test(view.program) && view.args.some((word) => /^-[A-Za-z]*R/.test(word))) {
+    // A recursive mode change outside the project folders; one path at a
+    // time, or a path known only when it runs, is ordinary work (`mkdir -p
+    // "$E" && chmod 700 "$E"`).
+    operands = view.positionals.slice(1).filter((word) => word !== UNKNOWN);
   } else return undefined;
   for (const operand of operands) {
     if (operand === UNKNOWN) return `${verb(view.program)} files named only when it runs`;
     if (command.cwd === undefined && !isAbsolute(operand) && !operand.startsWith("~")) return `${verb(view.program)} files in a directory known only when it runs`;
     const classification = facts.classify(operand, command.cwd);
-    if (!classification || !facts.disposable(classification.path)) return `${verb(view.program)} files outside the project folders (${operand})`;
+    if (!classification || !disposable(classification.path, facts)) return `${verb(view.program)} files outside the project folders (${operand})`;
   }
   return undefined;
 }
@@ -379,11 +502,74 @@ function killAssessment(view: CommandView, facts: RiskFacts): Assessment | undef
   const target = killTarget(view);
   if (target === "harmless") return { tier: "inspect", kind: "checks whether processes are running", outside: true };
   if (target === undefined) return { tier: "local", kind: "stops processes known only when it runs" };
-  const owned = facts.ownsProcesses(target);
-  if (owned === true) return { tier: "inspect", kind: "stops processes this chat started", outside: true };
-  if (owned === false) return { tier: "danger", kind: "stops processes this chat did not start" };
+  const known = facts.processFacts?.(target) ?? { owned: facts.ownsProcesses(target) };
+  // Its own, even when they run the installed Runtime's node (the agent's PATH finds it first).
+  if (known.owned === true) return { tier: "inspect", kind: "stops processes this chat started", outside: true };
+  if (known.installedApp) return { tier: "danger", kind: "stops the installed Cypher app's processes" };
+  // Started in the chat's folders (its dev instance, a test server), perhaps through `env -i` or before an engine restart: the model decides.
+  if (known.inRoots === true) return { tier: "local", kind: "stops processes running in this chat's project folders" };
+  // Running in, or on, what this task made (its dev instance's data directory).
+  if (known.inCreated === true) return { tier: "local", kind: "stops processes running in what this task made" };
+  if (known.owned === false) return { tier: "danger", kind: "stops processes this chat did not start" };
   // macOS hides the environment of its own binaries; nothing matched a name.
   return { tier: "danger", kind: "stops processes it cannot tell are this chat's" };
+}
+
+/** A path into `~/.cypher` or the app bundle written inside a word or a script's text (`python3 -c "open('~/.cypher/…')"`). */
+const INSTALLED_MENTION = /(?:~|\$HOME|\$\{HOME\})\/\.cypher(?![\w.-])(?:\/[^\s'"`;,|&<>()]*)?|\/Applications\/Cypher\.app(?![\w.-])/g;
+
+/** The first path in `text` that is the installed app or its data (not a worktree, not the chat's own folder). */
+function installedMention(text: string, facts: RiskFacts, home: string | undefined): string | undefined {
+  if (!facts.installedApp || home === undefined) return undefined;
+  for (const match of text.split(home).join("~").matchAll(INSTALLED_MENTION)) {
+    const mention = match[0];
+    if (mention.startsWith("/Applications/")) return mention;
+    const classification = facts.classify(`${home}${mention.replace(/^(~|\$HOME|\$\{HOME\})/, "")}`, undefined);
+    if (classification && facts.installedApp(classification.path)) return mention;
+  }
+  return undefined;
+}
+
+/**
+ * Touching the installed Cypher app (`/Applications/Cypher.app`, its data in
+ * `~/.cypher` outside the chats' worktrees, its Runtime): a human decides,
+ * whatever the user said. A chat's own dev instance lives elsewhere
+ * (`~/.cypher-development`).
+ */
+function installedAppRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): Assessment | undefined {
+  const installed = facts.installedApp;
+  if (!installed) return undefined;
+  const home = facts.classify("~", undefined)?.path;
+  const changes = (path: string): Assessment => ({ tier: "danger", kind: `changes the installed Cypher app or its data (${path})`, key: "installed Cypher app" });
+  // Reading the installed app's logs and data is how a report about it gets
+  // diagnosed: ordinary work the model decides on.
+  const reads = (path: string): Assessment => ({ tier: "local", kind: `reads the installed Cypher app's data (${path})` });
+  let soft: Assessment | undefined;
+  if (command.cwd !== undefined) {
+    const cwd = facts.classify(command.cwd, undefined);
+    // Running in its folder: whatever it does, it does there.
+    if (cwd && installed(cwd.path)) {
+      if (pathEffect(command, view, command.cwd) === "write") return changes(command.cwd);
+      soft ??= reads(command.cwd);
+    }
+  }
+  for (const word of [...command.words, ...command.reads, ...command.writes, ...(command.carried ?? [])]) {
+    if (word === UNKNOWN) continue;
+    if (pathWords([word]).length || command.reads.includes(word) || command.writes.includes(word)) {
+      const classification = facts.classify(word, command.cwd);
+      if (classification && installed(classification.path)) {
+        if (pathEffect(command, view, word) === "write") return changes(word);
+        soft ??= reads(word);
+      }
+    }
+    // Inside a script or an option's value: its own text says whether it writes.
+    const inside = installedMention(word, facts, home);
+    if (inside) {
+      if (WRITE_HINT.test(word) || pathEffect(command, view, inside) === "write") return changes(inside);
+      soft ??= reads(inside);
+    }
+  }
+  return soft;
 }
 
 /** `git push` publishes: to a default or protected branch, tags, force, deletes. */
@@ -511,8 +697,16 @@ function gitDiscardDanger(command: RiskCommand, view: CommandView, facts: RiskFa
     const dir = gitDirectory(command, view);
     if (target === undefined || target === UNKNOWN) return "removes a worktree known only when it runs";
     const classification = facts.classify(target, dir);
-    if (!classification || !facts.inWorkspace(classification.path)) return `removes a worktree outside this chat's workspace (${target})`;
-    return undefined;
+    if (!classification) return `removes a worktree outside this chat's workspace (${target})`;
+    // Its own workspace, or a worktree this task added itself.
+    if (facts.inWorkspace(classification.path) || facts.created?.worktree(classification.path) || facts.created?.has(classification.path)) return undefined;
+    return `removes a worktree outside this chat's workspace (${target})`;
+  }
+  if (sub === "branch" && view.args.some((word) => /^-[A-Za-z]*D$/.test(word) || word === "--delete" || word === "-d")) {
+    // Deleting branches this task created undoes its own work.
+    const names = view.positionals.slice(1).filter((word) => word !== UNKNOWN);
+    const own = (name: string) => facts.created?.branch(name) === true || facts.workspaceBranches?.().includes(name) === true;
+    if (names.length && names.length === view.positionals.length - 1 && names.every(own)) return undefined;
   }
   const discards =
     (sub === "reset" && view.args.some((word) => word === "--hard" || word === "--merge" || word === "--keep")) ||
@@ -523,7 +717,11 @@ function gitDiscardDanger(command: RiskCommand, view: CommandView, facts: RiskFa
     (sub === "branch" && view.args.some((word) => /^-[A-Za-z]*D/.test(word)));
   if (!discards) return undefined;
   const dir = gitDirectory(command, view);
-  if (dir !== undefined && facts.inWorkspace(dir)) return undefined;
+  if (dir === undefined) return "discards work in a checkout known only when it runs";
+  if (facts.inWorkspace(dir)) return undefined;
+  // A checkout this task made (a repro worktree, a clone in /tmp) is its own work.
+  const classification = facts.classify(dir, undefined);
+  if (classification && (facts.created?.has(classification.path) || facts.created?.worktree(classification.path))) return undefined;
   return "discards work in a checkout outside this chat's workspace";
 }
 
@@ -637,14 +835,23 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
   if (next) {
     const assessment = assessCommand({ ...command, words: next, reads: [], writes: [] }, facts);
     if (assessment.tier === "danger") return assessment;
-    const redirected = redirectDanger(command, facts);
-    if (redirected) return { tier: "danger", kind: redirected, key: dangerKey(redirected) };
-    return { tier: "local", kind: assessment.kind ?? `runs ${basename(next[0] ?? "a program")} through ${view.program}` };
+    const redirected = redirectRisk(command, facts);
+    if (redirected?.tier === "danger") return redirected;
+    return { tier: "local", kind: assessment.kind ?? redirected?.kind ?? `runs ${basename(next[0] ?? "a program")} through ${view.program}`, ...(assessment.once || redirected?.once ? { once: true as const } : {}) };
   }
   const kill = killAssessment(view, facts);
-  if (kill?.tier === "danger") return reviewable(kill, view);
+  if (kill?.tier === "danger") return kill;
+  // The checks that may also come out local (reading a secret, reading the
+  // installed app's data): a danger wins, a local one stands when nothing
+  // else is dangerous.
+  const system = permissionSystemRisk(command, view, facts);
+  if (system) return system;
+  let soft: Assessment | undefined;
+  for (const check of [pathRisk(command, view, facts), installedAppRisk(command, view, facts)]) {
+    if (check?.tier === "danger") return check;
+    soft ??= check;
+  }
   const danger =
-    pathDanger(command, view, facts) ??
     destroyDanger(command, view, facts) ??
     copyDanger(command, view, facts) ??
     protectedTarget(view, facts) ??
@@ -652,13 +859,109 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
       ? (gitOptionDanger(view) ?? gitConfigDanger(view) ?? gitPushDanger(command, view, facts) ?? gitDiscardDanger(command, view, facts) ?? gitHistoryDanger(view))
       : undefined) ??
     DANGER.map((entry) => dangerMatches(entry, view, facts)).find((kind) => kind !== undefined);
-  if (danger) return reviewable({ tier: "danger", kind: danger, key: dangerKey(danger) }, view);
+  if (danger) {
+    // Reading a secret or the environment on this machine is the model's to
+    // approve, once; writing or signing in with one is not (a secret that
+    // leaves the machine is the floor, `exfiltrates`).
+    if (SECRET_READ_KINDS.has(danger) && !view.positionals.some((word) => SECRET_WRITE_VERB.test(word))) return { tier: "local", kind: danger, once: true };
+    return { tier: "danger", kind: danger, key: dangerKey(danger) };
+  }
   if (kill) return kill;
+  if (soft) return soft;
   const entry = INSPECT.find((candidate) => inspectMatches(candidate, view));
   if (entry) return { tier: "inspect", ...(entry.outside ? { outside: true } : {}) };
   // The user added these because the sandbox cannot run them.
   if (facts.inspect.some((pattern) => !words.includes(UNKNOWN) && patternMatches(pattern, words))) return { tier: "inspect", outside: true };
   return { tier: "local" };
+}
+
+/**
+ * A path to one of the permission system's own files written anywhere in a
+ * command: as an operand, inside an option's value, or inside a script
+ * (`python3 -c "open('~/.cypher/pi-runtime/agent/permissions.json','w')"`).
+ */
+const SYSTEM_FILE =
+  /[~$\w./@{}-]*(?:permissions\.json|permission-audit\.jsonl|settings\.json|judge-health\.json|cypher-permissions[\w.-]*|sessions\/[\w./-]+)/g;
+
+/**
+ * Changing the permission system itself: its policy files, the settings that
+ * say which extensions load, its extension's code, its audit log and the
+ * session files an approval is restored from. The always-ask floor: no rule,
+ * grant or reviewing model ever approves one. Reading them is ordinary work.
+ */
+function permissionSystemRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): Assessment | undefined {
+  const system = facts.permissionSystem;
+  if (!system) return undefined;
+  const home = facts.classify("~", undefined)?.path;
+  const candidates = new Set<string>();
+  for (const word of [...command.words, ...command.reads, ...command.writes, ...(command.carried ?? [])]) {
+    if (word === UNKNOWN) continue;
+    if (pathWords([word]).length || command.reads.includes(word) || command.writes.includes(word)) candidates.add(word);
+    for (const match of word.matchAll(SYSTEM_FILE)) {
+      const path = match[0];
+      candidates.add(home === undefined ? path : path.replace(/^(\$HOME|\$\{HOME\})/, home));
+    }
+  }
+  for (const candidate of candidates) {
+    const classification = facts.classify(candidate, command.cwd);
+    if (!classification || !system(classification.path)) continue;
+    if (pathEffect(command, view, candidate) === "write" || command.words.some((word) => word !== UNKNOWN && word.includes(candidate) && WRITE_HINT.test(word))) {
+      return { tier: "danger", kind: `changes the permission system itself (${candidate})`, key: "permission-system", floor: true };
+    }
+  }
+  return undefined;
+}
+
+/** Pack kinds (packs.ts) that only read a secret here: the model may approve one, once. */
+const SECRET_READ_KINDS: ReadonlySet<string> = new Set(["reads a secret", "prints the environment, which holds secrets"]);
+
+/** Words that make a secret command more than a read: it signs in, stores or deletes. */
+const SECRET_WRITE_VERB =
+  /^(login|logout|signin|signout|add|add-.*|set|set-.*|delete|delete-.*|remove|rm|unlock|import|configure|write|store|create|rotate|edit|unset|inject|approve|reject|fill|refresh|switch|setup-git)$/i;
+
+/** Programs that can carry what they are given off this machine. */
+const SENDERS =
+  /^(curl|wget|http|https|xh|nc|ncat|netcat|socat|telnet|ftp|ssh|scp|sftp|rsync|mosh|mail|mailx|sendmail|mutt|neomutt|msmtp|slack|slackcat|telegram-send|signal-cli|discord-send|ntfy|apprise|pushover|twilio|gh|glab|aws|gcloud|az|op|vault)$/;
+
+/** Variable names whose value is a secret. */
+const SECRET_VARIABLE = /\$\{?[A-Za-z_]*(TOKEN|SECRET|PASSW|PASSWD|APIKEY|API_KEY|CREDENTIAL|PRIVATE_KEY|COOKIE|SESSION_TOKEN)[A-Za-z_]*\}?/i;
+
+/**
+ * The always-ask floor for a whole line: a secret or credential leaving this
+ * machine. A line that both reaches a secret (a sensitive file, the
+ * keychain, the environment) and runs a program that can send what it is
+ * given always asks the user, whatever the owner wrote and whatever the
+ * model says. A command that only prints a secret here does not: the model
+ * may approve that once (`pathRisk`).
+ */
+export function exfiltrates(commands: readonly RiskCommand[], facts: RiskFacts, text?: string): string | undefined {
+  let sender: string | undefined;
+  let secret: string | undefined;
+  for (const command of commands) {
+    const words = command.words;
+    if (words.length === 0) continue;
+    const view = viewOf(words);
+    if (SENDERS.test(view.program)) {
+      // A hosting CLI only sends what a writing verb carries.
+      const sends = !/^(gh|glab)$/.test(view.program) || view.positionals.some((word) => /^(api|gist|secret|variable|release|pr|issue|repo)$/.test(word));
+      if (sends) sender ??= view.program;
+    }
+    for (const [at, path] of [...view.args, ...command.reads].entries()) {
+      if (path === UNKNOWN || (path.startsWith("-") && !command.reads.includes(path))) continue;
+      // A key a connection is made with is used, not read out (as in `pathRisk`).
+      const before = view.args[at - 1] ?? "";
+      if (before === "-i" || /^(--identity|--key|--cert|--cacert|--client-cert|--pubkey)$/.test(before) || /IdentityFile/i.test(before)) continue;
+      const classification = facts.classify(path, command.cwd);
+      if (classification?.zone === "sensitive") secret ??= path;
+    }
+    // The keychain and the environment hold secrets whatever file they name.
+    if (/^(security|printenv)$/.test(view.program)) secret ??= view.program === "security" ? "the keychain" : "the environment";
+    if (view.program === "env" && view.positionals.length === 0) secret ??= "the environment";
+    if (words.some((word) => word !== UNKNOWN && SECRET_VARIABLE.test(word))) secret ??= "a value in this line";
+  }
+  if (text !== undefined && secret === undefined && SECRET_VARIABLE.test(text)) secret = "a value in this line";
+  if (sender === undefined || secret === undefined) return undefined;
+  return `sends a secret off this machine (${secret}) through ${sender}`;
 }
 
 /** The files a download writes: `-o`/`-O` values, a redirection, or the URL's file name (`curl -O`, `wget`). */
@@ -718,6 +1021,15 @@ export function downloadsAndRuns(commands: readonly { words: readonly string[]; 
  * `ssh host` would run). Words with `$` are known only when it runs.
  */
 export function assessOpaque(line: string, facts: RiskFacts): Assessment {
+  // Its words with `$` are unknown: look for the installed app in its text
+  // instead. Only a line that writes where it names it is dangerous; one
+  // that reads it is local work like any other read.
+  const home = facts.installedApp ? facts.classify("~", undefined)?.path : undefined;
+  const installed = installedMention(line, facts, home);
+  if (installed && mentionWrites(home === undefined ? line : line.split(home).join("~"), installed)) {
+    const kind = `changes the installed Cypher app or its data (${installed})`;
+    return { tier: "danger", kind, key: "installed Cypher app" };
+  }
   const segments: string[][] = [];
   const pieces = line.split(/;|&&|\|\||\||&|\(|\)|`|\$\(|\n|<|>/);
   for (const piece of pieces) {
@@ -751,6 +1063,23 @@ export function assessOpaque(line: string, facts: RiskFacts): Assessment {
 }
 
 const OPAQUE_KEYWORDS: ReadonlySet<string> = new Set(["{", "}", "!", "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "case", "esac", "select", "coproc", "time", "[[", "]]"]);
+
+/**
+ * Whether a line a rule can't read writes where it names `mention`: a
+ * redirection onto it, a program that changes or deletes what it names just
+ * before it, or a script opening it for writing. A line this can't place
+ * counts as writing.
+ */
+function mentionWrites(line: string, mention: string): boolean {
+  const at = line.indexOf(mention);
+  if (at < 0) return true;
+  const before = line.slice(Math.max(0, at - 60), at);
+  const after = line.slice(at + mention.length, at + mention.length + 60);
+  if (/(>>?|\btee\b|-o|--output[= ]?)\s*["'$]?[\w/~.$-]*$/.test(before)) return true;
+  if (/\b(cp|mv|ln|install|rsync|ditto|dd|truncate|chmod|chown|chgrp|chflags|xattr|sed|rm|rmdir|unlink|shred|trash|mkdir|touch|git)\s+(?:(?:-\S+|["'$]?[\w/~.$-]+["']?)\s+)*["'$]?[\w/~.$-]*$/.test(before)) return true;
+  if (/^[\w/.$-]*["']\s*,\s*["'][waxr]\+?/.test(after)) return true;
+  return WRITE_HINT.test(after);
+}
 
 function tokens(text: string): string[] {
   return text

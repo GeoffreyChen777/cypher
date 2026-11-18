@@ -823,6 +823,7 @@ fn command_queue_and_outcome_round_trip() {
         resolution: None,
         sent_at: None,
         dismissed: false,
+        author: None,
     };
     doc.queue_command(&entry).unwrap();
     doc.set_command_status("c1", SessionCommandStatus::Applied, None)
@@ -831,6 +832,51 @@ fn command_queue_and_outcome_round_trip() {
     assert_eq!(commands.len(), 1);
     assert_eq!(commands[0].status, SessionCommandStatus::Applied);
     assert_eq!(commands[0].payload, entry.payload);
+}
+
+/// Who wrote a message rides the entry and its signature: an agent's message
+/// can't be passed off as a person's by dropping the field.
+#[test]
+fn a_commands_author_is_written_signed_and_read_back() {
+    use crate::commands::{SessionCommandPayload, SessionCommandStatus, command_author};
+    let doc = SessionDoc::init("chat-1").unwrap();
+    let entry = |id: &str, author: Option<&str>| SessionCommandEntry {
+        id: id.into(),
+        payload: SessionCommandPayload::Steer {
+            prompt: "Merge PR 52 now.".into(),
+            message_id: Some(format!("m-{id}")),
+            agent_prompt: None,
+        },
+        issued_by: "dev-b".into(),
+        issued_at: 10,
+        based_on: None,
+        expires_at: None,
+        status: SessionCommandStatus::Pending,
+        resolution: None,
+        sent_at: None,
+        dismissed: false,
+        author: author.map(str::to_string),
+    };
+    doc.queue_signed_command(
+        "chat-1",
+        &entry("agent", Some(command_author::PLAN)),
+        |_| Some([1; 64]),
+    )
+    .unwrap();
+    doc.queue_signed_command("chat-1", &entry("person", None), |_| Some([1; 64]))
+        .unwrap();
+    let read = doc.read_commands_with_auth("chat-1").unwrap();
+    assert_eq!(read[0].0.author.as_deref(), Some("plan"));
+    assert_eq!(read[1].0.author, None);
+    let covers = |bytes: &[u8]| bytes.windows(b"author".len()).any(|w| w == b"author");
+    assert!(
+        covers(&read[0].1.signing_bytes),
+        "the signature covers who wrote it"
+    );
+    assert!(
+        !covers(&read[1].1.signing_bytes),
+        "a person's entry is the same bytes as before"
+    );
 }
 
 #[test]
@@ -866,6 +912,7 @@ fn run_request_attachments_survive_command_round_trip() {
         resolution: None,
         sent_at: None,
         dismissed: false,
+        author: None,
     })
     .unwrap();
     match &doc.read_commands().unwrap()[0].payload {
@@ -1159,6 +1206,7 @@ fn a_signed_command_reads_back_with_the_bytes_it_was_signed_over() {
         resolution: None,
         sent_at: Some(10),
         dismissed: false,
+        author: None,
     };
     let mut signed = Vec::new();
     doc.queue_signed_command("chat-1", &entry, |bytes| {
@@ -1230,6 +1278,7 @@ fn dismissals_sit_beside_the_ledger_and_sync() {
         resolution: None,
         sent_at: Some(10),
         dismissed: false,
+        author: None,
     };
     doc.queue_signed_command("chat-1", &entry, |_| Some([7; 64]))
         .unwrap();

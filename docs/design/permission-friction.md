@@ -122,7 +122,7 @@ in Settings with `"acknowledgeDanger": true` can.
 | Persistence and system | `sudo`, `launchctl load/bootstrap`, `crontab`, `defaults write`, `brew install/uninstall`, `npm -g`, writes to protected paths |
 | Secrets | `security find-*-password`, `printenv`/`env` dumps outside the sandbox, sensitive-file reads the user did not ask for by name (file tools) |
 | Code from the network | `curl … \| sh`, `bash <(curl …)`, `npx`/`uvx` of a package not in the project's lockfile |
-| Cypher itself | writes to the running instance's own data and permission files (`self`, human-only, unchanged) |
+| Cypher itself | writes to the running instance's own data and permission files (`self`, human-only, unchanged); outside the sandbox, anything that names the installed app (`/Applications/Cypher.app`, `~/.cypher` outside `worktrees/`, its Runtime, `CYPHER_DATA_DIR=~/.cypher …`) or stops its processes (human-only, 2026-11-18) |
 
 The model may also put an R1 request in front of the user (§6). It never moves an R2
 request to R1.
@@ -235,6 +235,13 @@ whose environment cannot be read (macOS hides it for its own binaries, such as `
 Pids known only at run time (`kill $(pgrep …)`) are R1-unknown and go to the model. The
 agent guideline says: look the pids up first, then kill them by number. Signal 0 (a
 liveness check) is R0.
+
+A target without the marker whose working directory (`lsof -d cwd`, `/proc/<pid>/cwd`)
+is inside the chat's project folders is R1 and goes to the model (2026-11-18): a dev
+instance or test server the chat started through `env -i` (which drops the marker), or
+before an engine restart. Read live, so it holds across restarts and a reused pid counts
+as what runs now. A target that is the installed app's (its program in
+`/Applications/Cypher.app` or `~/.cypher`, or running there) is R2 and a human's alone.
 
 ### 5.5 Toolchain locations
 

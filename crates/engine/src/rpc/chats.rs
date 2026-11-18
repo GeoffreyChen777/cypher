@@ -269,13 +269,14 @@ impl EngineRpc {
                 attachments: Vec::new(),
                 pending_attachments: Vec::new(),
             };
-            if let Err(err) = self.doc_host.queue_command(
+            if let Err(err) = self.doc_host.queue_agent_command(
                 &child_id,
                 SessionCommandPayload::Run {
                     request,
                     message_id: crate::util::new_id(),
                     agent_prompt: None,
                 },
+                cypher_doc::command_author::SUBAGENT,
             ) {
                 // Rollback: no bogus navigable row — the queue is what makes the
                 // child real. The local channel entry goes with it.

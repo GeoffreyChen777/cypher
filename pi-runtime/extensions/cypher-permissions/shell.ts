@@ -19,17 +19,22 @@
  *   (`env`);
  * - `&` after a command: it runs in the background, apart from the line's
  *   shell (`scoped`);
- * - `$NAME` and `${NAME}` after `NAME=value` set to a literal earlier in the
- *   line, where it surely ran (not after `&&` or `||`, in a pipeline, `if`,
- *   loop or substitution) and nothing since could have changed it (`read`,
- *   `export`, `declare`, `eval`, `source`, a program known only when it
- *   runs, …): the value, when expanding it cannot split or glob.
+ * - `( … )` at the start of a command: a subshell. Its commands are read
+ *   like the line's (`subshell` tells them apart); a `cd` or an assignment in
+ *   it stays in it;
+ * - `$NAME` and `${NAME}` after `NAME=value` (or `export NAME=value`) set
+ *   to a literal earlier in the line, where it surely ran (not after `&&` or
+ *   `||`, in a pipeline, `if`, loop or substitution) and nothing since could
+ *   have changed it (`read`, `declare`, `eval`, `source`, a program known
+ *   only when it runs, …; `unset` forgets only what it names): the value,
+ *   when expanding it cannot split or glob. `$HOME` is the home folder, and
+ *   `~` starting a value expands to it, as bash does;
  *
  * A word whose text is known only when it runs (a parameter, a
  * substitution, an unquoted glob or brace list) becomes [`UNKNOWN`]: it may
  * stand for any words, so in a pattern only `**` matches it.
  *
- * Everything else (subshells, groups, `case`, functions, arithmetic,
+ * Everything else (nested subshells, groups, `case`, functions, arithmetic,
  * process substitution, a substitution inside `${…}` or an unquoted
  * heredoc, an assignment in front of a command that changes how programs
  * run) makes the line opaque: no rule can match it, so it runs in the
@@ -56,6 +61,10 @@ export interface SimpleCommand {
   loop: boolean;
   /** Variables assigned in front of it (`NAME=value cmd`), by name. */
   env: string[];
+  /** Their values, in order; [`UNKNOWN`] for one known only when it runs. */
+  envValues?: string[];
+  /** In a subshell `( … )`: which one, numbered from 1 in the line. */
+  subshell?: number;
 }
 
 export type ParsedLine = { kind: "simple"; commands: SimpleCommand[] } | { kind: "opaque"; reason: string };
@@ -65,6 +74,8 @@ export interface ParseOptions {
   assignable?: (name: string) => boolean;
   /** Whether `NAME=value` in front of a command may stand (it does not change how programs load or run code). */
   prefixAllowed?: (name: string) => boolean;
+  /** Whether `export NAME=value` may keep its value known (not a variable bash itself reads); without it, `export` forgets every value. */
+  exportable?: (name: string) => boolean;
 }
 
 /** Words that open or close a compound command bash has and this reader does not. */
@@ -80,15 +91,20 @@ interface Variables {
   poisoned: boolean;
 }
 
-/** Builtins that set variables in ways the reader does not follow. */
+/**
+ * Builtins that set variables in ways the reader does not follow. (`set`
+ * changes options and the positional parameters, which are never known, but
+ * no named variable.)
+ */
 const SETS_VARIABLES: ReadonlySet<string> = new Set([
-  "read", "mapfile", "readarray", "export", "declare", "typeset", "local", "readonly", "let", "getopts", "unset", "eval", "source", ".", "builtin", "command", "wait", "set",
+  "read", "mapfile", "readarray", "export", "declare", "typeset", "local", "readonly", "let", "getopts", "unset", "eval", "source", ".", "builtin", "command", "wait",
 ]);
 
 export function parseShell(line: string, home: string, options: ParseOptions = {}): ParsedLine {
   try {
     const commands: SimpleCommand[] = [];
-    read(line, home, options, commands, false, { values: new Map(), poisoned: false });
+    // `$HOME` is the home folder `~` stands for, until the line changes it.
+    read(line, home, options, commands, false, { values: new Map([["HOME", home]]), poisoned: false }, { next: 1 });
     return { kind: "simple", commands };
   } catch (error) {
     if (error instanceof Opaque) return { kind: "opaque", reason: error.message };
@@ -98,8 +114,20 @@ export function parseShell(line: string, home: string, options: ParseOptions = {
 
 type Redirect = "read" | "write" | "readwrite" | "copy" | "herestring" | "heredoc" | "heredoc-tabs";
 
-/** Read `source` into `out`: the commands of a line, or of a substitution (`nested`). */
-function read(source: string, home: string, options: ParseOptions, out: SimpleCommand[], nested: boolean, vars: Variables): void {
+/**
+ * Read `source` into `out`: the commands of a line, or of a substitution
+ * (`nested`), or of a subshell (`subshell`, its number).
+ */
+function read(
+  source: string,
+  home: string,
+  options: ParseOptions,
+  out: SimpleCommand[],
+  nested: boolean,
+  vars: Variables,
+  subshells: { next: number },
+  subshell?: number,
+): void {
   // The word being read.
   let word = "";
   let inWord = false;
@@ -119,9 +147,12 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
   let assignValues: (string | undefined)[] = [];
   /** Assignments in front of the command's program. */
   let env: string[] = [];
+  let envValues: string[] = [];
   let redirect: Redirect | undefined;
   /** The command after `&&`, `||` or `|`. */
   let chained = false;
+  /** A subshell just closed: only operators and redirections may follow it. */
+  let afterSubshell = false;
 
   // Where in the line.
   /** Open `if` and loops, innermost last. */
@@ -167,6 +198,7 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
       if (kind !== "read") writes.push(text);
       return;
     }
+    if (afterSubshell) throw new Opaque("a subshell");
     if (forHeader === 3) return;
     if (test) {
       if (plain && text === "]]") test = false;
@@ -221,14 +253,14 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
       const assignment = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/.exec(unquoted);
       if (assignment && text.startsWith(assignment[0])) {
         assigns.push(assignment[1]);
-        // `+=` appends, and `~` after `=` or `:` expands in an assignment.
-        assignValues.push(known && !assignment[0].endsWith("+=") && !unquoted.includes("~") ? text.slice(assignment[0].length) : undefined);
+        assignValues.push(known && !assignment[0].endsWith("+=") ? assignedValue(text.slice(assignment[0].length), unquoted.slice(assignment[0].length), home) : undefined);
         return;
       }
     }
     if (assigns.length) {
       if (!assigns.every((name) => options.prefixAllowed?.(name))) throw new Opaque("a variable assignment in front of a command");
       env = assigns;
+      envValues = assignValues.map((value) => value ?? UNKNOWN);
       assigns = [];
       assignValues = [];
     }
@@ -248,19 +280,30 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
     // A value is known after an assignment that surely ran in the line's shell.
     if (words.length === 0) assigns.forEach((name, index) => vars.values.set(name, scoped ? undefined : assignValues[index]));
     const program = words[0];
-    if (program !== undefined && (program === UNKNOWN || SETS_VARIABLES.has(program) || (program === "printf" && words.some((word) => word === UNKNOWN || word.startsWith("-v"))))) {
+    if (program === "export" && exported(words, options)) {
+      for (const word of words.slice(1)) {
+        const [name, ...value] = word.split("=");
+        // `~` in an exported value: not followed here.
+        vars.values.set(name, scoped || value.join("=").includes("~") ? undefined : value.join("="));
+      }
+    } else if (program === "unset" && words.slice(1).every((word) => word === "-v" || /^[A-Za-z_][A-Za-z0-9_]*$/.test(word))) {
+      // It empties the variables it names, and only those.
+      for (const name of words.slice(1)) if (name !== "-v") vars.values.set(name, undefined);
+    } else if (program !== undefined && (program === UNKNOWN || SETS_VARIABLES.has(program) || (program === "printf" && words.some((word) => word === UNKNOWN || word.startsWith("-v"))))) {
       vars.poisoned = true;
     }
     if (words.length || reads.length || writes.length) {
       const loop = blocks.includes("loop");
-      out.push({ words, reads, writes, loop, env, scoped });
+      out.push({ words, reads, writes, loop, env, scoped, ...(envValues.length ? { envValues } : {}), ...(subshell !== undefined ? { subshell } : {}) });
     }
+    afterSubshell = false;
     words = [];
     reads = [];
     writes = [];
     assigns = [];
     assignValues = [];
     env = [];
+    envValues = [];
     chained = next === "and-or" || next === "pipe";
   };
 
@@ -291,7 +334,7 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
     if (next === "(") {
       if (source[i + 2] === "(") throw new Opaque("arithmetic");
       const close = closingParen(source, i + 2);
-      read(source.slice(i + 2, close), home, options, out, true, vars);
+      read(source.slice(i + 2, close), home, options, out, true, vars, subshells, subshell);
       unknown = true;
       inWord = true;
       return close;
@@ -338,7 +381,7 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
       inner += source[j];
     }
     if (j >= source.length) throw new Opaque("an unterminated backtick");
-    read(inner, home, options, out, true, vars);
+    read(inner, home, options, out, true, vars, subshells, subshell);
     unknown = true;
     inWord = true;
     return j;
@@ -397,7 +440,7 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
         } else {
           // In the background: it runs apart from the line's shell, and
           // what follows runs whether it does or not.
-          if (inWord || words.length || reads.length || writes.length || redirect) endCommand("background");
+          if (inWord || words.length || reads.length || writes.length || redirect || afterSubshell) endCommand("background");
           else throw new Opaque("a background job");
         }
         break;
@@ -447,7 +490,24 @@ function read(source: string, home: string, options: ParseOptions, out: SimpleCo
         if (source[i + 1] === "(") throw new Opaque("process substitution");
         break;
       }
-      case "(":
+      case "(": {
+        // A subshell starts a command; anywhere else `(` is something this reader does not follow (a function, `case`).
+        if (inWord || words.length || assigns.length || redirect || test || forHeader || afterSubshell) throw new Opaque("a subshell");
+        if (subshell !== undefined || nested) throw new Opaque("a nested subshell");
+        if (next === "(") throw new Opaque("arithmetic");
+        const close = closingParen(source, i + 1);
+        // Its own shell: its assignments and `cd` stay in it, and what it changes no later word sees.
+        const inner: Variables = { values: new Map(vars.values), poisoned: vars.poisoned };
+        const commands: SimpleCommand[] = [];
+        read(source.slice(i + 1, close), home, options, commands, false, inner, subshells, subshells.next++);
+        // Run only sometimes, or apart: then so is each command in it.
+        const apart = chained || blocks.length > 0;
+        const loop = blocks.includes("loop");
+        for (const command of commands) out.push({ ...command, scoped: command.scoped || apart, loop: command.loop || loop });
+        afterSubshell = true;
+        i = close;
+        break;
+      }
       case ")":
         throw new Opaque("a subshell");
       case "`":
@@ -606,4 +666,25 @@ function closingQuote(source: string, start: number): number {
     }
   }
   throw new Opaque("an unterminated quote");
+}
+
+/**
+ * The value an assignment gives, known as written: `~` starting it (unquoted,
+ * alone or before `/`) is the home folder, as bash expands it; any other `~`
+ * (after `:`, `~user`) is not followed.
+ */
+function assignedValue(value: string, unquoted: string, home: string): string | undefined {
+  if (!unquoted.includes("~")) return value;
+  if ((unquoted === "~" || unquoted.startsWith("~/")) && value.startsWith(unquoted[0]) && !unquoted.slice(1).includes("~")) return home + value.slice(1);
+  return undefined;
+}
+
+/** `export NAME=value …` with values known, for variables the line may keep (`exportable`). */
+function exported(words: readonly string[], options: ParseOptions): boolean {
+  if (!options.exportable || words.length < 2) return false;
+  return words.slice(1).every((word) => {
+    if (word === UNKNOWN) return false;
+    const name = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(word)?.[1];
+    return name !== undefined && options.exportable!(name);
+  });
 }

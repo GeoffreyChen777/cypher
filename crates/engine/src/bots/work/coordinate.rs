@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 use cypher_doc::{
     MessagePart, MessageRole, SessionCommandKind, SessionCommandPayload, SessionCommandStatus,
-    SessionMessageEntry,
+    SessionMessageEntry, command_author,
 };
 use cypher_proto::{
     self as p, ActivityKind, BotWork, Chat, ChatConfig, HarnessId, PermissionPromptKind,
@@ -561,13 +561,14 @@ impl Bots {
                     format!("Steer the session \"{}\"", title(&session)),
                 )
                 .await?;
-                self.inner.doc_host.queue_command(
+                self.inner.doc_host.queue_agent_command(
                     &session.id,
                     SessionCommandPayload::Steer {
                         prompt: message.to_string(),
                         message_id: Some(new_id()),
                         agent_prompt: None,
                     },
+                    command_author::PLAN,
                 )?;
                 self.log(
                     &view.bot.id,
@@ -1288,7 +1289,7 @@ impl Bots {
                 step.ended_at = None;
             }
         })?;
-        self.inner.doc_host.queue_command(
+        self.inner.doc_host.queue_agent_command(
             &session_id,
             SessionCommandPayload::Run {
                 request: RunRequest {
@@ -1308,6 +1309,7 @@ impl Bots {
                 message_id: new_id(),
                 agent_prompt: None,
             },
+            command_author::PLAN,
         )?;
         self.log(
             &view.bot.id,
@@ -1711,6 +1713,7 @@ mod tests {
             resolution: Some("no such model".into()),
             sent_at: None,
             dismissed: false,
+            author: None,
         };
         let run = || SessionCommandPayload::Steer {
             prompt: "go".into(),

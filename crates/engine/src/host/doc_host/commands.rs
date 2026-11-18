@@ -586,6 +586,29 @@ impl DocHost {
         chat_id: &str,
         payload: SessionCommandPayload,
     ) -> Result<String, EngineError> {
+        self.queue_command_by(chat_id, payload, None)
+    }
+
+    /// [`Self::queue_command`] for a message one of the engine's own agents
+    /// wrote (`author`, see [`SessionCommandEntry::author`]): a plan's brief,
+    /// the prompts it starts and steers sessions with, a subagent's task, a
+    /// routine's prompt, a peer's question. The permission check never
+    /// counts it as the owner's words.
+    pub fn queue_agent_command(
+        &self,
+        chat_id: &str,
+        payload: SessionCommandPayload,
+        author: &str,
+    ) -> Result<String, EngineError> {
+        self.queue_command_by(chat_id, payload, Some(author))
+    }
+
+    fn queue_command_by(
+        &self,
+        chat_id: &str,
+        payload: SessionCommandPayload,
+        author: Option<&str>,
+    ) -> Result<String, EngineError> {
         self.check_may_command(chat_id)?;
         let handle = self.open(chat_id)?;
         // The host and settings this command runs with, signed from what
@@ -616,6 +639,7 @@ impl DocHost {
                 // the stable message-send clock across retries.
                 sent_at: Some(now),
                 dismissed: false,
+                author: author.map(str::to_string),
             },
             true,
         )?;
@@ -712,6 +736,8 @@ impl DocHost {
             // place in the transcript/order is set by when it was first sent.
             sent_at: old.sent_at.or(Some(old.issued_at)),
             dismissed: false,
+            // An agent's message stays the agent's when it is sent again.
+            author: old.author,
         };
         let retry_id = retry.id.clone();
         // A command this device didn't sign — another device's, or one

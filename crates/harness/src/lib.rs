@@ -63,6 +63,13 @@ pub struct RunHostContext {
     /// prompt. `Some` also turns on the memory tools (`CYPHER_MEMORY`);
     /// `None` for runs without memory (peer threads, discovery).
     pub memory_prompt: Option<String>,
+    /// The owner's own words for the Runtime's permission check, as JSON
+    /// (`CYPHER_OWNER_WORDS`; docs/design/permission-control.md §7.3): what
+    /// a person typed in the chat, and the instruction a plan carries out,
+    /// never what an agent wrote. A trusted channel: the agent can't change
+    /// a running Pi's environment. `None` (discovery, a chat without a
+    /// ledger) unsets it, so no danger runs on an explicit request there.
+    pub owner_words: Option<String>,
 }
 
 impl RunHostContext {

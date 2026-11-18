@@ -86,6 +86,7 @@ fn run(id: &str, issued_by: &str, prompt: &str) -> SessionCommandEntry {
         resolution: None,
         sent_at: None,
         dismissed: false,
+        author: None,
     }
 }
 

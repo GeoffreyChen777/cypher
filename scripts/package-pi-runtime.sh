@@ -271,6 +271,7 @@ CYPHER_PI_RUNTIME_STAGE="$STAGE" \
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-fast-mode.test.mjs"
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-codemode.test.mjs"
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-permissions.test.mjs"
+"$STAGE/bin/node" --test "$SPEC/extensions/cypher-permissions-replay.test.mjs"
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-file-references.test.mjs"
 # The file-reference instructions in a prompt the staged Pi builds.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \

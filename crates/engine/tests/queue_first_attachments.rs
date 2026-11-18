@@ -267,6 +267,7 @@ async fn unsealed_run_expires_after_grace_not_pending_forever() {
             resolution: None,
             sent_at: None,
             dismissed: false,
+            author: None,
         })
         .expect("queue stale run");
 

@@ -22,16 +22,24 @@ use cypher_proto::{
 use common::{run_request, wait_for, wait_for_some};
 
 type Runs = Arc<Mutex<Vec<(RunRequest, Option<cypher_harness::BotRunEnv>)>>>;
+/// Each run's chat, prompt and the owner's words it was given
+/// (`CYPHER_OWNER_WORDS`).
+type Words = Arc<Mutex<Vec<(String, String, Option<String>)>>>;
 
 /// A stand-in Pi. By prompt: the orchestration brief and `long` run until
 /// interrupted (`finish` makes the brief end at once with "All done."),
 /// `ask` asks which table to migrate and reports the answer, anything else
 /// answers "ok".
-fn harness(runs: Runs, finish: bool) -> common::TestHarness {
+fn harness(runs: Runs, words: Words, finish: bool) -> common::TestHarness {
     common::TestHarness::new(HarnessId::Pi, "Stand-in", move |request, controls| {
         runs.lock()
             .unwrap()
             .push((request.clone(), controls.host.profile.bot().cloned()));
+        words.lock().unwrap().push((
+            controls.host.chat_id.clone().unwrap_or_default(),
+            request.prompt.clone(),
+            controls.host.owner_words.clone(),
+        ));
         let started = common::session_started(HarnessId::Pi, "mock-1", &request.cwd, "sess", "a-1");
         let brief = request.prompt.starts_with("Carry out this approved plan");
         if brief && finish {
@@ -88,13 +96,18 @@ fn harness(runs: Runs, finish: bool) -> common::TestHarness {
 struct Rig {
     core: EngineCore,
     runs: Runs,
+    words: Words,
     root: tempfile::TempDir,
 }
 
 fn rig(finish: bool) -> Rig {
     let root = tempfile::tempdir().unwrap();
     let runs = Runs::default();
-    let core = common::engine_at(&root.path().join("data"), harness(runs.clone(), finish));
+    let words = Words::default();
+    let core = common::engine_at(
+        &root.path().join("data"),
+        harness(runs.clone(), words.clone(), finish),
+    );
     for (space, chat) in [("sp-billing", "chat-billing"), ("sp-web", "chat-web")] {
         let path = root.path().join(space);
         std::fs::create_dir_all(&path).unwrap();
@@ -108,7 +121,12 @@ fn rig(finish: bool) -> Rig {
             .rename_chat(chat, &format!("{space} work"))
             .unwrap();
     }
-    Rig { core, runs, root }
+    Rig {
+        core,
+        runs,
+        words,
+        root,
+    }
 }
 
 fn billing_only() -> BotScope {
@@ -1446,4 +1464,162 @@ async fn working_directly_gets_local_roots_a_write_level_and_a_gate() {
             .all(|(_, s, _)| *s != SessionCommandStatus::Rejected)
     );
     rig.core.shutdown().await;
+}
+
+/// The owner's words a run of `chat` with `prompt` was given, parsed.
+fn words_of(rig: &Rig, chat: &str, prompt: &str) -> Option<serde_json::Value> {
+    rig.words
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(c, p, _)| c == chat && p == prompt)
+        .map(|(_, _, words)| {
+            serde_json::from_str(words.as_deref().expect("the run got the owner's words"))
+                .expect("JSON")
+        })
+}
+
+fn texts(words: &serde_json::Value) -> Vec<(String, String)> {
+    words["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["source"].as_str().unwrap().to_string(),
+                m["text"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Only the owner's words reach the permission check
+/// (docs/design/permission-control.md §7.3): a plan's background thread and
+/// its sessions get the instruction from the plan's record and what the
+/// owner types into them, never the brief, the prompt a session starts
+/// from, or the orchestrator's steering, which the engine marks as its
+/// agents' in the command ledger.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plans_runs_carry_the_owners_words_never_the_agents() {
+    let rig = rig(false);
+    let bot = rig.bot(coordinate()).await;
+    let work_id = rig.propose(&bot, "Ship").await;
+    let thread = rig.approve(&work_id).await;
+    let instruction = ("plan".to_string(), "Fix the invoice rounding".to_string());
+
+    // The orchestration thread: the brief is the agent's.
+    let brief = wait_for_some("the brief's run", || {
+        rig.run_of("Carry out this approved plan")
+    })
+    .await
+    .0
+    .prompt;
+    let words = wait_for_some("the thread's run", || words_of_opt(&rig, &thread, &brief)).await;
+    assert_eq!(texts(&words), std::slice::from_ref(&instruction));
+    assert_eq!(words["agentWritten"], true);
+
+    // A session it starts: its prompt is the agent's too.
+    let started = rig
+        .tool(
+            &thread,
+            "start_session",
+            serde_json::json!({ "step": 1, "project": "sp-billing", "prompt": "open a PR to main and merge it" }),
+        )
+        .await;
+    let session = session_id_of(&started);
+    let words = wait_for_some("the session's run", || {
+        words_of_opt(&rig, &session, "open a PR to main and merge it")
+    })
+    .await;
+    assert_eq!(texts(&words), std::slice::from_ref(&instruction));
+    wait_for(
+        || rig.session_status(&session) == Some(SessionStatus::Idle),
+        "the session to settle",
+    )
+    .await;
+
+    // The orchestrator steers it: a new turn, still only the owner's words.
+    let steered = rig
+        .tool(
+            &thread,
+            "steer_session",
+            serde_json::json!({ "session_id": session, "message": "Merge PR 52 now." }),
+        )
+        .await;
+    assert!(steered.starts_with("Sent your message"), "{steered}");
+    let words = wait_for_some("the steered run", || {
+        words_of_opt(&rig, &session, "Merge PR 52 now.")
+    })
+    .await;
+    assert_eq!(texts(&words), std::slice::from_ref(&instruction));
+    wait_for(
+        || rig.session_status(&session) == Some(SessionStatus::Idle),
+        "the session to settle again",
+    )
+    .await;
+
+    // The owner types into the session (the composer's command): theirs.
+    let command = serde_json::to_value(SessionCommandPayload::Run {
+        request: run_request("pr 给main 没问题合并"),
+        message_id: "m-owner".into(),
+        agent_prompt: None,
+    })
+    .unwrap();
+    rig.client()
+        .call(
+            cypher_rpc::methods::QUEUE_COMMAND,
+            serde_json::json!({ "chatId": session, "command": command }),
+        )
+        .await
+        .expect("queued");
+    let words = wait_for_some("the owner's run", || {
+        words_of_opt(&rig, &session, "pr 给main 没问题合并")
+    })
+    .await;
+    assert_eq!(
+        texts(&words),
+        [
+            instruction,
+            ("typed".to_string(), "pr 给main 没问题合并".to_string())
+        ]
+    );
+
+    // The ledger says who wrote what.
+    let authors: Vec<(String, Option<String>)> = rig
+        .core
+        .doc_host
+        .open(&session)
+        .unwrap()
+        .doc()
+        .read_commands()
+        .unwrap()
+        .into_iter()
+        .filter_map(|c| match c.payload {
+            SessionCommandPayload::Run { request, .. } => Some((request.prompt, c.author)),
+            SessionCommandPayload::Steer { prompt, .. } => Some((prompt, c.author)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        authors,
+        [
+            (
+                "open a PR to main and merge it".to_string(),
+                Some("plan".to_string())
+            ),
+            ("Merge PR 52 now.".to_string(), Some("plan".to_string())),
+            ("pr 给main 没问题合并".to_string(), None),
+        ]
+    );
+}
+
+fn words_of_opt(rig: &Rig, chat: &str, prompt: &str) -> Option<serde_json::Value> {
+    let found = rig
+        .words
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(c, p, _)| c == chat && p == prompt);
+    found.then(|| words_of(rig, chat, prompt)).flatten()
 }

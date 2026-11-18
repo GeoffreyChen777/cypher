@@ -85,7 +85,7 @@ export default function (pi) {
  * Run one turn. `answers` are picked, in order, for the approval dialogs.
  * Returns the tool results by call order and the dialogs that were shown.
  */
-async function turn(steps, { answers = [], level = "workspace-write", judge, extraExtensions = [], api, cwd = workspace } = {}) {
+async function turn(steps, { answers = [], level = "workspace-write", judge, extraExtensions = [], api, cwd = workspace, ownerWords } = {}) {
   const scriptFile = join(scratch, `script-${Math.random().toString(36).slice(2)}.json`);
   writeFileSync(scriptFile, JSON.stringify(steps));
   const child = spawn(
@@ -110,6 +110,8 @@ async function turn(steps, { answers = [], level = "workspace-write", judge, ext
         CYPHER_PERMISSION_LEVEL: level,
         CYPHER_CHAT_ID: "chat-e2e",
         GITHUB_TOKEN: "ghp_secret",
+        // What the engine passes: the owner's own words (explicit.ts).
+        ...(ownerWords ? { CYPHER_OWNER_WORDS: JSON.stringify(ownerWords) } : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],
     },
@@ -220,8 +222,10 @@ test("a command that needs more fails in the sandbox; escalated and approved, it
   assert.equal(results[0].isError, true);
   assert.match(results[0].text, /run it again with `escalate`/);
   assert.equal(dialogs.length, 1);
-  // Reading a key is dangerous: a human decides, every time.
-  assert.match(dialogs[0].title, /^Run this dangerous command outside the sandbox\?\n\nContext:\nNote: Dangerous: it reads or writes a secret \(~\/\.ssh\/id_ed25519\)\. This always asks\.\nPurpose: Update the other repo\n/);
+  // Reading a key here is local work (its contents reach the model provider, not
+  // another machine): with no reviewing model available, the user decides, once.
+  assert.match(dialogs[0].title, /^Run this command outside the sandbox\?\n\nContext:\nPurpose: Update the other repo\n/);
+  assert.deepEqual(dialogs[0].options, ["Run once", "Deny", "Deny and stop"]);
   assert.equal(results[1].isError, false, results[1].text);
   assert.match(results[1].text, /PRIVATE KEY/);
   assert.match(results[1].text, /Ran outside the sandbox \(approved once; no rule could cover it, because it writes ~\/Developer\/other\/outside\.txt, which commands in the sandbox can't\. Next time, escalate only the command that needs it and do the rest in the sandbox\)\./);
@@ -229,19 +233,22 @@ test("a command that needs more fails in the sandbox; escalated and approved, it
 });
 
 test("allowed for the task, matching dangerous commands run outside without asking; others still ask", { skip }, async () => {
+  // Sending data to a server is dangerous, and every such command carries the
+  // same danger, so a task grant covers the next one.
+  const post = (path) => `curl -sS -m 2 -X POST https://example.invalid/${path} || true`;
   const { results, dialogs } = await turn(
     [
-      { tool: "bash", args: { command: "cat ~/.ssh/id_ed25519", escalate: { label: "Read the key", reason: "x", patterns: [["cat", "**/.ssh/*"]] } } },
-      { tool: "bash", args: { command: "cat ~/.ssh/id_ed25519" } },
+      { tool: "bash", args: { command: post("one"), escalate: { label: "Notify", reason: "x", patterns: [["curl", "**"]] } } },
+      { tool: "bash", args: { command: post("two") } },
       { tool: "bash", args: { command: "cat .env", escalate: { label: "Read the env", reason: "x" } } },
     ],
     { answers: ["Allow for this task", "Deny"] },
   );
   assert.equal(dialogs.length, 2, "the second command matched the pattern and the danger");
   assert.deepEqual(dialogs[0].options, ["Allow for this task", "Deny", "Deny and stop"]);
-  assert.match(results[0].text, /PRIVATE KEY/);
-  assert.match(results[1].text, /PRIVATE KEY/);
-  assert.match(results[1].text, /allowed by `cat \*\*\/\.ssh\/\*`/);
+  assert.match(dialogs[0].title, /Dangerous: it sends data to a server/);
+  assert.match(results[0].text, /Ran outside the sandbox \(approved for this task/);
+  assert.match(results[1].text, /allowed by `curl …`/);
   assert.equal(results[2].isError, true);
   assert.doesNotMatch(results[2].text, /hunter2/);
 });
@@ -287,7 +294,7 @@ test("file tools: a sensitive read asks a human; symlinks resolve to their targe
 test("assisted: the judge approves an external write without a dialog; protected writes go to the human", async () => {
   const allowed = await turn(
     [{ tool: "write", args: { path: join(other, "from-judge.md"), content: "ok\n" } }],
-    { judge: '{"decision":"approve","reason":"the user asked for it","confidence":0.95}' },
+    { judge: '{"decision":"approve","reason":"the user asked for it"}' },
   );
   assert.equal(allowed.dialogs.length, 0);
   assert.equal(allowed.results[0].isError, false);
@@ -295,7 +302,7 @@ test("assisted: the judge approves an external write without a dialog; protected
 
   const escalated = await turn(
     [{ tool: "edit", args: { path: ".git/config", edits: [{ oldText: "[core]", newText: "[core]\n\tfsmonitor = touch /tmp/pwned" }] } }],
-    { judge: '{"decision":"ask-user","reason":"fsmonitor runs a program","confidence":0.9}', answers: ["Deny"] },
+    { judge: '{"decision":"ask-user","reason":"fsmonitor runs a program"}', answers: ["Deny"] },
   );
   assert.equal(escalated.dialogs.length, 1);
   assert.match(escalated.dialogs[0].title, /fsmonitor/);
@@ -303,8 +310,35 @@ test("assisted: the judge approves an external write without a dialog; protected
   assert.doesNotMatch(readFileSync(join(workspace, ".git", "config"), "utf8"), /fsmonitor/);
 });
 
+test("explicit request: the owner's own words, passed by the engine, let the model run a danger they asked for", { skip }, async () => {
+  const git = (...args) => spawnSync("git", ["-c", "user.email=a@b", "-c", "user.name=a", ...args], { encoding: "utf8" });
+  const remote = join(scratch, "explicit-remote.git");
+  const repo = join(home, "Developer", "explicit");
+  git("init", "-q", "--bare", "-b", "main", remote);
+  git("init", "-q", "-b", "main", repo);
+  git("-C", repo, "commit", "-q", "--allow-empty", "-m", "ship it");
+  git("-C", repo, "remote", "add", "origin", remote);
+  const step = [{ tool: "bash", args: { command: "git push -q origin main", escalate: { label: "Push main", reason: "the owner asked" } } }];
+  const approve = JSON.stringify({ decision: "approve", reason: "The owner asked to push main.", userQuote: "把 main 推到 origin", target: { kind: "branch", value: "main" } });
+
+  // Without the owner's words, the same approval asks.
+  const without = await turn(step, { cwd: repo, judge: approve, answers: ["Deny"] });
+  assert.equal(without.dialogs.length, 1);
+  assert.match(without.dialogs[0].title, /didn't pass your own words/);
+  assert.notEqual(git("--git-dir", remote, "rev-parse", "-q", "--verify", "main").status, 0, "nothing pushed");
+
+  // With them, it runs once, without a dialog.
+  const owned = await turn(step, { cwd: repo, judge: approve, ownerWords: { messages: [{ text: "把 main 推到 origin", source: "typed" }], agentWritten: false } });
+  assert.equal(owned.dialogs.length, 0);
+  assert.equal(owned.results[0].isError, false, owned.results[0].text);
+  assert.match(owned.results[0].text, /Ran outside the sandbox \(approved once by the reviewing model/);
+  assert.equal(git("--git-dir", remote, "rev-parse", "main").stdout.trim(), git("-C", repo, "rev-parse", "HEAD").stdout.trim());
+  const audit = readFileSync(join(agentDir, "permission-audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter((record) => record.command === "git push -q origin main");
+  assert.deepEqual(audit.at(-1).explicit, { ok: true, quote: "把 main 推到 origin", targets: ["branch main on origin"], passed: ["quote", "target", "current"], quoteSource: "typed" });
+});
+
 test("model first: the judge runs local work outside the sandbox and may read a sensitive file; dangerous commands skip it", { skip }, async () => {
-  const approve = '{"decision":"approve","reason":"the user asked for it","confidence":0.95}';
+  const approve = '{"decision":"approve","reason":"the user asked for it"}';
   const outside = await turn(
     [{ tool: "bash", args: { command: "echo judged > ../other/judged.txt", escalate: { label: "Note it in the other repo", reason: "the user asked" } } }],
     { judge: approve },
@@ -318,13 +352,26 @@ test("model first: the judge runs local work outside the sandbox and may read a 
   assert.equal(secret.dialogs.length, 0);
   assert.match(secret.results[0].text, /hunter2/);
 
+  // A secret the model approves is read once and never remembered.
+  const key = await turn(
+    [
+      { tool: "bash", args: { command: `cat ${join(home, ".ssh", "id_ed25519")}`, escalate: { label: "Show the key", reason: "x" } } },
+      { tool: "bash", args: { command: `cat ${join(home, ".ssh", "id_ed25519")}` } },
+    ],
+    { judge: approve },
+  );
+  assert.equal(key.dialogs.length, 0);
+  assert.match(key.results[0].text, /PRIVATE KEY/);
+  assert.equal(key.results[1].isError, true, "nothing was remembered");
+
+  // A danger asks even when the model would approve it: the owner's own words
+  // must say so, and nothing here quotes them.
   const held = await turn(
-    [{ tool: "bash", args: { command: `cat ${join(home, ".ssh", "id_ed25519")}`, escalate: { label: "Show the key", reason: "x" } } }],
+    [{ tool: "bash", args: { command: `rm -rf ${join(other, "everything")}`, escalate: { label: "Clean up", reason: "x" } } }],
     { judge: approve, answers: ["Deny"] },
   );
   assert.equal(held.dialogs.length, 1, "a dangerous command asks even when the model would approve");
-  assert.match(held.dialogs[0].title, /Dangerous: it reads or writes a secret/);
-  assert.doesNotMatch(held.dialogs[0].title, /Review:/);
+  assert.match(held.dialogs[0].title, /Dangerous: it deletes files outside the project folders/);
   assert.equal(held.results[0].isError, true);
 });
 
@@ -343,7 +390,7 @@ test("apply_patch goes through the same checks", async () => {
       { tool: "apply_patch", args: { patch: patch("src/added.ts") } },
       { tool: "apply_patch", args: { patch: patch(join(other, "patched.md")) } },
     ],
-    { extraExtensions: [codex], answers: ["Deny"], judge: '{"decision":"ask-user","reason":"unclear","confidence":0}', api: "openai-responses" },
+    { extraExtensions: [codex], answers: ["Deny"], judge: '{"decision":"ask-user","reason":"unclear"}', api: "openai-responses" },
   );
   assert.equal(results[0].isError, false, results[0].text);
   assert.equal(readFileSync(join(workspace, "src", "added.ts"), "utf8"), "patched\n");
@@ -366,7 +413,7 @@ test("filtered network: a new domain asks; a denied one never connects", { skip 
           },
         },
       ],
-      { answers: ["Deny"], judge: '{"decision":"ask-user","reason":"not part of the task","confidence":0.9}' },
+      { answers: ["Deny"], judge: '{"decision":"ask-user","reason":"not part of the task"}' },
     );
     assert.equal(dialogs.length, 1);
     assert.match(dialogs[0].title, /^Allow the agent to reach example\.com\?/);

@@ -151,6 +151,7 @@ fn queue_as_viewer(doc: &SessionDoc, id: &str, payload: SessionCommandPayload) {
         resolution: None,
         sent_at: None,
         dismissed: false,
+        author: None,
     })
     .expect("queue command");
 }

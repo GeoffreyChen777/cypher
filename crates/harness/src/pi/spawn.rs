@@ -33,6 +33,11 @@ const ENV_AGENT_DIR: &str = "PI_CODING_AGENT_DIR";
 /// `danger-full-access`. Absent for discovery and slash-command processes,
 /// which then use the extension's configured default.
 const ENV_PERMISSION_LEVEL: &str = "CYPHER_PERMISSION_LEVEL";
+/// The owner's own words ([`RunHostContext::owner_words`]), read by the
+/// same extension (`extensions/cypher-permissions/explicit.ts`): the only
+/// text a dangerous command may run on without a dialog. Set or cleared on
+/// every spawn, so a run never inherits another chat's (or the engine's).
+const ENV_OWNER_WORDS: &str = "CYPHER_OWNER_WORDS";
 const ENV_PACKAGE_DIR: &str = "PI_PACKAGE_DIR";
 /// Set only in agent-bot runs; the bot tools extension registers its tools
 /// only when it sees this.
@@ -403,6 +408,10 @@ impl PiHarness {
         cmd.env_remove(ENV_PERMISSION_LEVEL);
         if let Some(level) = sandbox {
             cmd.env(ENV_PERMISSION_LEVEL, permission_level(level));
+        }
+        cmd.env_remove(ENV_OWNER_WORDS);
+        if let Some(words) = host.owner_words.as_deref().filter(|w| !w.is_empty()) {
+            cmd.env(ENV_OWNER_WORDS, words);
         }
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);

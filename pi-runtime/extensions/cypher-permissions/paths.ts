@@ -113,6 +113,8 @@ export interface PathContextInput {
   protectedPatterns: readonly string[];
   self: readonly string[];
   writableSupport: readonly string[];
+  /** The permission system's own files (config.ts): a change there always asks. */
+  permissionSystem?: readonly string[];
   /** Temp directories: scratch space, writable like the workspace. */
   scratch?: readonly string[];
   home?: string;
@@ -125,6 +127,7 @@ export class PathContext {
   readonly protectedPatterns: CompiledPattern[];
   readonly self: CompiledPattern[];
   readonly writableSupport: CompiledPattern[];
+  readonly permissionSystem: CompiledPattern[];
   readonly scratch: readonly string[];
 
   constructor(input: PathContextInput) {
@@ -135,6 +138,7 @@ export class PathContext {
     this.protectedPatterns = compilePatterns(input.protectedPatterns, input.roots, this.home);
     this.self = compilePatterns(input.self, input.roots, this.home);
     this.writableSupport = compilePatterns(input.writableSupport, input.roots, this.home);
+    this.permissionSystem = compilePatterns(input.permissionSystem ?? [], input.roots, this.home);
   }
 
   canonical(path: string, cwd: string): string {
@@ -147,6 +151,11 @@ export class PathContext {
 
   isWritableSupport(path: string): boolean {
     return matchPatterns(path, this.writableSupport) !== undefined;
+  }
+
+  /** A file of the permission system itself: changing it always asks the user. */
+  isPermissionSystem(path: string): string | undefined {
+    return matchPatterns(path, this.permissionSystem);
   }
 
   inScratch(path: string): boolean {

@@ -125,6 +125,34 @@ pub struct SessionCommandEntry {
     /// field is omitted when false so old readers see identical frames.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dismissed: bool,
+    /// Who wrote this message when no person did: the engine's own agents
+    /// (`plan` for a plan's brief and the prompts it starts and steers
+    /// sessions with, `subagent` for a parent chat's task, `routine`,
+    /// `peer` for another person's workspace, `memory`). Set only by the
+    /// engine's internal callers (`DocHost::queue_agent_command`), never
+    /// from the RPC surface, and signed with the entry. `None`: a person
+    /// sent it. The permission check counts only messages without it as the
+    /// owner's words (docs/design/permission-control.md §7.3). Additive +
+    /// serde-defaulted: entries without it stay byte-identical, and older
+    /// readers keep it in the map they verify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+}
+
+/// The values of [`SessionCommandEntry::author`]: which of the engine's own
+/// agents wrote a message.
+pub mod command_author {
+    /// A plan: its brief, and the prompts its background session starts and
+    /// steers sessions with.
+    pub const PLAN: &str = "plan";
+    /// A parent chat's task for its subagent.
+    pub const SUBAGENT: &str = "subagent";
+    /// A routine's saved prompt.
+    pub const ROUTINE: &str = "routine";
+    /// Another person's workspace: its question, or its late answer.
+    pub const PEER: &str = "peer";
+    /// A memory pass.
+    pub const MEMORY: &str = "memory";
 }
 
 impl SessionCommandEntry {
@@ -255,6 +283,7 @@ mod tests {
             resolution: None,
             sent_at: None,
             dismissed: false,
+            author: None,
         }
     }
 

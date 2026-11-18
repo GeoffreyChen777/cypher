@@ -51,6 +51,7 @@ import { DENIAL_TEXT, parseDenials, scrubEnv, wrapCommand, writePolicyFile } fro
 import { isUnder } from "./cypher-permissions/paths.ts";
 import { permissionControlEnabled } from "./cypher-permissions/config.ts";
 import { describePattern } from "./cypher-permissions/commands.ts";
+import { OWNER_WORDS_ENV, parseOwnerWords } from "./cypher-permissions/explicit.ts";
 
 const FS_HOOK = Symbol.for("cypher.permissions.fs");
 const APPLY_PATCH = "apply_patch";
@@ -70,6 +71,8 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
         chatId: process.env.CYPHER_CHAT_ID || undefined,
         cwd: ctx.cwd,
         levelEnv: process.env.CYPHER_PERMISSION_LEVEL,
+        // What the owner wrote, as the engine knows it (agent-written briefs and steering left out).
+        ownerWords: parseOwnerWords(process.env[OWNER_WORDS_ENV]),
       });
       permissions.appendEntry = (type, data) => pi.appendEntry(type, data);
       permissions.reload(ctx.cwd, ctx.sessionManager?.getBranch() ?? []);
@@ -362,9 +365,9 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
     promptGuidelines: [
       ...(baseBash.promptGuidelines ?? []),
       "bash runs in a sandbox: the project folders, temp directories, toolchain caches and (in a git worktree) the repository's objects and refs are writable; the rest of the machine is readable except sensitive files (.env, keys, ~/.ssh keys, credentials); the network is open. Commands that need more (credentials for ssh, git push, gh or cloud CLIs; other processes; the keychain; launchctl; simulators; Docker's socket) fail in it.",
-      "Commands that only inspect what the sandbox cannot reach (lsof, gh run/pr view and list, git fetch, docker ps and logs, kubectl get, cloud describe and list, launchctl list) run outside it on their own, without escalate. So does stopping a process this chat started, by its pid.",
-      "Try a command in the sandbox first unless it obviously needs credentials, other processes or system services. When it needs more, run it again with `escalate` (label and reason). The reviewing model approves what plainly serves the user's request and remembers it for the chat; otherwise the user decides, and can keep it for the project. Dangerous commands (publishing, deploying, pushing to the default branch or tags, deleting outside the project folders, stopping processes this chat did not start, installing system-wide, reading secrets) always ask the user. Make the label and reason say plainly how it serves what the user asked. Do not work around the sandbox in other ways.",
-      "Commands that may leave the sandbox read best plainly: name programs directly, not through `bash -c`, `eval` or an interpreter, which no rule can allow. `NAME=value cmd`, `nohup`, `timeout`, `nice` and a trailing `&` are fine. Write paths and pids literally (not `$(pwd)` or `$(pgrep …)`): a word known only when the line runs counts as the worst it could be.",
+      "Commands that only inspect what the sandbox cannot reach (lsof, gh run/pr view and list, git fetch, docker ps and logs, kubectl get, cloud describe and list, launchctl list) run outside it on their own, without escalate. So does stopping a process this chat started, by its pid; stopping one that runs in the project folders (a dev instance or test server it started) goes to the reviewing model.",
+      "Try a command in the sandbox first unless it obviously needs credentials, other processes or system services. When it needs more, run it again with `escalate` (label and reason). The reviewing model approves what plainly serves the user's request (checking the work counts: builds, tests, the chat's dev instance, screenshots) and remembers it for the chat, or approves it once; otherwise the user decides, and can keep it for the project. Dangerous commands (publishing, deploying, pushing to the default branch or tags, deleting outside the project folders, stopping processes this chat did not start, installing system-wide, reading secrets, touching the installed Cypher app or its data in ~/.cypher) always ask the user; test with the chat's own dev instance instead. Make the label and reason say plainly how it serves what the user asked. Do not work around the sandbox in other ways.",
+      "Commands that may leave the sandbox read best plainly: name programs directly, not through `bash -c`, `eval` or an interpreter, which no rule can allow. `NAME=value cmd`, `nohup`, `timeout`, `nice`, a trailing `&`, `( … & )`, `$HOME` and variables set to a literal earlier in the line (`E=~/x; chmod 700 $E`) are fine. Write paths and pids literally (not `$(pwd)` or `$(pgrep …)`): a word known only when the line runs counts as the worst it could be.",
       "Escalate only the part that needs it: write its output to a file in the project folder or temp, or pipe it to plain filters (grep, sort, uniq, wc, cut, tr, head, tail, awk and sed programs that only print), and do other work in later commands in the sandbox. A line that also runs a script, an interpreter or other commands outside can only be approved once, so the user is asked again every time.",
     ],
     async execute(id, params, signal, onUpdate, ctx) {
@@ -416,6 +419,8 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
         };
       }
       if (ranOutside) {
+        // What it makes is this task's own from now on (created.ts).
+        st.noteCreated(command, ctx.cwd);
         const note = `[permissions] Ran outside the sandbox (${ranOutside.note}).`;
         try {
           const result = (await outside().execute(id, bashParams, signal, onUpdate, ctx)) as AnyResult;
@@ -432,6 +437,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       const viaProxy = compiled.policy.network.httpProxyPort;
       const policy = writePolicyFile(compiled.policy);
       const binary = st.status.binary!;
+      st.noteCreated(command, ctx.cwd);
       st.beginCommand(id, command, requestContext(ctx, signal, id));
       const tool = createBashToolDefinition(ctx.cwd, {
         shellPath,
