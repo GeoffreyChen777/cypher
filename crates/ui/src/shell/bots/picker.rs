@@ -132,6 +132,49 @@ fn line_mark(line: &BotLine) -> Option<LineMark> {
     })
 }
 
+/// A list row. What shows now is the one filled row (no check: the right
+/// edge is for what each workspace is doing); the pointer and the keyboard
+/// cursor get a lighter wash, so they never read as a second selection.
+fn switcher_row(
+    theme: &Theme,
+    selected: bool,
+    highlighted: bool,
+    fade_key: impl Into<SharedString>,
+) -> gpui::Div {
+    use crate::kit::{motion, theme::card_selected_bg};
+    let row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .px(px(8.0))
+        .py(px(6.0))
+        .rounded(px(8.0))
+        .text_size(px(13.0))
+        .cursor_pointer();
+    if selected {
+        return row.bg(card_selected_bg()).text_color(theme.text);
+    }
+    let cursor = card_selected_bg().opacity(0.5);
+    if highlighted {
+        return row.bg(cursor).text_color(theme.text);
+    }
+    let fade_key = fade_key.into();
+    let mut row = row
+        .text_color(motion::hover_blend(
+            &fade_key,
+            theme.text.opacity(0.9),
+            theme.text,
+        ))
+        .bg(motion::hover_blend(
+            &fade_key,
+            crate::kit::theme::wash(0.0),
+            cursor,
+        ));
+    row.interactivity()
+        .on_hover(motion::hover_listener(fade_key));
+    row
+}
+
 /// The bots `query` matches, best first (a name prefix before a substring),
 /// in the picker's order otherwise.
 fn filtered<'a>(lines: &'a [BotLine], query: &str) -> Vec<&'a BotLine> {
@@ -549,15 +592,6 @@ impl Shell {
         let shown = picks(lines, &query);
         let highlight = switcher.highlight.min(shown.len().saturating_sub(1));
         let ticker = self.pulse_ticker.entity_id();
-        let check = |selected: bool| {
-            div().flex_none().w(px(14.0)).when(selected, |el| {
-                el.child(
-                    icon(icons::CHECK)
-                        .size(px(13.0))
-                        .text_color(theme.text_muted),
-                )
-            })
-        };
         let rows: Vec<AnyElement> = shown
             .iter()
             .enumerate()
@@ -567,7 +601,7 @@ impl Shell {
                     Pick::Sessions => {
                         let selected = current.is_none();
                         let key = "bot-switcher-sessions";
-                        return popover::menu_row_nav(theme, selected, ix == highlight, key)
+                        return switcher_row(theme, selected, ix == highlight, key)
                             .id(key)
                             .gap(px(8.0))
                             .on_click(cx.listener(|this, _, _, cx| this.show_sessions(cx)))
@@ -585,7 +619,6 @@ impl Shell {
                                     ),
                             )
                             .child(div().flex_1().min_w_0().truncate().child(SESSIONS))
-                            .child(check(selected))
                             // The workspaces below it, a section of their own.
                             .when(shown.len() > 1, |el| el.mb(px(4.0)))
                             .into_any_element();
@@ -639,7 +672,7 @@ impl Shell {
                     ),
                     None => None,
                 };
-                popover::menu_row_nav(theme, selected, ix == highlight, key.clone())
+                switcher_row(theme, selected, ix == highlight, key.clone())
                     .id(SharedString::from(key))
                     .gap(px(8.0))
                     .on_click(cx.listener(move |this, _, _, cx| this.switch_to(&pick, cx)))
@@ -666,7 +699,6 @@ impl Shell {
                             .child(SharedString::from(transcript::single_line(&bot.name))),
                     )
                     .children(state)
-                    .child(check(selected))
                     .into_any_element()
             })
             .collect();
@@ -689,7 +721,7 @@ impl Shell {
                 .text_color(theme.text_muted)
                 .child(SharedString::from("Nothing by that name"))
         });
-        let new_bot = popover::menu_row(theme, false, "bot-switcher-new")
+        let new_bot = switcher_row(theme, false, false, "bot-switcher-new")
             .id("bot-switcher-new")
             .gap(px(8.0))
             .on_click(cx.listener(|this, _, _, cx| {
