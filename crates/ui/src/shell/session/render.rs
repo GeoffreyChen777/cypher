@@ -207,35 +207,74 @@ impl Shell {
                 .band_top(crate::transcript::TOP_CHROME_PX)
                 .band_bottom(bottom_band),
             )
-            .children(self.render_jump_to_bottom(sid, stack_h, cx))
+            .children(self.render_floating_pills(sid, stack_h, cx))
             // The find bar floats in the same layer, at the top
             // — outside the fade scope, over the transcript.
             .children(self.render_find_bar(sid, window, cx))
     }
 
-    /// The "↓ Scroll to bottom" pill: a LABELED rounded-full
-    /// chip — down-arrow glyph + 13px label on a near-opaque raised surface
-    /// with a hairline — horizontally centered over the transcript column and
-    /// floating a small gap above the composer. It hangs 14px below the
-    /// conversation region (through the reserved h-6 status strip, whose
-    /// content is left-aligned) so its bottom edge sits ~10px above the pill.
-    /// Shown past the transcript's 320px threshold; 180ms fade + 2px rise in.
-    /// `stack_h` is the measured bottom chrome stack the full-height
-    /// transcript scrolls under — the pill anchors just above it (the -14
-    /// carries the old status-strip overlap).
-    fn render_jump_to_bottom(
+    /// The pills floating over the transcript's bottom, in one centred row
+    /// a small gap above the composer: "↓ Scroll to bottom" (shown past the
+    /// transcript's 320px threshold; 180ms fade + 2px rise in) and, over a
+    /// workspace's own chat, "N need you" (what waits on the owner in its
+    /// plans and sessions; a click opens the page that answers them). They
+    /// share one shape ([`float_pill`]) and one row, so they never overlap;
+    /// alone, each is centred.
+    ///
+    /// The row hangs 14px below the conversation region (through the
+    /// reserved h-6 status strip, whose own content sits at its ends) so
+    /// the pills' bottom edge sits ~10px above the composer. `stack_h` is
+    /// the measured bottom chrome stack the full-height transcript scrolls
+    /// under.
+    fn render_floating_pills(
         &mut self,
         sid: SlotId,
         stack_h: f32,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let transcript = self.tiles.slots.get(&sid)?.transcript.clone();
-        if !transcript.read(cx).jump_button_shown() {
+        let theme = Theme::of(cx).clone();
+        let jump = transcript.read(cx).jump_button_shown().then(|| {
+            // Per-slot hover-fade key (the fade store is global).
+            let pill = float_pill(
+                format!("jump-pill-{sid}"),
+                div()
+                    .text_size(px(13.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from("↓")),
+                "Scroll to bottom".into(),
+                &theme,
+            )
+            .on_click(cx.listener(move |_, _, _, cx| {
+                transcript.update(cx, |transcript, cx| transcript.jump_to_bottom(cx));
+            }));
+            motion::dialog_in("jump-to-bottom", pill).into_any_element()
+        });
+        // In the amber of a session awaiting input, on its mark alone: the
+        // pill itself is the scroll pill's twin.
+        let needs = (self.board.slot == Some(sid))
+            .then(|| self.board_needs_count(cx))
+            .filter(|count| *count > 0)
+            .map(|count| {
+                float_pill(
+                    "board-needs-pill".to_string(),
+                    icon(icons::BELL)
+                        .size(px(13.0))
+                        .flex_none()
+                        .text_color(theme.warning),
+                    if count == 1 {
+                        "1 needs you".into()
+                    } else {
+                        format!("{count} need you").into()
+                    },
+                    &theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.open_need(None, cx)))
+                .into_any_element()
+            });
+        if jump.is_none() && needs.is_none() {
             return None;
         }
-        let theme = Theme::of(cx);
-        // Per-slot hover-fade key (the fade store is global).
-        let jump_key = format!("jump-pill-{sid}");
         Some(
             div()
                 .absolute()
@@ -243,47 +282,11 @@ impl Shell {
                 .left_0()
                 .right(px(10.0))
                 .flex()
+                .flex_row()
                 .justify_center()
-                .child(motion::dialog_in(
-                    "jump-to-bottom",
-                    crate::markdown::render::shield_selection(div().id("jump-to-bottom-btn"))
-                        .h(px(30.0))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_md()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .pl(px(11.0))
-                        .pr(px(13.0))
-                        .cursor_pointer()
-                        // Hover must BRIGHTEN the opaque pill, never replace it
-                        // with a translucent wash (a 10%-alpha bg here made the
-                        // pill go see-through on hover — user-reported), and it
-                        // fades over the CSS transition-colors 150ms, not snaps.
-                        .bg(motion::hover_blend(
-                            &jump_key,
-                            theme.surface_raised,
-                            theme.surface_raised_hover,
-                        ))
-                        .on_hover(motion::hover_listener(jump_key.clone()))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            transcript.update(cx, |transcript, cx| transcript.jump_to_bottom(cx));
-                        }))
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from("↓")),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(theme.text)
-                                .child(SharedString::from("Scroll to bottom")),
-                        ),
-                ))
+                .gap(px(8.0))
+                .children(jump)
+                .children(needs)
                 .into_any_element(),
         )
     }
@@ -381,53 +384,6 @@ impl Shell {
             }
         };
 
-        // Over a workspace's own composer: what waits on the owner in its
-        // sessions and plans, in the amber of a session awaiting input. A
-        // click opens the page that answers them.
-        let needs = (self.board.slot == Some(sid))
-            .then(|| self.board_needs_count(cx))
-            .filter(|count| *count > 0)
-            .map(|count| {
-                let key = "board-needs-strip";
-                div()
-                    .id(key)
-                    .flex_none()
-                    .h(px(20.0))
-                    .px(px(8.0))
-                    .rounded_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(5.0))
-                    .cursor_pointer()
-                    .text_size(px(11.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.warning)
-                    .bg(motion::hover_blend(
-                        key,
-                        theme.warning.opacity(0.1),
-                        theme.warning.opacity(0.18),
-                    ))
-                    .on_hover(motion::hover_listener(key))
-                    .on_click(cx.listener(|this, _, _, cx| this.open_need(None, cx)))
-                    .child(
-                        icon(icons::BELL)
-                            .size(px(11.0))
-                            .flex_none()
-                            .text_color(theme.warning),
-                    )
-                    .child(SharedString::from(if count == 1 {
-                        "1 needs you".to_string()
-                    } else {
-                        format!("{count} need you")
-                    }))
-                    .child(
-                        icon(icons::ALT_ARROW_RIGHT)
-                            .size(px(9.0))
-                            .flex_none()
-                            .text_color(theme.warning.opacity(0.8)),
-                    )
-            });
         // Pending-comments indicator pinned to the strip's upper-left; the
         // session status sits centered; the Subagents trigger stays right.
         let comments_trigger =
@@ -436,7 +392,6 @@ impl Shell {
             .child(comments_trigger)
             .child(div().flex_1())
             .child(left)
-            .children(needs)
             // Flex spacer keeps the center status centered and the subagents
             // trigger pinned to the composer-aligned right edge; when the
             // trigger renders Empty (no records) the strip is just the left
@@ -445,6 +400,48 @@ impl Shell {
             .child(subagents)
             .into_any_element()
     }
+}
+
+/// A pill floating over the transcript above the composer: a LABELED
+/// rounded-full chip — a small mark + 13px label on a near-opaque raised
+/// surface with a hairline and a soft lift. `key` is its id and hover-fade
+/// key (the fade store is global, so it must be unique on screen).
+fn float_pill(
+    key: String,
+    mark: impl IntoElement,
+    label: SharedString,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    crate::markdown::render::shield_selection(div().id(SharedString::from(key.clone())))
+        .flex_none()
+        .h(px(30.0))
+        .rounded_full()
+        .border_1()
+        .border_color(theme.border)
+        .shadow_md()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .pl(px(11.0))
+        .pr(px(13.0))
+        .cursor_pointer()
+        // Hover must BRIGHTEN the opaque pill, never replace it with a
+        // translucent wash (a 10%-alpha bg here made the pill go
+        // see-through on hover — user-reported), and it fades over the CSS
+        // transition-colors 150ms, not snaps.
+        .bg(motion::hover_blend(
+            &key,
+            theme.surface_raised,
+            theme.surface_raised_hover,
+        ))
+        .on_hover(motion::hover_listener(key))
+        .child(mark)
+        .child(
+            div()
+                .text_size(px(13.0))
+                .text_color(theme.text)
+                .child(label),
+        )
 }
 
 /// The no-projects onboarding canvas: one clear affordance.

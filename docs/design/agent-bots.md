@@ -1079,7 +1079,7 @@ A workspace
 │   Fix rounding     ││ Three sessions moved; ││───────────────────│
 │   Step 2 of 4 ▓▓░░ ││ nothing needs you.    ││ Plan to approve   │
 │ Routines           ││                       ││ Release 0.5       │
-│ Projects           ││  ▲ 2 need you ›       ││ [Reject] [Approve]│
+│ Projects           ││    ( ▲ 2 need you )   ││ [Reject] [Approve]│
 │   billing          ││ [ Ask Atlas…        ] ││               [×] │
 │     Fix rounding ● │└───────────────────────┘└───────────────────┘
 └────────────────────┘
@@ -1148,9 +1148,11 @@ An answer is the same owner field or queued command the item's own page writes, 
 card leaves the page once its record says so, and every count follows: the sidebar card,
 the strip, the switcher's list and the logo's amber count. After the last card the page
 says the owner is caught up. Two things say something waits: the sidebar's **Needs you**
-card, always first, and an amber **"N need you"** strip in the status row over the bot
-chat's composer. Both only open the page. A session's card also has the way into the
-session itself.
+card, always first, and an **"N need you"** pill floating over the bot chat's composer.
+Both only open the page. The pill is the twin of the transcript's "Scroll to bottom"
+pill (the same raised capsule, its bell in amber) and shares its centred row, so the two
+sit side by side when both show. A session's card also has the way into the session
+itself.
 
 **Shortcuts** sit pinned at the bottom of the sidebar, below the cards, which scroll above
 them: buttons, each an icon and a short label, wrapping; with none, the area isn't drawn. A

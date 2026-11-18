@@ -1,7 +1,7 @@
 //! **Needs you** (§13.1): everything in a workspace that waits on its
 //! owner, in one place. The sidebar card lists the items, most pressing
 //! first, in the amber the sidebar gives a session awaiting input; its rows
-//! and the strip over the chat's composer open the one page that answers
+//! and the pill over the chat's composer open the one page that answers
 //! them.
 //!
 //! The page stacks a card per item, each naming where it comes from and
@@ -344,7 +344,7 @@ impl Shell {
         })
     }
 
-    /// Open the Needs you page on the card `key` (a row, the strip). The
+    /// Open the Needs you page on the card `key` (a row, the pill). The
     /// workspace's own question is answered in its chat: its row goes there.
     pub(in crate::shell) fn open_need(&mut self, key: Option<String>, cx: &mut Context<Self>) {
         if key.as_deref() == Some(CHAT_KEY) {
@@ -479,7 +479,7 @@ impl Shell {
                 .child(SharedString::from(items.len().to_string()))
                 .into_any_element(),
         );
-        // A row or the strip asked for one card: bring it into view.
+        // A row asked for one card: bring it into view.
         let focus = self.board.needs_focus.take();
         if let Some(ix) = focus
             .as_ref()
