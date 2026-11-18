@@ -982,7 +982,25 @@ fn attention_count_tracks_the_sidebar_corners() {
     let mut asked_seen = chat("asked-seen", 0, Some(8));
     asked_seen.last_seen_at = asked_seen.last_message_at;
     orphan.space_id = Some("gone".into());
+    // A workspace's owner chat is on screen (the logo and the switcher);
+    // its hidden threads are not.
+    let owner = Chat {
+        bot: Some(cypher_proto::BotChat::owner("alpha")),
+        ..chat("owner", 0, Some(9))
+    };
+    let routine_thread = Chat {
+        bot: Some(cypher_proto::BotChat::thread(
+            "alpha",
+            cypher_proto::BotOrigin::Routine,
+            cypher_proto::BotThread::Routine {
+                routine_id: "r".into(),
+            },
+        )),
+        ..chat("routine-thread", 0, Some(10))
+    };
     s.apply_chats(vec![
+        owner,
+        routine_thread,
         chat("done", 0, Some(4)),
         chat("asking", 0, Some(5)),
         chat("failed", 0, Some(6)),
@@ -999,16 +1017,104 @@ fn attention_count_tracks_the_sidebar_corners() {
         session("running", SessionStatus::Working, 5, now),
         session("asked-seen", SessionStatus::AwaitingInput, 5, now),
     ]);
-    // done (unseen), asking, failed — not working, empty, seen, archived,
-    // a question already looked at (on any device), or a chat whose
-    // project is gone (the overview hides it too).
-    assert_eq!(s.attention_count(now), 3);
+    // done (unseen), asking, failed, the owner chat — not working, empty,
+    // seen, archived, a question already looked at (on any device), a chat
+    // whose project is gone (the overview hides it too), or a routine's
+    // hidden thread.
+    assert_eq!(s.attention_count(now), 4);
     s.begin_pending_send("done", "m1", now);
     assert_eq!(
         s.attention_count(now),
-        2,
+        3,
         "a send in flight reads as working"
     );
+}
+
+#[test]
+fn attention_count_takes_the_owner_chat_but_no_hidden_thread() {
+    use cypher_proto::{BotChat, BotOrigin, BotThread};
+    let now = Utc::now();
+    let marked = |id: &str, marker: BotChat| Chat {
+        bot: Some(marker),
+        ..chat(id, 0, Some(4))
+    };
+    // A workspace's owner chat has no project; a finished, unread turn in
+    // it counts like any session's.
+    let owner = marked("owner", BotChat::owner("alpha"));
+    assert!(owner.space_id.is_none());
+    let mut s = AppState::new();
+    s.apply_chats(vec![owner.clone()]);
+    assert_eq!(s.attention_count(now), 1, "the owner chat counts");
+    s.apply_sessions(vec![session("owner", SessionStatus::AwaitingInput, 5, now)]);
+    assert_eq!(s.attention_count(now), 1, "its question too");
+    s.apply_sessions(vec![session("owner", SessionStatus::Errored, 5, now)]);
+    assert_eq!(s.attention_count(now), 1, "and its failure");
+    let mut seen = owner;
+    seen.last_seen_at = seen.last_message_at;
+    s.apply_chats(vec![seen]);
+    assert_eq!(s.attention_count(now), 0, "opening it clears it");
+
+    // Every hidden thread stays off the Dock: nothing in the main UI shows
+    // it, and nothing there would ever mark it read.
+    let hidden = [
+        (
+            "work",
+            BotChat::thread(
+                "alpha",
+                BotOrigin::Owner,
+                BotThread::Work {
+                    work_id: "w".into(),
+                },
+            ),
+        ),
+        (
+            "routine",
+            BotChat::thread(
+                "alpha",
+                BotOrigin::Routine,
+                BotThread::Routine {
+                    routine_id: "r".into(),
+                },
+            ),
+        ),
+        (
+            "peer",
+            BotChat::thread(
+                "alpha",
+                BotOrigin::Peer,
+                BotThread::Peer {
+                    connection_id: "c".into(),
+                },
+            ),
+        ),
+        (
+            "routine-session",
+            BotChat::thread(
+                "alpha",
+                BotOrigin::Routine,
+                BotThread::RoutineSession {
+                    routine_id: "pr".into(),
+                },
+            ),
+        ),
+        (
+            "peer-main",
+            BotChat::thread("alpha", BotOrigin::Peer, BotThread::Main),
+        ),
+        (
+            "unknown",
+            BotChat::thread("alpha", BotOrigin::Owner, BotThread::Unknown),
+        ),
+    ];
+    for (id, marker) in hidden {
+        let mut s = AppState::new();
+        s.apply_chats(vec![marked(id, marker.clone())]);
+        assert_eq!(s.attention_count(now), 0, "{id}: finished, unread");
+        for status in [SessionStatus::AwaitingInput, SessionStatus::Errored] {
+            s.apply_sessions(vec![session(id, status, 5, now)]);
+            assert_eq!(s.attention_count(now), 0, "{id}: {status:?}");
+        }
+    }
 }
 
 #[test]
